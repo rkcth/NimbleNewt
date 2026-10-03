@@ -642,4 +642,4 @@ Additional validation scenarios for pause and routing:
 
 See the [design decision register](design-decisions.md) for one consolidated list of accepted decisions, proposed defaults, pending user questions, and implementation questions. Do not treat an unresolved mechanism as a reason to revisit a settled product requirement, or treat a suggested default as a user decision. Phases and MVP selection remain deferred.
 
-This draft is temporarily hosted within the current repository. NimbleNewt's intended distribution is a separate open-source repository with independent dependencies, setup, tests, and documentation. Existing orchestration integrations are optional adapters. Repository creation, publication, and license selection remain future work.
+NimbleNewt has a standalone local repository and uses the [MIT license](../../LICENSE), with independent dependencies, setup, tests, and documentation. Existing orchestration integrations are optional adapters. Public hosting and publication remain future work.

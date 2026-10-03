@@ -71,3 +71,7 @@ A controller manages tasks, permissions, communication, model routing, and persi
 - [Accepted decisions and open questions](docs/nimblenewt/design-decisions.md)
 - [Harness evaluation results](docs/nimblenewt/harness-test-results.md)
 - [Reproducible harness experiments](benchmarks/nimblenewt-harness/README.md)
+
+## License
+
+[MIT](LICENSE). Use, modify, and share NimbleNewt, including commercially. Contributions are welcome. Third-party dependencies retain their own licenses.

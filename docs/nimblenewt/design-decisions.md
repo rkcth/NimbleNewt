@@ -9,6 +9,7 @@ This register distinguishes settled direction from proposals, unanswered choices
 | Product purpose | Persistent, hierarchical agents with conversation as the primary user interface; task switching and durable recovery. | [Overview](README.md) |
 | Work scope | Finite projects and ongoing responsibilities, including coding, QA, marketing, support, graphic design, research, planning, user/development documentation, and server/service maintenance. A developer's local organizational contribution workflow is one important use case. | [Responsibilities](README.md#ongoing-operational-responsibilities) |
 | Documentation maintenance | User guidance explains how to use the product; development documentation explains how it works. Relevant implementation and release changes trigger impact checks and tracked updates. | [Areas of work](README.md#areas-of-work-and-collaboration) |
+| License | MIT, with no additional hosting restrictions. Contributions are welcome but not required. | [License](../../LICENSE) |
 | Distribution | Independent open-source repository; configurable deployment rather than hardcoded private infrastructure. | [Portability](portability-and-configuration.md) |
 | Platforms | macOS, Linux, and Windows are required; no platform is optional. Specific versions and architectures still need qualification. | [Platform contract](portability-and-configuration.md#required-operating-system-support) |
 | Runtime | Pi Durable is selected, with experimental API risk accepted. LangGraph/Deep Agents is an alternative. | [Runtime decision](runtime-compatibility-and-namespaces.md) |
@@ -64,7 +65,7 @@ Validate configuration combinations: a requested PC target must fit its authoriz
 - Define configuration migration, official release trust/publisher verification, updater installation, health checks, backward-compatible rollback windows, and failure recovery when both versions fail.
 - Select notification delivery, presence/disconnection handling, meeting quorum details, maximum queue/wait bounds, and the semantics of blocked job reconciliation.
 - Define attribution of meetings, supervision, and other shared overhead in P/PC accounting, along with measurement of occupied worker slots and background resources.
-- A standalone local NimbleNewt repository has been created. The public project name is NimbleNewt. Choose license, public hosting destination, and contributor guidance before publication; the repository has not been published.
+- A standalone local NimbleNewt repository has been created. The public project name is NimbleNewt. MIT is selected. Choose public hosting destination and contributor guidance before publication; the repository has not been published.
 
 General project collaboration, coding, and ongoing operational responsibilities are all in the product vision. Which capabilities are delivered first is a later phase/MVP decision, not an unresolved statement of purpose. NimbleNewt is independent; existing orchestration integrations are optional rather than a dependency question.
 
