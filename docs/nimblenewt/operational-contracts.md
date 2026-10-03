@@ -6,12 +6,12 @@ This document makes the product's existing requirements explicit at component bo
 
 | Term | Meaning |
 | --- | --- |
-| Installation | One configured Relay administrative domain with its own identities, policy, and durable records. |
+| Installation | One configured NimbleNewt administrative domain with its own identities, policy, and durable records. |
 | Controller | Deterministic services that authorize, schedule, journal, and coordinate work. It is not an LLM agent. |
 | Coordinator | An agent that converses with people and helps plan; it calls controller services under scoped authority. |
 | Agent | Durable identity with a desk, role, permissions, and assignments. Neither a model name nor a process ID. |
 | Worker | An execution process/environment hosting a harness for an agent's authorized attempt. Restarting a worker does not replace the agent. |
-| Harness | The model/tool execution runtime. Pi Durable is selected; its internal tasks are not automatically Relay tasks. |
+| Harness | The model/tool execution runtime. Pi Durable is selected; its internal tasks are not automatically NimbleNewt tasks. |
 | Model route | A provider/account/endpoint/model combination with capability, privacy, availability, and budget constraints. A remote model endpoint is not a remote worker. |
 | Task | An authorized outcome and acceptance criteria, with scope, dependencies, priority, difficulty, budget, and P/PC classification. |
 | Context | A persistent task, discussion, or meeting history and its current model-facing view. Context switching is not assignment transfer. |
@@ -20,7 +20,7 @@ This document makes the product's existing requirements explicit at component bo
 | Checkpoint | A committed recovery record referring to exact context, task, job, environment, and artifact versions. |
 | Capability | A scoped permission enforced by trusted services. A role supplies capabilities; a friendly role name grants none by itself. |
 
-Controller services own assignments, decisions, policy, routing exclusions, inboxes, budgets, and operation outcomes. A worker owns execution progress only within its current authority. Harness history can remain in native storage, but Relay must retain stable references and export/recovery metadata. Shared artifact storage and agent desks are distinct from editable repository files. Final storage engines and deployment topology remain separate implementation choices.
+Controller services own assignments, decisions, policy, routing exclusions, inboxes, budgets, and operation outcomes. A worker owns execution progress only within its current authority. Harness history can remain in native storage, but NimbleNewt must retain stable references and export/recovery metadata. Shared artifact storage and agent desks are distinct from editable repository files. Final storage engines and deployment topology remain separate implementation choices.
 
 ## State and ownership
 

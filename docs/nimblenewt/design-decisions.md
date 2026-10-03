@@ -1,6 +1,6 @@
 # Design decisions and remaining questions
 
-This register distinguishes settled direction from proposals, unanswered choices, and implementation evidence. A document marked historical cannot override a later user decision. Accepted requirements describe what Relay must do; they do not claim it has been built or qualified. Phases and MVP selection remain deferred.
+This register distinguishes settled direction from proposals, unanswered choices, and implementation evidence. A document marked historical cannot override a later user decision. Accepted requirements describe what NimbleNewt must do; they do not claim it has been built or qualified. Phases and MVP selection remain deferred.
 
 ## Accepted direction
 
@@ -18,15 +18,15 @@ This register distinguishes settled direction from proposals, unanswered choices
 | Context | Separate task/chat/meeting histories, expandable source-backed memory, and recorded decisions; no claim of preserving hidden model state. | [Persistent context](README.md#persistent-conversation-context) |
 | Desks | Owner-written records readable by authorized peers, with private scratch and scoped retrieval. | [Agent desks](README.md#agent-desks-and-shared-reading) |
 | Environments | Per-agent skills/tools/extensions and enforced isolation; code customization does not grant additional authority. | [Environments](README.md#individual-agent-environments) |
-| Tools | Protected Relay operations, shared maintainer-managed toolbox, read-only shared source, personal forks, and reviewed improvement proposals. | [Shared toolbox](README.md#shared-toolbox-and-promotion) |
-| Naming | Prefixed Relay and agent commands; durable agent identity separate from editable friendly names. Exact grammar/alias defaults remain proposed. | [Namespaces](runtime-compatibility-and-namespaces.md#command-naming) |
+| Tools | Protected NimbleNewt operations, shared maintainer-managed toolbox, read-only shared source, personal forks, and reviewed improvement proposals. | [Shared toolbox](README.md#shared-toolbox-and-promotion) |
+| Naming | Prefixed NimbleNewt and agent commands; durable agent identity separate from editable friendly names. Exact grammar/alias defaults remain proposed. | [Namespaces](runtime-compatibility-and-namespaces.md#command-naming) |
 | Routing | UI-editable difficulty profiles and ordered model routes; every model-using role obeys exclusions and fallback constraints. | [Routing](README.md#provider-switching-and-backup-models) |
 | Meetings | Scheduled and immediate meetings, unattended operation, summary and full transcript, votes with reasons, human-present agreement before action. | [Meetings](README.md#stand-ups-and-live-meetings) |
 | Quality assurance | Every agent checks its own work; additional QA responsibility can cover assigned work, projects, or entire teams. Scope and independent-review gates are explicit, with evidence tied to the reviewed version. | [QA](README.md#quality-assurance-and-review-scope) |
 | Work balance | Explicit production and production-capacity work; protect improvement without starving delivery. Numeric allocations remain proposals. | [P/PC](production-and-capacity.md) |
 | Replay | Read-only observable activity, source/artifact versions, and short stated rationales; no automatic tool/model reexecution. | [Replay](README.md#activity-history-and-replay) |
-| Repositories | Multi-repository projects; no required Relay files in target repositories. | [Repository independence](README.md#multiple-repositories-without-repository-setup-requirements) |
-| Product/development separation | Our Relay-source improvement/build/deployment loop is optional installation tooling. Public users improve their own projects; official-release installation is separate. | [Development workflow](development-workflow.md) |
+| Repositories | Multi-repository projects; no required NimbleNewt files in target repositories. | [Repository independence](README.md#multiple-repositories-without-repository-setup-requirements) |
+| Product/development separation | Our NimbleNewt-source improvement/build/deployment loop is optional installation tooling. Public users improve their own projects; official-release installation is separate. | [Development workflow](development-workflow.md) |
 
 ## User questions from the document review
 
@@ -48,7 +48,7 @@ See the accepted ownership model and proposed [worker topology](organization-and
 | Lifecycle limits | Preparation deadlines, cleanup budget, and force-escalation policy unset. | Show blocked preparation; never silently Force Stop or release assignments. |
 | Provider cutover | Immediate exclusion for new dispatch; planned drain versus immediate cancellation is explicit. Default drain duration/failback unset. | Disabled routes remain disabled until authorized reenablement; no endless retry or duplicated effects. |
 | Personal customization | Drafts within existing rights; catalog preapproval or scoped review for executable changes. | Exact artifact approval, isolated activation, bounded permissions, and rollback. |
-| Commands | `/relay.*`, `/toolbox.*`, durable agent prefixes, optional `/agent.*` and `/custom.*` aliases. | Canonical IDs persist; aliases cannot change queued targets or bypass collisions/permissions. |
+| Commands | `/nimblenewt.*`, `/toolbox.*`, durable agent prefixes, optional `/agent.*` and `/custom.*` aliases. | Canonical IDs persist; aliases cannot change queued targets or bypass collisions/permissions. |
 | Maintenance | Authorized exact releases, configured windows, isolated activation, automatic startup-failure rollback. Window/channel/automatic update defaults unset. | No unapproved candidate, lost input, double writer, or blind post-effect state rewind. |
 | Task return | Reassess eligibility/priority at the return boundary; temporary interruptions can carry authorized auto-return. | Retain original assignments; preserve manual lifecycle gates. |
 
@@ -64,12 +64,12 @@ Validate configuration combinations: a requested PC target must fit its authoriz
 - Define configuration migration, official release trust/publisher verification, updater installation, health checks, backward-compatible rollback windows, and failure recovery when both versions fail.
 - Select notification delivery, presence/disconnection handling, meeting quorum details, maximum queue/wait bounds, and the semantics of blocked job reconciliation.
 - Define attribution of meetings, supervision, and other shared overhead in P/PC accounting, along with measurement of occupied worker slots and background resources.
-- A standalone local Relay repository has been created. Choose license, public hosting destination, contributor guidance, and public naming before publication; the repository has not been published.
+- A standalone local NimbleNewt repository has been created. The public project name is NimbleNewt. Choose license, public hosting destination, and contributor guidance before publication; the repository has not been published.
 
-General project collaboration, coding, and ongoing operational responsibilities are all in the product vision. Which capabilities are delivered first is a later phase/MVP decision, not an unresolved statement of purpose. Relay is independent; existing orchestration integrations are optional rather than a dependency question.
+General project collaboration, coding, and ongoing operational responsibilities are all in the product vision. Which capabilities are delivered first is a later phase/MVP decision, not an unresolved statement of purpose. NimbleNewt is independent; existing orchestration integrations are optional rather than a dependency question.
 
 ## Evidence status
 
-The [harness report](harness-test-results.md) records six recovery scenarios and a Pi runtime-control suite using real harness packages with fake models/effects, on macOS only. Those results support narrow recovery and integration claims, not isolation, real provider failover, host reboot, Linux/Windows qualification, meetings, or an implemented Relay controller. No runtime tests were rerun during this prose review.
+The [harness report](harness-test-results.md) records six recovery scenarios and a Pi runtime-control suite using real harness packages with fake models/effects, on macOS only. Those results support narrow recovery and integration claims, not isolation, real provider failover, host reboot, Linux/Windows qualification, meetings, or an implemented NimbleNewt controller. No runtime tests were rerun during this prose review.
 
 The [regular pi document](pi-integration-research.md) is historical source research. Its slash commands, hooks, and session sidecars are not assumed to apply to Pi Durable. The earlier Deep Agents preference is retained only as historical evaluation context; Pi Durable is selected.

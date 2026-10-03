@@ -25,7 +25,7 @@ def log(name, value):
 class ScriptedModel(BaseChatModel):
     @property
     def _llm_type(self):
-        return 'relay-offline-probe'
+        return 'nimblenewt-offline-probe'
     def bind_tools(self, tools, **kwargs):
         return self
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):

@@ -27,7 +27,7 @@ const effect = defineTool({ name: 'effect', description: 'Perform fake external 
     if (stage === 'start') process.kill(process.pid, 'SIGKILL');
     return { content: [{ type: 'text', text: 'effect completed' }] };
 }});
-registry.install(defineExtension({ name: 'relay-probe', tools: [prepare, effect] }));
+registry.install(defineExtension({ name: 'nimblenewt-probe', tools: [prepare, effect] }));
 const models = createModels();
 const faux = fauxProvider({ provider: 'offline', models: [{ id: 'scripted' }] });
 models.setProvider(faux.provider);

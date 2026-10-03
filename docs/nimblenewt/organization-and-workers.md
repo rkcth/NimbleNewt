@@ -1,6 +1,6 @@
 # Organization and worker topology
 
-**Accepted baseline: one human owner per Relay installation.** The owner directs teams of agents across projects and repositories. Multiple human accounts, shared human administration, and human role hierarchies are outside the current design. Worker placement is a separate decision, with the multi-host proposal below still awaiting confirmation.
+**Accepted baseline: one human owner per NimbleNewt installation.** The owner directs teams of agents across projects and repositories. Multiple human accounts, shared human administration, and human role hierarchies are outside the current design. Worker placement is a separate decision, with the multi-host proposal below still awaiting confirmation.
 
 ## One owner, teams of agents
 
@@ -22,11 +22,11 @@ QA can be limited to an agent's own work or assigned across a project or team. A
 
 ## Developer workflow within an organization
 
-One important deployment is Relay installed on an individual developer's development machine. The developer directs their own agents across the projects they work on and submits resulting code changes within their organization. Other developers can use separate installations; shared organizational work flows through existing repositories, issues, branches, pull requests or merge requests, reviews, and CI. Direct coordination between separate Relay installations is not required by this workflow.
+One important deployment is NimbleNewt installed on an individual developer's development machine. The developer directs their own agents across the projects they work on and submits resulting code changes within their organization. Other developers can use separate installations; shared organizational work flows through existing repositories, issues, branches, pull requests or merge requests, reviews, and CI. Direct coordination between separate NimbleNewt installations is not required by this workflow.
 
-Relay should support the full local contribution loop: understand the request, inspect an existing checkout, prepare an isolated task workspace where needed, implement changes, run relevant checks, present the diff and validation results, and help submit or revise a contribution when authorized. Preserve the developer's existing uncommitted work. Keep agent transcripts, desks, configuration, and orchestration state outside the target repository; submitted changes contain the intended project work, not Relay's internal records.
+NimbleNewt should support the full local contribution loop: understand the request, inspect an existing checkout, prepare an isolated task workspace where needed, implement changes, run relevant checks, present the diff and validation results, and help submit or revise a contribution when authorized. Preserve the developer's existing uncommitted work. Keep agent transcripts, desks, configuration, and orchestration state outside the target repository; submitted changes contain the intended project work, not NimbleNewt's internal records.
 
-The developer controls their Relay agents, while repository permissions and organizational review requirements continue to govern submission and merge. Owner approval inside Relay does not bypass branch protections, required reviews, or CI. Use explicitly configured credentials and accurate commit/submission attribution; do not assume that permission to edit locally also authorizes pushing, opening a review, merging, or deploying. Existing delegation can authorize these actions without repeated confirmation.
+The developer controls their NimbleNewt agents, while repository permissions and organizational review requirements continue to govern submission and merge. Owner approval inside NimbleNewt does not bypass branch protections, required reviews, or CI. Use explicitly configured credentials and accurate commit/submission attribution; do not assume that permission to edit locally also authorizes pushing, opening a review, merging, or deploying. Existing delegation can authorize these actions without repeated confirmation.
 
 Model and tool configuration must accommodate the developer's permitted services and project data restrictions. A local installation may use approved remote models; local installation alone does not mean source code stays on the machine. Fallback routes must preserve those restrictions. Integrations should be optional and provider-independent so the same contribution workflow can fit different organizations and open-source projects.
 
@@ -50,7 +50,7 @@ One logical controller can later gain a tested failover mechanism, but this prop
 
 The baseline setup has one owner and a local worker, with projects and agent teams created as needed. It requires no human membership management, enterprise identity service, or network cluster. Whether remote workers belong in the initial design remains open.
 
-An individual using Relay for business work can direct agents across business projects, repositories, and managed services within their own authorization. This does not imply shared access for coworkers. Supporting several human users would require a separate design decision covering membership, privacy, conflicting authority, approvals, and meeting rights; it is not a promised upgrade path. Keep human, agent, and service identities distinct without implementing speculative enterprise governance.
+An individual using NimbleNewt for business work can direct agents across business projects, repositories, and managed services within their own authorization. This does not imply shared access for coworkers. Supporting several human users would require a separate design decision covering membership, privacy, conflicting authority, approvals, and meeting rights; it is not a promised upgrade path. Keep human, agent, and service identities distinct without implementing speculative enterprise governance.
 
 ## Qualification scenarios
 
@@ -59,7 +59,7 @@ An individual using Relay for business work can direct agents across business pr
 - Conflicting instructions from the owner's concurrent conversations are surfaced before the disputed action proceeds.
 - Repository content and agent messages cannot authenticate as the owner or change installation permissions.
 - A one-person local installation works without external identity services or a network cluster.
-- A developer completes an authorized contribution from an existing checkout through review submission, without adding Relay metadata, overwriting unrelated local work, bypassing repository checks, or disclosing project data to a prohibited fallback provider.
+- A developer completes an authorized contribution from an existing checkout through review submission, without adding NimbleNewt metadata, overwriting unrelated local work, bypassing repository checks, or disclosing project data to a prohibited fallback provider.
 
 - A server-maintenance responsibility survives completion of individual checks and host restart, records stale observations accurately, and reconciles an interrupted update before another attempt.
 - Pausing or suspending a maintenance agent preserves queued alerts and responsibility ownership without silently stopping the managed service or allowing competing maintenance writers.

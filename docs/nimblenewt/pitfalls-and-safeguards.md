@@ -1,12 +1,12 @@
-# Relay pitfalls and safeguards
+# NimbleNewt pitfalls and safeguards
 
-Relay's goal is durable, coordinated agent work. This document records failure scenarios and the safeguards incorporated into the [design plan](README.md#safeguards-in-the-design-plan), before selecting phases or an MVP. Safeguard outcomes are design requirements; the mechanisms described below and remaining policy choices need implementation validation. The [isolated harness experiments](harness-test-results.md) demonstrate selected behaviors and hazards, not implemented Relay safeguards.
+NimbleNewt's goal is durable, coordinated agent work. This document records failure scenarios and the safeguards incorporated into the [design plan](README.md#safeguards-in-the-design-plan), before selecting phases or an MVP. Safeguard outcomes are design requirements; the mechanisms described below and remaining policy choices need implementation validation. The [isolated harness experiments](harness-test-results.md) demonstrate selected behaviors and hazards, not implemented NimbleNewt safeguards.
 
 ## Hazards confirmed in initial experiments
 
 Both tested frameworks repeated an unprotected action after a crash when recovery permitted retry. Stable operation IDs protected the fake service in the corresponding tests; deduplicating a conversation submission alone did not protect tool effects. Pi Durable's default unsafe-tool handling reported an interruption without rerunning it, but declaring that tool replay-safe enabled duplication. Keep that declaration host-controlled and reconcile uncertain results before a model can issue a replacement action.
 
-Pi Durable's abort withdrew queued inputs but a new submission restarted work; preserve Relay's inbox separately and enforce a durable Pause gate. Its registry also allowed another extension to override a tool name; protect registration and enforce service authority outside extension code. The default SQLite synchronous mode was NORMAL, so specify stronger flush behavior where required rather than inferring host-failure durability from process recovery. Enforce single ownership and stale-owner rejection independently of the storage engine. Full results and test limitations are in the experiment report.
+Pi Durable's abort withdrew queued inputs but a new submission restarted work; preserve NimbleNewt's inbox separately and enforce a durable Pause gate. Its registry also allowed another extension to override a tool name; protect registration and enforce service authority outside extension code. The default SQLite synchronous mode was NORMAL, so specify stronger flush behavior where required rather than inferring host-failure durability from process recovery. Enforce single ownership and stale-owner rejection independently of the storage engine. Full results and test limitations are in the experiment report.
 
 ## Production and improvement can starve one another
 
@@ -20,13 +20,13 @@ A personal utility may depend on private files, assume one host, contain credent
 
 Provide audience-scoped read-only source access and independent writable personal forks with base-version provenance. Enforce shared immutability through file and service access, not just UI controls. Personal forks cannot shadow shared names or inherit execution privileges. Improvement proposals contain explicit patches and evidence, not entire private desks; stale proposals require conflict resolution and validation before a maintainer publishes a new version.
 
-Use a scoped toolbox-management permission, immutable reviewed promotion artifacts, explicit audiences, versioned updates, and independent invocation authorization. Keep proposals and shared entries separate; record author provenance without copying private context. Validate platform/backend requirements, replay behavior, and dependencies. Test unauthorized edits, personal-file changes, audience changes, revocation of queued work, and rollback. Toolbox permission never grants control over protected Relay commands. See the [shared toolbox design](README.md#shared-toolbox-and-promotion).
+Use a scoped toolbox-management permission, immutable reviewed promotion artifacts, explicit audiences, versioned updates, and independent invocation authorization. Keep proposals and shared entries separate; record author provenance without copying private context. Validate platform/backend requirements, replay behavior, and dependencies. Test unauthorized edits, personal-file changes, audience changes, revocation of queued work, and rollback. Toolbox permission never grants control over protected NimbleNewt commands. See the [shared toolbox design](README.md#shared-toolbox-and-promotion).
 
 ## Runtime upgrades can change the meaning of saved commands
 
 An API rename may also change arguments, return values, cancellation behavior, or persisted state. Prefixes reduce accidental naming conflicts but do not prevent an extension from attempting to shadow a protected operation. Editable agent names and context-sensitive shortcuts can also retarget queued work if stored as routing identities.
 
-Pi Durable is selected with this risk accepted. Use a pinned, versioned adapter; reserve Relay namespaces; bind agent-owned commands to immutable computer-assigned IDs; and persist resolved operation identities and schema versions. Qualify explicit mappings, migration of suspended checkpoints, collision rejection, and rollback on all required platforms before activation. Keep final authorization outside worker extension code. Follow the [runtime compatibility and namespace plan](runtime-compatibility-and-namespaces.md), including reconciliation of external effects when rollback would otherwise rewind state.
+Pi Durable is selected with this risk accepted. Use a pinned, versioned adapter; reserve NimbleNewt namespaces; bind agent-owned commands to immutable computer-assigned IDs; and persist resolved operation identities and schema versions. Qualify explicit mappings, migration of suspended checkpoints, collision rejection, and rollback on all required platforms before activation. Keep final authorization outside worker extension code. Follow the [runtime compatibility and namespace plan](runtime-compatibility-and-namespaces.md), including reconciliation of external effects when rollback would otherwise rewind state.
 
 ## A reusable project can accidentally depend on its first installation
 
@@ -54,7 +54,7 @@ Propose durable operation identities and intent records, idempotency keys when s
 
 ## Two workers can believe they own the same task
 
-A disconnected worker may keep running while Relay assigns its task to a replacement. Two agents can also produce individually valid edits that conflict semantically when combined.
+A disconnected worker may keep running while NimbleNewt assigns its task to a replacement. Two agents can also produce individually valid edits that conflict semantically when combined.
 
 Propose a single durable owner and increasing ownership generation for each task. Trusted write services reject requests from an obsolete generation. Expiring a lease alone is insufficient if an old worker retains direct write credentials. Transfers must revoke or fence the old worker before the new owner can change shared state. Use isolated task workspaces, version checks, controlled integration, and checks against the combined result. Direct write paths must provide equivalent enforcement or remain unavailable during uncertain ownership.
 
@@ -88,7 +88,7 @@ Propose per-agent homes and dependency stores, versioned environment artifacts, 
 
 A reviewed script may be edited before it runs, a newly registered tool may shadow a trusted name, or an in-process extension may reach controller credentials. A stale prompt can also attempt a tool after its permission has been revoked.
 
-Protected Pi Durable extensions should be loaded from controller-owned read-only artifacts, with reserved names and protected loader configuration. However, another extension in the same process can still interfere with runtime behavior. Treat the worker as untrusted and keep final authorization in external Relay services. Test attempts to disable or shadow the bridge as well as direct service calls from personal extensions; immutable source files alone are not sufficient enforcement.
+Protected Pi Durable extensions should be loaded from controller-owned read-only artifacts, with reserved names and protected loader configuration. However, another extension in the same process can still interfere with runtime behavior. Treat the worker as untrusted and keep final authorization in external NimbleNewt services. Test attempts to disable or shadow the bridge as well as direct service calls from personal extensions; immutable source files alone are not sufficient enforcement.
 
 Propose isolated harness workers and a stable tool bridge with versioned manifests and immutable executable artifacts. Approvals bind to the exact code, dependencies, and capabilities. Enforce access again at invocation, reserve controller tool names, and keep in-flight calls bound to their selected version. Treat shell access as an equivalent execution path subject to the same containment. Test live registration, unauthorized activation, changed code, revocation, and checkpointed background jobs. These safeguards are part of evaluating the proposed runtime and tool architecture.
 
@@ -144,7 +144,7 @@ Propose explicit project and repository scope on every dispatched task, independ
 
 An agent might write its plans into an upstream repository, add ignore rules for internal files, or include existing user changes in a PR. A cross-repository task could also complete only half of a coordinated update.
 
-Propose storing all Relay operational records externally, binding tasks to explicit checkout identities and revisions, recording initial working state, and inspecting actual contribution diffs before publication. Existing repository conventions still apply, but Relay-specific documents must never be required. Test an ordinary checkout with no Relay files present. Model related PRs and integration order as separate durable operations, with visible partial completion and a recovery plan.
+Propose storing all NimbleNewt operational records externally, binding tasks to explicit checkout identities and revisions, recording initial working state, and inspecting actual contribution diffs before publication. Existing repository conventions still apply, but NimbleNewt-specific documents must never be required. Test an ordinary checkout with no NimbleNewt files present. Model related PRs and integration order as separate durable operations, with visible partial completion and a recovery plan.
 
 ## Meetings can interrupt work or imply consent
 
@@ -172,7 +172,7 @@ When the user is present, the chair must ask whether they agree with the vote or
 
 ## Release and deployment boundaries
 
-Ordinary users improve their own projects and tooling. Our optional Relay development deployment must not become an enabled-by-default self-modification loop or gain access to the live installation through its project name. An authorized official-release updater can be public functionality without granting agents permission to produce or deploy Relay builds. Keep development artifacts, release authority, updater code, and live state separate. Test startup-failure rollback and prohibit blind state rewind after production effects. See [development scope](development-workflow.md) and [maintenance](maintenance-and-updates.md).
+Ordinary users improve their own projects and tooling. Our optional NimbleNewt development deployment must not become an enabled-by-default self-modification loop or gain access to the live installation through its project name. An authorized official-release updater can be public functionality without granting agents permission to produce or deploy NimbleNewt builds. Keep development artifacts, release authority, updater code, and live state separate. Test startup-failure rollback and prohibit blind state rewind after production effects. See [development scope](development-workflow.md) and [maintenance](maintenance-and-updates.md).
 
 ## Remaining operational tradeoffs
 

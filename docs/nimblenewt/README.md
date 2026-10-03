@@ -1,20 +1,20 @@
-# Relay concept draft
+# NimbleNewt concept draft
 
-**Relay is a system for running a persistent team of AI agents that can work independently, collaborate, and adapt without losing their place.**
+**NimbleNewt is a system for running a persistent team of AI agents that can work independently, collaborate, and adapt without losing their place.**
 
 Each agent has its own identity, memory, and customizable environment. Agents can pause, switch tasks, and resume—even after a reboot—while coordinating through a hierarchy, messages, shared work records, and regular planning.
 
 The system matches models and tools to task difficulty, manages interruptions and resources, and enforces boundaries so agents can improve their own workflows without damaging each other’s work or the underlying system.
 
-Relay supports both finite projects and ongoing responsibilities: software development, QA, marketing, support, graphic design, research, planning, user and technical documentation, and operating systems and services. Each installation has one human owner directing a persistent team of agents. A developer can install it on their development machine and submit changes through their organization's existing review process; an operations agent can maintain a server, keep deployed code updated, and check that services are working. Coding is an important use case, not the product boundary. Coworkers need no account in that owner's Relay installation.
+NimbleNewt supports both finite projects and ongoing responsibilities: software development, QA, marketing, support, graphic design, research, planning, user and technical documentation, and operating systems and services. Each installation has one human owner directing a persistent team of agents. A developer can install it on their development machine and submit changes through their organization's existing review process; an operations agent can maintain a server, keep deployed code updated, and check that services are working. Coding is an important use case, not the product boundary. Coworkers need no account in that owner's NimbleNewt installation.
 
-Conversation is the primary interface: the user can ask what is happening, request help, develop a project idea, and direct work across multiple repositories. Relay keeps its operational state outside those repositories and requires no special repository documents.
+Conversation is the primary interface: the user can ask what is happening, request help, develop a project idea, and direct work across multiple repositories. NimbleNewt keeps its operational state outside those repositories and requires no special repository documents.
 
-Relay is intended to become a standalone open-source project. Its core must work independently of this repository and any particular deployment. Model routes, local inference services, and environment preferences belong in configuration that users can manage through the UI. See [Standalone distribution and configuration](portability-and-configuration.md).
+NimbleNewt is intended to become a standalone open-source project. Its core must work independently of this repository and any particular deployment. Model routes, local inference services, and environment preferences belong in configuration that users can manage through the UI. See [Standalone distribution and configuration](portability-and-configuration.md).
 
 **macOS, Linux, and Windows are required platforms.** Installation, UI and conversational controls, agent execution, configuration, and durable recovery must be qualified on all three; platform support is a requirement, not a claim about the current prototype experiments.
 
-Created October 3, 2026. Relay is the working project name; availability and final public branding remain unchecked. This document separates accepted product requirements, proposed mechanisms, deployment-specific workflows, and measured evidence. A requirement is not an implementation claim. Numeric defaults and open decisions are tracked in the [design decision register](design-decisions.md).
+Created October 3, 2026. NimbleNewt is the selected project name. This document separates accepted product requirements, proposed mechanisms, deployment-specific workflows, and measured evidence. A requirement is not an implementation claim. Numeric defaults and open decisions are tracked in the [design decision register](design-decisions.md).
 
 ## Document guide
 
@@ -28,7 +28,7 @@ Created October 3, 2026. Relay is the working project name; availability and fin
 | [Production and capacity](production-and-capacity.md) | Delivery/improvement scheduling, budgets, and evaluation. |
 | [Runtime compatibility and namespaces](runtime-compatibility-and-namespaces.md) | Selected runtime, command identity, and version compatibility. |
 | [Maintenance and updates](maintenance-and-updates.md) | Public release installation, activation checks, and rollback boundaries. |
-| [Relay development workflow](development-workflow.md) | Our optional deployment-specific process for improving Relay's source and building candidates. |
+| [NimbleNewt development workflow](development-workflow.md) | Our optional deployment-specific process for improving NimbleNewt's source and building candidates. |
 | [Pitfalls and safeguards](pitfalls-and-safeguards.md) | Failure modes, required protections, and validation. |
 | [Harness comparison](harness-comparison.md) | Current selection and clearly labeled historical alternatives. |
 | [Harness test results](harness-test-results.md) | Exact scope and limitations of experiments; links to reproducible probes. |
@@ -36,20 +36,15 @@ Created October 3, 2026. Relay is the working project name; availability and fin
 
 ## Public product and our development deployment
 
-Public Relay helps users deliver their own projects and improve their tools, skills, and workflows. It does not ship a required team, backlog, credentials, or automatic development loop for modifying Relay itself. General feedback, PC planning, project work, and tool promotion are reusable product capabilities.
+Public NimbleNewt helps users deliver their own projects and improve their tools, skills, and workflows. It does not ship a required team, backlog, credentials, or automatic development loop for modifying NimbleNewt itself. General feedback, PC planning, project work, and tool promotion are reusable product capabilities.
 
-Our Relay development team uses those ordinary capabilities to work on the Relay repository, with optional build/release integrations and explicitly delegated permissions. Agent-authored candidate creation is deployment-specific. Installing an authorized official release with maintenance and recovery support is a separate public-product capability; installation does not require agents to develop Relay. See [the development workflow](development-workflow.md) for the boundary.
+Our NimbleNewt development team uses those ordinary capabilities to work on the NimbleNewt repository, with optional build/release integrations and explicitly delegated permissions. Agent-authored candidate creation is deployment-specific. Installing an authorized official release with maintenance and recovery support is a separate public-product capability; installation does not require agents to develop NimbleNewt. See [the development workflow](development-workflow.md) for the boundary.
 
-## Naming shortlist
+## Project name
 
-| Name | Why it fits |
-| --- | --- |
-| Relay | Continuity, communication, and handing work between agents. Recommended working name. |
-| Continuum | Emphasizes persistence across interruptions and restarts. |
-| Waystation | A place to pause, regroup, and continue a journey. |
-| Threadkeeper | Directly describes preserving multiple lines of work. |
+The selected name is **NimbleNewt**, a three-syllable, alliterative name suggesting adaptability and responsiveness. Use `nimblenewt` for package names, paths, and reserved command prefixes such as `/nimblenewt.pause`.
 
-Names have not been checked for product, package, domain, or trademark availability.
+Initial checks found no matching GitHub repositories, exact npm or PyPI packages, or public GitHub account at `nimblenewt`. GitHub organization-name availability must still be confirmed at creation. The `.com` domain is registered, which is not a blocker for this project. These checks are not trademark clearance.
 
 ## Requested behavior
 
@@ -67,21 +62,21 @@ Names have not been checked for product, package, domain, or trademark availabil
 - Agents respond to events and revise plans as priorities change.
 - Chat is the primary interface for status, help, brainstorming, project drafting, and directing work. Task views and dashboards support conversation rather than being required to operate the system.
 - The user's explicit choices take precedence over team proposals, votes, reviews, and prior agent decisions. Agents may explain concerns or recommend alternatives, but cannot replace the user's choice with their own consensus.
-- Projects can span multiple repositories, and repositories can participate in multiple projects. Existing open source checkouts must work without adding Relay-specific documents, configuration, history, or state to them.
-- Relay can be extracted into its own repository and distributed as an independent open-source application. No particular local coder, provider, host path, or existing orchestration installation is required. Users can configure their deployment, difficulty profiles, and ordered model fallbacks through the UI.
-- Relay must work on macOS, Linux, and Windows with the same core lifecycle, configuration, and safety guarantees. Platform-specific implementation details belong behind tested adapters; an unavailable optional integration must not make the whole platform unusable.
+- Projects can span multiple repositories, and repositories can participate in multiple projects. Existing open source checkouts must work without adding NimbleNewt-specific documents, configuration, history, or state to them.
+- NimbleNewt can be extracted into its own repository and distributed as an independent open-source application. No particular local coder, provider, host path, or existing orchestration installation is required. Users can configure their deployment, difficulty profiles, and ordered model fallbacks through the UI.
+- NimbleNewt must work on macOS, Linux, and Windows with the same core lifecycle, configuration, and safety guarantees. Platform-specific implementation details belong behind tested adapters; an unavailable optional integration must not make the whole platform unusable.
 
 ## Central design proposal
 
-Relay should own durable task state, scheduling, and communication. A harness executes bounded stretches of work and returns progress to Relay. An agent's identity and responsibilities persist independently of whichever process, harness, or model currently performs its work.
+NimbleNewt should own durable task state, scheduling, and communication. A harness executes bounded stretches of work and returns progress to NimbleNewt. An agent's identity and responsibilities persist independently of whichever process, harness, or model currently performs its work.
 
-The important distinction is between preserving a task and preserving a live model computation. Relay can design for recovery of recorded conversations, tool results, artifacts, decisions, and pending work. It cannot assume that every provider exposes an unfinished generation, hidden model state, or a portable session snapshot. Exact native continuation and reconstruction from durable records must be distinct, visible capabilities.
+The important distinction is between preserving a task and preserving a live model computation. NimbleNewt can design for recovery of recorded conversations, tool results, artifacts, decisions, and pending work. It cannot assume that every provider exposes an unfinished generation, hidden model state, or a portable session snapshot. Exact native continuation and reconstruction from durable records must be distinct, visible capabilities.
 
 The proposed baseline is continuation from a committed execution boundary with durable context, without blindly repeating completed effects. Arbitrary live-process restoration is not promised; individual tools may offer checkpoints or durable remote jobs. If a task requires stronger recovery, declare that requirement and qualify an adapter or report the limitation. Harnesses that cannot export enough state should be marked unsupported for durable tasks until an adequate adapter exists.
 
 ## Areas of work and collaboration
 
-Relay supports configurable specialist roles across the work needed to develop, operate, explain, and support a product or service. These are examples of responsibilities, not mandatory departments or a fixed roster. One agent may cover several areas, or several agents may divide a larger responsibility. The same durable tasks, context, permissions, QA, and collaboration contracts apply throughout.
+NimbleNewt supports configurable specialist roles across the work needed to develop, operate, explain, and support a product or service. These are examples of responsibilities, not mandatory departments or a fixed roster. One agent may cover several areas, or several agents may divide a larger responsibility. The same durable tasks, context, permissions, QA, and collaboration contracts apply throughout.
 
 | Area | Example responsibilities and deliverables |
 | --- | --- |
@@ -92,7 +87,7 @@ Relay supports configurable specialist roles across the work needed to develop, 
 | Development documentation | Architecture, component interactions, APIs, data models, design decisions, setup, and operational runbooks that explain how the system works. Keep these aligned with implementation changes. |
 | Development, QA, and operations | Build and validate functionality, investigate defects, maintain services, and feed verified changes and operational findings into the other areas. |
 
-Treat documentation maintenance as ongoing work. Relevant code, configuration, interface, and release changes should trigger a documentation-impact check and assign updates where needed. Record the documentation owner, applicable version, supporting implementation references, and validation status. Distinguish current behavior from proposed or unreleased behavior; stale or unverified instructions must remain visible rather than silently being treated as current. Documentation is a project deliverable where appropriate, distinct from Relay's private orchestration records, which stay outside target repositories.
+Treat documentation maintenance as ongoing work. Relevant code, configuration, interface, and release changes should trigger a documentation-impact check and assign updates where needed. Record the documentation owner, applicable version, supporting implementation references, and validation status. Distinguish current behavior from proposed or unreleased behavior; stale or unverified instructions must remain visible rather than silently being treated as current. Documentation is a project deliverable where appropriate, distinct from NimbleNewt's private orchestration records, which stay outside target repositories.
 
 Cross-role handoffs should carry the brief, acceptance criteria, exact source/artifact versions, outstanding questions, and intended audience. For example, support can report a recurring problem; development fixes it; QA verifies the result; documentation explains the changed behavior; design supplies illustrations; and marketing prepares an accurate announcement. Model these dependencies as linked work so a release change can flag affected documents, support guidance, and promotional assets for review.
 
@@ -104,15 +99,15 @@ An agent can own a continuing responsibility such as maintaining a server, along
 
 For example, a server-maintenance agent can inspect service health, notice an approved software update, prepare and apply that update within its delegated authority, validate the resulting service, and report the outcome. When recovery is safe and authorized it can restore the previous working version; otherwise it records the failure and escalates. Keep intended state, observed state, last successful check, and unresolved incidents distinct. “No recent observation” must not appear as “healthy.”
 
-Use deterministic monitoring and scheduled checks where practical, calling an agent when interpretation or action is needed. Group repeated alerts into the same incident, bound retries and repair attempts, and preserve unresolved incidents through restart. Provider outages or Relay downtime must be visible as gaps in agent coverage; external monitors may continue independently. A developer's sleeping laptop cannot provide continuous agent response unless execution remains available elsewhere.
+Use deterministic monitoring and scheduled checks where practical, calling an agent when interpretation or action is needed. Group repeated alerts into the same incident, bound retries and repair attempts, and preserve unresolved incidents through restart. Provider outages or NimbleNewt downtime must be visible as gaps in agent coverage; external monitors may continue independently. A developer's sleeping laptop cannot provide continuous agent response unless execution remains available elsewhere.
 
 Existing lifecycle and permission rules apply. Pause may leave already-running monitors or jobs active, but their events queue without silently resuming the agent. Suspend checkpoints the responsibility and reconciles external jobs on return; it does not automatically shut down the service being maintained. Suspend and Release requires an explicit handoff of monitoring and intervention ownership. Coordinate maintenance by managed resource so two agents cannot concurrently update the same service.
 
-Managing a remote server through an authorized API or remote-execution tool does not require hosting a Relay agent worker on that server. Multi-host workers remain a separate deployment choice. Updating a managed application is also distinct from updating Relay itself; each follows its own permissions, validation, and recovery procedure.
+Managing a remote server through an authorized API or remote-execution tool does not require hosting a NimbleNewt agent worker on that server. Multi-host workers remain a separate deployment choice. Updating a managed application is also distinct from updating NimbleNewt itself; each follows its own permissions, validation, and recovery procedure.
 
 ## Quality assurance and review scope
 
-Every agent is responsible for checking its own work against the user's requirements and recording relevant validation before claiming completion. QA is also an assignable specialty and ongoing responsibility. An agent may check only its own work, review selected peers or a project, or cover an entire agent team. Team-wide QA within a single-owner installation remains distinct from a developer using Relay to QA their human organization's work through authorized external repositories and systems; neither requires multiple human Relay accounts.
+Every agent is responsible for checking its own work against the user's requirements and recording relevant validation before claiming completion. QA is also an assignable specialty and ongoing responsibility. An agent may check only its own work, review selected peers or a project, or cover an entire agent team. Team-wide QA within a single-owner installation remains distinct from a developer using NimbleNewt to QA their human organization's work through authorized external repositories and systems; neither requires multiple human NimbleNewt accounts.
 
 | Scope | Responsibility |
 | --- | --- |
@@ -148,23 +143,23 @@ Keep organizational parentage separate from task dependencies: an agent may advi
 
 ## Conversation as the primary interface
 
-The user should be able to work through conversation as they do with a collaborator: ask what is happening, discuss tradeoffs, draft a new project, request a bug fix, or change priorities. A project can begin as an idea before any repository exists. Task lists, timelines, and dashboards remain useful supporting views; operating Relay must not require managing them manually.
+The user should be able to work through conversation as they do with a collaborator: ask what is happening, discuss tradeoffs, draft a new project, request a bug fix, or change priorities. A project can begin as an idea before any repository exists. Task lists, timelines, and dashboards remain useful supporting views; operating NimbleNewt must not require managing them manually.
 
 Propose a persistent conversational coordinator that retrieves relevant project records and asks specialist agents for help when necessary. Status answers should use observed task and tool state, identify stale or uncertain information, and distinguish completed work from plans. Routine status questions should not interrupt every worker or require a team meeting.
 
 Conversation can branch among projects while retaining the context of each. The coordinator should resolve project and repository scope from the current conversation and ask a focused question when the target is ambiguous. Switching the conversation's focus must not silently retarget already-running tasks.
 
-Discussing an idea is different from authorizing its execution. The coordinator can develop and save a proposal in Relay's project records while keeping implementation pending until requested. Explicit action requests can proceed within existing authorization and policy without redundant confirmation. Record substantive decisions as durable, versioned project state so they survive a conversation growing beyond the model's active context.
+Discussing an idea is different from authorizing its execution. The coordinator can develop and save a proposal in NimbleNewt's project records while keeping implementation pending until requested. Explicit action requests can proceed within existing authorization and policy without redundant confirmation. Record substantive decisions as durable, versioned project state so they survive a conversation growing beyond the model's active context.
 
 ## Persistent conversation context
 
 The user wants long-running conversations managed with an approach like pi's billion-context, rather than repeatedly starting fresh chats with a short handoff summary. Maintain a persistent conversation identity, original history, and a bounded active context that can recover earlier detail as needed. Keep work-task and meeting contexts separate from the main conversation while linking their records and applicable decisions.
 
-The [billion-context documentation](https://pi.dev/packages/billion-context?name=pi-coding-agent) describes incremental hierarchical compression with summaries linked to expandable source history. The [pi adapter documentation](https://github.com/ranxianglei/billion-context-pi/blob/master/README.md) describes context-event integration and warns about overlapping compression mechanisms. These are candidate implementation references, not verified Relay integrations. The desired capability is sustained conversation over a large durable history, not a claim that a model can attend to a billion tokens in one request.
+The [billion-context documentation](https://pi.dev/packages/billion-context?name=pi-coding-agent) describes incremental hierarchical compression with summaries linked to expandable source history. The [pi adapter documentation](https://github.com/ranxianglei/billion-context-pi/blob/master/README.md) describes context-event integration and warns about overlapping compression mechanisms. These are candidate implementation references, not verified NimbleNewt integrations. The desired capability is sustained conversation over a large durable history, not a claim that a model can attend to a billion tokens in one request.
 
-Proposed Relay requirements:
+Proposed NimbleNewt requirements:
 
-- Preserve original conversation events and source references in external Relay storage. Use layered summaries to fit active context, with tools to search and reopen original passages. Expanding a summary means retrieving the preserved source, not reconstructing deleted text from the summary.
+- Preserve original conversation events and source references in external NimbleNewt storage. Use layered summaries to fit active context, with tools to search and reopen original passages. Expanding a summary means retrieving the preserved source, not reconstructing deleted text from the summary.
 - Keep current user decisions, permissions, pending questions, and active goals in an explicit versioned context record. Compression must not silently weaken or supersede them; retrieve original wording when interpretation matters.
 - Save summary lineage, source ranges, retrieval indexes, and compression state alongside conversation checkpoints so rebooting or changing models does not reset conversational continuity.
 - Budget active context for the selected model, including tools and the expected response. Rebuild the context view when falling back to a smaller model; if essential constraints cannot fit, report the limitation instead of silently dropping them.
@@ -186,15 +181,15 @@ Agents should state relevant factual concerns and consequences candidly, then fo
 
 ## Multiple repositories without repository setup requirements
 
-Relay's project registry, desks, conversations, task records, checkpoints, environment definitions, and coordination policy should live in Relay-managed storage outside target repositories. The physical storage location is undecided. Repository-local Relay manifests, instruction files, and status documents must not be prerequisites for using the system.
+NimbleNewt's project registry, desks, conversations, task records, checkpoints, environment definitions, and coordination policy should live in NimbleNewt-managed storage outside target repositories. The physical storage location is undecided. Repository-local NimbleNewt manifests, instruction files, and status documents must not be prerequisites for using the system.
 
 Keep project identity separate from repository identity and checkout path. A project may coordinate changes across an application, a library, and documentation; one repository may support several independent tasks. Repository bindings should distinguish remotes, branches, revisions, and multiple local checkouts so relocation or similar directory names do not redirect work incorrectly. Each task has an explicit repository access scope; access to one project does not imply access to all registered repositories.
 
-Relay should read and follow applicable instructions and contribution conventions that already exist in a repository, without requiring its own conventions to be added. When the user requests project documentation or normal source changes, those are legitimate repository deliverables. Internal agent logs, scratch records, plans, and environment configuration remain outside the checkout unless explicitly requested as deliverables. This Relay design document is itself an explicitly requested deliverable, not a required setup file for future target repositories.
+NimbleNewt should read and follow applicable instructions and contribution conventions that already exist in a repository, without requiring its own conventions to be added. When the user requests project documentation or normal source changes, those are legitimate repository deliverables. Internal agent logs, scratch records, plans, and environment configuration remain outside the checkout unless explicitly requested as deliverables. This NimbleNewt design document is itself an explicitly requested deliverable, not a required setup file for future target repositories.
 
-Proposed example: the user checks out an open source project and asks Relay to fix a bug and create a PR. Relay registers the checkout externally, examines existing contribution guidance, records the starting state, assigns a scoped workspace, implements and verifies the fix, and creates the requested PR with only intended contribution files. Task history and agent setup stay in Relay storage. The workflow must not require editing `.gitignore` or adding special documents to keep Relay's own files out of the PR.
+Proposed example: the user checks out an open source project and asks NimbleNewt to fix a bug and create a PR. NimbleNewt registers the checkout externally, examines existing contribution guidance, records the starting state, assigns a scoped workspace, implements and verifies the fix, and creates the requested PR with only intended contribution files. Task history and agent setup stay in NimbleNewt storage. The workflow must not require editing `.gitignore` or adding special documents to keep NimbleNewt's own files out of the PR.
 
-Before producing a contribution, inspect its actual diff for unrelated changes, Relay state, or secrets. Record and preserve existing user changes rather than treating them as agent output. Coordinate cross-repository dependencies and review order explicitly: a set of PRs in different repositories is not one atomic change, and partial completion must remain visible and recoverable.
+Before producing a contribution, inspect its actual diff for unrelated changes, NimbleNewt state, or secrets. Record and preserve existing user changes rather than treating them as agent output. Coordinate cross-repository dependencies and review order explicitly: a set of PRs in different repositories is not one atomic change, and partial completion must remain visible and recoverable.
 
 ## Activity history and replay
 
@@ -226,25 +221,25 @@ Read and write boundaries must apply to files, search indexes, artifact links, a
 
 ## Runtime and tool architecture
 
-**Pi Durable is the selected reference worker runtime.** The user accepts its experimental API risk because its persistent conversation/task model closely fits Relay. LangGraph/Deep Agents remains an alternative. See [Harness comparison](harness-comparison.md) and [initial runtime experiments](harness-test-results.md) for evidence and remaining qualification gaps. Selection does not waive macOS, Linux, Windows, recovery, or isolation requirements.
+**Pi Durable is the selected reference worker runtime.** The user accepts its experimental API risk because its persistent conversation/task model closely fits NimbleNewt. LangGraph/Deep Agents remains an alternative. See [Harness comparison](harness-comparison.md) and [initial runtime experiments](harness-test-results.md) for evidence and remaining qualification gaps. Selection does not waive macOS, Linux, Windows, recovery, or isolation requirements.
 
-Follow [Runtime compatibility and command namespaces](runtime-compatibility-and-namespaces.md): reserve `/relay.*` for Relay operations, use durable computer-assigned agent IDs for canonical agent command prefixes, and offer context-bound aliases such as `/agent.*`. Friendly names remain editable labels. Pin runtime versions, maintain an explicit adapter mapping, and test API behavior, naming conflicts, checkpoint migrations, and rollback before upgrades.
+Follow [Runtime compatibility and command namespaces](runtime-compatibility-and-namespaces.md): reserve `/nimblenewt.*` for NimbleNewt operations, use durable computer-assigned agent IDs for canonical agent command prefixes, and offer context-bound aliases such as `/agent.*`. Friendly names remain editable labels. Pin runtime versions, maintain an explicit adapter mapping, and test API behavior, naming conflicts, checkpoint migrations, and rollback before upgrades.
 
-Propose a Relay controller with isolated Pi Durable workers behind a versioned adapter. Relay owns identity, task state, permissions, scheduling, meetings, context archives, provider policy, and recovery. Pi Durable supplies the model/tool execution loop and durable conversation primitives. The conversational coordinator is an agent managed by the controller, not the controller itself. Personal extensions run inside the isolated worker, not the privileged controller.
+Propose a NimbleNewt controller with isolated Pi Durable workers behind a versioned adapter. NimbleNewt owns identity, task state, permissions, scheduling, meetings, context archives, provider policy, and recovery. Pi Durable supplies the model/tool execution loop and durable conversation primitives. The conversational coordinator is an agent managed by the controller, not the controller itself. Personal extensions run inside the isolated worker, not the privileged controller.
 
 The [regular pi integration and extension assessment](pi-integration-research.md) remains reuse research, not the selected integration API. Regular pi SDK/RPC APIs, slash commands, and extensions must not be assumed compatible with Pi Durable. Port or replace the required context and tool integrations against pinned Pi Durable interfaces, and retain harness-neutral service contracts.
 
 ### Tools and scripts
 
-Relay can implement its own tools wherever needed; existing pi extensions and third-party packages are optional reuse candidates, not requirements. Choose among a custom protected extension, an external service integration, or an agent-created script according to the operation's authority and lifecycle needs. Build purpose-specific tools when that gives a clearer contract or better recovery behavior than adapting an existing package. Evaluate reuse against maintenance cost and compatibility rather than assuming every capability needs a dependency or a new implementation.
+NimbleNewt can implement its own tools wherever needed; existing pi extensions and third-party packages are optional reuse candidates, not requirements. Choose among a custom protected extension, an external service integration, or an agent-created script according to the operation's authority and lifecycle needs. Build purpose-specific tools when that gives a clearer contract or better recovery behavior than adapting an existing package. Evaluate reuse against maintenance cost and compatibility rather than assuming every capability needs a dependency or a new implementation.
 
 Custom tools follow the same versioning, input validation, permission enforcement, testing, and recovery requirements as reused tools. Tools that manage the team or privileged state belong in the protected layer and use external service authorization. Agents may create their own utilities within delegated permissions; their ability to author code does not grant them authority to modify protected tools. Keep harness-facing wrappers thin where possible so the same underlying tool can serve pi and other harnesses.
 
-Use protected Pi Durable extensions to expose the stable tools agents need for Relay operations. This is a proposed packaging boundary for controller-managed tools, separate from agent-authored scripts and optional personal extensions; regular pi extension code must be assessed for porting. Candidate tools include desk access, task updates, communication, meeting participation and ballots, job control, tool discovery and invocation, and environment-maintenance requests. Other harness adapters should expose equivalent service contracts.
+Use protected Pi Durable extensions to expose the stable tools agents need for NimbleNewt operations. This is a proposed packaging boundary for controller-managed tools, separate from agent-authored scripts and optional personal extensions; regular pi extension code must be assessed for porting. Candidate tools include desk access, task updates, communication, meeting participation and ballots, job control, tool discovery and invocation, and environment-maintenance requests. Other harness adapters should expose equivalent service contracts.
 
 Agents may call these tools within their authority but cannot edit, uninstall, disable, override, or replace their protected implementations. The worker controller selects and loads versioned extension artifacts from read-only storage outside the agent's writable home and target repositories. Agent-created code must not shadow reserved tool names or change the trusted loader configuration. A supervisor can review requests but cannot rewrite the protected base merely because it supervises a worker; changes require the designated administrator's authority and normal versioned rollout.
 
-The protected extensions are clients of Relay's services, not the final security boundary. Those services authenticate the worker and enforce task scope, ownership, lifecycle state, and permissions for every operation. Do not place controller-wide credentials or unrestricted administrative methods inside an extension. Read-only files prevent disk edits, but customizable extensions share a process and could interfere at runtime. Treat the whole worker as untrusted, enforce consequential controls externally, and validate that reserved tools remain intact before accepting a customized environment. Stop activation if integrity checks fail.
+The protected extensions are clients of NimbleNewt's services, not the final security boundary. Those services authenticate the worker and enforce task scope, ownership, lifecycle state, and permissions for every operation. Do not place controller-wide credentials or unrestricted administrative methods inside an extension. Read-only files prevent disk edits, but customizable extensions share a process and could interfere at runtime. Treat the whole worker as untrusted, enforce consequential controls externally, and validate that reserved tools remain intact before accepting a customized environment. Stop activation if integrity checks fail.
 
 The resulting tool layers are: protected controller-managed tools; a permission-managed shared toolbox; approved, versioned personal harness extensions; and agent-created scripts accessed through the protected bridge. Being read-only does not make a tool automatically authorized to perform every action it exposes. An agent's Suspend, release, or restart tool requests must still be checked against its delegated authority.
 
@@ -252,7 +247,7 @@ The resulting tool layers are: protected controller-managed tools; a permission-
 
 The shared toolbox is an accepted feature. An agent may describe a useful personal tool at stand-up or submit it directly for promotion. A designated maintainer can publish it for a role such as all coders, a selected team/project, or all agents within their authorized scope. The lead engineer is a proposed default holder of the scoped `toolbox.manage` permission; authority attaches to the permission and durable identity, not a job title or editable name. The user can configure maintainers and audiences through the UI or conversational controls under the same authorization rules.
 
-Only authorized maintainers can add or change shared entries, publish versions, change audiences, deprecate, revoke, or roll back them. Other agents may discover and invoke permitted tools, propose additions or patches, and maintain personal copies within their own permissions. A personal copy cannot replace the shared implementation. Toolbox management does not grant authority to alter protected Relay tools or bypass separate environment/safety approval requirements.
+Only authorized maintainers can add or change shared entries, publish versions, change audiences, deprecate, revoke, or roll back them. Other agents may discover and invoke permitted tools, propose additions or patches, and maintain personal copies within their own permissions. A personal copy cannot replace the shared implementation. Toolbox management does not grant authority to alter protected NimbleNewt tools or bypass separate environment/safety approval requirements.
 
 Agents in a tool's authorized audience have read-only access to its published source, manifest, tests, and usage instructions. They can inspect how it works, copy an exact version into their own writable environment, and adapt it for personal use. Preserve the source tool ID, base version, and content digest as provenance. The copy is independent, not a writable link to shared files, and is registered under the agent's durable namespace rather than shadowing `/toolbox.*`. Personal execution remains subject to the agent's normal permissions and activation policy; copying source does not inherit the shared tool's credentials or approvals.
 
@@ -264,7 +259,7 @@ Record the promotion proposal, audience, maintainer decision, and resulting vers
 
 Publication makes the approved version discoverable to its audience through the existing bridge without loading every description into every prompt or interrupting tasks. Availability is not execution permission: invocation still checks the caller's task scope, data access, budgets, platform compatibility, and current revocation status. Each execution records an exact version. Updates create new immutable versions; already-running jobs keep their selected version unless explicitly cancelled under policy. A revoked queued version must be blocked or explicitly replanned, not silently substituted. Harness extensions that require environment changes still use the approved Suspend/restart workflow.
 
-Reserve `/toolbox.command` for shared commands, separate from `/relay.command` and durable agent prefixes. Canonical records also include toolbox scope and stable tool ID; shortcuts resolve within an explicit scope and reject ambiguity. Maintainers cannot overwrite a same-named entry in another scope. See [command namespaces](runtime-compatibility-and-namespaces.md).
+Reserve `/toolbox.command` for shared commands, separate from `/nimblenewt.command` and durable agent prefixes. Canonical records also include toolbox scope and stable tool ID; shortcuts resolve within an explicit scope and reject ambiguity. Maintainers cannot overwrite a same-named entry in another scope. See [command namespaces](runtime-compatibility-and-namespaces.md).
 
 Validate the full path from a coder's personal tool to a role-scoped shared version: unauthorized publication and edits fail, eligible coders can discover it, excluded roles cannot invoke it, edits to the original do not change it, and promotion survives the author's rename or retirement. Exercise update, revocation, rollback, and attempts to use publication as a privilege escalation.
 
@@ -274,11 +269,11 @@ Also verify shared-source inspection, denied writes to published artifacts, isol
 
 Scripts are a suitable implementation for many agent-created utilities. A reusable tool should also have a versioned manifest describing its purpose, input and output schema, entry point, dependency versions, requested access, resource limits, and cancellation or recovery behavior. A skill describes when and how to use tools; it does not itself grant executable capabilities. Keep tools and manifests in the agent's environment outside target repositories.
 
-Propose three supported forms: scripts executed as bounded jobs for local utilities, structured tools exposed through the harness adapter for frequent operations, and services or MCP integrations for shared capabilities. A shared Relay tool registry and execution service can present the same contract through different harness adapters. Keep context or lifecycle extensions separate from ordinary script tools because they modify the harness runtime itself.
+Propose three supported forms: scripts executed as bounded jobs for local utilities, structured tools exposed through the harness adapter for frequent operations, and services or MCP integrations for shared capabilities. A shared NimbleNewt tool registry and execution service can present the same contract through different harness adapters. Keep context or lifecycle extensions separate from ordinary script tools because they modify the harness runtime itself.
 
-Prefer a stable Relay bridge with tool discovery and structured invocation. Agents can create a tool, test it in their permitted environment, request review if its activation needs it, and register an immutable version. Once activated, it becomes discoverable without restarting the task; the bridge supplies its schema and invokes it through the sandbox. Do not load every tool description into every prompt. Native tool declarations can be refreshed at the next model-request boundary when the harness supports that; a request already in flight cannot retroactively see a new declaration.
+Prefer a stable NimbleNewt bridge with tool discovery and structured invocation. Agents can create a tool, test it in their permitted environment, request review if its activation needs it, and register an immutable version. Once activated, it becomes discoverable without restarting the task; the bridge supplies its schema and invokes it through the sandbox. Do not load every tool description into every prompt. Native tool declarations can be refreshed at the next model-request boundary when the harness supports that; a request already in flight cannot retroactively see a new declaration.
 
-Do not depend on a regular pi CLI slash command for Pi Durable integration. Load the Relay bridge when the worker starts and keep its logical operations stable: tool discovery, description, and invocation. Expose them through the reserved Relay namespace and adapter-specific wire-name mapping. New scripts are registered in Relay's external catalog rather than installed as new harness extensions. The existing bridge discovers their approved schemas and invokes exact versions through Relay's execution service, which validates arguments and permissions. Ordinary catalog-tool creation and use therefore require no worker runtime reload.
+Do not depend on a regular pi CLI slash command for Pi Durable integration. Load the NimbleNewt bridge when the worker starts and keep its logical operations stable: tool discovery, description, and invocation. Expose them through the reserved NimbleNewt namespace and adapter-specific wire-name mapping. New scripts are registered in NimbleNewt's external catalog rather than installed as new harness extensions. The existing bridge discovers their approved schemas and invokes exact versions through NimbleNewt's execution service, which validates arguments and permissions. Ordinary catalog-tool creation and use therefore require no worker runtime reload.
 
 Changing a harness extension is a separate environment-maintenance operation. An agent can request it through the already-loaded bridge; the external worker controller handles checkpointing, an adapter-supported reload or worker restart, and restoration. Verify support against the pinned Pi Durable adapter version rather than assuming regular pi slash commands exist or are callable by the model. Preserve native session and conversation-compression state, settle active tool operations, and report maintenance progress. The requesting tool call should return a maintenance request identifier before its own worker is replaced, avoiding a call that waits forever for the runtime it just terminated. If safe restoration is unsupported, leave the change pending and report the limitation.
 
@@ -298,7 +293,7 @@ Propose a common maintained base with a separate persistent home, configuration,
 
 Agents may draft skills freely within their own storage. Activating extensions or executable skill dependencies follows the environment policy. Skills and extensions inherit the agent's existing permissions; they cannot grant themselves broader access. Promotion of a useful skill into a shared catalog is a separate, versioned publication step, and other agents opt into an approved version rather than receiving silent global changes.
 
-Agents can add their own extensions and request restart under standing delegated permission, or ask a supervisor to approve installation and restart. Both paths use a durable environment-maintenance request executed by Relay's external controller. Stage and verify the new revision, Suspend without releasing tasks, checkpoint, restart, and validate recovery. Roll back failed activation and preserve preexisting Pause or Suspend intent. Existing authorization must not trigger redundant approval requests.
+Agents can add their own extensions and request restart under standing delegated permission, or ask a supervisor to approve installation and restart. Both paths use a durable environment-maintenance request executed by NimbleNewt's external controller. Stage and verify the new revision, Suspend without releasing tasks, checkpoint, restart, and validate recovery. Roll back failed activation and preserve preexisting Pause or Suspend intent. Existing authorization must not trigger redundant approval requests.
 
 ### Isolation and shared project files
 
@@ -310,7 +305,7 @@ Where agents truly need to edit the same live workspace, propose a scoped file s
 
 ### Protected files and repository operations
 
-The user proposed protecting critical paths such as `.git` from deletion. Extend that proposal to replacement, renaming, truncation, permission changes, moving or deleting an ancestor, and access through links or alternate paths. Protect both a worktree's `.git` entry and the actual backing repository metadata. Additional candidates include Relay's state, safety policy, and recovery records.
+The user proposed protecting critical paths such as `.git` from deletion. Extend that proposal to replacement, renaming, truncation, permission changes, moving or deleting an ancestor, and access through links or alternate paths. Protect both a worktree's `.git` entry and the actual backing repository metadata. Additional candidates include NimbleNewt's state, safety policy, and recovery records.
 
 Propose keeping Git metadata outside agents' direct write authority and exposing authorized Git operations through a trusted repository service. Source files remain editable within task scope. The service can perform legitimate metadata updates for approved operations while denying arbitrary deletion or destructive repository changes. This reconciles repository protection with normal Git work; making all metadata immutable would also prevent legitimate updates. Hooks and configuration must not turn the service into a route for agent-controlled code to run with broader privileges.
 
@@ -388,7 +383,7 @@ Preserve original records alongside compact resume briefings. A summary helps re
 
 ## Branching and returning
 
-Proposed example: an agent is implementing image export when its parent asks for a quick feasibility assessment. Relay checkpoints the export task, creates a linked assessment task, supplies the relevant context, and records where to return. On completion, the assessment result goes to the parent and the agent becomes eligible to resume export.
+Proposed example: an agent is implementing image export when its parent asks for a quick feasibility assessment. NimbleNewt checkpoints the export task, creates a linked assessment task, supplies the relevant context, and records where to return. On completion, the assessment result goes to the parent and the agent becomes eligible to resume export.
 
 Returning is a scheduling decision: a newer urgent task may supersede the saved return destination. Preserve the destination until it is resumed or explicitly changed. Branches share immutable source references; new decisions and workspace changes remain scoped to the branch until deliberately incorporated. Separate workspaces are one possible implementation when branches would otherwise edit the same files.
 
@@ -482,9 +477,9 @@ Propose collecting brief initial positions before agents see one another's ballo
 
 ### Improvement proposals and deployment-specific development
 
-Public Relay agents can report recurring friction in their tools, skills, communication, and project workflows. Capture observations, permitted evidence, affected work, possible improvements, and an owner/disposition in a project-scoped improvement backlog. Group duplicates without discarding independent evidence, timebox stand-up discussion, and return evaluated outcomes to proposers. Accepted work enters the P/PC process with separate implementation and publication authority; no agent must invent suggestions to fill a quota.
+Public NimbleNewt agents can report recurring friction in their tools, skills, communication, and project workflows. Capture observations, permitted evidence, affected work, possible improvements, and an owner/disposition in a project-scoped improvement backlog. Group duplicates without discarding independent evidence, timebox stand-up discussion, and return evaluated outcomes to proposers. Accepted work enters the P/PC process with separate implementation and publication authority; no agent must invent suggestions to fill a quota.
 
-Our own development deployment also uses that process to propose changes to Relay's source. Its agents can investigate, prepare patches, and produce candidate builds only within that project's authorization. This optional [Relay development workflow](development-workflow.md) is not a public installation default and cannot grant itself control over the live controller or updater.
+Our own development deployment also uses that process to propose changes to NimbleNewt's source. Its agents can investigate, prepare patches, and produce candidate builds only within that project's authorization. This optional [NimbleNewt development workflow](development-workflow.md) is not a public installation default and cannot grant itself control over the live controller or updater.
 
 Public users can install authorized released versions through the proposed [maintenance and update mechanism](maintenance-and-updates.md), including startup-failure rollback. Our connection from an agent-authored change to a candidate build is separate from that updater. Runtime compatibility, review, and release authority apply regardless of who authored the code.
 
@@ -500,11 +495,11 @@ Track agenda items as queued, scheduled, discussed, deferred, or resolved, with 
 
 Retain the full communicated discussion with speaker identities, timestamps, questions, motions and their revisions, amendments, procedural rulings, votes, and outcomes. This record covers what participants actually communicated, not private model reasoning or desk scratch records. Preserve corrections as linked updates rather than silently rewriting earlier statements.
 
-The default summary shows attendance, key updates, decisions and reasons, significant dissent, unresolved questions, assigned actions, and the resulting plan. Link each summarized decision to the relevant discussion and distinguish adopted proposals from successfully applied task changes. Provide a full-discussion view and let the user ask questions such as “why did the team choose that?” with answers grounded in the record. Keep transcript and summary durable in Relay storage, with project access controls, including when a meeting is interrupted or its summarizer fails. A failed summary must not hide the available discussion.
+The default summary shows attendance, key updates, decisions and reasons, significant dissent, unresolved questions, assigned actions, and the resulting plan. Link each summarized decision to the relevant discussion and distinguish adopted proposals from successfully applied task changes. Provide a full-discussion view and let the user ask questions such as “why did the team choose that?” with answers grounded in the record. Keep transcript and summary durable in NimbleNewt storage, with project access controls, including when a meeting is interrupted or its summarizer fails. A failed summary must not hide the available discussion.
 
 ### Parliamentary meeting procedure
 
-The requested direction is a lightweight parliamentary procedure inspired by Robert's Rules or senate-style meetings. Relay will define its own explicit rules rather than claim strict compliance with either. The [official Robert's Rules FAQ](https://robertsrules.com/frequently-asked-questions/) and [official interpretations](https://robertsrules.com/official-interpretations/) are reference material; the procedure below is a Relay design proposal. The user's authority remains above team procedure and cannot be suspended by a vote.
+The requested direction is a lightweight parliamentary procedure inspired by Robert's Rules or senate-style meetings. NimbleNewt will define its own explicit rules rather than claim strict compliance with either. The [official Robert's Rules FAQ](https://robertsrules.com/frequently-asked-questions/) and [official interpretations](https://robertsrules.com/official-interpretations/) are reference material; the procedure below is a NimbleNewt design proposal. The user's authority remains above team procedure and cannot be suspended by a vote.
 
 Proposed sequence:
 
@@ -543,7 +538,7 @@ Subscriptions determine which agent or task receives each event. Apply cooldowns
 
 ## Accepted feature goals
 
-Relay explicitly distinguishes **P (production)** from **PC (production capacity)**. Delivering requested outcomes and improving the team's future ability to deliver both need scheduled resources. Approved PC work receives protected capacity so a continuous delivery backlog cannot starve it; PC also has limits so improvement work cannot consume all production capacity. Allocation, budgets, eligible queues, and time-limited exceptions are user-configurable. See [Production and production capacity](production-and-capacity.md) for the proposed 80/20 starting policy, evaluation criteria, and stand-up planning. The numeric allocation is a proposal, not a selected default.
+NimbleNewt explicitly distinguishes **P (production)** from **PC (production capacity)**. Delivering requested outcomes and improving the team's future ability to deliver both need scheduled resources. Approved PC work receives protected capacity so a continuous delivery backlog cannot starve it; PC also has limits so improvement work cannot consume all production capacity. Allocation, budgets, eligible queues, and time-limited exceptions are user-configurable. See [Production and production capacity](production-and-capacity.md) for the proposed 80/20 starting policy, evaluation criteria, and stand-up planning. The numeric allocation is a proposal, not a selected default.
 
 The following features are accepted as part of the project vision. Their implementation details remain proposals; inclusion does not set delivery order or select an MVP.
 
@@ -562,7 +557,7 @@ The following features are accepted as part of the project vision. Their impleme
 | Retirement and archival | Preserve searchable project and agent records while releasing active resources and revoking obsolete execution access. |
 | Simulation mode | Exercise workflows using simulated tools and events, including provider failures and competing edits, before granting real write access. |
 | Team learning loop | Use observed outcomes to propose improvements to skills, routing, and planning; evaluate versioned changes before adopting team defaults. |
-| Improvement feedback | Collect operational friction and project/tooling proposals at stand-ups, track decisions and authorized P/PC work, and report evaluated outcomes. Our Relay-source workflow is an optional deployment-specific use. |
+| Improvement feedback | Collect operational friction and project/tooling proposals at stand-ups, track decisions and authorized P/PC work, and report evaluated outcomes. Our NimbleNewt-source workflow is an optional deployment-specific use. |
 | Production and capacity balance | Track P and PC task outcomes separately; reserve improvement capacity, protect delivery, bound exceptions, and evaluate whether improvements actually help. |
 
 ## Pitfalls and proposed safeguards
@@ -573,8 +568,8 @@ See [Pitfalls and safeguards](pitfalls-and-safeguards.md) for failure scenarios,
 
 | Pitfall | Required design response | Evidence required for validation |
 | --- | --- | --- |
-| Deployment assumptions leaking into the product | Keep Relay independently installable; use versioned configuration and UI-managed profiles instead of hardcoded hosts, routes, paths, or team choices. | Extract only Relay files, install in a clean environment, and configure distinct deployments without source edits or access to the original project. |
-| Upstream API changes or command collisions | Pin runtime/adapter versions, reserve Relay and durable-agent namespaces, validate semantic mappings and checkpoint migrations, and retain tested rollback. | Agent renames preserve queued targets; collisions block activation; old suspended state restores without duplicated effects. |
+| Deployment assumptions leaking into the product | Keep NimbleNewt independently installable; use versioned configuration and UI-managed profiles instead of hardcoded hosts, routes, paths, or team choices. | Extract only NimbleNewt files, install in a clean environment, and configure distinct deployments without source edits or access to the original project. |
+| Upstream API changes or command collisions | Pin runtime/adapter versions, reserve NimbleNewt and durable-agent namespaces, validate semantic mappings and checkpoint migrations, and retain tested rollback. | Agent renames preserve queued targets; collisions block activation; old suspended state restores without duplicated effects. |
 | Shared tools spreading defects or authority | Restrict publication to scoped toolbox maintainers, promote immutable reviewed artifacts, and enforce caller permissions independently of audience. | Personal edits cannot alter shared versions; unauthorized publication fails; role visibility, invocation, revocation, and rollback remain enforced. |
 | Production starving improvement, or improvement replacing delivery | Reserve PC capacity with configurable floors, ceilings, budgets, bounded waiting, and expiring overrides; track accepted P outcomes and evaluated PC benefits. | Continuous backlogs in either category cannot starve the other; relabeling/delegation cannot evade budgets, and overrides survive restart and expire correctly. |
 | Platform differences breaking core behavior | Require macOS, Linux, and Windows support; adapt paths, process trees, permissions, installation, and durable storage without weakening lifecycle semantics. | Run core acceptance tests on all three OS families, including abrupt worker termination, restart, protected-path enforcement, and UI settings persistence. |
@@ -616,7 +611,7 @@ The system should demonstrate that it can:
 9. Verify that agents can edit authorized source files while attempts to delete, replace, or indirectly modify protected repository metadata are denied. Exercise legitimate Git operations through the proposed service.
 10. Test that an extension cannot exceed granted capabilities or resource limits, that required review precedes installation, and that a failed environment change can be rolled back.
 11. Draft a project through conversation before it has a repository, then coordinate scoped work across multiple repositories without losing conversational context or confusing targets.
-12. Complete a requested bug fix and PR from an ordinary checkout with no Relay-specific setup files, no ignore-rule changes for Relay state, and only intended contribution files in the final diff.
+12. Complete a requested bug fix and PR from an ordinary checkout with no NimbleNewt-specific setup files, no ignore-rule changes for NimbleNewt state, and only intended contribution files in the final diff.
 13. Answer a status question from durable records without interrupting all workers, distinguishing observed progress from stale reports and plans.
 14. Have the team agree on an approach, then issue a conflicting explicit user decision. Verify that affected tasks, reviews, and pending actions follow the user's decision, including after pause and restart, while completed effects are reported accurately.
 
@@ -647,4 +642,4 @@ Additional validation scenarios for pause and routing:
 
 See the [design decision register](design-decisions.md) for one consolidated list of accepted decisions, proposed defaults, pending user questions, and implementation questions. Do not treat an unresolved mechanism as a reason to revisit a settled product requirement, or treat a suggested default as a user decision. Phases and MVP selection remain deferred.
 
-This draft is temporarily hosted within the current repository. Relay's intended distribution is a separate open-source repository with independent dependencies, setup, tests, and documentation. Existing orchestration integrations are optional adapters. Repository creation, publication, and license selection remain future work.
+This draft is temporarily hosted within the current repository. NimbleNewt's intended distribution is a separate open-source repository with independent dependencies, setup, tests, and documentation. Existing orchestration integrations are optional adapters. Repository creation, publication, and license selection remain future work.

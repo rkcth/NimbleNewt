@@ -1,6 +1,6 @@
 # Production and production capacity
 
-Relay explicitly supports both **P (production)** and **PC (production capacity)**. P delivers the outcomes the user wants now. PC improves the team's ability to deliver future outcomes: reusable tools, better skills, faster verification, more reliable recovery, improved routing, and removal of recurring friction. Both are legitimate scheduled work, not competing definitions of success.
+NimbleNewt explicitly supports both **P (production)** and **PC (production capacity)**. P delivers the outcomes the user wants now. PC improves the team's ability to deliver future outcomes: reusable tools, better skills, faster verification, more reliable recovery, improved routing, and removal of recurring friction. Both are legitimate scheduled work, not competing definitions of success.
 
 The accepted goal is to prevent either category from starving the other. Allocation values below are proposals, editable through the UI and conversational controls; they are not approved fixed defaults or implemented scheduler behavior.
 
@@ -36,7 +36,7 @@ At its timebox, record adopt, revise within a newly authorized budget, defer, or
 
 ## Stand-ups and conversational visibility
 
-Public PC planning concerns the user's own production capacity: tools, skills, verification, and workflows. Maintain a project-scoped improvement backlog with evidence, an owner, and a disposition, then evaluate adopted changes. Our [Relay development deployment](development-workflow.md) may also propose Relay-source changes using the same mechanism; that loop is not enabled by default in the public product. Classify work by its outcome: delivering an assigned Relay feature can be P, while improving the team's ability to deliver is PC. Acceptance does not itself authorize deployment or protected-runtime edits.
+Public PC planning concerns the user's own production capacity: tools, skills, verification, and workflows. Maintain a project-scoped improvement backlog with evidence, an owner, and a disposition, then evaluate adopted changes. Our [NimbleNewt development deployment](development-workflow.md) may also propose NimbleNewt-source changes using the same mechanism; that loop is not enabled by default in the public product. Classify work by its outcome: delivering an assigned NimbleNewt feature can be P, while improving the team's ability to deliver is PC. Acceptance does not itself authorize deployment or protected-runtime edits.
 
 Include a short P/PC balance review in planning: production delivered and pending, capacity improvements attempted and evaluated, current allocation versus actual use, deferred PC work, and the next protected improvement window. Deep proposals become separate tasks rather than extending every meeting.
 
@@ -51,6 +51,6 @@ The user should be able to ask “What did we deliver?”, “How are we making 
 - Prevent budget bypass through delegation or relabeling, and prevent paused/suspended work from being awakened to meet a quota.
 - Complete an experiment with evaluation evidence; do not publish a shared tool solely because its PC task finished.
 - Restore settings, usage, pending proposals, and overrides after restart; honor a later user correction.
-- Carry a project/tooling improvement proposal from stand-up through triage, authorized work, review, and evaluation; preserve deferred proposals and prevent a meeting vote from bypassing publication authority. Test our Relay-source variant separately as an optional development integration.
+- Carry a project/tooling improvement proposal from stand-up through triage, authorized work, review, and evaluation; preserve deferred proposals and prevent a meeting vote from bypassing publication authority. Test our NimbleNewt-source variant separately as an optional development integration.
 
 These are planning and scheduling requirements, not a phase plan or MVP selection.
