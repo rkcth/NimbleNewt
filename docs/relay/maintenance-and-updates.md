@@ -1,0 +1,44 @@
+# Release installation and maintenance windows
+
+Public Relay can install an authorized released version during a configured maintenance window using a separately controlled updater. Developing Relay source and producing candidate builds is an optional deployment-specific workflow, described in [Our Relay development deployment](development-workflow.md); normal users do not need it. A candidate that cannot start or pass activation checks automatically returns to the previous known-good release. This is a design proposal, not an implemented updater or a guarantee that every failure can be repaired by switching binaries.
+
+## Keep development separate from activation
+
+The public installation consumes a verified release artifact from an explicitly trusted source. It does not need to build Relay or let its agents modify Relay source. In our development deployment, a separate authorized pipeline turns reviewed agent patches into candidate artifacts. Neither path edits the running installation. Version the code, dependencies, adapter mappings, configuration schema, and data migrations together. Require independent review and the existing platform, recovery, and compatibility checks for affected behavior.
+
+A scoped release-management permission can schedule an exact reviewed artifact under the user's policy; it is distinct from `toolbox.manage` and ordinary coding access. A standing maintenance policy can authorize routine updates without asking the user every time. Changes outside that policy need the appropriate decision-maker's approval. Bind authorization to the artifact digest, migration plan, and target installations, not a branch name or mutable download URL. Verify both artifact integrity and authorized publisher provenance; a matching hash alone does not establish who authorized the artifact. Signing/trust-store implementation remains to be chosen. Retest/review a changed artifact rather than activating whatever happens to be latest when the window opens.
+
+## Recovery must work without Relay or a model
+
+Use a small deterministic launcher/updater outside the Relay controller and agent workers. It maintains separate current and candidate release directories, a durable update journal, and the last known-good version. It can start, stop, check, and revert releases even if Relay cannot import its code or start its UI. Do not overwrite executable files belonging to a running release.
+
+Protect the updater, artifact verification, health-check policy, and release authorization from ordinary agent writes. Give it only the narrow host permissions its job requires, not an arbitrary command interface available to agents. Updating this recovery component is a separate administrative procedure; a routine Relay release cannot replace its own recovery mechanism. Keep a local recovery/status path available when the main UI is down.
+
+Implement launcher/service and filesystem operations for macOS, Linux, and Windows. A durable active-release record must resolve to either the previous release or the candidate after interruption, never an installation assembled from parts of both. Verify the actual platform behavior rather than assuming one shell command or symlink swap works everywhere.
+
+## Maintenance sequence
+
+1. **Prepare:** acquire and verify the exact authorized release before the window. Candidate building, if used by a development deployment, has already happened in a separate pipeline. Test migrations and recovery using isolated copies and fake services without production credentials. Check space for release artifacts and consistent state backups.
+2. **Quiesce:** block ordinary dispatch, inventory jobs, and Suspend affected workers without releasing assignments. Preserve each worker's prior lifecycle state. Wait for bounded cleanup and settled/reconciled effects. If safe suspension cannot finish in the window, defer the update and report why; do not silently Force Stop.
+3. **Checkpoint:** stop all relevant state writers and create a consistent snapshot of data, artifacts, configuration, and required secrets references. Retain the old state for activation rollback. Any input acknowledged during downtime must be persisted in an independent compatible inbox; otherwise report temporary unavailability instead of acknowledging and losing it.
+4. **Activate under quarantine:** start the exact candidate against its prepared state with ordinary agent scheduling and external side-effect dispatch disabled. Apply migrations only under exclusive ownership. Keep the previous version stopped so there is never a second active writer.
+5. **Verify:** the updater checks startup within a deadline, state readability, command/adapter registration, a local administration request, and a bounded fake task/checkpoint/restore cycle. Check migration invariants and prior ownership/lifecycle state. A live process or a self-reported healthy flag is insufficient. Keep evaluation credentials and effects isolated.
+6. **Commit or revert:** if checks fail or startup times out, terminate the candidate and its children, restore the compatible pre-activation state and previous release, and verify that release before reopening dispatch. If checks pass, record successful activation and follow the authorized resume policy. Previously paused, suspended, or stopped work stays that way; previously running work resumes only as covered by the maintenance authorization and after current-policy checks.
+
+Persist progress before each consequential transition. After an updater crash or host reboot, recover from the journal and observed process/state identity; do not guess based on which process answers first. Keep candidate failure logs and notify the user. Quarantine a failed artifact so a repeated maintenance timer cannot create an update/rollback loop. If the previous release also fails, retain snapshots and enter bounded recovery mode with a clear status rather than repeatedly launching workers against uncertain state.
+
+If maintenance is cancelled or deferred after a gate has been applied, record which gates belong to that update. Clear only those gates under the authorized return policy after readiness checks; do not erase a human's earlier or concurrent Pause/Stop request. Report any workers left suspended and why, rather than leaving them silently idle or automatically waking all of them.
+
+## What automatic rollback can safely mean
+
+**Before production dispatch resumes**, reverting code and its matching pre-update state is the intended automatic path: the candidate has not been allowed to create production effects. Preserve separately accepted inbox entries and maintenance decisions through that rollback. Recovery tests must verify this boundary.
+
+**After production resumes**, reverting a database snapshot could erase new task completions, user decisions, or knowledge of external effects. Do not automatically rewind that state. Prefer backward-compatible, additive schema changes so the previous release can run against current data during a defined rollback period. Post-activation automatic code rollback is allowed only for a tested compatible version/state pair and after reconciling active operations. Delay destructive migrations until that period closes, or classify them as separately authorized maintenance with a specific recovery plan.
+
+If compatibility cannot be guaranteed, fail closed on new work and enter recovery mode rather than label a stale snapshot restoration safe. A watchdog should distinguish release defects from provider outages or unrelated host resource failures; rolling back healthy code will not fix exhausted model credits. Repeated crash/health thresholds and probation duration are settings. Passing startup checks also cannot prove the absence of later semantic bugs, so keep independent verification, observation, and a way to stop rollout.
+
+## UI, conversation, and validation
+
+Expose maintenance windows with timezone, duration, target scope, trusted release source/channel, exact version, authorization, preparation limits, health deadlines, rollout status, rollback eligibility, and failure history through chat and UI. A window is permission to attempt an eligible update, not permission to discard unfinished work. A delayed window should not silently cause deployment at an unrelated time.
+
+Test at least: broken imports/startup, migration failure, hung workers, missing dependencies, command collisions, disk exhaustion, updater termination at every transition, reboot during activation, previous-release failure, and a candidate that fails only after dispatch resumes. Verify no duplicated effects, no lost acknowledged input, no double ownership, preserved Pause state, and a functioning recovery path on macOS, Linux, and Windows. These are required future experiments; the existing harness tests do not test this release system.

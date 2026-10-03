@@ -1,0 +1,9 @@
+{
+  "name": "relay-harness-probe",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "@earendil-works/pi-durable": "1.0.1"
+  }
+}

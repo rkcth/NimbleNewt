@@ -1,0 +1,33 @@
+{
+  "sqlite_default_synchronous": {
+    "synchronous": 1
+  },
+  "explicit_full_synchronous": {
+    "synchronous": 2
+  },
+  "hot_replacement": [
+    "v1",
+    "v2"
+  ],
+  "protected_name_overridable": "overridden",
+  "next_request_model_switch_preserved_context": true,
+  "separate_meeting_context": true,
+  "abort": {
+    "active": {
+      "conversationId": 1,
+      "type": "input",
+      "status": "unanswered",
+      "entry": 45,
+      "id": 46,
+      "reason": "aborted"
+    },
+    "queued": {
+      "conversationId": 1,
+      "type": "input",
+      "status": "unanswered",
+      "id": 51,
+      "reason": "aborted"
+    }
+  },
+  "new_submission_after_abort_runs": true
+}

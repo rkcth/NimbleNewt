@@ -1,0 +1,116 @@
+[
+  {
+    "framework": "deepagents",
+    "scenario": "approval",
+    "attempts": 1,
+    "effects": 1,
+    "completed_prerequisite_runs": 1,
+    "stages": [
+      {
+        "stage": "start",
+        "returncode": 0,
+        "stdout": "{\"status\": \"approval_suspended\", \"next\": [\"HumanInTheLoopMiddleware.after_model\"]}"
+      },
+      {
+        "stage": "resume",
+        "returncode": 0,
+        "stdout": "{\"status\": \"resumed\", \"messages\": 6, \"thread_isolation\": true}"
+      }
+    ]
+  },
+  {
+    "framework": "deepagents",
+    "scenario": "plain",
+    "attempts": 2,
+    "effects": 2,
+    "completed_prerequisite_runs": 1,
+    "stages": [
+      {
+        "stage": "start",
+        "returncode": -9,
+        "stdout": ""
+      },
+      {
+        "stage": "resume",
+        "returncode": 0,
+        "stdout": "{\"status\": \"resumed\", \"messages\": 6, \"thread_isolation\": true}"
+      }
+    ]
+  },
+  {
+    "framework": "deepagents",
+    "scenario": "idempotent",
+    "attempts": 2,
+    "effects": 1,
+    "completed_prerequisite_runs": 1,
+    "stages": [
+      {
+        "stage": "start",
+        "returncode": -9,
+        "stdout": ""
+      },
+      {
+        "stage": "resume",
+        "returncode": 0,
+        "stdout": "{\"status\": \"resumed\", \"messages\": 6, \"thread_isolation\": true}"
+      }
+    ]
+  },
+  {
+    "framework": "pi-durable",
+    "scenario": "unsafe",
+    "attempts": 1,
+    "effects": 1,
+    "completed_prerequisite_runs": 1,
+    "stages": [
+      {
+        "stage": "start",
+        "returncode": -9,
+        "stdout": ""
+      },
+      {
+        "stage": "resume",
+        "returncode": 0,
+        "stdout": "{\"status\":\"resumed\",\"submission_deduplicated\":true,\"result\":{\"conversationId\":1,\"requestId\":\"operation-1\",\"type\":\"input\",\"status\":\"done\",\"entry\":6,\"id\":7,\"answer\":18}}"
+      }
+    ]
+  },
+  {
+    "framework": "pi-durable",
+    "scenario": "safe",
+    "attempts": 2,
+    "effects": 2,
+    "completed_prerequisite_runs": 1,
+    "stages": [
+      {
+        "stage": "start",
+        "returncode": -9,
+        "stdout": ""
+      },
+      {
+        "stage": "resume",
+        "returncode": 0,
+        "stdout": "{\"status\":\"resumed\",\"submission_deduplicated\":true,\"result\":{\"conversationId\":1,\"requestId\":\"operation-1\",\"type\":\"input\",\"status\":\"done\",\"entry\":6,\"id\":7,\"answer\":18}}"
+      }
+    ]
+  },
+  {
+    "framework": "pi-durable",
+    "scenario": "idempotent",
+    "attempts": 2,
+    "effects": 1,
+    "completed_prerequisite_runs": 1,
+    "stages": [
+      {
+        "stage": "start",
+        "returncode": -9,
+        "stdout": ""
+      },
+      {
+        "stage": "resume",
+        "returncode": 0,
+        "stdout": "{\"status\":\"resumed\",\"submission_deduplicated\":true,\"result\":{\"conversationId\":1,\"requestId\":\"operation-1\",\"type\":\"input\",\"status\":\"done\",\"entry\":6,\"id\":7,\"answer\":18}}"
+      }
+    ]
+  }
+]
