@@ -80,6 +80,26 @@ Presence must be explicit in the meeting interface, with durable join/leave even
 
 Task return revalidates decisions and ownership. A bounded side discussion can have an authorized automatic return condition, but manually paused, suspended, or stopped work stays gated. New priorities can defer the return without transferring the original assignment.
 
+## Supervisor intervention and stalled-work recovery
+
+Supervisors must be able to help an agent recover from repetitive actions, circular planning, repeated failures, or a model request that consumes time or budget without a useful result. Detection uses observable evidence, not access to hidden reasoning. A live process, token stream, heartbeat, or confident progress message is not proof of task progress.
+
+The controller tracks request duration, last completed step, repeated equivalent actions and errors, tool/job status, budget consumption, and evidence toward the task's acceptance criteria. It raises a durable concern to the responsible supervisor. Thresholds depend on task difficulty and expected operation duration; research, long builds, external dependencies, and authorized waits must not be mistaken for loops simply because no file changed. Routine checks use controller telemetry rather than continuous model conversations. Detection rules, thresholds, and false-positive tolerances remain to be calibrated.
+
+Recovery proceeds through bounded interventions within delegated authority:
+
+1. Inspect the task contract, recent attempts, results, and actual artifacts. Identify whether the agent is working, waiting, blocked, or repeating an unsuccessful approach. Ask for a brief status and a concrete next deliverable when the agent is responsive.
+2. Give a targeted correction: restate the objective, point out the repeated failure, supply missing information, narrow the task, or request a different approach. Preserve the user's requirements and define a progress checkpoint and budget for the next attempt.
+3. If a model request is stuck, the controller can cancel or abandon that attempt under the recovery policy without waiting for the model to process a message. Persist the intervention and queued input first; reject late responses from the abandoned attempt. Before continuing, reconcile any tool effects separately. A model-request cancellation is not proof that a tool or remote job stopped.
+4. Resume with the same agent and durable task context, optionally using an eligible backup model or a fresh execution context reconstructed from the task record. Preserve original history and record what context was carried forward; this is not a claim to restore hidden model state.
+5. If takeover is needed, use Suspend and Release, with an opportunity for bounded cleanup and handoff preparation. Pause or a timeout never releases ownership. If the agent cannot prepare a handoff, use only an authorized emergency-recovery policy, establish exclusive execution authority, and expose incomplete or uncertain state before reassignment.
+
+Record the evidence, intervention, authority, model/context changes, budget, and result. Supervisor recovery cannot override a human Pause, Suspend, Stop, model exclusion, permission boundary, or explicit decision. Set finite retry counts and cumulative time/cost limits across all recovery attempts; changing models or contexts must not reset those limits. Repeated failure becomes a visible blocker for the owner or authorized higher supervisor, rather than an endless supervisor-worker correction loop.
+
+Model-independent controller limits remain effective if the supervisor itself stalls or is unavailable. Reserve resources for recovery. Show suspected stalls separately from confirmed failures, allow legitimate work to continue within its budget, and let the owner inspect or intervene. Supervisors are subject to the same monitoring and limits as other agents.
+
+Qualification must cover a live but unproductive model stream, repeated equivalent failed actions, legitimate long-running work, correction that restores progress, cancellation with a late response, an uncertain external effect, unavailable supervisors, exhausted recovery budgets, preserved manual pauses, and takeover without duplicate execution. These are required future validation scenarios, not existing test results.
+
 ## Failure visibility and administration
 
 Provide model-independent status, Stop/Force Stop, routing exclusions, and recovery controls. Separate receipt, durable acceptance, activation, and successful effect in replies. Report exact blockers and last observed state, including freshness. Controller outage cannot be treated as renewed permission for worker effects; already-running remote operations remain observable uncertainties until reconciled.

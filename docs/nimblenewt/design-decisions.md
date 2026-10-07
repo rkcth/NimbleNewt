@@ -1,6 +1,6 @@
 # Design decisions and remaining questions
 
-This register distinguishes settled direction from proposals, unanswered choices, and implementation evidence. A document marked historical cannot override a later user decision. Accepted requirements describe what NimbleNewt must do; they do not claim it has been built or qualified. Phases and MVP selection remain deferred.
+This register distinguishes settled direction from proposals, unanswered choices, and implementation evidence. A document marked historical cannot override a later user decision. Accepted requirements describe what NimbleNewt must do; they do not claim it has been built or qualified. A proposed implementation outline is registered as an inactive Paperclip backlog; first-release/MVP selection and execution authorization remain deferred.
 
 ## Accepted direction
 
@@ -23,6 +23,7 @@ This register distinguishes settled direction from proposals, unanswered choices
 | Naming | Prefixed NimbleNewt and agent commands; durable agent identity separate from editable friendly names. Exact grammar/alias defaults remain proposed. | [Namespaces](runtime-compatibility-and-namespaces.md#command-naming) |
 | Routing | UI-editable difficulty profiles and ordered model routes; every model-using role obeys exclusions and fallback constraints. | [Routing](README.md#provider-switching-and-backup-models) |
 | Meetings | Scheduled and immediate meetings, unattended operation, summary and full transcript, votes with reasons, human-present agreement before action. | [Meetings](README.md#stand-ups-and-live-meetings) |
+| Supervisor recovery | Supervisors can detect and redirect stalled or looping work, with bounded controller-enforced interruption, saved context, and explicit handoff authority. | [Recovery contract](operational-contracts.md#supervisor-intervention-and-stalled-work-recovery) |
 | Quality assurance | Every agent checks its own work; additional QA responsibility can cover assigned work, projects, or entire teams. Scope and independent-review gates are explicit, with evidence tied to the reviewed version. | [QA](README.md#quality-assurance-and-review-scope) |
 | Work balance | Explicit production and production-capacity work; protect improvement without starving delivery. Numeric allocations remain proposals. | [P/PC](production-and-capacity.md) |
 | Replay | Read-only observable activity, source/artifact versions, and short stated rationales; no automatic tool/model reexecution. | [Replay](README.md#activity-history-and-replay) |

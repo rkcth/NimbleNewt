@@ -187,3 +187,9 @@ Ordinary users improve their own projects and tooling. Our optional NimbleNewt d
 - Which decisions can a supervisor make autonomously, and which remain with the human?
 
 The [decision register](design-decisions.md) is authoritative for which policy questions remain open; questions above describe the failure cases to consider, not independent decisions. The guiding rule is to make uncertain state visible and preserve a bounded path to recovery. A task should not appear complete, paused, suspended, restored, or approved merely because an agent says it is. The design plan pairs each failure category with its required response and validation evidence.
+
+## Activity can hide stalled work
+
+An agent can repeatedly plan, retry the same failure, or stream model output without producing a useful result. Aggressive timeouts can also interrupt legitimate research or long-running tools. A supervisor that keeps issuing corrections can create a second loop and spend more than the original task.
+
+Use observable progress evidence and task-specific expectations, with model-independent controller monitoring. Give supervisors bounded authority to diagnose, redirect, interrupt a stuck model attempt, or resume with an eligible backup and saved context. Persist pending input before interruption; reconcile external effects and reject late results. Keep assignments during Pause, and require prepared release or authorized emergency recovery before takeover. Cap cumulative recovery cost and attempts, preserve human lifecycle gates, and escalate unresolved failures visibly. Apply the same limits to supervisors. See [the intervention contract](operational-contracts.md#supervisor-intervention-and-stalled-work-recovery) for the recovery sequence and required validation scenarios.
