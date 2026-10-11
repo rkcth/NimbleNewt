@@ -64,6 +64,8 @@ An agent can spawn subtasks faster than they finish, repeatedly interrupt peers,
 
 Propose limits on delegation depth, active children, queued work, meeting rounds, and interruption frequency. Track event causation to suppress loops, deduplicate delivery, batch informational updates, and slow producers when queues are full. Record dependencies, detect circular waits, and escalate to a named resolver after a deadline. Increase scheduling attention to older eligible tasks without overriding explicit pauses. Track accepted outcomes and time blocked alongside activity counts.
 
+An external conversation client can also disconnect after sending, retry an uncertain request, or flood another agent with follow-ups. The [conversation API](agent-apis.md) must keep threads and delivery cursors durable, deduplicate stable message IDs, enforce per-sender and per-recipient limits, and distinguish queued, delivered, handled, and answered. A WebSocket, long-polling request, or MCP call ending does not prove the agent stopped working or that the message failed. Reconnect from recorded state rather than replaying a model turn or external effect.
+
 ## Approval and review can become either a bottleneck or a rubber stamp
 
 A supervisor may be unavailable, overloaded, or persuaded by an agent's confident report. A reviewer may repeat the author's assumptions and approve work that does not meet the actual request.

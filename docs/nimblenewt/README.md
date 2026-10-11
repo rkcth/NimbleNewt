@@ -22,6 +22,7 @@ Created October 3, 2026. NimbleNewt is the selected project name. This document 
 | --- | --- |
 | This README | Product behavior and relationships between features. |
 | [Operational contracts](operational-contracts.md) | Definitions, state/ownership rules, authority, durable operations, and recovery boundaries. |
+| [Agent state and conversation APIs](agent-apis.md) | Durable state edits and two-way agent conversations, with transport and MCP integration choices still open. |
 | [Organization and workers](organization-and-workers.md) | Accepted single-owner model and separately proposed local/remote worker topology. |
 | [Design decisions](design-decisions.md) | Accepted choices, pending user questions, proposed defaults, and remaining engineering decisions. |
 | [Portability and configuration](portability-and-configuration.md) | Standalone product boundary, required platforms, and UI-managed settings. |
@@ -50,6 +51,7 @@ Initial checks found no matching GitHub repositories, exact npm or PyPI packages
 
 - One human owner directs each installation. Teams, supervisors, and delegated roles are agents; multiple human accounts and shared human administration are outside the current design. This is independent of how many computers run workers.
 - Multiple agents can operate through different harnesses and communicate within a hierarchy.
+- Authorized clients can add and edit durable state through an API, and external agents can exchange multiple messages with NimbleNewt agents in either direction through durable conversation threads.
 - Each agent owns a durable desk. Work records are readable by authorized peers within their sharing scope but writable only by the owner; a private scratch area holds temporary notes. Agents can ask the owner for interpretation or missing information.
 - Each agent should have a customizable environment, including its own harness configuration, extensions, and skills, without changing other agents’ environments. Isolation, shared workspace access, safety supervision, and protection of critical files are design areas to develop.
 - Agents can branch into another task, briefly respond to a message, or revisit earlier work without starting over.
@@ -428,6 +430,8 @@ Fallback eligibility must retain task permissions, context needs, and budget con
 
 ## Communication without constant interruption
 
+The [conversation API](agent-apis.md#two-way-conversation-api) gives agents inside or outside NimbleNewt a durable, two-way thread. Either participant can initiate, reply, ask a follow-up, and resume later; delivery does not depend on an open connection. The controller enforces identity, project scope, lifecycle gates, and backpressure on direct API calls just as it does on the UI and harness tools. The initial wire transport and optional MCP adapter remain architecture choices.
+
 Propose a durable inbox for every agent. Messages carry an associated task, sender, purpose, urgency, optional response deadline, and correlation identifier. Delivery, acknowledgment, and answering are separate states.
 
 | Class | Delivery behavior |
@@ -550,6 +554,7 @@ The following features are accepted as part of the project vision. Their impleme
 | Independent verification | Route important work to another agent that inspects artifacts and performs relevant checks rather than accepting the author's account. |
 | Cost and resource accounting | Attribute provider spending and local resource use to tasks, agents, and projects; support delegated budgets and requests for more resources. |
 | Conversational control and supporting console | Answer status questions, help develop projects, and direct work through chat; offer supporting views of activity, costs, and blockers, with task, team, and system Pause, Suspend, Suspend and Release, Stop, and Resume controls. |
+| Agent state and conversation APIs | Let authorized clients add and edit durable state and let external agents carry on two-way, multi-turn conversations with NimbleNewt agents. Enforce the same permissions, lifecycle gates, and recovery rules as internal clients. |
 | Decision history | Preserve decisions, authors, reasons, evidence, and explicit supersession links so outdated guidance can be recognized. |
 | Activity history and replay | Inspect recorded conversations, tool actions, evidence, and decision explanations through a read-only timeline, distinguishing contemporaneous records from retrospective analysis. |
 | Safe experimentation | Trial tools, extensions, and approaches in disposable environments, compare results, and promote or roll back versioned changes. |

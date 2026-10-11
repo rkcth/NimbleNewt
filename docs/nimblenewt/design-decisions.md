@@ -18,6 +18,7 @@ This register distinguishes settled direction from proposals, unanswered choices
 | Lifecycle | Pause and Suspend retain assignments; Suspend and Release explicitly releases prepared work. Stop normally performs graceful preparation; Force Stop is a distinct exception. | [State and ownership](operational-contracts.md#state-and-ownership) |
 | Context | Separate task/chat/meeting histories, expandable source-backed memory, and recorded decisions; no claim of preserving hidden model state. | [Persistent context](README.md#persistent-conversation-context) |
 | Desks | Owner-written records readable by authorized peers, with private scratch and scoped retrieval. | [Agent desks](README.md#agent-desks-and-shared-reading) |
+| Agent APIs | Authorized clients can add and edit durable state; NimbleNewt and external agents can initiate and continue two-way, multi-turn conversations. The controller enforces the same permissions and lifecycle rules for every client. | [API contract](agent-apis.md) |
 | Environments | Per-agent skills/tools/extensions and enforced isolation; code customization does not grant additional authority. | [Environments](README.md#individual-agent-environments) |
 | Tools | Protected NimbleNewt operations, shared maintainer-managed toolbox, read-only shared source, personal forks, and reviewed improvement proposals. | [Shared toolbox](README.md#shared-toolbox-and-promotion) |
 | Naming | Prefixed NimbleNewt and agent commands; durable agent identity separate from editable friendly names. Exact grammar/alias defaults remain proposed. | [Namespaces](runtime-compatibility-and-namespaces.md#command-naming) |
@@ -59,6 +60,7 @@ Validate configuration combinations: a requested PC target must fit its authoriz
 ## Engineering choices to resolve before implementation commitments
 
 - Choose the controller/worker transport and durable storage engines, artifact layout, cross-store checkpoint protocol, schema migration strategy, and tested backup/restore procedure.
+- Choose the first API wire transport and versioning policy. Evaluate HTTPS send/reply with cursor-based long-polling or server-sent events, optional WebSockets, and an MCP adapter for compatible harnesses. Keep conversation state and delivery guarantees independent of connections; do not mistake MCP transport sessions for durable threads. See [Agent APIs](agent-apis.md).
 - Qualify the pinned Pi Durable adapter, extension/command mappings, background jobs, and one compression owner; choose reuse versus porting for billion-context-style retrieval.
 - Select per-platform sandboxing, protected Git operations, process-tree control, credential storage, and file-sharing mechanisms. Define minimum OS versions, Linux distributions, architectures, and filesystems.
 - Specify the initial action/role permission catalog, permission-change audit, independent-review rules, delegated ceilings, and approval timeouts without granting authority through titles alone.

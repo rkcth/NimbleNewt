@@ -22,6 +22,8 @@ This document makes the product's existing requirements explicit at component bo
 
 Controller services own assignments, decisions, policy, routing exclusions, inboxes, budgets, and operation outcomes. A worker owns execution progress only within its current authority. Harness history can remain in native storage, but NimbleNewt must retain stable references and export/recovery metadata. Shared artifact storage and agent desks are distinct from editable repository files. Final storage engines and deployment topology remain separate implementation choices.
 
+The [agent APIs](agent-apis.md) expose controlled state reads and writes and durable two-way conversations to the UI, workers, and authorized external agents. Transport adapters do not become additional state owners. Direct API calls must enforce the same capability, lifecycle, version, and effect-reconciliation rules as internal actions.
+
 ## State and ownership
 
 Do not encode all state into one status field:

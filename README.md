@@ -31,6 +31,7 @@ flowchart TD
 - **You direct the team through conversation.** Talk to an agent or supervisor to plan a project, get help, or ask what’s happening. Your decisions take precedence over the agents’ recommendations.
 - **Agents have roles and responsibilities.** Supervisors coordinate specialists in development, QA, operations, research, marketing, support, design, and documentation. They handle both individual tasks and ongoing responsibilities.
 - **Each agent has its own workspace and memory.** Its “desk” holds its history, current work, and next steps. Agents can read authorized team records and ask each other questions, while keeping private scratch notes and their own environments.
+- **Other tools and agents can connect.** A permission-checked API lets authorized clients add or edit durable state. Agents running in other harnesses can have ongoing, two-way conversations with NimbleNewt agents and return to the same thread later.
 - **Work can be interrupted and resumed.** Agents switch between tasks and conversations while retaining the context needed to return. Pause retains assignments and allows background jobs to continue. Suspend prepares and saves work to disk so it can survive a reboot. Suspend and Release also prepares it for another agent to take over.
 - **The team meets and plans.** Scheduled stand-ups let agents report progress, discuss problems, and propose improvements. You can join, call a meeting, or catch up through a summary and full transcript. Votes include short reasons; unattended decisions stay within your delegated authority.
 - **Supervisors help agents get unstuck.** When an agent repeats failed steps or spends too long without useful progress, its supervisor can redirect it, interrupt a stuck model request, or try another model using saved task context. Recovery attempts have limits, and unresolved problems come back to you.
@@ -69,6 +70,7 @@ A controller manages tasks, permissions, communication, model routing, and persi
 ## More detail
 
 - [Full design and document guide](docs/nimblenewt/README.md)
+- [Agent state and conversation API design](docs/nimblenewt/agent-apis.md)
 - [Accepted decisions and open questions](docs/nimblenewt/design-decisions.md)
 - [Harness evaluation results](docs/nimblenewt/harness-test-results.md)
 - [Reproducible harness experiments](benchmarks/nimblenewt-harness/README.md)

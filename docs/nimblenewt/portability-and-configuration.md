@@ -49,6 +49,7 @@ Normal setup and administration must not require source edits. Provide UI contro
 | Shared toolbox | Scoped maintainer assignments, role/team/all-agent audiences, read-only source inspection, personal forks, improvement proposals and diffs, published versions, compatibility, revocation, and rollback. |
 | Quality assurance | Own-work, assigned-review, and project/team scope; reviewer assignments, triggers, evidence requirements, independent-review gates, and escalation rules. |
 | Operations | Meeting schedules and timezone, notifications, budgets, retention, and lifecycle preparation limits. |
+| Agent API access | Local/remote exposure, protected transport, scoped and revocable client credentials, permitted agent/project audiences, and selected update delivery method. Keep remote exposure off by default. |
 | P/PC planning | Production/capacity task categories, allocation window and accounting basis, protected shares, spending/concurrency ceilings, maximum waiting time, and expiring exceptions. |
 | Project improvement backlog | Problems and proposals about the user's own projects/tooling, evidence, meeting links, owners, dispositions, linked work, and evaluated results. Our NimbleNewt-source backlog is an optional configured use. |
 | Maintenance and releases | Window/timezone, target scope, exact released version, delegated release authority, preparation and health deadlines, status, rollback eligibility, and failure history. |
@@ -56,6 +57,8 @@ Normal setup and administration must not require source edits. Provide UI contro
 Show the effective setting and where it comes from. Proposed precedence is installation defaults, team/agent settings, then explicit task overrides, all constrained by authorization, budgets, capabilities, and current user decisions. Some policies are restrictions rather than defaults: a task override cannot re-enable a globally disabled provider or grant itself broader authority. The UI should distinguish editable, inherited, and administratively locked values.
 
 The UI, conversational controls, and any CLI/API must use the same configuration service, validation, and permission checks. For example, reordering a fallback list in the UI and asking the supervisor to reorder it should produce the same durable routing revision. A headless deployment should remain operable through the same service contracts.
+
+The [state and conversation APIs](agent-apis.md) must work with the qualified controller on macOS, Linux, and Windows. Optional WebSocket or MCP adapters may have their own compatibility requirements, but no platform may lose the core two-way conversation or durable state contract because one adapter is unavailable.
 
 ## Safe configuration changes
 

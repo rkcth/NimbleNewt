@@ -18,6 +18,8 @@ Depends on: N00.
 
 Review the design with Rob and any collaborator. Resolve initial worker placement, storage/transport, UI approach, supported OS versions, lifecycle budgets and first-release scope. Separate accepted requirements from proposed defaults.
 
+Choose the first transport for the durable state and two-way conversation APIs. Compare HTTP send/reply with cursor-based long-polling or server-sent events, optional WebSockets for live updates, and an MCP adapter for compatible harnesses. Keep persisted threads independent of transport sessions; record version and migration behavior.
+
 Completion criteria: Approved architecture decisions and a demonstrable first-release scenario; unresolved choices remain explicit. Do not silently commit to multi-host workers or multi-human administration.
 
 ### [AII-252](http://192.168.2.10:3100/AII/issues/AII-252) · N02 — Establish the portable project foundation
@@ -68,6 +70,14 @@ Separate task, chat and meeting histories; store owner-written peer-readable wor
 
 Completion criteria: Switch away and return with decisions and next steps intact; retrieval respects scopes and provenance; memory growth remains bounded; no claims of recovering hidden model reasoning.
 
+### AII-519 · N07a — Expose a durable state API
+
+Depends on: N00, N01, N04, N06, N07.
+
+Expose permission-checked, versioned operations for authorized clients to create, read, edit, and query agent and task state, including checkpoints, assignments, shared desk records, and evidence references. Keep private scratch private and peer desk writes forbidden. Require stable identities, expected revisions, idempotency, audit history, bounded retrieval, and clear accepted-versus-completed results. Use the same controller authority as the UI and harness tools.
+
+Completion criteria: State survives restart on macOS, Linux, and Windows; concurrent edits reject stale writers, retries apply once, and direct API calls cannot cross project, privacy, lifecycle, or ownership boundaries. Document and test the contract. See [Agent APIs](nimblenewt/agent-apis.md).
+
 ### [AII-258](http://192.168.2.10:3100/AII/issues/AII-258) · N08 — Implement configurable model routing and fallback
 
 Depends on: N03, N04, N06.
@@ -82,6 +92,8 @@ Depends on: N05, N07, N08.
 
 Let the owner discuss projects, assign authorized work, ask status, change priorities and invoke lifecycle/model settings. Provide activity, transcript and evidence views alongside chat.
 
+Use the same controller operations as the state API (N07a) and conversation API (N10a); the UI must not bypass their permissions or show a queued request as completed work.
+
 Completion criteria: A user can plan a task, interrupt it with a question and return; UI distinguishes accepted requests from completed actions and observed state. History replay never reexecutes tools.
 
 ### [AII-260](http://192.168.2.10:3100/AII/issues/AII-260) · N10 — Implement team hierarchy and event-driven coordination
@@ -90,7 +102,17 @@ Depends on: N04, N06, N07.
 
 Implement supervisor assignments, scoped inter-agent messages, dependencies, external event ingestion, batching, backpressure and bounded delegation. Keep human authority above team decisions.
 
+Provide the inbox, identity and delivery rules used by the two-way API in N10a; external agents do not gain worker or supervisor authority by sending a message.
+
 Completion criteria: Multiple specialists coordinate without duplicate ownership or message storms; deduplicate events, detect circular waits, preserve priority changes and respect manual lifecycle gates.
+
+### AII-520 · N10a — Expose an inter-agent conversation API
+
+Depends on: N00, N01, N04, N06, N07, N07a, N10.
+
+Let NimbleNewt agents and authorized agents on other harnesses each initiate a durable thread and carry on multiple back-and-forth turns. Support replies, follow-up questions, recipient discovery, correlated messages, queued/delivered/answered states, cursor-based recovery, and bounded interruptions. Compare HTTP polling or streaming, optional WebSockets, and an MCP adapter without making any connection the source of conversation state.
+
+Completion criteria: Both sides can initiate and resume a multi-turn conversation after disconnect or restart; retries do not duplicate turns or wakeups; privacy, hierarchy, project scope, Pause/Suspend, and human authority hold through direct API access. Document and test the contract. See [Agent APIs](nimblenewt/agent-apis.md).
 
 ### [AII-261](http://192.168.2.10:3100/AII/issues/AII-261) · N11 — Add supervisor recovery for stalled agents
 
