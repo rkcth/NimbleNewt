@@ -13,7 +13,9 @@ This document makes the product's existing requirements explicit at component bo
 | Worker | An execution process/environment hosting a harness for an agent's authorized attempt. Restarting a worker does not replace the agent. |
 | Harness | The model/tool execution runtime. Pi Durable is selected; its internal tasks are not automatically NimbleNewt tasks. |
 | Model route | A provider/account/endpoint/model combination with capability, privacy, availability, and budget constraints. A remote model endpoint is not a remote worker. |
+| Project | A durable goal, scope, conversation context, task links and optional workstreams or milestones; no repository is required. |
 | Task | An authorized outcome and acceptance criteria, with scope, dependencies, priority, difficulty, budget, and P/PC classification. |
+| Deliverable | A versioned task output or verified operational result with an owner, audience, authoritative reference, review state and acceptance evidence. |
 | Context | A persistent task, discussion, or meeting history and its current model-facing view. Context switching is not assignment transfer. |
 | Attempt | One authorized execution instance, with a worker/environment version, routing/decision revisions, and expiry or cancellation state. |
 | Job | An independently tracked long-running local/remote operation. A durable job record does not imply the underlying process is resumable. |
@@ -48,6 +50,16 @@ Suspend allows bounded cleanup, durably saves recoverable state, and releases ex
 
 Only one current authorized execution writer may advance a task. A retry/restart gets a new attempt identity; stale attempts cannot write merely because the agent ID is unchanged. Assignment generation and execution fencing must cover trusted services and every direct write path. If a disconnected worker retains uncontrolled filesystem or service access, safe takeover is not established. Preserve ownership and report uncertainty instead of dispatching a duplicate writer.
 
+## Project and delivery records
+
+The controller owns a versioned project record with stable identity, goal, scope, authorized participants, task links and optional workstreams or milestones. A project need not have a repository; a repository may be associated with more than one project under explicit access scopes. Project records and operational metadata do not become required files in target repositories.
+
+A task's assignment record identifies its durable owner and generation. Execution attempts identify the worker and last observed activity separately. Assignment does not imply active execution; a running process or heartbeat does not establish useful progress. Status queries preserve last observation time and distinguish fresh, stale and unknown execution evidence. Paused, suspended and blocked work can retain its assignee. Reassignment follows release and stale-writer fencing rather than a view-level edit.
+
+A deliverable record links a project and producing task to a stable output identity, responsible agent, type, intended audience, exact artifact hash/revision or authoritative observed-system version, access scope, current state and acceptance evidence. Submitting, reviewing, accepting, rejecting and superseding are separate versioned events. Acceptance is valid only for the reviewed version and required checks; a changed or missing artifact makes affected evidence stale without erasing history. Operational results without a file still require a verifiable reference and observation time.
+
+Each tool invocation, including an external MCP call, has a durable operation identity and links to its project, task, agent, execution attempt and exact tool/server version or observed catalog revision. Record start/end state, confirmed or uncertain outcome, bounded diagnostic references, and available time or resource use. Redact or restrict sensitive payloads before presenting project summaries. Tool activity is evidence about work, not task completion by itself. Conversational answers, views and external API clients use the same authorized records and distinguish proposed, accepted and applied changes.
+
 ## Admission, execution, and recovery
 
 1. Authenticate the actor and resolve project, task, agent, command, and version. Resolve shortcuts before queueing. Save durable intent before acknowledging acceptance.
@@ -61,6 +73,12 @@ Assume messages may be redelivered. Deduplicate by stable input identity, retain
 A checkpoint becomes ready only when its referenced data and artifacts are durable and readable. Cross-store writes require a recoverable commit protocol: incomplete snapshots are not published as ready, and orphaned artifacts are distinguishable from committed ones. Pin required references during retention. Actual transaction and artifact-store implementation is still to be selected.
 
 Restore native conversation/history when supported; reconstruct from portable records only with visible fidelity limits. Recovery does not freeze and restore arbitrary process memory or hidden model computation. Completed effects remain recorded; uncertain effects require investigation. A live job may need completion, cancellation, restart from a tool checkpoint, or an explicitly tracked remote-job exception.
+
+An MCP adapter cannot become an alternate authority or write path. External servers, capabilities and resource reads are scoped to the current task and project; server-provided text is untrusted. Keep credential references separate from model-visible metadata, record observed resource hashes/revisions or explicit uncertainty, and reconcile ambiguous external effects before retry. A connection or protocol task handle is not NimbleNewt ownership, approval or durable recovery state. See [MCP integrations](mcp-integrations.md).
+
+## Changed dependencies before resume
+
+Checkpoints include observed read/write dependency versions and durable event cursors. Resume stays gated while the controller collects changes, directly verifies current hashes/revisions, prepares a permission-filtered delta packet and records agent relevance review. Affected assumptions, artifacts, tests and approvals become stale until revalidated. Directory/search dependencies, external freshness and event-retention gaps require explicit reconciliation. Recheck reviewed versions at admission and enforce conditional writes and execution fencing; task ownership alone does not prevent cross-task resource conflicts. See the accepted [resume reconciliation contract](resume-reconciliation.md) for lifecycle steps and failure tests. This preserves retained task context rather than replacing it with the side conversation.
 
 ## Authority and visibility
 

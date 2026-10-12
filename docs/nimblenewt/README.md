@@ -1,10 +1,12 @@
 # NimbleNewt concept draft
 
-**NimbleNewt is a system for running a persistent team of AI agents that can work independently, collaborate, and adapt without losing their place.**
+**Talk to your agents without making them lose their place.**
 
-Each agent has its own identity, memory, and customizable environment. Agents can pause, switch tasks, and resume—even after a reboot—while coordinating through a hierarchy, messages, shared work records, and regular planning.
+NimbleNewt gives you a persistent team of AI agents that you direct through conversation. Its central pause/suspend approach keeps task working context separate from incidental chat, so you can ask questions or change priorities while your agents keep their place. Keeping important working state separate from side conversations reduces unnecessary reconstruction and supports efficient, focused work.
 
-The system matches models and tools to task difficulty, manages interruptions and resources, and enforces boundaries so agents can improve their own workflows without damaging each other’s work or the underlying system.
+Each agent has its own identity, memory, and customizable environment. Agents pause, switch tasks, and resume—even after a reboot—while coordinating through a hierarchy, messages, shared work records, and regular planning.
+
+The system matches models and tools to task difficulty, manages interruptions and resources, and enforces boundaries so agents can improve their workflows without damaging each other's work or the underlying system.
 
 NimbleNewt supports both finite projects and ongoing responsibilities: software development, QA, marketing, support, graphic design, research, planning, user and technical documentation, and operating systems and services. Each installation has one human owner directing a persistent team of agents. A developer can install it on their development machine and submit changes through their organization's existing review process; an operations agent can maintain a server, keep deployed code updated, and check that services are working. Coding is an important use case, not the product boundary. Coworkers need no account in that owner's NimbleNewt installation.
 
@@ -21,8 +23,10 @@ Created October 3, 2026. NimbleNewt is the selected project name. This document 
 | Document | Purpose |
 | --- | --- |
 | This README | Product behavior and relationships between features. |
+| [Resume reconciliation](resume-reconciliation.md) | Dependency versions, change detection, targeted updates, stale evidence and race-safe continuation. |
 | [Operational contracts](operational-contracts.md) | Definitions, state/ownership rules, authority, durable operations, and recovery boundaries. |
-| [Agent state and conversation APIs](agent-apis.md) | Durable state edits and two-way agent conversations, with transport and MCP integration choices still open. |
+| [Agent state and conversation APIs](agent-apis.md) | Durable state edits and two-way agent conversations, with transport choices still open. |
+| [MCP integrations](mcp-integrations.md) | Approved external MCP tools/resources/prompts and the controller-backed adapter for other agents. |
 | [Organization and workers](organization-and-workers.md) | Accepted single-owner model and separately proposed local/remote worker topology. |
 | [Design decisions](design-decisions.md) | Accepted choices, pending user questions, proposed defaults, and remaining engineering decisions. |
 | [Portability and configuration](portability-and-configuration.md) | Standalone product boundary, required platforms, and UI-managed settings. |
@@ -67,6 +71,10 @@ Initial checks found no matching GitHub repositories, exact npm or PyPI packages
 - Projects can span multiple repositories, and repositories can participate in multiple projects. Existing open source checkouts must work without adding NimbleNewt-specific documents, configuration, history, or state to them.
 - NimbleNewt can be extracted into its own repository and distributed as an independent open-source application. No particular local coder, provider, host path, or existing orchestration installation is required. Users can configure their deployment, difficulty profiles, and ordered model fallbacks through the UI.
 - NimbleNewt must work on macOS, Linux, and Windows with the same core lifecycle, configuration, and safety guarantees. Platform-specific implementation details belong behind tested adapters; an unavailable optional integration must not make the whole platform unusable.
+
+## Design and implementation status
+
+NimbleNewt is under development. The overview describes the product contract to implement. Efficiency and quality improvements are goals that require measurement; no measured savings or release date is claimed. Required platforms, the selected runtime and context/lifecycle mechanisms still need implementation and qualification. The sections below preserve the engineering boundaries: durable records are distinct from live model/cache state, safe suspension requires resolving or explicitly tracking in-flight effects, and returning tasks must reconcile relevant changes. These limits guide implementation rather than dilute the intended user experience.
 
 ## Central design proposal
 
@@ -136,12 +144,27 @@ QA work uses normal task queues, budgets, durable context, and lifecycle control
 | Environment | An agent's versioned tools, harness configuration, extensions, skills, and bounded execution resources. |
 | Responsibility | Continuing objective, owner, managed resources, desired condition, schedules/events, permissions, and incident history. |
 | Task | Goal, owner, acceptance criteria, priority, difficulty, dependencies, budget, and lifecycle. |
+| Deliverable | A versioned task output or verified operational result with an authoritative reference and acceptance evidence. |
 | Task branch | A separate line of work linked to its origin, with its own context and return destination. |
 | Execution attempt | One bounded run using a particular harness, model, and policy version. |
 | Checkpoint | Durable task state and references to the evidence and artifacts needed to continue. |
 | Message or event | A persisted input with identity, delivery state, urgency, and task association. |
 
 Keep organizational parentage separate from task dependencies: an agent may advise another team without changing its reporting relationship. Delegating a child task should not automatically fork or copy every piece of the parent's context.
+
+## Projects, assignments and delivery
+
+A project holds a durable goal, scope, decisions, tasks, and conversation context. It can start before a repository exists, span several repositories, and include non-code work. Optional workstreams or milestones organize larger efforts without turning a due date into proof of progress. Project records link to work products and observations; internal planning state stays outside target repositories.
+
+Each task has a current assignee or is unassigned, with a versioned assignment history. The current owner is distinct from the agent or worker actively executing an attempt. A task can remain assigned while paused, suspended, blocked, or awaiting review. Status answers show the task's goal, owner, readiness, blockers, lifecycle gate, last observed execution and observation time. An unreachable worker or old progress report appears as unknown or stale, not as active work. Transfer still requires the authorized release and fencing rules.
+
+A deliverable is a first-class project record linked to its producing task, responsible agent, intended audience, exact artifact or observed system version, location or authoritative reference, and acceptance criteria. Deliverables may be files, code changes, documents, designs, research findings, decisions, or verified operational outcomes. Draft, submitted, under-review, accepted, rejected, and superseded states remain distinct; submitting a file does not complete a task. Evidence and approvals attach to the exact version, and a changed version reopens the affected checks. Missing or inaccessible artifacts are reported rather than silently counted as delivered.
+
+Tool activity links to the project, task, agent, execution attempt, and exact tool version. Records distinguish invocation, in-progress work, confirmed result, failure, cancellation and uncertain outcome, with time and resource use where available. Summaries expose useful actions and costs; restricted inputs, outputs, credentials and private records follow their access rules. A tool call alone is not useful progress or a delivered result.
+
+Conversation and supporting views read the same permission-filtered project records. The owner can ask who owns and is presently working on each task, what is blocked, what changed, which tools were used, and what has actually been delivered. A project overview links these answers to tasks, versions and evidence, shows freshness and uncertainty, and supports filtering without requiring the owner to manage a board. Chat can draft a project and propose assignments, but proposals remain distinct from authorized and applied changes.
+
+Qualification follows a task from assignment through tool use, pause or worker loss, handoff, deliverable submission, review and completion. Chat, project views and the state API agree on owner, activity, blocker and delivery state at each step; stale observations and failed or uncertain effects never appear as completed work.
 
 ## Conversation as the primary interface
 
@@ -152,6 +175,18 @@ Propose a persistent conversational coordinator that retrieves relevant project 
 Conversation can branch among projects while retaining the context of each. The coordinator should resolve project and repository scope from the current conversation and ask a focused question when the target is ambiguous. Switching the conversation's focus must not silently retarget already-running tasks.
 
 Discussing an idea is different from authorizing its execution. The coordinator can develop and save a proposal in NimbleNewt's project records while keeping implementation pending until requested. Explicit action requests can proceed within existing authorization and policy without redundant confirmation. Record substantive decisions as durable, versioned project state so they survive a conversation growing beyond the model's active context.
+
+## Conversation interruptions and retained task state
+
+A user message triggers a scoped interruption chosen for the conversation's needs. A brief consultation can pause the current task at a safe boundary and answer in a separate conversation context while retaining the task context. The responding agent can consult its own task history, scratch files and notes, the conversation flow, current project files, and relevant shared information within its permissions. Authorized peers' published work records are read-only; their private scratch is unavailable unless explicitly granted. A coordinator may answer from observed records without interrupting every worker.
+
+For example, agent A is working on Task A. A status question pauses A's foreground work safely while the agent answers using retained task state and current evidence. If no task change is needed, an authorized return continues the retained task context without a fresh task handoff or unnecessary reconstruction. Incidental chat stays in the conversation history; applicable decisions and source-backed updates are brought into A's task context before its next action.
+
+If the conversation instead prioritizes urgent Task B, suspend A before releasing its execution resources: settle in-flight commands, save recoverable context and artifact references, and record pending or uncertain effects. Commands may finish, checkpoint and stop where supported, or be cancelled safely with explicit recovery status. Report preparation or a blocker until the required boundary is established. Run B under its own task context and authorization. On the authorized return, restore A's saved context, reconcile relevant decisions, project file changes and job outcomes, and recheck ownership, permissions and remaining lifecycle gates. Elapsed hours, days or months do not imply that external conditions stayed unchanged.
+
+Pause retains task ownership and may leave permitted background jobs running; Suspend durably prepares recovery and releases execution resources while retaining ownership. Neither transfers the task to another agent. A bounded side conversation can have an authorized return condition; a manual Pause or Suspend must not be lifted by an ordinary message or by the side discussion ending. Task-level and agent-level scopes remain distinct under the [operational contracts](operational-contracts.md#state-and-ownership).
+
+Preserving task records is distinct from retaining a live model request, provider KV cache, or process-memory snapshot. The baseline stores histories, tool results, decisions, notes, artifacts and checkpoints. Restore native history where supported and expose fidelity limits when reconstructing from portable records. No universal cache support, exact bit-for-bit resumption or zero-cost transition is assumed. Measure repeated reconstruction, context retention, resume correctness, accepted-result quality, time and cost to evaluate the intended benefits.
 
 ## Persistent conversation context
 
@@ -225,6 +260,8 @@ Read and write boundaries must apply to files, search indexes, artifact links, a
 
 **Pi Durable is the selected reference worker runtime.** The user accepts its experimental API risk because its persistent conversation/task model closely fits NimbleNewt. LangGraph/Deep Agents remains an alternative. See [Harness comparison](harness-comparison.md) and [initial runtime experiments](harness-test-results.md) for evidence and remaining qualification gaps. Selection does not waive macOS, Linux, Windows, recovery, or isolation requirements.
 
+TypeScript is the default language throughout the controller, worker adapter, API, and UI so Pi Durable can be used directly. A Rust component requires a specific, demonstrated need that TypeScript cannot meet well, a bounded interface, and a maintenance plan. A Rust rewrite of Pi Durable is not assumed to improve agent throughput and is not part of the initial implementation. See [runtime compatibility and language choice](runtime-compatibility-and-namespaces.md).
+
 Follow [Runtime compatibility and command namespaces](runtime-compatibility-and-namespaces.md): reserve `/nimblenewt.*` for NimbleNewt operations, use durable computer-assigned agent IDs for canonical agent command prefixes, and offer context-bound aliases such as `/agent.*`. Friendly names remain editable labels. Pin runtime versions, maintain an explicit adapter mapping, and test API behavior, naming conflicts, checkpoint migrations, and rollback before upgrades.
 
 Propose a NimbleNewt controller with isolated Pi Durable workers behind a versioned adapter. NimbleNewt owns identity, task state, permissions, scheduling, meetings, context archives, provider policy, and recovery. Pi Durable supplies the model/tool execution loop and durable conversation primitives. The conversational coordinator is an agent managed by the controller, not the controller itself. Personal extensions run inside the isolated worker, not the privileged controller.
@@ -244,6 +281,12 @@ Agents may call these tools within their authority but cannot edit, uninstall, d
 The protected extensions are clients of NimbleNewt's services, not the final security boundary. Those services authenticate the worker and enforce task scope, ownership, lifecycle state, and permissions for every operation. Do not place controller-wide credentials or unrestricted administrative methods inside an extension. Read-only files prevent disk edits, but customizable extensions share a process and could interfere at runtime. Treat the whole worker as untrusted, enforce consequential controls externally, and validate that reserved tools remain intact before accepting a customized environment. Stop activation if integrity checks fail.
 
 The resulting tool layers are: protected controller-managed tools; a permission-managed shared toolbox; approved, versioned personal harness extensions; and agent-created scripts accessed through the protected bridge. Being read-only does not make a tool automatically authorized to perform every action it exposes. An agent's Suspend, release, or restart tool requests must still be checked against its delegated authority.
+
+### MCP connections and usage
+
+NimbleNewt agents can use approved external MCP servers as another source of tools, resources and prompts. The owner configures each connection and its audience in the UI; the controller catalogs current capabilities and checks authority for every call. A connection or model-visible tool description does not grant filesystem, secret, project or publishing access. MCP calls appear in the same task-linked activity and deliverable views as local and shared tools, with the server, exact capability, version or observation time, outcome and uncertainty visible to permitted readers.
+
+MCP resource reads participate in dependency and resume checks. Changed or unavailable resources prompt review, while server-provided text stays untrusted. Long-running or effectful calls use durable operation/effect records; a disconnected session is not proof of cancellation or completion. NimbleNewt can also expose its own permitted state and conversations to other MCP-capable agents through a controller-backed adapter. See [MCP integrations](mcp-integrations.md) for both directions, configuration, security and qualification.
 
 ### Shared toolbox and promotion
 
@@ -549,6 +592,8 @@ The following features are accepted as part of the project vision. Their impleme
 | Feature | Intended behavior |
 | --- | --- |
 | Task contracts | Assign an expected result, acceptance criteria, budget, permissions, and evidence required for completion. Version changes to the contract. |
+| Project and delivery visibility | Track projects, task ownership versus observed execution, blockers, versioned deliverables, review state and attributable tool activity. Answer from one permission-filtered record with visible freshness and uncertainty in chat and supporting views. |
+| MCP usage | Let agents use approved external MCP tools, resources and prompts under task-scoped authority, and expose permitted NimbleNewt operations to compatible MCP clients through the controller. Record versions, effects, freshness and uncertainty; sessions do not own durable state. |
 | Dependency tracking | Record prerequisites and responsible agents, detect circular waits, and expose who can unblock work. |
 | Recovery checks | Before resuming, check for changed files, requirements, dependencies, permissions, and decisions; revise the plan when needed. |
 | Independent verification | Route important work to another agent that inspects artifacts and performs relevant checks rather than accepting the author's account. |

@@ -4,6 +4,8 @@
 
 The user selected **Pi Durable as NimbleNewt's reference worker runtime**, accepting its experimental API risk in exchange for its close fit to persistent conversations, tasks, and customizable agents. LangGraph/Deep Agents remains an alternative, not a second required implementation. Selection is not production qualification: macOS, Linux, Windows, isolation, recovery, and context integration still require validation.
 
+**TypeScript is the default implementation language** for the controller, Pi Durable worker adapter, API, workers, and UI. This permits direct use of Pi Durable's TypeScript package and keeps one primary language across the product. Keep package and trust boundaries explicit even when they share a language. Rust is an exception for a specific, bounded problem that TypeScript cannot solve well, after measuring or otherwise demonstrating the need and defining a small maintained interface. Do not port Pi Durable to Rust merely on an unmeasured performance assumption; such a port would own compatibility with its model, storage, tool, extension and recovery behavior. The current decision does not prohibit a later evidence-backed port.
+
 NimbleNewt owns its public commands, stable operation identities, permissions, and lifecycle contracts. Put Pi Durable APIs behind a versioned adapter inside the isolated worker. Do not expose upstream method names as NimbleNewt's durable contract or assume regular pi CLI extensions and slash commands exist unchanged in Pi Durable.
 
 ## Command naming

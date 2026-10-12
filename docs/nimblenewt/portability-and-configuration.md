@@ -4,6 +4,8 @@ NimbleNewt is intended to become an independent open-source application. This st
 
 **NimbleNewt must work on macOS, Linux, and Windows.** All three are required product targets, not optional future ports. Current experimental evidence covers macOS only.
 
+Use TypeScript as the default implementation language across the controller, Pi Durable integration, API, workers, and UI. This does not replace per-platform qualification: process control, isolation, storage and packaging still need native behavior and tests on every required OS. A narrowly scoped Rust component is permissible only when a concrete need is demonstrated and its cross-platform interface and upkeep are justified. See [runtime compatibility](runtime-compatibility-and-namespaces.md).
+
 Each installation is under one human owner's control and supports both project work and ongoing responsibilities. A developer's development machine is an important installation setting; support their existing checkouts, tools, and organizational contribution process without requiring coworkers to use NimbleNewt. Server maintenance and other ongoing work must declare their availability needs: continuous agent response requires an always-available execution host, while an intermittently running installation must show coverage gaps and reconcile on return. Local execution is the baseline; remote model services remain configurable, and multi-host agent workers are a separate pending proposal. See [the developer workflow](organization-and-workers.md#developer-workflow-within-an-organization).
 
 ## Separate the product from its installation
