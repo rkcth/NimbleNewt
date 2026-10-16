@@ -28,7 +28,7 @@ Worker topology, storage/transport, OS support details, numerical budgets and th
 - Repository: https://github.com/rkcth/NimbleNewt
 - Current local source: `/Volumes/RobsExternalDrive/Programming/AIImageMaker/NimbleNewt`
 - Design: `docs/nimblenewt/README.md`, `design-decisions.md`, `operational-contracts.md`, `pitfalls-and-safeguards.md`, and supporting documents.
-- The planning issue holds a snapshot of current design documents, including local uncommitted supervisor-recovery requirements. Remote GitHub content may lag this snapshot. No execution workspace or server clone is provisioned by this import.
+- The planning issue holds a versioned snapshot of the design documents. The October 16 synchronization publishes the current planning changes to GitHub and creates a server reference checkout at `/srv/code/repos/nimblenewt`. This is a reference copy, not an activated execution workspace; N00 remains closed.
 
 ## Activation
 
@@ -40,3 +40,29 @@ Rob must explicitly authorize scope before N00 is completed. The team can then s
 - [Planning documents and human activation gate](http://192.168.2.10:3100/AII/issues/AII-250).
 - Work outline: AII-251 through AII-269, all unassigned Backlog and outside scheduler authorization.
 - Registered October 7, 2026; no execution workspace provisioned and no implementation started by onboarding.
+
+## Approval and learning requirements — October 15, 2026
+
+Public installations start with tight approvals and offer easy scoped relaxation through authenticated chat and UI. Separate direct owner authorization, derived authority, standing grants, independent technical review and execution admission. Rob’s private installation carries his existing grants; public installations inherit none of them. Users may choose stricter or more autonomous policies per project, environment, action, budget or maintenance window.
+
+Support independent agent review before any configured command, using immediate bounded inquiries that preserve both agents’ assignments and context rather than transferring a task to a supervisor. Preserve mandatory human review such as reviewing the exact code before commit, with developer/agent/reviewer attribution. Measure review latency; do not claim it is already faster. Corporate integration does not silently expand the single-human-owner installation model.
+
+Implement an event-driven learning lifecycle: observation, candidate, triage, bounded experiment, evaluation, scoped adoption, monitoring and retention/revision/withdrawal. Version lessons and skill usage with source evidence, applicability, dependencies, contradictions and supersession. Deduplicate evidence, preserve paused-task compatibility subject to revocation, and account for reflection and monitoring within existing P/PC limits. Learning cannot weaken its own criteria or approval rules.
+
+The complete contracts are `docs/nimblenewt/authorization-and-delegation.md` and `docs/nimblenewt/learning-and-improvement.md`. These planning updates do not authorize implementation or clear N00.
+
+Paperclip synchronization verified October 15, 2026: project and goal descriptions updated; current design snapshot, implementation outline, project goals, authorization contract and learning contract saved on AII-250. Learning lifecycle is AII-615; existing affected tasks were amended without changing assignments or activating work.
+
+## Conversational policy authoring and task management
+
+Accepted owner clarification, October 15, 2026: freeform conversation with agents is the primary way to configure decisions and direct work. Presets, forms and policy fields are optional conveniences, not the limits of what the owner can express. The owner should not need to create tickets, edit dependencies, assign agents or move task statuses to obtain an authorized outcome. Direct task management remains available to the owner and authorized API clients.
+
+An authorized agent can receive a policy instruction in ordinary language, resolve its intended scope using the conversation and current project context, and record the original wording alongside a versioned operational interpretation. Support contextual conditions, exceptions, combinations and later amendments, not just a fixed list of approval modes. For example: “Handle development deployments yourselves; have another agent check commands touching customer data; let me review code before any commit in this repository.” A later “Allow commits for this prototype only until Friday” changes that scope without dropping unrelated restrictions. Resolve dates/timezones and project references from known context; clarify only material uncertainty.
+
+Apply clear authorized edits through the common configuration service and report the resulting scope and effective behavior in plain language. Do not require a form, special syntax, a task ID or redundant confirmation of a clear owner instruction. If intent conflicts with a retained owner restriction, is materially ambiguous, or cannot be enforced with available capabilities, explain the specific issue and seek only the missing decision. Do not silently discard a condition or claim an unsupported rule is active. Preserve natural-language intent and provenance, distinguish proposed/accepted/applied states, and surface the actual interpretation for correction. Context-dependent judgment may use an authorized agent review at execution; deterministic services still enforce grants, mandatory gates and version checks. A freeform policy is not merely prompt text that a worker can ignore or rewrite.
+
+Agents handle decomposition, task creation, dependencies, assignment proposals or authorized assignment changes, progress, recovery and completion evidence within the user's granted scope. Existing grants permit routine task administration without repeated approval; a strict policy may still require approval of the substantive action. Do not turn every internal task transition into a separate human decision. The owner can discuss outcomes, change priorities, interrupt, ask status and correct direction without managing a board. Agents must persist these changes in authoritative records rather than only promise them in conversation. Explicit planning-only instructions and implementation holds remain binding.
+
+UI, conversation, API and external adapters use the same versioned records and permission checks. Direct owner/API edits appear in subsequent agent context; concurrent edits reject stale writes and are reconciled before execution. Record the authenticated origin separately from a forwarding agent; an arbitrary message is not an owner instruction. Any appropriately authorized agent can handle or route the conversation through a bounded inquiry, without requiring a particular CTO or transferring the original task. Preserve privacy and lifecycle holds.
+
+Qualification: complete an authorized project scenario entirely through conversation, including policy creation, a scoped exception, task decomposition/coordination, a changed priority and delivery, with no required task-board interaction. Verify unsupported/ambiguous policy handling, scoped amendments, direct UI/API edits racing conversational edits, revocation, restart and retained provenance. Assert that relaxing one condition preserves the mandatory human code-review gate elsewhere and that a planning request never activates implementation.

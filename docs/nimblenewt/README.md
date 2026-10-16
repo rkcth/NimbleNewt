@@ -154,6 +154,8 @@ Keep organizational parentage separate from task dependencies: an agent may advi
 
 ## Projects, assignments and delivery
 
+Conversation drives task administration as well as status: agents create and maintain tasks, dependencies, assignments and progress within granted authority. The user directs outcomes and need not manage a task board. Direct user and API task editing remain available. Freeform policy instructions are interpreted, versioned and applied through the same service; presets are optional. See [conversational policy and task management](authorization-and-delegation.md#conversational-policy-authoring-and-task-management).
+
 A project holds a durable goal, scope, decisions, tasks, and conversation context. It can start before a repository exists, span several repositories, and include non-code work. Optional workstreams or milestones organize larger efforts without turning a due date into proof of progress. Project records link to work products and observations; internal planning state stays outside target repositories.
 
 Each task has a current assignee or is unassigned, with a versioned assignment history. The current owner is distinct from the agent or worker actively executing an attempt. A task can remain assigned while paused, suspended, blocked, or awaiting review. Status answers show the task's goal, owner, readiness, blockers, lifecycle gate, last observed execution and observation time. An unreachable worker or old progress report appears as unknown or stale, not as active work. Transfer still requires the authorized release and fencing rules.
@@ -506,7 +508,7 @@ Meetings proceed on schedule without the user present. The user can join late or
 
 Agents may vote on decisions when the user is absent. An adopted motion within delegated authority is actionable without waiting for the user to attend or ratify it. Examples can include choosing among permitted implementation approaches, coordinating dependencies, and adjusting plans within existing priorities and budgets. The motion's subject must actually fall within delegated scope; voting does not grant new permissions or override a prior user decision. Matters outside that scope remain recommendations for the user.
 
-When the user is present, agents still debate and vote, but the chair presents the result and asks whether the user agrees or wants another direction before acting on it. Record the vote separately from the user's final decision. Agreement authorizes applying the outcome within its scope; a different user direction takes precedence without requiring another team vote to validate it. Silence is not agreement: keep the decision pending and continue unrelated permitted work.
+When the user is present, agents still debate and vote. For new decisions requiring owner agreement under current policy, the chair presents the result and asks whether the user agrees or wants another direction before acting. Existing grants remain valid; presence alone does not require renewed consent for already-authorized work. Record the vote separately from the user's final decision. Agreement authorizes applying the outcome within its scope; a different user direction takes precedence without requiring another team vote to validate it. Silence is not agreement: keep the decision pending and continue unrelated permitted work.
 
 Evaluate attendance when the result is presented. If the user joins before an absent-user decision has been dispatched for action, present it for their decision first. If the user leaves while a decision awaits their response, do not silently convert it into an approved absent-user vote; retain it as pending unless they explicitly delegate that decision. Report already-executed outcomes accurately when the user joins later.
 
@@ -693,3 +695,9 @@ Additional validation scenarios for pause and routing:
 See the [design decision register](design-decisions.md) for one consolidated list of accepted decisions, proposed defaults, pending user questions, and implementation questions. Do not treat an unresolved mechanism as a reason to revisit a settled product requirement, or treat a suggested default as a user decision. Phases and MVP selection remain deferred.
 
 NimbleNewt has a standalone local repository and uses the [MIT license](../../LICENSE), with independent dependencies, setup, tests, and documentation. Existing orchestration integrations are optional adapters. Public hosting and publication remain future work.
+
+## Approval policies and learning lifecycle
+
+Follow [Authorization, delegation, and command review](authorization-and-delegation.md): tight public defaults, easy scoped relaxation, private standing grants, authenticated chat approvals, optional independent review before any command, and human gates such as review before commit. Fast review uses bounded inquiries while preserving both agents’ tasks; latency remains to be measured. Review and authorization are distinct. Corporate workflows retain developer/agent/reviewer attribution without expanding the current single-owner installation model.
+
+The [learning lifecycle](learning-and-improvement.md) connects automatic observation capture, versioned lessons, bounded experiments, scoped adoption, monitoring and withdrawal to the existing P/PC and toolbox contracts. Learning cannot relax its own authority.

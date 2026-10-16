@@ -10,6 +10,8 @@ MCP integration additions below were synchronized and read back in the existing 
 
 The TypeScript-first implementation decision was synchronized and read back in existing Paperclip tasks AII-251, AII-252, AII-253 and AII-268 on 2026-10-12. They remain unassigned Backlog items under the N00 planning hold.
 
+October 15 planning update: authorization profiles, inquiry-based command review and the learning lifecycle were synchronized and read back in Paperclip tasks AII-251, AII-254, AII-256, AII-257, AII-519, AII-259, AII-260, AII-261, AII-262, AII-263, AII-265, AII-266, AII-268 and AII-269. N16a is AII-615 with native blockers N00, N04, N06, N07, N07a, N10, N13, N15 and N16; N18 now also depends on N16a. Project/goal descriptions and five planning documents on N00 were updated and verified. All 23 project tasks remain unassigned Backlog; N00 remains closed.
+
 ## Proposed task sequence
 
 ### [AII-250](http://192.168.2.10:3100/AII/issues/AII-250) · N00 — Human decision: authorize NimbleNewt work
@@ -35,6 +37,10 @@ Completion criteria: Approved architecture decisions and a demonstrable first-re
 MCP scope: Select and pin compatible MCP client/server protocol revisions, transports and adapter versions; define external-server registration, capability refresh, authorization, effect recovery and migration without making MCP sessions authoritative task state.
 
 Additional MCP completion criteria: Document a portable client/server compatibility matrix and an end-to-end scenario; unknown or unsupported revisions fail clearly, and no transport choice silently broadens permissions.
+
+Authorization/learning scope (October 15): Specify tight public approval defaults, scoped relaxation and trusted private grants; choose action classifications, reviewer capacity/fallback and initial learning scenario. Keep single-owner scope explicit.
+
+Conversational configuration scope (October 15): Specify freeform conversational policy representation and interpretation, contextual judgment versus deterministic enforcement, and a complete conversation-only delivery scenario. Presets must not limit expressible intent.
 
 ### [AII-252](http://192.168.2.10:3100/AII/issues/AII-252) · N02 — Establish the portable project foundation
 
@@ -77,6 +83,10 @@ MCP scope: Represent external MCP calls as durable task-linked operations/effect
 
 Additional MCP completion criteria: Crash, timeout and restart preserve confirmed versus uncertain MCP effects; retries do not blindly duplicate effectful calls and stale resource observations trigger resume review.
 
+Authorization/learning scope (October 15): Persist grants, derived authorization provenance, review requests/verdicts, exact operation dependencies, revocations and learning event identities. Restart and duplicate delivery cannot lose decisions or duplicate effects.
+
+Conversational configuration scope (October 15): Persist original policy wording, authenticated origin, scoped operational interpretation, revisions and applied status; preserve links between conversational decisions and task mutations.
+
 ### [AII-255](http://192.168.2.10:3100/AII/issues/AII-255) · N05 — Implement Pause, Suspend, release and Stop
 
 Depends on: N04, N06, N07.
@@ -109,6 +119,10 @@ MCP scope: Apply task/project capability checks to MCP server registration, disc
 
 Additional MCP completion criteria: Unapproved or revoked capabilities, cross-project resources, credential leaks, prompt injection and alternate direct paths are denied; local and remote transports receive equivalent scope checks.
 
+Authorization/learning scope (October 15): Implement the authorization contract across shell, tools, MCP and API paths: direct/derived/standing grants, locked restrictions, configurable command review and human pre-commit gates. Recheck policy and reviewed versions at admission; no self-grants or bypass through scripts or repository paths.
+
+Conversational configuration scope (October 15): Enforce conversationally authored contextual policies and exceptions through the same controller checks. Unsupported conditions remain explicitly unapplied; narrowed exceptions cannot erase unrelated mandatory gates.
+
 ### [AII-257](http://192.168.2.10:3100/AII/issues/AII-257) · N07 — Build agent desks and retrievable context
 
 Depends on: N04, N06.
@@ -121,6 +135,10 @@ Completion criteria: Switch away and return with decisions and next steps intact
 Accepted resume-reconciliation scope: Capture source-backed read dependencies and targeted delta packets in the retained task history. Link assumptions and derived evidence to exact inputs; preserve original checkpoints and relevance-review decisions.
 
 Additional completion criteria: Directory/search additions and indirect/unknown coverage receive conservative review; relevant updates enter retained task context without merging incidental chat; permission boundaries and provenance hold.
+
+Authorization/learning scope (October 15): Retain source-backed grants and versioned lessons across task switches and handoffs; distinguish facts, interpretations and instructions; preserve contradicting/superseded evidence and access boundaries.
+
+Conversational configuration scope (October 15): Retain owner policy intent, scoped amendments and direct UI/API changes in relevant task context; prevent stale summaries from overriding current decisions.
 
 ### AII-519 · N07a — Expose a durable state API
 
@@ -137,6 +155,10 @@ Additional project-delivery completion criteria: Chat, UI and API report the sam
 MCP scope: Expose permitted state operations and resources through a controller-backed MCP adapter with the same revisions, permissions, lifecycle gates, idempotency and audit trail as native API clients. Keep remote exposure opt-in.
 
 Additional MCP completion criteria: A compatible MCP client reads and edits scoped state through the same authority as UI/API; private scratch, stale writes and manual holds remain protected, and protocol reconnect does not create a second state owner.
+
+Authorization/learning scope (October 15): Expose authenticated decision/grant and review operations with revisions, idempotency and separate human/delegate identities. Chat and UI decisions use the same authority; an agent claim cannot fabricate consent.
+
+Conversational configuration scope (October 15): Expose policy and task administration equivalently to agents, direct owner UI and API clients. Use versioned operations, propagate edits and reconcile concurrent conversational/API writes.
 
 ### [AII-258](http://192.168.2.10:3100/AII/issues/AII-258) · N08 — Implement configurable model routing and fallback
 
@@ -164,6 +186,10 @@ MCP scope: Show configured MCP connection status and task-linked tool/resource a
 
 Additional MCP completion criteria: The owner can ask which MCP server/tool was used and what happened; UI status agrees with the authoritative operation record and never shows an unavailable server or uncertain call as completed work.
 
+Authorization/learning scope (October 15): Provide tight presets, scoped loosening, approve-once/task/project choices, expiry/revocation and effective-policy explanations through UI/chat. Show why an action is already covered or the precise new decision needed; preserve narrower human review requirements.
+
+Conversational configuration scope (October 15): Make freeform conversation the primary configuration and task-management experience. Agents apply clear authorized edits, explain effective scope, and ask only about material ambiguity. No required forms, preset selection, ticket IDs or board interaction.
+
 ### [AII-260](http://192.168.2.10:3100/AII/issues/AII-260) · N10 — Implement team hierarchy and event-driven coordination
 
 Depends on: N04, N06, N07.
@@ -179,6 +205,10 @@ Accepted resume-reconciliation scope: Provide durable scoped change ingestion, p
 
 Additional completion criteria: Missed/duplicate events and restart do not lose detection; expired retention invokes direct reconciliation; incoming events never lift manual holds.
 
+Authorization/learning scope (October 15): Route durable command-review inquiries immediately to eligible independent agents using bounded side tasks, without transferring original assignments. Support fallback, budgets, queue visibility and cycle prevention; held agents remain held. Generate deduplicated learning events.
+
+Conversational configuration scope (October 15): Coordinate agent-driven decomposition, task creation, dependencies and assignment within grants. Route policy inquiries to an eligible agent without requiring a CTO task handoff or weakening holds.
+
 ### AII-520 · N10a — Expose an inter-agent conversation API
 
 Depends on: N00, N01, N04, N06, N07, N07a, N10.
@@ -191,6 +221,8 @@ MCP scope: Offer durable two-way conversation operations to compatible external 
 
 Additional MCP completion criteria: Both sides continue a multi-turn conversation after disconnect/restart through MCP without duplicate turns, private-data leakage or dependence on a live MCP transport session.
 
+Conversational configuration scope (October 15): Carry authenticated policy/task instructions and responses through durable conversations, distinguishing source identity from a forwarding agent. Report accepted versus applied edits and retain equivalent native/API behavior.
+
 ### [AII-261](http://192.168.2.10:3100/AII/issues/AII-261) · N11 — Add supervisor recovery for stalled agents
 
 Depends on: N05, N08, N10.
@@ -199,13 +231,17 @@ Detect repetitive failures and lack of useful progress from observable evidence.
 
 Completion criteria: Recover a looping agent without losing history or replaying effects; distinguish long legitimate work and waits; enforce cumulative retry/time/cost limits; escalate persistent blockers to the owner.
 
+Authorization/learning scope (October 15): Reconcile redundant approval stalls through supported existing grants. Do not weaken mandatory gates; distinguish unavailable reviewers, true scope gaps and technical enforcement blockers. Emit recovery/friction learning candidates.
+
 ### [AII-262](http://192.168.2.10:3100/AII/issues/AII-262) · N12 — Implement stand-ups and urgent meetings
 
 Depends on: N09, N10.
 
 Support scheduled and immediate meetings with agenda items, orderly discussion, votes and short reasons, owner participation, unattended delegated decisions, summaries and full transcripts.
 
-Completion criteria: No duplicate catch-up meetings or automatic override of holds; present owner agreement is required before acting; absent-owner actions stay delegated; recorded dissent and deferred agenda items survive restarts.
+Completion criteria: No duplicate catch-up meetings or automatic override of holds; present owner agreement is required for new decisions under current policy, without reopening existing grants; absent-owner actions stay delegated; recorded dissent and deferred agenda items survive restarts.
+
+Authorization/learning scope (October 15): Owner presence does not reopen existing grants. Require owner agreement for new decisions under effective policy, and preserve pending mandatory decisions across disconnection.
 
 ### [AII-263](http://192.168.2.10:3100/AII/issues/AII-263) · N13 — Build personal extensions and the shared toolbox
 
@@ -222,6 +258,8 @@ Additional project-delivery completion criteria: Project summaries show useful t
 MCP scope: Implement NimbleNewt as an MCP client for approved local/remote servers. Register connections and scoped credentials, discover/version tools/resources/prompts, refresh catalogs, invoke through the protected bridge, and surface connection configuration in the UI.
 
 Additional MCP completion criteria: An agent discovers and uses an approved MCP capability in its task without worker restart; changed catalogs or revoked grants are rechecked; effectful failures remain uncertain until reconciled; exact server/tool identity appears in activity records.
+
+Authorization/learning scope (October 15): Record exact instructional skill versions supplied/used as well as executable tool versions. Support immutable adoption, deprecation/merge, retained paused-task artifacts and reviewed migration; revoked dependencies cannot run merely for compatibility.
 
 ### [AII-264](http://192.168.2.10:3100/AII/issues/AII-264) · N14 — Support multi-repository and ongoing operational work
 
@@ -252,6 +290,8 @@ Project-delivery scope: Treat deliverables as versioned task outputs or verified
 
 Additional project-delivery completion criteria: Submission is distinct from acceptance and task completion; missing or changed outputs and stale reviews cannot appear as delivered. A rejected or superseded version keeps its history while the project overview shows the current review state.
 
+Authorization/learning scope (October 15): Separate owner consent, independent technical review and execution admission. Bind human code review to the staged diff/tree and base; preserve developer, agent, execution and reviewer attribution. Evaluate learning against separate representative cases and unchanged criteria.
+
 ### [AII-266](http://192.168.2.10:3100/AII/issues/AII-266) · N16 — Balance delivery and capacity improvement
 
 Depends on: N10, N13, N15.
@@ -259,6 +299,16 @@ Depends on: N10, N13, N15.
 Track production and production-capacity tasks, configurable budgets and protected improvement opportunities. Route tooling and NimbleNewt improvement proposals through stand-ups and authorized review.
 
 Completion criteria: Measure useful outcomes and actual spending without quota busywork or unbounded catch-up debt. Defaults remain configurable; improving NimbleNewt itself is an optional deployment workflow.
+
+Authorization/learning scope (October 15): Account for reflection, candidate triage, experiments and post-adoption monitoring within bounded P/PC allocations. Necessary command review for production remains P cost; measure review overhead and avoid quota-driven proposals.
+
+### [AII-615](http://192.168.2.10:3100/AII/issues/AII-615) · N16a — Implement the learning lifecycle
+
+Depends on: N04, N06, N07, N07a, N10, N13, N15, N16. Remains behind N00.
+
+Implement event-driven observations and deduplicated candidates, triage, versioned lessons with evidence/dependency/contradiction links, bounded experiments, scoped adoption, monitoring and withdrawal. Use existing controller services and P/PC accounting rather than a second scheduler.
+
+Completion criteria: Demonstrate correction/failure/recovery-to-candidate capture, independent evidence accounting, separate evaluation cases, monitoring triggers and negative experiment completion. Retain paused-task dependencies subject to revocation, reconcile withdrawal without rewinding effects, and prevent policy or acceptance-criteria self-relaxation. Restart at each transition preserves authority, evidence and budgets. See [learning lifecycle](nimblenewt/learning-and-improvement.md).
 
 ### [AII-267](http://192.168.2.10:3100/AII/issues/AII-267) · N17 — Implement backup, recovery and controlled updates
 
@@ -270,7 +320,7 @@ Completion criteria: Failed activation returns to a compatible known-good releas
 
 ### [AII-268](http://192.168.2.10:3100/AII/issues/AII-268) · N18 — Qualify complete workflows on all required platforms
 
-Depends on: N11, N12, N15, N16, N17.
+Depends on: N11, N12, N15, N16, N16a, N17.
 
 Run real integration and fault tests on macOS, Linux and Windows across lifecycle, routing, meetings, isolation, workload recovery and updates. Include non-coding workflows and resource limits.
 
@@ -291,6 +341,10 @@ MCP scope: Qualify MCP client and server-side paths on macOS, Linux and Windows,
 
 Additional MCP completion criteria: End-to-end tests show correct task/project attribution, no unsafe retry or data leak, matching chat/UI/API outcomes, and durable work state independent of MCP connections. Publish supported-version and unsupported-feature evidence.
 
+Authorization/learning scope (October 15): Qualify authorization and learning acceptance scenarios on all three OSes: strict/relaxed scoped profiles, chat decisions, revocation races, exact command/script/diff changes, human pre-commit gates, independent inquiry review without ownership transfer, reviewer outage/cycles, duplicate evidence and monitored regressions. Measure review latency against queued handoff; do not assume speed.
+
+Conversational configuration scope (October 15): Qualify an end-to-end conversation-only project and policy workflow: contextual exceptions, amendments, unsupported rules, direct user/API edits and races, restart, retained human gates and no accidental activation from planning.
+
 ### [AII-269](http://192.168.2.10:3100/AII/issues/AII-269) · N19 — Prepare documentation and release readiness
 
 Depends on: N18.
@@ -299,3 +353,6 @@ Finish installation, configuration, user/developer guides, examples, diagnostics
 
 Completion criteria: A fresh installation follows the guides on each supported OS. Record known limitations and independent review. Publishing packages, deploying services or announcing a release needs separate explicit authorization.
 
+Authorization/learning scope (October 15): Document presets, scoped delegation, private grants, command-review limitations, human commit review, attribution and learning maintenance. Explain the single-owner limit for corporate workflows.
+
+Conversational configuration scope (October 15): Teach users to configure policies and direct outcomes in ordinary language. Present presets/forms and manual task/API editing as optional alternatives, with examples of contextual exceptions and their effective scope.

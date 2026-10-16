@@ -4,6 +4,8 @@ NimbleNewt exposes one controller-owned API contract to its UI, local workers, o
 
 ## Durable state API
 
+The same service supports conversational configuration and agent-managed tasks. Authorized agents translate freeform owner intent into versioned policy and task changes, retaining source wording, interpretation, scope and application status. Expose equivalent reads/edits to direct user and API clients; propagate their changes into subsequent agent context. Task-board use is optional. Preserve contextual policy conditions or report unsupported enforcement; do not reduce arbitrary owner intent silently to a preset.
+
 Authorized clients can create, read, edit, and query task and agent state: assignments, lifecycle intent and observed state, checkpoints, owner-written desk records, decisions, message references, and evidence links. Every response identifies the durable object, revision, provenance, and whether a requested change was merely accepted or has actually taken effect. Reads support bounded filtering and pagination so a client need not load an entire agent history.
 
 Project-scoped queries return a bounded overview of goals, tasks, current assignees, observed execution, blockers, linked deliverables, review state, and attributable tool activity. Each status includes its source and observation time; stale or unreachable execution is not presented as current work. A project can exist without a repository, and the same task and deliverable records back both chat answers and UI views. Filters and pagination apply by project, task, agent, state and time within the caller's permissions.

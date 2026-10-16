@@ -38,6 +38,8 @@ Use CI on macOS, Linux, and Windows for shared code and adapter tests, plus inst
 
 ## UI-managed settings
 
+Configuration is primarily authored and amended by talking to authorized agents in ordinary language. UI forms and presets are optional, not an exhaustive policy language. Preserve the owner’s wording and operational interpretation, support contextual exceptions and report what took effect. Clear authorized changes need no repeated confirmation. Unsupported or materially ambiguous conditions require a specific explanation rather than silent approximation. See [conversational configuration](authorization-and-delegation.md#conversational-policy-authoring-and-task-management).
+
 Normal setup and administration must not require source edits. Provide UI controls for:
 
 | Area | User-adjustable values |
@@ -49,6 +51,8 @@ Normal setup and administration must not require source edits. Provide UI contro
 | Environments and repositories | Harness, execution backend, workspace bindings, data locations, shared resources, and limits supported by that backend. |
 | Tools and extensions | Catalog entries, permissions, approved versions, installation/restart status, and rollback choices. |
 | Shared toolbox | Scoped maintainer assignments, role/team/all-agent audiences, read-only source inspection, personal forks, improvement proposals and diffs, published versions, compatibility, revocation, and rollback. |
+| Approval policy | Tight public preset; per-project/environment/action grants; human, agent-review or automatic execution modes; mandatory human commit review; expiry/revocation; effective policy and trusted decision provenance. Private deployment grants stay outside public defaults. |
+| Learning | Candidate triggers, deduplication/triage limits, experiment budgets, adoption scope, monitoring and retirement conditions. |
 | Quality assurance | Own-work, assigned-review, and project/team scope; reviewer assignments, triggers, evidence requirements, independent-review gates, and escalation rules. |
 | Operations | Meeting schedules and timezone, notifications, budgets, retention, and lifecycle preparation limits. |
 | Agent API access | Local/remote exposure, protected transport, scoped and revocable client credentials, permitted agent/project audiences, and selected update delivery method. Keep remote exposure off by default. |
