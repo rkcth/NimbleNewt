@@ -1,7 +1,8 @@
 # Current implementation plan
 
-This is the consolidated October 16 planning baseline. Rob authorized document/task reconciliation and Mac/server/GitHub synchronization. N00 remains the separate implementation execution gate.
+This is the consolidated October 16 planning baseline, approved by Rob on October 17, 2026. Rob authorized document/task reconciliation and Mac/server/GitHub synchronization. N00 remains the separate implementation execution gate.
 
+- [Approval record](approval.md)
 - [Design and contracts](design-proposal.md)
 - [Executable task cards](task-plan.md) and [machine-readable DAG](task-plan.json)
 - [Status and evidence boundary](finalization-status.md)

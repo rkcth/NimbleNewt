@@ -1,6 +1,6 @@
 # Implementation planning status
 
-October 16, 2026: Rob authorized reconciliation and synchronization of documents and task definitions. Implementation execution remains held at N00.
+October 17, 2026: Rob approved the implementation plan at revision `aaa9f0ddd11d92bfdedbb93fa926f7b9312870de`. See [the approval record](approval.md). Implementation execution remains held at N00. The earlier authorization to reconcile and synchronize documents and task definitions remains in effect.
 
 The current plan uses TypeScript, Pi Durable behind an adapter, SQLite and PostgreSQL controller backends, subordinate remote workers, conversational policy, tight public isolation/approval defaults, controlled controller promotion and coordinated snapshot backups. Tests must run against actual NimbleNewt code. Earlier probes establish feasibility only.
 
