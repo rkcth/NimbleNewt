@@ -1,4 +1,4 @@
-# NimbleNewt concept draft
+# NimbleNewt product design
 
 **Talk to your agents without making them lose their place.**
 
@@ -18,6 +18,8 @@ NimbleNewt is intended to become a standalone open-source project. Its core must
 
 Created October 3, 2026. NimbleNewt is the selected project name. This document separates accepted product requirements, proposed mechanisms, deployment-specific workflows, and measured evidence. A requirement is not an implementation claim. Numeric defaults and open decisions are tracked in the [design decision register](design-decisions.md).
 
+The [current implementation plan](implementation-plan/README.md) is authoritative for October 16 topology, storage, backup, qualification and task ordering. The product contracts below continue to apply.
+
 ## Document guide
 
 | Document | Purpose |
@@ -27,7 +29,7 @@ Created October 3, 2026. NimbleNewt is the selected project name. This document 
 | [Operational contracts](operational-contracts.md) | Definitions, state/ownership rules, authority, durable operations, and recovery boundaries. |
 | [Agent state and conversation APIs](agent-apis.md) | Durable state edits and two-way agent conversations, with transport choices still open. |
 | [MCP integrations](mcp-integrations.md) | Approved external MCP tools/resources/prompts and the controller-backed adapter for other agents. |
-| [Organization and workers](organization-and-workers.md) | Accepted single-owner model and separately proposed local/remote worker topology. |
+| [Organization and workers](organization-and-workers.md) | Accepted single-owner model and accepted subordinate local/remote worker topology. |
 | [Design decisions](design-decisions.md) | Accepted choices, pending user questions, proposed defaults, and remaining engineering decisions. |
 | [Portability and configuration](portability-and-configuration.md) | Standalone product boundary, required platforms, and UI-managed settings. |
 | [Production and capacity](production-and-capacity.md) | Delivery/improvement scheduling, budgets, and evaluation. |

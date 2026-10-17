@@ -32,7 +32,7 @@ Model and tool configuration must accommodate the developer's permitted services
 
 ## One controller, multiple worker hosts
 
-**Separate proposal awaiting confirmation.** Single-owner operation does not decide how many computers may run workers. The recommendation below supports local and remote workers, but multi-host execution is not yet an accepted requirement.
+**Accepted October 16:** one primary controller coordinates local and subordinate remote workers. Remote workers are required for cross-OS tests and distributed capacity; they cannot self-promote. See the [current contracts](implementation-plan/design-proposal.md).
 
 Keep one logical controller authoritative for assignments, decisions, gates, and resource/accounting records. Workers register a durable host identity and capabilities such as OS/architecture, installed harness versions, isolation backend, tools, and workspace bindings. Local execution uses the same contract with a simpler transport. A GPU model server can be just a model route; it need not host an agent worker.
 
@@ -42,7 +42,7 @@ An [external agent using the conversation API](agent-apis.md#two-way-conversatio
 
 Schedule work only where its platform, tools, data-location policy, repository access, and resource requirements are satisfied. Transfer exact artifact versions with integrity checks rather than assume a path exists identically on every computer. Keep private source and credentials on authorized hosts. Moving an execution location for the same agent is distinct from transferring assignment to another agent; both require stopping/fencing the prior attempt before enabling a replacement writer.
 
-Controller connectivity is part of execution authority. Under a partition, do not start new privileged effects with stale authority. Already-started local/remote jobs may continue physically; journal observations, report uncertainty, and reconcile before takeover. An unreachable worker is not evidence that it stopped. Returning workers must revalidate their attempt/ownership generation and cannot commit late writes. Offline autonomous execution would require a separately specified bounded authority model; it is not assumed by this proposal.
+Controller connectivity is part of execution authority. Under a partition, do not start new privileged effects with stale authority. An independent watchdog stops the execution boundary by lease expiry. Already-issued external requests may still finish; journal uncertainty and reconcile before takeover. An unreachable worker is not evidence that it stopped. Returning workers must revalidate their attempt/ownership generation and cannot commit late writes. Offline autonomous execution would require a separately specified bounded authority model; it is not assumed by this proposal.
 
 Scope maintenance to a host, agent group, or installation. A host outage must not automatically release agent assignments. The controller can coordinate readiness, but an unreachable host cannot be reported safely suspended without evidence. Staged releases need compatible controller/worker protocol versions, and rollback must preserve that compatibility.
 
@@ -50,7 +50,7 @@ One logical controller can later gain a tested failover mechanism, but this prop
 
 ## Simple setup and future scope
 
-The baseline setup has one owner and a local worker, with projects and agent teams created as needed. It requires no human membership management, enterprise identity service, or network cluster. Whether remote workers belong in the initial design remains open.
+The baseline setup has one owner and a local worker, with projects and agent teams created as needed. It requires no human membership management, enterprise identity service, or network cluster. Subordinate remote workers are included in the initial implementation plan.
 
 An individual using NimbleNewt for business work can direct agents across business projects, repositories, and managed services within their own authorization. This does not imply shared access for coworkers. Supporting several human users would require a separate design decision covering membership, privacy, conflicting authority, approvals, and meeting rights; it is not a promised upgrade path. Keep human, agent, and service identities distinct without implementing speculative enterprise governance.
 

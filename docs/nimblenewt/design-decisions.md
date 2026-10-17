@@ -1,6 +1,6 @@
 # Design decisions and remaining questions
 
-This register distinguishes settled direction from proposals, unanswered choices, and implementation evidence. A document marked historical cannot override a later user decision. Accepted requirements describe what NimbleNewt must do; they do not claim it has been built or qualified. A proposed implementation outline is registered as an inactive Paperclip backlog; first-release/MVP selection and execution authorization remain deferred.
+This register distinguishes settled direction from proposals, unanswered choices, and implementation evidence. A document marked historical cannot override a later user decision. Accepted requirements describe what NimbleNewt must do; they do not claim it has been built or qualified. A proposed implementation outline is registered as an inactive Paperclip backlog; the consolidated implementation baseline is published; execution authorization remains separate.
 
 ## Accepted direction
 
@@ -38,15 +38,11 @@ This register distinguishes settled direction from proposals, unanswered choices
 | Repositories | Multi-repository projects; no required NimbleNewt files in target repositories. | [Repository independence](README.md#multiple-repositories-without-repository-setup-requirements) |
 | Product/development separation | Our NimbleNewt-source improvement/build/deployment loop is optional installation tooling. Public users improve their own projects; official-release installation is separate. | [Development workflow](development-workflow.md) |
 
-## User questions from the document review
+## October 16 implementation baseline
 
-The single-owner decision is settled. Worker placement remains a separate question; choosing one human user does not require one computer.
+The [current implementation plan](implementation-plan/README.md) resolves topology and storage: one authoritative controller; subordinate remote workers; SQLite and PostgreSQL; typed transactional storage interface; Pi-owned retained context; private-network browser chat; controlled controller promotion; independent backups; coordinated pause/checkpoint/snapshot/resume/transfer. Tight public approval/isolation defaults remain.
 
-| Question | Recommended direction | What it affects |
-| --- | --- | --- |
-| Worker placement | One logical controller coordinating registered local/remote workers, including mixed operating systems. Defer active-active controllers. | Worker registration, secure transport, artifacts, disconnections, and update coordination. |
-
-See the accepted ownership model and proposed [worker topology](organization-and-workers.md). User responses should update this register and the associated contracts rather than leaving contradictory versions across files.
+Tests qualify actual NimbleNewt code after its components are built. Historical probes are not release evidence. Planning synchronization is authorized; N00 still controls implementation activation. Initial limits are four productive attempts total, two per host, plus two inquiry/review slots. Detailed operational defaults and compatibility tasks are in the current plan.
 
 ## Proposed defaults, not user-selected values
 
@@ -68,7 +64,7 @@ Validate configuration combinations: a requested PC target must fit its authoriz
 
 - Select dependency-manifest schema, file/resource identity and hashing policy, shell/tool read instrumentation, directory/query coverage, per-stream cursor retention and missed-event reconciliation, external freshness adapters and atomic integration/write enforcement. Apply the accepted [resume contract](resume-reconciliation.md); do not substitute event delivery alone for current-version verification.
 
-- Choose the controller/worker transport and durable storage engines, artifact layout, cross-store checkpoint protocol, schema migration strategy, and tested backup/restore procedure.
+- Implement and qualify the selected HTTPS/cursor-update transport, SQLite/PostgreSQL stores, immutable artifacts, coordinated checkpoint backups and journaled migrations in the current plan.
 - Pin supported MCP protocol/transport and adapter versions for both client and server-side use, including catalog refresh, authorization, effect recovery and migration. The capability is accepted; exact versions and first-release placement remain architecture choices.
 - Choose the first API wire transport and versioning policy. Evaluate HTTPS send/reply with cursor-based long-polling or server-sent events, optional WebSockets, and an MCP adapter for compatible harnesses. Keep conversation state and delivery guarantees independent of connections; do not mistake MCP transport sessions for durable threads. See [Agent APIs](agent-apis.md).
 - Qualify the pinned Pi Durable adapter, extension/command mappings, background jobs, and one compression owner; choose reuse versus porting for billion-context-style retrieval.

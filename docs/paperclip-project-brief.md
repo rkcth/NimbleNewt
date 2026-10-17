@@ -1,6 +1,6 @@
 # NimbleNewt — project goals and execution hold
 
-**Planning only. Not authorized to start.** Rob authorized project registration, goal documentation and a task outline on October 7, 2026. No agent research, implementation, review runs, dispatch, publication or deployment is authorized by this import. Keep all issues unassigned in Backlog and outside automatic scheduling until Rob explicitly selects work. Do not remove the activation dependency automatically.
+**Planning synchronized; implementation execution held.** On October 16 Rob authorized document/task reconciliation and synchronization to Mac, server and GitHub. Earlier isolated research was separately authorized. This request does not dispatch implementation, deploy services or clear N00.
 
 ## Purpose
 
@@ -17,11 +17,9 @@ Build a persistent, conversational team of AI agents for one human owner. Agents
 7. Work across existing repositories and services without polluting target repositories; support macOS, Linux and Windows.
 8. Make work inspectable and independently reviewable; balance delivery with capacity improvement. Ship under MIT with portable public defaults and controlled updates.
 
-## Current evidence and open decisions
+## Current implementation baseline
 
-The repository contains design documentation, mascot assets and limited offline harness experiments. Pi Durable is the selected initial runtime direction; it is not yet qualified for the full product. Existing recovery experiments were run on macOS and do not establish Linux/Windows, reboot, isolation or provider-failover behavior.
-
-Worker topology, storage/transport, OS support details, numerical budgets and the first useful release remain decisions to make. The sequence below is a proposed implementation outline, not an approved MVP or execution schedule. Optional self-development of NimbleNewt is separate from normal product use.
+Use the [consolidated plan](nimblenewt/implementation-plan/README.md) and its 105-card machine-readable DAG. TypeScript controller, SQLite/PostgreSQL, Pi conversation adapter, subordinate remote workers, chat-first control, scoped approvals and coordinated backups are specified there. Historical cross-platform probes are feasibility evidence only; acceptance tests execute actual NimbleNewt code after implementation.
 
 ## Sources
 
