@@ -22,13 +22,14 @@
       "id": "G02",
       "parent": "N03",
       "existing_issue": "AII-253",
-      "title": "Complete candidate runtime conformance",
+      "title": "Accept the Pi adapter first milestone",
       "depends_on": [
         "F05",
-        "F06"
+        "F06",
+        "F03"
       ],
-      "deliverable": "Actual NimbleNewt component/integration tests: Version-pinned TypeScript fixture for selected Pi release",
-      "acceptance_and_verification": "Tool output reaches next model step; queued cancellation preserved at controller boundary; compaction and interrupted tool cases pass; exact lock and logs retained; invoke production implementation, not a parallel test-only state machine; attach implementation commit and reproducible evidence",
+      "deliverable": "Tests importing the actual NimbleNewt Pi adapter with pinned runtime and deterministic providers on Mac/Linux/Windows",
+      "acceptance_and_verification": "Semantic tool output reaches next model step; exact inquiry fork leaves parent unchanged; unchanged and selective-update resumes; task A/B context separation; abort during streaming and partial tool arguments; no unfinished tool action; queued input retained; real process kill and fresh-process restoration; same request ID deduplicated; compaction preserves historical branch recovery; typecheck and lockfile retained; actual adapter code, not a parallel probe; record unsupported capabilities and block dependent feature acceptance",
       "status": "planned",
       "research_evidence": "Historical context-and-windows-results.md only; acceptance requires actual NimbleNewt code",
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -42,11 +43,10 @@
       "existing_issue": "AII-253",
       "title": "Qualify forward migration and compatibility rejection",
       "depends_on": [
-        "G02",
-        "F04"
+        "G02"
       ],
-      "deliverable": "Actual NimbleNewt component/integration tests: Versioned checkpoint fixtures and compatibility table",
-      "acceptance_and_verification": "Resume supported old checkpoints and reject incompatible ones without mutation; prove failed migration preserves originals; explicitly test extension and compaction fixtures; invoke production implementation, not a parallel test-only state machine; attach implementation commit and reproducible evidence",
+      "deliverable": "Actual Pi adapter checkpoint version, extension and compaction migration fixtures",
+      "acceptance_and_verification": "Resume supported old checkpoints and reject incompatible ones without mutation; prove failed migration preserves originals; explicitly test extension and compaction fixtures; invoke production implementation, not a parallel test-only state machine; attach implementation commit and reproducible evidence; independent of controller schema migrations, which are covered by F04",
       "status": "planned",
       "research_evidence": "Historical context-and-windows-results.md only; acceptance requires actual NimbleNewt code",
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -189,8 +189,8 @@
       "depends_on": [
         "G07"
       ],
-      "deliverable": "Controller, adapter, worker, contracts and client skeleton",
-      "acceptance_and_verification": "Clean typecheck/build and dependency-boundary checks; privileged packages are not imported into customizable worker code",
+      "deliverable": "Minimal TypeScript Pi adapter package, shared contracts and test runner; other packages are boundary placeholders",
+      "acceptance_and_verification": "Clean typecheck/build and dependency checks; real adapter test entry point; no controller or database implementation required to begin Pi work",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -204,7 +204,9 @@
       "existing_issue": "AII-252",
       "title": "Implement versioned configuration and secret references",
       "depends_on": [
-        "F01"
+        "F01",
+        "G02",
+        "G03"
       ],
       "deliverable": "Configuration loader, migrations and example public/private profiles",
       "acceptance_and_verification": "Invalid or unsupported config fails clearly; secrets absent from exported config/logs; private grants excluded from public defaults",
@@ -238,7 +240,9 @@
       "existing_issue": "AII-252",
       "title": "Define transactional controller storage contract",
       "depends_on": [
-        "F01"
+        "F01",
+        "G02",
+        "G03"
       ],
       "deliverable": "Typed domain operations and shared semantic fixtures",
       "acceptance_and_verification": "Atomic transition plus audit/outbox; unique IDs and payload mismatch; revision/epoch checks; consistent data types, transaction boundaries and ambiguous-commit resolution; no raw SQL in domain services",
@@ -360,11 +364,10 @@
       "existing_issue": "AII-253",
       "title": "Implement adapter checkpoints and cancellation mapping",
       "depends_on": [
-        "F05",
-        "F04"
+        "F05"
       ],
-      "deliverable": "Checkpoint references, cancellation dispositions and controller inbox bridge",
-      "acceptance_and_verification": "Abort cannot lose queued owner input; retained commands re-admit only under current gates; no accidental wake of stopped task",
+      "deliverable": "Real Pi adapter branch, checkpoint, abort and fresh-process restoration APIs; typed controller integration boundary",
+      "acceptance_and_verification": "Retain parent context across inquiry branch; selective update applied once; adapter-owned queued input survives cancellation; incomplete tool calls never execute; retained commands require later controller readmission; no controller database prerequisite; controller inbox bridge is integrated and tested in S09",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",

@@ -8,3 +8,5 @@ This is the consolidated October 16 planning baseline. Rob authorized document/t
 - [Paperclip synchronization status](paperclip-sync-status.md)
 
 The four research reports in this directory are historical feasibility evidence, not actual-code qualification. Current design and task ordering supersede older proposals in those reports.
+
+First implementation milestone: build the actual Pi adapter and portable tests (F01/F03/F05/F06), qualify context/cancellation/recovery/compatibility (G02/G03), then build controller storage and orchestration around that verified boundary.

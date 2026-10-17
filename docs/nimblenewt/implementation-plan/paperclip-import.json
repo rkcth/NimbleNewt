@@ -6,7 +6,7 @@
   "gate": "AII-250",
   "gateUnchanged": "backlog",
   "nativeDependenciesVerified": true,
-  "taskManifestSha256": "45affff40d016169380c0af1de4139466a0425fd36cfa62f69c8babd9f67ea68",
+  "taskManifestSha256": "10e419b6342ac6d42f15f9dcbba8f1bab11c046a1b352ab9e9449e3b1c41cae9",
   "mapping": {
     "G01": {
       "id": "67a96ead-f567-408c-ac94-d4030ac4599e",
@@ -35,7 +35,9 @@
       "identifier": "AII-644",
       "parent": "N02",
       "depends_on": [
-        "F01"
+        "F01",
+        "G02",
+        "G03"
       ]
     },
     "F03": {
@@ -51,7 +53,9 @@
       "identifier": "AII-646",
       "parent": "N02",
       "depends_on": [
-        "F01"
+        "F01",
+        "G02",
+        "G03"
       ]
     },
     "F05": {
@@ -109,8 +113,7 @@
       "identifier": "AII-653",
       "parent": "N03",
       "depends_on": [
-        "F05",
-        "F04"
+        "F05"
       ]
     },
     "S01": {
@@ -135,7 +138,8 @@
       "parent": "N03",
       "depends_on": [
         "F05",
-        "F06"
+        "F06",
+        "F03"
       ]
     },
     "S02": {
@@ -160,8 +164,7 @@
       "identifier": "AII-659",
       "parent": "N03",
       "depends_on": [
-        "G02",
-        "F04"
+        "G02"
       ]
     },
     "S04": {

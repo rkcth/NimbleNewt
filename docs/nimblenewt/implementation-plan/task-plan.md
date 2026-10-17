@@ -15,7 +15,7 @@ Each card inherits the current design, permissions, isolation, versioning, and r
 5. **Dependencies:** IDs below are leaf-level blockers. Do not inherit aggregate parent dependency edges mechanically; that can create cycles. A parent completes only when its approved children and inherited requirements are accepted. The validated leaf DAG is authoritative for execution ordering. Before activating children, reconcile legacy aggregate-parent blocker edges; parent grouping must not introduce ancestor deadlocks.
 6. **Parallel work:** only disjoint workspaces/ownership with satisfied prerequisites. Shared schema/contract changes require the appropriate owner and integration review. Concurrency is a policy/capacity decision, not permission to bypass blockers.
 7. **Stop conditions:** pause dependent work after a failed architectural assumption, unresolved effect, missing permission, incompatible checkpoint, or exhausted budget. Preserve progress and record a typed blocker with a resolver and next review time.
-8. **Branch choices:** Remote workers (H02) are accepted first-release scope. Responsive browser access over private networking (U07) is also accepted first-release scope; no dedicated mobile app is required. G09 tests implemented context switching and G04 tests the implemented controller integration on both databases; neither blocks creating the code it tests. G10 evaluates optional engine caching; C06 can use the no-cache fallback for unsupported engines. Do not build two scheduling backends. No other accepted feature disappears by implication.
+8. **Branch choices:** Remote workers (H02) are accepted first-release scope. Responsive browser access over private networking (U07) is also accepted first-release scope; no dedicated mobile app is required. Pi-first milestone: F01/F03 then F05/F06, followed by G02/G03 against the actual adapter, before F02/F04a and the controller foundation. G09 later tests integrated context switching and G04 the integrated controller on both databases. G10 evaluates optional engine caching; C06 can use the no-cache fallback for unsupported engines. Do not build two scheduling backends. No other accepted feature disappears by implication.
 
 ## Import and activation procedure
 
@@ -59,20 +59,20 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** Record current decisions, dual database support, remote topology, operating limits and owner planning-sync authorization; preserve N00 execution hold.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
-### G02 — Complete candidate runtime conformance
+### G02 — Accept the Pi adapter first milestone
 
 - **Parent:** N03 / AII-253.
-- **Blockers:** F05, F06.
-- **Deliverable:** Actual NimbleNewt component/integration tests: Version-pinned TypeScript fixture for selected Pi release.
-- **Acceptance and verification:** Tool output reaches next model step; queued cancellation preserved at controller boundary; compaction and interrupted tool cases pass; exact lock and logs retained; invoke production implementation, not a parallel test-only state machine; attach implementation commit and reproducible evidence.
+- **Blockers:** F05, F06, F03.
+- **Deliverable:** Tests importing the actual NimbleNewt Pi adapter with pinned runtime and deterministic providers on Mac/Linux/Windows.
+- **Acceptance and verification:** Semantic tool output reaches next model step; exact inquiry fork leaves parent unchanged; unchanged and selective-update resumes; task A/B context separation; abort during streaming and partial tool arguments; no unfinished tool action; queued input retained; real process kill and fresh-process restoration; same request ID deduplicated; compaction preserves historical branch recovery; typecheck and lockfile retained; actual adapter code, not a parallel probe; record unsupported capabilities and block dependent feature acceptance.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### G03 — Qualify forward migration and compatibility rejection
 
 - **Parent:** N03 / AII-253.
-- **Blockers:** G02, F04.
-- **Deliverable:** Actual NimbleNewt component/integration tests: Versioned checkpoint fixtures and compatibility table.
-- **Acceptance and verification:** Resume supported old checkpoints and reject incompatible ones without mutation; prove failed migration preserves originals; explicitly test extension and compaction fixtures; invoke production implementation, not a parallel test-only state machine; attach implementation commit and reproducible evidence.
+- **Blockers:** G02.
+- **Deliverable:** Actual Pi adapter checkpoint version, extension and compaction migration fixtures.
+- **Acceptance and verification:** Resume supported old checkpoints and reject incompatible ones without mutation; prove failed migration preserves originals; explicitly test extension and compaction fixtures; invoke production implementation, not a parallel test-only state machine; attach implementation commit and reproducible evidence; independent of controller schema migrations, which are covered by F04.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### G04 — Prove supporting durable engine integration
@@ -135,14 +135,14 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 
 - **Parent:** N02 / AII-252.
 - **Blockers:** G07.
-- **Deliverable:** Controller, adapter, worker, contracts and client skeleton.
-- **Acceptance and verification:** Clean typecheck/build and dependency-boundary checks; privileged packages are not imported into customizable worker code.
+- **Deliverable:** Minimal TypeScript Pi adapter package, shared contracts and test runner; other packages are boundary placeholders.
+- **Acceptance and verification:** Clean typecheck/build and dependency checks; real adapter test entry point; no controller or database implementation required to begin Pi work.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### F02 — Implement versioned configuration and secret references
 
 - **Parent:** N02 / AII-252.
-- **Blockers:** F01.
+- **Blockers:** F01, G02, G03.
 - **Deliverable:** Configuration loader, migrations and example public/private profiles.
 - **Acceptance and verification:** Invalid or unsupported config fails clearly; secrets absent from exported config/logs; private grants excluded from public defaults.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
@@ -158,7 +158,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F04a — Define transactional controller storage contract
 
 - **Parent:** N02 / AII-252.
-- **Blockers:** F01.
+- **Blockers:** F01, G02, G03.
 - **Deliverable:** Typed domain operations and shared semantic fixtures.
 - **Acceptance and verification:** Atomic transition plus audit/outbox; unique IDs and payload mismatch; revision/epoch checks; consistent data types, transaction boundaries and ambiguous-commit resolution; no raw SQL in domain services.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
@@ -214,9 +214,9 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F06 — Implement adapter checkpoints and cancellation mapping
 
 - **Parent:** N03 / AII-253.
-- **Blockers:** F05, F04.
-- **Deliverable:** Checkpoint references, cancellation dispositions and controller inbox bridge.
-- **Acceptance and verification:** Abort cannot lose queued owner input; retained commands re-admit only under current gates; no accidental wake of stopped task.
+- **Blockers:** F05.
+- **Deliverable:** Real Pi adapter branch, checkpoint, abort and fresh-process restoration APIs; typed controller integration boundary.
+- **Acceptance and verification:** Retain parent context across inquiry branch; selective update applied once; adapter-owned queued input survives cancellation; incomplete tool calls never execute; retained commands require later controller readmission; no controller database prerequisite; controller inbox bridge is integrated and tested in S09.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### F07 — Enforce immutable extension and namespace registration

@@ -7,3 +7,5 @@ The current plan uses TypeScript, Pi Durable behind an adapter, SQLite and Postg
 The 105-card DAG now separates design recording from component implementation, actual-code qualification, integrated fault testing and release acceptance. No implementation feature is marked complete. PostgreSQL failover, combined recovery, cross-OS isolation and full-product release tests remain implementation work. Version pins and OS capabilities are qualified by the implementing cards.
 
 See task-plan.json for canonical dependencies and paperclip-sync-status.md for external tracker status. Synchronizing this plan does not activate workers or authorize deployment.
+
+Pi-first ordering is selected: the real adapter and cross-platform tests precede controller storage/configuration. G02/G03 gate those dependent components; G09 and G04 remain later integrated acceptance. No implementation dispatch occurred as part of this planning update.
