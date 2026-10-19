@@ -27,7 +27,13 @@ jobs:
       - run: npm ci
       # Builds, checks package boundaries and the license inventory, then runs all tests under the
       # in-process offline guard (scripts/offline-guard.mjs).
-      - run: npm test
+      - name: npm test
+        shell: bash
+        run: set -o pipefail; npm test 2>&1 | tee test.log
+      # Job logs need authentication to read; surface the tail of a failure as an annotation instead.
+      - name: Annotate test failure
+        if: failure()
+        run: node scripts/ci-annotate.mjs test.log
       # The suite must not rewrite tracked files (e.g. a stale generated inventory).
       - run: git diff --exit-code
       # Real network isolation: rerun the suite in a network namespace with no connectivity. This covers

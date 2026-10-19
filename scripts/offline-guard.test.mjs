@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 
-const guard = fileURLToPath(new URL("./offline-guard.mjs", import.meta.url));
+// --import needs a file: URL on Windows; a drive-letter path is rejected as an unknown URL scheme.
+const guard = pathToFileURL(fileURLToPath(new URL("./offline-guard.mjs", import.meta.url))).href;
 
 /** Runs `code` as an ES module in a child process with the guard preloaded; returns its stdout. */
 function run(code) {
