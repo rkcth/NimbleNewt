@@ -1,0 +1,24 @@
+{
+  "name": "@nimblenewt/pi-adapter",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Adapter between NimbleNewt and the pinned Pi Durable runtime. Independent of the controller database and UI.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@nimblenewt/contracts": "0.0.0",
+    "@earendil-works/pi-durable": "1.3.0"
+  },
+  "scripts": {
+    "test": "node ../../scripts/run-package-tests.mjs"
+  }
+}

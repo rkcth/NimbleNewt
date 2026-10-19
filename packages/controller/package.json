@@ -1,0 +1,17 @@
+{
+  "name": "@nimblenewt/controller",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Placeholder: controller, storage and orchestration (not yet implemented).",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ]
+}

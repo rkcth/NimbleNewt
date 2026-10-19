@@ -1,0 +1,17 @@
+{
+  "name": "@nimblenewt/worker",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Placeholder: worker host service (not yet implemented).",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ]
+}
