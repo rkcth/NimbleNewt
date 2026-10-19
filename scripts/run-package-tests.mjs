@@ -12,4 +12,4 @@ function testFiles(dir) {
 const files = existsSync("dist") ? testFiles("dist") : [];
 if (files.length === 0) { console.error("no compiled test files found in dist/; did the build run?"); process.exit(1); }
 const guard = pathToFileURL(fileURLToPath(new URL("./offline-guard.mjs", import.meta.url))).href;
-process.exit(spawnSync(process.execPath, ["--import", guard, "--test", ...files], { stdio: "inherit" }).status ?? 1);
+process.exit(spawnSync(process.execPath, ["--import", guard, "--test", "--test-timeout=60000", ...files], { stdio: "inherit" }).status ?? 1);
