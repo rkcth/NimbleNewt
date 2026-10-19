@@ -25,3 +25,11 @@ export class InvalidToolError extends PiAdapterError {
 export class RequestIdConflictError extends PiAdapterError {
   override readonly name = "RequestIdConflictError";
 }
+
+/** The conversation was busy and the request asked to be rejected (`whenBusy: "reject"`); it was not admitted. */
+export class ConversationBusyError extends PiAdapterError {
+  override readonly name = "ConversationBusyError";
+  constructor(readonly conversationId: number) {
+    super(`conversation ${conversationId} is busy; the request was not admitted`);
+  }
+}

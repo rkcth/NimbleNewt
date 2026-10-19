@@ -1,18 +1,16 @@
-import { createHash } from "node:crypto";
-import type { AdapterRequest, RequestId, SemanticResult, ToolCallOutcome, UnansweredReason } from "@nimblenewt/contracts";
+import type { AdapterRequest, RequestId, SemanticResult, ToolCallOutcome } from "@nimblenewt/contracts";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { Models, Static, TSchema } from "@earendil-works/pi-ai";
 import {
-  Harness, createRegistry, defineDoc, defineExtension, defineTool,
-  type Conversation, type Storage, type Submission,
+  ConversationBusy, Harness, createRegistry, defineDoc, defineExtension, defineTool,
+  type Conversation, type SettledSubmissionRecord, type Storage, type Submission,
 } from "@earendil-works/pi-durable";
-import { InvalidToolError, RequestIdConflictError, UnknownCommandError } from "./errors.js";
+import { ConversationBusyError, InvalidToolError, RequestIdConflictError, UnknownCommandError } from "./errors.js";
+import { fingerprintOf, mapReason } from "./results.js";
 import { assertSupportedRuntime, type RuntimeInfo } from "./runtime.js";
 
 /** Commands the adapter accepts. None exist yet; F06 adds branch, checkpoint and abort commands. */
 const SUPPORTED_COMMANDS: readonly string[] = [];
-
-const KNOWN_REASONS: ReadonlySet<string> = new Set(["aborted", "model_error", "stale", "restart"]);
 
 /** What a running tool call can observe about its own invocation. */
 export interface AdapterToolContext {
@@ -60,7 +58,8 @@ export interface SubmissionHandle {
 
 /** Adapter-owned durable record per request ID, kept in a Pi document committed with the transcript. */
 interface RequestRecord {
-  fingerprint: string;
+  /** Absent only for a result recorded without a prior claim; an absent fingerprint matches any payload. */
+  fingerprint?: string;
   result?: SemanticResult;
 }
 interface RequestsState {
@@ -102,11 +101,170 @@ function toolOutcome(entry: EntryLike): ToolCallOutcome {
   return { callId, name, status: message.isError === true ? "error" : "ok", output: textOf(message.content) };
 }
 
-const fingerprintOf = (content: string): string => createHash("sha256").update(content).digest("hex");
+/** One Pi conversation: the root task conversation now, inquiry branches and task contexts from F06b. */
+export class AdapterConversation {
+  /** @internal Use `PiAdapter.root()` or `PiAdapter.conversation()`. */
+  constructor(private readonly harness: Harness, private readonly conversation: Conversation, private readonly storage: Storage) {}
+
+  get id(): number {
+    return this.conversation.id;
+  }
+
+  /**
+   * Admit a request. Submitting the same request ID again returns the original submission and result; reusing it with
+   * different content or busy policy throws RequestIdConflictError, including while the original is still queued or
+   * after compaction.
+   */
+  async submit(request: AdapterRequest): Promise<SubmissionHandle> {
+    if (request.kind === "command") throw new UnknownCommandError(request.name, SUPPORTED_COMMANDS);
+    // Record the payload fingerprint before admission: a crash in between leaves a record for the same payload to retry.
+    const created = await this.claim(request.requestId, fingerprintOf(request));
+    let submission: Submission;
+    try {
+      submission = await this.conversation.submit(
+        { type: "input", content: request.content, requestId: request.requestId, ...(request.whenBusy === undefined ? {} : { whenBusy: request.whenBusy }) },
+        context,
+      );
+    } catch (error) {
+      if (error instanceof ConversationBusy) {
+        // A rejected request was never admitted, so it must not keep the request ID reserved for this payload.
+        if (created) await this.release(request.requestId);
+        throw new ConversationBusyError(this.id);
+      }
+      throw error;
+    }
+    return { requestId: request.requestId, submissionId: submission.id, result: () => this.resultOf(request.requestId, submission) };
+  }
+
+  /** The recorded result of a request that has already settled and been read; `undefined` otherwise. Never waits. */
+  async recorded(id: RequestId): Promise<SemanticResult | undefined> {
+    return (await this.record(id))?.result;
+  }
+
+  /**
+   * Read-only status of a request: its result if it has settled (recording it the first time), `undefined` if it is
+   * unknown or still pending. Never waits and never starts the scheduler, so it is safe to use after a restart while
+   * interrupted work must stay stopped. A request admitted before a crash can be read this way without resubmitting it.
+   */
+  async lookup(id: RequestId): Promise<SemanticResult | undefined> {
+    const recorded = await this.recorded(id);
+    if (recorded !== undefined) return recorded;
+    const record = await this.storage.submissionByRequest(this.conversation.id, id, context);
+    if (record === undefined || record.type !== "input" || (record.status !== "done" && record.status !== "unanswered")) return undefined;
+    return this.settle(id, record);
+  }
+
+  /**
+   * Abort the running request and withdraw queued ones. Minimal for now: F06c replaces it with scoped cancellation.
+   * Aborted requests settle as `unanswered` with reason `aborted`.
+   */
+  async abort(): Promise<void> {
+    await this.conversation.abort(context);
+  }
+
+  /** Compact the conversation's model-visible context now. Older entries stay in storage and results stay readable. */
+  async compact(instructions?: string): Promise<void> {
+    const task = await this.conversation.compact(instructions, context);
+    await this.harness.waitForTask(task, context);
+  }
+
+  private async record(id: RequestId): Promise<RequestRecord | undefined> {
+    const state = (await this.harness.snapshot(Requests, this.conversation.id, context)) as unknown as RequestsState;
+    return state.requests[id];
+  }
+
+  /** Records the payload fingerprint for a request ID; returns whether this call created the record. */
+  private async claim(id: RequestId, fingerprint: string): Promise<boolean> {
+    let conflict = false;
+    let created = false;
+    await this.conversation.commit(async (tx) => {
+      const state = (await tx.doc(Requests, this.conversation.id)) as unknown as RequestsState;
+      const existing = state.requests[id];
+      if (existing === undefined) { state.requests[id] = { fingerprint }; created = true; }
+      else if (existing.fingerprint !== undefined && existing.fingerprint !== fingerprint) conflict = true;
+    }, context);
+    if (conflict) throw new RequestIdConflictError(`request ID "${id}" was already used with different content`);
+    return created;
+  }
+
+  /** Drops a claim that never led to an admitted submission. A record that already holds a result is kept. */
+  private async release(id: RequestId): Promise<void> {
+    await this.conversation.commit(async (tx) => {
+      const state = (await tx.doc(Requests, this.conversation.id)) as unknown as RequestsState;
+      // Another call may have been admitted under this ID while this one was being rejected; its claim must stay.
+      const admitted = await tx.submissionByRequest(this.conversation.id, id);
+      if (admitted === undefined && state.requests[id]?.result === undefined) delete state.requests[id];
+    }, context);
+  }
+
+  /** Ascending scan of the conversation's history by entry ID, which includes entries compacted out of the active view. */
+  private async scan(min: number, max: number | undefined, stopAt?: (entry: EntryLike) => boolean): Promise<EntryLike[]> {
+    const found: EntryLike[] = [];
+    let cursor;
+    for (;;) {
+      const page = await this.conversation.entries(
+        { minEntryId: min as never, ...(max === undefined ? {} : { maxEntryId: max as never }), order: "ascending" },
+        100,
+        cursor,
+        context,
+      );
+      for (const entry of page.items as unknown as EntryLike[]) {
+        if (stopAt?.(entry)) return found;
+        found.push(entry);
+      }
+      if (page.next === undefined) return found;
+      cursor = page.next;
+    }
+  }
+
+  private async resultOf(id: RequestId, submission: Submission): Promise<SemanticResult> {
+    const stored = (await this.record(id))?.result;
+    if (stored !== undefined) return stored;
+    return this.settle(id, await submission.wait(context));
+  }
+
+  /**
+   * Builds the semantic result of a settled submission and records it (first writer wins).
+   * Tool calls belong to the request whose input most recently precedes them: a steered-in input starts a new segment,
+   * so each call is counted once. The final answer text is shared by requests that were merged into one run.
+   */
+  private async settle(id: RequestId, settled: SettledSubmissionRecord): Promise<SemanticResult> {
+    const ownCalls = async (): Promise<ToolCallOutcome[]> => {
+      if (settled.entry === undefined) return [];
+      const last = settled.status === "done" ? (settled.answer as number) - 1 : undefined;
+      const entries = await this.scan((settled.entry as number) + 1, last, (e) => e.kind === "pi.user");
+      return entries.filter((e) => e.kind === "pi.tool-result").map(toolOutcome);
+    };
+    const toolCalls = await ownCalls();
+    let result: SemanticResult;
+    if (settled.status === "done") {
+      const answerId = settled.answer as number;
+      const answer = (await this.scan(answerId, answerId))[0];
+      const text = answer === undefined ? "" : textOf(firstMessage(answer).content);
+      const unknown = toolCalls.filter((c) => c.status === "unknown_tool").map((c) => c.name);
+      result = unknown.length > 0
+        ? { status: "failed", requestId: id, code: "unknown_tool", detail: `runtime reported tool(s) unavailable: ${[...new Set(unknown)].join(", ")}`, text, toolCalls }
+        : { status: "completed", requestId: id, text, toolCalls };
+    } else {
+      const reason = mapReason(settled.reason);
+      const detail = settled.detail === undefined ? settled.reason : `${settled.reason}: ${JSON.stringify(settled.detail)}`;
+      result = { status: "unanswered", requestId: id, reason, detail, toolCalls };
+    }
+
+    // First writer wins, so concurrent callers and later calls all see one recorded result.
+    await this.conversation.commit(async (tx) => {
+      const state = (await tx.doc(Requests, this.conversation.id)) as unknown as RequestsState;
+      const existing = state.requests[id];
+      if (existing === undefined) state.requests[id] = { result };
+      else if (existing.result === undefined) existing.result = result;
+    }, context);
+    return (await this.record(id))?.result ?? result;
+  }
+}
 
 /** Maps NimbleNewt requests onto a pinned Pi Durable harness and Pi results back to semantic results. */
 export class PiAdapter {
-  private constructor(private readonly harness: Harness, private readonly root: Conversation) {}
+  private constructor(private readonly harness: Harness, private readonly rootConversation: Conversation, private readonly storage: Storage) {}
 
   static async open(options: PiAdapterOptions): Promise<PiAdapter> {
     assertSupportedRuntime(options.runtime);
@@ -142,111 +300,30 @@ export class PiAdapter {
       context,
     );
     const root = await harness.root(context, { agent: { model: options.model } });
-    return new PiAdapter(harness, root);
+    return new PiAdapter(harness, root, options.storage);
+  }
+
+  /** The root conversation, created on first use and the same on every reopen of the same storage. */
+  root(): AdapterConversation {
+    return new AdapterConversation(this.harness, this.rootConversation, this.storage);
+  }
+
+  /** Re-acquire an existing conversation by ID, for example after a restart; `undefined` if there is none. */
+  async conversation(id: number): Promise<AdapterConversation | undefined> {
+    const found = await this.harness.conversation(id as never, context);
+    return found === undefined ? undefined : new AdapterConversation(this.harness, found, this.storage);
   }
 
   /**
-   * Admit a request. Submitting the same request ID again returns the original submission and result; reusing it with
-   * different content throws RequestIdConflictError, including while the original is still queued or after compaction.
+   * Start the scheduler so runs a previous process left unfinished continue. Reopening storage does not do this by itself:
+   * the controller decides when interrupted work may run again.
    */
-  async submit(request: AdapterRequest): Promise<SubmissionHandle> {
-    if (request.kind === "command") throw new UnknownCommandError(request.name, SUPPORTED_COMMANDS);
-    // Record the payload fingerprint before admission: a crash in between leaves a record for the same payload to retry.
-    await this.claim(request.requestId, fingerprintOf(request.content));
-    const submission = await this.root.submit({ type: "input", content: request.content, requestId: request.requestId }, context);
-    return { requestId: request.requestId, submissionId: submission.id, result: () => this.resultOf(request.requestId, submission) };
-  }
-
-  /**
-   * Abort the running request and withdraw queued ones. Minimal for now: F06 adds scoped abort, branches and checkpoints.
-   * Aborted requests settle as `unanswered` with reason `aborted`.
-   */
-  async abort(): Promise<void> {
-    await this.root.abort(context);
-  }
-
-  /** Compact the conversation's model-visible context now. Older entries stay in storage and results stay readable. */
-  async compact(instructions?: string): Promise<void> {
-    const task = await this.root.compact(instructions, context);
-    await this.harness.waitForTask(task, context);
+  resume(): void {
+    this.harness.resume();
   }
 
   async close(): Promise<void> {
     await this.harness.close(context);
   }
-
-  private async record(id: RequestId): Promise<RequestRecord | undefined> {
-    const state = (await this.harness.snapshot(Requests, this.root.id, context)) as unknown as RequestsState;
-    return state.requests[id];
-  }
-
-  private async claim(id: RequestId, fingerprint: string): Promise<void> {
-    let conflict = false;
-    await this.root.commit(async (tx) => {
-      const state = (await tx.doc(Requests, this.root.id)) as unknown as RequestsState;
-      const existing = state.requests[id];
-      if (existing === undefined) state.requests[id] = { fingerprint };
-      else if (existing.fingerprint !== fingerprint) conflict = true;
-    }, context);
-    if (conflict) throw new RequestIdConflictError(`request ID "${id}" was already used with different content`);
-  }
-
-  /** Ascending scan of the conversation's history by entry ID, which includes entries compacted out of the active view. */
-  private async scan(min: number, max: number | undefined, stopAt?: (entry: EntryLike) => boolean): Promise<EntryLike[]> {
-    const found: EntryLike[] = [];
-    let cursor;
-    for (;;) {
-      const page = await this.root.entries(
-        { minEntryId: min as never, ...(max === undefined ? {} : { maxEntryId: max as never }), order: "ascending" },
-        100,
-        cursor,
-        context,
-      );
-      for (const entry of page.items as unknown as EntryLike[]) {
-        if (stopAt?.(entry)) return found;
-        found.push(entry);
-      }
-      if (page.next === undefined) return found;
-      cursor = page.next;
-    }
-  }
-
-  private async resultOf(id: RequestId, submission: Submission): Promise<SemanticResult> {
-    const stored = (await this.record(id))?.result;
-    if (stored !== undefined) return stored;
-
-    const settled = await submission.wait(context);
-    let toolCalls: ToolCallOutcome[] = [];
-    let result: SemanticResult;
-    if (settled.status === "done") {
-      const start = settled.entry as number;
-      const answerId = settled.answer as number;
-      const entries = await this.scan(start + 1, answerId);
-      toolCalls = entries.filter((e) => e.kind === "pi.tool-result").map(toolOutcome);
-      const answer = entries.find((e) => e.id === answerId);
-      const text = answer === undefined ? "" : textOf(firstMessage(answer).content);
-      const unknown = toolCalls.filter((c) => c.status === "unknown_tool").map((c) => c.name);
-      result = unknown.length > 0
-        ? { status: "failed", requestId: id, code: "unknown_tool", detail: `runtime reported tool(s) unavailable: ${[...new Set(unknown)].join(", ")}`, text, toolCalls }
-        : { status: "completed", requestId: id, text, toolCalls };
-    } else {
-      // An unanswered request owns the entries up to the next input, which belongs to a later request.
-      if (settled.entry !== undefined) {
-        const entries = await this.scan((settled.entry as number) + 1, undefined, (e) => e.kind === "pi.user");
-        toolCalls = entries.filter((e) => e.kind === "pi.tool-result").map(toolOutcome);
-      }
-      const reason: UnansweredReason = KNOWN_REASONS.has(settled.reason) ? (settled.reason as UnansweredReason) : "other";
-      const detail = settled.detail === undefined ? settled.reason : `${settled.reason}: ${JSON.stringify(settled.detail)}`;
-      result = { status: "unanswered", requestId: id, reason, detail, toolCalls };
-    }
-
-    // First writer wins, so concurrent callers and later calls all see one recorded result.
-    await this.root.commit(async (tx) => {
-      const state = (await tx.doc(Requests, this.root.id)) as unknown as RequestsState;
-      const existing = state.requests[id];
-      if (existing === undefined) state.requests[id] = { fingerprint: "", result };
-      else if (existing.result === undefined) existing.result = result;
-    }, context);
-    return (await this.record(id))?.result ?? result;
-  }
 }
+

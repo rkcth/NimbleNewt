@@ -23,7 +23,7 @@ export type ToolCallOutcome =
   | { readonly callId: string; readonly name: string; readonly status: "unknown_tool" };
 
 /** Why the runtime ended a request without an answer. `other` keeps the runtime's own wording in `detail`. */
-export type UnansweredReason = "aborted" | "model_error" | "stale" | "restart" | "other";
+export type UnansweredReason = "aborted" | "model_error" | "no_model" | "stale" | "reset" | "faulted" | "other";
 
 /** Semantic outcome of one submitted request, independent of the underlying agent runtime. Immutable once recorded. */
 export type SemanticResult =
@@ -54,7 +54,10 @@ export type SemanticResult =
       readonly toolCalls: readonly ToolCallOutcome[];
     };
 
+/** What to do with an input that arrives while the conversation is already working. */
+export type WhenBusy = "followUp" | "steer" | "reject";
+
 /** Requests an adapter accepts. */
 export type AdapterRequest =
-  | { readonly kind: "input"; readonly requestId: RequestId; readonly content: string }
+  | { readonly kind: "input"; readonly requestId: RequestId; readonly content: string; readonly whenBusy?: WhenBusy }
   | { readonly kind: "command"; readonly requestId: RequestId; readonly name: string; readonly args?: { readonly [key: string]: JsonValue } };
