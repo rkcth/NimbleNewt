@@ -1,11 +1,11 @@
 // F01 package-boundary rules. Pure function so it can be tested against fixtures.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join, normalize, relative } from "node:path";
 
 /** Runtime dependencies each package may declare and import. Anything else is a violation. */
 export const ALLOWED = {
   contracts: [],
-  "pi-adapter": ["@nimblenewt/contracts", "@earendil-works/pi-durable"],
+  "pi-adapter": ["@nimblenewt/contracts", "@earendil-works/chord", "@earendil-works/pi-ai", "@earendil-works/pi-durable"],
   controller: [],
   api: [],
   worker: [],
@@ -57,16 +57,18 @@ export function checkBoundaries(packagesDir, allowed = ALLOWED) {
         for (const [, specifier] of readFileSync(file, "utf8").matchAll(SPECIFIER)) {
           if (specifier.startsWith(".") || specifier.startsWith("node:")) continue;
           const name = packageName(specifier);
-          if (!permitted.includes(name)) errors.push(`${dir}: ${file.slice(packagesDir.length + 1)} imports ${name}, which is not allowed`);
-          else if (!declared.has(name)) errors.push(`${dir}: ${file.slice(packagesDir.length + 1)} imports ${name}, which is not a declared dependency`);
+          if (!permitted.includes(name)) errors.push(`${dir}: ${relative(packagesDir, file)} imports ${name}, which is not allowed`);
+          else if (!declared.has(name)) errors.push(`${dir}: ${relative(packagesDir, file)} imports ${name}, which is not a declared dependency`);
         }
       }
     }
 
     const tsconfigPath = join(pkgPath, "tsconfig.json");
     if (!existsSync(tsconfigPath)) { errors.push(`${dir}: missing tsconfig.json`); continue; }
-    const tsconfig = JSON.parse(readFileSync(tsconfigPath, "utf8"));
-    const refs = new Set((tsconfig.references ?? []).map((r) => `@nimblenewt/${r.path.replace(/^\.\.\//, "")}`));
+    let tsconfig;
+    try { tsconfig = JSON.parse(readFileSync(tsconfigPath, "utf8")); }
+    catch { errors.push(`${dir}: tsconfig.json must be plain JSON (no comments or trailing commas)`); continue; }
+    const refs = new Set((tsconfig.references ?? []).map((r) => `@nimblenewt/${basename(normalize(r.path))}`));
     const workspaceDeps = new Set([...declared].filter((d) => d.startsWith("@nimblenewt/")));
     for (const dep of workspaceDeps) if (!refs.has(dep)) errors.push(`${dir}: tsconfig references do not include dependency ${dep}`);
     for (const ref of refs) if (!workspaceDeps.has(ref)) errors.push(`${dir}: tsconfig references ${ref}, which is not a declared dependency`);

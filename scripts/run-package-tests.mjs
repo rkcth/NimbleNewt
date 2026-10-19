@@ -1,7 +1,9 @@
-// Runs the compiled tests of the package in the current directory; fails if none are found.
+// Runs the compiled tests of the package in the current directory under the offline guard;
+// fails if none are found.
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 function testFiles(dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
@@ -9,4 +11,5 @@ function testFiles(dir) {
 }
 const files = existsSync("dist") ? testFiles("dist") : [];
 if (files.length === 0) { console.error("no compiled test files found in dist/; did the build run?"); process.exit(1); }
-process.exit(spawnSync(process.execPath, ["--test", ...files], { stdio: "inherit" }).status ?? 1);
+const guard = pathToFileURL(fileURLToPath(new URL("./offline-guard.mjs", import.meta.url))).href;
+process.exit(spawnSync(process.execPath, ["--import", guard, "--test", ...files], { stdio: "inherit" }).status ?? 1);

@@ -50,3 +50,13 @@ test("ignores stray files and reports directories without a manifest", () => {
   const errors = fixture((d) => { writeFileSync(join(d, ".DS_Store"), ""); cpSync(join(d, "ui"), join(d, "empty"), { recursive: true }); rmSync(join(d, "empty/package.json")); });
   assert.deepEqual(errors, ["empty: missing package.json"]);
 });
+
+test("reports a tsconfig that is not plain JSON instead of crashing", () => {
+  const errors = fixture((d) => writeFileSync(join(d, "ui/tsconfig.json"), '// comment\n{ "references": [] }'));
+  assert.deepEqual(errors, ["ui: tsconfig.json must be plain JSON (no comments or trailing commas)"]);
+});
+
+test("error messages name the file relative to packages/", () => {
+  const errors = fixture((d) => appendFileSync(join(d, "pi-adapter/src/index.ts"), 'export * as c from "@nimblenewt/controller";\n'));
+  assert.ok(errors.some((e) => e.startsWith("pi-adapter: pi-adapter") && e.includes("index.ts imports")), errors.join("\n"));
+});

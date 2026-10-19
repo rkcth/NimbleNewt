@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: ["22.19.0", "24.21.0"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+      # Install scripts are disabled by .npmrc; the lockfile is authoritative.
+      - run: npm ci
+      # Builds, checks package boundaries and the license inventory, then runs all tests under the
+      # in-process offline guard (scripts/offline-guard.mjs).
+      - run: npm test
+      # The suite must not rewrite tracked files (e.g. a stale generated inventory).
+      - run: git diff --exit-code
+      # Real network isolation: rerun the suite in a network namespace with no connectivity. This covers
+      # child processes and native code that the in-process guard cannot.
+      - name: Rerun with the network disabled
+        if: runner.os == 'Linux'
+        # A new namespace starts with the loopback interface down; bring it up for local-only tests.
+        run: >-
+          sudo unshare --net -- sh -c
+          'ip link set lo up && exec setpriv --reuid="$1" --regid="$2" --clear-groups env "PATH=$3" "HOME=$4" CI=true npm test'
+          sh "$(id -u)" "$(id -g)" "$PATH" "$HOME"
