@@ -13,3 +13,7 @@ export {
   ASSIGNMENT_LIMITS, activityIdOf, assignmentIdOf, generationIdOf,
   type ActivityBody, type AssignmentBody, type AssignmentState, type AttemptBody, type AttemptState, type Fence, type GenerationBody, type Owner,
 } from "./assignment-model.js";
+export {
+  INBOX_LIMITS, InboxService, inboxMessageId,
+  type AdmissionOutcome, type AdmissionResult, type Admission, type AdmitMessage, type IncomingMessage, type InboxMessageBody, type InboxState, type SettleMessage,
+} from "./inbox.js";
