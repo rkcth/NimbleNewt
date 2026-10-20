@@ -7,6 +7,7 @@ This is the consolidated October 16 planning baseline, approved by Rob on Octobe
 - [Executable task cards](task-plan.md) and [machine-readable DAG](task-plan.json)
 - [Status and evidence boundary](finalization-status.md)
 - [Paperclip synchronization status](paperclip-sync-status.md)
+- Records: [G01 decisions and open owner items](g01-decision-record.md), [G07 architecture, coverage and DAG validation](g07-architecture-and-coverage.md), [G02 Pi adapter milestone](g02-acceptance.md), [G03 compatibility](g03-compatibility.md)
 
 The four research reports in this directory are historical feasibility evidence, not actual-code qualification. Current design and task ordering supersede older proposals in those reports.
 

@@ -20,7 +20,11 @@ test("the roadmap marks done, in-review and not-started cards, counts them, and 
   assert.ok(!text.includes("N00"), "the activation gate is not a roadmap task");
   assert.match(text, /> Work began on the owner's instruction\./);
   assert.match(text, /This section is generated from `task-plan.json`/);
-  assert.ok(!text.includes("_Note: F01 started"), "the note about unclosed planning records goes away once G01 and G07 are done");
+  assert.match(text, /_Note: F01 started.*G07 is still not fully closed\._/, "the note names the planning record that is still open");
+  const closed = renderRoadmap({ tasks: [card("G01", [], "implemented"), card("G07", ["G01"], "implemented"), card("F01", ["G07"], "implemented")] });
+  assert.ok(!closed.includes("_Note: F01 started"), "the note goes away once G01 and G07 are both fully implemented");
+  const both = renderRoadmap({ tasks: [card("G01"), card("G07", ["G01"]), card("F01", ["G07"], "implemented")] });
+  assert.match(both, /G01 and G07 are still not fully closed/);
 });
 
 test("only the roadmap section of the README is replaced", () => {

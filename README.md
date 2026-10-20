@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **5 of 105 tasks implemented**, 1 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **6 of 105 tasks implemented**, 2 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -103,11 +103,11 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 1
 
-- [ ] **G01** Record accepted scope and experiment prerequisites
+- [~] **G01** Record accepted scope and experiment prerequisites — recorded; open owner decisions (N00 budget, PostgreSQL versions, minimum OS versions) listed in the record
 
 ### Phase 2
 
-- [ ] **G07** Record current architecture and executable task manifest _(needs G01)_
+- [x] **G07** Record current architecture and executable task manifest _(needs G01)_
 
 ### Phase 3
 
@@ -325,7 +325,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 ### Phase 40
 
 - [ ] **D03** Approve release readiness and publication decision _(needs X08, D01, D02)_
-_Note: F01 started before its prerequisite planning records G01 and G07 were formally closed, so they remain unchecked._
+_Note: F01 started before its prerequisite planning records G01 and G07 were formally closed; G01 is still not fully closed._
 
 ## More detail
 

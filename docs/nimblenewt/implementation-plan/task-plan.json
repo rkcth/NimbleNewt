@@ -12,12 +12,19 @@
       "depends_on": [],
       "deliverable": "Decision records for D1-D7, supported versions, workload envelope and budget",
       "acceptance_and_verification": "Record current decisions, dual database support, remote topology, operating limits and owner planning-sync authorization; preserve N00 execution hold",
-      "status": "planned",
+      "status": "implemented-awaiting-signoff",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "pending_commit": true,
+        "record": "docs/nimblenewt/implementation-plan/g01-decision-record.md",
+        "note": "Consolidates the owner-accepted D1-D7 and the limits; the production/N00 budget, supported PostgreSQL versions and minimum OS versions are open owner decisions listed in the record.",
+        "roadmap_note": "recorded; open owner decisions (N00 budget, PostgreSQL versions, minimum OS versions) listed in the record",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "G02",
@@ -67,7 +74,12 @@
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
       "progress": {
-        "pending_commit": true,
+        "commits": [
+          "a721db3"
+        ],
+        "ci_runs": [
+          "39357582142"
+        ],
         "record": "docs/nimblenewt/implementation-plan/g03-compatibility.md",
         "note": "Compatibility gate qualified with real Pi 1.0.1/1.2.0/1.3.0 and earlier-adapter fixtures: storage marker, explicit adoption after a read-only scan, checkpoint format 2 with a pure upgrade from format 1, failed adoption leaves the original unchanged. No Pi-to-Pi storage migration was needed or built; see the record for what is not covered.",
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
@@ -140,12 +152,18 @@
       ],
       "deliverable": "Current design, requirement coverage and validated implementation DAG",
       "acceptance_and_verification": "Record owner planning-sync authorization; actual-code qualification follows implementation dependencies; no standalone probe gate; N00 execution authorization remains separate",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "pending_commit": true,
+        "record": "docs/nimblenewt/implementation-plan/g07-architecture-and-coverage.md",
+        "note": "Architecture summary, requirement-coverage matrix (31 accepted areas to cards, with gaps named) and a DAG validation test (scripts/plan.test.mjs).",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "G08",

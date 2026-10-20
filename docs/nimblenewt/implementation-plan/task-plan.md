@@ -56,6 +56,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### G01 — Record accepted scope and experiment prerequisites
 
 - **Parent:** N01 / AII-251.
+- **Status:** implemented-awaiting-signoff; record [g01-decision-record.md](g01-decision-record.md).
+- **Progress note:** Consolidates the owner-accepted D1-D7 and the limits; the production/N00 budget, supported PostgreSQL versions and minimum OS versions are open owner decisions listed in the record.
 - **Blockers:** Owner scope/decision input; no implementation activation.
 - **Deliverable:** Decision records for D1-D7, supported versions, workload envelope and budget.
 - **Acceptance and verification:** Record current decisions, dual database support, remote topology, operating limits and owner planning-sync authorization; preserve N00 execution hold.
@@ -74,7 +76,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### G03 — Qualify forward migration and compatibility rejection
 
 - **Parent:** N03 / AII-253.
-- **Status:** implemented; record [g03-compatibility.md](g03-compatibility.md).
+- **Status:** implemented; commits `a721db3`; CI runs 39357582142; record [g03-compatibility.md](g03-compatibility.md).
 - **Progress note:** Compatibility gate qualified with real Pi 1.0.1/1.2.0/1.3.0 and earlier-adapter fixtures: storage marker, explicit adoption after a read-only scan, checkpoint format 2 with a pure upgrade from format 1, failed adoption leaves the original unchanged. No Pi-to-Pi storage migration was needed or built; see the record for what is not covered.
 - **Blockers:** G02.
 - **Deliverable:** Actual Pi adapter checkpoint version, extension and compaction migration fixtures.
@@ -108,6 +110,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### G07 — Record current architecture and executable task manifest
 
 - **Parent:** N01 / AII-251.
+- **Status:** implemented; record [g07-architecture-and-coverage.md](g07-architecture-and-coverage.md).
+- **Progress note:** Architecture summary, requirement-coverage matrix (31 accepted areas to cards, with gaps named) and a DAG validation test (scripts/plan.test.mjs).
 - **Blockers:** G01.
 - **Deliverable:** Current design, requirement coverage and validated implementation DAG.
 - **Acceptance and verification:** Record owner planning-sync authorization; actual-code qualification follows implementation dependencies; no standalone probe gate; N00 execution authorization remains separate.

@@ -51,7 +51,7 @@ export function renderRoadmap(plan) {
     }
   }
   const open = tasks.filter((t) => ["G01", "G07"].includes(t.id) && t.status !== "implemented").map((t) => t.id);
-  if (open.length === 2) out.push("_Note: F01 started before its prerequisite planning records G01 and G07 were formally closed, so they remain unchecked._");
+  if (open.length > 0) out.push(`_Note: F01 started before its prerequisite planning records G01 and G07 were formally closed; ${open.join(" and ")} ${open.length === 1 ? "is" : "are"} still not fully closed._`);
   return out.join("\n") + "\n";
 }
 
