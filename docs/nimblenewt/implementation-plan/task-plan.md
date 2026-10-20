@@ -244,6 +244,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F04h — Refuse unsupported environments unless explicitly overridden
 
 - **Parent:** N02 / AII-252.
+- **Status:** implemented; commits `ae3b81b`; CI runs 39490486463; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** One list of supported environments (SUPPORTED_ENVIRONMENT); an uncovered OS, architecture, Node or PostgreSQL version is a hard stop whose message names what was found, what is supported, how to run the project's own verification and the exact override (--allow-unsupported-environment or NIMBLENEWT_ALLOW_UNSUPPORTED_ENVIRONMENT); the override starts normally, prints a notice and writes an audit record once per epoch. The PostgreSQL adapter refuses an old server before creating anything and, with allowUnsupportedServer, opens unchanged; the floor cannot be lowered any other way outside the F04g verification run. Tested on the reference store, SQLite, SQLite on a worker thread and PostgreSQL. The OS release floors are the lowest releases seen in CI and are for the owner to confirm; no controller executable exists yet, so the start-up call sequence is carried forward to U01. CI run 39490486463 (commit 4c26cd2) is green on all six cells; the run for ae3b81b itself failed one Windows cell on a racy S05 test, fixed in 4c26cd2.
 - **Blockers:** F04g.
 - **Deliverable:** Startup check of the PostgreSQL server version and of the operating system, architecture and Node version against the supported list, with a documented override switch.
 - **Acceptance and verification:** An unsupported PostgreSQL major, OS or Node version makes the controller refuse to start with a message that says what was found, what is supported, how to run the project's own verification against that version (the per-major PostgreSQL qualification and the QA script) and the exact switch that overrides the refusal; the override starts the controller, records the override in the audit log and in startup output, and never changes behaviour otherwise; the refusal is a hard stop, not a warning, because warnings are missed; tested for supported, unsupported and overridden cases on every storage backend; the supported list lives in one place.
@@ -299,6 +301,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### S02 — Implement assignment generations and attempt admission
 
 - **Parent:** N04 / AII-254.
+- **Status:** implemented; commits `168e35d`; CI runs 39485674692; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Assignment per task with generations and an immutable history, attempts with a single active writer, fenced task writes whose check is atomic with the change, observed activity kept apart from ownership, assignment events written in the same transaction. Tested on four backends including concurrent first assignments, concurrent admissions and fenced writes racing transfers. Unfenced ProjectService commands remain until permissions (A01); the worker and adapter do not check fences yet. CI run 39485674692 is green on all six cells.
 - **Blockers:** S01, F05.
 - **Deliverable:** Assignment history, attempt records and fencing checks.
 - **Acceptance and verification:** Two competing admissions yield one valid writer; old generation cannot mutate task after transfer; observed activity separate from owner.
@@ -307,6 +311,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### S03 — Implement durable transition delivery
 
 - **Parent:** N04 / AII-254.
+- **Status:** implemented; commits `08c438b`; CI runs 39484786735; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Task commands write their event (a snapshot of the new revision) in the same transaction as the change, so there is no message without its change or the reverse; a DeliveryDispatcher claims messages in commit order per task, hands them to a handler and records the receipt in one transaction, at least once, with backoff, takeover handling and stale-epoch stop; reconcileTaskEvents repairs a task whose current revision has no message. Tested on four backends and with a real SIGKILL before and after the task commit and before and after the receipt. Not yet consumed in production (the inbox is S04) or called by a periodic scan (S07). CI run 39484786735 is green on all six cells.
 - **Blockers:** S01.
 - **Deliverable:** Selected engine delivery mechanism and domain outbox bridge where needed.
 - **Acceptance and verification:** Kill before/after commit and receipt; committed intent is eventually found; no event for rolled-back transition; cross-store gap reconciled.
@@ -315,6 +321,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### S04 — Implement durable inbox and duplicate handling
 
 - **Parent:** N04 / AII-254.
+- **Status:** implemented; commits `e1b582b`; CI runs 39486830124; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Durable inbox: a message is held before it is acknowledged, one record per delivery, a changed payload under the same delivery ID is refused; assignment messages are admitted from the current assignment through an attempt command derived from the message, so duplicates, out-of-order arrivals, concurrent callers and a crash between steps never create a second attempt, and a no-attempt decision cannot contradict an attempt another caller created. Closed tasks settle as task_closed; not-yet-ready tasks are deferred. Tested on four backends. CI run 39486830124 is green on all six cells.
 - **Blockers:** S03, S02.
 - **Deliverable:** Receipt, admission and settlement records.
 - **Acceptance and verification:** Duplicate/out-of-order delivery cannot create second attempt; acceptance acknowledges only durable receipt; changed payload rejected.
@@ -323,6 +331,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### S05 — Implement effect ledger and idempotent bridge
 
 - **Parent:** N04 / AII-254.
+- **Status:** implemented; commits `99b902f`, `4c26cd2`; CI runs 39487923883, 39490486463; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Effect ledger and idempotent bridge: intent (ledger row, full input, stable key, fence checked in the same transaction) recorded before anything is done; execution under a leased, revision-guarded claim by a bridge that declares whether its target is idempotent or can be asked; after a crash or doubt a started effect is reconciled, retried with its key or becomes uncertain and is refused for retry until a person resolves it; a vanished executor never causes a blind second execution and a late result is not recorded over another holder's. Tested on four backends and with real SIGKILL after the outside success and before the result was saved. CI run 39487923883 is green on all six cells after rerunning one macOS cell GitHub cancelled; one Windows test that raced was fixed in 4c26cd2 (run 39490486463 green).
 - **Blockers:** S02, S04.
 - **Deliverable:** Effect intents, external keys and reconciliation interface.
 - **Acceptance and verification:** Kill after external success before result save; protected effect occurs once; unsupported target becomes uncertain and blocks blind retry.

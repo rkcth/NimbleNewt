@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **17 of 112 tasks implemented**, 2 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **22 of 112 tasks implemented**, 2 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -158,17 +158,17 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 13
 
-- [ ] **F04h** Refuse unsupported environments unless explicitly overridden _(needs F04g)_
-- [ ] **S02** Implement assignment generations and attempt admission _(needs S01, F05)_
-- [ ] **S03** Implement durable transition delivery _(needs S01)_
+- [x] **F04h** Refuse unsupported environments unless explicitly overridden _(needs F04g)_
+- [x] **S02** Implement assignment generations and attempt admission _(needs S01, F05)_
+- [x] **S03** Implement durable transition delivery _(needs S01)_
 
 ### Phase 14
 
-- [ ] **S04** Implement durable inbox and duplicate handling _(needs S03, S02)_
+- [x] **S04** Implement durable inbox and duplicate handling _(needs S03, S02)_
 
 ### Phase 15
 
-- [ ] **S05** Implement effect ledger and idempotent bridge _(needs S02, S04)_
+- [x] **S05** Implement effect ledger and idempotent bridge _(needs S02, S04)_
 
 ### Phase 16
 
