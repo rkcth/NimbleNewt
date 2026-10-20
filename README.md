@@ -85,7 +85,7 @@ TypeScript is the default language for the controller, worker adapter, API, and 
 
 ## Design and implementation status
 
-NimbleNewt is under development. The lifecycle and context behavior above is the product contract to implement. Pi Durable is the selected initial runtime direction. The Pi adapter milestone (G02) is implemented and passing CI on Linux, macOS and Windows, and awaits real-hardware QA and owner sign-off; its record lists the capabilities that are still unsupported ([G02 acceptance record](docs/nimblenewt/implementation-plan/g02-acceptance.md)). The controller, storage, workers, UI and everything else are not built; see the roadmap below. Efficiency and quality improvements are goals to evaluate, not measured performance claims or a launch-date commitment.
+NimbleNewt is under development. The lifecycle and context behavior above is the product contract to implement. Pi Durable is the selected initial runtime direction. The Pi adapter milestone (G02) is implemented and passing CI on Linux, macOS and Windows, and awaits real-hardware QA and owner sign-off; its record lists the capabilities that are still unsupported ([G02 acceptance record](docs/nimblenewt/implementation-plan/g02-acceptance.md)). Beneath it, versioned configuration, the controller storage layer (SQLite and PostgreSQL 17 and above, with journaled migrations), the protected tool registry, project and task records, and verified artifacts are implemented; assignment, delivery, the API, workers, the UI and everything else are not built. See the roadmap below. Efficiency and quality improvements are goals to evaluate, not measured performance claims or a launch-date commitment.
 
 Durable continuity uses recorded histories, tool results, notes, decisions, artifacts and checkpoints. These are distinct from arbitrary process-memory snapshots, hidden model state or a provider's live KV cache. Restore native history where supported and expose fidelity limits when reconstructing from portable records. Exact bit-for-bit continuation, zero latency and universal cache retention are not promised.
 
@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **14 of 107 tasks implemented**, 2 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **17 of 107 tasks implemented**, 2 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -152,9 +152,9 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 ### Phase 12
 
 - [x] **F04f** Move the SQLite adapter off the main thread _(needs F04)_
-- [ ] **F04g** Verify supported PostgreSQL versions _(needs F04)_
-- [ ] **S01** Implement project/task records and revisioned commands _(needs F04)_
-- [ ] **S06** Implement artifact publication and integrity _(needs F04)_
+- [x] **F04g** Verify supported PostgreSQL versions _(needs F04)_
+- [x] **S01** Implement project/task records and revisioned commands _(needs F04)_
+- [x] **S06** Implement artifact publication and integrity _(needs F04)_
 
 ### Phase 13
 

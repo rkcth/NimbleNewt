@@ -27,6 +27,11 @@ export interface WorkloadSpec {
   readonly thinkMs: number;
   readonly durationMs: number;
   readonly warmupMs: number;
+  /**
+   * For short smoke runs on slow machines: the agents keep going past the deadline (at most 30 s) until this many transitions have been
+   * applied, so a run cannot end having done nothing. Unset for measurements, which are timed.
+   */
+  readonly minTransitions?: number;
 }
 
 export interface LatencyStats { readonly count: number; readonly perSecond: number; readonly p50: number; readonly p95: number; readonly p99: number; readonly max: number }
@@ -121,9 +126,10 @@ export async function runWorkload(raw: ControllerStorage, spec: WorkloadSpec, op
     const task = { kind: "task", id: `a${i}` };
     let revision = 1;
     let k = 0;
-    while (performance.now() < deadline) {
+    const going = (): boolean => performance.now() < deadline || (spec.minTransitions !== undefined && transitions < spec.minTransitions && performance.now() < deadline + 30_000);
+    while (going()) {
       // Two transitions for each pass over the outbox, like a task that makes progress and then reports.
-      for (let step = 0; step < 2 && performance.now() < deadline; step++) {
+      for (let step = 0; step < 2 && going(); step++) {
         const from = performance.now();
         for (;;) {
           try {

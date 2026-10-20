@@ -26,7 +26,17 @@ Linux x64 (Ubuntu 26.04, Node 22.23), run on the development machine:
 
 All five majors passed every test, so nothing here shows a reason to exclude 14, 15 or 16 on functional grounds; that is the evidence for the owner's later decision on how far back to support.
 
-Windows and macOS: the full normal suite already runs against 17.10 there in CI. The per-major run on all three operating systems is the `PostgreSQL versions` workflow; its results are added to this record when it has been run (see the bottom of this file).
+All three operating systems, from the hand-started `PostgreSQL versions` workflow (run 39438475744, commit `c2574d7`, GitHub-hosted runners, Node 22.19.0; 236 of 236 tests in every cell):
+
+| Major | Server | Linux x64 | macOS arm64 | Windows x64 |
+| --- | --- | --- | --- | --- |
+| 14 | 14.23 | passed | passed | passed |
+| 15 | 15.18 | passed | passed | passed |
+| 16 | 16.14 | passed | passed | passed |
+| 17 | 17.10 | passed | passed | passed |
+| 18 | 18.4 | passed | passed | passed |
+
+The first run of the workflow (39436717586, commit `b63ec1d`) had one failure, 18 on Windows, in a test of the PostgreSQL crash-recovery suite that asserted a storage call had failed during a server restart even when the process had been blocked by the restart and no call was in flight. That assertion was a test defect, not a PostgreSQL 18 problem (it had also failed intermittently on Windows with Node 24 in the QA runs of the whole suite), and it was replaced by a check that the store held connections when the server was killed and then recovered and lost nothing; every cell passes since.
 
 ## Not established
 

@@ -57,7 +57,7 @@
           "39356097952"
         ],
         "record": "docs/nimblenewt/implementation-plan/g02-acceptance.md",
-        "note": "Acceptance suite and record written and CI green on all six cells; needs real macOS/Windows QA and owner acceptance.",
+        "note": "Acceptance suite and record written and CI green on all six cells; the hand-started QA workflow passed all repeats on all six cells at c2574d7; still needs real-hardware macOS/Windows QA and owner acceptance.",
         "roadmap_note": "implemented and passing CI; awaiting independent macOS/Windows QA and owner sign-off",
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
       }
@@ -490,12 +490,23 @@
       ],
       "deliverable": "Qualification run of the PostgreSQL adapter on the latest minor of each major from 14 to current, and the supported-version statement",
       "acceptance_and_verification": "Conformance, parity, crash and migration suites run per major; 17 and above is the claimed support, each lower major is reported as passed or failed without claiming support; the code version floor matches the claim; server version and platform recorded; owner decides later whether to narrow support to the two most recent majors",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "b63ec1d"
+        ],
+        "ci_runs": [
+          "39436696991"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/f04g-postgres-versions.md",
+        "note": "PostgreSQL 17 and above is the supported range and the adapter refuses older servers at open. The six PostgreSQL-dependent test files were run against the latest build of each of 14, 15, 16, 17 and 18 (exact locked installs): all pass 236/236 on Linux, macOS and Windows (hand-started workflow run 39438475744). 14 to 16 are verified and reported, not supported; narrowing support to the two most recent majors is the owner's later decision. CI run 39436696991 is green on all six cells.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "F04e",
@@ -624,12 +635,23 @@
       ],
       "deliverable": "Domain commands, stable identities and optimistic revisions",
       "acceptance_and_verification": "Duplicate identical command applies once; conflicting key payload and stale revision rejected; task may exist without repository",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "c2574d7"
+        ],
+        "ci_runs": [
+          "39438460593"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "ProjectService: project and task records changed only by idempotent, revisioned commands (derived stable IDs, command digest kept in the audit entry, duplicates answered with the recorded result including concurrent ones, stale revisions and reused command IDs rejected, task lifecycle, optional repository). Tested on the reference store, SQLite, SQLite on a worker thread and PostgreSQL. No assignment (S02), outbox (S03) or permissions (A01) yet. CI run 39438460593 is green on all six cells after a rerun of one cell that GitHub cancelled for lack of a macOS runner.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "S02",
@@ -712,12 +734,23 @@
       ],
       "deliverable": "Immutable blob/manifest storage and hash verification",
       "acceptance_and_verification": "Crash between blob and manifest leaves no accepted dangling reference; corrupt/missing blob blocks resume; orphan cleanup safe",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "659f1be"
+        ],
+        "ci_runs": [
+          "39440347235"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Immutable content-addressed blobs and artifact manifests: blobs stored and flushed first, the manifest committed last as one idempotent command, so a crash between leaves no accepted dangling reference (real SIGKILL at four exact points); missing, truncated or altered blobs block resuming; reads return only verified bytes; orphan cleanup is grace-period, lock and epoch guarded. One process owns a blob store (not enforced on disk). CI run 39440347235 is green on all six cells after a rerun of one Windows cell that failed on a flaky smoke-test threshold, hardened since.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "S07",

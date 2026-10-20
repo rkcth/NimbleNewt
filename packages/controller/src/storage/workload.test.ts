@@ -14,7 +14,7 @@ const server = (): Promise<TestServer> => (serverPromise ??= startTestServer());
 after(async () => { if (serverPromise !== undefined) await (await serverPromise).stop(); });
 
 // A short run: it checks that nothing is lost or duplicated under concurrent load, not how fast anything is.
-const SMOKE: WorkloadSpec = { name: "smoke", agents: 6, idleHosts: 10, hostPeriodMs: 100, inquirers: 1, hotRow: false, thinkMs: 2, durationMs: 1500, warmupMs: 200 };
+const SMOKE: WorkloadSpec = { name: "smoke", agents: 6, idleHosts: 10, hostPeriodMs: 100, inquirers: 1, hotRow: false, thinkMs: 2, durationMs: 1500, warmupMs: 200, minTransitions: 8 };
 const HOT: WorkloadSpec = { ...SMOKE, name: "smoke, hot row", hotRow: true };
 
 for (const spec of [SMOKE, HOT]) {

@@ -67,7 +67,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 
 - **Parent:** N03 / AII-253.
 - **Status:** implemented-awaiting-signoff; commits `fe494f9`; CI runs 39356097952; record [g02-acceptance.md](g02-acceptance.md).
-- **Progress note:** Acceptance suite and record written and CI green on all six cells; needs real macOS/Windows QA and owner acceptance.
+- **Progress note:** Acceptance suite and record written and CI green on all six cells; the hand-started QA workflow passed all repeats on all six cells at c2574d7; still needs real-hardware macOS/Windows QA and owner acceptance.
 - **Blockers:** F05, F06, F03.
 - **Deliverable:** Tests importing the actual NimbleNewt Pi adapter with pinned runtime and deterministic providers on Mac/Linux/Windows.
 - **Acceptance and verification:** Semantic tool output reaches next model step; exact inquiry fork leaves parent unchanged; unchanged and selective-update resumes; task A/B context separation; abort during streaming and partial tool arguments; no unfinished tool action; queued input retained; real process kill and fresh-process restoration; same request ID deduplicated; compaction preserves historical branch recovery; typecheck and lockfile retained; actual adapter code, not a parallel probe; record unsupported capabilities and block dependent feature acceptance.
@@ -234,6 +234,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F04g — Verify supported PostgreSQL versions
 
 - **Parent:** N02 / AII-252.
+- **Status:** implemented; commits `b63ec1d`; CI runs 39436696991; record [f04g-postgres-versions.md](f04g-postgres-versions.md).
+- **Progress note:** PostgreSQL 17 and above is the supported range and the adapter refuses older servers at open. The six PostgreSQL-dependent test files were run against the latest build of each of 14, 15, 16, 17 and 18 (exact locked installs): all pass 236/236 on Linux, macOS and Windows (hand-started workflow run 39438475744). 14 to 16 are verified and reported, not supported; narrowing support to the two most recent majors is the owner's later decision. CI run 39436696991 is green on all six cells.
 - **Blockers:** F04.
 - **Deliverable:** Qualification run of the PostgreSQL adapter on the latest minor of each major from 14 to current, and the supported-version statement.
 - **Acceptance and verification:** Conformance, parity, crash and migration suites run per major; 17 and above is the claimed support, each lower major is reported as passed or failed without claiming support; the code version floor matches the claim; server version and platform recorded; owner decides later whether to narrow support to the two most recent majors.
@@ -279,6 +281,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### S01 — Implement project/task records and revisioned commands
 
 - **Parent:** N04 / AII-254.
+- **Status:** implemented; commits `c2574d7`; CI runs 39438460593; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** ProjectService: project and task records changed only by idempotent, revisioned commands (derived stable IDs, command digest kept in the audit entry, duplicates answered with the recorded result including concurrent ones, stale revisions and reused command IDs rejected, task lifecycle, optional repository). Tested on the reference store, SQLite, SQLite on a worker thread and PostgreSQL. No assignment (S02), outbox (S03) or permissions (A01) yet. CI run 39438460593 is green on all six cells after a rerun of one cell that GitHub cancelled for lack of a macOS runner.
 - **Blockers:** F04.
 - **Deliverable:** Domain commands, stable identities and optimistic revisions.
 - **Acceptance and verification:** Duplicate identical command applies once; conflicting key payload and stale revision rejected; task may exist without repository.
@@ -319,6 +323,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### S06 — Implement artifact publication and integrity
 
 - **Parent:** N04 / AII-254.
+- **Status:** implemented; commits `659f1be`; CI runs 39440347235; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Immutable content-addressed blobs and artifact manifests: blobs stored and flushed first, the manifest committed last as one idempotent command, so a crash between leaves no accepted dangling reference (real SIGKILL at four exact points); missing, truncated or altered blobs block resuming; reads return only verified bytes; orphan cleanup is grace-period, lock and epoch guarded. One process owns a blob store (not enforced on disk). CI run 39440347235 is green on all six cells after a rerun of one Windows cell that failed on a flaky smoke-test threshold, hardened since.
 - **Blockers:** F04.
 - **Deliverable:** Immutable blob/manifest storage and hash verification.
 - **Acceptance and verification:** Crash between blob and manifest leaves no accepted dangling reference; corrupt/missing blob blocks resume; orphan cleanup safe.

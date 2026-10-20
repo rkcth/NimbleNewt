@@ -64,6 +64,16 @@ Known limits that are not capabilities: the digest in a checkpoint detects accid
 
 The owner chose to keep this QA out of Paperclip for now. The `QA` workflow (`.github/workflows/qa.yml`) is started by hand from the Actions tab ("Run workflow", with the number of runs, default 5). On fresh ubuntu, macOS and Windows GitHub-hosted runners × Node 22.19.0 and 24.21.0 it checks out into a path containing a space (`nn check`), runs `npm ci`, and runs `scripts/qa.mjs`, which repeats `npm test` and records, per machine: OS, architecture, Node and npm versions, commit, whether the working tree was clean, the totals of every run (pass, fail, cancelled), the gate messages, the platform line of the "G02 environment" test, whether `package-lock.json` or any tracked file changed, and whether every run on the machine reported the same number of tests and packages (a package silently not running fails the record). The full logs, `qa-evidence.json` and `qa-summary.md` are uploaded as an artifact (kept 90 days) and the summary is shown on the run page. The same script runs by hand on any machine: `npm ci` then `node scripts/qa.mjs --runs=5`.
 
+Results so far (all on GitHub-hosted runners; none of this is the real-hardware run or the owner's acceptance):
+
+| Run | Commit | Result |
+| --- | --- | --- |
+| 39429205965 | `92fbe0b` | Linux, macOS and Windows on Node 22.19 passed all 5 repeats; Windows on Node 24.21 failed 3 of 5 on two flaky tests (a PostgreSQL crash-recovery test that waited a fixed 500 ms, and a smoke test that required inquiries during a window in which in-thread SQLite starved them). Both were test defects. |
+| 39433524265 | `d4d824a` | Everything passed except Windows on Node 24.21, which failed 2 of 5 on a remaining assertion in the PostgreSQL crash-recovery test (no storage call was in flight during the server restart). Fixed. |
+| 39438479827 | `c2574d7` | **All six cells (Linux, macOS arm64, Windows x64 on Node 22.19.0 and 24.21.0) passed all 5 repeats**: 1035 tests per run, 30 runs, 0 failures; the evidence records are in the run's artifacts. |
+
+The QA run found the flaky tests that ordinary CI had missed or only hit occasionally, which is what it is for.
+
 What this covers of the checklist below: steps 2 (fresh checkout, path with a space), 3 (install and run, totals), 4 (five repeats) and 6 (failure tails are in the record). What it cannot cover: step 5 (the runners are virtual machines, with whatever antivirus the runner image has), real hardware, and anything that needs a person. The sign-off boxes below therefore stay unticked until the owner has seen a passing record and decides; a passing automated run is evidence for that decision, not the decision. Running the script by hand on the owner's own Mac and Windows machines is what would cover real hardware.
 
 
