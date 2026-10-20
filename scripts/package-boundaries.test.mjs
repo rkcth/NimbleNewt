@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, rmSync, writeFileSync, appendFileSync, readFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, appendFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { checkBoundaries } from "./package-boundaries.mjs";
+import { checkBoundaries, DATABASE_FOLDERS } from "./package-boundaries.mjs";
 
 const realPackages = fileURLToPath(new URL("../packages/", import.meta.url));
 
@@ -59,4 +59,39 @@ test("reports a tsconfig that is not plain JSON instead of crashing", () => {
 test("error messages name the file relative to packages/", () => {
   const errors = fixture((d) => appendFileSync(join(d, "pi-adapter/src/index.ts"), 'export * as c from "@nimblenewt/controller";\n'));
   assert.ok(errors.some((e) => e.startsWith("pi-adapter: pi-adapter") && e.includes("index.ts imports")), errors.join("\n"));
+});
+
+// ---- F04a: SQL and database drivers stay inside the two adapter folders ----------------------------------------
+
+const addSource = (d, path, text) => { mkdirSync(join(d, path, ".."), { recursive: true }); writeFileSync(join(d, path), text); };
+
+test("rejects SQL text and database drivers in domain code", () => {
+  const cases = [
+    ["controller/src/domain/tasks.ts", 'export const q = "SELECT id, body FROM tasks WHERE id = ?";\n'],
+    ["controller/src/domain/tasks.ts", 'export const q = `INSERT INTO tasks (id) VALUES (1)`;\n'],
+    ["controller/src/domain/tasks.ts", 'db.exec("CREATE TABLE t (id TEXT)");\n'],
+    ["api/src/x.ts", 'import { DatabaseSync } from "node:sqlite";\n'],
+    ["api/src/x.ts", 'import pg from "pg";\n'],
+    ["worker/src/x.ts", 'import Database from "better-sqlite3";\n'],
+    ["controller/src/storage/memory.ts", 'import { Client } from "pg/lib/client";\n'],
+    ["controller/src/storage/sqlite-notes.ts", 'export const q = "DELETE FROM x";\n'],
+    ["controller/src/domain/a.ts", 'const q = "UPDATE tasks SET state = 1";\n'],
+    ["controller/src/domain/a.ts", "const q = 'insert into tasks values (1)';\n"],
+    ["controller/src/domain/a.ts", 'const q = `INSERT INTO t VALUES (1) ON CONFLICT DO NOTHING`;\n'],
+    ["controller/src/domain/a.ts", 'const q = `\n  select id\n  from tasks`;\nconst r = "select id from tasks";\n'],
+    ["controller/src/domain/a.ts", 'const q = "merge into t using s";\n'],
+  ];
+  for (const [path, text] of cases) {
+    const errors = fixture((d) => addSource(d, path, text));
+    assert.ok(errors.some((e) => e.includes(path.split("/").slice(1).join("/")) && /contains SQL|database driver/.test(e)), `${path}: ${text}\n${errors.join("\n")}`);
+  }
+});
+
+test("allows SQL and drivers inside the adapter folders, and ordinary words elsewhere", () => {
+  for (const folder of DATABASE_FOLDERS) {
+    const errors = fixture((d) => addSource(d, `${folder}x.ts`, 'import { DatabaseSync } from "node:sqlite";\nexport const q = "SELECT a FROM t";\n'));
+    assert.deepEqual(errors.filter((e) => /contains SQL|database driver/.test(e)), [], folder);
+  }
+  const errors = fixture((d) => addSource(d, "controller/src/domain/words.ts", "// select the rows from the list; insert into the queue; delete from memory; update the doc and set it\n/* it's fine to say update x set y */\nexport const x = \"choose the best from the menu\";\n"));
+  assert.deepEqual(errors.filter((e) => /contains SQL/.test(e)), []);
 });

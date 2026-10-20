@@ -1,6 +1,6 @@
 // F01 package-boundary rules. Pure function so it can be tested against fixtures.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { basename, join, normalize, relative } from "node:path";
+import { basename, join, normalize, relative, sep } from "node:path";
 
 /** Runtime dependencies each package may declare and import. Anything else is a violation. */
 export const ALLOWED = {
@@ -12,6 +12,19 @@ export const ALLOWED = {
   worker: [],
   ui: [],
 };
+
+/**
+ * Only these folders may talk to a database. Everything else (domain services, API, workers) uses the typed storage
+ * contract, so no SQL, driver or connection can leak into domain code (card F04a).
+ */
+export const DATABASE_FOLDERS = ["controller/src/storage/sqlite/", "controller/src/storage/postgres/"];
+const DATABASE_DRIVERS = new Set(["node:sqlite", "sqlite3", "better-sqlite3", "pg", "pg-pool", "postgres", "mysql", "mysql2", "@electric-sql/pglite", "embedded-postgres", "knex", "kysely", "drizzle-orm", "typeorm", "sequelize", "@prisma/client"]);
+/** A tripwire for SQL written in source: statement forms in upper case anywhere in a file. */
+const SQL_TEXT = /\b(?:INSERT\s+INTO|DELETE\s+FROM|UPDATE\s+\S+\s+SET|MERGE\s+INTO|ON\s+CONFLICT|CREATE\s+(?:TABLE|INDEX|UNIQUE\s+INDEX)|ALTER\s+TABLE|DROP\s+TABLE|SELECT\s[^;'"`\n]{1,200}\sFROM)\b/;
+/** The same forms in any letter case, but only inside string and template literals (comments and prose are skipped). */
+const SQL_LITERAL = /\b(?:insert\s+into|delete\s+from|update\s+\S+\s+set|merge\s+into|on\s+conflict|create\s+(?:table|index|unique\s+index)|alter\s+table|drop\s+table|select\s[^;'"`\n]{1,200}\sfrom)\b/i;
+const LITERALS = /"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`/g;
+const hasSql = (text) => SQL_TEXT.test(text) || (text.match(LITERALS) ?? []).some((literal) => SQL_LITERAL.test(literal));
 
 const SPECIFIER = /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)["']([^"']+)["']/g;
 const EXACT = /^\d+\.\d+\.\d+$/;
@@ -55,7 +68,13 @@ export function checkBoundaries(packagesDir, allowed = ALLOWED) {
     const srcDir = join(pkgPath, "src");
     if (existsSync(srcDir)) {
       for (const file of sourceFiles(srcDir)) {
-        for (const [, specifier] of readFileSync(file, "utf8").matchAll(SPECIFIER)) {
+        const text = readFileSync(file, "utf8");
+        const where = relative(packagesDir, file).split(sep).join("/");
+        if (!DATABASE_FOLDERS.some((folder) => where.startsWith(folder))) {
+          if (hasSql(text)) errors.push(`${dir}: ${where} contains SQL; only ${DATABASE_FOLDERS.join(" and ")} may`);
+          for (const [, specifier] of text.matchAll(SPECIFIER)) if (DATABASE_DRIVERS.has(specifier) || DATABASE_DRIVERS.has(packageName(specifier))) errors.push(`${dir}: ${where} imports the database driver ${specifier}; only ${DATABASE_FOLDERS.join(" and ")} may`);
+        }
+        for (const [, specifier] of text.matchAll(SPECIFIER)) {
           if (specifier.startsWith(".") || specifier.startsWith("node:")) continue;
           const name = packageName(specifier);
           if (!permitted.includes(name)) errors.push(`${dir}: ${relative(packagesDir, file)} imports ${name}, which is not allowed`);

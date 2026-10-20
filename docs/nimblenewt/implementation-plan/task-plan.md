@@ -174,6 +174,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F04a — Define transactional controller storage contract
 
 - **Parent:** N02 / AII-252.
+- **Status:** implemented; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Typed storage contract, canonical JSON/hash/validation rules, error classification, bounded retry with ambiguous-commit resolution, in-memory reference store, fault injector, shared conformance suite (about 90 cases, including epoch fencing of every write and atomic receipt/timer/effect reconciliation) and a build check that keeps SQL and drivers out of non-adapter code. Verified against the reference store only; real SQLite/PostgreSQL conformance is F04b/F04c.
 - **Blockers:** F01, G02, G03.
 - **Deliverable:** Typed domain operations and shared semantic fixtures.
 - **Acceptance and verification:** Atomic transition plus audit/outbox; unique IDs and payload mismatch; revision/epoch checks; consistent data types, transaction boundaries and ambiguous-commit resolution; no raw SQL in domain services.
