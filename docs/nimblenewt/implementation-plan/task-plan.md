@@ -194,7 +194,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F04c — Implement PostgreSQL controller storage adapter
 
 - **Parent:** N02 / AII-252.
-- **Status:** implemented; record [implementation-notes.md](implementation-notes.md).
+- **Status:** implemented; commits `257e630`; record [implementation-notes.md](implementation-notes.md).
 - **Progress note:** PostgreSQL controller storage adapter on pg 8.23.1: bounded pool, READ COMMITTED with row-level rules (ON CONFLICT, conditional UPDATE, FOR SHARE epoch fence, SKIP LOCKED claims, counter-row sequence numbers), explicit verified server settings, driver-error classification. Passes the shared conformance suite and PostgreSQL-specific concurrency, deadlock, lock-timeout, pool-bound and connection-cut tests against a real PostgreSQL 17.10 server. Only 17.10 qualified; supported versions are an open owner decision; Windows/macOS runs and throughput not yet evidenced.
 - **Blockers:** F04a.
 - **Deliverable:** PostgreSQL adapter and schema with bounded pool and retry policy.
