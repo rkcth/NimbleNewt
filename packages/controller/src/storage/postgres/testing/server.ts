@@ -1,5 +1,5 @@
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { spawnSync, type ChildProcess } from "node:child_process";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import net from "node:net";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -57,6 +57,49 @@ function hydrateSymlinks(embeddedDir: string): void {
   }
 }
 
+const hex = (code: number): string => `0x${(code >>> 0).toString(16).toUpperCase().padStart(8, "0")}`;
+
+/** Describes a process exit as decimal and 32-bit hex: on Windows a process that dies at once usually exits with an NTSTATUS code (0xC0000135 = a DLL was not found). */
+function describeExit(code: number | null, signal: NodeJS.Signals | null): string {
+  return `exit code ${code === null ? "none" : `${code} (${hex(code)})`}, signal ${signal ?? "none"}`;
+}
+
+/**
+ * The library does not say why a server that exits at once exited, and assigns its child process some moments after start()
+ * begins. Look for the handle every millisecond for a while, report an exit that has already happened, and listen for the rest.
+ */
+function watchProcess(getProcess: () => ChildProcess | undefined, note: (line: string) => void): void {
+  let tries = 0;
+  const timer = setInterval(() => {
+    const proc = getProcess();
+    if (proc === undefined) { if (++tries > 400) { clearInterval(timer); note("no postgres process handle appeared within 400 ms of start()"); } return; }
+    clearInterval(timer);
+    note(`postgres process started, pid ${proc.pid ?? "none"}`);
+    if (proc.exitCode !== null || proc.signalCode !== null) note(`postgres process had already ended: ${describeExit(proc.exitCode, proc.signalCode)}`);
+    proc.on("exit", (code, signal) => note(`postgres process exited: ${describeExit(code, signal)}`));
+    proc.on("close", (code, signal) => note(`postgres process stdio closed: ${describeExit(code, signal)}`));
+    proc.on("error", (error) => note(`postgres process error: ${error.message}`));
+  }, 1);
+  timer.unref();
+}
+
+/** Facts gathered only when the server fails to start, to tell a missing library from a bad environment from a bad data directory. */
+function diagnoseStartFailure(embeddedPackageDir: string, dataDirectory: string, port: number): string[] {
+  const lines: string[] = [];
+  const binDir = join(binariesDir(embeddedPackageDir), "native", "bin");
+  const executable = join(binDir, process.platform === "win32" ? "postgres.exe" : "postgres");
+  const run = spawnSync(executable, ["--version"], { encoding: "utf8", timeout: 20_000 });
+  lines.push(`diagnosis: postgres --version -> ${run.error !== undefined ? `spawn error ${run.error.message}` : `${describeExit(run.status, run.signal)}; stdout ${JSON.stringify(run.stdout?.trim() ?? "")}; stderr ${JSON.stringify(run.stderr?.trim() ?? "")}`}`);
+  try { lines.push(`diagnosis: bin directory ${binDir}: ${readdirSync(binDir).join(", ")}`); } catch (error) { lines.push(`diagnosis: cannot list ${binDir}: ${error instanceof Error ? error.message : String(error)}`); }
+  const path = process.env.PATH ?? process.env.Path ?? "";
+  lines.push(`diagnosis: cwd ${process.cwd()}; PATH length ${path.length}; PATH contains the bin directory: ${path.toLowerCase().includes(binDir.toLowerCase())}; port ${port}; node ${process.version}`);
+  try { lines.push(`diagnosis: data directory ${dataDirectory}: ${readdirSync(dataDirectory).slice(0, 40).join(", ")}`); } catch (error) { lines.push(`diagnosis: cannot list data directory: ${error instanceof Error ? error.message : String(error)}`); }
+  for (const file of ["postmaster.pid", "postmaster.opts"]) {
+    try { lines.push(`diagnosis: ${file}: ${JSON.stringify(readFileSync(join(dataDirectory, file), "utf8").slice(0, 300))}`); } catch { /* not there */ }
+  }
+  return lines;
+}
+
 /** Starts a real PostgreSQL server on a free loopback port in a temporary directory. `flags` are extra `postgres` options. */
 export async function startEmbeddedServer(flags: readonly string[] = [], baseDirectory: string = tmpdir()): Promise<TestServer> {
   const require = createRequire(import.meta.url);
@@ -68,7 +111,15 @@ export async function startEmbeddedServer(flags: readonly string[] = [], baseDir
   const port = await freePort();
   // Keep what the server and initdb say: when startup stalls, this is the only evidence there is.
   const log: string[] = [];
-  const keep = (message: unknown) => { log.push(String(message).trim()); if (log.length > 60) log.shift(); };
+  // Also echoed as it happens, prefixed so a CI annotation can show the server's last words even when the process running the tests
+  // ends before any test can report them.
+  let echo = false; // initdb is chatty and almost never the problem; echo from the moment the server is started
+  const keep = (message: unknown) => {
+    const line = String(message).trim();
+    log.push(line);
+    if (log.length > 60) log.shift();
+    if (echo) for (const part of line.split(/\r?\n/).slice(0, 6)) process.stderr.write(`[embedded-postgres] server: ${part.slice(0, 300)}\n`);
+  };
   // Bind to the IPv4 loopback only: nothing outside this machine can reach the test server, and no name resolution is involved.
   const settings = { databaseDir: join(directory, "data"), port, user: USER, password: PASSWORD, persistent: true, postgresFlags: ["-c", "listen_addresses=127.0.0.1", ...flags], onLog: keep, onError: keep };
   let server = new EmbeddedPostgres(settings);
@@ -96,7 +147,18 @@ export async function startEmbeddedServer(flags: readonly string[] = [], baseDir
   };
   try {
     await step("initdb", 120_000, () => server.initialise());
-    await step("starting the server", 60_000, () => server.start());
+    try {
+      await step("starting the server", 60_000, () => {
+        echo = true;
+        const starting = server.start();
+        watchProcess(() => (server as unknown as { process?: ChildProcess }).process, keep);
+        return starting;
+      });
+    } catch (error) {
+      const facts = diagnoseStartFailure(join(embeddedDir, ".."), join(directory, "data"), port);
+      for (const line of facts) keep(line);
+      throw new Error(`${error instanceof Error ? error.message : String(error)}\n${facts.join("\n")}`, { cause: error });
+    }
     // Create the database ourselves, by address: the library connects to the name "localhost", which resolves differently on different platforms and Node versions.
     await step("creating the test database", 30_000, async () => { await withClient(url("postgres"), async (c) => { await c.query('CREATE DATABASE "nimblenewt_test"'); }); });
   } catch (error) {
