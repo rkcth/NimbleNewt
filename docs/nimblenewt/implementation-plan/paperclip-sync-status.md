@@ -15,3 +15,13 @@ October 19, 2026: card statuses and progress evidence (commits, CI runs) were ad
 2026-10-20 (later): cards F04h (refuse unsupported environments unless explicitly overridden) and D04 (detailed real-world QA, the last item) were added to the plan (owner decisions); like F04f and F04g they are not in Paperclip.
 
 2026-10-20 (later): QA checkpoint cards Y01, Y02 and Y03 were added to the plan (owner request); like F04f to F04h and D04 they are not in Paperclip.
+
+2026-10-20 (Paperclip board synchronized with the plan): Claude Code, at Rob's direction (not an agent run, and not a human approval), updated the Paperclip cards for completed work and added the cards missing from the board. Changes were made through the Paperclip API under the owner's board account. Only cards whose plan status is `implemented` were touched; cards that are `planned`, and G01 and G02 (`implemented-awaiting-signoff`), were left as they were.
+
+- Marked done, each with a "Completion record" comment (commits, CI runs, written record, delivered summary, review note): G03 (AII-659), G07 (AII-642), F02 (AII-644), F04a (AII-646), F04b (AII-648), F04c (AII-649), F04d (AII-651), F04 (AII-652), F07 (AII-650), S01 (AII-654), S06 (AII-655).
+- Already done, comment added for the audit trail only: F01 (AII-643), F03 (AII-645), F05 (AII-647), F06 (AII-653). These four had been set to done earlier on 2026-10-19/20 by Claude Code, without an evidence comment.
+- Cards created from the plan, using the October 16 card format (plan parent, native blockers from `depends_on`, N00 AII-250 as the gate, unassigned): F04f (AII-856, marked done with a completion comment), F04g (AII-857, marked done with a completion comment), F04h (AII-858), D04 (AII-859), Y01 (AII-860), Y02 (AII-861), Y03 (AII-862). The last five are Backlog.
+- One reversal: G02 (AII-656) was set to `in_review` for a short time on 2026-10-19 and returned to Backlog at Rob's request. It is not complete, and its status and comments are unchanged since.
+- Not changed: N00 (AII-250) and its hold, every assignment, every other Backlog card. No agent was woken: all touched cards were unassigned with no running work.
+
+The Paperclip board now holds 135 NimbleNewt cards: 17 done and 118 Backlog. `paperclip-import.json` is unchanged. It still maps only the original 105 cards and carries the SHA-256 of the October 16 manifest. The seven cards above, and the status of the completed ones, are recorded here and in each card's comments rather than in that file.
