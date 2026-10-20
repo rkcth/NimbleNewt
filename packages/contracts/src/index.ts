@@ -254,6 +254,11 @@ export interface ConversationPort {
   /** Read-only status: the result if the request has settled, `undefined` otherwise; never waits, never resumes work. */
   lookup(requestId: RequestId): Promise<SemanticResult | undefined>;
   abort(): Promise<AbortReport>;
+  /**
+   * Compact the model-visible context now. Explicit by design: compaction is never an incidental effect of asking a question.
+   * Older entries stay in the history. Refused while interrupted work is held.
+   */
+  compact(instructions?: string): Promise<void>;
   retainedRequests(): Promise<RetainedRequest[]>;
   readmit(requestId: RequestId, newRequestId: RequestId): Promise<SubmissionPort>;
   branch(request: BranchRequest): Promise<BranchPort>;

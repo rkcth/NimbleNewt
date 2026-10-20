@@ -4,3 +4,4 @@ export { MINIMUM_NODE_VERSION, PINNED_PI_DURABLE_VERSION, assertSupportedRuntime
 export { fingerprintOf, fingerprintsMatch, mapReason } from "./results.js";
 export { turnBoundaries } from "./branches.js";
 export { canonicalJson, digestHistory } from "./checkpoints.js";
+export { SUPPORTED_CAPABILITIES, UNSUPPORTED_CAPABILITIES, type Capability, type UnsupportedCapability } from "./capabilities.js";
