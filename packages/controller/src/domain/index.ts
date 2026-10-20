@@ -17,3 +17,7 @@ export {
   INBOX_LIMITS, InboxService, inboxMessageId,
   type AdmissionOutcome, type AdmissionResult, type Admission, type AdmitMessage, type IncomingMessage, type InboxMessageBody, type InboxState, type SettleMessage,
 } from "./inbox.js";
+export {
+  EFFECT_LIMITS, EffectRejected, EffectService,
+  type EffectBody, type EffectBridge, type EffectOutcome, type EffectRequest, type EffectServiceOptions, type IntendEffect, type Reconciliation, type ResolveEffect,
+} from "./effects.js";

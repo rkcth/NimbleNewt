@@ -10,11 +10,13 @@
  * - `stale_epoch`: this controller is no longer the primary. Stop writing.
  * - `fenced`: the caller acted under an ownership generation or attempt that is no longer current (card S02). Nothing was written; re-read the assignment.
  * - `payload_changed`: a delivery ID already received arrived again with a different payload (card S04). Nothing was changed; the sender is faulty.
+ * - `effect_uncertain`: an external effect may or may not have happened and the target cannot be asked, so it is not retried blindly (card S05); a person resolves it.
+ * - `effect_busy`: another executor holds the effect right now; try again after its lease.
  * - `integrity`: stored content is missing or does not match its recorded hash (artifacts, card S06). It must not be used.
  * - `unavailable`: storage could not complete the command (busy beyond the retry budget, unreachable). The command may be retried
  *   with the same command ID: it applies once.
  */
-export type DomainErrorCode = "invalid_command" | "command_conflict" | "stale_revision" | "not_found" | "invalid_transition" | "stale_epoch" | "integrity" | "fenced" | "payload_changed" | "unavailable";
+export type DomainErrorCode = "invalid_command" | "command_conflict" | "stale_revision" | "not_found" | "invalid_transition" | "stale_epoch" | "integrity" | "fenced" | "payload_changed" | "effect_uncertain" | "effect_busy" | "unavailable";
 
 export class DomainError extends Error {
   readonly code: DomainErrorCode;

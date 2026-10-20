@@ -332,7 +332,10 @@ export class AssignmentService {
     }
   }
 
-  #guard(taskIdInput: string, fenceInput: Fence): FenceGuard {
+  /** The guard that makes a write atomic with the current ownership: used for task writes here and for effects (card S05). */
+  guardFor(fence: Fence): FenceGuard { return this.#guard("", fence); }
+
+  #guard(_unused: string, fenceInput: Fence): FenceGuard {
     const fence = checkFence(fenceInput);
     return {
       payload: { fence: fence as unknown as JsonObject },

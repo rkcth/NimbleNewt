@@ -45,6 +45,8 @@ export interface Built {
   readonly outbox?: readonly OutboxEntry[];
   readonly effects?: readonly EffectEntry[];
   readonly timers?: readonly TimerEntry[];
+  /** Moves effects forward in the ledger in the same transaction (card S05). */
+  readonly settle?: readonly { readonly effectId: string; readonly outcome: "uncertain" | "confirmed" | "failed"; readonly evidence?: JsonObject }[];
   readonly audit?: readonly AuditEntry[];
   /**
    * What a lost race on any of the command's guarded records means in the command's own terms. Without it, a lost race on a record the
@@ -140,7 +142,7 @@ export class CommandRunner {
     const input: OperationInput = {
       operationId, epoch: this.epoch, actor: meta.actor, correlationId: operationId, at: this.#clock(),
       changes: built.changes, audit: [{ type, subject: built.ref, detail: { commandDigest: digest, ...built.detail } }, ...(built.audit ?? [])],
-      outbox: built.outbox ?? [], effects: built.effects ?? [], timers: built.timers ?? [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [],
+      outbox: built.outbox ?? [], effects: built.effects ?? [], timers: built.timers ?? [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: built.settle ?? [],
     };
     let result: OperationResult;
     try {
