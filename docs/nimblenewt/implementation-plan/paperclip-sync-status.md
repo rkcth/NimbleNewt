@@ -13,3 +13,5 @@ October 19, 2026: card statuses and progress evidence (commits, CI runs) were ad
 2026-10-20: cards F04f and F04g were added to the plan (owner decisions); they are not in Paperclip, which still holds the 105 imported cards.
 
 2026-10-20 (later): cards F04h (refuse unsupported environments unless explicitly overridden) and D04 (detailed real-world QA, the last item) were added to the plan (owner decisions); like F04f and F04g they are not in Paperclip.
+
+2026-10-20 (later): QA checkpoint cards Y01, Y02 and Y03 were added to the plan (owner request); like F04f to F04h and D04 they are not in Paperclip.

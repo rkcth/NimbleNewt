@@ -45,7 +45,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N15 / AII-265 | Q01, Q02, Q03 |
 | N16 / AII-266 | B01 |
 | N17 / AII-267 | K01, K02, K03, K04, K05 |
-| N18 / AII-268 | G06, X09, X10, X01, X02, X03, X04, X05, X06, X07, X08 |
+| N18 / AII-268 | G06, X09, X10, X01, X02, X03, X04, X05, X06, X07, X08, Y01, Y02, Y03 |
 | N19 / AII-269 | D01, D02, D03, D04 |
 | N07a / AII-519 | U01, T04 |
 | N10a / AII-520 | U02, T05 |
@@ -365,7 +365,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### A01 — Implement authenticated principals and capabilities
 
 - **Parent:** N06 / AII-256.
-- **Blockers:** S01, F02, S09.
+- **Blockers:** S01, F02, S09, Y01.
 - **Deliverable:** Owner/agent/host identities and scoped capability checks.
 - **Acceptance and verification:** Spoofed actor and cross-project access rejected; permission checks cover API and tool paths; secrets redacted.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
@@ -733,7 +733,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### P02 — Implement isolated coding workspaces and integration
 
 - **Parent:** N14 / AII-264.
-- **Blockers:** P01, A04, L04.
+- **Blockers:** P01, A04, L04, Y02.
 - **Deliverable:** Worktree/workspace adapter and integration contract.
 - **Acceptance and verification:** Dirty/untracked work survives interruption; conflicting integration revalidates evidence; no metadata pollution of target checkout.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
@@ -741,7 +741,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### P03 — Implement non-code and sandbox operations adapters
 
 - **Parent:** N14 / AII-264.
-- **Blockers:** P01, T01, S05.
+- **Blockers:** P01, T01, S05, Y02.
 - **Deliverable:** Research/documentation/design deliverables and simulated service operations.
 - **Acceptance and verification:** Non-code task produces accepted artifact; operational effect records verified target; scoped repair cannot affect collateral service.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
@@ -773,7 +773,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### B01 — Implement production/improvement budget admission
 
 - **Parent:** N16 / AII-266.
-- **Blockers:** H03, R02, Q01.
+- **Blockers:** H03, R02, Q01, Y03.
 - **Deliverable:** P/PC accounting, reservations and limits.
 - **Acceptance and verification:** Reflection/experiments/monitoring charged; production review remains P; no quota busywork or catch-up debt.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
@@ -837,7 +837,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### K04 — Implement selected standby replication and recovery watermarks
 
 - **Parent:** N17 / AII-267.
-- **Blockers:** K01, K03, H09.
+- **Blockers:** K01, K03, H09, Y03.
 - **Deliverable:** SQLite recovery and native PostgreSQL replication/promotion integration plus artifact/workflow recovery manifest.
 - **Acceptance and verification:** Distinguish database failover from controller promotion; test configured synchronous/asynchronous loss behavior, writable-primary reconnection and uncertain commits; no custom PostgreSQL replication protocol; measure lag and loss window; missing blobs or workflow state prevent unsafe promotion; backups remain independently restorable; replicated standby is an optional installation capability with controlled promotion.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
@@ -960,4 +960,28 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Blockers:** D03.
 - **Deliverable:** Automated and manual QA run on the completed product on the owner's real macOS and Windows machines and on Linux, with a written plan and evidence for each platform.
 - **Acceptance and verification:** Detailed plan agreed with the owner before the run: install from a clean checkout and from the release artifact, full automated suite repeated, real-agent trial with a real model provider approved by the owner, long-running and restart scenarios, crash and power-loss style kills, unattended operation, antivirus and filesystem behaviour on Windows, sleep and network change on laptops, every supported PostgreSQL major released in the last three years re-verified, supported OS release floors confirmed; results recorded per platform; failures raised as typed blockers; this is the last item of the plan and the owner accepts it.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### Y01 — QA checkpoint 1: durable core
+
+- **Parent:** N18 / AII-268.
+- **Blockers:** S09, F04h.
+- **Deliverable:** Cross-platform QA of the completed durable core (storage on both backends, assignment, delivery, inbox, effect ledger, reconciliation, waits, artifacts, environment check) before security and agent layers are built on it.
+- **Acceptance and verification:** Scenario set run on Linux, macOS and Windows: repeated kill and restart at every durable boundary, no lost acknowledged work or duplicated effect, artifact integrity after kills, unsupported environment refused and overridden as designed, suite repeated five times per platform with no flaky failure left unexplained; evidence recorded per platform. Each checkpoint has two parts: an automated part (an integration scenario set run by the QA workflow on Linux, macOS and Windows with crash and restart kills, extended from scripts/qa.mjs) that must pass, and a real-hardware run on the owner's Mac, Windows and Linux machines that the owner runs and signs off. Failures are raised as typed blockers and fixed before the layers above are built; the owner may waive the real-hardware part for a checkpoint explicitly, and the waiver is recorded. Not a substitute for the final D04..
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### Y02 — QA checkpoint 2: isolation, stop and recovery
+
+- **Parent:** N18 / AII-268.
+- **Blockers:** G05, G06, A06, L04, H09.
+- **Deliverable:** Cross-platform QA of the sandbox and protected filesystem, human pre-commit gate, pause, stop, release and checked resume, and remote reconnect with primary epochs, before the cards that run agent work on them (P02, P03) are built.
+- **Acceptance and verification:** Scenario set run on Linux, macOS and Windows with real sandbox launchers: escape and path-trick attempts refused, pause and stop settle with no unfinished tool action, resume invalidates stale evidence, a worker lost mid-task is fenced and reconciled with no duplicate protected effect, Windows implementation qualified on real Windows; evidence recorded per platform. Each checkpoint has two parts: an automated part (an integration scenario set run by the QA workflow on Linux, macOS and Windows with crash and restart kills, extended from scripts/qa.mjs) that must pass, and a real-hardware run on the owner's Mac, Windows and Linux machines that the owner runs and signs off. Failures are raised as typed blockers and fixed before the layers above are built; the owner may waive the real-hardware part for a checkpoint explicitly, and the waiver is recorded. Not a substitute for the final D04..
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### Y03 — QA checkpoint 3: first complete chat-driven workflow
+
+- **Parent:** N18 / AII-268.
+- **Blockers:** U07, M02, P02, P03, Q02, K03.
+- **Deliverable:** Cross-platform QA of the first end-to-end workflow driven from chat (project, tasks, meeting decision, coding and non-code work, independent QA, backup and migration) before budgets, improvement, standby failover and the release campaigns are built on it.
+- **Acceptance and verification:** Scenario set run on Linux, macOS and Windows from a fresh install using the web chat over a private network: a project is created and finished from chat, restarts and a worker loss mid-way lose nothing, backup restores and a migration rolls back as documented, responsive chat under load; evidence recorded per platform. Each checkpoint has two parts: an automated part (an integration scenario set run by the QA workflow on Linux, macOS and Windows with crash and restart kills, extended from scripts/qa.mjs) that must pass, and a real-hardware run on the owner's Mac, Windows and Linux machines that the owner runs and signs off. Failures are raised as typed blockers and fixed before the layers above are built; the owner may waive the real-hardware part for a checkpoint explicitly, and the waiver is recorded. Not a substitute for the final D04..
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
