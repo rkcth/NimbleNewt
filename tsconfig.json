@@ -1,11 +1,26 @@
 {
   "files": [],
   "references": [
-    { "path": "packages/contracts" },
-    { "path": "packages/pi-adapter" },
-    { "path": "packages/controller" },
-    { "path": "packages/api" },
-    { "path": "packages/worker" },
-    { "path": "packages/ui" }
+    {
+      "path": "packages/contracts"
+    },
+    {
+      "path": "packages/pi-adapter"
+    },
+    {
+      "path": "packages/config"
+    },
+    {
+      "path": "packages/controller"
+    },
+    {
+      "path": "packages/api"
+    },
+    {
+      "path": "packages/worker"
+    },
+    {
+      "path": "packages/ui"
+    }
   ]
 }

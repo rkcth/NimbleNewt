@@ -56,7 +56,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### G01 — Record accepted scope and experiment prerequisites
 
 - **Parent:** N01 / AII-251.
-- **Status:** implemented-awaiting-signoff; record [g01-decision-record.md](g01-decision-record.md).
+- **Status:** implemented-awaiting-signoff; commits `5e2953f`; CI runs 39358055788; record [g01-decision-record.md](g01-decision-record.md).
 - **Progress note:** Consolidates the owner-accepted D1-D7 and the limits; the production/N00 budget, supported PostgreSQL versions and minimum OS versions are open owner decisions listed in the record.
 - **Blockers:** Owner scope/decision input; no implementation activation.
 - **Deliverable:** Decision records for D1-D7, supported versions, workload envelope and budget.
@@ -110,7 +110,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### G07 — Record current architecture and executable task manifest
 
 - **Parent:** N01 / AII-251.
-- **Status:** implemented; record [g07-architecture-and-coverage.md](g07-architecture-and-coverage.md).
+- **Status:** implemented; commits `5e2953f`; CI runs 39358055788; record [g07-architecture-and-coverage.md](g07-architecture-and-coverage.md).
 - **Progress note:** Architecture summary, requirement-coverage matrix (31 accepted areas to cards, with gaps named) and a DAG validation test (scripts/plan.test.mjs).
 - **Blockers:** G01.
 - **Deliverable:** Current design, requirement coverage and validated implementation DAG.
@@ -154,6 +154,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F02 — Implement versioned configuration and secret references
 
 - **Parent:** N02 / AII-252.
+- **Status:** implemented; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** New dependency-free packages/config: schema-versioned configuration with a loader, migration chain, path-addressed validation errors, secret references with redacting resolvers, and a sanitized export/import with preview and mapping. Config history, drafts and concurrent-edit control belong to the controller-backed configuration service (U04).
 - **Blockers:** F01, G02, G03.
 - **Deliverable:** Configuration loader, migrations and example public/private profiles.
 - **Acceptance and verification:** Invalid or unsupported config fails clearly; secrets absent from exported config/logs; private grants excluded from public defaults.

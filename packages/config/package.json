@@ -1,0 +1,21 @@
+{
+  "name": "@nimblenewt/config",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Versioned NimbleNewt configuration: loader, validation, migrations, secret references and sanitized export. No runtime dependencies.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "examples"
+  ],
+  "scripts": {
+    "test": "node ../../scripts/run-package-tests.mjs"
+  }
+}

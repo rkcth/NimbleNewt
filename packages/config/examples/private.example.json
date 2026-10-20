@@ -1,0 +1,44 @@
+{
+  "configVersion": 1,
+  "profile": "private",
+  "installation": {
+    "name": "example-private",
+    "dataDir": "/srv/example/nimblenewt-data",
+    "workspaces": {
+      "main-checkout": { "path": "/srv/example/checkouts/project" }
+    }
+  },
+  "controller": {
+    "storage": { "kind": "postgres", "url": { "secret": "controller.database-url" }, "maxConnections": 10 }
+  },
+  "limits": { "productiveAttempts": 4, "perHost": 2, "inquirySlots": 2 },
+  "execution": {
+    "isolation": "trusted-host",
+    "trustedHost": { "authorizedBy": "example-owner", "reason": "builds need the host toolchain until the sandbox image exists" }
+  },
+  "models": {
+    "providers": {
+      "local": { "adapter": "openai-compatible", "endpoint": "http://127.0.0.1:8000/v1", "enabled": true, "paid": false, "models": ["local-coder"] },
+      "example-cloud": {
+        "adapter": "openai-compatible",
+        "endpoint": "https://api.example.invalid/v1",
+        "credential": { "secret": "example-cloud.api-key" },
+        "enabled": true,
+        "paid": true,
+        "models": ["example-model"]
+      }
+    },
+    "difficulty": {
+      "simple": ["local/local-coder"],
+      "demanding": ["example-cloud/example-model", "local/local-coder"]
+    }
+  },
+  "api": { "remoteExposure": true },
+  "approvals": {
+    "preset": "tight",
+    "grants": [
+      { "id": "owner-git-push", "action": "git.push", "scope": "main-checkout", "visibility": "private", "expires": "2027-01-31" },
+      { "id": "read-docs", "action": "fs.read", "scope": "docs", "visibility": "public" }
+    ]
+  }
+}

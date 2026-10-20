@@ -5,6 +5,7 @@ import { basename, join, normalize, relative } from "node:path";
 /** Runtime dependencies each package may declare and import. Anything else is a violation. */
 export const ALLOWED = {
   contracts: [],
+  config: [],
   "pi-adapter": ["@nimblenewt/contracts", "@earendil-works/chord", "@earendil-works/pi-ai", "@earendil-works/pi-durable"],
   controller: [],
   api: [],

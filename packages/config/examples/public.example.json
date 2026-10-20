@@ -1,0 +1,30 @@
+{
+  "configVersion": 1,
+  "profile": "public",
+  "installation": {
+    "name": "example",
+    "dataDir": "{{dataDir}}",
+    "workspaces": {}
+  },
+  "controller": {
+    "storage": { "kind": "sqlite", "path": "{{sqlitePath}}" }
+  },
+  "models": {
+    "providers": {
+      "fake": { "adapter": "fake", "enabled": true, "paid": false, "models": ["scripted"] },
+      "example-cloud": {
+        "adapter": "openai-compatible",
+        "endpoint": "https://api.example.invalid/v1",
+        "credential": { "secret": "example-cloud.api-key" },
+        "enabled": false,
+        "paid": true,
+        "models": ["example-model"]
+      }
+    },
+    "difficulty": {
+      "simple": ["fake/scripted"],
+      "medium": ["fake/scripted"],
+      "demanding": ["fake/scripted"]
+    }
+  }
+}
