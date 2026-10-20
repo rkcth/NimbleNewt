@@ -1,41 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { after, test } from "node:test";
 import { FaultInjectingStorage } from "../storage/faults.js";
 import { MemoryStorage } from "../storage/memory.js";
-import { PostgresStorage } from "../storage/postgres/index.js";
-import { startTestServer, withClient, type TestServer } from "../storage/postgres/testing/server.js";
-import { SqliteStorage, SqliteWorkerStorage } from "../storage/sqlite/index.js";
 import type { ControllerStorage } from "../storage/types.js";
 import { DomainError, TRANSITIONS, derivedId, isDomainError, type DomainErrorCode, type TaskState } from "./index.js";
 import { ProjectService } from "./service.js";
+import { backends, stopServer, type World } from "./testing/backends.js";
 
-let serverPromise: Promise<TestServer> | undefined;
-const server = (): Promise<TestServer> => (serverPromise ??= startTestServer());
-after(async () => { if (serverPromise !== undefined) await (await serverPromise).stop(); });
-
-interface World { readonly storage: ControllerStorage; close(): Promise<void> }
-const backends: { name: string; open(): Promise<World> }[] = [
-  { name: "reference store", open: async () => { const storage = new MemoryStorage(); return { storage, close: () => storage.close() }; } },
-  { name: "SQLite", open: async () => {
-    const dir = mkdtempSync(join(tmpdir(), "nn-domain-"));
-    const storage = await SqliteStorage.open({ path: join(dir, "c.sqlite") });
-    return { storage, close: async () => { await storage.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } };
-  } },
-  { name: "SQLite on a worker thread", open: async () => {
-    const dir = mkdtempSync(join(tmpdir(), "nn-domain-"));
-    const storage = await SqliteWorkerStorage.open({ path: join(dir, "c.sqlite") });
-    return { storage, close: async () => { await storage.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } };
-  } },
-  { name: "PostgreSQL", open: async () => {
-    const s = await server();
-    const schema = `domain_${process.pid}_${Math.random().toString(36).slice(2, 8)}`;
-    const storage = await PostgresStorage.open({ connectionString: s.url(), schema });
-    return { storage, close: async () => { await storage.close(); await withClient(s.url(), async (c) => { await c.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); }); } };
-  } },
-];
+after(stopServer);
 
 const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, check?: (error: DomainError) => void): Promise<void> => {
   await assert.rejects(run, (error: unknown) => {

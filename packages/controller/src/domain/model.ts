@@ -59,6 +59,7 @@ const REPOSITORY_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const COMMAND_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 const PROJECT_ID = /^proj-[a-z2-7]{20}$/;
 const TASK_ID = /^task-[a-z2-7]{20}$/;
+const ARTIFACT_ID = /^art-[a-z2-7]{20}$/;
 
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 
@@ -79,6 +80,7 @@ export const commandId = (value: unknown): string => {
 };
 export const actor = (value: unknown): string => text(value, "actor", { min: 1, max: LIMITS.actor });
 export const projectId = (value: unknown): string => (typeof value === "string" && PROJECT_ID.test(value) ? value : invalid("projectId", "is not a project ID"));
+export const artifactId = (value: unknown): string => (typeof value === "string" && ARTIFACT_ID.test(value) ? value : invalid("artifactId", "is not an artifact ID"));
 export const taskId = (value: unknown): string => (typeof value === "string" && TASK_ID.test(value) ? value : invalid("taskId", "is not a task ID"));
 export function revision(value: unknown, field = "expectedRevision"): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) return invalid(field, "must be a whole number of at least 1");

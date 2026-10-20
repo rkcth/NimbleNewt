@@ -8,10 +8,11 @@
  * - `not_found`: the project or task does not exist.
  * - `invalid_transition`: the task cannot move from its current state to the requested one.
  * - `stale_epoch`: this controller is no longer the primary. Stop writing.
+ * - `integrity`: stored content is missing or does not match its recorded hash (artifacts, card S06). It must not be used.
  * - `unavailable`: storage could not complete the command (busy beyond the retry budget, unreachable). The command may be retried
  *   with the same command ID: it applies once.
  */
-export type DomainErrorCode = "invalid_command" | "command_conflict" | "stale_revision" | "not_found" | "invalid_transition" | "stale_epoch" | "unavailable";
+export type DomainErrorCode = "invalid_command" | "command_conflict" | "stale_revision" | "not_found" | "invalid_transition" | "stale_epoch" | "integrity" | "unavailable";
 
 export class DomainError extends Error {
   readonly code: DomainErrorCode;
