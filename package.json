@@ -13,9 +13,11 @@
     "clean": "node scripts/clean-dist.mjs",
     "build": "tsc --build",
     "check:deps": "node scripts/check-package-boundaries.mjs",
-    "test": "npm run clean && npm run build && npm run check:deps && npm run licenses:check && node --test \"scripts/*.test.mjs\" && npm run test --workspaces --if-present",
+    "test": "npm run clean && npm run build && npm run check:deps && npm run licenses:check && npm run roadmap:check && node --test \"scripts/*.test.mjs\" && npm run test --workspaces --if-present",
     "licenses:write": "node scripts/license-inventory.mjs --write",
-    "licenses:check": "node scripts/license-inventory.mjs --check"
+    "licenses:check": "node scripts/license-inventory.mjs --check",
+    "roadmap:write": "node scripts/roadmap.mjs --write",
+    "roadmap:check": "node scripts/roadmap.mjs --check"
   },
   "devDependencies": {
     "@types/node": "22.20.5",

@@ -2,6 +2,8 @@
 
 **Current task definitions; execution held at N00. Live Paperclip import status is recorded separately in paperclip-sync-status.md.**
 
+> **Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item. Card statuses and progress are generated from the PROGRESS table in scripts/generate_task_plan.py: edit that table, not this file.** This file is generated; run `python3 scripts/generate_task_plan.py` then `npm run roadmap:write`.
+
 The existing 23 issues remain workstream parents. N00/AII-250 remains the explicit implementation gate; it is not a coding task. The cards below are proposed children, not replacements for existing history. Parent IDs refer to the current planning backlog. Machine-readable source: [task-plan.json](task-plan.json).
 
 ## Execution rules applying to every card
@@ -62,6 +64,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### G02 — Accept the Pi adapter first milestone
 
 - **Parent:** N03 / AII-253.
+- **Status:** implemented-awaiting-signoff; commits `fe494f9`; CI runs 39356097952; record [g02-acceptance.md](g02-acceptance.md).
+- **Progress note:** Acceptance suite and record written and CI green on all six cells; needs real macOS/Windows QA and owner acceptance.
 - **Blockers:** F05, F06, F03.
 - **Deliverable:** Tests importing the actual NimbleNewt Pi adapter with pinned runtime and deterministic providers on Mac/Linux/Windows.
 - **Acceptance and verification:** Semantic tool output reaches next model step; exact inquiry fork leaves parent unchanged; unchanged and selective-update resumes; task A/B context separation; abort during streaming and partial tool arguments; no unfinished tool action; queued input retained; real process kill and fresh-process restoration; same request ID deduplicated; compaction preserves historical branch recovery; typecheck and lockfile retained; actual adapter code, not a parallel probe; record unsupported capabilities and block dependent feature acceptance.
@@ -134,6 +138,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F01 — Create TypeScript package boundaries
 
 - **Parent:** N02 / AII-252.
+- **Status:** implemented; commits `9318464`.
+- **Progress note:** Delivered with F03/F05 on the Pi-first path; boundary checker, strict TypeScript, locked dependencies.
 - **Blockers:** G07.
 - **Deliverable:** Minimal TypeScript Pi adapter package, shared contracts and test runner; other packages are boundary placeholders.
 - **Acceptance and verification:** Clean typecheck/build and dependency checks; real adapter test entry point; no controller or database implementation required to begin Pi work.
@@ -150,6 +156,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F03 — Establish portable CI and test fixtures
 
 - **Parent:** N02 / AII-252.
+- **Status:** implemented; commits `10b12c5`, `bfbaeb2`; CI runs 39341276543.
+- **Progress note:** Matrix CI, offline guard, offline fixtures, license inventory; the first run failed on Windows and was fixed in bfbaeb2.
 - **Blockers:** F01.
 - **Deliverable:** macOS/Linux/Windows pipelines and offline fixtures.
 - **Acceptance and verification:** Fresh checkouts build and run offline smoke tests on all selected versions; locked dependencies and license inventory captured.
@@ -206,6 +214,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F05 — Implement pinned Pi adapter submission contract
 
 - **Parent:** N03 / AII-253.
+- **Status:** implemented; commits `24019e5`; CI runs 39343771217.
 - **Blockers:** F01.
 - **Deliverable:** Typed adapter mapping request IDs and semantic results.
 - **Acceptance and verification:** Duplicate submit returns original result; output sentinel retained; unknown tool/command and unsupported runtime fail explicitly.
@@ -214,6 +223,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F06 — Implement adapter checkpoints and cancellation mapping
 
 - **Parent:** N03 / AII-253.
+- **Status:** implemented; commits `b764bef`, `51e545c`, `b3b6e0f`, `e559db0`, `23eb5f3`, `8abbb11`, `faf4738`, `12d1db7`, `7c85449`; CI runs 39344954150, 39346341366, 39347068717, 39347963920, 39349319911, 39350464195, 39350846384, 39351488611, 39355119190.
+- **Progress note:** Delivered in nine reviewed pieces: F06a handles/restart, F06b branches/updates, F06c1 abort/readmission, F06c2a hold, F06c2b context decisions, F06c2c branch lifecycle, F06d1 checkpoints, F06d2 controller boundary/audit/recovery, F06e independent tasks.
 - **Blockers:** F05.
 - **Deliverable:** Real Pi adapter branch, checkpoint, abort and fresh-process restoration APIs; typed controller integration boundary.
 - **Acceptance and verification:** Retain parent context across inquiry branch; selective update applied once; adapter-owned queued input survives cancellation; incomplete tool calls never execute; retained commands require later controller readmission; no controller database prerequisite; controller inbox bridge is integrated and tested in S09.

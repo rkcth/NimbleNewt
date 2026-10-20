@@ -111,11 +111,30 @@ D02|N19|Finish developer/API/security and license guidance|T05,K03,F03|Architect
 D03|N19|Approve release readiness and publication decision|X08,D01,D02|Exact release manifest, known limitations and owner signoff|All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision
 '''
 parents={f'N{i:02d}':f'AII-{250+i}' for i in range(20)};parents.update(N07a='AII-519',N10a='AII-520',N16a='AII-615')
+# Progress is recorded here, not edited into the generated files, so regenerating keeps it. Statuses: planned (default),
+# implemented (accepted by the card's own acceptance), implemented-awaiting-signoff (built and passing, but the card still
+# needs sign-off the implementer cannot give, such as real-hardware QA or the owner). `reviewed_by` is the independent
+# AI reviewer that approved the work before it was committed; it is not a substitute for human review where a card asks for it.
+# `ci_runs` are GitHub Actions runs where all six cells (ubuntu/macOS/Windows x Node 22.19.0/24.21.0) passed.
+PROGRESS={
+ 'F01':dict(status='implemented',commits=['9318464'],note='Delivered with F03/F05 on the Pi-first path; boundary checker, strict TypeScript, locked dependencies.'),
+ 'F03':dict(status='implemented',commits=['10b12c5','bfbaeb2'],ci_runs=['39341276543'],note='Matrix CI, offline guard, offline fixtures, license inventory; the first run failed on Windows and was fixed in bfbaeb2.'),
+ 'F05':dict(status='implemented',commits=['24019e5'],ci_runs=['39343771217']),
+ 'F06':dict(status='implemented',commits=['b764bef','51e545c','b3b6e0f','e559db0','23eb5f3','8abbb11','faf4738','12d1db7','7c85449'],ci_runs=['39344954150','39346341366','39347068717','39347963920','39349319911','39350464195','39350846384','39351488611','39355119190'],note='Delivered in nine reviewed pieces: F06a handles/restart, F06b branches/updates, F06c1 abort/readmission, F06c2a hold, F06c2b context decisions, F06c2c branch lifecycle, F06d1 checkpoints, F06d2 controller boundary/audit/recovery, F06e independent tasks.'),
+ 'G02':dict(status='implemented-awaiting-signoff',commits=['fe494f9'],ci_runs=['39356097952'],record='docs/nimblenewt/implementation-plan/g02-acceptance.md',note='Acceptance suite and record written and CI green on all six cells; needs real macOS/Windows QA and owner acceptance.',roadmap_note='implemented and passing CI; awaiting independent macOS/Windows QA and owner sign-off'),
+}
 tasks=[]
 for line in raw.strip().splitlines():
  id,parent,title,deps,deliverable,accept=line.split('|')
  tasks.append({'id':id,'parent':parent,'existing_issue':parents[parent],'title':title,'depends_on':deps.split(',') if deps else [],'deliverable':deliverable,'acceptance_and_verification':accept,'status':'planned','research_evidence': ('Historical context-and-windows-results.md only; acceptance requires actual NimbleNewt code' if id in ['G02','G03','G04','G05','G06','G08','G09','G10'] else None),'activation_gate':'Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites','attempt_budget':'Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.','continuation':'Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.','completion':'Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.'})
+for t in tasks:
+ p=PROGRESS.get(t['id'])
+ if p:
+  t['status']=p['status']
+  t['progress']={k:v for k,v in p.items() if k!='status'}
+  t['progress']['reviewed_by']='reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan\'s independent-review requirement is still for the owner to judge'
 by={t['id']:t for t in tasks};assert len(by)==len(tasks)
+unknown=set(PROGRESS)-set(by);assert not unknown,unknown
 seen=set();visiting=set()
 def visit(id):
  assert id in by,id
@@ -125,10 +144,12 @@ def visit(id):
  for d in by[id]['depends_on']:visit(d)
  visiting.remove(id);seen.add(id)
 for t in tasks:visit(t['id'])
-(out/'task-plan.json').write_text(json.dumps({'schema_version':1,'status':'implementation-plan-execution-held','baseline_commit':'ecd24cb26ebb6be47c26518237b30c2d0aa6bd56','tasks':tasks},indent=2)+'\n')
+(out/'task-plan.json').write_text(json.dumps({'schema_version':1,'status':'implementation-plan-execution-held','execution_note':"Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item. Card statuses and progress are generated from the PROGRESS table in scripts/generate_task_plan.py: edit that table, not this file.",'baseline_commit':'ecd24cb26ebb6be47c26518237b30c2d0aa6bd56','tasks':tasks},indent=2)+'\n')
 head='''# Proposed Paperclip execution cards
 
 **Current task definitions; execution held at N00. Live Paperclip import status is recorded separately in paperclip-sync-status.md.**
+
+> **Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item. Card statuses and progress are generated from the PROGRESS table in scripts/generate_task_plan.py: edit that table, not this file.** This file is generated; run `python3 scripts/generate_task_plan.py` then `npm run roadmap:write`.
 
 The existing 23 issues remain workstream parents. N00/AII-250 remains the explicit implementation gate; it is not a coding task. The cards below are proposed children, not replacements for existing history. Parent IDs refer to the current planning backlog. Machine-readable source: [task-plan.json](task-plan.json).
 
@@ -156,8 +177,17 @@ rows=['| Existing parent | Proposed children |','| --- | --- |']
 for parent in parents:
  ids=[t['id'] for t in tasks if t['parent']==parent]
  rows.append(f"| {parent} / {parents[parent]} | {', '.join(ids) if ids else 'Owner-controlled implementation activation gate'} |")
+def status_md(t):
+ if t['status']=='planned':return ''
+ p=t['progress'];bits=[f"**Status:** {t['status']}"]
+ if p.get('commits'):bits.append('commits '+', '.join(f'`{c}`' for c in p['commits']))
+ if p.get('ci_runs'):bits.append('CI runs '+', '.join(p['ci_runs']))
+ if p.get('record'):bits.append(f"record [{p['record'].rsplit('/',1)[-1]}]({p['record'].rsplit('/',1)[-1]})")
+ line='- '+'; '.join(bits)+'.\n'
+ if p.get('note'):line+='- **Progress note:** '+p['note']+'\n'
+ return line
 text=head+'\n'.join(rows)+'\n\n## Cards\n'
 for t in tasks:
- text+=f"\n### {t['id']} — {t['title']}\n\n- **Parent:** {t['parent']} / {t['existing_issue']}.\n- **Blockers:** {', '.join(t['depends_on']) or 'Owner scope/decision input; no implementation activation'}.\n- **Deliverable:** {t['deliverable']}.\n- **Acceptance and verification:** {t['acceptance_and_verification']}.\n- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.\n"
+ text+=f"\n### {t['id']} — {t['title']}\n\n- **Parent:** {t['parent']} / {t['existing_issue']}.\n{status_md(t)}- **Blockers:** {', '.join(t['depends_on']) or 'Owner scope/decision input; no implementation activation'}.\n- **Deliverable:** {t['deliverable']}.\n- **Acceptance and verification:** {t['acceptance_and_verification']}.\n- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.\n"
 (out/'task-plan.md').write_text(text)
 print(json.dumps({'tasks':len(tasks),'parents':len(parents),'acyclic':len(seen)==len(tasks),'path':str(out/'task-plan.md')}))

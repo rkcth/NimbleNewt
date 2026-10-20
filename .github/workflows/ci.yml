@@ -34,6 +34,10 @@ jobs:
       - name: Annotate test failure
         if: failure()
         run: node scripts/ci-annotate.mjs test.log
+      # The generated plan files must match their generator (task-plan.json/md come from scripts/generate_task_plan.py).
+      - name: Generated plan files are current
+        if: runner.os == 'Linux'
+        run: python3 scripts/generate_task_plan.py && git diff --exit-code docs/
       # The suite must not rewrite tracked files (e.g. a stale generated inventory).
       - run: git diff --exit-code
       # Real network isolation: rerun the suite in a network namespace with no connectivity. This covers
