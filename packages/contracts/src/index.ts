@@ -101,3 +101,18 @@ export interface RetainedRequest {
   readonly requestId: RequestId;
   readonly request: Extract<AdapterRequest, { kind: "input" | "update" }>;
 }
+
+/** Work a previous process left unfinished in the storage, found when an adapter opens it. */
+export interface InterruptedWork {
+  /** While held, anything that would make progress (submit, abort, compact, waiting) is refused. */
+  readonly held: boolean;
+  readonly conversations: readonly {
+    readonly conversationId: number;
+    /** Live tasks (generations, tool calls) the conversation still has. */
+    readonly tasks: number;
+    /** Requests admitted to the conversation but not yet settled. */
+    readonly requestIds: readonly string[];
+    /** True once every task of the conversation has been marked for abandonment. */
+    readonly abandoned: boolean;
+  }[];
+}

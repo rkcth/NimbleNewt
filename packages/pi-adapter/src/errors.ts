@@ -53,3 +53,19 @@ export class NotRetainedError extends PiAdapterError {
 export class AlreadyReadmittedError extends PiAdapterError {
   override readonly name = "AlreadyReadmittedError";
 }
+
+/**
+ * The storage holds interrupted work and the adapter is on hold: nothing may make progress until the controller has
+ * looked at it (`interrupted()`), optionally abandoned some of it, and released the hold.
+ */
+export class InterruptedWorkError extends PiAdapterError {
+  override readonly name = "InterruptedWorkError";
+  constructor(readonly conversationIds: readonly number[]) {
+    super(`interrupted work in conversation(s) ${conversationIds.join(", ")} must be reviewed and the hold released before anything can make progress`);
+  }
+}
+
+/** Readmission was requested in a way that cannot work, for example under the request's own ID. */
+export class InvalidReadmissionError extends PiAdapterError {
+  override readonly name = "InvalidReadmissionError";
+}

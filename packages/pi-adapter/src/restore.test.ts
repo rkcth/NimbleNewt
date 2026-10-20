@@ -62,7 +62,7 @@ test("a real process kill mid-tool is recovered in a fresh process; an unsafe to
   assert.equal(attemptsIn(log), 1);
 
   const adapter = await reopen(dir, [effectTool(log, { killFirstAttempt: false })], [fauxAssistantMessage("recovered")]);
-  adapter.resume();
+  adapter.releaseHold();
   const result = await (await adapter.root().submit(input("kill-1", "do the effect"))).result();
   assert.equal(attemptsIn(log), 1, "an interrupted unsafe tool must not run again");
   assert.equal(result.status, "completed");
@@ -78,7 +78,7 @@ test("a real process kill mid-tool is recovered in a fresh process; a replay-saf
   assert.equal(attemptsIn(log), 1);
 
   const adapter = await reopen(dir, [effectTool(log, { killFirstAttempt: false, replay: "safe" })], [fauxAssistantMessage("recovered")]);
-  adapter.resume();
+  adapter.releaseHold();
   const result = await (await adapter.root().submit(input("kill-1", "do the effect"))).result();
   assert.equal(attemptsIn(log), 2);
   assert.deepEqual([result.status, result.toolCalls[0]?.status, result.toolCalls[0] && "output" in result.toolCalls[0] ? result.toolCalls[0].output : ""], ["completed", "ok", EFFECT_OUTPUT]);
@@ -101,11 +101,12 @@ test("a request fingerprint survives a restart, so reuse with different content 
   await first.root().submit(input("fp-1", "original")); // deliberately never read: no recorded result yet
   await first.close();
   const second = await reopen(dir, [], [fauxAssistantMessage("c")]);
+  second.releaseHold(); // fp-1 was left unfinished, so the hold must be released before anything can be submitted
   await assert.rejects(second.root().submit(input("fp-1", "tampered")), (e) => e instanceof Error && e.name === "RequestIdConflictError");
 });
 
 
-test("reopening storage does not run interrupted work until resume() is called", async () => {
+test("reopening storage does not run interrupted work until the hold is released", async () => {
   const dir = scratch();
   const log = join(dir, "attempts.log");
   killChild(dir, log, "safe");
@@ -113,13 +114,13 @@ test("reopening storage does not run interrupted work until resume() is called",
 
   const adapter = await reopen(dir, [effectTool(log, { killFirstAttempt: false, replay: "safe" })], [fauxAssistantMessage("recovered")]);
   await new Promise((resolve) => setTimeout(resolve, 500));
-  assert.equal(attemptsIn(log), 1, "interrupted work ran without resume()");
+  assert.equal(attemptsIn(log), 1, "interrupted work ran without releasing the hold");
   assert.equal(await adapter.root().recorded(requestId("kill-1")), undefined);
 
-  adapter.resume();
+  adapter.releaseHold();
   const deadline = Date.now() + 20000;
   while (attemptsIn(log) < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
-  assert.equal(attemptsIn(log), 2, "resume() did not continue the interrupted work");
+  assert.equal(attemptsIn(log), 2, "releaseHold() did not continue the interrupted work");
 });
 
 test("lookup() reads a settled request after a restart without starting interrupted work", async () => {

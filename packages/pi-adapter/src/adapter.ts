@@ -1,4 +1,4 @@
-import type { AbortReport, AdapterRequest, BranchRequest, RequestId, RetainedRequest, SemanticResult, ToolCallOutcome } from "@nimblenewt/contracts";
+import type { AbortReport, AdapterRequest, BranchRequest, InterruptedWork, RequestId, RetainedRequest, SemanticResult, ToolCallOutcome } from "@nimblenewt/contracts";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { Models, Static, TSchema } from "@earendil-works/pi-ai";
 import {
@@ -8,7 +8,7 @@ import {
 import { INPUT_KINDS, turnBoundaries } from "./branches.js";
 import {
   AlreadyReadmittedError, ConversationBusyError, InvalidBranchPointError, InvalidToolError, NoBranchPointError, NotRetainedError,
-  RequestIdConflictError, UnknownCommandError,
+  InterruptedWorkError, InvalidReadmissionError, RequestIdConflictError, UnknownCommandError,
 } from "./errors.js";
 import { fingerprintOf, fingerprintsMatch, mapReason } from "./results.js";
 import { assertSupportedRuntime, type RuntimeInfo } from "./runtime.js";
@@ -43,6 +43,12 @@ export interface PiAdapterOptions {
   readonly tools?: readonly AdapterTool[];
   /** Pi Durable harness settings, for example compaction thresholds. */
   readonly settings?: NonNullable<Parameters<typeof Harness.open>[1]["settings"]>;
+  /**
+   * Refuse anything that would make progress while the storage holds interrupted work, until the controller has reviewed
+   * it and called `releaseHold()`. Default true. Pi's scheduler is harness-wide, so without the hold almost any call
+   * (submit, abort, compact, waiting for a result) would silently re-run every interrupted run.
+   */
+  readonly holdInterrupted?: boolean;
   /** Receives Pi Durable's non-fatal reports (for example a throwing listener). */
   readonly onReport?: (error: unknown) => void;
   /** Override runtime detection; for tests of the unsupported-runtime path. */
@@ -149,10 +155,30 @@ function toolOutcome(entry: EntryLike): ToolCallOutcome {
   return { callId, name, status: message.isError === true ? "error" : "ok", output: textOf(message.content) };
 }
 
+/** Shared by an adapter and its conversation handles: whether interrupted work is being held back. */
+class Hold {
+  held: boolean;
+  constructor(held: boolean, private readonly harness: Harness) { this.held = held; }
+
+  /** Throws unless progress is allowed. Called before anything that would start Pi's scheduler. */
+  async assertRunnable(): Promise<void> {
+    if (!this.held) return;
+    throw new InterruptedWorkError(await this.conversationIds());
+  }
+
+  async conversationIds(): Promise<number[]> {
+    const inspection = await this.harness.inspect(context);
+    const ids = new Set<number>();
+    for (const task of inspection.tasks) ids.add(task.record.conversationId as number);
+    for (const submission of inspection.submissions) ids.add(submission.conversationId as number);
+    return [...ids].sort((a, b) => a - b);
+  }
+}
+
 /** One Pi conversation: the root task conversation now, inquiry branches and task contexts from F06b. */
 export class AdapterConversation {
   /** @internal Use `PiAdapter.root()` or `PiAdapter.conversation()`. */
-  constructor(private readonly harness: Harness, private readonly conversation: Conversation, private readonly storage: Storage) {}
+  constructor(private readonly harness: Harness, private readonly conversation: Conversation, private readonly storage: Storage, private readonly hold: Hold) {}
 
   get id(): number {
     return this.conversation.id;
@@ -165,6 +191,7 @@ export class AdapterConversation {
    */
   async submit(request: AdapterRequest): Promise<SubmissionHandle> {
     if (request.kind === "command") throw new UnknownCommandError(request.name, SUPPORTED_COMMANDS);
+    await this.hold.assertRunnable();
     // Record the payload fingerprint before admission: a crash in between leaves a record for the same payload to retry.
     const created = await this.claim(request, fingerprintOf(request));
     let submission: Submission;
@@ -217,7 +244,7 @@ export class AdapterConversation {
           state.branches[id] = { childId: childId as number, forkedAt: at };
         },
       }, context);
-      return { conversation: new AdapterConversation(this.harness, child, this.storage), forkedAt: at };
+      return { conversation: new AdapterConversation(this.harness, child, this.storage, this.hold), forkedAt: at };
     } catch (error) {
       if (!(error instanceof BranchAlreadyExists)) throw error;
       const winner = await this.branchRecord(id);
@@ -236,7 +263,7 @@ export class AdapterConversation {
     }
     const child = await this.harness.conversation(record.childId as never, context);
     if (child === undefined) throw new InvalidBranchPointError(`branch conversation ${record.childId} no longer exists`);
-    return { conversation: new AdapterConversation(this.harness, child, this.storage), forkedAt: record.forkedAt };
+    return { conversation: new AdapterConversation(this.harness, child, this.storage, this.hold), forkedAt: record.forkedAt };
   }
 
   /**
@@ -280,6 +307,7 @@ export class AdapterConversation {
    * tool call is never executed, and Pi leaves it out of the context of later requests.
    */
   async abort(): Promise<AbortReport> {
+    await this.hold.assertRunnable();
     const before = await this.abortedSubmissions();
     await this.conversation.abort(context);
     const aborted: RequestId[] = [];
@@ -308,6 +336,7 @@ export class AdapterConversation {
    * ID; a different one is refused, so a request is never readmitted twice.
    */
   async readmit(id: RequestId, newId: RequestId): Promise<SubmissionHandle> {
+    if (newId === id) throw new InvalidReadmissionError(`request "${id}" cannot be readmitted under its own ID: that would return the aborted submission`);
     const result = await this.lookup(id);
     const record = await this.record(id);
     if (result?.status !== "unanswered" || result.retained !== true || record?.request === undefined) {
@@ -325,7 +354,20 @@ export class AdapterConversation {
       claimedBy = stored.readmittedAs;
     }, context);
     if (claimedBy !== newId) throw new AlreadyReadmittedError(`request "${id}" was already readmitted as "${claimedBy}"`);
-    return this.submit({ ...record.request, requestId: newId });
+    try {
+      return await this.submit({ ...record.request, requestId: newId });
+    } catch (error) {
+      // A typed refusal means nothing was admitted under the new ID, so give the claim back and let the controller retry
+      // with another ID. Other errors leave the claim: the outcome is unknown and a retry with this ID is idempotent.
+      if (error instanceof RequestIdConflictError || error instanceof ConversationBusyError || error instanceof InterruptedWorkError) {
+        await this.conversation.commit(async (tx) => {
+          const state = (await tx.doc(Requests, this.conversation.id)) as unknown as RequestsState;
+          const stored = state.requests[id];
+          if (stored?.readmittedAs === newId) delete stored.readmittedAs;
+        }, context);
+      }
+      throw error;
+    }
   }
 
   private async abortedSubmissions(): Promise<Map<number, SettledSubmissionRecord>> {
@@ -343,6 +385,7 @@ export class AdapterConversation {
 
   /** Compact the conversation's model-visible context now. Older entries stay in storage and results stay readable. */
   async compact(instructions?: string): Promise<void> {
+    await this.hold.assertRunnable();
     const task = await this.conversation.compact(instructions, context);
     await this.harness.waitForTask(task, context);
   }
@@ -405,6 +448,11 @@ export class AdapterConversation {
   private async resultOf(id: RequestId, submission: Submission): Promise<SemanticResult> {
     const stored = (await this.record(id))?.result;
     if (stored !== undefined) return stored;
+    // A settled submission is read from its record, so reading it never starts Pi's scheduler; waiting for an
+    // unsettled one does, and is refused while interrupted work is held.
+    const current = await submission.status(context);
+    if (current.type === "input" && (current.status === "done" || current.status === "unanswered")) return this.settle(id, current);
+    await this.hold.assertRunnable();
     return this.settle(id, await submission.wait(context));
   }
 
@@ -455,7 +503,7 @@ export class AdapterConversation {
 
 /** Maps NimbleNewt requests onto a pinned Pi Durable harness and Pi results back to semantic results. */
 export class PiAdapter {
-  private constructor(private readonly harness: Harness, private readonly rootConversation: Conversation, private readonly storage: Storage) {}
+  private constructor(private readonly harness: Harness, private readonly rootConversation: Conversation, private readonly storage: Storage, private readonly hold: Hold) {}
 
   static async open(options: PiAdapterOptions): Promise<PiAdapter> {
     assertSupportedRuntime(options.runtime);
@@ -491,25 +539,80 @@ export class PiAdapter {
       context,
     );
     const root = await harness.root(context, { agent: { model: options.model } });
-    return new PiAdapter(harness, root, options.storage);
+    // Read-only: finds work a previous process left unfinished without starting the scheduler.
+    const inspection = await harness.inspect(context);
+    const interrupted = inspection.tasks.length > 0 || inspection.submissions.length > 0;
+    return new PiAdapter(harness, root, options.storage, new Hold(interrupted && options.holdInterrupted !== false, harness));
   }
 
   /** The root conversation, created on first use and the same on every reopen of the same storage. */
   root(): AdapterConversation {
-    return new AdapterConversation(this.harness, this.rootConversation, this.storage);
+    return new AdapterConversation(this.harness, this.rootConversation, this.storage, this.hold);
   }
 
   /** Re-acquire an existing conversation by ID, for example after a restart; `undefined` if there is none. */
   async conversation(id: number): Promise<AdapterConversation | undefined> {
     const found = await this.harness.conversation(id as never, context);
-    return found === undefined ? undefined : new AdapterConversation(this.harness, found, this.storage);
+    return found === undefined ? undefined : new AdapterConversation(this.harness, found, this.storage, this.hold);
   }
 
   /**
-   * Start the scheduler so runs a previous process left unfinished continue. Reopening storage does not do this by itself:
-   * the controller decides when interrupted work may run again.
+   * Interrupted work found in the storage, per conversation. Read-only: it never starts the scheduler, so it is safe to
+   * call while the hold is on and the way to decide what to do with that work.
    */
-  resume(): void {
+  async interrupted(): Promise<InterruptedWork> {
+    const inspection = await this.harness.inspect(context);
+    const byConversation = new Map<number, { tasks: number; requestIds: string[]; allMarked: boolean }>();
+    const entry = (id: number) => {
+      let found = byConversation.get(id);
+      if (found === undefined) { found = { tasks: 0, requestIds: [], allMarked: true }; byConversation.set(id, found); }
+      return found;
+    };
+    for (const task of inspection.tasks) {
+      const item = entry(task.record.conversationId as number);
+      item.tasks += 1;
+      if (!task.record.abortRequested) item.allMarked = false;
+    }
+    for (const submission of inspection.submissions) {
+      const item = entry(submission.conversationId as number);
+      if (submission.requestId !== undefined) item.requestIds.push(submission.requestId);
+      if (submission.status === "queued") item.allMarked = false; // nothing to mark: it would be placed and run on release
+    }
+    return {
+      held: this.hold.held,
+      conversations: [...byConversation.entries()].sort(([a], [b]) => a - b)
+        .map(([conversationId, item]) => ({ conversationId, tasks: item.tasks, requestIds: item.requestIds, abandoned: item.tasks > 0 && item.allMarked })),
+    };
+  }
+
+  /**
+   * Mark every live task of the given conversations for abandonment, without starting anything: their interrupted tool
+   * calls and generations will not run again. The abort is carried out (and their requests settle `unanswered`) once the
+   * hold is released. Queued requests that never started are withdrawn and stay retained. Conversations not listed are
+   * untouched.
+   */
+  async abandonInterrupted(conversationIds: readonly number[]): Promise<void> {
+    const wanted = new Set(conversationIds);
+    const inspection = await this.harness.inspect(context);
+    for (const task of inspection.tasks) {
+      if (wanted.has(task.record.conversationId as number) && !task.record.abortRequested) await this.harness.abortTask(task.record.id, context);
+    }
+    // Queued submissions have no task to mark; withdraw them so they cannot start on release. Like any request withdrawn
+    // before starting, they stay available through retainedRequests() and readmit().
+    for (const submission of inspection.submissions) {
+      if (wanted.has(submission.conversationId as number) && submission.status === "queued") {
+        await this.harness.abortSubmission(submission.id, context, submission.conversationId);
+      }
+    }
+  }
+
+  /**
+   * End the hold and start the scheduler: interrupted work that was not abandoned runs again (tools declared replay-safe
+   * re-run; others are reported to the model as interrupted). Also the way to start the scheduler when nothing is held.
+   * Pi's scheduler is harness-wide, so this resumes every conversation that was not abandoned.
+   */
+  releaseHold(): void {
+    this.hold.held = false;
     this.harness.resume();
   }
 

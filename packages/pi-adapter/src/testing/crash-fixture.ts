@@ -1,4 +1,5 @@
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import type { AdapterTool } from "../adapter.js";
 
@@ -24,4 +25,29 @@ export function effectTool(logFile: string, options: { killFirstAttempt: boolean
       return EFFECT_OUTPUT;
     },
   };
+}
+
+/**
+ * Tools for the two-conversation crash scenario. In the child, toolA blocks forever and toolB waits until toolA has
+ * started and then kills the process; in the parent both just log and return (replay-safe).
+ */
+export function twoConversationTools(dir: string, options: { child: boolean }): AdapterTool[] {
+  const log = (name: string) => appendFileSync(join(dir, `${name}.log`), "x\n");
+  return [
+    {
+      name: "toolA", description: "Blocks in the child", parameters: Type.Object({}), replay: "safe",
+      execute: async () => { log("toolA"); if (options.child) await new Promise(() => {}); return "A-DONE"; },
+    },
+    {
+      name: "toolB", description: "Kills the child once toolA has started", parameters: Type.Object({}), replay: "safe",
+      execute: async () => {
+        log("toolB");
+        if (options.child) {
+          while (!existsSync(join(dir, "toolA.log"))) await new Promise((resolve) => setTimeout(resolve, 20));
+          process.kill(process.pid, "SIGKILL");
+        }
+        return "B-DONE";
+      },
+    },
+  ];
 }

@@ -3,7 +3,7 @@ import { afterEach, test } from "node:test";
 import { requestId, type SemanticResult } from "@nimblenewt/contracts";
 import { fauxAssistantMessage, fauxToolCall, Type } from "@earendil-works/pi-ai";
 import { MemoryStorage } from "@earendil-works/pi-durable";
-import { AlreadyReadmittedError, NoBranchPointError, NotRetainedError, PiAdapter, type AdapterTool } from "./index.js";
+import { AlreadyReadmittedError, InvalidReadmissionError, NoBranchPointError, NotRetainedError, PiAdapter, RequestIdConflictError, type AdapterTool } from "./index.js";
 import { OFFLINE_MODEL_REF, createOfflineModels } from "./testing/offline.js";
 
 const adapters: PiAdapter[] = [];
@@ -189,4 +189,24 @@ test("the instruction of a request that had started and was aborted stays in the
   // Pi keeps an aborted, started request's input in later context. Nothing re-runs it, but the model can see it and may
   // act on it. Changing this (hide the entry, or frame it as aborted) is the F06c2 decision; a change must update this test.
   assert.ok(nextSaw.includes("DELETE-ALL-FILES-INSTRUCTION"));
+});
+
+test("readmitting under the request's own ID is refused", async () => {
+  const w = await busyWithQueue();
+  await w.conversation.abort();
+  await w.b.result();
+  await assert.rejects(w.conversation.readmit(requestId("B"), requestId("B")), InvalidReadmissionError);
+});
+
+test("a readmission refused because the new ID is taken gives the claim back, so another new ID still works", async () => {
+  const w = await busyWithQueue();
+  await w.conversation.abort();
+  await w.b.result();
+  // "taken" is already used by a different request, so submitting B's payload under it is a conflict.
+  w.faux.setResponses([fauxAssistantMessage("taken answer"), fauxAssistantMessage("B finally")]);
+  await (await w.conversation.submit(input("taken", "a different payload"))).result();
+  await assert.rejects(w.conversation.readmit(requestId("B"), requestId("taken")), RequestIdConflictError);
+  assert.deepEqual((await w.conversation.retainedRequests()).map((r) => r.requestId), ["B", "C"], "the refused readmission should not hide B");
+  const retry = await w.conversation.readmit(requestId("B"), requestId("B-retry"));
+  assert.equal((await retry.result()).status, "completed");
 });
