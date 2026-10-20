@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **22 of 112 tasks implemented**, 2 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **25 of 112 tasks implemented**, 2 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -172,15 +172,15 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 16
 
-- [ ] **S07** Implement startup and periodic reconciliation _(needs S03, S04, S05)_
+- [x] **S07** Implement startup and periodic reconciliation _(needs S03, S04, S05)_
 
 ### Phase 17
 
-- [ ] **S08** Implement typed waits and deadline settlement _(needs S04, S07)_
+- [x] **S08** Implement typed waits and deadline settlement _(needs S04, S07)_
 
 ### Phase 18
 
-- [ ] **S09** Verify the durable vertical slice _(needs S05, S06, S07, S08, F06, G02, G03)_
+- [x] **S09** Verify the durable vertical slice _(needs S05, S06, S07, S08, F06, G02, G03)_
 
 ### Phase 19
 

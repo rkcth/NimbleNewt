@@ -351,6 +351,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### S07 — Implement startup and periodic reconciliation
 
 - **Parent:** N04 / AII-254.
+- **Status:** implemented; commits `40bd4bd`; CI runs 39494505537; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Startup and periodic reconciliation: a Reconciler pass reads durable state only (no wake-ups, no model) and announces tasks lacking an event, delivers due messages with bounded retry, admits received inbox messages and recovers started effects; scans keep durable cursors; each step and item is isolated so one bad record cannot stop a pass; handler failures are counted and a message that keeps failing is held with one visible blocker that a person resolves; manual holds are respected and never cleared by a pass; a trouble that returns after a blocker was resolved opens a new blocker. Tested on four backends. CI run 39494505537 is green on all six cells.
 - **Blockers:** S03, S04, S05.
 - **Deliverable:** Deterministic repair scan, cursors and bounded retry.
 - **Acceptance and verification:** Drop wakeups and restart dispatcher; pending work found without LLM; manual hold preserved; exhausted retries create visible blocker.
@@ -359,6 +361,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### S08 — Implement typed waits and deadline settlement
 
 - **Parent:** N04 / AII-254.
+- **Status:** implemented; commits `8544c5c`; CI runs 39497378879; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Typed waits and deadline settlement: a wait names its reason, resolver, summary and next action and either a deadline with what happens at it (resume, cancel, escalate) or an explicit indefinite hold with its owner; opening it blocks the task, schedules the deadline and announces the change in one transaction; only the named resolver can answer while the wait is open and the task is still blocked; a late answer to a closed wait or cancelled task is refused and revives nothing; an answer racing a deadline yields one outcome; the reconciler settles deadlines, closes waits whose task is no longer blocked, opens overdue blockers and flags blocked tasks nothing explains. Tested on four backends. CI run 39497378879 is green on all six cells.
 - **Blockers:** S04, S07.
 - **Deliverable:** Wait reasons, resolver IDs, deadlines and terminal outcomes.
 - **Acceptance and verification:** No waiting task lacks next action or explicit indefinite owner hold; late answer cannot revive cancelled operation.
@@ -367,6 +371,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### S09 — Verify the durable vertical slice
 
 - **Parent:** N04 / AII-254.
+- **Status:** implemented; commits `6c7b5b2`; CI runs 39499789791; record [s09-acceptance-report.md](s09-acceptance-report.md).
+- **Progress note:** Integrated fault harness and first acceptance report: the path from a chat-command stub to a worker result (assignment, delivery, inbox admission, the controller inbox bridge to a conversation, a fenced effect through the ledger, an artifact, a recovery point, completion) is crashed at each of 129 enumerated boundaries (every storage write including taking the epoch, blob steps, the outside effect, the conversation, the bridge), restarted under a new epoch and required to equal a clean run: all 129 on the reference store and SQLite, 20 on SQLite on a worker thread and on PostgreSQL, 10 real SIGKILLs, and 18 real SIGKILLs with the real Pi adapter (tests-only packages/integration) including with the model request in flight. Adds ConversationBridge and RecoveryPoints; found and fixed an unbounded retry loop in the effect ledger. Waits, timers and delivery retries are not on the crash path; the cross-OS and real-hardware parts of QA checkpoint Y01 are not claimed by this card. CI run 39499789791 is green on all six cells.
 - **Blockers:** S05, S06, S07, S08, F06, G02, G03.
 - **Deliverable:** Integrated fault harness and first acceptance report.
 - **Acceptance and verification:** Chat-command stub through worker result survives every enumerated crash boundary; exact effects and owner generation agree after restart.

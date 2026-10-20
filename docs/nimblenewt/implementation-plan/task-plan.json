@@ -838,12 +838,23 @@
       ],
       "deliverable": "Deterministic repair scan, cursors and bounded retry",
       "acceptance_and_verification": "Drop wakeups and restart dispatcher; pending work found without LLM; manual hold preserved; exhausted retries create visible blocker",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "40bd4bd"
+        ],
+        "ci_runs": [
+          "39494505537"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Startup and periodic reconciliation: a Reconciler pass reads durable state only (no wake-ups, no model) and announces tasks lacking an event, delivers due messages with bounded retry, admits received inbox messages and recovers started effects; scans keep durable cursors; each step and item is isolated so one bad record cannot stop a pass; handler failures are counted and a message that keeps failing is held with one visible blocker that a person resolves; manual holds are respected and never cleared by a pass; a trouble that returns after a blocker was resolved opens a new blocker. Tested on four backends. CI run 39494505537 is green on all six cells.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "S08",
@@ -856,12 +867,23 @@
       ],
       "deliverable": "Wait reasons, resolver IDs, deadlines and terminal outcomes",
       "acceptance_and_verification": "No waiting task lacks next action or explicit indefinite owner hold; late answer cannot revive cancelled operation",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "8544c5c"
+        ],
+        "ci_runs": [
+          "39497378879"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Typed waits and deadline settlement: a wait names its reason, resolver, summary and next action and either a deadline with what happens at it (resume, cancel, escalate) or an explicit indefinite hold with its owner; opening it blocks the task, schedules the deadline and announces the change in one transaction; only the named resolver can answer while the wait is open and the task is still blocked; a late answer to a closed wait or cancelled task is refused and revives nothing; an answer racing a deadline yields one outcome; the reconciler settles deadlines, closes waits whose task is no longer blocked, opens overdue blockers and flags blocked tasks nothing explains. Tested on four backends. CI run 39497378879 is green on all six cells.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "S09",
@@ -879,12 +901,23 @@
       ],
       "deliverable": "Integrated fault harness and first acceptance report",
       "acceptance_and_verification": "Chat-command stub through worker result survives every enumerated crash boundary; exact effects and owner generation agree after restart",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "6c7b5b2"
+        ],
+        "ci_runs": [
+          "39499789791"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/s09-acceptance-report.md",
+        "note": "Integrated fault harness and first acceptance report: the path from a chat-command stub to a worker result (assignment, delivery, inbox admission, the controller inbox bridge to a conversation, a fenced effect through the ledger, an artifact, a recovery point, completion) is crashed at each of 129 enumerated boundaries (every storage write including taking the epoch, blob steps, the outside effect, the conversation, the bridge), restarted under a new epoch and required to equal a clean run: all 129 on the reference store and SQLite, 20 on SQLite on a worker thread and on PostgreSQL, 10 real SIGKILLs, and 18 real SIGKILLs with the real Pi adapter (tests-only packages/integration) including with the model request in flight. Adds ConversationBridge and RecoveryPoints; found and fixed an unbounded retry loop in the effect ledger. Waits, timers and delivery retries are not on the crash path; the cross-OS and real-hardware parts of QA checkpoint Y01 are not claimed by this card. CI run 39499789791 is green on all six cells.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "A01",
