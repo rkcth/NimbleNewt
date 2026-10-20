@@ -90,3 +90,11 @@ export class TooManyBranchesError extends PiAdapterError {
     super(`this conversation already has ${limit} active branches; discard one first`);
   }
 }
+
+/** A checkpoint cannot be used: it is damaged, from an incompatible runtime, or the history it refers to has changed. */
+export class CheckpointRejectedError extends PiAdapterError {
+  override readonly name = "CheckpointRejectedError";
+  constructor(readonly reason: string, readonly detail: string) {
+    super(`checkpoint rejected (${reason}): ${detail}`);
+  }
+}

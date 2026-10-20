@@ -1,5 +1,5 @@
 import type {
-  AbortReport, AdapterRequest, BranchInfo, BranchRequest, InterruptedWork, RequestId, RetainedRequest, SemanticResult, ToolCallOutcome, UpdateSource,
+  AbortReport, AdapterRequest, BranchInfo, BranchRequest, Checkpoint, CheckpointVerdict, InterruptedWork, RequestId, RetainedRequest, SemanticResult, ToolCallOutcome, UpdateSource,
 } from "@nimblenewt/contracts";
 import type { JsonValue } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
@@ -9,12 +9,14 @@ import {
   type Conversation, type SettledSubmissionRecord, type Storage, type Submission, type SubmissionDraft,
 } from "@earendil-works/pi-durable";
 import { startsRequestSegment, turnBoundaries } from "./branches.js";
+import { digestHistory } from "./checkpoints.js";
 import {
-  AlreadyReadmittedError, BranchDiscardedError, ConversationBusyError, InvalidBranchPointError, InvalidToolError, NoBranchPointError, NotRetainedError,
+  AlreadyReadmittedError, BranchDiscardedError, CheckpointRejectedError, ConversationBusyError, InvalidBranchPointError, InvalidToolError, NoBranchPointError, NotRetainedError,
   InterruptedWorkError, InvalidReadmissionError, NotHeldError, RequestIdConflictError, TooManyBranchesError, UnknownCommandError,
 } from "./errors.js";
 import { fingerprintOf, fingerprintsMatch, mapReason } from "./results.js";
-import { assertSupportedRuntime, type RuntimeInfo } from "./runtime.js";
+import { CONTRACTS_VERSION } from "@nimblenewt/contracts";
+import { PINNED_PI_DURABLE_VERSION, assertSupportedRuntime, type RuntimeInfo } from "./runtime.js";
 
 /** Commands the adapter accepts. None exist yet; F06 adds branch, checkpoint and abort commands. */
 const SUPPORTED_COMMANDS: readonly string[] = [];
@@ -156,6 +158,8 @@ interface EntryLike {
   readonly kind: string;
   readonly model?: readonly unknown[];
   readonly data?: unknown;
+  readonly head?: unknown;
+  readonly edits?: unknown;
 }
 
 function textOf(content: unknown): string {
@@ -419,6 +423,46 @@ export class AdapterConversation {
     const child = await this.harness.conversation(record.childId as never, context);
     if (child === undefined) throw new InvalidBranchPointError(`branch conversation ${record.childId} no longer exists`);
     return { conversation: new AdapterConversation(this.harness, child, this.shared), forkedAt: record.forkedAt, discarded: record.discarded === true };
+  }
+
+  /**
+   * A checkpoint of this conversation at a completed-turn boundary (by default the latest, exactly as for `branch()`): a
+   * portable record that lets a controller later confirm the history is intact and that this runtime can continue from it.
+   * Read-only; allowed while interrupted work is held. A turn still in progress is not part of it.
+   */
+  async checkpoint(options: { readonly at?: number } = {}): Promise<Checkpoint> {
+    const entries = await this.scan(0, options.at);
+    const boundaries = turnBoundaries(entries);
+    const at = options.at ?? boundaries.at(-1);
+    if (at === undefined) throw new NoBranchPointError(`conversation ${this.id} has no completed turn to checkpoint`);
+    if (!boundaries.includes(at)) throw new InvalidBranchPointError(`entry ${at} is not a completed-turn boundary of conversation ${this.id}`);
+    return {
+      format: 1,
+      conversationId: this.id,
+      at,
+      digest: digestHistory(entries.filter((entry) => entry.id <= at)),
+      runtimeVersion: PINNED_PI_DURABLE_VERSION,
+      contractsVersion: CONTRACTS_VERSION,
+    };
+  }
+
+  /**
+   * Whether a checkpoint of this conversation still describes it: known format, a runtime that can continue from it, the
+   * entry exists and is a completed-turn boundary, and the history up to it is byte-for-byte what was checkpointed.
+   * Later turns and compaction do not invalidate it. Read-only.
+   */
+  async verifyCheckpoint(checkpoint: Checkpoint): Promise<CheckpointVerdict> {
+    const reject = (reason: Extract<CheckpointVerdict, { valid: false }>["reason"], detail: string): CheckpointVerdict => ({ valid: false, reason, detail });
+    if (checkpoint.format !== 1) return reject("unsupported_format", `checkpoint format ${String(checkpoint.format)} is not understood`);
+    if (checkpoint.runtimeVersion !== PINNED_PI_DURABLE_VERSION || checkpoint.contractsVersion !== CONTRACTS_VERSION) {
+      return reject("incompatible_runtime", `checkpoint is from runtime ${checkpoint.runtimeVersion} / contracts ${checkpoint.contractsVersion}; this adapter supports ${PINNED_PI_DURABLE_VERSION} / ${CONTRACTS_VERSION} only (no forward migration yet)`);
+    }
+    if (checkpoint.conversationId !== this.id) return reject("unknown_conversation", `checkpoint is for conversation ${checkpoint.conversationId}, not ${this.id}`);
+    const prefix = await this.scan(0, checkpoint.at);
+    if (prefix.at(-1)?.id !== checkpoint.at) return reject("unknown_entry", `entry ${checkpoint.at} does not exist in conversation ${this.id}`);
+    if (!turnBoundaries(prefix).includes(checkpoint.at)) return reject("not_a_boundary", `entry ${checkpoint.at} is not a completed-turn boundary`);
+    if (digestHistory(prefix) !== checkpoint.digest) return reject("history_changed", `the history of conversation ${this.id} up to entry ${checkpoint.at} is not what was checkpointed`);
+    return { valid: true };
   }
 
   /**
@@ -776,6 +820,29 @@ export class PiAdapter {
   async conversation(id: number): Promise<AdapterConversation | undefined> {
     const found = await this.harness.conversation(id as never, context);
     return found === undefined ? undefined : new AdapterConversation(this.harness, found, this.shared);
+  }
+
+  /**
+   * Whether a checkpoint still describes its conversation (see `AdapterConversation.verifyCheckpoint`). A conversation
+   * that does not exist is `unknown_conversation`. Read-only; allowed while interrupted work is held.
+   */
+  async verifyCheckpoint(checkpoint: Checkpoint): Promise<CheckpointVerdict> {
+    if (checkpoint.format !== 1) return { valid: false, reason: "unsupported_format", detail: `checkpoint format ${String(checkpoint.format)} is not understood` };
+    const conversation = await this.conversation(checkpoint.conversationId);
+    if (conversation === undefined) return { valid: false, reason: "unknown_conversation", detail: `conversation ${checkpoint.conversationId} does not exist` };
+    return conversation.verifyCheckpoint(checkpoint);
+  }
+
+  /**
+   * Restore the task context a checkpoint refers to as a new conversation: verify it, then branch its conversation at the
+   * checkpoint's entry. Later turns of the original are not part of the result. Idempotent by request ID, like any branch.
+   * Throws `CheckpointRejectedError` if the checkpoint does not verify.
+   */
+  async restoreCheckpoint(checkpoint: Checkpoint, requestId: RequestId): Promise<AdapterBranch> {
+    const verdict = await this.verifyCheckpoint(checkpoint);
+    if (!verdict.valid) throw new CheckpointRejectedError(verdict.reason, verdict.detail);
+    const conversation = await this.conversation(checkpoint.conversationId);
+    return conversation!.branch({ requestId, at: checkpoint.at });
   }
 
   /**

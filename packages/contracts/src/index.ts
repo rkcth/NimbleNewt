@@ -142,3 +142,34 @@ export interface BranchInfo {
   /** A discarded branch is closed to new work; its transcript stays readable. */
   readonly discarded: boolean;
 }
+
+/**
+ * A portable, verifiable reference to a conversation at a completed-turn boundary. It holds no conversation content: the
+ * history lives in the runtime's storage, and the checkpoint lets a controller confirm later (after a restart, on another
+ * worker, after an upgrade) that the history it refers to is intact and that this runtime can continue from it.
+ */
+export interface Checkpoint {
+  /** Layout of this record; a runtime rejects formats it does not know. */
+  readonly format: 1;
+  readonly conversationId: number;
+  /** The entry the checkpoint is taken after: a completed-turn boundary. */
+  readonly at: number;
+  /** Digest of the conversation's history up to and including `at` (see the adapter for the exact form). */
+  readonly digest: string;
+  /** Exact version of the agent runtime the history was written by. */
+  readonly runtimeVersion: string;
+  /** Version of these shared contracts when the checkpoint was taken. */
+  readonly contractsVersion: number;
+}
+
+export type CheckpointRejection =
+  | "unsupported_format"
+  | "incompatible_runtime"
+  | "unknown_conversation"
+  | "unknown_entry"
+  | "not_a_boundary"
+  | "history_changed";
+
+export type CheckpointVerdict =
+  | { readonly valid: true }
+  | { readonly valid: false; readonly reason: CheckpointRejection; readonly detail: string };

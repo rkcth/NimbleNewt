@@ -70,6 +70,9 @@ test("interrupted work is reported read-only, and everything that would make pro
   await assert.rejects(root.abort(), InterruptedWorkError);
   await assert.rejects(root.compact(), InterruptedWorkError);
   await assert.rejects(root.discardBranch(requestId("side")), InterruptedWorkError);
+  // Checkpoints are read-only, so they work while held and start nothing.
+  const heldCheckpoint = await root.checkpoint();
+  assert.deepEqual(await adapter.verifyCheckpoint(heldCheckpoint), { valid: true });
   assert.deepEqual((await root.listBranches()).map((b) => [b.requestId, b.discarded]), [["side", false]], "a refused discard must not mark the branch");
   // Reads are allowed and do not disturb anything.
   assert.equal(await root.lookup(requestId("req-a")), undefined);
