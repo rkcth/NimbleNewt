@@ -4,7 +4,7 @@ Records what was run, on which servers, and what the support statement is. The m
 
 ## The support statement
 
-**PostgreSQL 17 and above is supported** (the owner's decision of 2026-10-20). The adapter now refuses a server older than 17 at open, with a message naming the minimum (the code floor was 14 before this card). PostgreSQL 14, 15 and 16 are run through the same suites and reported below; a pass there is information, not a promise. Whether to narrow support to the two most recent majors is a later owner decision; this card does not make it.
+**PostgreSQL 17 and above is supported** (the owner's decision of 2026-10-20). The adapter now refuses a server older than 17 at open, with a message naming the minimum (the code floor was 14 before this card). PostgreSQL 14, 15 and 16 are run through the same suites and reported below; a pass there is information, not a promise. Whether to narrow support to the two most recent majors is a later owner decision; this card does not make it. Later decisions (2026-10-20, see the G01 record): an older server will refuse to start unless explicitly overridden, with instructions on how to test that version (card F04h; today there is no override), and before launch every major released in the last three years is to be validated.
 
 ## What is run
 

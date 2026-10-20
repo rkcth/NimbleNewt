@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **17 of 107 tasks implemented**, 2 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **17 of 109 tasks implemented**, 2 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -158,6 +158,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 13
 
+- [ ] **F04h** Refuse unsupported environments unless explicitly overridden _(needs F04g)_
 - [ ] **S02** Implement assignment generations and attempt admission _(needs S01, F05)_
 - [ ] **S03** Implement durable transition delivery _(needs S01)_
 
@@ -326,7 +327,11 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 40
 
-- [ ] **D03** Approve release readiness and publication decision _(needs X08, D01, D02)_
+- [ ] **D03** Approve release readiness and publication decision _(needs X08, D01, D02, F04h)_
+
+### Phase 41
+
+- [ ] **D04** Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
 _Note: F01 started before its prerequisite planning records G01 and G07 were formally closed; G01 is still not fully closed._
 
 ## More detail

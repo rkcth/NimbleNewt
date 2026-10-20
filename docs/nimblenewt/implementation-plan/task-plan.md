@@ -29,7 +29,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | --- | --- |
 | N00 / AII-250 | Owner-controlled implementation activation gate |
 | N01 / AII-251 | G01, G04, G07, G08 |
-| N02 / AII-252 | F01, F02, F03, F04a, F04b, F04c, F04d, F04, F04f, F04g, F04e |
+| N02 / AII-252 | F01, F02, F03, F04a, F04b, F04c, F04d, F04, F04f, F04g, F04h, F04e |
 | N03 / AII-253 | G02, G03, G09, G10, F05, F06, F07, C06 |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, C03 |
 | N05 / AII-255 | L05, L01, L02, L03, L04, H08 |
@@ -46,7 +46,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N16 / AII-266 | B01 |
 | N17 / AII-267 | K01, K02, K03, K04, K05 |
 | N18 / AII-268 | G06, X09, X10, X01, X02, X03, X04, X05, X06, X07, X08 |
-| N19 / AII-269 | D01, D02, D03 |
+| N19 / AII-269 | D01, D02, D03, D04 |
 | N07a / AII-519 | U01, T04 |
 | N10a / AII-520 | U02, T05 |
 | N16a / AII-615 | B02, B03, B04, B05 |
@@ -239,6 +239,14 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Blockers:** F04.
 - **Deliverable:** Qualification run of the PostgreSQL adapter on the latest minor of each major from 14 to current, and the supported-version statement.
 - **Acceptance and verification:** Conformance, parity, crash and migration suites run per major; 17 and above is the claimed support, each lower major is reported as passed or failed without claiming support; the code version floor matches the claim; server version and platform recorded; owner decides later whether to narrow support to the two most recent majors.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### F04h — Refuse unsupported environments unless explicitly overridden
+
+- **Parent:** N02 / AII-252.
+- **Blockers:** F04g.
+- **Deliverable:** Startup check of the PostgreSQL server version and of the operating system, architecture and Node version against the supported list, with a documented override switch.
+- **Acceptance and verification:** An unsupported PostgreSQL major, OS or Node version makes the controller refuse to start with a message that says what was found, what is supported, how to run the project's own verification against that version (the per-major PostgreSQL qualification and the QA script) and the exact switch that overrides the refusal; the override starts the controller, records the override in the audit log and in startup output, and never changes behaviour otherwise; the refusal is a hard stop, not a warning, because warnings are missed; tested for supported, unsupported and overridden cases on every storage backend; the supported list lives in one place.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### F04e — Implement chat-controlled controller database transfer
@@ -941,7 +949,15 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D03 — Approve release readiness and publication decision
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** X08, D01, D02.
+- **Blockers:** X08, D01, D02, F04h.
 - **Deliverable:** Exact release manifest, known limitations and owner signoff.
 - **Acceptance and verification:** All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### D04 — Run detailed real-world QA on macOS, Linux and Windows
+
+- **Parent:** N19 / AII-269.
+- **Blockers:** D03.
+- **Deliverable:** Automated and manual QA run on the completed product on the owner's real macOS and Windows machines and on Linux, with a written plan and evidence for each platform.
+- **Acceptance and verification:** Detailed plan agreed with the owner before the run: install from a clean checkout and from the release artifact, full automated suite repeated, real-agent trial with a real model provider approved by the owner, long-running and restart scenarios, crash and power-loss style kills, unattended operation, antivirus and filesystem behaviour on Windows, sleep and network change on laptops, every supported PostgreSQL major released in the last three years re-verified, supported OS release floors confirmed; results recorded per platform; failures raised as typed blockers; this is the last item of the plan and the owner accepts it.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

@@ -48,6 +48,14 @@ Given by the owner in conversation with the implementing AI session; recorded he
 4. **Numeric defaults and budgets:** the current defaults (PostgreSQL pool of 10, lock and statement timeouts, lease durations, retry bounds, SQLite busy-wait bound) stay as provisional, configurable values labelled **unvalidated**; they are revisited after a trial with real agents. No production target is set.
 5. **QA:** G02 QA runs outside Paperclip for now, as the hand-started `QA` workflow (see [g02-acceptance.md](g02-acceptance.md)).
 
+### Second round, 2026-10-20 (answers to five questions, asked one at a time)
+
+6. **N00 scope and budget:** the owner asked what would cost money. Answer given: the plan's "budget" is the spending limit for AI agent runs; nothing done so far costs money (CI is free on a public repository, tests are offline). Decision: **scope only, no money cap yet.** The Pi-first path is in scope; anything that uses a paid model provider or dispatches Paperclip workers needs the owner's explicit go-ahead first; revisit when the real-agent trial comes up. The N00 gate itself is still the owner's to open and is not opened by this record.
+7. **OS release floors:** claim what CI runs today (the hosted runner releases; the owner's Mac overlaps with them); older releases are untested and not claimed. **Unsupported environments refuse to start unless explicitly overridden** (not silently blocked, and not merely warned): the controller **refuses to start** on an unsupported OS, architecture, Node version or PostgreSQL major, with a message that says what was found, what is supported, how to test that version with the project's own verification, and the exact startup switch that overrides the refusal. A warning alone is rejected because it would be missed. Card F04h. The exact runner versions are to be confirmed and written into the platform table before the check is built.
+8. **Other numbers and defaults** (meeting cadence, voting rules, P/PC allocation, lifecycle limits, update windows, budgets): provisional and configurable, labelled unvalidated, revisited after the real-agent trial.
+9. **PostgreSQL support window:** 17 and above is supported. An older server makes the controller refuse to start, tells the user how to test their version and how to override (card F04h; today the adapter refuses with no override). Before launch, validate every major released in the last three years (possibly just 17 and 18, possibly more); whether to narrow to the two most recent majors is still decided later.
+10. **G02 real-hardware QA:** not done now. The periodic hosted-runner QA continues. Detailed real-world QA on macOS, Linux and Windows (the owner has all three) is planned as the **last item of the plan** (card D04), with automated testing of the completed product. The G02 real-hardware and Linux boxes therefore stay unticked until then; the owner ticks the acceptance box.
+
 ## Budget
 
 - **Decided:** research paid-model spend is capped at $25 total with no automatic overage (D6).
@@ -61,8 +69,8 @@ Given by the owner in conversation with the implementing AI session; recorded he
 
 ## Open owner decisions this record surfaces
 
-1. N00 formal scope and budget (the implementation budget in particular).
+1. ~~N00 formal scope and budget~~ Scope-only record decided 2026-10-20 (no money cap yet; paid model use needs the owner's go-ahead); the N00 gate is still the owner's to open.
 2. ~~Supported PostgreSQL versions~~ Decided 2026-10-20 (17 and above; verification in F04g). Embedded/ephemeral servers in CI are in use.
-3. ~~Minimum OS versions and architectures~~ Decided 2026-10-20 as what CI covers; exact OS release floors and real-hardware qualification remain.
+3. ~~Minimum OS versions and architectures~~ Decided 2026-10-20 as what CI covers; exact OS release floors decided as the CI runner releases (to be confirmed), with refuse-unless-overridden behaviour (F04h); real-hardware qualification moved to the last plan item (D04).
 4. Production and improvement budgets (provisional, configurable storage defaults decided 2026-10-20) and the proposed defaults in the design register that the owner has not set (P/PC allocation, meeting cadence, voting rules, lifecycle limits, update windows).
 5. Acceptance of the G02 milestone and its default decisions (aborted-input framing, update behaviour, branch and task limits, the interrupted-work hold).

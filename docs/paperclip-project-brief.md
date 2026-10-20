@@ -19,7 +19,7 @@ Build a persistent, conversational team of AI agents for one human owner. Agents
 
 ## Current implementation baseline
 
-Use the [consolidated plan](nimblenewt/implementation-plan/README.md) and its machine-readable DAG (105 cards imported into Paperclip; the plan has 107 since 2026-10-20, see [paperclip-sync-status.md](nimblenewt/implementation-plan/paperclip-sync-status.md)). TypeScript controller, SQLite/PostgreSQL, Pi conversation adapter, subordinate remote workers, chat-first control, scoped approvals and coordinated backups are specified there. Historical cross-platform probes are feasibility evidence only; acceptance tests execute actual NimbleNewt code after implementation.
+Use the [consolidated plan](nimblenewt/implementation-plan/README.md) and its machine-readable DAG (105 cards imported into Paperclip; the plan has 109 since 2026-10-20 (F04f, F04g, F04h, D04), see [paperclip-sync-status.md](nimblenewt/implementation-plan/paperclip-sync-status.md)). TypeScript controller, SQLite/PostgreSQL, Pi conversation adapter, subordinate remote workers, chat-first control, scoped approvals and coordinated backups are specified there. Historical cross-platform probes are feasibility evidence only; acceptance tests execute actual NimbleNewt code after implementation.
 
 ## Sources
 

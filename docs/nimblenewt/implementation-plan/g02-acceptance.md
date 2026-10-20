@@ -91,6 +91,8 @@ Goal: confirm the suite on real machines and report anything CI cannot show. CI 
 
 ## Sign-off
 
+Decided 2026-10-20: the real-hardware runs are not done now. The hand-started hosted-runner `QA` workflow continues, and detailed QA on the owner's real macOS and Windows machines and on Linux is the last item of the plan (card D04). These boxes stay unticked until then.
+
 - [ ] macOS (real hardware): ______  (commit, Node, date)
 - [ ] Windows (real hardware): ______
 - [ ] Linux (any distribution beyond the CI runner): ______
