@@ -28,7 +28,7 @@ export interface WorkloadSpec {
   readonly durationMs: number;
   readonly warmupMs: number;
   /**
-   * For short smoke runs on slow machines: the agents keep going past the deadline (at most 30 s) until this many transitions have been
+   * For short smoke runs on slow machines: the agents keep going past the deadline (at most 30 s) until this many transitions after the warm-up have been
    * applied, so a run cannot end having done nothing. Unset for measurements, which are timed.
    */
   readonly minTransitions?: number;
@@ -90,6 +90,8 @@ export async function runWorkload(raw: ControllerStorage, spec: WorkloadSpec, op
   const deadline = start + spec.warmupMs + spec.durationMs;
   const samples: Record<string, number[]> = { transition: [], claimComplete: [], heartbeat: [], inquiry: [] };
   const record = (kind: string, from: number): void => { if (from >= measureFrom) samples[kind]!.push(performance.now() - from); };
+  /** Transitions that count toward the measurement: those that started after the warm-up. */
+  const measuredTransitions = (): number => samples["transition"]!.length;
 
   // ---- setup (not measured)
   await storage.acquireEpoch({ holder: "workload", at: ISO(0) });
@@ -126,7 +128,7 @@ export async function runWorkload(raw: ControllerStorage, spec: WorkloadSpec, op
     const task = { kind: "task", id: `a${i}` };
     let revision = 1;
     let k = 0;
-    const going = (): boolean => performance.now() < deadline || (spec.minTransitions !== undefined && transitions < spec.minTransitions && performance.now() < deadline + 30_000);
+    const going = (): boolean => performance.now() < deadline || (spec.minTransitions !== undefined && measuredTransitions() < spec.minTransitions && performance.now() < deadline + 30_000);
     while (going()) {
       // Two transitions for each pass over the outbox, like a task that makes progress and then reports.
       for (let step = 0; step < 2 && going(); step++) {
