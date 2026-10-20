@@ -29,7 +29,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | --- | --- |
 | N00 / AII-250 | Owner-controlled implementation activation gate |
 | N01 / AII-251 | G01, G04, G07, G08 |
-| N02 / AII-252 | F01, F02, F03, F04a, F04b, F04c, F04d, F04, F04e |
+| N02 / AII-252 | F01, F02, F03, F04a, F04b, F04c, F04d, F04, F04f, F04g, F04e |
 | N03 / AII-253 | G02, G03, G09, G10, F05, F06, F07, C06 |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, C03 |
 | N05 / AII-255 | L05, L01, L02, L03, L04, H08 |
@@ -86,7 +86,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### G04 — Prove supporting durable engine integration
 
 - **Parent:** N01 / AII-251.
-- **Blockers:** S09, F04d, G09.
+- **Blockers:** S09, F04d, F04f, F04g, G09.
 - **Deliverable:** Actual embedded controller and Pi integration on SQLite and PostgreSQL.
 - **Acceptance and verification:** Kill worker and controller around admission and result; no lost acknowledged request or duplicate protected effect; wait survives service restart; exercise both real controller databases, connection loss and ambiguous commits; validate the mechanism decisions in design proposal section 3; classify any failure as an implementation defect or evidence against the selected architecture; do not defer backend selection to this task; invoke production implementation, not a parallel test-only state machine; attach implementation commit and reproducible evidence.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
@@ -219,6 +219,22 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Blockers:** F04d.
 - **Deliverable:** Backend-specific versioned schema migration journals.
 - **Acceptance and verification:** Interrupted schema migration recoverable on both databases; incompatible downgrade rejected; constraints enforce unique operation and delivery IDs; upgrades preserve fixture state.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### F04f — Move the SQLite adapter off the main thread
+
+- **Parent:** N02 / AII-252.
+- **Blockers:** F04.
+- **Deliverable:** Worker-thread SQLite adapter behind the unchanged ControllerStorage contract, with synchronous=FULL kept.
+- **Acceptance and verification:** Conformance, parity and crash-boundary suites pass unchanged against it; event-loop delay under the 32-active-equivalent workload is measured with the F04d method and compared with the in-thread adapter; worker crash, startup failure and shutdown surface as typed storage errors and never lose or duplicate an acknowledged commit; ambiguous commits still resolve by operation ID; no weakening of durability settings.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### F04g — Verify supported PostgreSQL versions
+
+- **Parent:** N02 / AII-252.
+- **Blockers:** F04.
+- **Deliverable:** Qualification run of the PostgreSQL adapter on the latest minor of each major from 14 to current, and the supported-version statement.
+- **Acceptance and verification:** Conformance, parity, crash and migration suites run per major; 17 and above is the claimed support, each lower major is reported as passed or failed without claiming support; the code version floor matches the claim; server version and platform recorded; owner decides later whether to narrow support to the two most recent majors.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### F04e — Implement chat-controlled controller database transfer

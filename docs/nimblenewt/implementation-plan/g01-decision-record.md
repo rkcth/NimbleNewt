@@ -32,11 +32,21 @@ As D6: 4 productive attempts installation-wide, 2 per worker host, 2 inquiry/rev
 
 | Item | Decided by the owner | Qualified or chosen so far | Open |
 | --- | --- | --- | --- |
-| Operating systems | macOS, Linux and Windows are all required; exact versions to be qualified on the three available machines | CI (hosted runners `ubuntu-latest`, `macos-latest`, `windows-latest`) passes the full suite; the development server runs Ubuntu 26.04.1 LTS (Linux 7.0.0) on x86_64 | Exact minimum OS versions, architectures (Apple Silicon vs Intel, Windows/Linux ARM) and filesystems; real-hardware runs on the owner's Mac and Windows 11 Pro 10.0.26200 (see the G02 checklist) |
+| Operating systems | macOS, Linux and Windows are all required; exact versions to be qualified on the three available machines | CI (hosted runners `ubuntu-latest`, `macos-latest`, `windows-latest`) passes the full suite; the development server runs Ubuntu 26.04.1 LTS (Linux 7.0.0) on x86_64 | **Decided 2026-10-20:** claim only what CI covers (Linux x64, macOS arm64, Windows x64; Node 22.19.0 or newer). Linux arm64 is the next platform to add to CI; Intel Macs and Windows arm64 are not claimed. Mac and Windows claims stay provisional until real-hardware runs (G02 checklist; the owner's Mac and Windows 11 Pro 10.0.26200) and the owner's acceptance. Still open: exact OS release floors, filesystems |
 | Node.js | TypeScript is the implementation language | Node 22.19.0 (minimum) and 24.21.0 (current) pass CI on all three platforms; `engines` is `>=22.19.0` | Which Node lines are supported long-term |
 | Pi Durable | Selected as the initial runtime | Exactly 1.3.0, pinned; any other version is refused (see [g03-compatibility.md](g03-compatibility.md)) | Upgrade procedure and qualification of later releases |
-| SQLite | First-release controller backend | Pi's optional SQLite storage backend uses `node:sqlite`; the adapter has been qualified only on JSONL and memory storage, and the controller SQLite adapter does not exist yet (F04b) | Minimum SQLite version and durability settings |
-| PostgreSQL | First-release controller backend | None | **Which PostgreSQL major versions to support, and how tests obtain a server on all three platforms** |
+| SQLite | First-release controller backend | Pi's optional SQLite storage backend uses `node:sqlite`; the Pi adapter has been qualified only on JSONL and memory storage; the controller SQLite adapter is implemented (F04b: WAL, `synchronous=FULL`) and green in CI on Linux x64, macOS arm64 and Windows x64 | **Decided 2026-10-20:** keep `synchronous=FULL` and move the adapter to a worker thread (card F04f). Still open: minimum SQLite version |
+| PostgreSQL | First-release controller backend | Qualified: 17.10 only, on all three platforms with an embedded server started by the test helper (F04c, F04d, F04) | **Decided 2026-10-20:** support 17 and above. Card F04g verifies the latest minor of each major from 14 up and aligns the code floor (currently 14) with the claim; the owner may later narrow support to the two most recent majors |
+
+## Decisions recorded 2026-10-20
+
+Given by the owner in conversation with the implementing AI session; recorded here, not yet signed off as part of G01.
+
+1. **SQLite and the event loop:** worker thread, `synchronous=FULL` kept (card F04f). `synchronous=NORMAL` is rejected because it can lose acknowledged commits on power loss.
+2. **PostgreSQL:** support 17 and above; verify against 14 and later majors (card F04g); narrowing to the two most recent majors is a later decision.
+3. **Platforms:** claim what CI covers (see the table); Linux arm64 next.
+4. **Numeric defaults and budgets:** the current defaults (PostgreSQL pool of 10, lock and statement timeouts, lease durations, retry bounds, SQLite busy-wait bound) stay as provisional, configurable values labelled **unvalidated**; they are revisited after a trial with real agents. No production target is set.
+5. **QA:** G02 QA runs outside Paperclip for now, as the hand-started `QA` workflow (see [g02-acceptance.md](g02-acceptance.md)).
 
 ## Budget
 
@@ -52,7 +62,7 @@ As D6: 4 productive attempts installation-wide, 2 per worker host, 2 inquiry/rev
 ## Open owner decisions this record surfaces
 
 1. N00 formal scope and budget (the implementation budget in particular).
-2. Supported PostgreSQL versions, and whether PostgreSQL test runs may use an embedded/ephemeral server in CI.
-3. Minimum OS versions and architectures (and which of the owner's machines count as the qualifying hardware).
-4. Production and improvement budgets and the proposed defaults in the design register that the owner has not set (P/PC allocation, meeting cadence, voting rules, lifecycle limits, update windows).
+2. ~~Supported PostgreSQL versions~~ Decided 2026-10-20 (17 and above; verification in F04g). Embedded/ephemeral servers in CI are in use.
+3. ~~Minimum OS versions and architectures~~ Decided 2026-10-20 as what CI covers; exact OS release floors and real-hardware qualification remain.
+4. Production and improvement budgets (provisional, configurable storage defaults decided 2026-10-20) and the proposed defaults in the design register that the owner has not set (P/PC allocation, meeting cadence, voting rules, lifecycle limits, update windows).
 5. Acceptance of the G02 milestone and its default decisions (aborted-input framing, update behaviour, branch and task limits, the interrupted-work hold).

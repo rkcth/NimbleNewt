@@ -215,6 +215,7 @@ sequence; check at hundreds of thousands of rows).
 * **SQLite and the event loop.** If the SQLite backend is to serve a controller that also serves HTTP and inquiries, its commits
   should run off the main thread (a worker thread owning the connection) or be grouped, or `synchronous = NORMAL` could be accepted
   (with its power-loss tradeoff, which G01 does not yet decide). This is a design change, not done here.
+  **Decided by the owner 2026-10-20:** worker thread, `synchronous=FULL` kept; tracked as card F04f.
 * **Pool size and hot aggregates** for PostgreSQL deployments, and whether the design needs a rule against many agents writing one
   record.
-* **Minimum hardware and supported database versions** remain open owner decisions (G01); this record gives one data point.
+* **Minimum hardware and supported database versions:** the owner decided on 2026-10-20 to support PostgreSQL 17 and above (verification on older majors is card F04g) and to claim only the platforms CI covers (see G01). This record gives one data point; the numeric defaults remain provisional and unvalidated.

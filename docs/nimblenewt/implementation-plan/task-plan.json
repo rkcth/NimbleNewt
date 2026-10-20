@@ -98,6 +98,8 @@
       "depends_on": [
         "S09",
         "F04d",
+        "F04f",
+        "F04g",
         "G09"
       ],
       "deliverable": "Actual embedded controller and Pi integration on SQLite and PostgreSQL",
@@ -449,6 +451,40 @@
         "note": "Journaled, checksummed schema migrations on both backends: transactional and idempotent non-transactional steps, refusal of newer databases, edited migrations, journal gaps and foreign databases, advisory-lock serialisation on PostgreSQL, committed layout-1 fixtures. Upgrade behaviour is qualified with synthetic later layouts (the production list has one migration), including a crash at every statement of an upgrade on both backends. CI run 39374886124 is green on all six cells.",
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
       }
+    },
+    {
+      "id": "F04f",
+      "parent": "N02",
+      "existing_issue": "AII-252",
+      "title": "Move the SQLite adapter off the main thread",
+      "depends_on": [
+        "F04"
+      ],
+      "deliverable": "Worker-thread SQLite adapter behind the unchanged ControllerStorage contract, with synchronous=FULL kept",
+      "acceptance_and_verification": "Conformance, parity and crash-boundary suites pass unchanged against it; event-loop delay under the 32-active-equivalent workload is measured with the F04d method and compared with the in-thread adapter; worker crash, startup failure and shutdown surface as typed storage errors and never lose or duplicate an acknowledged commit; ambiguous commits still resolve by operation ID; no weakening of durability settings",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "F04g",
+      "parent": "N02",
+      "existing_issue": "AII-252",
+      "title": "Verify supported PostgreSQL versions",
+      "depends_on": [
+        "F04"
+      ],
+      "deliverable": "Qualification run of the PostgreSQL adapter on the latest minor of each major from 14 to current, and the supported-version statement",
+      "acceptance_and_verification": "Conformance, parity, crash and migration suites run per major; 17 and above is the claimed support, each lower major is reported as passed or failed without claiming support; the code version floor matches the claim; server version and platform recorded; owner decides later whether to narrow support to the two most recent majors",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
       "id": "F04e",
