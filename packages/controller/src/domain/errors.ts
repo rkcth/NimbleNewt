@@ -12,11 +12,12 @@
  * - `payload_changed`: a delivery ID already received arrived again with a different payload (card S04). Nothing was changed; the sender is faulty.
  * - `effect_uncertain`: an external effect may or may not have happened and the target cannot be asked, so it is not retried blindly (card S05); a person resolves it.
  * - `effect_busy`: another executor holds the effect right now; try again after its lease.
+ * - `wait_closed`: the wait an answer was meant for has already closed (timed out, cancelled, or its task is no longer waiting), so the answer was not applied and revived nothing (card S08).
  * - `integrity`: stored content is missing or does not match its recorded hash (artifacts, card S06). It must not be used.
  * - `unavailable`: storage could not complete the command (busy beyond the retry budget, unreachable). The command may be retried
  *   with the same command ID: it applies once.
  */
-export type DomainErrorCode = "invalid_command" | "command_conflict" | "stale_revision" | "not_found" | "invalid_transition" | "stale_epoch" | "integrity" | "fenced" | "payload_changed" | "effect_uncertain" | "effect_busy" | "unavailable";
+export type DomainErrorCode = "invalid_command" | "command_conflict" | "stale_revision" | "not_found" | "invalid_transition" | "stale_epoch" | "integrity" | "fenced" | "payload_changed" | "effect_uncertain" | "effect_busy" | "wait_closed" | "unavailable";
 
 export class DomainError extends Error {
   readonly code: DomainErrorCode;

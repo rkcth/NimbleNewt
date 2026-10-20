@@ -130,7 +130,12 @@ export class BlockerService {
           const slot = await this.#runner.get(slotRef.kind, slotRef.id);
           if (slot === undefined) throw new DomainError("integrity", `blocker ${id} has no slot`);
           const { openId, ...rest } = slot.body as unknown as SlotBody;
-          if (openId !== id) throw new DomainError("integrity", `blocker ${id} is open but its slot names ${openId ?? "no blocker"}`);
+          if (openId !== id) {
+            // A concurrent resolve may have closed this blocker (and cleared its slot) after we read it: a lost race, not corruption.
+            const now = await this.#runner.get("blocker", id);
+            if (now === undefined || now.revision !== current.revision) throw new DomainError("stale_revision", `blocker ${id} was resolved meanwhile`, { currentRevision: now?.revision ?? 0 });
+            throw new DomainError("integrity", `blocker ${id} is open but its slot names ${openId ?? "no blocker"}`);
+          }
           const ref: AggregateRef = { kind: "blocker", id };
           const next: BlockerBody = { ...body, state: "resolved", resolution, resolvedBy: meta.actor };
           return {

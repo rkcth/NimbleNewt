@@ -76,7 +76,7 @@ for (const backend of backends) {
   };
   const effects_status = async (ctx: Ctx, id: string): Promise<string | undefined> => (await ctx.effects.get(id))?.status;
   const ctx_effects = (world: World, epoch: number, assign: AssignmentService): EffectService => EffectService.withEpoch(world.storage, epoch, assign, { clock: () => new Date(T0).toISOString(), holder: "scan-effects" });
-  const ZERO = { eventsRepaired: 0, deliveryFailures: 0, deliveriesHeld: 0, inboxAdmitted: 0, inboxHeld: 0, inboxDeferred: 0, effectsRun: 0, effectsHeld: 0, effectsUnbridged: 0, blockersOpened: 0, errors: 0 };
+  const ZERO = { eventsRepaired: 0, deliveryFailures: 0, deliveriesHeld: 0, inboxAdmitted: 0, inboxHeld: 0, inboxDeferred: 0, effectsRun: 0, effectsHeld: 0, effectsUnbridged: 0, blockersOpened: 0, waitsTimedOut: 0, waitsOrphaned: 0, unexplainedBlocks: 0, errors: 0 };
 
   suite("after dropped wake-ups and a restart, one pass finds and finishes all pending work, with no model involved, and the next pass has nothing to do", async (ctx) => {
     const { projects, assign, inbox, effects, world, reconciler, seen, clock } = ctx;
@@ -323,13 +323,19 @@ for (const backend of backends) {
     assert.equal((await blockers.list({ limit: 10, openOnly: true })).items.length, 1);
     await refuses("invalid_command", () => blockers.openBlocker({ commandId: cid("bad"), actor: me, type: "nonsense" as never, subject, summary: "x", resolver: "r" }));
     await refuses("invalid_command", () => blockers.openBlocker({ commandId: cid("bad"), actor: me, type: "manual_hold", subject: { kind: "Task", id: "x" }, summary: "x", resolver: "r" }));
+    // Two people resolving it at once: one wins, the other is told it was resolved meanwhile (never a corruption error).
+    const racing = await blockers.openBlocker({ commandId: cid("o4"), actor: me, type: "manual_hold", subject: { kind: "task", id: "task-bbbbbbbbbbbbbbbbbbbb" }, summary: "race", resolver: "rob" });
+    const results = await Promise.allSettled([1, 2].map((k) => blockers.resolveBlocker({ commandId: cid(`rr${k}`), actor: "rob", blockerId: racing.id, expectedRevision: 1, resolution: `by ${k}` })));
+    assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
+    for (const r of results) if (r.status === "rejected") assert.ok(r.reason instanceof DomainError && (r.reason.code === "stale_revision" || r.reason.code === "invalid_command"), String(r.reason));
+    assert.equal(await blockers.openFor("manual_hold", { kind: "task", id: "task-bbbbbbbbbbbbbbbbbbbb" }), undefined);
     await refuses("stale_revision", () => blockers.resolveBlocker({ commandId: cid("r"), actor: me, blockerId: first.value.id, expectedRevision: 9, resolution: "done" }));
     await blockers.resolveBlocker({ commandId: cid("r"), actor: "rob", blockerId: first.value.id, expectedRevision: (await blockers.getBlocker(first.value.id))!.revision, resolution: "done" });
     assert.equal(await blockers.openFor("manual_hold", subject), undefined);
     await refuses("invalid_command", () => blockers.resolveBlocker({ commandId: cid("r2"), actor: "rob", blockerId: first.value.id, expectedRevision: 2, resolution: "again" }));
     const next = await blockers.openBlocker({ commandId: cid("o3"), actor: me, type: "manual_hold", subject, summary: "wait once more", resolver: "rob" });
     assert.notEqual(next.id, first.value.id);
-    assert.equal((await blockers.list({ limit: 10 })).items.length, 2);
+    assert.equal((await blockers.list({ limit: 10 })).items.length, 3);
     assert.equal((await blockers.list({ limit: 10, openOnly: true })).items.length, 1);
   });
 }

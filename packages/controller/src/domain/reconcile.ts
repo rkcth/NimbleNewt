@@ -8,6 +8,8 @@ import type { EffectBody, EffectBridge, EffectService } from "./effects.js";
 import type { InboxMessageBody, InboxService } from "./inbox.js";
 import { CommandRunner, mapStorageError, type RunnerOptions } from "./runner.js";
 import type { ProjectService } from "./service.js";
+import type { WaitBody, WaitService } from "./waits.js";
+import type { TaskBody } from "./model.js";
 
 /** One destination whose messages the reconciler delivers: where they go. */
 export interface Destination {
@@ -20,6 +22,8 @@ export interface ReconcilerDependencies {
   readonly inbox: InboxService;
   readonly effects: EffectService;
   readonly blockers: BlockerService;
+  /** When given, passes also settle wait deadlines, close waits whose task was cancelled, and flag blocked tasks that nothing explains (card S08). */
+  readonly waits?: WaitService;
   readonly destinations: readonly Destination[];
   /** The bridge for each effect kind. An effect of a kind with no bridge is left for a person (it is reported, never guessed at). */
   readonly bridges: Readonly<Record<string, EffectBridge>>;
@@ -59,6 +63,12 @@ export interface PassReport {
   /** Effects of a kind that has no bridge. */
   readonly effectsUnbridged: number;
   readonly blockersOpened: number;
+  /** Waits whose deadline passed and were settled this pass. */
+  readonly waitsTimedOut: number;
+  /** Open waits closed because their task was cancelled or finished meanwhile. */
+  readonly waitsOrphaned: number;
+  /** Blocked tasks with neither a wait nor a blocker, flagged with an `unexplained_block` blocker. */
+  readonly unexplainedBlocks: number;
   /** Items or steps that failed this pass and were skipped so the rest could go on (a record that cannot be processed for a lasting reason also gets a `scan_failure` blocker). */
   readonly errors: number;
   /** True when every scan reached the end of its data in this pass (so the pass saw everything). */
@@ -96,7 +106,7 @@ export class Reconciler {
   }
 
   async runPass(): Promise<PassReport> {
-    const report = { eventsRepaired: 0, delivered: {} as Record<string, number>, deliveryFailures: 0, deliveriesHeld: 0, inboxAdmitted: 0, inboxHeld: 0, inboxDeferred: 0, effectsRun: 0, effectsHeld: 0, effectsUnbridged: 0, blockersOpened: 0, errors: 0 };
+    const report = { eventsRepaired: 0, delivered: {} as Record<string, number>, deliveryFailures: 0, deliveriesHeld: 0, inboxAdmitted: 0, inboxHeld: 0, inboxDeferred: 0, effectsRun: 0, effectsHeld: 0, effectsUnbridged: 0, blockersOpened: 0, waitsTimedOut: 0, waitsOrphaned: 0, unexplainedBlocks: 0, errors: 0 };
     let complete = true;
     // Each step stands alone: one that fails (storage trouble, a bad record) is counted and the others still run. Only losing the epoch stops the pass.
     const step = async (run: () => Promise<boolean | void>): Promise<void> => {
@@ -110,6 +120,10 @@ export class Reconciler {
     await step(() => this.#deliver(report));
     await step(() => this.#admitInbox(report));
     await step(() => this.#recoverEffects(report));
+    if (this.#deps.waits !== undefined) {
+      await step(() => this.#settleWaits(report));
+      await step(() => this.#checkBlockedTasks(report));
+    }
     return { ...report, complete };
   }
 
@@ -253,6 +267,79 @@ export class Reconciler {
     const last = page[page.length - 1];
     const more = page.length === pageSize && last !== undefined;
     await this.#saveCursor("inbox", more ? last.id : undefined, cursor);
+    return !more;
+  }
+
+  /** Settles passed deadlines, closes waits whose task is gone, and makes overdue (escalated) waits visible. */
+  async #settleWaits(report: { waitsTimedOut: number; waitsOrphaned: number; blockersOpened: number; errors: number }): Promise<boolean> {
+    const waits = this.#deps.waits!;
+    const due = await waits.settleDue({ limit: this.#options.pageSize ?? 100, claimant: this.#options.claimant ?? "reconciler" });
+    report.waitsTimedOut += due.timedOut;
+    const pageSize = this.#options.pageSize ?? 100;
+    const cursor = await this.#cursor("waits");
+    const page = await this.#runner.list("wait", { ...(cursor.afterId === undefined ? {} : { afterId: cursor.afterId }), limit: pageSize });
+    for (const aggregate of page) {
+      const wait = aggregate.body as unknown as WaitBody;
+      try {
+        if (wait.state === "open") {
+          const task = await this.#runner.get("task", wait.taskId);
+          const state = (task?.body as unknown as TaskBody | undefined)?.state;
+          // A wait whose task is not blocked any more (cancelled, finished, or released by another route) can never be answered; close it so the task is free to wait again.
+          if (task === undefined || state !== "blocked") {
+            await waits.cancelWait({ commandId: `orphan:${aggregate.id}`, actor: this.#options.claimant ?? "reconciler", waitId: aggregate.id, expectedRevision: aggregate.revision, reason: `task ${wait.taskId} is ${state ?? "missing"}, not blocked`, task: "leave" });
+            report.waitsOrphaned += 1;
+          }
+        } else if (wait.state === "timed_out" && wait.outcome === "timed_out_escalated") {
+          const task = await this.#runner.get("task", wait.taskId);
+          const subject = { kind: "task", id: wait.taskId };
+          if ((task?.body as unknown as TaskBody | undefined)?.state === "blocked" && (await this.#deps.blockers.openFor("wait_overdue", subject)) === undefined) {
+            await this.#deps.blockers.openBlocker({
+              commandId: `overdue:${h(`${aggregate.id}\0${await this.#deps.blockers.occurrences("wait_overdue", subject)}`)}`, actor: this.#options.claimant ?? "reconciler", type: "wait_overdue", subject, resolver: wait.resolver,
+              summary: `Task ${wait.taskId} has been waiting on ${wait.resolver} (${wait.reason}: ${wait.summary.slice(0, 300)}) and its deadline ${wait.deadline ?? ""} passed. Next action when answered: ${wait.nextAction}.`,
+            });
+            report.blockersOpened += 1;
+          }
+        }
+      } catch (error) {
+        if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "wait_closed")) continue;
+        await this.#flag({ kind: "wait", id: aggregate.id }, error, report);
+      }
+    }
+    const last = page[page.length - 1];
+    const more = page.length === pageSize && last !== undefined;
+    await this.#saveCursor("waits", more ? last.id : undefined, cursor);
+    return !more;
+  }
+
+  /** A blocked task must have an open wait (deadline or indefinite owner) or an open blocker; any other is flagged so nothing waits invisibly. */
+  async #checkBlockedTasks(report: { unexplainedBlocks: number; blockersOpened: number; errors: number }): Promise<boolean> {
+    const waits = this.#deps.waits!;
+    const pageSize = this.#options.pageSize ?? 100;
+    const cursor = await this.#cursor("blocked-tasks");
+    const page = await this.#runner.list("task", { ...(cursor.afterId === undefined ? {} : { afterId: cursor.afterId }), limit: pageSize });
+    for (const aggregate of page) {
+      if ((aggregate.body as unknown as TaskBody).state !== "blocked") continue;
+      const subject = { kind: "task", id: aggregate.id };
+      try {
+        if ((await waits.openFor(aggregate.id)) !== undefined) continue;
+        // A wait that timed out with "escalate" leaves the task blocked on purpose; the wait scan opens its overdue blocker.
+        if ((await waits.lastFor(aggregate.id))?.outcome === "timed_out_escalated") continue;
+        let explained = false;
+        for (const type of ["manual_hold", "wait_overdue", "unexplained_block"] as const) if ((await this.#deps.blockers.openFor(type, subject)) !== undefined) { explained = true; break; }
+        if (explained) continue;
+        await this.#deps.blockers.openBlocker({
+          commandId: `unexplained:${h(`${aggregate.id}\0${await this.#deps.blockers.occurrences("unexplained_block", subject)}`)}`, actor: this.#options.claimant ?? "reconciler", type: "unexplained_block", subject, resolver: "owner",
+          summary: `Task ${aggregate.id} is blocked but has no wait (with a deadline or an explicit indefinite owner) and no blocker saying why or who acts next. Add one or release the task.`,
+        });
+        report.unexplainedBlocks += 1;
+        report.blockersOpened += 1;
+      } catch (error) {
+        await this.#flag(subject, error, report);
+      }
+    }
+    const last = page[page.length - 1];
+    const more = page.length === pageSize && last !== undefined;
+    await this.#saveCursor("blocked-tasks", more ? last.id : undefined, cursor);
     return !more;
   }
 

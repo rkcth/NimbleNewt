@@ -26,3 +26,7 @@ export {
   type BlockerBody, type BlockerType, type OpenBlocker, type ResolveBlocker,
 } from "./blockers.js";
 export { Reconciler, type Destination, type PassReport, type ReconcilerDependencies, type ReconcilerOptions } from "./reconcile.js";
+export {
+  ON_DEADLINE, WAIT_LIMITS, WAIT_REASONS, WaitService,
+  type AnswerWait, type CancelWait, type DueReport, type OnDeadline, type OpenWait, type WaitBody, type WaitReason, type WaitState,
+} from "./waits.js";
