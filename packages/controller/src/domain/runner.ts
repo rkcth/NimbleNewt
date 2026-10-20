@@ -2,7 +2,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { commitOperation } from "../storage/commit.js";
 import { isStorageError } from "../storage/errors.js";
 import { canonicalJson, sha256 } from "../storage/json.js";
-import type { Aggregate, AggregateRef, Change, ControllerStorage, JsonObject, OperationInput, OperationResult } from "../storage/types.js";
+import type { Aggregate, AggregateRef, AuditEntry, Change, ControllerStorage, EffectEntry, JsonObject, OperationInput, OperationResult, OutboxEntry, TimerEntry } from "../storage/types.js";
 import { DomainError } from "./errors.js";
 import { operationIdOf } from "./ids.js";
 import { actor as checkActor, commandId as checkCommandId, type View } from "./model.js";
@@ -37,6 +37,15 @@ export interface Built {
   readonly creates: boolean;
   readonly changes: readonly Change[];
   readonly detail: JsonObject;
+  /**
+   * What the command also commits in the same transaction (all optional): messages for other parts of the system (card S03), effect
+   * intentions (S05), timers, and extra audit entries after the command's own. They are part of the command's digest only through its
+   * payload, so a builder must derive them deterministically from the command and the state it saw.
+   */
+  readonly outbox?: readonly OutboxEntry[];
+  readonly effects?: readonly EffectEntry[];
+  readonly timers?: readonly TimerEntry[];
+  readonly audit?: readonly AuditEntry[];
 }
 
 /** The same object without its undefined fields (an absent optional field is omitted, never stored as undefined). */
@@ -121,8 +130,8 @@ export class CommandRunner {
     }
     const input: OperationInput = {
       operationId, epoch: this.epoch, actor: meta.actor, correlationId: operationId, at: this.#clock(),
-      changes: built.changes, audit: [{ type, subject: built.ref, detail: { commandDigest: digest, ...built.detail } }],
-      outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [],
+      changes: built.changes, audit: [{ type, subject: built.ref, detail: { commandDigest: digest, ...built.detail } }, ...(built.audit ?? [])],
+      outbox: built.outbox ?? [], effects: built.effects ?? [], timers: built.timers ?? [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [],
     };
     let result: OperationResult;
     try {

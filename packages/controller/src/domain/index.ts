@@ -3,3 +3,5 @@ export { LIMITS as DOMAIN_LIMITS, TASK_STATES, TRANSITIONS, type ProjectBody, ty
 export { derivedId, operationIdOf } from "./ids.js";
 export { CommandRunner, defined, mapStorageError, revisionOf, view, type Built, type CommandMeta, type CommandResult, type RunnerOptions } from "./runner.js";
 export { ProjectService, type CreateProject, type CreateTask, type ServiceOptions, type TransitionTask, type UpdateProject, type UpdateTask } from "./service.js";
+export { TASK_EVENTS, taskEventEntry, taskEventId, type TaskEvent, type TaskEventChange } from "./events.js";
+export { DeliveryDispatcher, type Delivery, type DeliveryHandler, type DispatcherOptions, type PassResult } from "./delivery.js";

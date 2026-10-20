@@ -1,7 +1,8 @@
 import type { Aggregate, ControllerStorage, JsonObject } from "../storage/types.js";
 import { DomainError } from "./errors.js";
+import { taskEventEntry, taskEventId } from "./events.js";
 import { derivedId } from "./ids.js";
-import { CommandRunner, defined, view, type CommandMeta, type CommandResult, type RunnerOptions } from "./runner.js";
+import { CommandRunner, defined, mapStorageError, view, type CommandMeta, type CommandResult, type RunnerOptions } from "./runner.js";
 import {
   LIMITS, TRANSITIONS, onlyKnown, projectId as checkProjectId, repositories as checkRepositories, repositoryId as checkRepositoryId,
   revision as checkRevision, taskId as checkTaskId, taskState, text,
@@ -141,7 +142,7 @@ export class ProjectService {
           if (repository !== undefined && !owner.repositories.some((r) => r.id === repository)) throw new DomainError("invalid_command", `repositoryId: project ${project} has no repository ${repository}`, { field: "repositoryId" });
           const id = derivedId("task", meta.commandId);
           const body: TaskBody = { projectId: project, title, description, state: "proposed", ...(repository === undefined ? {} : { repositoryId: repository }), createdBy: meta.actor };
-          return { ref: { kind: "task", id }, creates: true, changes: [{ type: "create", ref: { kind: "task", id }, body: body as unknown as JsonObject }], detail: { projectId: project, title } };
+          return { ref: { kind: "task", id }, creates: true, changes: [{ type: "create", ref: { kind: "task", id }, body: body as unknown as JsonObject }], detail: { projectId: project, title }, outbox: [taskEventEntry(id, body, 1, "created")] };
         },
       };
     });
@@ -172,7 +173,7 @@ export class ProjectService {
             ...rest, ...defined({ title, description }),
             ...(repository === null ? {} : typeof repository === "string" ? { repositoryId: repository } : _previous === undefined ? {} : { repositoryId: _previous }),
           };
-          return { ref: { kind: "task", id }, creates: false, changes: [{ type: "update", ref: { kind: "task", id }, expectedRevision: expected, body: next as unknown as JsonObject }], detail: defined({ title, repositoryId: repository }) };
+          return { ref: { kind: "task", id }, creates: false, changes: [{ type: "update", ref: { kind: "task", id }, expectedRevision: expected, body: next as unknown as JsonObject }], detail: defined({ title, repositoryId: repository }), outbox: [taskEventEntry(id, next, expected + 1, "updated")] };
         },
       };
     });
@@ -191,10 +192,42 @@ export class ProjectService {
           const body = current.body as unknown as TaskBody;
           if (!TRANSITIONS[body.state].includes(to)) throw new DomainError("invalid_transition", `task ${id} cannot move from ${body.state} to ${to} (allowed: ${TRANSITIONS[body.state].join(", ") || "none, it is final"})`, { field: "to" });
           const next: TaskBody = { ...body, state: to };
-          return { ref: { kind: "task", id }, creates: false, changes: [{ type: "update", ref: { kind: "task", id }, expectedRevision: expected, body: next as unknown as JsonObject }], detail: { from: body.state, to } };
+          return { ref: { kind: "task", id }, creates: false, changes: [{ type: "update", ref: { kind: "task", id }, expectedRevision: expected, body: next as unknown as JsonObject }], detail: { from: body.state, to }, outbox: [taskEventEntry(id, next, expected + 1, "transitioned", body.state)] };
         },
       };
     });
+  }
+
+  /**
+   * Gap repair for task events (card S03): for each task in the page, makes sure its current revision has its event, and writes the event
+   * (change `reconciled`) in one command if it does not. Commands announce their own changes in the same transaction, so a gap exists only
+   * for records written before events existed or by a store restored from a copy; this finds them. It reads, never rewrites, a task: if
+   * the task moves while it is being repaired, the repair is skipped (the command that moved it announced the new revision). Repeating it
+   * changes nothing. Returns where to continue (absent at the end).
+   */
+  async reconcileTaskEvents(page: { afterId?: string; limit: number }): Promise<{ checked: number; repaired: string[]; next?: string }> {
+    const tasks = await this.#runner.list("task", page);
+    const repaired: string[] = [];
+    for (const task of tasks) {
+      let known: unknown;
+      try { known = await this.#runner.storage.getDelivery(taskEventId(task.id, task.revision)); } catch (error) { throw mapStorageError(error); }
+      if (known !== undefined) continue;
+      try {
+        await this.#runner.command("task.event.repair", { commandId: `repair:${task.id}:${task.revision}`, actor: "reconciler" }, async () => ({
+          payload: { taskId: task.id, revision: task.revision },
+          build: async () => {
+            const current = await this.#runner.existing("task", task.id, task.revision);
+            const body = current.body as unknown as TaskBody;
+            return { ref: { kind: "task", id: task.id }, creates: false, changes: [{ type: "check", ref: { kind: "task", id: task.id }, expectedRevision: task.revision }], detail: { revision: task.revision }, outbox: [taskEventEntry(task.id, body, task.revision, "reconciled")] };
+          },
+        }));
+        repaired.push(task.id);
+      } catch (error) {
+        if (!(error instanceof DomainError) || error.code !== "stale_revision") throw error;
+      }
+    }
+    const last = tasks[tasks.length - 1];
+    return { checked: tasks.length, repaired, ...(tasks.length === page.limit && last !== undefined ? { next: last.id } : {}) };
   }
 
   // ---- reads ---------------------------------------------------------------------------------------------------------------
