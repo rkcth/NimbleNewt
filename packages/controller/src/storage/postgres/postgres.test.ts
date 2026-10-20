@@ -53,7 +53,7 @@ test("the server and session settings are verified and read back", async () => {
   try {
     const s = await storage.settings();
     assert.deepEqual({ ...s, serverVersion: "x", serverVersionNum: 0 }, {
-      serverVersion: "x", serverVersionNum: 0, schema, schemaVersion: SCHEMA_VERSION, synchronousCommit: "on", fsync: "on", fullPageWrites: "on", isolation: "read committed",
+      serverVersion: "x", serverVersionNum: 0, encoding: "UTF8", schema, schemaVersion: SCHEMA_VERSION, synchronousCommit: "on", fsync: "on", fullPageWrites: "on", isolation: "read committed",
       maxConnections: 7, lockTimeoutMs: 1234, statementTimeoutMs: 5678,
     });
     assert.ok(s.serverVersionNum >= 140000);
@@ -113,6 +113,21 @@ test("an unreachable server, a wrong password and a missing database fail fast a
   await assert.rejects(PostgresStorage.open({ connectionString: missing.toString(), schema: schemaName() }), (e) => isStorageError(e, "unavailable"));
 });
 function await_net(): typeof import("node:net") { return process.getBuiltinModule("node:net") as typeof import("node:net"); }
+
+test("a database whose encoding is not UTF8 is refused, with the reason and the fix, and nothing is created in it", async () => {
+  const s = await server();
+  if (s.kind !== "embedded") return;
+  const name = `latin_${process.pid}`;
+  await withClient(s.url("postgres"), async (c) => { await c.query(`CREATE DATABASE ${name} WITH ENCODING 'LATIN1' TEMPLATE template0 LC_COLLATE 'C' LC_CTYPE 'C'`); });
+  try {
+    const schema = schemaName();
+    await assert.rejects(PostgresStorage.open({ connectionString: s.url(name), schema }), (e) => isStorageError(e, "unavailable") && /encoding is LATIN1, not UTF8.*ENCODING 'UTF8'/.test((e as Error).message));
+    const created = await withClient(s.url(name), async (c) => (await c.query("SELECT count(*)::int AS n FROM pg_namespace WHERE nspname = $1", [schema])).rows[0]!.n);
+    assert.equal(created, 0, "a refused database must not get a schema");
+  } finally {
+    await withClient(s.url("postgres"), async (c) => { await c.query(`DROP DATABASE IF EXISTS ${name}`); });
+  }
+});
 
 test("a server configured without durable writes is refused", async () => {
   const unsafe = await startEmbeddedServer(["-c", "fsync=off"]);

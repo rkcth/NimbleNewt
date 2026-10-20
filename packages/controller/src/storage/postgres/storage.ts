@@ -33,6 +33,8 @@ export interface PostgresOptions {
 export interface PostgresSettings {
   readonly serverVersion: string;
   readonly serverVersionNum: number;
+  /** The encoding of the database the controller connected to. Must be `UTF8`: bodies are JSON text. */
+  readonly encoding: string;
   readonly schema: string;
   readonly schemaVersion: number;
   /** `on`: the server flushes WAL to disk before each commit returns. */
@@ -142,6 +144,7 @@ export class PostgresStorage implements ControllerStorage {
   async #verifyServer(): Promise<void> {
     const s = await this.settings({ skipSchema: true });
     if (s.serverVersionNum < MINIMUM_SERVER_VERSION_NUM) throw new StorageError("unavailable", `PostgreSQL ${s.serverVersion} is older than the minimum this version of NimbleNewt requires (14)`);
+    if (s.encoding !== "UTF8") throw new StorageError("unavailable", `the database encoding is ${s.encoding}, not UTF8; the controller stores JSON text and needs a UTF8 database (create it with ENCODING 'UTF8'; on Windows the default is a legacy code page)`);
     if (s.fsync !== "on" || s.fullPageWrites !== "on") throw new StorageError("unavailable", `the PostgreSQL server is configured without durable writes (fsync=${s.fsync}, full_page_writes=${s.fullPageWrites}); refusing to store controller state on it`);
     if (s.synchronousCommit !== "on") throw new StorageError("unavailable", `synchronous_commit is "${s.synchronousCommit}", not "on", so commits would be acknowledged before they are flushed`);
     if (s.isolation !== "read committed") throw new StorageError("unavailable", `the session isolation level is "${s.isolation}", not "read committed"`);
@@ -173,7 +176,7 @@ export class PostgresStorage implements ControllerStorage {
     try {
       const version = options.skipSchema === true ? 0 : count((await client.query("SELECT version FROM schema_info WHERE singleton = 1", [])).rows[0] as Row, "version");
       return {
-        serverVersion: await show(client, "server_version"), serverVersionNum: Number(await show(client, "server_version_num")), schema: this.#options.schema, schemaVersion: version,
+        serverVersion: await show(client, "server_version"), serverVersionNum: Number(await show(client, "server_version_num")), encoding: String((await client.query("SELECT pg_encoding_to_char(encoding) AS e FROM pg_database WHERE datname = current_database()")).rows[0]!.e), schema: this.#options.schema, schemaVersion: version,
         synchronousCommit: await show(client, "synchronous_commit"), fsync: await show(client, "fsync"), fullPageWrites: await show(client, "full_page_writes"),
         isolation: await show(client, "default_transaction_isolation"), maxConnections: this.#options.maxConnections, lockTimeoutMs: this.#options.lockTimeoutMs, statementTimeoutMs: this.#options.statementTimeoutMs,
       };

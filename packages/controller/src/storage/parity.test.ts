@@ -17,7 +17,7 @@ const SEEDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
 const STEPS = 500;
 
 for (const seed of SEEDS) {
-  test(`the reference store, SQLite and PostgreSQL agree on every result and on the final state (seed ${seed}, ${STEPS} steps)`, async (t) => {
+  test(`the reference store, SQLite and PostgreSQL agree on every result and on the final state (seed ${seed}, ${STEPS} steps)`, { timeout: 180_000 }, async (t) => {
     const dir = mkdtempSync(join(tmpdir(), "nn-parity-"));
     const s = await server();
     const schema = `parity_${process.pid}_${seed}`;

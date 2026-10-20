@@ -15,7 +15,7 @@
     "dist"
   ],
   "scripts": {
-    "test": "node ../../scripts/run-package-tests.mjs",
+    "test": "node ../../scripts/run-package-tests.mjs --timeout=300000",
     "qualify": "node dist/storage/qualification/report.js"
   },
   "dependencies": {

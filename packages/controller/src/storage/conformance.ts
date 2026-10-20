@@ -49,7 +49,8 @@ const expectKind = async (promise: Promise<unknown>, kind: StorageErrorKind): Pr
 
 export function runStorageConformance(harness: StorageHarness): void {
   const withStore = (name: string, body: (s: ControllerStorage) => Promise<void>, options: { epoch?: boolean } = {}) =>
-    test(name, async () => {
+    // Each case has its own bound, so a hang is reported quickly and by name, whatever the file-level bound is for slow server startups.
+    test(name, { timeout: 60_000 }, async () => {
       const { storage, close } = await harness.open();
       try {
         if (options.epoch !== false) await storage.acquireEpoch({ holder: "controller-1", at: T0 });

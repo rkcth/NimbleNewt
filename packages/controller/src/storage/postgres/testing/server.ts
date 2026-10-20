@@ -120,8 +120,9 @@ export async function startEmbeddedServer(flags: readonly string[] = [], baseDir
     if (log.length > 60) log.shift();
     if (echo) for (const part of line.split(/\r?\n/).slice(0, 6)) process.stderr.write(`[embedded-postgres] server: ${part.slice(0, 300)}\n`);
   };
-  // Bind to the IPv4 loopback only: nothing outside this machine can reach the test server, and no name resolution is involved.
-  const settings = { databaseDir: join(directory, "data"), port, user: USER, password: PASSWORD, persistent: true, postgresFlags: ["-c", "listen_addresses=127.0.0.1", ...flags], onLog: keep, onError: keep };
+  // The cluster is UTF8 with the C locale on every platform: initdb on Windows would otherwise pick the legacy code page WIN1252, which
+  // cannot store the JSON text the controller keeps. Bind to the IPv4 loopback only: nothing outside this machine can reach the test server, and no name resolution is involved.
+  const settings = { databaseDir: join(directory, "data"), port, user: USER, password: PASSWORD, persistent: true, initdbFlags: ["--encoding=UTF8", "--locale=C"], postgresFlags: ["-c", "listen_addresses=127.0.0.1", ...flags], onLog: keep, onError: keep };
   let server = new EmbeddedPostgres(settings);
   const url = (database = "nimblenewt_test") => `postgres://${USER}:${PASSWORD}@127.0.0.1:${port}/${database}`;
   // The library's own steps have no timeouts and reject with nothing when the server exits early; give each a deadline and the log.
