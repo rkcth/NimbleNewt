@@ -1,4 +1,4 @@
-import type { Aggregate, ControllerStorage, JsonObject } from "../storage/types.js";
+import type { Aggregate, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import { DomainError } from "./errors.js";
 import { taskEventEntry, taskEventId } from "./events.js";
 import { derivedId } from "./ids.js";
@@ -29,6 +29,13 @@ export interface UpdateTask extends CommandMeta {
   readonly repositoryId?: string | null;
 }
 export interface TransitionTask extends CommandMeta { readonly taskId: string; readonly expectedRevision: number; readonly to: TaskState }
+
+/** An extra condition on a task command, checked inside the command so it is atomic with the change (card S02: the fence of an owner's write). */
+export interface FenceGuard {
+  /** Part of the command's digest, so a repeat with a different fence is a different command. */
+  readonly payload: JsonObject;
+  readonly check: (taskId: string) => Promise<{ changes: readonly Change[]; detail: JsonObject }>;
+}
 
 export interface ServiceOptions extends RunnerOptions {
   /** Who holds the primary epoch, recorded with it. */
@@ -148,7 +155,7 @@ export class ProjectService {
     });
   }
 
-  updateTask(command: UpdateTask): Promise<CommandResult> {
+  updateTask(command: UpdateTask, guard?: FenceGuard): Promise<CommandResult> {
     return this.#runner.command("task.update", command, async () => {
       onlyKnown(command, ["commandId", "actor", "taskId", "expectedRevision", "title", "description", "repositoryId"]);
       const id = checkTaskId(command.taskId);
@@ -158,8 +165,9 @@ export class ProjectService {
       const repository = command.repositoryId === undefined || command.repositoryId === null ? command.repositoryId : checkRepositoryId(command.repositoryId, "repositoryId");
       if (title === undefined && description === undefined && repository === undefined) throw new DomainError("invalid_command", "an update must change at least one of title, description or repositoryId", { field: "title" });
       return {
-        payload: { taskId: id, expectedRevision: expected, ...defined({ title, description }), ...(repository === undefined ? {} : { repositoryId: repository }) },
+        payload: { taskId: id, expectedRevision: expected, ...defined({ title, description }), ...(repository === undefined ? {} : { repositoryId: repository }), ...(guard?.payload ?? {}) },
         build: async () => {
+          const fenced = await guard?.check(id);
           const current = await this.#runner.existing("task", id, expected);
           const body = current.body as unknown as TaskBody;
           if (TRANSITIONS[body.state].length === 0) throw new DomainError("invalid_command", `task ${id} is ${body.state} and can no longer be edited`, { field: "taskId" });
@@ -173,26 +181,27 @@ export class ProjectService {
             ...rest, ...defined({ title, description }),
             ...(repository === null ? {} : typeof repository === "string" ? { repositoryId: repository } : _previous === undefined ? {} : { repositoryId: _previous }),
           };
-          return { ref: { kind: "task", id }, creates: false, changes: [{ type: "update", ref: { kind: "task", id }, expectedRevision: expected, body: next as unknown as JsonObject }], detail: defined({ title, repositoryId: repository }), outbox: [taskEventEntry(id, next, expected + 1, "updated")] };
+          return { ref: { kind: "task", id }, creates: false, changes: [{ type: "update", ref: { kind: "task", id }, expectedRevision: expected, body: next as unknown as JsonObject }, ...(fenced?.changes ?? [])], detail: { ...defined({ title, repositoryId: repository }), ...(fenced?.detail ?? {}) }, outbox: [taskEventEntry(id, next, expected + 1, "updated")], ...contention(id, guard, this.#runner) };
         },
       };
     });
   }
 
-  transitionTask(command: TransitionTask): Promise<CommandResult> {
+  transitionTask(command: TransitionTask, guard?: FenceGuard): Promise<CommandResult> {
     return this.#runner.command("task.transition", command, async () => {
       onlyKnown(command, ["commandId", "actor", "taskId", "expectedRevision", "to"]);
       const id = checkTaskId(command.taskId);
       const expected = checkRevision(command.expectedRevision);
       const to = taskState(command.to);
       return {
-        payload: { taskId: id, expectedRevision: expected, to },
+        payload: { taskId: id, expectedRevision: expected, to, ...(guard?.payload ?? {}) },
         build: async () => {
+          const fenced = await guard?.check(id);
           const current = await this.#runner.existing("task", id, expected);
           const body = current.body as unknown as TaskBody;
           if (!TRANSITIONS[body.state].includes(to)) throw new DomainError("invalid_transition", `task ${id} cannot move from ${body.state} to ${to} (allowed: ${TRANSITIONS[body.state].join(", ") || "none, it is final"})`, { field: "to" });
           const next: TaskBody = { ...body, state: to };
-          return { ref: { kind: "task", id }, creates: false, changes: [{ type: "update", ref: { kind: "task", id }, expectedRevision: expected, body: next as unknown as JsonObject }], detail: { from: body.state, to }, outbox: [taskEventEntry(id, next, expected + 1, "transitioned", body.state)] };
+          return { ref: { kind: "task", id }, creates: false, changes: [{ type: "update", ref: { kind: "task", id }, expectedRevision: expected, body: next as unknown as JsonObject }, ...(fenced?.changes ?? [])], detail: { from: body.state, to, ...(fenced?.detail ?? {}) }, outbox: [taskEventEntry(id, next, expected + 1, "transitioned", body.state)], ...contention(id, guard, this.#runner) };
         },
       };
     });
@@ -271,6 +280,17 @@ export class ProjectService {
 
   // ---- plumbing ------------------------------------------------------------------------------------------------------------
 }
+
+/**
+ * For a guarded command: a lost race may be the guard's record moving (an ownership change), not the task. Ask the guard again: if it now
+ * refuses, that refusal (`fenced`) is the answer; otherwise the default (`stale_revision` of the task) stands.
+ */
+const contention = (taskId: string, guard: FenceGuard | undefined, runner: CommandRunner): { contention?: () => Promise<DomainError> } =>
+  guard === undefined ? {} : { contention: async () => {
+    try { await guard.check(taskId); } catch (error) { if (error instanceof DomainError) return error; throw error; }
+    const now = await runner.get("task", taskId);
+    return now === undefined ? new DomainError("not_found", `task ${taskId} does not exist`) : new DomainError("stale_revision", `task ${taskId} changed meanwhile and is now at revision ${now.revision}`, { currentRevision: now.revision });
+  } };
 
 const SCAN_PAGE = 500;
 const MAX_SCAN_PAGES = 20;

@@ -46,6 +46,12 @@ export interface Built {
   readonly effects?: readonly EffectEntry[];
   readonly timers?: readonly TimerEntry[];
   readonly audit?: readonly AuditEntry[];
+  /**
+   * What a lost race on any of the command's guarded records means in the command's own terms. Without it, a lost race on a record the
+   * command creates is `command_conflict` and on one it updates `stale_revision`. A command that creates one record and guards another
+   * (an attempt admitted against its assignment) says here that it lost to a concurrent writer.
+   */
+  readonly contention?: () => Promise<DomainError>;
 }
 
 /** The same object without its undefined fields (an absent optional field is omitted, never stored as undefined). */
@@ -80,6 +86,9 @@ export class CommandRunner {
       throw mapStorageError(error);
     }
   }
+
+  /** The time the runner records with commands (the same clock). */
+  now(): string { return this.#clock(); }
 
   async get(kind: string, id: string): Promise<Aggregate | undefined> {
     try { return await this.storage.getAggregate({ kind, id }); } catch (error) { throw mapStorageError(error); }
@@ -138,6 +147,7 @@ export class CommandRunner {
       result = await commitOperation(this.storage, input, { attempts: this.#attempts, pause: this.#pause });
     } catch (error) {
       if (isStorageError(error, "revision_conflict")) {
+        if (built.contention !== undefined) return refusedUnlessApplied(await built.contention());
         if (built.creates) return refusedUnlessApplied(new DomainError("command_conflict", `${built.ref.kind} ${built.ref.id} already exists, so this command ID was used by something else`, { cause: error }));
         const now = await this.get(built.ref.kind, built.ref.id);
         if (now === undefined) throw new DomainError("not_found", `${built.ref.kind} ${built.ref.id} does not exist`, { cause: error });

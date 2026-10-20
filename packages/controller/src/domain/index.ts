@@ -2,6 +2,14 @@ export { DomainError, isDomainError, type DomainErrorCode } from "./errors.js";
 export { LIMITS as DOMAIN_LIMITS, TASK_STATES, TRANSITIONS, type ProjectBody, type ProjectState, type Repository, type TaskBody, type TaskState, type View } from "./model.js";
 export { derivedId, operationIdOf } from "./ids.js";
 export { CommandRunner, defined, mapStorageError, revisionOf, view, type Built, type CommandMeta, type CommandResult, type RunnerOptions } from "./runner.js";
-export { ProjectService, type CreateProject, type CreateTask, type ServiceOptions, type TransitionTask, type UpdateProject, type UpdateTask } from "./service.js";
+export { ProjectService, type FenceGuard, type CreateProject, type CreateTask, type ServiceOptions, type TransitionTask, type UpdateProject, type UpdateTask } from "./service.js";
 export { TASK_EVENTS, taskEventEntry, taskEventId, type TaskEvent, type TaskEventChange } from "./events.js";
 export { DeliveryDispatcher, type Delivery, type DeliveryHandler, type DispatcherOptions, type PassResult } from "./delivery.js";
+export {
+  ASSIGNMENT_EVENTS, AssignmentService, assignmentEventId,
+  type AdmitAttempt, type AssignmentEvent, type AssignTask, type FencedTransition, type FencedUpdate, type FinishAttempt, type ObserveActivity, type ReleaseTask, type TransferTask,
+} from "./assignments.js";
+export {
+  ASSIGNMENT_LIMITS, activityIdOf, assignmentIdOf, generationIdOf,
+  type ActivityBody, type AssignmentBody, type AssignmentState, type AttemptBody, type AttemptState, type Fence, type GenerationBody, type Owner,
+} from "./assignment-model.js";
