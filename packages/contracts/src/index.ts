@@ -27,6 +27,8 @@ export type UnansweredReason = "aborted" | "model_error" | "no_model" | "stale" 
 
 /** Semantic outcome of one submitted request, independent of the underlying agent runtime. Immutable once recorded. */
 export type SemanticResult =
+  /** A place-only update was added to the transcript; the model was not asked anything. */
+  | { readonly status: "placed"; readonly requestId: RequestId; readonly entryId: number; readonly toolCalls: readonly ToolCallOutcome[] }
   | {
       readonly status: "completed";
       readonly requestId: RequestId;
@@ -75,7 +77,18 @@ export type AdapterRequest =
    * A deliberately selected update to a task's context (for example a decision made in an inquiry). It is placed in the
    * transcript as its own kind of entry, so provenance is visible, and is applied once per request ID.
    */
-  | { readonly kind: "update"; readonly requestId: RequestId; readonly content: string; readonly source?: UpdateSource; readonly whenBusy?: WhenBusy }
+  | {
+      readonly kind: "update";
+      readonly requestId: RequestId;
+      readonly content: string;
+      readonly source?: UpdateSource;
+      readonly whenBusy?: WhenBusy;
+      /**
+       * Whether applying the update also resumes the task (default true). With `false` the update is only placed in the
+       * transcript, at the next turn boundary, and the model is not asked anything; the controller resumes the task later.
+       */
+      readonly run?: boolean;
+    }
   | { readonly kind: "command"; readonly requestId: RequestId; readonly name: string; readonly args?: { readonly [key: string]: JsonValue } };
 
 /** Create a side conversation (an inquiry branch) from a task's context. Idempotent by request ID. */

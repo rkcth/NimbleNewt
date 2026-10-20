@@ -1,10 +1,26 @@
-/** Transcript entry kinds that carry an input addressed to the agent and so start a request's segment. */
-export const INPUT_KINDS: ReadonlySet<string> = new Set(["pi.user", "nimblenewt.update"]);
-
 export interface BoundaryEntry {
   readonly id: number;
   readonly kind: string;
   readonly model?: readonly unknown[];
+  readonly data?: unknown;
+}
+
+/** A place-only update: added to context at a boundary without asking the model anything. */
+export function isPlacedUpdate(entry: { readonly kind: string; readonly data?: unknown }): boolean {
+  return entry.kind === "nimblenewt.update" && (entry.data as { run?: unknown } | undefined)?.run === false;
+}
+
+/** An adapter entry that only carries a context edit (framing of an aborted input): it extends the preceding boundary. */
+export function isContextEditOnly(entry: { readonly kind: string }): boolean {
+  return entry.kind === "nimblenewt.aborted-input";
+}
+
+/**
+ * Whether an entry is an input addressed to the agent, which starts a request's segment of the transcript. A place-only
+ * update is not: it asks nothing, and tool calls around it still belong to the request that was running.
+ */
+export function startsRequestSegment(entry: { readonly kind: string; readonly data?: unknown }): boolean {
+  return entry.kind === "pi.user" || (entry.kind === "nimblenewt.update" && !isPlacedUpdate(entry));
 }
 
 interface MessageLike {
@@ -50,7 +66,11 @@ export function turnBoundaries(entries: readonly BoundaryEntry[]): number[] {
       if (sawCalls && open.size === 0) { boundaries.push(entry.id); sawCalls = false; inputPending = false; }
     } else if (entry.kind === "pi.compaction") {
       if (open.size === 0 && !inputPending) boundaries.push(entry.id);
-    } else if (INPUT_KINDS.has(entry.kind)) {
+    } else if (isPlacedUpdate(entry) || isContextEditOnly(entry)) {
+      // Part of the task's context but not a question: a boundary when nothing is waiting for an answer. A context edit
+      // must be inherited by a branch taken right after it, or the branch would see what the edit hides from the task.
+      if (open.size === 0 && !inputPending) boundaries.push(entry.id);
+    } else if (startsRequestSegment(entry)) {
       open.clear();
       sawCalls = false;
       inputPending = true;

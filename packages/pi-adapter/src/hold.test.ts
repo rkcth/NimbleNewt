@@ -9,7 +9,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { openNodeJsonlStorage } from "@earendil-works/pi-durable/storage/jsonl/node";
 import { requestId } from "@nimblenewt/contracts";
-import { InterruptedWorkError, PiAdapter } from "./index.js";
+import { InterruptedWorkError, NotHeldError, PiAdapter } from "./index.js";
 import { twoConversationTools } from "./testing/crash-fixture.js";
 import { OFFLINE_MODEL_REF, createOfflineModels } from "./testing/offline.js";
 
@@ -62,7 +62,7 @@ test("interrupted work is reported read-only, and everything that would make pro
   const report = await adapter.interrupted();
   assert.equal(report.held, true);
   assert.deepEqual(report.conversations.map((c) => c.conversationId), [ids.root, ids.branch]);
-  assert.deepEqual(report.conversations.map((c) => c.requestIds), [["req-a", "req-a2"], ["req-b"]]);
+  assert.deepEqual(report.conversations.map((c) => c.requestIds), [["req-a", "req-a2", "req-u"], ["req-b"]]);
   assert.ok(report.conversations.every((c) => c.tasks > 0 && !c.abandoned));
 
   const root = adapter.root();
@@ -87,7 +87,12 @@ test("abandoning one conversation leaves the other's work untouched until releas
   await sleep(600);
   assert.deepEqual([count(dir, "toolA"), count(dir, "toolB")], [1, 1], "abandoning ran something");
 
+  // The abandoned request's input is framed for the model right away, before any run can start.
+  const rootTranscript = await adapter.root().transcript();
+  assert.equal(rootTranscript.filter((e) => e.kind === "nimblenewt.aborted-input").length, 1, "the abandoned input was not framed before release");
+
   adapter.releaseHold();
+  await assert.rejects(adapter.abandonInterrupted([ids.branch]), NotHeldError);
   const branch = await adapter.conversation(ids.branch);
   assert.ok(branch);
   await until(async () => (await branch.lookup(requestId("req-b")))?.status === "completed", "the branch request to finish");
@@ -103,6 +108,15 @@ test("abandoning one conversation leaves the other's work untouched until releas
   const queued = await adapter.root().lookup(requestId("req-a2"));
   assert.deepEqual([queued?.status, queued?.status === "unanswered" && queued.retained], ["unanswered", true]);
   assert.deepEqual((await adapter.root().retainedRequests()).map((r) => r.requestId), ["req-a2"]);
+
+  // The queued place-only update asks the model nothing, so abandonment leaves it alone. With no run left to reach a turn
+  // boundary, Pi keeps it queued until the next input places it: nothing happens behind the controller's back.
+  await sleep(300);
+  assert.equal(await adapter.root().lookup(requestId("req-u")), undefined);
+  assert.ok(!(await adapter.root().transcript()).some((e) => e.text === "PLACED-UPDATE"));
+  await (await adapter.root().submit({ kind: "input", requestId: requestId("after-recovery"), content: "carry on" })).result();
+  await until(async () => (await adapter.root().lookup(requestId("req-u")))?.status === "placed", "the queued place-only update to be placed by the next input");
+  assert.ok((await adapter.root().transcript()).some((e) => e.kind === "nimblenewt.update" && e.text === "PLACED-UPDATE"));
 });
 
 test("releasing the hold without abandoning anything resumes every interrupted conversation", async () => {

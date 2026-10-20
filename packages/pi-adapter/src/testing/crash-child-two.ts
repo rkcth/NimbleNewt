@@ -34,4 +34,5 @@ writeFileSync(join(directory, "ids.json"), JSON.stringify({ root: root.id, branc
 await root.submit({ kind: "input", requestId: requestId("req-a"), content: "TASK-A" });
 await branch.conversation.submit({ kind: "input", requestId: requestId("req-b"), content: "TASK-B" });
 await root.submit({ kind: "input", requestId: requestId("req-a2"), content: "QUEUED-AFTER-A" }); // queued behind req-a
+await root.submit({ kind: "update", requestId: requestId("req-u"), content: "PLACED-UPDATE", run: false }); // a queued passive write
 await new Promise(() => {}); // the process is killed from inside toolB

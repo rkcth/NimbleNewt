@@ -16,7 +16,7 @@ export function mapReason(reason: string): UnansweredReason {
  */
 export function fingerprintOf(request: FingerprintedRequest): string {
   const payload = request.kind === "update"
-    ? JSON.stringify(["update", request.content, request.whenBusy ?? null, request.source?.conversationId ?? null, request.source?.entryId ?? null])
+    ? JSON.stringify(["update", request.content, request.whenBusy ?? null, request.source?.conversationId ?? null, request.source?.entryId ?? null, request.run ?? true])
     : JSON.stringify([request.content, request.whenBusy ?? null]);
   return `v1:sha256:${createHash("sha256").update(payload).digest("hex")}`;
 }

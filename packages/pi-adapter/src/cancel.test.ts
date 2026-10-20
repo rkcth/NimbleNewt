@@ -9,9 +9,9 @@ import { OFFLINE_MODEL_REF, createOfflineModels } from "./testing/offline.js";
 const adapters: PiAdapter[] = [];
 afterEach(async () => { for (const adapter of adapters.splice(0)) await adapter.close(); });
 
-async function open(tools: readonly AdapterTool[] = [], models: Parameters<typeof createOfflineModels>[0] = {}) {
+async function open(tools: readonly AdapterTool[] = [], models: Parameters<typeof createOfflineModels>[0] = {}, extra: { abortedInputs?: "frame" | "keep" } = {}) {
   const offline = createOfflineModels(models);
-  const adapter = await PiAdapter.open({ storage: new MemoryStorage(), models: offline.models, model: OFFLINE_MODEL_REF, tools });
+  const adapter = await PiAdapter.open({ storage: new MemoryStorage(), models: offline.models, model: OFFLINE_MODEL_REF, tools, ...extra });
   adapters.push(adapter);
   return { adapter, faux: offline.faux };
 }
@@ -84,7 +84,7 @@ test("withdrawn requests are listed with their payloads and run only when the co
   await (await w.conversation.readmit(requestId("C"), requestId("C-again"))).result();
   const transcript = await w.conversation.transcript();
   const update = transcript.find((e) => e.kind === "nimblenewt.update");
-  assert.deepEqual(update?.data, { source: { conversationId: 99, entryId: 7 } });
+  assert.deepEqual(update?.data, { source: { conversationId: 99, entryId: 7 }, run: true });
 });
 
 test("only requests that never started can be readmitted", async () => {
@@ -173,9 +173,9 @@ test("readmitting concurrently under different new IDs runs the request once; un
   assert.equal(same[0].submissionId, same[1].submissionId);
 });
 
-test("the instruction of a request that had started and was aborted stays in the model's context (current behaviour, pinned)", async () => {
+async function abortedThenAsk(options: { abortedInputs?: "frame" | "keep" }) {
   const hold = holdingTool();
-  const { adapter, faux } = await open([hold.tool]);
+  const { adapter, faux } = await open([hold.tool], {}, options);
   const conversation = adapter.root();
   faux.setResponses([fauxAssistantMessage(fauxToolCall("hold", {}, { id: "h" }), { stopReason: "toolUse" })]);
   const started = await conversation.submit(input("risky", "DELETE-ALL-FILES-INSTRUCTION"));
@@ -183,12 +183,35 @@ test("the instruction of a request that had started and was aborted stays in the
   await conversation.abort();
   await started.result();
 
-  let nextSaw = "";
-  faux.setResponses([(context) => { nextSaw = JSON.stringify(context.messages); return fauxAssistantMessage("ok"); }]);
+  let nextMessages: readonly { role: string; content: unknown }[] = [];
+  faux.setResponses([(context) => { nextMessages = context.messages as never; return fauxAssistantMessage("ok"); }]);
   await (await conversation.submit(input("later", "something else"))).result();
-  // Pi keeps an aborted, started request's input in later context. Nothing re-runs it, but the model can see it and may
-  // act on it. Changing this (hide the entry, or frame it as aborted) is the F06c2 decision; a change must update this test.
-  assert.ok(nextSaw.includes("DELETE-ALL-FILES-INSTRUCTION"));
+  const userTexts = nextMessages.filter((m) => m.role === "user").map((m) => JSON.stringify(m.content));
+  return { conversation, userTexts };
+}
+
+test("by default the input of a request that had started and was aborted reaches later runs marked as aborted", async () => {
+  const { conversation, userTexts } = await abortedThenAsk({});
+  const risky = userTexts.find((t) => t.includes("DELETE-ALL-FILES-INSTRUCTION"));
+  assert.ok(risky?.includes("This request was aborted before it finished. Do not continue it unless asked again."), `the instruction was not framed: ${userTexts.join(" | ")}`);
+  assert.ok(!userTexts.includes(JSON.stringify("DELETE-ALL-FILES-INSTRUCTION")), "the raw instruction is still in the model's context");
+  // The transcript keeps the original, and records the framing as its own entry.
+  const transcript = await conversation.transcript();
+  assert.equal(transcript.find((e) => e.kind === "pi.user")?.text, "DELETE-ALL-FILES-INSTRUCTION");
+  assert.equal(transcript.filter((e) => e.kind === "nimblenewt.aborted-input").length, 1);
+});
+
+test("with abortedInputs: keep the aborted instruction stays in later context exactly as before", async () => {
+  const { conversation, userTexts } = await abortedThenAsk({ abortedInputs: "keep" });
+  assert.ok(userTexts.includes(JSON.stringify("DELETE-ALL-FILES-INSTRUCTION")));
+  assert.equal((await conversation.transcript()).filter((e) => e.kind === "nimblenewt.aborted-input").length, 0);
+});
+
+test("framing happens once however often the abort is observed", async () => {
+  const { conversation } = await abortedThenAsk({});
+  await conversation.abort();
+  await conversation.lookup(requestId("risky"));
+  assert.equal((await conversation.transcript()).filter((e) => e.kind === "nimblenewt.aborted-input").length, 1);
 });
 
 test("readmitting under the request's own ID is refused", async () => {
@@ -209,4 +232,42 @@ test("a readmission refused because the new ID is taken gives the claim back, so
   assert.deepEqual((await w.conversation.retainedRequests()).map((r) => r.requestId), ["B", "C"], "the refused readmission should not hide B");
   const retry = await w.conversation.readmit(requestId("B"), requestId("B-retry"));
   assert.equal((await retry.result()).status, "completed");
+});
+
+test("an inquiry branch taken after an abort sees the aborted instruction framed, like the task does", async () => {
+  const hold = holdingTool();
+  const { adapter, faux } = await open([hold.tool]);
+  const conversation = adapter.root();
+  faux.setResponses([fauxAssistantMessage(fauxToolCall("hold", {}, { id: "h" }), { stopReason: "toolUse" })]);
+  const started = await conversation.submit(input("risky-branch", "DELETE-ALL-FILES-INSTRUCTION"));
+  await hold.up;
+  await conversation.abort();
+  await started.result();
+
+  const branch = await conversation.branch({ requestId: requestId("after-abort-branch") });
+  let childSaw = "";
+  faux.setResponses([(context) => { childSaw = JSON.stringify(context.messages); return fauxAssistantMessage("answer"); }]);
+  await (await branch.conversation.submit(input("child-ask", "What happened?"))).result();
+  assert.ok(childSaw.includes("This request was aborted before it finished"), `the branch saw the instruction unframed: ${childSaw}`);
+  assert.ok(!childSaw.includes('"content":"DELETE-ALL-FILES-INSTRUCTION"'), "the raw instruction reached the branch");
+});
+
+test("a submission made while an abort is in progress waits for the framing, so its run never sees the instruction unframed", async () => {
+  const hold = holdingTool();
+  const { adapter, faux } = await open([hold.tool]);
+  const conversation = adapter.root();
+  let nextSaw = "";
+  faux.setResponses([
+    fauxAssistantMessage(fauxToolCall("hold", {}, { id: "h" }), { stopReason: "toolUse" }),
+    (context) => { nextSaw = JSON.stringify(context.messages); return fauxAssistantMessage("ok"); },
+  ]);
+  const started = await conversation.submit(input("risky-race", "DELETE-ALL-FILES-INSTRUCTION"));
+  await hold.up;
+  const aborting = conversation.abort();
+  const racing = conversation.submit(input("racing", "something else")); // issued while the abort is still running
+  await aborting;
+  await started.result();
+  assert.equal((await (await racing).result()).status, "completed");
+  assert.ok(nextSaw.includes("This request was aborted before it finished"), `the racing run read the instruction unframed: ${nextSaw}`);
+  assert.ok(!nextSaw.includes('"content":"DELETE-ALL-FILES-INSTRUCTION"'));
 });

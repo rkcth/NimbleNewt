@@ -1,14 +1,17 @@
-import type { AbortReport, AdapterRequest, BranchRequest, InterruptedWork, RequestId, RetainedRequest, SemanticResult, ToolCallOutcome } from "@nimblenewt/contracts";
+import type {
+  AbortReport, AdapterRequest, BranchRequest, InterruptedWork, RequestId, RetainedRequest, SemanticResult, ToolCallOutcome, UpdateSource,
+} from "@nimblenewt/contracts";
+import type { JsonValue } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import type { Models, Static, TSchema } from "@earendil-works/pi-ai";
+import type { ImageContent, Models, Static, TextContent, TSchema } from "@earendil-works/pi-ai";
 import {
   ConversationBusy, Harness, createRegistry, defineDoc, defineExtension, defineTool,
-  type Conversation, type SettledSubmissionRecord, type Storage, type Submission,
+  type Conversation, type SettledSubmissionRecord, type Storage, type Submission, type SubmissionDraft,
 } from "@earendil-works/pi-durable";
-import { INPUT_KINDS, turnBoundaries } from "./branches.js";
+import { startsRequestSegment, turnBoundaries } from "./branches.js";
 import {
   AlreadyReadmittedError, ConversationBusyError, InvalidBranchPointError, InvalidToolError, NoBranchPointError, NotRetainedError,
-  InterruptedWorkError, InvalidReadmissionError, RequestIdConflictError, UnknownCommandError,
+  InterruptedWorkError, InvalidReadmissionError, NotHeldError, RequestIdConflictError, UnknownCommandError,
 } from "./errors.js";
 import { fingerprintOf, fingerprintsMatch, mapReason } from "./results.js";
 import { assertSupportedRuntime, type RuntimeInfo } from "./runtime.js";
@@ -44,6 +47,12 @@ export interface PiAdapterOptions {
   /** Pi Durable harness settings, for example compaction thresholds. */
   readonly settings?: NonNullable<Parameters<typeof Harness.open>[1]["settings"]>;
   /**
+   * What the model sees of an input whose request was aborted after it had started. `frame` (default) replaces it, for
+   * the model only, with the same text marked as aborted and not to be continued unless asked again; the transcript keeps
+   * the original. `keep` leaves it as it was, so the model may carry the aborted instruction forward.
+   */
+  readonly abortedInputs?: "frame" | "keep";
+  /**
    * Refuse anything that would make progress while the storage holds interrupted work, until the controller has reviewed
    * it and called `releaseHold()`. Default true. Pi's scheduler is harness-wide, so without the hold almost any call
    * (submit, abort, compact, waiting for a result) would silently re-run every interrupted run.
@@ -74,6 +83,8 @@ interface RequestRecord {
   request?: RetainedRequest["request"];
   /** Set once a retained request has been readmitted, under this new request ID. */
   readmittedAs?: string;
+  /** Set once the aborted input of this request has been framed (or deliberately kept) for later model context. */
+  framed?: boolean;
   result?: SemanticResult;
 }
 /** A branch created for a request ID: the child conversation and the entry it forked after. */
@@ -155,6 +166,29 @@ function toolOutcome(entry: EntryLike): ToolCallOutcome {
   return { callId, name, status: message.isError === true ? "error" : "ok", output: textOf(message.content) };
 }
 
+function sourceData(source: UpdateSource | undefined): JsonValue {
+  return source === undefined ? null : { conversationId: source.conversationId, entryId: source.entryId };
+}
+
+/** A place-only update: a passive write that adds the text to the model's context at the next boundary. */
+function placedUpdateDraft(request: Extract<AdapterRequest, { kind: "update" }>): SubmissionDraft {
+  return {
+    type: "write",
+    requestId: request.requestId,
+    entry: {
+      kind: "nimblenewt.update",
+      model: [{ role: "user", content: request.content, timestamp: Date.now() }],
+      data: { source: sourceData(request.source), run: false },
+    },
+  };
+}
+
+/** The same input with a marker in front, for the model's view of an aborted request. */
+function framedContent(content: string | (TextContent | ImageContent)[]): string | (TextContent | ImageContent)[] {
+  const marker = "[This request was aborted before it finished. Do not continue it unless asked again.]";
+  return typeof content === "string" ? `${marker} ${content}` : [{ type: "text", text: marker }, ...content];
+}
+
 /** Shared by an adapter and its conversation handles: whether interrupted work is being held back. */
 class Hold {
   held: boolean;
@@ -175,10 +209,19 @@ class Hold {
   }
 }
 
+/** What an adapter shares with every conversation handle it hands out. */
+interface Shared {
+  readonly storage: Storage;
+  readonly hold: Hold;
+  readonly abortedInputs: "frame" | "keep";
+  /** Conversations with an abort in progress: new submissions wait for the abort and its framing to finish. */
+  readonly aborting: Map<number, Promise<unknown>>;
+}
+
 /** One Pi conversation: the root task conversation now, inquiry branches and task contexts from F06b. */
 export class AdapterConversation {
   /** @internal Use `PiAdapter.root()` or `PiAdapter.conversation()`. */
-  constructor(private readonly harness: Harness, private readonly conversation: Conversation, private readonly storage: Storage, private readonly hold: Hold) {}
+  constructor(private readonly harness: Harness, private readonly conversation: Conversation, private readonly shared: Shared) {}
 
   get id(): number {
     return this.conversation.id;
@@ -191,19 +234,21 @@ export class AdapterConversation {
    */
   async submit(request: AdapterRequest): Promise<SubmissionHandle> {
     if (request.kind === "command") throw new UnknownCommandError(request.name, SUPPORTED_COMMANDS);
-    await this.hold.assertRunnable();
+    await this.shared.hold.assertRunnable();
+    // A submission must not slip in between an abort and the framing of the aborted input, or its run would read it unframed.
+    await this.shared.aborting.get(this.id)?.catch(() => undefined);
     // Record the payload fingerprint before admission: a crash in between leaves a record for the same payload to retry.
     const created = await this.claim(request, fingerprintOf(request));
     let submission: Submission;
     try {
       submission = await this.conversation.submit(
-        {
+        request.kind === "update" && request.run === false ? placedUpdateDraft(request) : {
           type: "input",
           content: request.content,
           requestId: request.requestId,
           ...(request.whenBusy === undefined ? {} : { whenBusy: request.whenBusy }),
           // An update is placed as its own kind of entry, so provenance is in the transcript; the model still sees the text.
-          ...(request.kind === "update" ? { entry: { kind: "nimblenewt.update", data: { source: request.source === undefined ? null : { conversationId: request.source.conversationId, entryId: request.source.entryId } } } } : {}),
+          ...(request.kind === "update" ? { entry: { kind: "nimblenewt.update", data: { source: sourceData(request.source), run: true } } } : {}),
         },
         context,
       );
@@ -244,7 +289,7 @@ export class AdapterConversation {
           state.branches[id] = { childId: childId as number, forkedAt: at };
         },
       }, context);
-      return { conversation: new AdapterConversation(this.harness, child, this.storage, this.hold), forkedAt: at };
+      return { conversation: new AdapterConversation(this.harness, child, this.shared), forkedAt: at };
     } catch (error) {
       if (!(error instanceof BranchAlreadyExists)) throw error;
       const winner = await this.branchRecord(id);
@@ -263,7 +308,7 @@ export class AdapterConversation {
     }
     const child = await this.harness.conversation(record.childId as never, context);
     if (child === undefined) throw new InvalidBranchPointError(`branch conversation ${record.childId} no longer exists`);
-    return { conversation: new AdapterConversation(this.harness, child, this.storage, this.hold), forkedAt: record.forkedAt };
+    return { conversation: new AdapterConversation(this.harness, child, this.shared), forkedAt: record.forkedAt };
   }
 
   /**
@@ -295,8 +340,8 @@ export class AdapterConversation {
   async lookup(id: RequestId): Promise<SemanticResult | undefined> {
     const recorded = await this.recorded(id);
     if (recorded !== undefined) return recorded;
-    const record = await this.storage.submissionByRequest(this.conversation.id, id, context);
-    if (record === undefined || record.type !== "input" || (record.status !== "done" && record.status !== "unanswered")) return undefined;
+    const record = await this.shared.storage.submissionByRequest(this.conversation.id, id, context);
+    if (record === undefined || (record.status !== "done" && record.status !== "unanswered")) return undefined;
     return this.settle(id, record);
   }
 
@@ -307,7 +352,17 @@ export class AdapterConversation {
    * tool call is never executed, and Pi leaves it out of the context of later requests.
    */
   async abort(): Promise<AbortReport> {
-    await this.hold.assertRunnable();
+    await this.shared.hold.assertRunnable();
+    const running = this.abortAndFrame();
+    this.shared.aborting.set(this.id, running);
+    try {
+      return await running;
+    } finally {
+      if (this.shared.aborting.get(this.id) === running) this.shared.aborting.delete(this.id);
+    }
+  }
+
+  private async abortAndFrame(): Promise<AbortReport> {
     const before = await this.abortedSubmissions();
     await this.conversation.abort(context);
     const aborted: RequestId[] = [];
@@ -315,8 +370,37 @@ export class AdapterConversation {
     for (const [id, record] of await this.abortedSubmissions()) {
       if (before.has(id) || record.requestId === undefined) continue;
       (record.entry === undefined ? retained : aborted).push(record.requestId as RequestId);
+      if (record.entry !== undefined) await this.frameAborted(record.requestId as RequestId, record.entry as number);
     }
     return { aborted, retained };
+  }
+
+  /**
+   * For the model only, replace the input of a request that started and was aborted with a marked copy (option
+   * `abortedInputs`), once. The transcript keeps the original and records a `nimblenewt.aborted-input` entry. Without
+   * this Pi keeps the aborted instruction in later context as if it were live.
+   *
+   * The entry is appended directly in a commit, not through a Pi submission, so it does not wait for a turn boundary. In
+   * `abort()` and `abandonInterrupted()` the conversation is idle (or held), so that is safe. When an abort the adapter
+   * did not start is first observed by reading a result while another run is mid-turn, the append interleaves with that
+   * run's own entries; this worked in every probe but is not a case Pi documents.
+   * @internal
+   */
+  async frameAborted(id: RequestId, entryId: number): Promise<void> {
+    if (this.shared.abortedInputs === "keep") return;
+    await this.conversation.commit(async (tx) => {
+      const state = (await tx.doc(Requests, this.conversation.id)) as unknown as RequestsState;
+      const stored = (state.requests[id] ??= {});
+      if (stored.framed === true) return;
+      stored.framed = true;
+      const original = (await tx.entry(entryId as never))?.model?.[0];
+      if (original?.role !== "user") return;
+      await tx.appendEntry(this.conversation.id, {
+        kind: "nimblenewt.aborted-input",
+        data: { requestId: id, target: entryId },
+        edits: [{ target: entryId as never, action: "replace", messages: [{ role: "user", content: framedContent(original.content), timestamp: original.timestamp }] }],
+      });
+    }, context);
   }
 
   /** Requests withdrawn before they started and not yet readmitted, in admission order. Read-only. */
@@ -374,7 +458,7 @@ export class AdapterConversation {
     const found = new Map<number, SettledSubmissionRecord>();
     let cursor;
     for (;;) {
-      const page = await this.storage.scanSubmissions({ conversationId: this.conversation.id, status: "unanswered" }, 100, cursor, context);
+      const page = await this.shared.storage.scanSubmissions({ conversationId: this.conversation.id, status: "unanswered" }, 100, cursor, context);
       for (const record of page.items) {
         if (record.type === "input" && record.status === "unanswered" && record.reason === "aborted") found.set(record.id, record);
       }
@@ -385,7 +469,7 @@ export class AdapterConversation {
 
   /** Compact the conversation's model-visible context now. Older entries stay in storage and results stay readable. */
   async compact(instructions?: string): Promise<void> {
-    await this.hold.assertRunnable();
+    await this.shared.hold.assertRunnable();
     const task = await this.conversation.compact(instructions, context);
     await this.harness.waitForTask(task, context);
   }
@@ -451,8 +535,8 @@ export class AdapterConversation {
     // A settled submission is read from its record, so reading it never starts Pi's scheduler; waiting for an
     // unsettled one does, and is refused while interrupted work is held.
     const current = await submission.status(context);
-    if (current.type === "input" && (current.status === "done" || current.status === "unanswered")) return this.settle(id, current);
-    await this.hold.assertRunnable();
+    if (current.status === "done" || current.status === "unanswered") return this.settle(id, current);
+    await this.shared.hold.assertRunnable();
     return this.settle(id, await submission.wait(context));
   }
 
@@ -462,10 +546,11 @@ export class AdapterConversation {
    * so each call is counted once. The final answer text is shared by requests that were merged into one run.
    */
   private async settle(id: RequestId, settled: SettledSubmissionRecord): Promise<SemanticResult> {
+    if (settled.type === "write") return this.settleWrite(id, settled);
     const ownCalls = async (): Promise<ToolCallOutcome[]> => {
       if (settled.entry === undefined) return [];
       const last = settled.status === "done" ? (settled.answer as number) - 1 : undefined;
-      const entries = await this.scan((settled.entry as number) + 1, last, (e) => INPUT_KINDS.has(e.kind));
+      const entries = await this.scan((settled.entry as number) + 1, last, (e) => startsRequestSegment(e));
       return entries.filter((e) => e.kind === "pi.tool-result").map(toolOutcome);
     };
     const toolCalls = await ownCalls();
@@ -484,9 +569,23 @@ export class AdapterConversation {
       // Withdrawn by an abort before it was ever placed in the transcript: nothing of it ran.
       const neverStarted = settled.reason === "aborted" && settled.entry === undefined;
       result = { status: "unanswered", requestId: id, reason, detail, ...(neverStarted ? { retained: true as const } : {}), toolCalls };
+      // The abort is now observed; make sure the model no longer sees this request's input as a live instruction.
+      if (settled.reason === "aborted" && settled.entry !== undefined) await this.frameAborted(id, settled.entry as number);
     }
 
-    // First writer wins, so concurrent callers and later calls all see one recorded result.
+    return this.recordResult(id, result);
+  }
+
+  /** A place-only update (a passive write) has settled: it was added to the transcript, or could not be. */
+  private async settleWrite(id: RequestId, settled: SettledSubmissionRecord): Promise<SemanticResult> {
+    const result: SemanticResult = settled.status === "done"
+      ? { status: "placed", requestId: id, entryId: settled.entry as number, toolCalls: [] }
+      : { status: "unanswered", requestId: id, reason: mapReason(String(settled.reason)), detail: String(settled.reason), toolCalls: [] };
+    return this.recordResult(id, result);
+  }
+
+  /** Records a built result; the first writer wins, so concurrent callers and later calls all see one recorded result. */
+  private async recordResult(id: RequestId, result: SemanticResult): Promise<SemanticResult> {
     await this.conversation.commit(async (tx) => {
       const state = (await tx.doc(Requests, this.conversation.id)) as unknown as RequestsState;
       const existing = state.requests[id];
@@ -503,7 +602,7 @@ export class AdapterConversation {
 
 /** Maps NimbleNewt requests onto a pinned Pi Durable harness and Pi results back to semantic results. */
 export class PiAdapter {
-  private constructor(private readonly harness: Harness, private readonly rootConversation: Conversation, private readonly storage: Storage, private readonly hold: Hold) {}
+  private constructor(private readonly harness: Harness, private readonly rootConversation: Conversation, private readonly shared: Shared) {}
 
   static async open(options: PiAdapterOptions): Promise<PiAdapter> {
     assertSupportedRuntime(options.runtime);
@@ -542,18 +641,23 @@ export class PiAdapter {
     // Read-only: finds work a previous process left unfinished without starting the scheduler.
     const inspection = await harness.inspect(context);
     const interrupted = inspection.tasks.length > 0 || inspection.submissions.length > 0;
-    return new PiAdapter(harness, root, options.storage, new Hold(interrupted && options.holdInterrupted !== false, harness));
+    return new PiAdapter(harness, root, {
+      storage: options.storage,
+      hold: new Hold(interrupted && options.holdInterrupted !== false, harness),
+      abortedInputs: options.abortedInputs ?? "frame",
+      aborting: new Map(),
+    });
   }
 
   /** The root conversation, created on first use and the same on every reopen of the same storage. */
   root(): AdapterConversation {
-    return new AdapterConversation(this.harness, this.rootConversation, this.storage, this.hold);
+    return new AdapterConversation(this.harness, this.rootConversation, this.shared);
   }
 
   /** Re-acquire an existing conversation by ID, for example after a restart; `undefined` if there is none. */
   async conversation(id: number): Promise<AdapterConversation | undefined> {
     const found = await this.harness.conversation(id as never, context);
-    return found === undefined ? undefined : new AdapterConversation(this.harness, found, this.storage, this.hold);
+    return found === undefined ? undefined : new AdapterConversation(this.harness, found, this.shared);
   }
 
   /**
@@ -576,10 +680,10 @@ export class PiAdapter {
     for (const submission of inspection.submissions) {
       const item = entry(submission.conversationId as number);
       if (submission.requestId !== undefined) item.requestIds.push(submission.requestId);
-      if (submission.status === "queued") item.allMarked = false; // nothing to mark: it would be placed and run on release
+      if (submission.status === "queued" && submission.type === "input") item.allMarked = false; // nothing to mark: it would be placed and run on release
     }
     return {
-      held: this.hold.held,
+      held: this.shared.hold.held,
       conversations: [...byConversation.entries()].sort(([a], [b]) => a - b)
         .map(([conversationId, item]) => ({ conversationId, tasks: item.tasks, requestIds: item.requestIds, abandoned: item.tasks > 0 && item.allMarked })),
     };
@@ -592,15 +696,26 @@ export class PiAdapter {
    * untouched.
    */
   async abandonInterrupted(conversationIds: readonly number[]): Promise<void> {
+    if (!this.shared.hold.held) throw new NotHeldError("work can only be abandoned while the hold is in force: once the scheduler runs, an abort is only a late request");
     const wanted = new Set(conversationIds);
     const inspection = await this.harness.inspect(context);
     for (const task of inspection.tasks) {
       if (wanted.has(task.record.conversationId as number) && !task.record.abortRequested) await this.harness.abortTask(task.record.id, context);
     }
+    // The requests that had started will be aborted on release; frame their inputs now so no run can see them as live.
+    for (const submission of inspection.submissions) {
+      if (!wanted.has(submission.conversationId as number) || submission.status !== "placed" || submission.requestId === undefined) continue;
+      const conversation = await this.harness.conversation(submission.conversationId, context);
+      if (conversation !== undefined && submission.entry !== undefined) {
+        await new AdapterConversation(this.harness, conversation, this.shared).frameAborted(submission.requestId as RequestId, submission.entry as number);
+      }
+    }
     // Queued submissions have no task to mark; withdraw them so they cannot start on release. Like any request withdrawn
     // before starting, they stay available through retainedRequests() and readmit().
     for (const submission of inspection.submissions) {
-      if (wanted.has(submission.conversationId as number) && submission.status === "queued") {
+      // Queued place-only updates (writes) are left alone: they ask the model nothing, and placing them on release is
+      // the controller's earlier decision, not a hazard.
+      if (wanted.has(submission.conversationId as number) && submission.status === "queued" && submission.type === "input") {
         await this.harness.abortSubmission(submission.id, context, submission.conversationId);
       }
     }
@@ -612,7 +727,7 @@ export class PiAdapter {
    * Pi's scheduler is harness-wide, so this resumes every conversation that was not abandoned.
    */
   releaseHold(): void {
-    this.hold.held = false;
+    this.shared.hold.held = false;
     this.harness.resume();
   }
 

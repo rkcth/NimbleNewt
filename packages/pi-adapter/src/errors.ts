@@ -69,3 +69,8 @@ export class InterruptedWorkError extends PiAdapterError {
 export class InvalidReadmissionError extends PiAdapterError {
   override readonly name = "InvalidReadmissionError";
 }
+
+/** `abandonInterrupted` was called when no hold is in force: the scheduler may already be running, so it cannot be done safely. */
+export class NotHeldError extends PiAdapterError {
+  override readonly name = "NotHeldError";
+}

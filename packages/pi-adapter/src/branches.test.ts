@@ -146,7 +146,7 @@ test("a selected update is applied once, carries its provenance, and is seen by 
   assert.ok(parentSaw.includes("Decision: use plan B."));
   const updates = (await parent.transcript()).filter((e) => e.kind === "nimblenewt.update");
   assert.equal(updates.length, 1);
-  assert.deepEqual(updates[0]?.data, { source: { conversationId: branch.conversation.id, entryId: answerEntry.id } });
+  assert.deepEqual(updates[0]?.data, { source: { conversationId: branch.conversation.id, entryId: answerEntry.id }, run: true });
   await assert.rejects(parent.submit({ ...update, content: "Decision: use plan C." }), RequestIdConflictError);
 });
 
@@ -298,4 +298,87 @@ test("a compaction that lands after the task's unanswered input is not a fork po
 
   release();
   assert.equal((await running.result()).status, "completed");
+});
+
+const placed = (id: string, content: string) => ({ kind: "update", requestId: requestId(id), content, run: false }) as const;
+
+test("a place-only update is added to the transcript without asking the model anything, once, and the next run sees it", async () => {
+  const { adapter, faux } = await finishedTask();
+  const parent = adapter.root();
+  let modelCalls = 0;
+  let nextSaw = "";
+  faux.setResponses([(context) => { modelCalls += 1; nextSaw = JSON.stringify(context.messages); return fauxAssistantMessage("continuing"); }]);
+
+  const first = await parent.submit(placed("place-1", "Decision: use plan B."));
+  const second = await parent.submit(placed("place-1", "Decision: use plan B."));
+  assert.equal(second.submissionId, first.submissionId);
+  const result = await first.result();
+  assert.equal(result.status, "placed");
+  assert.deepEqual(await second.result(), result);
+  assert.equal(modelCalls, 0, "a place-only update must not ask the model anything");
+
+  const updates = (await parent.transcript()).filter((e) => e.kind === "nimblenewt.update");
+  assert.equal(updates.length, 1);
+  assert.deepEqual([updates[0]?.id === (result.status === "placed" ? result.entryId : -1), updates[0]?.data, updates[0]?.text], [true, { source: null, run: false }, "Decision: use plan B."]);
+
+  await (await parent.submit(input("after-place", "carry on"))).result();
+  assert.equal(modelCalls, 1);
+  assert.equal(nextSaw.split("Decision: use plan B.").length - 1, 1, "the update should reach the model exactly once");
+  await assert.rejects(parent.submit({ ...placed("place-1", "Decision: use plan C.") }), RequestIdConflictError);
+  await assert.rejects(parent.submit({ kind: "update", requestId: requestId("place-1"), content: "Decision: use plan B." }), RequestIdConflictError, "run: false is part of the request's identity");
+});
+
+test("a place-only update that arrives mid-run waits for the boundary and does not take over the run's tool calls", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let started!: () => void;
+  const up = new Promise<void>((resolve) => { started = resolve; });
+  const hold: AdapterTool = { name: "hold", description: "Waits", parameters: Type.Object({}), execute: async () => { started(); await gate; return "held"; } };
+  const { adapter, faux } = await open([hold, echo]);
+  let modelCalls = 0;
+  faux.setResponses([
+    () => { modelCalls += 1; return fauxAssistantMessage(fauxToolCall("hold", {}, { id: "c1" }), { stopReason: "toolUse" }); },
+    () => { modelCalls += 1; return fauxAssistantMessage(fauxToolCall("echo", {}, { id: "c2" }), { stopReason: "toolUse" }); },
+    () => { modelCalls += 1; return fauxAssistantMessage("final"); },
+  ]);
+  const a = await adapter.root().submit(input("mid-a", "start"));
+  await up;
+  const u = await adapter.root().submit(placed("mid-u", "Decision: use plan B."));
+  release();
+  const [ra, ru] = [await a.result(), await u.result()];
+  assert.equal(ru.status, "placed");
+  assert.equal(modelCalls, 3, "the update caused an extra model call");
+  assert.deepEqual([ra.status, ra.toolCalls.map((c) => c.callId)], ["completed", ["c1", "c2"]], "the run's tool calls were cut at the placed update");
+});
+
+test("a branch taken after a place-only update sees it, because it is part of the task's context", async () => {
+  const { adapter, faux } = await finishedTask();
+  const parent = adapter.root();
+  await (await parent.submit(placed("branch-place", "Decision: use plan B."))).result();
+  const updateEntry = (await parent.transcript()).find((e) => e.kind === "nimblenewt.update");
+  const branch = await parent.branch({ requestId: requestId("after-place") });
+  assert.equal(branch.forkedAt, updateEntry?.id);
+  let childSaw = "";
+  faux.setResponses([(context) => { childSaw = JSON.stringify(context.messages); return fauxAssistantMessage("answer"); }]);
+  await (await branch.conversation.submit(input("ask-place", "Which plan?"))).result();
+  assert.ok(childSaw.includes("Decision: use plan B."));
+});
+
+test("turnBoundaries: a place-only update is a boundary only when nothing is waiting for an answer, and never leaves an input pending", () => {
+  const answered = [entry(1, "pi.user", { role: "user" }), entry(2, "pi.assistant", { role: "assistant", stopReason: "stop", content: [] })];
+  const placedUpdate = (id: number) => ({ id, kind: "nimblenewt.update", model: [{ role: "user" }], data: { run: false } });
+  assert.deepEqual(turnBoundaries([...answered, placedUpdate(3)]), [2, 3]);
+  assert.deepEqual(turnBoundaries([...answered, entry(3, "pi.user", { role: "user" }), placedUpdate(4)]), [2], "not while an input is waiting for its answer");
+  assert.deepEqual(turnBoundaries([...answered, placedUpdate(3), entry(4, "pi.compaction", {})]), [2, 3, 4], "a placed update does not leave an input pending for a later compaction");
+  assert.deepEqual(turnBoundaries([...answered, { id: 3, kind: "nimblenewt.update", model: [{ role: "user" }], data: { run: true } }]), [2], "an applied (running) update is an input awaiting its answer");
+});
+
+test("turnBoundaries: the framing entry of an aborted input extends the boundary before it, so a branch inherits the edit", () => {
+  const abortedRound = [
+    entry(1, "pi.user", { role: "user" }),
+    entry(2, "pi.assistant", { role: "assistant", stopReason: "toolUse", content: [call("x")] }),
+    entry(3, "pi.tool-result", { role: "toolResult", toolCallId: "x" }),
+  ];
+  assert.deepEqual(turnBoundaries([...abortedRound, entry(4, "nimblenewt.aborted-input", {})]), [3, 4]);
+  assert.deepEqual(turnBoundaries([entry(1, "pi.user", { role: "user" }), entry(2, "nimblenewt.aborted-input", {})]), [], "nothing was answered, so there is no boundary");
 });
