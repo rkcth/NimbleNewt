@@ -329,6 +329,9 @@
         "commits": [
           "b5229b8"
         ],
+        "ci_runs": [
+          "39360216342"
+        ],
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "Typed storage contract, canonical JSON/hash/validation rules, error classification, bounded retry with ambiguous-commit resolution, in-memory reference store, fault injector, shared conformance suite (about 90 cases, including epoch fencing of every write and atomic receipt/timer/effect reconciliation) and a build check that keeps SQL and drivers out of non-adapter code. Verified against the reference store only; real SQLite/PostgreSQL conformance is F04b/F04c.",
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
@@ -354,6 +357,9 @@
         "commits": [
           "8aed518"
         ],
+        "ci_runs": [
+          "39362190327"
+        ],
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "SQLite controller storage adapter on node:sqlite: WAL, synchronous FULL, bounded busy timeout, BEGIN IMMEDIATE writes, schema-level uniqueness, best-effort network-filesystem refusal. Passes the shared conformance suite and multi-process contention and SIGKILL tests on Linux. Power-loss durability, Windows/macOS runs (CI) and throughput are not yet evidenced.",
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
@@ -369,12 +375,18 @@
       ],
       "deliverable": "PostgreSQL adapter and schema with bounded pool and retry policy",
       "acceptance_and_verification": "Shared fixtures pass on real PostgreSQL; competing claims preserve ownership and ordering; deadlock/serialization retries and ambiguous commit handled without duplicated admission",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "pending_commit": true,
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "PostgreSQL controller storage adapter on pg 8.23.1: bounded pool, READ COMMITTED with row-level rules (ON CONFLICT, conditional UPDATE, FOR SHARE epoch fence, SKIP LOCKED claims, counter-row sequence numbers), explicit verified server settings, driver-error classification. Passes the shared conformance suite and PostgreSQL-specific concurrency, deadlock, lock-timeout, pool-bound and connection-cut tests against a real PostgreSQL 17.10 server. Only 17.10 qualified; supported versions are an open owner decision; Windows/macOS runs and throughput not yet evidenced.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "F04d",

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { checkBoundaries, DATABASE_FOLDERS } from "./package-boundaries.mjs";
+import { ALLOWED, checkBoundaries, DATABASE_FOLDERS } from "./package-boundaries.mjs";
 
 const realPackages = fileURLToPath(new URL("../packages/", import.meta.url));
 
@@ -101,4 +101,25 @@ test("a command-line flag such as --import is not mistaken for an import stateme
   assert.deepEqual(errors.filter((e) => /flags\.ts/.test(e)), []);
   const real = fixture((d) => addSource(d, "controller/src/real.ts", 'import x from "left-pad";\nconst y = await import("right-pad");\n'));
   assert.ok(real.some((e) => e.includes("left-pad")) && real.some((e) => e.includes("right-pad")), real.join("\n"));
+});
+
+test("a devDependency may be imported by test files and testing/ folders but not by production code", () => {
+  const allowed = { ...ALLOWED, controller: [...ALLOWED.controller, "test-helper"] };
+  const run = (mutate) => {
+    const dir = mkdtempSync(join(tmpdir(), "nn boundaries-"));
+    cpSync(realPackages, dir, { recursive: true, filter: (src) => !src.includes("node_modules") && !src.endsWith("dist") });
+    try { mutate(dir); return checkBoundaries(dir, allowed); } finally { rmSync(dir, { recursive: true, force: true }); }
+  };
+  const withDev = (d) => editManifest(d, "controller", (m) => { m.devDependencies = { ...m.devDependencies, "test-helper": "1.0.0" }; });
+  const ok = run((d) => { withDev(d); addSource(d, "controller/src/x/testing/server.ts", 'import e from "test-helper";\n'); addSource(d, "controller/src/x/x.test.ts", 'import e from "test-helper";\n'); });
+  assert.deepEqual(ok.filter((e) => /test-helper/.test(e)), []);
+  const bad = run((d) => { withDev(d); addSource(d, "controller/src/x/production.ts", 'import e from "test-helper";\n'); });
+  assert.ok(bad.some((e) => /production\.ts imports test-helper.*devDependency may only be imported by test files/.test(e)), bad.join("\n"));
+});
+
+test("exact pins may carry a pre-release tag, ranges never pass", () => {
+  for (const [range, ok] of [["17.10.0-beta.17", true], ["1.2.3", true], ["^1.2.3", false], ["~1.2.3", false], ["1.x", false], [">=1.0.0", false], ["1.2.3 - 2.0.0", false], ["latest", false], ["1.2.3-", false], ["1.2.3+build", false]]) {
+    const errors = fixture((d) => editManifest(d, "controller", (m) => { m.devDependencies = { "embedded-postgres": range }; }));
+    assert.equal(errors.some((e) => /must be pinned to an exact version/.test(e)), !ok, range);
+  }
 });

@@ -174,7 +174,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F04a — Define transactional controller storage contract
 
 - **Parent:** N02 / AII-252.
-- **Status:** implemented; commits `b5229b8`; record [implementation-notes.md](implementation-notes.md).
+- **Status:** implemented; commits `b5229b8`; CI runs 39360216342; record [implementation-notes.md](implementation-notes.md).
 - **Progress note:** Typed storage contract, canonical JSON/hash/validation rules, error classification, bounded retry with ambiguous-commit resolution, in-memory reference store, fault injector, shared conformance suite (about 90 cases, including epoch fencing of every write and atomic receipt/timer/effect reconciliation) and a build check that keeps SQL and drivers out of non-adapter code. Verified against the reference store only; real SQLite/PostgreSQL conformance is F04b/F04c.
 - **Blockers:** F01, G02, G03.
 - **Deliverable:** Typed domain operations and shared semantic fixtures.
@@ -184,7 +184,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F04b — Implement SQLite controller storage adapter
 
 - **Parent:** N02 / AII-252.
-- **Status:** implemented; commits `8aed518`; record [implementation-notes.md](implementation-notes.md).
+- **Status:** implemented; commits `8aed518`; CI runs 39362190327; record [implementation-notes.md](implementation-notes.md).
 - **Progress note:** SQLite controller storage adapter on node:sqlite: WAL, synchronous FULL, bounded busy timeout, BEGIN IMMEDIATE writes, schema-level uniqueness, best-effort network-filesystem refusal. Passes the shared conformance suite and multi-process contention and SIGKILL tests on Linux. Power-loss durability, Windows/macOS runs (CI) and throughput are not yet evidenced.
 - **Blockers:** F04a.
 - **Deliverable:** Local SQLite adapter and schema with explicit durability settings.
@@ -194,6 +194,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F04c — Implement PostgreSQL controller storage adapter
 
 - **Parent:** N02 / AII-252.
+- **Status:** implemented; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** PostgreSQL controller storage adapter on pg 8.23.1: bounded pool, READ COMMITTED with row-level rules (ON CONFLICT, conditional UPDATE, FOR SHARE epoch fence, SKIP LOCKED claims, counter-row sequence numbers), explicit verified server settings, driver-error classification. Passes the shared conformance suite and PostgreSQL-specific concurrency, deadlock, lock-timeout, pool-bound and connection-cut tests against a real PostgreSQL 17.10 server. Only 17.10 qualified; supported versions are an open owner decision; Windows/macOS runs and throughput not yet evidenced.
 - **Blockers:** F04a.
 - **Deliverable:** PostgreSQL adapter and schema with bounded pool and retry policy.
 - **Acceptance and verification:** Shared fixtures pass on real PostgreSQL; competing claims preserve ownership and ordering; deadlock/serialization retries and ambiguous commit handled without duplicated admission.

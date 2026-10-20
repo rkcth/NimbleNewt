@@ -35,6 +35,14 @@ Install scripts are disabled repository-wide (`.npmrc` `ignore-scripts=true`). P
 | @earendil-works/pi-codemode | 1.3.0 | MIT | runtime | no |
 | @earendil-works/pi-durable | 1.3.0 | MIT | runtime | no |
 | @earendil-works/pi-telemetry | 1.3.0 | MIT | runtime | no |
+| @embedded-postgres/darwin-arm64 | 17.10.0-beta.17 | MIT | dev | yes (not run) |
+| @embedded-postgres/darwin-x64 | 17.10.0-beta.17 | MIT | dev | yes (not run) |
+| @embedded-postgres/linux-arm | 17.10.0-beta.17 | MIT | dev | yes (not run) |
+| @embedded-postgres/linux-arm64 | 17.10.0-beta.17 | MIT | dev | yes (not run) |
+| @embedded-postgres/linux-ia32 | 17.10.0-beta.17 | MIT | dev | yes (not run) |
+| @embedded-postgres/linux-ppc64 | 17.10.0-beta.17 | MIT | dev | yes (not run) |
+| @embedded-postgres/linux-x64 | 17.10.0-beta.17 | MIT | dev | yes (not run) |
+| @embedded-postgres/windows-x64 | 17.10.0-beta.17 | MIT | dev | yes (not run) |
 | @google/genai | 2.21.0 | Apache-2.0 | runtime | yes (not run) |
 | @protobufjs/aspromise | 1.1.2 | BSD-3-Clause | runtime | no |
 | @protobufjs/base64 | 1.1.2 | BSD-3-Clause | runtime | no |
@@ -54,6 +62,7 @@ Install scripts are disabled repository-wide (`.npmrc` `ignore-scripts=true`). P
 | @smithy/types | 4.19.0 | Apache-2.0 | runtime | no |
 | @stablelib/base64 | 1.0.1 | MIT | runtime | no |
 | @types/node | 22.20.5 | MIT | runtime | no |
+| @types/pg | 8.23.1 | MIT | dev | no |
 | @types/retry | 0.12.0 | MIT | runtime | no |
 | @typescript/typescript-aix-ppc64 | 7.0.2 | Apache-2.0 | dev | no |
 | @typescript/typescript-darwin-arm64 | 7.0.2 | Apache-2.0 | dev | no |
@@ -77,6 +86,7 @@ Install scripts are disabled repository-wide (`.npmrc` `ignore-scripts=true`). P
 | @typescript/typescript-win32-x64 | 7.0.2 | Apache-2.0 | dev | no |
 | agent-base | 7.1.4 | MIT | runtime | no |
 | agent-base | 9.0.0 | MIT | runtime | no |
+| async-exit-hook | 2.0.1 | MIT | dev | no |
 | base64-js | 1.5.1 | MIT | runtime | no |
 | bignumber.js | 9.3.1 | MIT | runtime | no |
 | bowser | 2.14.1 | MIT | runtime | no |
@@ -85,6 +95,7 @@ Install scripts are disabled repository-wide (`.npmrc` `ignore-scripts=true`). P
 | debug | 4.4.3 | MIT | runtime | no |
 | diff | 8.0.4 | BSD-3-Clause | runtime | no |
 | ecdsa-sig-formatter | 1.0.11 | Apache-2.0 | runtime | no |
+| embedded-postgres | 17.10.0-beta.17 | MIT | dev | no |
 | extend | 3.0.2 | MIT | runtime | no |
 | fast-sha256 | 1.3.0 | Unlicense | runtime | no |
 | fetch-blob | 3.2.0 | MIT | runtime | no |
@@ -107,11 +118,24 @@ Install scripts are disabled repository-wide (`.npmrc` `ignore-scripts=true`). P
 | openai | 7.19.0 | Apache-2.0 | runtime | no |
 | p-retry | 4.6.2 | MIT | runtime | no |
 | partial-json | 0.1.7 | MIT | runtime | no |
+| pg | 8.23.1 | MIT | runtime | no |
+| pg-cloudflare | 1.4.1 | MIT | optional | no |
+| pg-connection-string | 2.14.1 | MIT | runtime | no |
+| pg-int8 | 1.0.1 | ISC | runtime | no |
+| pg-pool | 3.14.0 | MIT | runtime | no |
+| pg-protocol | 1.16.1 | MIT | runtime | no |
+| pg-types | 2.2.0 | MIT | runtime | no |
+| pgpass | 1.0.5 | MIT | runtime | no |
+| postgres-array | 2.0.0 | MIT | runtime | no |
+| postgres-bytea | 1.0.1 | MIT | runtime | no |
+| postgres-date | 1.0.7 | MIT | runtime | no |
+| postgres-interval | 1.2.0 | MIT | runtime | no |
 | protobufjs | 7.6.6 | BSD-3-Clause | runtime | yes (not run) |
 | proxy-agent-negotiate | 1.1.0 | MIT | runtime | no |
 | quickjs-wasi | 3.6.2 | MIT | runtime | no |
 | retry | 0.13.1 | MIT | runtime | no |
 | safe-buffer | 5.2.1 | MIT | runtime | no |
+| split2 | 4.2.0 | ISC | runtime | no |
 | standardwebhooks | 1.1.1 | MIT | runtime | no |
 | ts-algebra | 2.0.0 | MIT | runtime | no |
 | tslib | 2.8.1 | 0BSD | runtime | no |
@@ -120,3 +144,4 @@ Install scripts are disabled repository-wide (`.npmrc` `ignore-scripts=true`). P
 | undici-types | 6.21.0 | MIT | runtime | no |
 | web-streams-polyfill | 3.3.3 | MIT | runtime | no |
 | ws | 8.22.0 | MIT | runtime | no |
+| xtend | 4.0.2 | MIT | runtime | no |

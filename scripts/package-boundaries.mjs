@@ -7,7 +7,7 @@ export const ALLOWED = {
   contracts: [],
   config: [],
   "pi-adapter": ["@nimblenewt/contracts", "@earendil-works/chord", "@earendil-works/pi-ai", "@earendil-works/pi-durable"],
-  controller: [],
+  controller: ["pg", "@types/pg", "embedded-postgres"],
   api: [],
   worker: [],
   ui: [],
@@ -27,8 +27,11 @@ const LITERALS = /"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`/g;
 const hasSql = (text) => SQL_TEXT.test(text) || (text.match(LITERALS) ?? []).some((literal) => SQL_LITERAL.test(literal));
 
 // `(?<![-\w.$])` keeps command-line flags such as "--import" from being read as import statements.
+/** Files that only tests load: they may import devDependencies. */
+const TEST_ONLY = /(?:^|\/)testing\/|\.test\.ts$/;
 const SPECIFIER = /(?:\bfrom\s*|(?<![-\w.$])import\s*\(?\s*|\brequire\s*\(\s*)["']([^"']+)["']/g;
-const EXACT = /^\d+\.\d+\.\d+$/;
+/** An exact version, optionally with a pre-release tag (some packages ship their stable builds under one). Ranges never match. */
+const EXACT = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$/;
 
 function packageName(specifier) {
   const parts = specifier.split("/");
@@ -66,6 +69,7 @@ export function checkBoundaries(packagesDir, allowed = ALLOWED) {
     }
 
     const declared = new Set(Object.keys(manifest.dependencies ?? {}));
+    const declaredDev = new Set(Object.keys(manifest.devDependencies ?? {}));
     const srcDir = join(pkgPath, "src");
     if (existsSync(srcDir)) {
       for (const file of sourceFiles(srcDir)) {
@@ -79,7 +83,7 @@ export function checkBoundaries(packagesDir, allowed = ALLOWED) {
           if (specifier.startsWith(".") || specifier.startsWith("node:")) continue;
           const name = packageName(specifier);
           if (!permitted.includes(name)) errors.push(`${dir}: ${relative(packagesDir, file)} imports ${name}, which is not allowed`);
-          else if (!declared.has(name)) errors.push(`${dir}: ${relative(packagesDir, file)} imports ${name}, which is not a declared dependency`);
+          else if (!declared.has(name) && !(TEST_ONLY.test(where) && declaredDev.has(name))) errors.push(`${dir}: ${relative(packagesDir, file)} imports ${name}, which is not a declared dependency${declaredDev.has(name) ? " (a devDependency may only be imported by test files and testing/ folders)" : ""}`);
         }
       }
     }

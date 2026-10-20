@@ -16,5 +16,12 @@
   ],
   "scripts": {
     "test": "node ../../scripts/run-package-tests.mjs"
+  },
+  "dependencies": {
+    "pg": "8.23.1"
+  },
+  "devDependencies": {
+    "@types/pg": "8.23.1",
+    "embedded-postgres": "17.10.0-beta.17"
   }
 }
