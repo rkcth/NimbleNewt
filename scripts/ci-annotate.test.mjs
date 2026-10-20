@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { annotations, escapeData, escapeProperty, failures, specFailures, tapFailures } from "./ci-annotate.mjs";
+import { annotations, escapeData, escapeProperty, failures, specFailures, tapFailures, timeline } from "./ci-annotate.mjs";
 
 const fixture = (name) => readFileSync(fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url)), "utf8").split(/\r?\n/);
 const spec = fixture("node24-spec-failures.log"); // a real Node 24 run, output piped to a file
@@ -51,5 +51,42 @@ test("a log with no failures still yields the tail, and many failures are capped
   const many = Array.from({ length: 20 }, (_, i) => `not ok ${i + 1} - t${i}\n  ---\n  error: 'x'\n  ...`).join("\n");
   assert.equal(failures(many.split("\n")).length, 8);
   const manySpec = ["✖ failing tests:", "", ...Array.from({ length: 20 }, (_, i) => `test at f.mjs:${i}:1\n✖ t${i} (1ms)\n  Error: x\n`)].join("\n");
-  assert.equal(specFailures(manySpec.split("\n")).length, 8);
+  assert.equal(specFailures(manySpec.split("\n")).length, 20, "parsing finds all of them");
+  assert.equal(failures(manySpec.split("\n")).length, 8, "annotating is capped");
+});
+
+test("tests cancelled because a file's process ended are collapsed into one line after the real failures", () => {
+  const cancelled = (name) => `not ok 1 - ${name}\n  ---\n  failureType: 'cancelledByParent'\n  error: 'Promise resolution is still pending but the event loop has already resolved'\n  ...`;
+  const real = "not ok 9 - the one that matters\n  ---\n  failureType: 'testCodeFailure'\n  error: 'boom'\n  ...";
+  const log = [...Array.from({ length: 30 }, (_, i) => cancelled(`victim ${i}`)), real].join("\n");
+  const found = failures(log.split("\n"));
+  assert.equal(found.length, 2);
+  assert.equal(found[0].name, "the one that matters");
+  assert.match(found[1].name, /^30 test\(s\) cancelled because their test file's process ended early/);
+  assert.match(found[1].text, /first: victim 0/);
+  assert.equal(failures(Array.from({ length: 30 }, (_, i) => cancelled(`v${i}`)).join("\n").split("\n")).length, 1, "only symptoms: one line");
+});
+
+test("the embedded PostgreSQL startup timeline is surfaced as its own annotation, without colons or commas in the title", () => {
+  const log = "noise\n[embedded-postgres] +0 ms initdb: begin\n[embedded-postgres] +4200 ms initdb: done\nmore noise";
+  assert.deepEqual(timeline(log.split("\n")), ["[embedded-postgres] +0 ms initdb: begin", "[embedded-postgres] +4200 ms initdb: done"]);
+  const lines = annotations(log);
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /^::error title=Embedded PostgreSQL startup timeline::\[embedded-postgres\] \+0 ms initdb: begin%0A/);
+  assert.equal(annotations("nothing relevant").length, 1);
+});
+
+test("the total number of annotations never exceeds GitHub's limit of 10 per step, and the timeline and tail always survive", () => {
+  const real = (i) => `not ok ${i} - real failure ${i}\n  ---\n  failureType: 'testCodeFailure'\n  error: 'x'\n  ...`;
+  const cancelled = "not ok 99 - victim\n  ---\n  failureType: 'cancelledByParent'\n  error: 'Promise resolution is still pending but the event loop has already resolved'\n  ...";
+  for (const withTimeline of [false, true]) {
+    for (const withSymptoms of [false, true]) {
+      const log = [...Array.from({ length: 40 }, (_, i) => real(i + 1)), ...(withSymptoms ? [cancelled] : []), ...(withTimeline ? ["[embedded-postgres] +1 ms step: begin"] : [])].join("\n");
+      const lines = annotations(log);
+      assert.ok(lines.length <= 10, `${lines.length} annotations (timeline ${withTimeline}, symptoms ${withSymptoms})`);
+      assert.match(lines[lines.length - 1], /Test output \(last 80 lines\)/);
+      assert.equal(lines.some((l) => /Embedded PostgreSQL startup timeline/.test(l)), withTimeline);
+      assert.equal(lines.some((l) => /cancelled because their test file's process ended early/.test(l)), withSymptoms);
+    }
+  }
 });

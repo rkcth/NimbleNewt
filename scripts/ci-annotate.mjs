@@ -9,7 +9,9 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-const MAX_FAILURES = 8;
+/** GitHub shows at most 10 annotations per step; the log tail is always one of them, and the startup timeline is another when there is one. */
+const MAX_ANNOTATIONS = 10;
+const MAX_TIMELINE_LINES = 60;
 const MAX_BLOCK_LINES = 40;
 const MAX_BLOCK_CHARS = 3000;
 
@@ -21,7 +23,7 @@ const indentOf = (line) => line.length - line.trimStart().length;
 /** Failing tests in TAP output: each `not ok` line with the YAML block that follows it (to its `...` end marker). */
 export function tapFailures(lines) {
   const found = [];
-  for (let i = 0; i < lines.length && found.length < MAX_FAILURES; i++) {
+  for (let i = 0; i < lines.length; i++) {
     const match = /^(\s*)not ok \d+ - (.*)$/.exec(lines[i]);
     if (match === null) continue;
     const indent = match[1].length;
@@ -45,7 +47,7 @@ export function specFailures(lines) {
   const start = lines.findIndex((l) => l.trim() === "✖ failing tests:");
   if (start < 0) return [];
   const found = [];
-  for (let i = start + 1; i < lines.length && found.length < MAX_FAILURES; i++) {
+  for (let i = start + 1; i < lines.length; i++) {
     if (!/^test at /.test(lines[i])) continue;
     const head = /^✖ (.*?) \([\d.]+m?s\)\s*$/.exec(lines[i + 1] ?? "");
     if (head === null) continue;
@@ -56,14 +58,34 @@ export function specFailures(lines) {
   return found;
 }
 
-export const failures = (lines) => {
+/** A test cancelled only because the process running its file ended is a symptom; the failure that ended it is the cause. */
+const isSymptom = (f) => /cancelledByParent|event loop has already resolved/.test(f.text);
+
+/**
+ * Failures worth annotating: root causes first, then a single line counting the symptoms (with the first one's name), so a file
+ * that dies takes one annotation, not eight.
+ */
+export const failures = (lines, limit = MAX_ANNOTATIONS - 2) => {
   const spec = specFailures(lines);
-  return spec.length > 0 ? spec : tapFailures(lines);
+  const all = spec.length > 0 ? spec : tapFailures(lines);
+  const causes = all.filter((f) => !isSymptom(f));
+  const symptoms = all.filter(isSymptom);
+  const out = causes.slice(0, Math.max(0, limit - (symptoms.length > 0 ? 1 : 0)));
+  if (symptoms.length > 0) {
+    out.push({ name: `${symptoms.length} test(s) cancelled because their test file's process ended early`, text: `first: ${symptoms[0].name}\n${symptoms[0].text}` });
+  }
+  return out;
 };
+
+/** Lines the embedded PostgreSQL test server printed about its own startup (kept in the log by the test helper). */
+export const timeline = (lines) => lines.filter((l) => l.includes("[embedded-postgres]")).slice(-MAX_TIMELINE_LINES);
 
 export function annotations(log) {
   const lines = log.split(/\r?\n/);
-  const out = failures(lines).map((f) => `::error title=${escapeProperty(`Failed - ${f.name}`.slice(0, 200))}::${escapeData(f.text)}`);
+  const startup = timeline(lines);
+  const fixed = 1 + (startup.length > 0 ? 1 : 0);
+  const out = failures(lines, MAX_ANNOTATIONS - fixed).map((f) => `::error title=${escapeProperty(`Failed - ${f.name}`.slice(0, 200))}::${escapeData(f.text)}`);
+  if (startup.length > 0) out.push(`::error title=${escapeProperty("Embedded PostgreSQL startup timeline")}::${escapeData(startup.join("\n"))}`);
   out.push(`::error title=${escapeProperty("Test output (last 80 lines)")}::${escapeData(lines.slice(-80).join("\n"))}`);
   return out;
 }
