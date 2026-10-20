@@ -136,10 +136,10 @@ export interface InterruptedWork {
 export interface BranchInfo {
   /** The request ID the branch was created under. */
   readonly requestId: RequestId;
-  /** Why it exists: a side inquiry, or a restored checkpoint. The two are limited separately. */
-  readonly kind: "inquiry" | "restore";
+  /** Why it exists: a side inquiry, a restored checkpoint, or an independent task. Each kind is limited separately. */
+  readonly kind: "inquiry" | "restore" | "task";
   readonly conversationId: number;
-  /** The parent entry the branch forked after. */
+  /** The parent entry the branch forked after; 0 for a task, which starts with an empty context. */
   readonly forkedAt: number;
   /** A discarded branch is closed to new work; its transcript stays readable. */
   readonly discarded: boolean;
@@ -211,6 +211,7 @@ export type AuditEvent =
   | { readonly type: "readmit"; readonly at: number; readonly conversationId: number; readonly requestId: RequestId; readonly newRequestId: RequestId }
   | { readonly type: "discard_branch"; readonly at: number; readonly conversationId: number; readonly branchRequestId: RequestId; readonly report: AbortReport }
   | { readonly type: "restore_checkpoint"; readonly at: number; readonly checkpoint: Checkpoint; readonly branchRequestId: RequestId; readonly newConversationId: number }
+  | { readonly type: "create_task"; readonly at: number; readonly requestId: RequestId; readonly conversationId: number }
   | { readonly type: "recover"; readonly at: number; readonly decision: RecoveryDecision; readonly found: InterruptedWork };
 
 /** An admitted request, as the controller sees it. */
@@ -219,6 +220,19 @@ export interface SubmissionPort {
   readonly submissionId: number;
   /** Waits for the request to settle and returns its recorded result. Refused while interrupted work is held. */
   result(): Promise<SemanticResult>;
+}
+
+/** Start an independent task: a new conversation with an empty context. Idempotent by request ID. */
+export interface TaskRequest {
+  readonly requestId: RequestId;
+}
+
+/** An independent task conversation. */
+export interface TaskPort {
+  readonly conversation: ConversationPort;
+  /** False when the request ID had already created this task. */
+  readonly created: boolean;
+  readonly discarded: boolean;
 }
 
 /** A side conversation created from a task's context. */
@@ -254,6 +268,12 @@ export interface ConversationPort {
 export interface RuntimePort {
   root(): ConversationPort;
   conversation(id: number): Promise<ConversationPort | undefined>;
+  /**
+   * Start another task with an empty context, separate from every other task's. Tasks are children of the root
+   * conversation's record: list them with `root().listBranches()` (kind `task`) and close one with
+   * `root().discardBranch(requestId)`.
+   */
+  createTask(request: TaskRequest): Promise<TaskPort>;
   /** Interrupted work found when the runtime opened its storage, per conversation. Read-only. */
   interrupted(): Promise<InterruptedWork>;
   /**

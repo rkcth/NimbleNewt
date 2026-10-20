@@ -1,12 +1,12 @@
 import type {
-  AbortReport, AdapterRequest, AuditEvent, BranchInfo, BranchRequest, Checkpoint, CheckpointVerdict, ConversationPort, InterruptedWork, RecoveryDecision, RequestId, RetainedRequest, RuntimePort, SemanticResult, ToolCallOutcome, TranscriptEntry, UpdateSource,
+  AbortReport, AdapterRequest, AuditEvent, BranchInfo, BranchRequest, Checkpoint, CheckpointVerdict, ConversationPort, InterruptedWork, TaskPort, TaskRequest, RecoveryDecision, RequestId, RetainedRequest, RuntimePort, SemanticResult, ToolCallOutcome, TranscriptEntry, UpdateSource,
 } from "@nimblenewt/contracts";
 import type { JsonValue } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { ImageContent, Models, Static, TextContent, TSchema } from "@earendil-works/pi-ai";
 import {
   ConversationBusy, Harness, createRegistry, defineDoc, defineExtension, defineTool,
-  type Conversation, type SettledSubmissionRecord, type Storage, type Submission, type SubmissionDraft,
+  type Conversation, type SettledSubmissionRecord, type Storage, type Submission, type SubmissionDraft, type Tx,
 } from "@earendil-works/pi-durable";
 import { startsRequestSegment, turnBoundaries } from "./branches.js";
 import { CHECKPOINT_DIGEST_PREFIX, digestHistory } from "./checkpoints.js";
@@ -53,6 +53,8 @@ export interface PiAdapterOptions {
    * may have open at once; discarded branches do not count. Default 8. Branches are cheap but each is a full conversation the controller must eventually review or discard.
    */
   readonly maxActiveBranches?: number;
+  /** Most independent tasks (see `createTask`) that may be open at once; discarded tasks do not count. Default 16. */
+  readonly maxActiveTasks?: number;
   /**
    * What the model sees of an input whose request was aborted after it had started. `frame` (default) replaces it, for
    * the model only, with the same text marked as aborted and not to be continued unless asked again; the transcript keeps
@@ -114,7 +116,7 @@ interface BranchRecord {
   forkedAt: number;
   discarded?: boolean;
   /** Absent on records written before restores existed, which are inquiries. */
-  kind?: "inquiry" | "restore";
+  kind?: "inquiry" | "restore" | "task";
 }
 interface RequestsState {
   requests: Record<string, RequestRecord>;
@@ -232,6 +234,9 @@ interface Shared {
   readonly hold: Hold;
   readonly abortedInputs: "frame" | "keep";
   readonly maxActiveBranches: number;
+  readonly maxActiveTasks: number;
+  /** Model every conversation of this adapter starts with. */
+  readonly model: { readonly provider: string; readonly modelId: string };
   readonly beforeAdmission: ((conversationId: number) => Promise<void>) | undefined;
   readonly audit: ((event: AuditEvent) => void | Promise<void>) | undefined;
   /** Conversations with an abort in progress: new submissions wait for the abort and its framing to finish. */
@@ -327,7 +332,7 @@ export class AdapterConversation implements ConversationPort {
   async createBranch(request: BranchRequest, kind: "inquiry" | "restore"): Promise<AdapterBranch> {
     const id = request.requestId;
     const existing = await this.branchRecord(id);
-    if (existing !== undefined) return this.reopenBranch(existing, request);
+    if (existing !== undefined) return this.reopenBranch(existing, request, kind);
     await this.assertActive();
 
     const boundaries = turnBoundaries(await this.scan(0, undefined));
@@ -338,24 +343,69 @@ export class AdapterConversation implements ConversationPort {
       const child = await this.conversation.fork(at as never, {
         ownership: { kind: "ownerless" },
         // Runs in the fork's creating commit, so the branch and its request record exist together or not at all.
-        init: async (tx, childId) => {
-          const state = (await tx.doc(Requests, this.conversation.id)) as unknown as RequestsState;
-          state.branches ??= {};
-          if (state.branches[id] !== undefined) throw new BranchAlreadyExists();
-          // Counted in the creating commit, so concurrent creators cannot exceed the limit between them.
-          // Inquiries and restored checkpoints are limited separately, so a burst of one cannot starve the other.
-          const active = Object.values(state.branches).filter((b) => b.discarded !== true && (b.kind ?? "inquiry") === kind).length;
-          if (active >= this.shared.maxActiveBranches) throw new BranchLimitReached();
-          state.branches[id] = { childId: childId as number, forkedAt: at, kind };
-        },
+        init: (tx, childId) => this.registerChild(tx, id, childId as number, at, kind),
       }, context);
       return { conversation: new AdapterConversation(this.harness, child, this.shared), forkedAt: at, discarded: false };
     } catch (error) {
-      if (error instanceof BranchLimitReached) throw new TooManyBranchesError(this.shared.maxActiveBranches);
+      if (error instanceof BranchLimitReached) throw new TooManyBranchesError(this.limitFor(kind));
       if (!(error instanceof BranchAlreadyExists)) throw error;
       const winner = await this.branchRecord(id);
       if (winner === undefined) throw error;
-      return this.reopenBranch(winner, request);
+      return this.reopenBranch(winner, request, kind);
+    }
+  }
+
+  private limitFor(kind: "inquiry" | "restore" | "task"): number {
+    return kind === "task" ? this.shared.maxActiveTasks : this.shared.maxActiveBranches;
+  }
+
+  /**
+   * Records a child conversation in this conversation's document, inside the commit that creates it, so the child and its
+   * record exist together or not at all. The active count of each kind is taken in the same commit, so concurrent creators
+   * cannot exceed the limit between them. Inquiries, restored checkpoints and tasks are limited separately.
+   */
+  private async registerChild(tx: Tx, id: RequestId, childId: number, forkedAt: number, kind: "inquiry" | "restore" | "task"): Promise<void> {
+    const state = (await tx.doc(Requests, this.conversation.id)) as unknown as RequestsState;
+    state.branches ??= {};
+    if (state.branches[id] !== undefined) throw new BranchAlreadyExists();
+    const active = Object.values(state.branches).filter((b) => b.discarded !== true && (b.kind ?? "inquiry") === kind).length;
+    if (active >= this.limitFor(kind)) throw new BranchLimitReached();
+    state.branches[id] = { childId, forkedAt, kind };
+  }
+
+  /**
+   * Start an independent task: a new conversation with an empty context (task A and task B never see each other). It is a
+   * child record of this conversation, created atomically and idempotent by request ID like a branch, limited separately
+   * (`maxActiveTasks`), listed by `listBranches()` with kind `task` and closed with `discardBranch()`. Only the root
+   * conversation creates tasks. Creating one starts nothing, so it is allowed while interrupted work is held.
+   * @internal Use `PiAdapter.createTask`.
+   */
+  async createTask(request: TaskRequest): Promise<{ conversation: AdapterConversation; created: boolean; discarded: boolean }> {
+    const id = request.requestId;
+    const reopen = async (record: BranchRecord) => {
+      if ((record.kind ?? "inquiry") !== "task") throw new RequestIdConflictError(`request ID "${id}" already created a ${record.kind ?? "inquiry"}, not a task`);
+      const child = await this.harness.conversation(record.childId as never, context);
+      if (child === undefined) throw new InvalidBranchPointError(`task conversation ${record.childId} no longer exists`);
+      return { conversation: new AdapterConversation(this.harness, child, this.shared), created: false, discarded: record.discarded === true };
+    };
+    const existing = await this.branchRecord(id);
+    if (existing !== undefined) return reopen(existing);
+    await this.assertActive();
+    try {
+      const child = await this.harness.createConversation({
+        ownership: { kind: "ownerless" },
+        agent: { model: this.shared.model },
+        init: (tx, childId) => this.registerChild(tx, id, childId as number, 0, "task"),
+      }, context);
+      const created = new AdapterConversation(this.harness, child, this.shared);
+      await this.emit({ type: "create_task", at: Date.now(), requestId: id, conversationId: created.id });
+      return { conversation: created, created: true, discarded: false };
+    } catch (error) {
+      if (error instanceof BranchLimitReached) throw new TooManyBranchesError(this.limitFor("task"));
+      if (!(error instanceof BranchAlreadyExists)) throw error;
+      const winner = await this.branchRecord(id);
+      if (winner === undefined) throw error;
+      return reopen(winner);
     }
   }
 
@@ -425,7 +475,8 @@ export class AdapterConversation implements ConversationPort {
     return (await this.state()).branches?.[id];
   }
 
-  private async reopenBranch(record: BranchRecord, request: BranchRequest): Promise<AdapterBranch> {
+  private async reopenBranch(record: BranchRecord, request: BranchRequest, kind: "inquiry" | "restore"): Promise<AdapterBranch> {
+    if ((record.kind ?? "inquiry") !== kind) throw new RequestIdConflictError(`request ID "${request.requestId}" already created a ${record.kind ?? "inquiry"}, not a ${kind}`);
     if (request.at !== undefined && request.at !== record.forkedAt) {
       throw new RequestIdConflictError(`request ID "${request.requestId}" already created a branch at entry ${record.forkedAt}, not ${request.at}`);
     }
@@ -824,6 +875,8 @@ export class PiAdapter implements RuntimePort {
       hold: new Hold(interrupted && options.holdInterrupted !== false, harness),
       abortedInputs: options.abortedInputs ?? "frame",
       maxActiveBranches: options.maxActiveBranches ?? 8,
+      maxActiveTasks: options.maxActiveTasks ?? 16,
+      model: options.model,
       beforeAdmission: options.testHooks?.beforeAdmission,
       audit: options.audit,
       aborting: new Map(),
@@ -834,6 +887,14 @@ export class PiAdapter implements RuntimePort {
   /** The root conversation, created on first use and the same on every reopen of the same storage. */
   root(): AdapterConversation {
     return new AdapterConversation(this.harness, this.rootConversation, this.shared);
+  }
+
+  /**
+   * Start another task with an empty context, independent of every other task (see `AdapterConversation.createTask`).
+   * Idempotent by request ID.
+   */
+  async createTask(request: TaskRequest): Promise<TaskPort> {
+    return this.root().createTask(request);
   }
 
   /** Re-acquire an existing conversation by ID, for example after a restart; `undefined` if there is none. */
