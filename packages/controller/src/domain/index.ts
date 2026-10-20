@@ -30,3 +30,7 @@ export {
   ON_DEADLINE, WAIT_LIMITS, WAIT_REASONS, WaitService,
   type AnswerWait, type CancelWait, type DueReport, type OnDeadline, type OpenWait, type WaitBody, type WaitReason, type WaitState,
 } from "./waits.js";
+export {
+  ConversationBridge, RecoveryPoints,
+  type BridgeDependencies, type BridgeOptions, type BridgeResult, type BridgeRun, type ConversationSubmitter, type RecordRecoveryPoint, type RecoveryPointBody,
+} from "./bridge.js";

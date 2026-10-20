@@ -254,20 +254,21 @@ export class EffectService {
 
   // ---- execution -------------------------------------------------------------------------------------------------------------
 
-  async #execute(request: EffectRequest, bridge: EffectBridge): Promise<EffectOutcome> {
+  /** `tries`: executions made so far in this call plus this one; a call executes at most twice, so a target that keeps failing ends the call as `pending` instead of looping. */
+  async #execute(request: EffectRequest, bridge: EffectBridge, tries = 1): Promise<EffectOutcome> {
     let evidence: JsonObject;
     try {
       evidence = await bridge.execute(request);
     } catch (error) {
       if (error instanceof EffectRejected) return this.#settleById(request.effectId, "failed", { reason: error.message, ...error.evidence });
       // The outcome is unknown: it may have been applied. Ask, or retry the same key, or stop.
-      return this.#recoverAfterError(request, bridge, error);
+      return this.#recoverAfterError(request, bridge, error, tries);
     }
     return this.#settleById(request.effectId, "confirmed", evidence);
   }
 
-  async #recoverAfterError(request: EffectRequest, bridge: EffectBridge, cause: unknown): Promise<EffectOutcome> {
-    if (bridge.reconcile !== undefined) return this.#recover(request, bridge, false, true);
+  async #recoverAfterError(request: EffectRequest, bridge: EffectBridge, cause: unknown, tries: number): Promise<EffectOutcome> {
+    if (bridge.reconcile !== undefined) return this.#recover(request, bridge, false, true, tries);
     if (bridge.idempotent) return { effectId: request.effectId, status: "pending", note: `the target did not answer (${cause instanceof Error ? cause.message : String(cause)}); run again to retry with the same key` };
     return this.#settleById(request.effectId, "uncertain", { reason: "the target gave no answer and cannot be asked or retried safely", error: cause instanceof Error ? cause.message : String(cause) });
   }
@@ -277,7 +278,7 @@ export class EffectService {
    * its claim or this very call just saw the attempt fail); it cannot when a previous executor vanished holding the claim, because its
    * request may still be in flight. Then, for a target that does not honour a key, executing again could apply the effect twice.
    */
-  async #recover(request: EffectRequest, bridge: EffectBridge, fenceLost: boolean, trustNotApplied: boolean): Promise<EffectOutcome> {
+  async #recover(request: EffectRequest, bridge: EffectBridge, fenceLost: boolean, trustNotApplied: boolean, tries = 1): Promise<EffectOutcome> {
     if (bridge.reconcile !== undefined) {
       let answer: Reconciliation;
       try { answer = await bridge.reconcile(request); } catch (error) {
@@ -289,11 +290,12 @@ export class EffectService {
       if (answer.state === "not_applied") {
         if (!trustNotApplied && !bridge.idempotent) return this.#settleById(request.effectId, "uncertain", { reason: "an earlier executor vanished holding the effect and the target does not honour a key, so its request may still be in flight", ...(answer.evidence ?? {}) });
         if (fenceLost) return this.#settleById(request.effectId, "failed", { reason: "superseded; the target confirms it never happened", ...(answer.evidence ?? {}) });
-        return this.#execute(request, bridge);
+        if (tries >= 2) return { effectId: request.effectId, status: "pending", note: "the target keeps failing the request, and says it did not happen; run again later" };
+        return this.#execute(request, bridge, tries + 1);
       }
       return this.#settleById(request.effectId, "uncertain", { reason: "the target does not know either", ...(answer.evidence ?? {}) });
     }
-    if (bridge.idempotent && !fenceLost) return this.#execute(request, bridge);
+    if (bridge.idempotent && !fenceLost) return tries >= 2 ? { effectId: request.effectId, status: "pending", note: "the target keeps failing; run again later" } : this.#execute(request, bridge, tries + 1);
     return this.#settleById(request.effectId, "uncertain", { reason: fenceLost ? "the attempt lost its generation after the effect started and the target cannot be asked" : "the effect started, the target cannot be asked and does not honour a key, so it cannot be retried safely" });
   }
 

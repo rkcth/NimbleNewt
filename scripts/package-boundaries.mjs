@@ -12,6 +12,9 @@ export const ALLOWED = {
   api: [],
   worker: [],
   ui: [],
+  // Tests that run the controller and the Pi adapter together (card S09). It holds no product code and nothing depends on it, which is why
+  // it alone may depend on both.
+  integration: ["@nimblenewt/contracts", "@nimblenewt/controller", "@nimblenewt/pi-adapter", "@earendil-works/chord", "@earendil-works/pi-ai", "@earendil-works/pi-durable"],
 };
 
 /**

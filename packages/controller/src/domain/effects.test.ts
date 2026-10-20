@@ -218,6 +218,17 @@ for (const backend of backends) {
     assert.deepEqual(outside.applications, [first.effectId]);
   });
 
+  suite("a target that keeps failing and keeps saying it did not happen ends the call as pending, not in a loop", async ({ effects }) => {
+    for (const make of [askable, (o: Outside): EffectBridge => ({ ...keyed(o), reconcile: askable(o).reconcile! })]) {
+      const outside = new Outside();
+      outside.failBefore = 1000;
+      const r = await effects.perform(intent("e"), make(outside));
+      assert.equal(r.status, "pending");
+      assert.equal(outside.executeCalls, 2, "at most two tries in one call");
+      assert.equal(outside.applications.length, 0);
+    }
+  });
+
   suite("an askable target that never received the request is asked, found untouched, and the effect is then executed once", async ({ effects }) => {
     const outside = new Outside();
     outside.failBefore = 1;
