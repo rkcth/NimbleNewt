@@ -91,6 +91,15 @@ function losingFirstSettlement(storage: ControllerStorage, options: { dead?: boo
   });
 }
 
+/** Waits (polling, with a deadline) until a condition holds: never a fixed pause, which a slow machine can outrun. */
+async function until(condition: () => boolean, what: string, ms = 20_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 const deferred = <T>() => { let resolve!: (value: T) => void; const promise = new Promise<T>((r) => { resolve = r; }); return { promise, resolve }; };
 
 for (const backend of backends) {
@@ -279,7 +288,7 @@ for (const backend of backends) {
     const slow: EffectBridge = { ...askable(outside), execute: async (r) => { outside.executeCalls++; await gate.promise; return outside.apply(r.key); } };
     const made = await effects.intend(intent("e"));
     const first = effects.run(made.id, slow);
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await until(() => outside.executeCalls === 1, "the first run to reach the target");
     await refuses("effect_busy", () => effects.run(made.id, slow), (e) => assert.match(e.message, /already being run/));
     gate.resolve();
     assert.equal((await first).status, "confirmed");
@@ -307,7 +316,7 @@ for (const backend of backends) {
       const a = make(`exec-a-${name}`);
       const made = await a.intend(intent(`e-${name}`));
       void a.run(made.id, bridge()).catch(() => undefined);
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await until(() => outside.executeCalls === 1, "the first executor to reach the target");
       clock.now += 6 * 60_000;
       // The first executor is stuck in its request, which has not reached the target yet. A second one takes over after the lease.
       const b = make(`exec-b-${name}`);
@@ -332,10 +341,10 @@ for (const backend of backends) {
     const b = make("exec-b");
     const made = await a.intend(intent("e"));
     const runA = a.run(made.id, bridge());
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await until(() => calls === 1, "executor A to reach the target");
     clock.now += 6 * 60_000;
     const runB = b.run(made.id, bridge());
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await until(() => calls === 2, "executor B to take the claim and reach the target");
     gateA.resolve();
     const late = await runA;
     assert.equal(late.status, "pending", "A's late result is not recorded while B holds the effect");
