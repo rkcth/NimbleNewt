@@ -23,6 +23,7 @@ export const SUPPORTED_CAPABILITIES: readonly Capability[] = [
   { id: "abort-and-retention", description: "Aborting never executes a partially streamed tool call; queued requests are withdrawn, retained and run only when explicitly readmitted." },
   { id: "restart-recovery", description: "After a process kill the storage is held; interrupted work is reviewed, abandoned or resumed in one audited step; replay-safe tools re-run, others are reported interrupted." },
   { id: "checkpoints", description: "Checkpoints of completed-turn boundaries verify history and runtime compatibility and restore as a new conversation." },
+  { id: "compatibility-gate", description: "Storage written by an unknown or different runtime is refused untouched; unmarked storage is adopted only on request after a read-only scan; old checkpoint formats are upgraded without mutation and incompatible ones rejected with a reason." },
   { id: "audit-trail", description: "Abort, readmission, branch discard, checkpoint restore, task creation and recovery are reported to an audit sink." },
 ];
 
@@ -71,9 +72,9 @@ export const UNSUPPORTED_CAPABILITIES: readonly UnsupportedCapability[] = [
   },
   {
     id: "forward-migration",
-    description: "Continuing from checkpoints or storage written by another Pi Durable version.",
-    why: "Any version other than the pinned one is rejected explicitly; needs a storage format identifier and a migration table (G03).",
-    blocks: ["G03", "K03"],
+    description: "Continuing from storage or checkpoints written by a different Pi Durable version by migrating them.",
+    why: "No migration is defined. Storage written by Pi 1.0.1, 1.2.0 and 1.3.0 has the same on-disk layout in the fixtures tested, so it is adopted, not migrated; a storage whose marker names another version is refused. A Pi release that changes the layout needs a real, atomic migration (G03 qualified the gate, not a migration).",
+    blocks: ["K03"],
   },
   {
     id: "in-flight-state",

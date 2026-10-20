@@ -151,19 +151,31 @@ export interface BranchInfo {
  * worker, after an upgrade) that the history it refers to is intact and that this runtime can continue from it.
  */
 export interface Checkpoint {
-  /** Layout of this record; a runtime rejects formats it does not know. */
-  readonly format: 1;
+  /** Layout of this record; a runtime upgrades older formats it knows and rejects ones it does not. */
+  readonly format: 2;
   readonly conversationId: number;
   /** The entry the checkpoint is taken after: a completed-turn boundary. */
   readonly at: number;
   /** Digest of the conversation's history up to and including `at` (see the adapter for the exact form). */
   readonly digest: string;
-  /** Exact version of the agent runtime the history was written by. */
-  readonly runtimeVersion: string;
+  /** The agent runtime the history was written by, exactly. */
+  readonly runtime: { readonly name: string; readonly version: string };
+  /** Identifier of the persisted history layout (for example `pi-durable:1`); a different layout needs a migration. */
+  readonly historyFormat: string;
   /**
    * Version of these shared contracts when the checkpoint was taken. Informational: validity depends on the record layout
    * (`format`), the digest algorithm and the runtime's history compatibility, not on unrelated contract changes.
    */
+  readonly contractsVersion: number;
+}
+
+/** Format 1 of a checkpoint, as stored by earlier versions. Accepted wherever a checkpoint is, and upgraded without mutation. */
+export interface CheckpointV1 {
+  readonly format: 1;
+  readonly conversationId: number;
+  readonly at: number;
+  readonly digest: string;
+  readonly runtimeVersion: string;
   readonly contractsVersion: number;
 }
 
@@ -265,7 +277,7 @@ export interface ConversationPort {
   listBranches(): Promise<BranchInfo[]>;
   discardBranch(requestId: RequestId): Promise<AbortReport>;
   checkpoint(options?: { readonly at?: number }): Promise<Checkpoint>;
-  verifyCheckpoint(checkpoint: Checkpoint): Promise<CheckpointVerdict>;
+  verifyCheckpoint(checkpoint: Checkpoint | CheckpointV1): Promise<CheckpointVerdict>;
   transcript(): Promise<TranscriptEntry[]>;
 }
 
@@ -286,7 +298,19 @@ export interface RuntimePort {
    * single audit event with what was found. Only valid while interrupted work is held.
    */
   recover(decision: RecoveryDecision): Promise<void>;
-  verifyCheckpoint(checkpoint: Checkpoint): Promise<CheckpointVerdict>;
-  restoreCheckpoint(checkpoint: Checkpoint, requestId: RequestId): Promise<BranchPort>;
+  verifyCheckpoint(checkpoint: Checkpoint | CheckpointV1): Promise<CheckpointVerdict>;
+  restoreCheckpoint(checkpoint: Checkpoint | CheckpointV1, requestId: RequestId): Promise<BranchPort>;
+  /** What the storage says about who wrote it and how it was accepted. */
+  storageInfo(): Promise<StorageInfo>;
   close(): Promise<void>;
+}
+
+/** What a runtime's storage records about itself: who wrote it, and whether it was adopted without a marker. */
+export interface StorageInfo {
+  readonly markerFormat: number;
+  /** Exact version of the agent runtime the storage is recorded as written by. */
+  readonly runtimeVersion: string;
+  readonly historyFormat: string;
+  /** True if the storage had no marker (written by an earlier or foreign process) and the controller adopted it after a scan. */
+  readonly adoptedUnmarked: boolean;
 }

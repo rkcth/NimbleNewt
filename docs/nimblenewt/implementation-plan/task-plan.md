@@ -2,7 +2,7 @@
 
 **Current task definitions; execution held at N00. Live Paperclip import status is recorded separately in paperclip-sync-status.md.**
 
-> **Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item. Card statuses and progress are generated from the PROGRESS table in scripts/generate_task_plan.py: edit that table, not this file.** This file is generated; run `python3 scripts/generate_task_plan.py` then `npm run roadmap:write`.
+> **Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.** This file is generated; run `python3 scripts/generate_task_plan.py` then `npm run roadmap:write`.
 
 The existing 23 issues remain workstream parents. N00/AII-250 remains the explicit implementation gate; it is not a coding task. The cards below are proposed children, not replacements for existing history. Parent IDs refer to the current planning backlog. Machine-readable source: [task-plan.json](task-plan.json).
 
@@ -74,6 +74,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### G03 — Qualify forward migration and compatibility rejection
 
 - **Parent:** N03 / AII-253.
+- **Status:** implemented; record [g03-compatibility.md](g03-compatibility.md).
+- **Progress note:** Compatibility gate qualified with real Pi 1.0.1/1.2.0/1.3.0 and earlier-adapter fixtures: storage marker, explicit adoption after a read-only scan, checkpoint format 2 with a pure upgrade from format 1, failed adoption leaves the original unchanged. No Pi-to-Pi storage migration was needed or built; see the record for what is not covered.
 - **Blockers:** G02.
 - **Deliverable:** Actual Pi adapter checkpoint version, extension and compaction migration fixtures.
 - **Acceptance and verification:** Resume supported old checkpoints and reject incompatible ones without mutation; prove failed migration preserves originals; explicitly test extension and compaction fixtures; invoke production implementation, not a parallel test-only state machine; attach implementation commit and reproducible evidence; independent of controller schema migrations, which are covered by F04.

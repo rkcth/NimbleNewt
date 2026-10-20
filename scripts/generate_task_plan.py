@@ -117,6 +117,7 @@ parents={f'N{i:02d}':f'AII-{250+i}' for i in range(20)};parents.update(N07a='AII
 # AI reviewer that approved the work before it was committed; it is not a substitute for human review where a card asks for it.
 # `ci_runs` are GitHub Actions runs where all six cells (ubuntu/macOS/Windows x Node 22.19.0/24.21.0) passed.
 PROGRESS={
+ 'G03':dict(status='implemented',pending_commit=True,record='docs/nimblenewt/implementation-plan/g03-compatibility.md',note='Compatibility gate qualified with real Pi 1.0.1/1.2.0/1.3.0 and earlier-adapter fixtures: storage marker, explicit adoption after a read-only scan, checkpoint format 2 with a pure upgrade from format 1, failed adoption leaves the original unchanged. No Pi-to-Pi storage migration was needed or built; see the record for what is not covered.'),
  'F01':dict(status='implemented',commits=['9318464'],note='Delivered with F03/F05 on the Pi-first path; boundary checker, strict TypeScript, locked dependencies.'),
  'F03':dict(status='implemented',commits=['10b12c5','bfbaeb2'],ci_runs=['39341276543'],note='Matrix CI, offline guard, offline fixtures, license inventory; the first run failed on Windows and was fixed in bfbaeb2.'),
  'F05':dict(status='implemented',commits=['24019e5'],ci_runs=['39343771217']),
@@ -144,12 +145,12 @@ def visit(id):
  for d in by[id]['depends_on']:visit(d)
  visiting.remove(id);seen.add(id)
 for t in tasks:visit(t['id'])
-(out/'task-plan.json').write_text(json.dumps({'schema_version':1,'status':'implementation-plan-execution-held','execution_note':"Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item. Card statuses and progress are generated from the PROGRESS table in scripts/generate_task_plan.py: edit that table, not this file.",'baseline_commit':'ecd24cb26ebb6be47c26518237b30c2d0aa6bd56','tasks':tasks},indent=2)+'\n')
+(out/'task-plan.json').write_text(json.dumps({'schema_version':1,'status':'implementation-plan-execution-held','execution_note':"Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.",'baseline_commit':'ecd24cb26ebb6be47c26518237b30c2d0aa6bd56','tasks':tasks},indent=2)+'\n')
 head='''# Proposed Paperclip execution cards
 
 **Current task definitions; execution held at N00. Live Paperclip import status is recorded separately in paperclip-sync-status.md.**
 
-> **Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item. Card statuses and progress are generated from the PROGRESS table in scripts/generate_task_plan.py: edit that table, not this file.** This file is generated; run `python3 scripts/generate_task_plan.py` then `npm run roadmap:write`.
+> **Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.** This file is generated; run `python3 scripts/generate_task_plan.py` then `npm run roadmap:write`.
 
 The existing 23 issues remain workstream parents. N00/AII-250 remains the explicit implementation gate; it is not a coding task. The cards below are proposed children, not replacements for existing history. Parent IDs refer to the current planning backlog. Machine-readable source: [task-plan.json](task-plan.json).
 

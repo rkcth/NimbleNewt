@@ -35,7 +35,7 @@ async function taskWithTwoTurns(content = "first request") {
 
 test("a checkpoint is a small portable record of a completed-turn boundary, and it verifies", async () => {
   const { adapter, conversation, afterFirst } = await taskWithTwoTurns();
-  assert.deepEqual(Object.keys(afterFirst).sort(), ["at", "contractsVersion", "conversationId", "digest", "format", "runtimeVersion"]);
+  assert.deepEqual(Object.keys(afterFirst).sort(), ["at", "contractsVersion", "conversationId", "digest", "format", "historyFormat", "runtime"]);
   assert.match(afterFirst.digest, /^v1:sha256:[0-9a-f]{64}$/);
   assert.equal(afterFirst.conversationId, conversation.id);
   const roundTripped = JSON.parse(JSON.stringify(afterFirst)) as Checkpoint;
@@ -80,8 +80,10 @@ test("a checkpoint is rejected, with a reason, when it cannot be trusted", async
     const verdict = await adapter.verifyCheckpoint(checkpoint as Checkpoint);
     return verdict.valid ? "valid" : verdict.reason;
   };
-  assert.equal(await reasons({ ...afterFirst, format: 2 }), "unsupported_format");
-  assert.equal(await reasons({ ...afterFirst, runtimeVersion: "1.2.0" }), "incompatible_runtime");
+  assert.equal(await reasons({ ...afterFirst, format: 3 }), "unsupported_format");
+  assert.equal(await reasons({ ...afterFirst, runtime: { ...afterFirst.runtime, version: "1.2.0" } }), "incompatible_runtime");
+  assert.equal(await reasons({ ...afterFirst, runtime: { name: "other-runtime", version: afterFirst.runtime.version } }), "incompatible_runtime");
+  assert.equal(await reasons({ ...afterFirst, historyFormat: "pi-durable:2" }), "incompatible_runtime");
   // The contracts version is informational: an unrelated contract change must not invalidate checkpoints.
   assert.equal(await reasons({ ...afterFirst, contractsVersion: 999 }), "valid");
   assert.equal(await reasons({ ...afterFirst, digest: afterFirst.digest.replace("v1:", "v2:") }), "unsupported_format");

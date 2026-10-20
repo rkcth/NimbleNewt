@@ -1,5 +1,5 @@
 import type {
-  AbortReport, AdapterRequest, AuditEvent, BranchInfo, BranchRequest, Checkpoint, CheckpointVerdict, ConversationPort, InterruptedWork, TaskPort, TaskRequest, RecoveryDecision, RequestId, RetainedRequest, RuntimePort, SemanticResult, ToolCallOutcome, TranscriptEntry, UpdateSource,
+  AbortReport, AdapterRequest, AuditEvent, BranchInfo, BranchRequest, Checkpoint, CheckpointV1, CheckpointVerdict, ConversationPort, InterruptedWork, StorageInfo, TaskPort, TaskRequest, RecoveryDecision, RequestId, RetainedRequest, RuntimePort, SemanticResult, ToolCallOutcome, TranscriptEntry, UpdateSource,
 } from "@nimblenewt/contracts";
 import type { JsonValue } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
@@ -9,10 +9,11 @@ import {
   type Conversation, type SettledSubmissionRecord, type Storage, type Submission, type SubmissionDraft, type Tx,
 } from "@earendil-works/pi-durable";
 import { startsRequestSegment, turnBoundaries } from "./branches.js";
-import { CHECKPOINT_DIGEST_PREFIX, digestHistory } from "./checkpoints.js";
+import { CHECKPOINT_DIGEST_PREFIX, CHECKPOINT_FORMAT, HISTORY_FORMAT, RUNTIME_NAME, SUPPORTED_HISTORY_FORMATS, digestHistory, upgradeCheckpoint } from "./checkpoints.js";
+import { ensureStorageCompatible, readStorageInfo } from "./storage-compat.js";
 import {
   AlreadyReadmittedError, BranchDiscardedError, CheckpointRejectedError, ConversationBusyError, InvalidBranchPointError, InvalidToolError, NoBranchPointError, NotRetainedError,
-  InterruptedWorkError, InvalidReadmissionError, InvalidRecoveryError, NotHeldError, RequestIdConflictError, TooManyBranchesError, UnknownCommandError,
+  IncompatibleStorageError, InterruptedWorkError, InvalidReadmissionError, InvalidRecoveryError, NotHeldError, RequestIdConflictError, TooManyBranchesError, UnknownCommandError,
 } from "./errors.js";
 import { fingerprintOf, fingerprintsMatch, mapReason } from "./results.js";
 import { CONTRACTS_VERSION } from "@nimblenewt/contracts";
@@ -81,6 +82,12 @@ export interface PiAdapterOptions {
     /** Called for every input submission after its request ID is claimed and before it is handed to Pi. */
     readonly beforeAdmission?: (conversationId: number) => Promise<void>;
   };
+  /**
+   * Accept a storage that has data but no NimbleNewt compatibility marker (written by an earlier build of this adapter or by
+   * Pi Durable directly). The adapter scans it read-only first and writes its marker only if the scan finds nothing wrong;
+   * without this flag such a storage is refused and left untouched. Default false.
+   */
+  readonly adoptUnmarkedStorage?: boolean;
   /** Receives Pi Durable's non-fatal reports (for example a throwing listener). */
   readonly onReport?: (error: unknown) => void;
   /** Override runtime detection; for tests of the unsupported-runtime path. */
@@ -497,11 +504,12 @@ export class AdapterConversation implements ConversationPort {
     if (at === undefined) throw new NoBranchPointError(`conversation ${this.id} has no completed turn to checkpoint`);
     if (!boundaries.includes(at)) throw new InvalidBranchPointError(`entry ${at} is not a completed-turn boundary of conversation ${this.id}`);
     return {
-      format: 1,
+      format: CHECKPOINT_FORMAT,
       conversationId: this.id,
       at,
       digest: digestHistory(entries.filter((entry) => entry.id <= at)),
-      runtimeVersion: PINNED_PI_DURABLE_VERSION,
+      runtime: { name: RUNTIME_NAME, version: PINNED_PI_DURABLE_VERSION },
+      historyFormat: HISTORY_FORMAT,
       contractsVersion: CONTRACTS_VERSION,
     };
   }
@@ -511,12 +519,18 @@ export class AdapterConversation implements ConversationPort {
    * entry exists and is a completed-turn boundary, and the history up to it is byte-for-byte what was checkpointed.
    * Later turns and compaction do not invalidate it. Read-only.
    */
-  async verifyCheckpoint(checkpoint: Checkpoint): Promise<CheckpointVerdict> {
+  async verifyCheckpoint(stored: Checkpoint | CheckpointV1): Promise<CheckpointVerdict> {
     const reject = (reason: Extract<CheckpointVerdict, { valid: false }>["reason"], detail: string): CheckpointVerdict => ({ valid: false, reason, detail });
-    if (checkpoint.format !== 1) return reject("unsupported_format", `checkpoint format ${String(checkpoint.format)} is not understood`);
+    // Older formats are upgraded in memory; the stored record is never modified, whether or not it verifies.
+    const upgraded = upgradeCheckpoint(stored);
+    if (!upgraded.ok) return reject(upgraded.reason, upgraded.detail);
+    const checkpoint = upgraded.checkpoint;
     if (!checkpoint.digest.startsWith(CHECKPOINT_DIGEST_PREFIX)) return reject("unsupported_format", `digest algorithm "${checkpoint.digest.split(":").slice(0, 2).join(":")}" is not understood`);
-    if (checkpoint.runtimeVersion !== PINNED_PI_DURABLE_VERSION) {
-      return reject("incompatible_runtime", `checkpoint is from runtime ${checkpoint.runtimeVersion}; this adapter supports ${PINNED_PI_DURABLE_VERSION} only (no forward migration yet)`);
+    if (checkpoint.runtime.name !== RUNTIME_NAME || checkpoint.runtime.version !== PINNED_PI_DURABLE_VERSION) {
+      return reject("incompatible_runtime", `checkpoint is from ${checkpoint.runtime.name} ${checkpoint.runtime.version}; this adapter supports ${RUNTIME_NAME} ${PINNED_PI_DURABLE_VERSION} only (no history migration yet)`);
+    }
+    if (!SUPPORTED_HISTORY_FORMATS.includes(checkpoint.historyFormat)) {
+      return reject("incompatible_runtime", `checkpoint history format "${checkpoint.historyFormat}" is not one this adapter reads (${SUPPORTED_HISTORY_FORMATS.join(", ")})`);
     }
     if (checkpoint.conversationId !== this.id) return reject("unknown_conversation", `checkpoint is for conversation ${checkpoint.conversationId}, not ${this.id}`);
     const prefix = await this.scan(0, checkpoint.at);
@@ -866,6 +880,12 @@ export class PiAdapter implements RuntimePort {
       },
       context,
     );
+    try {
+      await ensureStorageCompatible(harness, options.storage, { adoptUnmarkedStorage: options.adoptUnmarkedStorage === true });
+    } catch (error) {
+      await harness.close(context).catch(() => undefined);
+      throw error;
+    }
     const root = await harness.root(context, { agent: { model: options.model } });
     // Read-only: finds work a previous process left unfinished without starting the scheduler.
     const inspection = await harness.inspect(context);
@@ -907,11 +927,12 @@ export class PiAdapter implements RuntimePort {
    * Whether a checkpoint still describes its conversation (see `AdapterConversation.verifyCheckpoint`). A conversation
    * that does not exist is `unknown_conversation`. Read-only; allowed while interrupted work is held.
    */
-  async verifyCheckpoint(checkpoint: Checkpoint): Promise<CheckpointVerdict> {
-    if (checkpoint.format !== 1) return { valid: false, reason: "unsupported_format", detail: `checkpoint format ${String(checkpoint.format)} is not understood` };
-    const conversation = await this.conversation(checkpoint.conversationId);
-    if (conversation === undefined) return { valid: false, reason: "unknown_conversation", detail: `conversation ${checkpoint.conversationId} does not exist` };
-    return conversation.verifyCheckpoint(checkpoint);
+  async verifyCheckpoint(stored: Checkpoint | CheckpointV1): Promise<CheckpointVerdict> {
+    const upgraded = upgradeCheckpoint(stored);
+    if (!upgraded.ok) return { valid: false, reason: upgraded.reason, detail: upgraded.detail };
+    const conversation = await this.conversation(upgraded.checkpoint.conversationId);
+    if (conversation === undefined) return { valid: false, reason: "unknown_conversation", detail: `conversation ${upgraded.checkpoint.conversationId} does not exist` };
+    return conversation.verifyCheckpoint(upgraded.checkpoint);
   }
 
   /**
@@ -919,9 +940,12 @@ export class PiAdapter implements RuntimePort {
    * checkpoint's entry. Later turns of the original are not part of the result. Idempotent by request ID, like any branch.
    * Throws `CheckpointRejectedError` if the checkpoint does not verify.
    */
-  async restoreCheckpoint(checkpoint: Checkpoint, requestId: RequestId): Promise<AdapterBranch> {
-    const verdict = await this.verifyCheckpoint(checkpoint);
+  async restoreCheckpoint(stored: Checkpoint | CheckpointV1, requestId: RequestId): Promise<AdapterBranch> {
+    const verdict = await this.verifyCheckpoint(stored);
     if (!verdict.valid) throw new CheckpointRejectedError(verdict.reason, verdict.detail);
+    const upgraded = upgradeCheckpoint(stored);
+    if (!upgraded.ok) throw new CheckpointRejectedError(upgraded.reason, upgraded.detail); // unreachable after a valid verdict
+    const checkpoint = upgraded.checkpoint;
     const conversation = await this.conversation(checkpoint.conversationId);
     const restored = await conversation!.createBranch({ requestId, at: checkpoint.at }, "restore");
     await this.shared.audit?.({ type: "restore_checkpoint", at: Date.now(), checkpoint, branchRequestId: requestId, newConversationId: restored.conversation.id });
@@ -945,6 +969,16 @@ export class PiAdapter implements RuntimePort {
     if (decision.abandon.length > 0) await this.abandonInterrupted(decision.abandon);
     await this.releaseHold();
     await this.shared.audit?.({ type: "recover", at: Date.now(), decision, found });
+  }
+
+  /**
+   * What the storage records about who wrote it and how this adapter came to accept it (see `adoptUnmarkedStorage`).
+   * Read-only.
+   */
+  async storageInfo(): Promise<StorageInfo> {
+    const info = await readStorageInfo(this.harness);
+    if (info === undefined) throw new IncompatibleStorageError("the storage has no compatibility marker");
+    return info;
   }
 
   /**

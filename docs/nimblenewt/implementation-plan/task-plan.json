@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "status": "implementation-plan-execution-held",
-  "execution_note": "Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item. Card statuses and progress are generated from the PROGRESS table in scripts/generate_task_plan.py: edit that table, not this file.",
+  "execution_note": "Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.",
   "baseline_commit": "ecd24cb26ebb6be47c26518237b30c2d0aa6bd56",
   "tasks": [
     {
@@ -60,12 +60,18 @@
       ],
       "deliverable": "Actual Pi adapter checkpoint version, extension and compaction migration fixtures",
       "acceptance_and_verification": "Resume supported old checkpoints and reject incompatible ones without mutation; prove failed migration preserves originals; explicitly test extension and compaction fixtures; invoke production implementation, not a parallel test-only state machine; attach implementation commit and reproducible evidence; independent of controller schema migrations, which are covered by F04",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": "Historical context-and-windows-results.md only; acceptance requires actual NimbleNewt code",
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "pending_commit": true,
+        "record": "docs/nimblenewt/implementation-plan/g03-compatibility.md",
+        "note": "Compatibility gate qualified with real Pi 1.0.1/1.2.0/1.3.0 and earlier-adapter fixtures: storage marker, explicit adoption after a read-only scan, checkpoint format 2 with a pure upgrade from format 1, failed adoption leaves the original unchanged. No Pi-to-Pi storage migration was needed or built; see the record for what is not covered.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "G04",

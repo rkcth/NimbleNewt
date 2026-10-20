@@ -1,0 +1,1 @@
+{"format":1,"type":"record","seq":24,"ordinal":0,"payload":{"type":"document","id":4,"content":{"version":1,"kind":"base","value":{"models":{"offline/scripted":{"input":433,"output":12,"cacheRead":82,"cacheWrite":60,"totalTokens":587,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}},"tools":{}}}}}

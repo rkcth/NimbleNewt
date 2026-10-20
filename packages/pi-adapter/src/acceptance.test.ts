@@ -143,7 +143,7 @@ test("G02 milestone: tasks, tool output, dedupe, inquiry, update, compaction, ch
   const flipped = beforeCompaction.digest.endsWith("0") ? "1" : "0";
   const reasonFor = async (checkpoint: typeof beforeCompaction) => { const verdict = await first.runtime.verifyCheckpoint(checkpoint); return verdict.valid ? "valid" : verdict.reason; };
   assert.equal(await reasonFor({ ...beforeCompaction, digest: `${beforeCompaction.digest.slice(0, -1)}${flipped}` }), "history_changed");
-  assert.equal(await reasonFor({ ...beforeCompaction, runtimeVersion: "0.0.0-other" }), "incompatible_runtime");
+  assert.equal(await reasonFor({ ...beforeCompaction, runtime: { ...beforeCompaction.runtime, version: "0.0.0-other" } }), "incompatible_runtime");
   assert.equal(await reasonFor({ ...beforeCompaction, at: beforeCompaction.at + 100000 }), "unknown_entry");
   const restoredOld = await first.runtime.restoreCheckpoint(beforeCompaction, requestId("restore-old"));
   assert.equal((await restoredOld.conversation.transcript()).map((e) => e.text).join("|"), oldContext, "restoring the pre-compaction checkpoint must give back the older, uncompacted history");

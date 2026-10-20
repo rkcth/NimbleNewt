@@ -93,9 +93,9 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **4 of 105 tasks implemented**, 1 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **5 of 105 tasks implemented**, 1 awaiting sign-off.
 
-> Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item. Card statuses and progress are generated from the PROGRESS table in scripts/generate_task_plan.py: edit that table, not this file.
+> Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
 This section is generated from `task-plan.json`: edit the PROGRESS table in `scripts/generate_task_plan.py`, run it, then run `npm run roadmap:write`; `npm test` fails if it is stale.
 
@@ -128,7 +128,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 7
 
-- [ ] **G03** Qualify forward migration and compatibility rejection _(needs G02)_
+- [x] **G03** Qualify forward migration and compatibility rejection _(needs G02)_
 
 ### Phase 8
 

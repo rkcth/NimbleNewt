@@ -42,7 +42,7 @@ Recorded in code as `UNSUPPORTED_CAPABILITIES` (`packages/pi-adapter/src/capabil
 | `cancel-single-request` | `abort()` is whole-conversation. | L01, U03 |
 | `transcript-paging` | `transcript()` returns the full history. | U05, U07 |
 | `progress-events` | No event stream yet. | H06, V01, U05, U07 |
-| `forward-migration` | Any other Pi Durable version is refused; needs a storage format id and migration table. Independent of controller schema migrations (F04). | G03, K03 |
+| `forward-migration` | No migration is defined: old Pi storage in the tested fixtures has the same layout and is adopted, a marker naming another version is refused (see [g03-compatibility.md](g03-compatibility.md)). A Pi release that changes the layout needs a real, atomic migration. | K03 |
 | `in-flight-state` | Branches and checkpoints start at completed-turn boundaries. | G09, L01 |
 | `usage-accounting` | Pi records spend per conversation but the port does not expose it. | R02, B01, X07 |
 | `per-task-model-and-tools` | One model and tool set for the whole adapter. | R01, T01 |

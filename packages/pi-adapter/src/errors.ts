@@ -103,3 +103,24 @@ export class CheckpointRejectedError extends PiAdapterError {
 export class InvalidRecoveryError extends PiAdapterError {
   override readonly name = "InvalidRecoveryError";
 }
+
+/**
+ * The storage has data but no NimbleNewt compatibility marker, so who wrote it is unknown. It was left untouched. If the
+ * controller knows it is compatible (for example it was written by an earlier build of this adapter, or by Pi Durable
+ * directly), reopen with `adoptUnmarkedStorage: true`: the adapter then scans it read-only and only writes its marker if
+ * the scan finds nothing wrong.
+ */
+export class UnmarkedStorageError extends PiAdapterError {
+  override readonly name = "UnmarkedStorageError";
+  constructor(readonly conversations: number) {
+    super(`the storage holds ${conversations} conversation(s) but no compatibility marker; it was not modified (pass adoptUnmarkedStorage to adopt it after a scan)`);
+  }
+}
+
+/** The storage cannot be used by this adapter and was left exactly as it was. */
+export class IncompatibleStorageError extends PiAdapterError {
+  override readonly name = "IncompatibleStorageError";
+  constructor(readonly reason: string, readonly findings: readonly string[] = []) {
+    super(`incompatible storage: ${reason}${findings.length > 0 ? ` (${findings.slice(0, 5).join("; ")}${findings.length > 5 ? `; and ${findings.length - 5} more` : ""})` : ""}; it was not modified`);
+  }
+}

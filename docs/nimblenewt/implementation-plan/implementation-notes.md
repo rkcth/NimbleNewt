@@ -152,3 +152,12 @@ Remaining before G02: run the whole suite on macOS and Windows (CI does this on 
 ## G02 notes
 
 The first-milestone acceptance record is [g02-acceptance.md](g02-acceptance.md): the G02 items mapped to tests, the unsupported-capability list (also in code as `UNSUPPORTED_CAPABILITIES`, guarded by tests), the decisions the owner may override, and a QA checklist for real macOS/Windows/Linux runs. The acceptance suite (`acceptance.test.ts`) uses only the contract port types, JSONL storage, a deterministic provider and real SIGKILLs. G02 is **not** signed off until the sign-off boxes in that record are checked.
+
+## G03 notes
+
+The G03 evidence record is [g03-compatibility.md](g03-compatibility.md). What changed in the code, for later cards:
+
+- **Checkpoint format 2** (`Checkpoint`): `runtime: { name, version }` and `historyFormat` replace `runtimeVersion`; `CheckpointV1` is still accepted everywhere a checkpoint is (`verifyCheckpoint`, `restoreCheckpoint`, the ports) and upgraded by the pure `upgradeCheckpoint`. Validity still depends on format, digest algorithm and runtime/history compatibility, not on `contractsVersion`. The audit event for a restore carries the upgraded (format 2) checkpoint.
+- **Storage marker and open policy:** `PiAdapter.open` now refuses a storage it cannot place (`UnmarkedStorageError`, `IncompatibleStorageError`) before it creates the root conversation or starts anything, and writes its marker only for an empty storage or an adopted one that scanned clean. `adoptUnmarkedStorage: true` is the controller's explicit decision; existing deployments (none yet) of F05-F06 storages need it once. `storageInfo()` is on the port. All earlier tests keep passing because every storage they create is empty at first open and so gets a marker.
+- **Hold interaction:** the compatibility check runs before the interrupted-work inspection, so an incompatible storage is refused before any hold or recovery question arises.
+- **Open item for G06/K03:** a Pi release that changes the on-disk layout. The gate will refuse it; a migration must then be added to `STORAGE_MIGRATIONS` and be atomic.
