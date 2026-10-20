@@ -214,12 +214,19 @@ export class ProjectService {
    * the task moves while it is being repaired, the repair is skipped (the command that moved it announced the new revision). Repeating it
    * changes nothing. Returns where to continue (absent at the end).
    */
-  async reconcileTaskEvents(page: { afterId?: string; limit: number }): Promise<{ checked: number; repaired: string[]; next?: string }> {
+  async reconcileTaskEvents(page: { afterId?: string; limit: number }): Promise<{ checked: number; repaired: string[]; failed: { taskId: string; code: string }[]; next?: string }> {
     const tasks = await this.#runner.list("task", page);
     const repaired: string[] = [];
+    // A task that cannot be repaired is reported and the scan goes on: one bad record must not stop the rest (only losing the epoch stops it).
+    const failed: { taskId: string; code: string }[] = [];
     for (const task of tasks) {
       let known: unknown;
-      try { known = await this.#runner.storage.getDelivery(taskEventId(task.id, task.revision)); } catch (error) { throw mapStorageError(error); }
+      try { known = await this.#runner.storage.getDelivery(taskEventId(task.id, task.revision)); } catch (error) {
+        const mapped = mapStorageError(error);
+        if (mapped.code === "stale_epoch") throw mapped;
+        failed.push({ taskId: task.id, code: mapped.code });
+        continue;
+      }
       if (known !== undefined) continue;
       try {
         await this.#runner.command("task.event.repair", { commandId: `repair:${task.id}:${task.revision}`, actor: "reconciler" }, async () => ({
@@ -232,11 +239,13 @@ export class ProjectService {
         }));
         repaired.push(task.id);
       } catch (error) {
-        if (!(error instanceof DomainError) || error.code !== "stale_revision") throw error;
+        if (!(error instanceof DomainError)) throw error;
+        if (error.code === "stale_epoch") throw error;
+        if (error.code !== "stale_revision") failed.push({ taskId: task.id, code: error.code });
       }
     }
     const last = tasks[tasks.length - 1];
-    return { checked: tasks.length, repaired, ...(tasks.length === page.limit && last !== undefined ? { next: last.id } : {}) };
+    return { checked: tasks.length, repaired, failed, ...(tasks.length === page.limit && last !== undefined ? { next: last.id } : {}) };
   }
 
   // ---- reads ---------------------------------------------------------------------------------------------------------------

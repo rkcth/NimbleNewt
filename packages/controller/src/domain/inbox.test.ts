@@ -76,10 +76,10 @@ for (const backend of backends) {
     const lossy = new FaultInjectingStorage(world.storage, [{ when: "before", kind: "unavailable" }]);
     const faulty = InboxService.withEpoch(lossy, epoch, assign, { ...fast, attempts: 1 });
     const dispatcher = (target: InboxService) => new DeliveryDispatcher(world.storage, epoch, { destination: ASSIGNMENT_EVENTS, claimant: "d", handler: target.handler(SOURCE), clock: () => T, backoffMs: () => 0, pause: async () => undefined });
-    assert.deepEqual(await dispatcher(faulty).runOnce(), { delivered: 0, failed: 1, superseded: 0 });
+    assert.deepEqual(await dispatcher(faulty).runOnce(), { delivered: 0, failed: 1, superseded: 0, held: 0 });
     assert.equal(await inbox.getByDelivery(SOURCE, assignmentEventId(taskId, 1)), undefined, "nothing was held");
     assert.notEqual((await world.storage.getDelivery(assignmentEventId(taskId, 1)))?.state, "delivered", "so nothing was acknowledged");
-    assert.deepEqual(await dispatcher(inbox).runOnce(), { delivered: 1, failed: 0, superseded: 0 });
+    assert.deepEqual(await dispatcher(inbox).runOnce(), { delivered: 1, failed: 0, superseded: 0, held: 0 });
     const held = (await inbox.getByDelivery(SOURCE, assignmentEventId(taskId, 1)))!;
     assert.equal(held.state, "received");
     const delivery = (await world.storage.getDelivery(assignmentEventId(taskId, 1)))!;

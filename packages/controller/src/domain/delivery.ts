@@ -37,6 +37,16 @@ export interface DispatcherOptions {
   readonly backoffMs?: (attempt: number) => number;
   readonly attempts?: number;
   readonly pause?: (attempt: number) => Promise<void>;
+  /** How long a held message waits before it is looked at again. Default 5 minutes. */
+  readonly holdBackoffMs?: number;
+  /** A held message is given back without calling the handler (for example while a blocker on it is open). */
+  readonly isHeld?: (claim: DeliveryClaim) => Promise<boolean>;
+  /**
+   * Called when the handler failed (card S07, bounded retry). Returns `hold` when the message has used up its allowed failures (the hook has
+   * opened the visible blocker): it then waits `holdBackoffMs` instead of the normal backoff. Counting failures, not claims, is the hook's job:
+   * a claim that only found the message held is not a failure.
+   */
+  readonly onFailure?: (claim: DeliveryClaim, reason: string) => Promise<"retry" | "hold">;
 }
 
 export interface PassResult {
@@ -45,6 +55,8 @@ export interface PassResult {
   readonly failed: number;
   /** Messages another dispatcher took over while this one held them; nothing was recorded for them here. */
   readonly superseded: number;
+  /** Messages given back without being handed over because they are held or exhausted. */
+  readonly held: number;
 }
 
 const defaultBackoff = (attempt: number): number => Math.min(60_000, 1000 * 2 ** Math.min(attempt - 1, 10));
@@ -82,22 +94,28 @@ export class DeliveryDispatcher {
     try {
       claims = await this.#storage.claimDeliveries({ epoch: this.#epoch, destination: this.#options.destination, claimant: this.#options.claimant, now: this.#clock(), leaseMs: this.#options.leaseMs ?? 60_000, limit: this.#options.batch ?? 10 });
     } catch (error) { throw mapStorageError(error); }
-    let delivered = 0, failed = 0, superseded = 0;
+    let delivered = 0, failed = 0, superseded = 0, held = 0;
     // One key's messages are claimed one at a time (storage never hands out two of one key), so claims here are independent.
     for (const claim of claims) {
       const outcome = await this.#deliver(claim);
-      if (outcome === "delivered") delivered++; else if (outcome === "failed") failed++; else superseded++;
+      if (outcome === "delivered") delivered++; else if (outcome === "failed") failed++; else if (outcome === "held") held++; else superseded++;
     }
-    return { delivered, failed, superseded };
+    return { delivered, failed, superseded, held };
   }
 
-  async #deliver(claim: DeliveryClaim): Promise<"delivered" | "failed" | "superseded"> {
+  async #deliver(claim: DeliveryClaim): Promise<"delivered" | "failed" | "superseded" | "held"> {
+    if (this.#options.isHeld !== undefined && await this.#options.isHeld(claim)) {
+      return (await this.#giveBack(claim, "held", this.#options.holdBackoffMs ?? 5 * 60_000)) === "superseded" ? "superseded" : "held";
+    }
     let receipt: JsonObject;
     try {
       const result = await this.#options.handler({ deliveryId: claim.deliveryId, ...(claim.orderingKey === undefined ? {} : { orderingKey: claim.orderingKey }), aggregate: claim.aggregate, aggregateRevision: claim.aggregateRevision, payload: claim.payload, attempt: claim.attempt });
       receipt = { result: result ?? {}, attempt: claim.attempt };
     } catch (error) {
-      return this.#giveBack(claim, error instanceof Error ? error.message : String(error));
+      const reason = error instanceof Error ? error.message : String(error);
+      let verdict: "retry" | "hold" = "retry";
+      try { verdict = (await this.#options.onFailure?.(claim, reason)) ?? "retry"; } catch (hookError) { if (hookError instanceof DomainError && hookError.code === "stale_epoch") throw hookError; }
+      return verdict === "hold" ? this.#giveBack(claim, reason, this.#options.holdBackoffMs ?? 5 * 60_000) : this.#giveBack(claim, reason);
     }
     const at = this.#clock();
     const input: OperationInput = {
@@ -118,9 +136,9 @@ export class DeliveryDispatcher {
     }
   }
 
-  async #giveBack(claim: DeliveryClaim, reason: string): Promise<"failed" | "superseded"> {
+  async #giveBack(claim: DeliveryClaim, reason: string, backoffOverride?: number): Promise<"failed" | "superseded"> {
     const now = this.#clock();
-    const backoff = (this.#options.backoffMs ?? defaultBackoff)(claim.attempt);
+    const backoff = backoffOverride ?? (this.#options.backoffMs ?? defaultBackoff)(claim.attempt);
     try {
       await this.#storage.retryDelivery({ epoch: this.#epoch, deliveryId: claim.deliveryId, claimToken: claim.claimToken, nextAttemptAt: new Date(Date.parse(now) + backoff).toISOString(), reason: reason.slice(0, 500), at: now });
       return "failed";

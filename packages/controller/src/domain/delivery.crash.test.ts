@@ -55,7 +55,7 @@ test("killed just before the task's transaction commits: there is no task and no
   scenario("create-before-commit", false, async (dir, storage, projects, taskId) => {
     assert.equal(await projects.getTask(taskId), undefined);
     assert.equal(await storage.getDelivery(taskEventId(taskId, 1)), undefined, "no message for a change that did not happen");
-    assert.deepEqual(await projects.reconcileTaskEvents({ limit: 10 }), { checked: 0, repaired: [] });
+    assert.deepEqual(await projects.reconcileTaskEvents({ limit: 10 }), { checked: 0, repaired: [], failed: [] });
     const project = (await projects.listProjects({ limit: 1 }))[0]!;
     const made = await projects.createTask({ commandId: "crash-task", actor: "child", projectId: project.id, title: "crash test" });
     assert.equal(made.replayed, false);

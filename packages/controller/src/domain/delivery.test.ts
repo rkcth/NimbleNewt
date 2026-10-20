@@ -96,11 +96,11 @@ for (const backend of backends) {
     let now = T;
     const flaky = async (d: Delivery) => { if (fail) throw new Error("engine is down"); return e.handler(d); };
     const d = new DeliveryDispatcher(world.storage, epoch, { destination: TASK_EVENTS, claimant: "d1", handler: flaky, clock: () => now, backoffMs: () => 1000, pause: async () => undefined });
-    assert.deepEqual(await d.runOnce(), { delivered: 0, failed: 1, superseded: 0 });
-    assert.deepEqual(await d.runOnce(), { delivered: 0, failed: 0, superseded: 0 }, "nothing is due before the backoff ends, and the later message waits behind the first");
+    assert.deepEqual(await d.runOnce(), { delivered: 0, failed: 1, superseded: 0, held: 0 });
+    assert.deepEqual(await d.runOnce(), { delivered: 0, failed: 0, superseded: 0, held: 0 }, "nothing is due before the backoff ends, and the later message waits behind the first");
     now = at(1001); fail = false;
-    assert.deepEqual(await d.runOnce(), { delivered: 1, failed: 0, superseded: 0 });
-    assert.deepEqual(await d.runOnce(), { delivered: 1, failed: 0, superseded: 0 });
+    assert.deepEqual(await d.runOnce(), { delivered: 1, failed: 0, superseded: 0, held: 0 });
+    assert.deepEqual(await d.runOnce(), { delivered: 1, failed: 0, superseded: 0, held: 0 });
     assert.deepEqual([...e.seen.keys()], [taskEventId(t.id, 1), taskEventId(t.id, 2)], "delivered in commit order");
     const record = await world.storage.getDelivery(taskEventId(t.id, 1));
     assert.deepEqual([record?.state, record?.attempts], ["delivered", 2]);
@@ -114,11 +114,11 @@ for (const backend of backends) {
     // The first receipt commit fails before it happens (the handler has already run).
     const storage: ControllerStorage = new FaultInjectingStorage(world.storage, [{ when: "before", kind: "unavailable" }]);
     const first = new DeliveryDispatcher(storage, epoch, { destination: TASK_EVENTS, claimant: "d1", handler: e.handler, clock: () => now, leaseMs: 5000, attempts: 1, pause: async () => undefined });
-    assert.deepEqual(await first.runOnce(), { delivered: 0, failed: 1, superseded: 0 });
+    assert.deepEqual(await first.runOnce(), { delivered: 0, failed: 1, superseded: 0, held: 0 });
     assert.equal((await world.storage.getDelivery(taskEventId(t.id, 1)))?.state, "claimed", "the controller does not know it was delivered");
-    assert.deepEqual(await first.runOnce(), { delivered: 0, failed: 0, superseded: 0 }, "still claimed until the lease ends");
+    assert.deepEqual(await first.runOnce(), { delivered: 0, failed: 0, superseded: 0, held: 0 }, "still claimed until the lease ends");
     now = at(5001);
-    assert.deepEqual(await first.runOnce(), { delivered: 1, failed: 0, superseded: 0 });
+    assert.deepEqual(await first.runOnce(), { delivered: 1, failed: 0, superseded: 0, held: 0 });
     assert.equal(e.calls.length, 2, "the destination was handed the message twice");
     assert.deepEqual(e.calls.map((c) => c.deliveryId), [taskEventId(t.id, 1), taskEventId(t.id, 1)]);
     assert.equal(e.seen.size, 1, "and holds it once");
@@ -131,7 +131,7 @@ for (const backend of backends) {
     const e = engine();
     const storage: ControllerStorage = new FaultInjectingStorage(world.storage, [{ when: "after", kind: "uncertain_commit" }]);
     const d = new DeliveryDispatcher(storage, epoch, { destination: TASK_EVENTS, claimant: "d1", handler: e.handler, clock: () => T, pause: async () => undefined });
-    assert.deepEqual(await d.runOnce(), { delivered: 1, failed: 0, superseded: 0 });
+    assert.deepEqual(await d.runOnce(), { delivered: 1, failed: 0, superseded: 0, held: 0 });
     assert.equal(e.calls.length, 1);
     assert.equal((await world.storage.getDelivery(taskEventId(t.id, 1)))?.state, "delivered");
     const receipts = (await world.storage.listAudit({ afterSeq: 0, limit: 100 })).filter((r) => r.type === "delivery.receipt");
@@ -148,12 +148,12 @@ for (const backend of backends) {
     const slow = async (d: Delivery) => {
       // While A is inside its handler, its lease ends and B takes the message and delivers it.
       now = at(61_000);
-      if (!takenOver) { takenOver = true; assert.deepEqual(await b!.runOnce(), { delivered: 1, failed: 0, superseded: 0 }); }
+      if (!takenOver) { takenOver = true; assert.deepEqual(await b!.runOnce(), { delivered: 1, failed: 0, superseded: 0, held: 0 }); }
       return e.handler(d);
     };
     const a = new DeliveryDispatcher(world.storage, epoch, { destination: TASK_EVENTS, claimant: "A", handler: slow, clock: () => now, pause: async () => undefined });
     b = new DeliveryDispatcher(world.storage, epoch, { destination: TASK_EVENTS, claimant: "B", handler: e.handler, clock: () => now, pause: async () => undefined });
-    assert.deepEqual(await a.runOnce(), { delivered: 0, failed: 0, superseded: 1 });
+    assert.deepEqual(await a.runOnce(), { delivered: 0, failed: 0, superseded: 1, held: 0 });
     const record = await world.storage.getDelivery(taskEventId(t.id, 1));
     assert.equal(record?.state, "delivered");
     assert.equal((record?.receipt as { attempt: number }).attempt, 2, "B's receipt stands");
