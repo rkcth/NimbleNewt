@@ -18,6 +18,12 @@ export interface SqliteOptions {
   readonly path: string;
   /** How long a write waits for another connection's write lock before failing as `retryable`. Default 5000, at most 60000. */
   readonly busyTimeoutMs?: number;
+  /**
+   * For the crash qualification only: called immediately before and after every numbered statement of a write transaction
+   * (`BEGIN IMMEDIATE` is statement 1, `COMMIT` the last), so a test can kill the process at an exact atomic boundary.
+   * Never set in production.
+   */
+  readonly testHooks?: { readonly statement?: (phase: "before" | "after", sql: string, ordinal: number) => void };
 }
 
 /** The durability and safety settings in force, read back from the database after they were applied. */
@@ -53,11 +59,15 @@ const maybe = (row: Row, key: string): string | undefined => (row[key] === null 
 export class SqliteStorage implements ControllerStorage {
   readonly #db: DatabaseSync;
   readonly #busyTimeoutMs: number;
+  readonly #hook: SqliteOptions["testHooks"];
+  #ordinal = 0;
+  #inWrite = false;
   readonly #statements = new Map<string, StatementSync>();
   #closed = false;
   readonly path: string;
 
-  private constructor(db: DatabaseSync, path: string, busyTimeoutMs: number) {
+  private constructor(db: DatabaseSync, path: string, busyTimeoutMs: number, hook: SqliteOptions["testHooks"]) {
+    this.#hook = hook;
     this.#db = db;
     this.path = path;
     this.#busyTimeoutMs = busyTimeoutMs;
@@ -78,7 +88,7 @@ export class SqliteStorage implements ControllerStorage {
     let db: DatabaseSync | undefined;
     try {
       db = new DatabaseSync(absolute, { timeout: busyTimeoutMs, enableForeignKeyConstraints: true });
-      const store = new SqliteStorage(db, absolute, busyTimeoutMs);
+      const store = new SqliteStorage(db, absolute, busyTimeoutMs, options.testHooks);
       store.#configure();
       store.#ensureSchema();
       return store;
@@ -140,9 +150,18 @@ export class SqliteStorage implements ControllerStorage {
     }
     return statement;
   }
-  #get(sql: string, ...params: SQLInputValue[]): Row | undefined { return this.#sql(sql).get(...params) as Row | undefined; }
-  #all(sql: string, ...params: SQLInputValue[]): Row[] { return this.#sql(sql).all(...params) as Row[]; }
-  #run(sql: string, ...params: SQLInputValue[]): void { this.#sql(sql).run(...params); }
+  /** Runs one numbered statement of a write transaction, with the test hooks around it. */
+  #step<T>(sql: string, fn: () => T): T {
+    if (this.#hook?.statement === undefined || !this.#inWrite) return fn();
+    const ordinal = ++this.#ordinal;
+    this.#hook.statement("before", sql, ordinal);
+    const result = fn();
+    this.#hook.statement("after", sql, ordinal);
+    return result;
+  }
+  #get(sql: string, ...params: SQLInputValue[]): Row | undefined { return this.#step(sql, () => this.#sql(sql).get(...params) as Row | undefined); }
+  #all(sql: string, ...params: SQLInputValue[]): Row[] { return this.#step(sql, () => this.#sql(sql).all(...params) as Row[]); }
+  #run(sql: string, ...params: SQLInputValue[]): void { this.#step(sql, () => { this.#sql(sql).run(...params); }); }
 
   #usable(): void {
     if (this.#closed) throw new StorageError("unavailable", "the storage is closed");
@@ -161,8 +180,18 @@ export class SqliteStorage implements ControllerStorage {
    */
   #writeTransaction<T>(fn: () => T, onUnknownCommit: "uncertain_commit" | "retryable"): T {
     this.#usable();
+    this.#ordinal = 0;
+    this.#inWrite = true;
     try {
-      this.#db.exec("BEGIN IMMEDIATE");
+      return this.#transaction(fn, onUnknownCommit);
+    } finally {
+      this.#inWrite = false;
+    }
+  }
+
+  #transaction<T>(fn: () => T, onUnknownCommit: "uncertain_commit" | "retryable"): T {
+    try {
+      this.#step("BEGIN IMMEDIATE", () => this.#db.exec("BEGIN IMMEDIATE"));
     } catch (error) {
       throw classify(error);
     }
@@ -174,7 +203,7 @@ export class SqliteStorage implements ControllerStorage {
       throw classify(error);
     }
     try {
-      this.#db.exec("COMMIT");
+      this.#step("COMMIT", () => this.#db.exec("COMMIT"));
     } catch (error) {
       this.#rollback();
       if (isBusy(error)) throw classify(error);

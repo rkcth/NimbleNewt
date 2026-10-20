@@ -1,0 +1,550 @@
+{
+  "generatedAt": "2026-10-20T04:08:32.920Z",
+  "machine": {
+    "platform": "linux",
+    "release": "7.0.0-38-generic",
+    "arch": "x64",
+    "cpus": 12,
+    "cpuModel": "12th Gen Intel(R) Core(TM) i5-12400",
+    "memoryGiB": 123,
+    "loadAverage": [
+      7.32,
+      9.15,
+      9.59
+    ],
+    "node": "v24.21.0",
+    "dataDirectory": "/home/rob/.cache/nimblenewt-bench",
+    "dataFilesystem": "ext4"
+  },
+  "backends": {
+    "sqlite": {
+      "settings": {
+        "sqliteVersion": "3.53.4",
+        "schemaVersion": 1,
+        "journalMode": "wal",
+        "synchronous": "FULL",
+        "foreignKeys": true,
+        "busyTimeoutMs": 5000
+      },
+      "results": [
+        {
+          "spec": {
+            "name": "baseline: 4 active, 100 idle hosts",
+            "agents": 4,
+            "idleHosts": 100,
+            "hostPeriodMs": 2000,
+            "inquirers": 2,
+            "hotRow": false,
+            "thinkMs": 5,
+            "durationMs": 15000,
+            "warmupMs": 2000
+          },
+          "measuredMs": 15000,
+          "latency": {
+            "transition": {
+              "count": 568,
+              "perSecond": 37.87,
+              "p50": 6.28,
+              "p95": 12.2,
+              "p99": 13.1,
+              "max": 24.27
+            },
+            "claimComplete": {
+              "count": 285,
+              "perSecond": 19,
+              "p50": 24.18,
+              "p95": 37.56,
+              "p99": 43.96,
+              "max": 49.39
+            },
+            "heartbeat": {
+              "count": 733,
+              "perSecond": 48.87,
+              "p50": 6.25,
+              "p95": 12.17,
+              "p99": 12.61,
+              "max": 15.96
+            },
+            "inquiry": {
+              "count": 346,
+              "perSecond": 23.07,
+              "p50": 0.07,
+              "p95": 0.21,
+              "p99": 0.28,
+              "max": 0.31
+            }
+          },
+          "calls": {
+            "acquireEpoch": {
+              "ok": 1
+            },
+            "currentEpoch": {
+              "ok": 1
+            },
+            "applyOperation": {
+              "ok": 2143
+            },
+            "getAggregate": {
+              "ok": 400
+            },
+            "listAudit": {
+              "ok": 400
+            },
+            "claimDeliveries": {
+              "ok": 329
+            }
+          },
+          "conflictsRetriedByCaller": 0,
+          "eventLoopDelayMs": {
+            "p50": 1.06,
+            "p99": 81.85,
+            "max": 135.79
+          },
+          "invariants": {
+            "transitionsApplied": 657,
+            "auditGapFree": true,
+            "deliveriesUnique": true,
+            "revisionsMatch": true,
+            "deliveriesClaimedTwice": 0
+          }
+        },
+        {
+          "spec": {
+            "name": "stress: 32 active equivalents, 100 idle hosts",
+            "agents": 32,
+            "idleHosts": 100,
+            "hostPeriodMs": 2000,
+            "inquirers": 2,
+            "hotRow": false,
+            "thinkMs": 5,
+            "durationMs": 15000,
+            "warmupMs": 2000
+          },
+          "measuredMs": 15000,
+          "latency": {
+            "transition": {
+              "count": 654,
+              "perSecond": 43.6,
+              "p50": 6.3,
+              "p95": 11.65,
+              "p99": 12.67,
+              "max": 13.66
+            },
+            "claimComplete": {
+              "count": 360,
+              "perSecond": 24,
+              "p50": 24.69,
+              "p95": 33.35,
+              "p99": 42.91,
+              "max": 52.03
+            },
+            "heartbeat": {
+              "count": 594,
+              "perSecond": 39.6,
+              "p50": 6.28,
+              "p95": 11.92,
+              "p99": 13.25,
+              "max": 18
+            },
+            "inquiry": {
+              "count": 48,
+              "perSecond": 3.2,
+              "p50": 0.12,
+              "p95": 0.25,
+              "p99": 0.36,
+              "max": 0.36
+            }
+          },
+          "calls": {
+            "acquireEpoch": {
+              "ok": 1
+            },
+            "currentEpoch": {
+              "ok": 1
+            },
+            "applyOperation": {
+              "ok": 2225
+            },
+            "getAggregate": {
+              "ok": 56
+            },
+            "listAudit": {
+              "ok": 56
+            },
+            "claimDeliveries": {
+              "ok": 397
+            }
+          },
+          "conflictsRetriedByCaller": 0,
+          "eventLoopDelayMs": {
+            "p50": 1.05,
+            "p99": 423.36,
+            "max": 722.99
+          },
+          "invariants": {
+            "transitionsApplied": 782,
+            "auditGapFree": true,
+            "deliveriesUnique": true,
+            "revisionsMatch": true,
+            "deliveriesClaimedTwice": 0
+          }
+        },
+        {
+          "spec": {
+            "name": "hot row: 32 active all updating one shared record",
+            "agents": 32,
+            "idleHosts": 100,
+            "hostPeriodMs": 2000,
+            "inquirers": 2,
+            "hotRow": true,
+            "thinkMs": 5,
+            "durationMs": 15000,
+            "warmupMs": 2000
+          },
+          "measuredMs": 15000,
+          "latency": {
+            "transition": {
+              "count": 625,
+              "perSecond": 41.67,
+              "p50": 6.39,
+              "p95": 11.87,
+              "p99": 12.88,
+              "max": 15.59
+            },
+            "claimComplete": {
+              "count": 331,
+              "perSecond": 22.07,
+              "p50": 24.71,
+              "p95": 34.32,
+              "p99": 40.56,
+              "max": 51.53
+            },
+            "heartbeat": {
+              "count": 606,
+              "perSecond": 40.4,
+              "p50": 6.3,
+              "p95": 11.94,
+              "p99": 13.39,
+              "max": 22.05
+            },
+            "inquiry": {
+              "count": 48,
+              "perSecond": 3.2,
+              "p50": 0.12,
+              "p95": 0.3,
+              "p99": 0.34,
+              "max": 0.34
+            }
+          },
+          "calls": {
+            "acquireEpoch": {
+              "ok": 1
+            },
+            "currentEpoch": {
+              "ok": 1
+            },
+            "applyOperation": {
+              "ok": 2099,
+              "revision_conflict": 496
+            },
+            "getAggregate": {
+              "ok": 1266
+            },
+            "listAudit": {
+              "ok": 54
+            },
+            "claimDeliveries": {
+              "ok": 363
+            }
+          },
+          "conflictsRetriedByCaller": 496,
+          "eventLoopDelayMs": {
+            "p50": 1.05,
+            "p99": 416.81,
+            "max": 833.09
+          },
+          "invariants": {
+            "transitionsApplied": 716,
+            "auditGapFree": true,
+            "deliveriesUnique": true,
+            "revisionsMatch": true,
+            "deliveriesClaimedTwice": 0
+          }
+        }
+      ]
+    },
+    "postgres": {
+      "settings": {
+        "serverVersion": "17.10",
+        "serverVersionNum": 170010,
+        "schema": "report_2",
+        "schemaVersion": 1,
+        "synchronousCommit": "on",
+        "fsync": "on",
+        "fullPageWrites": "on",
+        "isolation": "read committed",
+        "maxConnections": 10,
+        "lockTimeoutMs": 5000,
+        "statementTimeoutMs": 30000
+      },
+      "results": [
+        {
+          "spec": {
+            "name": "baseline: 4 active, 100 idle hosts",
+            "agents": 4,
+            "idleHosts": 100,
+            "hostPeriodMs": 2000,
+            "inquirers": 2,
+            "hotRow": false,
+            "thinkMs": 5,
+            "durationMs": 15000,
+            "warmupMs": 2000
+          },
+          "measuredMs": 15000,
+          "latency": {
+            "transition": {
+              "count": 2636,
+              "perSecond": 175.73,
+              "p50": 6.96,
+              "p95": 12.67,
+              "p99": 15.87,
+              "max": 36.79
+            },
+            "claimComplete": {
+              "count": 1322,
+              "perSecond": 88.13,
+              "p50": 15.54,
+              "p95": 32.28,
+              "p99": 39.55,
+              "max": 60.05
+            },
+            "heartbeat": {
+              "count": 744,
+              "perSecond": 49.6,
+              "p50": 3.71,
+              "p95": 5.86,
+              "p99": 8.46,
+              "max": 11.62
+            },
+            "inquiry": {
+              "count": 1462,
+              "perSecond": 97.47,
+              "p50": 0.52,
+              "p95": 1.24,
+              "p99": 2.42,
+              "max": 5.22
+            }
+          },
+          "calls": {
+            "acquireEpoch": {
+              "ok": 1
+            },
+            "currentEpoch": {
+              "ok": 1
+            },
+            "applyOperation": {
+              "ok": 6065
+            },
+            "getAggregate": {
+              "ok": 1656
+            },
+            "listAudit": {
+              "ok": 1656
+            },
+            "claimDeliveries": {
+              "ok": 1490
+            }
+          },
+          "conflictsRetriedByCaller": 0,
+          "eventLoopDelayMs": {
+            "p50": 1.06,
+            "p99": 2.1,
+            "max": 7.7
+          },
+          "pool": {
+            "maxTotal": 7,
+            "maxWaiting": 0
+          },
+          "invariants": {
+            "transitionsApplied": 2977,
+            "auditGapFree": true,
+            "deliveriesUnique": true,
+            "revisionsMatch": true,
+            "deliveriesClaimedTwice": 0
+          }
+        },
+        {
+          "spec": {
+            "name": "stress: 32 active equivalents, 100 idle hosts",
+            "agents": 32,
+            "idleHosts": 100,
+            "hostPeriodMs": 2000,
+            "inquirers": 2,
+            "hotRow": false,
+            "thinkMs": 5,
+            "durationMs": 15000,
+            "warmupMs": 2000
+          },
+          "measuredMs": 15000,
+          "latency": {
+            "transition": {
+              "count": 1949,
+              "perSecond": 129.93,
+              "p50": 88.48,
+              "p95": 194.64,
+              "p99": 280.73,
+              "max": 563.49
+            },
+            "claimComplete": {
+              "count": 986,
+              "perSecond": 65.73,
+              "p50": 254.22,
+              "p95": 593.96,
+              "p99": 715.1,
+              "max": 952.42
+            },
+            "heartbeat": {
+              "count": 711,
+              "perSecond": 47.4,
+              "p50": 69.8,
+              "p95": 122.21,
+              "p99": 138.05,
+              "max": 146.27
+            },
+            "inquiry": {
+              "count": 191,
+              "perSecond": 12.73,
+              "p50": 117.71,
+              "p95": 223.6,
+              "p99": 250.42,
+              "max": 262.55
+            }
+          },
+          "calls": {
+            "acquireEpoch": {
+              "ok": 1
+            },
+            "currentEpoch": {
+              "ok": 1
+            },
+            "applyOperation": {
+              "ok": 5319
+            },
+            "getAggregate": {
+              "ok": 219
+            },
+            "listAudit": {
+              "ok": 219
+            },
+            "claimDeliveries": {
+              "ok": 1131
+            }
+          },
+          "conflictsRetriedByCaller": 0,
+          "eventLoopDelayMs": {
+            "p50": 1.07,
+            "p99": 2.35,
+            "max": 9.02
+          },
+          "pool": {
+            "maxTotal": 10,
+            "maxWaiting": 36
+          },
+          "invariants": {
+            "transitionsApplied": 2257,
+            "auditGapFree": true,
+            "deliveriesUnique": true,
+            "revisionsMatch": true,
+            "deliveriesClaimedTwice": 0
+          }
+        },
+        {
+          "spec": {
+            "name": "hot row: 32 active all updating one shared record",
+            "agents": 32,
+            "idleHosts": 100,
+            "hostPeriodMs": 2000,
+            "inquirers": 2,
+            "hotRow": true,
+            "thinkMs": 5,
+            "durationMs": 15000,
+            "warmupMs": 2000
+          },
+          "measuredMs": 15000,
+          "latency": {
+            "transition": {
+              "count": 562,
+              "perSecond": 37.47,
+              "p50": 461.08,
+              "p95": 2448.25,
+              "p99": 3328.35,
+              "max": 5376.15
+            },
+            "claimComplete": {
+              "count": 312,
+              "perSecond": 20.8,
+              "p50": 48.03,
+              "p95": 125.33,
+              "p99": 149.64,
+              "max": 193.87
+            },
+            "heartbeat": {
+              "count": 749,
+              "perSecond": 49.93,
+              "p50": 20.21,
+              "p95": 40.62,
+              "p99": 54.13,
+              "max": 63.94
+            },
+            "inquiry": {
+              "count": 658,
+              "perSecond": 43.87,
+              "p50": 26.27,
+              "p95": 47.46,
+              "p99": 65.06,
+              "max": 72.18
+            }
+          },
+          "calls": {
+            "acquireEpoch": {
+              "ok": 1
+            },
+            "currentEpoch": {
+              "ok": 1
+            },
+            "applyOperation": {
+              "ok": 2122,
+              "revision_conflict": 15463
+            },
+            "getAggregate": {
+              "ok": 16825
+            },
+            "listAudit": {
+              "ok": 726
+            },
+            "claimDeliveries": {
+              "ok": 325
+            }
+          },
+          "conflictsRetriedByCaller": 15463,
+          "eventLoopDelayMs": {
+            "p50": 1.04,
+            "p99": 3.01,
+            "max": 6.59
+          },
+          "pool": {
+            "maxTotal": 10,
+            "maxWaiting": 32
+          },
+          "invariants": {
+            "transitionsApplied": 636,
+            "auditGapFree": true,
+            "deliveriesUnique": true,
+            "revisionsMatch": true,
+            "deliveriesClaimedTwice": 0
+          }
+        }
+      ]
+    }
+  }
+}

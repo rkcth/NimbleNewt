@@ -277,6 +277,9 @@ export interface ControllerStorage {
    * existing operation (same hash: return its stored result with `replayed: true`; different hash: `idempotency_conflict`);
    * epoch (`stale_epoch`); then each change's revision (`revision_conflict`, `not_found`) and the uniqueness of every
    * delivery, effect and timer ID (`duplicate_id`). If any check fails nothing is written, including the operation record.
+   * When several things are wrong at once, the error reported is the first of these in this order, each in argument order: a
+   * change, a delivery receipt, a timer completion, an effect settlement, a duplicate delivery ID, a duplicate effect ID, a
+   * duplicate timer ID. Every backend must report the same one (the parity test enforces it).
    */
   applyOperation(input: OperationInput): Promise<OperationResult>;
   /** Looks an operation up by its stable ID. This is how an uncertain commit is resolved: present means it committed. */

@@ -498,3 +498,72 @@ test("a constraint violation from an outside writer is reported as an invariant 
     assert.equal(await storage.getOperation("collides"), undefined);
   } finally { await close(); }
 });
+
+// ---- the server itself crashes ----------------------------------------------------------------------------------
+test("a server killed by an immediate shutdown while work is in flight loses nothing it acknowledged, shows no partial operation, and the store recovers by itself", async () => {
+  const s = await startEmbeddedServer(); // its own server: this test crashes it
+  if (s.crashAndRestart === undefined) return;
+  const schema = schemaName();
+  const storage = await PostgresStorage.open({ connectionString: s.url(), schema, maxConnections: 4, lockTimeoutMs: 2000, connectTimeoutMs: 1000 });
+  let stop = false;
+  let writerDone: Promise<void> | undefined;
+  try {
+    await storage.acquireEpoch({ holder: "a", at: T0 });
+    await storage.applyOperation(op("seed", { changes: [create("counter", "c", { n: 0 })] }));
+    const acknowledged = new Set<string>();
+    const attempted = new Set<string>();
+    let sawOutage = false;
+    // One writer bumps the counter in a loop, as a controller would, riding out the outage the way a caller must:
+    // retry `unavailable` after a pause, resolve everything else by operation ID.
+    const writer = writerDone = (async () => {
+      for (let i = 0; !stop; i++) {
+        const id = `bump-${i}`;
+        attempted.add(id);
+        for (;;) {
+          try {
+            const current = await storage.getAggregate({ kind: "counter", id: "c" });
+            const revision = current!.revision;
+            const done = await storage.getOperation(id);
+            if (done !== undefined) { acknowledged.add(id); break; }
+            await commitOperation(storage, op(id, {
+              changes: [update("counter", "c", revision, { n: i })], audit: [{ type: "bump", detail: { i } }],
+              outbox: [{ deliveryId: id, destination: "d", priority: 5, aggregate: { kind: "counter", id: "c" }, payload: {} }],
+            }), { attempts: 3 });
+            acknowledged.add(id);
+            break;
+          } catch (error) {
+            if (isStorageError(error, "revision_conflict")) continue; // the operation committed meanwhile with another number: resolved above
+            if (isStorageError(error, "unavailable") || isStorageError(error, "retryable") || isStorageError(error, "uncertain_commit")) { sawOutage = true; await sleep(100); continue; }
+            throw error;
+          }
+        }
+        await sleep(5);
+      }
+    })();
+    await sleep(500);
+    const before = acknowledged.size;
+    assert.ok(before >= 5, `only ${before} operations were acknowledged before the crash`);
+    await s.crashAndRestart();
+    await sleep(1000);
+    const after = acknowledged.size;
+    stop = true;
+    await writer;
+    assert.ok(sawOutage, "the writer never noticed the crash, so it did not happen while work was in flight");
+    assert.ok(after > before, "the store never resumed after the server restarted");
+
+    // Every acknowledged operation is present; nothing is half there.
+    const counter = (await storage.getAggregate({ kind: "counter", id: "c" }))!;
+    const audits = (await storage.listAudit({ afterSeq: 0, limit: 1000 })).filter((a) => a.type === "bump");
+    const deliveries = (await Promise.all([...attempted].map((id) => storage.getDelivery(id)))).filter((d) => d !== undefined);
+    for (const id of acknowledged) assert.ok(await storage.getOperation(id) !== undefined, `acknowledged operation ${id} was lost`);
+    assert.equal(counter.revision, 1 + audits.length, "one revision per applied operation");
+    assert.equal(audits.length, deliveries.length, "audit entries and deliveries must agree: an operation was partly applied");
+    assert.ok(audits.length >= acknowledged.size, "every acknowledged operation left its audit entry");
+    assert.deepEqual((await storage.listAudit({ afterSeq: 0, limit: 1000 })).map((a) => a.seq), Array.from({ length: audits.length }, (_, i) => i + 1), "audit numbers must stay gap-free");
+  } finally {
+    stop = true;
+    await writerDone?.catch(() => undefined);
+    await storage.close().catch(() => undefined);
+    await s.stop();
+  }
+});

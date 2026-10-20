@@ -300,6 +300,12 @@ export class PostgresStorage implements ControllerStorage {
     // 2. Fence.
     await this.#fence(tx, input.epoch);
 
+    // Refusals are collected, not thrown on the spot: locks must be taken in a fixed order (below), but the contract promises that
+    // when several things are wrong the error reported is the first in this order: changes, receipts, timer completions, effect
+    // settlements, duplicate deliveries, duplicate effects, duplicate timers, each in argument order. Every backend must agree.
+    const failures: { rank: number; index: number; error: StorageError }[] = [];
+    const refuse = (rank: number, index: number, kind: ConstructorParameters<typeof StorageError>[0], message: string): void => { failures.push({ rank, index, error: new StorageError(kind, message) }); };
+
     // 3. Aggregates, in key order so concurrent operations cannot deadlock one another.
     const revisions: { ref: AggregateRef; revision: number }[] = input.changes.map((c) => ({ ref: c.ref, revision: 0 }));
     const order = input.changes.map((change, i) => ({ change, i })).sort((a, b) => compareCodePoints(key(a.change.ref), key(b.change.ref)));
@@ -307,33 +313,27 @@ export class PostgresStorage implements ControllerStorage {
       const label = `${key(change.ref)} (changes[${i}])`;
       if (change.type === "create") {
         const created = await tx.q("INSERT INTO aggregates (kind, id, revision, body, created_at, updated_at) VALUES ($1, $2, 1, $3, $4, $4) ON CONFLICT (kind, id) DO NOTHING RETURNING revision", [change.ref.kind, change.ref.id, canonicalJson(change.body), input.at]);
-        if (created.length === 0) throw new StorageError("revision_conflict", `${label} already exists`);
-        revisions[i]!.revision = 1;
+        if (created.length === 0) refuse(0, i, "revision_conflict", `${label} already exists`);
+        else revisions[i]!.revision = 1;
       } else if (change.type === "update") {
         const updated = await tx.q("UPDATE aggregates SET revision = revision + 1, body = $3, updated_at = $4 WHERE kind = $1 AND id = $2 AND revision = $5 RETURNING revision", [change.ref.kind, change.ref.id, canonicalJson(change.body), input.at, change.expectedRevision]);
         if (updated.length === 0) {
           const now = (await tx.q("SELECT revision FROM aggregates WHERE kind = $1 AND id = $2", [change.ref.kind, change.ref.id]))[0];
-          if (now === undefined) throw new StorageError("not_found", `${label} does not exist`);
-          throw new StorageError("revision_conflict", `${label} is at revision ${count(now, "revision")}, expected ${change.expectedRevision}`);
-        }
-        revisions[i]!.revision = count(updated[0]!, "revision");
+          if (now === undefined) refuse(0, i, "not_found", `${label} does not exist`);
+          else refuse(0, i, "revision_conflict", `${label} is at revision ${count(now, "revision")}, expected ${change.expectedRevision}`);
+        } else revisions[i]!.revision = count(updated[0]!, "revision");
       } else {
         const row = (await tx.q("SELECT revision FROM aggregates WHERE kind = $1 AND id = $2 FOR SHARE", [change.ref.kind, change.ref.id]))[0];
-        if (row === undefined) throw new StorageError("not_found", `${label} does not exist`);
-        if (count(row, "revision") !== change.expectedRevision) throw new StorageError("revision_conflict", `${label} is at revision ${count(row, "revision")}, expected ${change.expectedRevision}`);
-        revisions[i]!.revision = change.expectedRevision;
+        if (row === undefined) refuse(0, i, "not_found", `${label} does not exist`);
+        else if (count(row, "revision") !== change.expectedRevision) refuse(0, i, "revision_conflict", `${label} is at revision ${count(row, "revision")}, expected ${change.expectedRevision}`);
+        else revisions[i]!.revision = change.expectedRevision;
       }
     }
 
-    // 4. Reconciliation: lock the rows in ID order, then judge them.
-    const deliveries = new Map<string, Row>();
-    for (const c of sortedBy(input.completeDeliveries, (x) => x.deliveryId)) {
-      const d = (await tx.q("SELECT state, token, receipt FROM deliveries WHERE delivery_id = $1 FOR UPDATE", [c.deliveryId]))[0];
-      if (d === undefined) throw new StorageError("not_found", `delivery ${c.deliveryId} does not exist`);
-      if (text(d, "state") === "delivered") {
-        if (maybe(d, "receipt") !== canonicalJson(c.receipt)) throw new StorageError("state_conflict", `delivery ${c.deliveryId} was already delivered with a different receipt`);
-      } else if (text(d, "state") !== "claimed" || maybe(d, "token") !== c.claimToken) throw new StorageError("state_conflict", `delivery ${c.deliveryId} is not held by this claim`);
-      deliveries.set(c.deliveryId, d);
+    // 4. Reconciliation: lock the rows in ID order (deliveries, then timers, then effects), then judge them in argument order.
+    const deliveries = new Map<string, Row | undefined>();
+    for (const id of [...new Set(input.completeDeliveries.map((c) => c.deliveryId))].sort(compareCodePoints)) {
+      deliveries.set(id, (await tx.q("SELECT state, token, receipt FROM deliveries WHERE delivery_id = $1 FOR UPDATE", [id]))[0]);
     }
     // Timers that are completed and timers that are cancelled are locked in ONE pass in ID order: two operations that complete
     // and cancel each other's timers would otherwise take the same locks in opposite orders.
@@ -341,32 +341,47 @@ export class PostgresStorage implements ControllerStorage {
     for (const id of [...new Set([...input.completeTimers.map((c) => c.timerId), ...input.cancelTimers])].sort(compareCodePoints)) {
       timerRows.set(id, (await tx.q("SELECT state, token FROM timers WHERE timer_id = $1 FOR UPDATE", [id]))[0]);
     }
-    for (const c of input.completeTimers) {
+    const effectRows = new Map<string, Row | undefined>();
+    for (const id of [...new Set(input.settleEffects.map((c) => c.effectId))].sort(compareCodePoints)) {
+      effectRows.set(id, (await tx.q("SELECT status FROM effects WHERE effect_id = $1 FOR UPDATE", [id]))[0]);
+    }
+    for (const [j, c] of input.completeDeliveries.entries()) {
+      const d = deliveries.get(c.deliveryId);
+      if (d === undefined) refuse(1, j, "not_found", `delivery ${c.deliveryId} does not exist`);
+      else if (text(d, "state") === "delivered") {
+        if (maybe(d, "receipt") !== canonicalJson(c.receipt)) refuse(1, j, "state_conflict", `delivery ${c.deliveryId} was already delivered with a different receipt`);
+      } else if (text(d, "state") !== "claimed" || maybe(d, "token") !== c.claimToken) refuse(1, j, "state_conflict", `delivery ${c.deliveryId} is not held by this claim`);
+    }
+    for (const [j, c] of input.completeTimers.entries()) {
       const t = timerRows.get(c.timerId);
-      if (t === undefined) throw new StorageError("not_found", `timer ${c.timerId} does not exist`);
+      if (t === undefined) { refuse(2, j, "not_found", `timer ${c.timerId} does not exist`); continue; }
       const repeat = text(t, "state") === "completed" && maybe(t, "token") === c.claimToken;
-      if (!repeat && (text(t, "state") !== "claimed" || maybe(t, "token") !== c.claimToken)) throw new StorageError("state_conflict", `timer ${c.timerId} is not held by this claim`);
+      if (!repeat && (text(t, "state") !== "claimed" || maybe(t, "token") !== c.claimToken)) refuse(2, j, "state_conflict", `timer ${c.timerId} is not held by this claim`);
     }
     const previous = new Map<string, string>();
-    for (const c of sortedBy(input.settleEffects, (x) => x.effectId)) {
-      const e = (await tx.q("SELECT status FROM effects WHERE effect_id = $1 FOR UPDATE", [c.effectId]))[0];
-      if (e === undefined) throw new StorageError("not_found", `effect ${c.effectId} does not exist`);
+    for (const [j, c] of input.settleEffects.entries()) {
+      const e = effectRows.get(c.effectId);
+      if (e === undefined) { refuse(3, j, "not_found", `effect ${c.effectId} does not exist`); continue; }
       const status = text(e, "status");
-      if (status !== c.outcome && (status === "confirmed" || status === "failed")) throw new StorageError("state_conflict", `effect ${c.effectId} is already ${status}`);
+      if (status !== c.outcome && (status === "confirmed" || status === "failed")) refuse(3, j, "state_conflict", `effect ${c.effectId} is already ${status}`);
       previous.set(c.effectId, status);
     }
 
-    // 5. New effects and timers (unique by ON CONFLICT), then the cancellations.
-    for (const e of sortedBy(input.effects, (x) => x.effectId)) {
+    // 5. Identity of new things. Deliveries are looked at here only so a refusal can be ranked; the insert below is what is race-safe.
+    for (const [j, o] of input.outbox.entries()) {
+      if ((await tx.q("SELECT 1 AS x FROM deliveries WHERE delivery_id = $1", [o.deliveryId])).length > 0) refuse(4, j, "duplicate_id", `delivery ${o.deliveryId} already exists`);
+    }
+    for (const { e, j } of input.effects.map((e, j) => ({ e, j })).sort((a, b) => compareCodePoints(a.e.effectId, b.e.effectId))) {
       const made = await tx.q("INSERT INTO effects (effect_id, operation_id, attempt_id, target, input_digest, reconciliation_handle, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, 'intended', $7, $7) ON CONFLICT (effect_id) DO NOTHING RETURNING effect_id",
         [e.effectId, input.operationId, e.attemptId ?? null, e.target, e.inputDigest, e.reconciliationHandle ?? null, input.at]);
-      if (made.length === 0) throw new StorageError("duplicate_id", `effect ${e.effectId} already exists`);
+      if (made.length === 0) refuse(5, j, "duplicate_id", `effect ${e.effectId} already exists`);
     }
-    for (const t of sortedBy(input.timers, (x) => x.timerId)) {
+    for (const { t, j } of input.timers.map((t, j) => ({ t, j })).sort((a, b) => compareCodePoints(a.t.timerId, b.t.timerId))) {
       const made = await tx.q("INSERT INTO timers (timer_id, due_at, aggregate_kind, aggregate_id, payload, state, attempts) VALUES ($1, $2, $3, $4, $5, 'pending', 0) ON CONFLICT (timer_id) DO NOTHING RETURNING timer_id",
         [t.timerId, t.dueAt, t.aggregate?.kind ?? null, t.aggregate?.id ?? null, canonicalJson(t.payload)]);
-      if (made.length === 0) throw new StorageError("duplicate_id", `timer ${t.timerId} already exists`);
+      if (made.length === 0) refuse(6, j, "duplicate_id", `timer ${t.timerId} already exists`);
     }
+    if (failures.length > 0) throw failures.sort((a, b) => a.rank - b.rank || a.index - b.index)[0]!.error; // everything is rolled back with the transaction
     for (const id of sortedBy(input.cancelTimers, (x) => x)) {
       const row = timerRows.get(id);
       if (row !== undefined && (text(row, "state") === "pending" || text(row, "state") === "claimed")) await tx.q("UPDATE timers SET state = 'cancelled' WHERE timer_id = $1", [id]);
@@ -575,6 +590,11 @@ export class PostgresStorage implements ControllerStorage {
     if (this.#closed) return;
     this.#closed = true;
     await this.#pool.end();
+  }
+
+  /** Connections now open, idle and waiting for a free one: the pool pressure, for workload reports. */
+  poolStats(): { total: number; idle: number; waiting: number } {
+    return { total: this.#pool.totalCount, idle: this.#pool.idleCount, waiting: this.#pool.waitingCount };
   }
 
   /** The last error reported by an idle pooled connection, if any (for diagnostics). */

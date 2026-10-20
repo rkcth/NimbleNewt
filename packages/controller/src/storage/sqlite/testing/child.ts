@@ -6,6 +6,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { commitOperation } from "../../commit.js";
 import { StorageError } from "../../errors.js";
 import type { OperationInput } from "../../types.js";
+import { ACTIONS, type BoundaryAction } from "../../qualification/boundaries.js";
 import { SqliteStorage } from "../storage.js";
 
 const [mode, database, a, b, c] = process.argv.slice(2) as [string, string, string?, string?, string?];
@@ -15,6 +16,27 @@ const base = (operationId: string): OperationInput => ({
   completeDeliveries: [], completeTimers: [], settleEffects: [],
 });
 const say = (line: string) => process.stdout.write(`${line}\n`);
+
+// The crash-boundary mode opens its own storage with a hook that kills this process at an exact statement.
+if (mode === "boundary") {
+  const [when, ordinalText, actionName] = [a!, b!, c as BoundaryAction["name"]];
+  const target = ordinalText === "none" ? 0 : Number(ordinalText);
+  let armed = false;
+  let last = 0;
+  const storage = await SqliteStorage.open({
+    path: database, busyTimeoutMs: 20_000,
+    testHooks: { statement: (phase, _sql, ordinal) => {
+      if (!armed) return;
+      last = Math.max(last, ordinal);
+      if (target !== 0 && ordinal === target && phase === when) process.kill(process.pid, "SIGKILL");
+    } },
+  });
+  armed = true;
+  await ACTIONS[actionName].run(storage);
+  say(`completed ${last}`);
+  await storage.close();
+  process.exit(0);
+}
 
 const storage = await SqliteStorage.open({ path: database, busyTimeoutMs: 20_000 });
 

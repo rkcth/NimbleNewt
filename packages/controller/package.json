@@ -15,7 +15,8 @@
     "dist"
   ],
   "scripts": {
-    "test": "node ../../scripts/run-package-tests.mjs"
+    "test": "node ../../scripts/run-package-tests.mjs",
+    "qualify": "node dist/storage/qualification/report.js"
   },
   "dependencies": {
     "pg": "8.23.1"
