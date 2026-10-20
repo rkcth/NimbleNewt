@@ -12,3 +12,4 @@ dist/
 *.tsbuildinfo
 test.log
 qa-output/
+pg-versions-output/

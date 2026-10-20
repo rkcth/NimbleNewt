@@ -4,6 +4,7 @@ import net from "node:net";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 
 /** A PostgreSQL server for tests. Either one the caller supplies, or a real one started from the `embedded-postgres` binaries. */
 export interface TestServer {
@@ -102,11 +103,15 @@ function diagnoseStartFailure(embeddedPackageDir: string, dataDirectory: string,
 
 /** Starts a real PostgreSQL server on a free loopback port in a temporary directory. `flags` are extra `postgres` options. */
 export async function startEmbeddedServer(flags: readonly string[] = [], baseDirectory: string = tmpdir()): Promise<TestServer> {
-  const require = createRequire(import.meta.url);
-  const embeddedDir = dirname(require.resolve("embedded-postgres"));
+  // NIMBLENEWT_TEST_POSTGRES_DIR names a directory with its own node_modules holding a different `embedded-postgres` (another PostgreSQL
+  // major version); scripts/postgres-versions.mjs sets it for the version verification (card F04g). Unset, the repository's own is used.
+  const alternate = process.env["NIMBLENEWT_TEST_POSTGRES_DIR"];
+  const require = createRequire(alternate === undefined || alternate === "" ? import.meta.url : join(resolve(alternate), "package.json"));
+  const entry = require.resolve("embedded-postgres");
+  const embeddedDir = dirname(entry);
   hydrateSymlinks(join(embeddedDir, ".."));
   type Embedded = { initialise(): Promise<void>; start(): Promise<void>; stop(): Promise<void>; createDatabase(name: string): Promise<void> };
-  const { default: EmbeddedPostgres } = (await import("embedded-postgres")) as { default: new (options: Record<string, unknown>) => Embedded };
+  const { default: EmbeddedPostgres } = (await import(pathToFileURL(entry).href)) as { default: new (options: Record<string, unknown>) => Embedded };
   const directory = mkdtempSync(join(baseDirectory, "nn-test-pg-"));
   const port = await freePort();
   // Keep what the server and initdb say: when startup stalls, this is the only evidence there is.

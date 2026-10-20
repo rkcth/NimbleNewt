@@ -50,8 +50,27 @@ export interface PostgresSettings {
   readonly statementTimeoutMs: number;
 }
 
-/** Oldest server major version the code requires. Which versions are supported is an owner decision; only 17 has been qualified. */
-export const MINIMUM_SERVER_VERSION_NUM = 140000;
+/**
+ * Oldest server version this build accepts: PostgreSQL 17 and above, the owner's decision of 2026-10-20 (card F04g). Older majors are
+ * refused at open. They are verified separately and reported, not supported (docs: f04g-postgres-versions.md).
+ */
+export const MINIMUM_SERVER_VERSION_NUM = 170000;
+let serverFloor = MINIMUM_SERVER_VERSION_NUM;
+
+/**
+ * For the version verification only (card F04g): accept servers down to `floor` (for example 140000) in this process, so the same suites
+ * can be run against PostgreSQL 14 to 16 and their results reported. Production code never calls this; it is applied by
+ * `postgres/testing/older-servers.ts`, which `scripts/postgres-versions.mjs` loads with `node --import`.
+ */
+export function lowerServerFloorForVerification(floor: number): void {
+  if (!Number.isSafeInteger(floor) || floor < 140000 || floor > MINIMUM_SERVER_VERSION_NUM) throw new RangeError("the verification floor must be between PostgreSQL 14 and the supported minimum");
+  serverFloor = floor;
+}
+
+/** Why a server of this version is refused, or undefined when it is acceptable. */
+export function serverVersionProblem(versionNum: number, version: string, floor: number = serverFloor): string | undefined {
+  return versionNum < floor ? `PostgreSQL ${version} is older than the minimum this version of NimbleNewt supports (${Math.floor(MINIMUM_SERVER_VERSION_NUM / 10000)})` : undefined;
+}
 
 type Row = Record<string, unknown>;
 interface Tx { q(sql: string, params?: unknown[]): Promise<Row[]> }
@@ -146,7 +165,8 @@ export class PostgresStorage implements ControllerStorage {
 
   async #verifyServer(): Promise<void> {
     const s = await this.settings({ skipSchema: true });
-    if (s.serverVersionNum < MINIMUM_SERVER_VERSION_NUM) throw new StorageError("unavailable", `PostgreSQL ${s.serverVersion} is older than the minimum this version of NimbleNewt requires (14)`);
+    const tooOld = serverVersionProblem(s.serverVersionNum, s.serverVersion);
+    if (tooOld !== undefined) throw new StorageError("unavailable", tooOld);
     if (s.encoding !== "UTF8") throw new StorageError("unavailable", `the database encoding is ${s.encoding}, not UTF8; the controller stores JSON text and needs a UTF8 database (create it with ENCODING 'UTF8'; on Windows the default is a legacy code page)`);
     if (s.fsync !== "on" || s.fullPageWrites !== "on") throw new StorageError("unavailable", `the PostgreSQL server is configured without durable writes (fsync=${s.fsync}, full_page_writes=${s.fullPageWrites}); refusing to store controller state on it`);
     if (s.synchronousCommit !== "on") throw new StorageError("unavailable", `synchronous_commit is "${s.synchronousCommit}", not "on", so commits would be acknowledged before they are flushed`);

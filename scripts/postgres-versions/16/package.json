@@ -1,0 +1,9 @@
+{
+  "name": "nimblenewt-postgres-16-verification",
+  "private": true,
+  "license": "MIT",
+  "description": "Pins the embedded PostgreSQL 16 server used by scripts/postgres-versions.mjs (card F04g). Not a dependency of any package.",
+  "dependencies": {
+    "embedded-postgres": "16.14.0-beta.17"
+  }
+}

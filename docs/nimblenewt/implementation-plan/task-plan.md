@@ -224,6 +224,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F04f — Move the SQLite adapter off the main thread
 
 - **Parent:** N02 / AII-252.
+- **Status:** implemented; commits `d4d824a`; CI runs 39433503180; record [f04d-storage-qualification.md](f04d-storage-qualification.md).
+- **Progress note:** The SQLite adapter runs on its own worker thread with synchronous=FULL kept: p99 event-loop delay under 32 concurrent loops fell from about 440 ms to about 2 ms in two real-disk Linux runs; throughput is no lower. Costs recorded: calls queue first-in-first-out so per-call latency rises, reads wait behind commits (a separate read connection is a follow-up), and hot-row contention is no longer masked. Conformance, parity and crash-boundary suites pass unchanged; a worker that stops mid-write fails the waiting write as uncertain_commit. Linux only measured. CI run 39433503180 is green on all six cells.
 - **Blockers:** F04.
 - **Deliverable:** Worker-thread SQLite adapter behind the unchanged ControllerStorage contract, with synchronous=FULL kept.
 - **Acceptance and verification:** Conformance, parity and crash-boundary suites pass unchanged against it; event-loop delay under the 32-active-equivalent workload is measured with the F04d method and compared with the in-thread adapter; worker crash, startup failure and shutdown surface as typed storage errors and never lose or duplicate an acknowledged commit; ambiguous commits still resolve by operation ID; no weakening of durability settings.
@@ -267,6 +269,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F07 — Enforce immutable extension and namespace registration
 
 - **Parent:** N03 / AII-253.
+- **Status:** implemented; commits `1015b01`; CI runs 39430658838; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Dependency-free @nimblenewt/registry: strict canonical names with an injective provider wire-name mapping; trusted, per-agent and read-only capabilities; immutable, increasing, revocable versions; a sealable protected namespace; pin sets that restore the exact pinned versions or block, never substituting; reserved-set integrity check; history replay through the same rules. Not yet wired into the adapter or workers (S02, T01, A05 carry that forward; see the F07 notes). CI run 39430658838 is green on all six cells after a rerun: the first attempt failed one Windows/Node 24 cell on an unrelated flaky assertion in the in-thread SQLite smoke test, fixed in F04f.
 - **Blockers:** F05, F02.
 - **Deliverable:** Protected registry facade and artifact version selection.
 - **Acceptance and verification:** Personal extension cannot replace reserved system tool; paused attempt restores pinned version or blocks on revocation.

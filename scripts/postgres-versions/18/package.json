@@ -1,0 +1,9 @@
+{
+  "name": "nimblenewt-postgres-18-verification",
+  "private": true,
+  "license": "MIT",
+  "description": "Pins the embedded PostgreSQL 18 server used by scripts/postgres-versions.mjs (card F04g). Not a dependency of any package.",
+  "dependencies": {
+    "embedded-postgres": "18.4.0-beta.17"
+  }
+}
