@@ -11,6 +11,9 @@
       "path": "packages/config"
     },
     {
+      "path": "packages/registry"
+    },
+    {
       "path": "packages/controller"
     },
     {

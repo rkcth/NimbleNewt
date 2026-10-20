@@ -6,6 +6,7 @@ import { basename, join, normalize, relative, sep } from "node:path";
 export const ALLOWED = {
   contracts: [],
   config: [],
+  registry: [],
   "pi-adapter": ["@nimblenewt/contracts", "@earendil-works/chord", "@earendil-works/pi-ai", "@earendil-works/pi-durable"],
   controller: ["pg", "@types/pg", "embedded-postgres"],
   api: [],

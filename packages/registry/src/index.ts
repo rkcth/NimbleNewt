@@ -1,0 +1,2 @@
+export { MAX_WIRE_LENGTH, PROTECTED_NAMESPACE, RESERVED_NAMESPACES, TOOLBOX_NAMESPACE, agentNamespace, canonicalFromWire, isAgentId, parseName, wireName, type Layer, type ParsedName } from "./names.js";
+export { RegistryError, createRegistry, type AgentRegistrar, type Artifact, type BlockCode, type Operation, type Pin, type PinSet, type Registry, type RegistryErrorCode, type RegistryView, type ReservedProblem, type RestoreResult, type Selection, type TrustedRegistrar } from "./registry.js";
