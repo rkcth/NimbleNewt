@@ -154,7 +154,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F02 — Implement versioned configuration and secret references
 
 - **Parent:** N02 / AII-252.
-- **Status:** implemented; record [implementation-notes.md](implementation-notes.md).
+- **Status:** implemented; commits `d9c75db`; record [implementation-notes.md](implementation-notes.md).
 - **Progress note:** New dependency-free packages/config: schema-versioned configuration with a loader, migration chain, path-addressed validation errors, secret references with redacting resolvers, and a sanitized export/import with preview and mapping. Config history, drafts and concurrent-edit control belong to the controller-backed configuration service (U04).
 - **Blockers:** F01, G02, G03.
 - **Deliverable:** Configuration loader, migrations and example public/private profiles.
