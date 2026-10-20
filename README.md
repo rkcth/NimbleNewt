@@ -91,6 +91,238 @@ Durable continuity uses recorded histories, tool results, notes, decisions, arti
 
 Suspend must settle or explicitly track in-flight operations before declaring readiness. A blocked or uncertain effect cannot be treated as successful cleanup. Return must recheck relevant changes, ownership, permissions and lifecycle gates. Authorized peers' published work records are read-only; private scratch requires an explicit grant. See the [operational contracts](docs/nimblenewt/operational-contracts.md) and [full design](docs/nimblenewt/README.md) for these engineering boundaries.
 
+## Roadmap
+
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **4 of 105 tasks done**, 1 in review.
+
+Legend: `[x]` done · `[~]` implemented, awaiting review/sign-off · `[ ]` not started. Task prefixes: G gates, F foundations, S durable state, A authorization, C context, L lifecycle, H workers, R routing, U user interface, V supervision, M meetings, T tools, P projects, Q quality, B improvement, K backup/recovery, X release qualification, D documentation.
+
+### Phase 1
+
+- [ ] **G01** Record accepted scope and experiment prerequisites
+
+### Phase 2
+
+- [ ] **G07** Record current architecture and executable task manifest _(needs G01)_
+
+### Phase 3
+
+- [x] **F01** Create TypeScript package boundaries _(needs G07)_
+
+### Phase 4
+
+- [x] **F03** Establish portable CI and test fixtures _(needs F01)_
+- [x] **F05** Implement pinned Pi adapter submission contract _(needs F01)_
+
+### Phase 5
+
+- [x] **F06** Implement adapter checkpoints and cancellation mapping _(needs F05)_
+
+### Phase 6
+
+- [~] **G02** Accept the Pi adapter first milestone _(needs F05, F06, F03)_ — implemented and passing CI; awaiting independent macOS/Windows QA and owner sign-off
+
+### Phase 7
+
+- [ ] **G03** Qualify forward migration and compatibility rejection _(needs G02)_
+
+### Phase 8
+
+- [ ] **F02** Implement versioned configuration and secret references _(needs F01, G02, G03)_
+- [ ] **F04a** Define transactional controller storage contract _(needs F01, G02, G03)_
+
+### Phase 9
+
+- [ ] **F04b** Implement SQLite controller storage adapter _(needs F04a)_
+- [ ] **F04c** Implement PostgreSQL controller storage adapter _(needs F04a)_
+- [ ] **F07** Enforce immutable extension and namespace registration _(needs F05, F02)_
+
+### Phase 10
+
+- [ ] **F04d** Qualify storage adapter parity and contention _(needs F04b, F04c)_
+
+### Phase 11
+
+- [ ] **F04** Define storage schema migration runners _(needs F04d)_
+
+### Phase 12
+
+- [ ] **S01** Implement project/task records and revisioned commands _(needs F04)_
+- [ ] **S06** Implement artifact publication and integrity _(needs F04)_
+
+### Phase 13
+
+- [ ] **S02** Implement assignment generations and attempt admission _(needs S01, F05)_
+- [ ] **S03** Implement durable transition delivery _(needs S01)_
+
+### Phase 14
+
+- [ ] **S04** Implement durable inbox and duplicate handling _(needs S03, S02)_
+
+### Phase 15
+
+- [ ] **S05** Implement effect ledger and idempotent bridge _(needs S02, S04)_
+
+### Phase 16
+
+- [ ] **S07** Implement startup and periodic reconciliation _(needs S03, S04, S05)_
+
+### Phase 17
+
+- [ ] **S08** Implement typed waits and deadline settlement _(needs S04, S07)_
+
+### Phase 18
+
+- [ ] **S09** Verify the durable vertical slice _(needs S05, S06, S07, S08, F06, G02, G03)_
+
+### Phase 19
+
+- [ ] **A01** Implement authenticated principals and capabilities _(needs S01, F02, S09)_
+
+### Phase 20
+
+- [ ] **A02** Implement revisioned grants and restrictions _(needs A01)_
+- [ ] **A03** Implement selected sandbox launcher _(needs A01, F03)_
+- [ ] **C01** Implement separated task/chat/meeting histories _(needs S01, S06, A01, F06)_
+- [ ] **H01** Implement worker enrollment and observation _(needs A01, S02)_
+
+### Phase 21
+
+- [ ] **A04** Implement protected filesystem and Git bridge _(needs A03, S05)_
+- [ ] **A05** Implement exact-operation review admission _(needs A02, S05, F07)_
+- [ ] **C02** Implement bounded source-backed retrieval _(needs C01)_
+- [ ] **H02** Implement subordinate remote work/artifact transport _(needs H01, S06, A03)_
+- [ ] **H03** Implement priority admission and reserved control capacity _(needs S08, H01)_
+- [ ] **R01** Implement model routing and capability policy _(needs F05, A02, F02)_
+- [ ] **T01** Implement immutable tool/skill catalog and attribution _(needs F07, A03, C01)_
+
+### Phase 22
+
+- [ ] **A06** Implement human pre-commit gate and attribution _(needs A04, A05)_
+- [ ] **C03** Capture read/write/search dependency manifests _(needs S06, A04, C01)_
+- [ ] **G05** Prove selected isolation boundary per OS _(needs A03, A04)_
+- [ ] **H04** Implement durable inquiries and correlation _(needs S04, C01, H03)_
+- [ ] **H07** Implement idle host polling and capability placement _(needs H02, H03)_
+- [ ] **T03** Implement approved MCP client connections _(needs T01, A01, S05)_
+- [ ] **U01** Implement versioned state query/write API _(needs S01, A01, C02)_
+
+### Phase 23
+
+- [ ] **C04** Implement safe-boundary continuation capture _(needs C02, C03, F06)_
+- [ ] **G06** Qualify actual Windows implementation _(needs G02, G03, G05, F03)_
+- [ ] **H05** Implement review routing and wait-cycle prevention _(needs H04, A05)_
+- [ ] **H06** Implement event subscriptions and gap recovery _(needs S07, C03)_
+- [ ] **T04** Implement controller-backed MCP state adapter _(needs U01, T03)_
+- [ ] **U02** Implement durable conversation API and transport _(needs U01, H04)_
+
+### Phase 24
+
+- [ ] **C05** Implement retained context branches and selective updates _(needs C04, H04)_
+- [ ] **R02** Implement fallback and cumulative budget accounting _(needs R01, S05, C04)_
+- [ ] **T05** Implement MCP durable conversation adapter _(needs U02, T04)_
+- [ ] **V01** Implement health and progress stall detection _(needs H01, S08, C04)_
+
+### Phase 25
+
+- [ ] **C06** Implement optional inference-cache capability adapters _(needs C05)_
+- [ ] **L05** Implement generation interruption and late-result handling _(needs C05, F06, A02)_
+- [ ] **U03** Implement owner chat command interpretation _(needs U01, U02, R02)_
+
+### Phase 26
+
+- [ ] **G09** Prove retained-context inquiry and mid-generation interruption _(needs C05, L05)_
+- [ ] **G10** Benchmark native backend caching and branch markers _(needs C06)_
+- [ ] **L01** Implement Pause and background settlement _(needs C04, A02, S08, L05)_
+- [ ] **M01** Implement durable meeting scheduling and agendas _(needs H04, U03)_
+- [ ] **P01** Implement repository-independent projects and responsibilities _(needs U03, S01)_
+- [ ] **U04** Implement conversational policy editing _(needs U03, A02, A05)_
+- [ ] **U05** Implement chat status and blocker explanations _(needs U03, S08, H01)_
+
+### Phase 27
+
+- [ ] **G04** Prove supporting durable engine integration _(needs S09, F04d, G09)_
+- [ ] **L02** Implement Suspend and graceful Stop _(needs L01)_
+- [ ] **M02** Implement votes, decisions and meeting summaries _(needs M01, A02, C02)_
+- [ ] **P03** Implement non-code and sandbox operations adapters _(needs P01, T01, S05)_
+
+### Phase 28
+
+- [ ] **H08** Implement remote disconnect watchdog and hard stop _(needs H02, L02)_
+- [ ] **K01** Implement consistent backup and restore _(needs S06, F04, L02, S05)_
+- [ ] **L03** Implement prepared release and reassignment _(needs L02, S02, S05)_
+- [ ] **L04** Implement checked resume and evidence invalidation _(needs C03, L02, A02)_
+- [ ] **U06** Implement deterministic recovery chat controls _(needs U01, L02, A02)_
+
+### Phase 29
+
+- [ ] **F04e** Implement chat-controlled controller database transfer _(needs F04, K01, F06)_
+- [ ] **H09** Implement reconnect reconciliation and primary epochs _(needs H08, L04, S05)_
+- [ ] **P02** Implement isolated coding workspaces and integration _(needs P01, A04, L04)_
+- [ ] **T02** Implement review/promotion/deprecation and retention _(needs T01, A05, L04)_
+- [ ] **U07** Qualify responsive web chat over private networking _(needs U03, U06, A01)_
+- [ ] **V02** Implement bounded supervisor recovery _(needs V01, L03, L04, R02, H05)_
+
+### Phase 30
+
+- [ ] **H10** Implement distributed agent capacity and fan-in limits _(needs H07, H09, H03)_
+- [ ] **K02** Implement deterministic release staging and activation _(needs K01, F02, T02)_
+- [ ] **Q01** Implement deliverable submission and acceptance _(needs S06, U01, P02, P03)_
+- [ ] **X09** Implement external release-test job protocol _(needs H07, H09, F03, S06)_
+
+### Phase 31
+
+- [ ] **B01** Implement production/improvement budget admission _(needs H03, R02, Q01)_
+- [ ] **K03** Implement migration recovery and rollback limits _(needs K02, G03)_
+- [ ] **Q02** Implement independent QA and dependency-bound evidence _(needs Q01, A06, C03, H05)_
+
+### Phase 32
+
+- [ ] **B02** Implement observations and provenance deduplication _(needs B01, H06, C01)_
+- [ ] **D02** Finish developer/API/security and license guidance _(needs T05, K03, F03)_
+- [ ] **K04** Implement selected standby replication and recovery watermarks _(needs K01, K03, H09)_
+- [ ] **Q03** Implement documentation impact and release evidence links _(needs Q02, C02)_
+- [ ] **X01** Run integrated crash and handoff campaign _(needs S09, V02, H02, Q02, K03, G04)_
+- [ ] **X02** Run policy, isolation and adversarial campaign _(needs A06, U04, T05, Q02, G05)_
+
+### Phase 33
+
+- [ ] **B03** Implement versioned lessons and triage _(needs B02, T01)_
+- [ ] **K05** Implement fenced primary promotion and recovery chat _(needs K04, U06)_
+
+### Phase 34
+
+- [ ] **B04** Implement bounded baseline experiments _(needs B03, Q02)_
+- [ ] **G08** Prove remote stop and failover authority contracts _(needs H09, K05)_
+
+### Phase 35
+
+- [ ] **B05** Implement scoped adoption and monitored withdrawal _(needs B04, T02, L04)_
+- [ ] **X10** Run partition and remote-worker safety campaign _(needs X09, H10, K05, G08)_
+
+### Phase 36
+
+- [ ] **X03** Run chat-only complete product workflow _(needs U05, U06, U07, M02, P03, Q03, B05, K03, C06, L05, G09)_
+
+### Phase 37
+
+- [ ] **D01** Finish installation and chat-first user guidance _(needs X03, Q03)_
+- [ ] **X04** Qualify fresh macOS release candidate _(needs X01, X02, X03, X09, F03)_
+- [ ] **X05** Qualify fresh Linux release candidate _(needs X01, X02, X03, X09, F03)_
+- [ ] **X06** Qualify fresh Windows release candidate _(needs X01, X02, X03, X09, F03, G06)_
+
+### Phase 38
+
+- [ ] **X07** Measure load, inquiry latency and budget behavior _(needs X04, X05, X06)_
+
+### Phase 39
+
+- [ ] **X08** Run representative soak and independent release audit _(needs X07, X10, F04e, G10)_
+
+### Phase 40
+
+- [ ] **D03** Approve release readiness and publication decision _(needs X08, D01, D02)_
+_Note: F01 started before its prerequisite planning records G01 and G07 were formally closed, so they remain unchecked._
+
 ## More detail
 
 - [Full design and document guide](docs/nimblenewt/README.md)
