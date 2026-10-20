@@ -432,7 +432,7 @@
       ],
       "deliverable": "Backend-specific versioned schema migration journals",
       "acceptance_and_verification": "Interrupted schema migration recoverable on both databases; incompatible downgrade rejected; constraints enforce unique operation and delivery IDs; upgrades preserve fixture state",
-      "status": "implemented-awaiting-signoff",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
@@ -442,8 +442,11 @@
         "commits": [
           "cd35ff3"
         ],
+        "ci_runs": [
+          "39374886124"
+        ],
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
-        "note": "Journaled, checksummed schema migrations on both backends: transactional and idempotent non-transactional steps, refusal of newer databases, edited migrations, journal gaps and foreign databases, advisory-lock serialisation on PostgreSQL, committed layout-1 fixtures. Upgrade behaviour is qualified with synthetic later layouts (the production list has one migration), including a crash at every statement of an upgrade on both backends. Held awaiting a CI run that is green on all six cells (the PostgreSQL suites fail on windows-latest with Node 22.19.0).",
+        "note": "Journaled, checksummed schema migrations on both backends: transactional and idempotent non-transactional steps, refusal of newer databases, edited migrations, journal gaps and foreign databases, advisory-lock serialisation on PostgreSQL, committed layout-1 fixtures. Upgrade behaviour is qualified with synthetic later layouts (the production list has one migration), including a crash at every statement of an upgrade on both backends. CI run 39374886124 is green on all six cells.",
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
       }
     },

@@ -214,8 +214,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F04 — Define storage schema migration runners
 
 - **Parent:** N02 / AII-252.
-- **Status:** implemented-awaiting-signoff; commits `cd35ff3`; record [implementation-notes.md](implementation-notes.md).
-- **Progress note:** Journaled, checksummed schema migrations on both backends: transactional and idempotent non-transactional steps, refusal of newer databases, edited migrations, journal gaps and foreign databases, advisory-lock serialisation on PostgreSQL, committed layout-1 fixtures. Upgrade behaviour is qualified with synthetic later layouts (the production list has one migration), including a crash at every statement of an upgrade on both backends. Held awaiting a CI run that is green on all six cells (the PostgreSQL suites fail on windows-latest with Node 22.19.0).
+- **Status:** implemented; commits `cd35ff3`; CI runs 39374886124; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Journaled, checksummed schema migrations on both backends: transactional and idempotent non-transactional steps, refusal of newer databases, edited migrations, journal gaps and foreign databases, advisory-lock serialisation on PostgreSQL, committed layout-1 fixtures. Upgrade behaviour is qualified with synthetic later layouts (the production list has one migration), including a crash at every statement of an upgrade on both backends. CI run 39374886124 is green on all six cells.
 - **Blockers:** F04d.
 - **Deliverable:** Backend-specific versioned schema migration journals.
 - **Acceptance and verification:** Interrupted schema migration recoverable on both databases; incompatible downgrade rejected; constraints enforce unique operation and delivery IDs; upgrades preserve fixture state.
