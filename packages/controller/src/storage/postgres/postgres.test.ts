@@ -507,12 +507,23 @@ test("a server killed by an immediate shutdown while work is in flight loses not
   const storage = await PostgresStorage.open({ connectionString: s.url(), schema, maxConnections: 4, lockTimeoutMs: 2000, connectTimeoutMs: 1000 });
   let stop = false;
   let writerDone: Promise<void> | undefined;
+  // Raw failures of the storage's own calls, seen before commitOperation's bounded retries can hide them. (Stopping and restarting the
+  // server blocks this process for a while, so the writer can only meet the outage in the first calls after the restart.)
+  const rawFailures: string[] = [];
+  const watched = new Proxy(storage, {
+    get(target, name, receiver) {
+      const value = Reflect.get(target, name, receiver) as unknown;
+      if (typeof value !== "function" || typeof name !== "string" || name === "close") return value;
+      return async (...args: unknown[]) => {
+        try { return await (value as (...a: unknown[]) => Promise<unknown>).apply(target, args); } catch (error) { rawFailures.push(isStorageError(error) ? error.kind : "other"); throw error; }
+      };
+    },
+  });
   try {
     await storage.acquireEpoch({ holder: "a", at: T0 });
     await storage.applyOperation(op("seed", { changes: [create("counter", "c", { n: 0 })] }));
     const acknowledged = new Set<string>();
     const attempted = new Set<string>();
-    let sawOutage = false;
     // One writer bumps the counter in a loop, as a controller would, riding out the outage the way a caller must:
     // retry `unavailable` after a pause, resolve everything else by operation ID.
     const writer = writerDone = (async () => {
@@ -521,11 +532,11 @@ test("a server killed by an immediate shutdown while work is in flight loses not
         attempted.add(id);
         for (;;) {
           try {
-            const current = await storage.getAggregate({ kind: "counter", id: "c" });
+            const current = await watched.getAggregate({ kind: "counter", id: "c" });
             const revision = current!.revision;
-            const done = await storage.getOperation(id);
+            const done = await watched.getOperation(id);
             if (done !== undefined) { acknowledged.add(id); break; }
-            await commitOperation(storage, op(id, {
+            await commitOperation(watched, op(id, {
               changes: [update("counter", "c", revision, { n: i })], audit: [{ type: "bump", detail: { i } }],
               outbox: [{ deliveryId: id, destination: "d", priority: 5, aggregate: { kind: "counter", id: "c" }, payload: {} }],
             }), { attempts: 3 });
@@ -533,7 +544,7 @@ test("a server killed by an immediate shutdown while work is in flight loses not
             break;
           } catch (error) {
             if (isStorageError(error, "revision_conflict")) continue; // the operation committed meanwhile with another number: resolved above
-            if (isStorageError(error, "unavailable") || isStorageError(error, "retryable") || isStorageError(error, "uncertain_commit")) { sawOutage = true; await sleep(100); continue; }
+            if (isStorageError(error, "unavailable") || isStorageError(error, "retryable") || isStorageError(error, "uncertain_commit")) { await sleep(100); continue; }
             throw error;
           }
         }
@@ -548,7 +559,9 @@ test("a server killed by an immediate shutdown while work is in flight loses not
     const after = acknowledged.size;
     stop = true;
     await writer;
-    assert.ok(sawOutage, "the writer never noticed the crash, so it did not happen while work was in flight");
+    // The crash broke the store's connections: at least one raw storage call failed because of it. (A fast restart can be ridden out by
+    // the bounded retries without any error reaching the writer loop, which is why the failures are recorded below that layer.)
+    assert.ok(rawFailures.some((k) => k === "retryable" || k === "uncertain_commit" || k === "unavailable"), `no storage call failed because of the crash (${rawFailures.join() || "none failed"}), so it did not happen while the store was connected`);
     assert.ok(after > before, "the store never resumed after the server restarted");
 
     // Every acknowledged operation is present; nothing is half there.

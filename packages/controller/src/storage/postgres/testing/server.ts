@@ -1,5 +1,5 @@
 import { spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { closeSync, existsSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import net from "node:net";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -145,13 +145,48 @@ export async function startEmbeddedServer(flags: readonly string[] = [], baseDir
       clearTimeout(timer);
     }
   };
+  // On Windows the server must not be started by running postgres.exe directly: it refuses to run with administrative permissions,
+  // and the GitHub-hosted Windows runners run jobs as an administrator. pg_ctl is PostgreSQL's own launcher for this: it starts the
+  // server with a restricted token. (Everywhere else the library starts and stops the process itself.)
+  const viaPgCtl = process.platform === "win32" || process.env.NIMBLENEWT_TEST_POSTGRES_VIA_PG_CTL === "1"; // the variable lets other platforms exercise the Windows path
+  const dataDirectory = join(directory, "data");
+  const serverLog = join(directory, "server.log");
+  const pgCtlPath = join(binariesDir(join(embeddedDir, "..")), "native", "bin", process.platform === "win32" ? "pg_ctl.exe" : "pg_ctl");
+  // pg_ctl's own output goes to a file we open, never to pipes: on Windows `pg_ctl start` leaves a long-running server that can inherit
+  // the pipe handles, and Node would then wait for an end-of-file that never comes.
+  const pgCtlOutput = join(directory, "pg_ctl.out");
+  const pgCtl = (args: string[]): void => {
+    const fd = openSync(pgCtlOutput, "w");
+    let run;
+    try { run = spawnSync(pgCtlPath, args, { stdio: ["ignore", fd, fd], timeout: 120_000 }); } finally { closeSync(fd); }
+    let said = "";
+    try { said = readFileSync(pgCtlOutput, "utf8").trim().split(/\r?\n/).slice(-6).join(" | "); } catch { /* nothing written */ }
+    keep(`pg_ctl ${args[0]}: ${run.error !== undefined ? `spawn error ${run.error.message}` : describeExit(run.status, run.signal)} ${said}`);
+    if (run.error !== undefined || run.status !== 0) {
+      let tail = "";
+      try { tail = readFileSync(serverLog, "utf8").split(/\r?\n/).slice(-15).join("\n"); } catch { /* no log yet */ }
+      throw new Error(`pg_ctl ${args[0]} failed (${run.error !== undefined ? run.error.message : describeExit(run.status, run.signal)}): ${said}\nserver log:\n${tail}`);
+    }
+  };
+  const launcher = {
+    start: async (): Promise<void> => {
+      if (!viaPgCtl) return server.start();
+      pgCtl(["start", "-D", dataDirectory, "-w", "-t", "60", "-l", serverLog, "-o", ["-p", String(port), ...settings.postgresFlags].join(" ")]);
+      try { for (const line of readFileSync(serverLog, "utf8").split(/\r?\n/).filter((l) => l.trim() !== "").slice(-12)) keep(line); } catch { /* the log is only for evidence */ }
+    },
+    stop: async (mode: "fast" | "immediate" = "fast"): Promise<void> => {
+      if (!viaPgCtl) return mode === "fast" ? server.stop() : undefined;
+      pgCtl(["stop", "-D", dataDirectory, "-m", mode, "-w", "-t", "60"]);
+    },
+  };
+  if (viaPgCtl) process.once("exit", () => { spawnSync(pgCtlPath, ["stop", "-D", dataDirectory, "-m", "immediate"], { stdio: "ignore", timeout: 30_000 }); });
   try {
     await step("initdb", 120_000, () => server.initialise());
     try {
       await step("starting the server", 60_000, () => {
         echo = true;
-        const starting = server.start();
-        watchProcess(() => (server as unknown as { process?: ChildProcess }).process, keep);
+        const starting = launcher.start();
+        if (!viaPgCtl) watchProcess(() => (server as unknown as { process?: ChildProcess }).process, keep);
         return starting;
       });
     } catch (error) {
@@ -162,7 +197,7 @@ export async function startEmbeddedServer(flags: readonly string[] = [], baseDir
     // Create the database ourselves, by address: the library connects to the name "localhost", which resolves differently on different platforms and Node versions.
     await step("creating the test database", 30_000, async () => { await withClient(url("postgres"), async (c) => { await c.query('CREATE DATABASE "nimblenewt_test"'); }); });
   } catch (error) {
-    await server.stop().catch(() => undefined);
+    await launcher.stop().catch(() => undefined);
     rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     throw error;
   }
@@ -171,14 +206,12 @@ export async function startEmbeddedServer(flags: readonly string[] = [], baseDir
     url,
     version: async () => (await withClient(url(), async (c) => String((await c.query("SHOW server_version")).rows[0]!.server_version))),
     stop: async () => {
-      try { await server.stop(); } finally { rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
+      try { await launcher.stop(); } finally { rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
     },
     crashAndRestart: async () => {
-      const pgCtl = join(binariesDir(join(embeddedDir, "..")), "native", "bin", process.platform === "win32" ? "pg_ctl.exe" : "pg_ctl");
-      const stopped = spawnSync(pgCtl, ["stop", "-D", join(directory, "data"), "-m", "immediate", "-w", "-t", "60"], { encoding: "utf8", timeout: 90_000 });
-      if (stopped.status !== 0) throw new Error(`pg_ctl stop -m immediate failed (${stopped.error?.message ?? `exit ${stopped.status}`}): ${stopped.stdout ?? ""}${stopped.stderr ?? ""}`);
+      pgCtl(["stop", "-D", dataDirectory, "-m", "immediate", "-w", "-t", "60"]);
       server = new EmbeddedPostgres(settings);
-      await step("restarting the server after the crash", 60_000, () => server.start()); // runs crash recovery from the write-ahead log
+      await step("restarting the server after the crash", 60_000, () => launcher.start()); // runs crash recovery from the write-ahead log
     },
   };
 }
