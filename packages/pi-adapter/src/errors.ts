@@ -74,3 +74,19 @@ export class InvalidReadmissionError extends PiAdapterError {
 export class NotHeldError extends PiAdapterError {
   override readonly name = "NotHeldError";
 }
+
+/** The branch was discarded: it accepts no new work. Its transcript can still be read. */
+export class BranchDiscardedError extends PiAdapterError {
+  override readonly name = "BranchDiscardedError";
+  constructor(readonly conversationId: number) {
+    super(`conversation ${conversationId} is a discarded branch and accepts no new work`);
+  }
+}
+
+/** Creating another branch would exceed the number of active (not discarded) branches allowed per conversation. */
+export class TooManyBranchesError extends PiAdapterError {
+  override readonly name = "TooManyBranchesError";
+  constructor(readonly limit: number) {
+    super(`this conversation already has ${limit} active branches; discard one first`);
+  }
+}

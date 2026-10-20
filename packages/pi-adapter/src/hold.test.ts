@@ -69,6 +69,8 @@ test("interrupted work is reported read-only, and everything that would make pro
   await assert.rejects(root.submit({ kind: "input", requestId: requestId("new-1"), content: "hello" }), InterruptedWorkError);
   await assert.rejects(root.abort(), InterruptedWorkError);
   await assert.rejects(root.compact(), InterruptedWorkError);
+  await assert.rejects(root.discardBranch(requestId("side")), InterruptedWorkError);
+  assert.deepEqual((await root.listBranches()).map((b) => [b.requestId, b.discarded]), [["side", false]], "a refused discard must not mark the branch");
   // Reads are allowed and do not disturb anything.
   assert.equal(await root.lookup(requestId("req-a")), undefined);
   assert.ok((await root.transcript()).length > 0);
@@ -91,7 +93,7 @@ test("abandoning one conversation leaves the other's work untouched until releas
   const rootTranscript = await adapter.root().transcript();
   assert.equal(rootTranscript.filter((e) => e.kind === "nimblenewt.aborted-input").length, 1, "the abandoned input was not framed before release");
 
-  adapter.releaseHold();
+  await adapter.releaseHold();
   await assert.rejects(adapter.abandonInterrupted([ids.branch]), NotHeldError);
   const branch = await adapter.conversation(ids.branch);
   assert.ok(branch);
@@ -122,7 +124,7 @@ test("abandoning one conversation leaves the other's work untouched until releas
 test("releasing the hold without abandoning anything resumes every interrupted conversation", async () => {
   const { dir, ids } = interruptedStorage();
   const { adapter } = await reopen(dir);
-  adapter.releaseHold();
+  await adapter.releaseHold();
   await until(() => count(dir, "toolA") === 2 && count(dir, "toolB") === 2, "both replay-safe tools to run again");
   const branch = await adapter.conversation(ids.branch);
   await until(async () => (await branch?.lookup(requestId("req-b")))?.status === "completed", "the branch request to finish");
@@ -142,4 +144,21 @@ test("holdInterrupted: false opts out, and a storage with nothing interrupted is
   cleanup.push(() => rmSync(clean, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const fresh = await reopen(clean);
   assert.deepEqual(await fresh.adapter.interrupted(), { held: false, conversations: [] });
+});
+
+test("a discarded branch's interrupted work is abandoned automatically on release, even if the process died before aborting it", async () => {
+  const { dir, ids } = interruptedStorage();
+  const { adapter } = await reopen(dir);
+
+  // The crash window: the branch was marked discarded, then the process died before its work was aborted.
+  await adapter.root().markBranchDiscarded(requestId("side"));
+  const report = await adapter.interrupted();
+  assert.deepEqual(report.conversations.map((c) => [c.conversationId, c.discarded]), [[ids.root, false], [ids.branch, true]]);
+
+  await adapter.releaseHold();
+  await until(() => count(dir, "toolA") === 2, "the root conversation's replay-safe tool to run again");
+  await sleep(400);
+  assert.equal(count(dir, "toolB"), 1, "the discarded branch's interrupted tool ran again");
+  const branch = await adapter.conversation(ids.branch);
+  await until(async () => (await branch?.lookup(requestId("req-b")))?.status === "unanswered", "the discarded branch's request to settle");
 });

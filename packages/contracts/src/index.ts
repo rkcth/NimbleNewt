@@ -127,5 +127,18 @@ export interface InterruptedWork {
     readonly requestIds: readonly string[];
     /** True once every task of the conversation has been marked for abandonment. */
     readonly abandoned: boolean;
+    /** True for a discarded branch: its work is abandoned automatically when the hold is released. */
+    readonly discarded: boolean;
   }[];
+}
+
+/** One branch of a conversation, as listed by the adapter. */
+export interface BranchInfo {
+  /** The request ID the branch was created under. */
+  readonly requestId: RequestId;
+  readonly conversationId: number;
+  /** The parent entry the branch forked after. */
+  readonly forkedAt: number;
+  /** A discarded branch is closed to new work; its transcript stays readable. */
+  readonly discarded: boolean;
 }
