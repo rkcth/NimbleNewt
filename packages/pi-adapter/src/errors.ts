@@ -43,3 +43,13 @@ export class NoBranchPointError extends PiAdapterError {
 export class InvalidBranchPointError extends PiAdapterError {
   override readonly name = "InvalidBranchPointError";
 }
+
+/** Readmission was requested for a request that was not withdrawn before starting, or whose payload is unavailable. */
+export class NotRetainedError extends PiAdapterError {
+  override readonly name = "NotRetainedError";
+}
+
+/** A retained request was already readmitted under a different request ID. */
+export class AlreadyReadmittedError extends PiAdapterError {
+  override readonly name = "AlreadyReadmittedError";
+}

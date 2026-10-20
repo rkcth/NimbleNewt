@@ -15,11 +15,18 @@ export interface OfflineModels {
 }
 
 /** A scripted model provider with no network or credentials. Test processes also run under scripts/offline-guard.mjs. */
-export function createOfflineModels(options: { readonly contextWindow?: number } = {}): OfflineModels {
+export function createOfflineModels(options: {
+  readonly contextWindow?: number;
+  /** Stream replies slowly, in small chunks, so a test can abort in the middle of a message or tool call. */
+  readonly slowStream?: { readonly tokensPerSecond: number; readonly tokenSize: number };
+} = {}): OfflineModels {
   const models = createModels();
   const faux = fauxProvider({
     provider: OFFLINE_PROVIDER,
     models: [{ id: OFFLINE_MODEL, ...(options.contextWindow === undefined ? {} : { contextWindow: options.contextWindow }) }],
+    ...(options.slowStream === undefined
+      ? {}
+      : { tokensPerSecond: options.slowStream.tokensPerSecond, tokenSize: { min: options.slowStream.tokenSize, max: options.slowStream.tokenSize } }),
   });
   models.setProvider(faux.provider);
   return { models, faux };

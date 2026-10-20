@@ -1,4 +1,4 @@
-import type { AdapterRequest, BranchRequest, RequestId, SemanticResult, ToolCallOutcome } from "@nimblenewt/contracts";
+import type { AbortReport, AdapterRequest, BranchRequest, RequestId, RetainedRequest, SemanticResult, ToolCallOutcome } from "@nimblenewt/contracts";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { Models, Static, TSchema } from "@earendil-works/pi-ai";
 import {
@@ -6,7 +6,10 @@ import {
   type Conversation, type SettledSubmissionRecord, type Storage, type Submission,
 } from "@earendil-works/pi-durable";
 import { INPUT_KINDS, turnBoundaries } from "./branches.js";
-import { ConversationBusyError, InvalidBranchPointError, InvalidToolError, NoBranchPointError, RequestIdConflictError, UnknownCommandError } from "./errors.js";
+import {
+  AlreadyReadmittedError, ConversationBusyError, InvalidBranchPointError, InvalidToolError, NoBranchPointError, NotRetainedError,
+  RequestIdConflictError, UnknownCommandError,
+} from "./errors.js";
 import { fingerprintOf, fingerprintsMatch, mapReason } from "./results.js";
 import { assertSupportedRuntime, type RuntimeInfo } from "./runtime.js";
 
@@ -61,6 +64,10 @@ export interface SubmissionHandle {
 interface RequestRecord {
   /** Absent only for a result recorded without a prior claim; an absent fingerprint matches any payload. */
   fingerprint?: string;
+  /** The submitted request, kept until its result is recorded (and while it is retained) so it can be readmitted. */
+  request?: RetainedRequest["request"];
+  /** Set once a retained request has been readmitted, under this new request ID. */
+  readmittedAs?: string;
   result?: SemanticResult;
 }
 /** A branch created for a request ID: the child conversation and the entry it forked after. */
@@ -81,6 +88,10 @@ export interface TranscriptEntry {
   readonly role: string | undefined;
   /** Text of that message. */
   readonly text: string;
+  /** Why the message ended (assistant messages), for example `stop`, `toolUse` or `aborted`. */
+  readonly stopReason: string | undefined;
+  /** IDs of the tool calls the message makes (assistant messages). */
+  readonly toolCallIds: readonly string[];
   /** Application data attached to the entry (for example an update's source). */
   readonly data: unknown;
 }
@@ -117,6 +128,14 @@ function textOf(content: unknown): string {
   return content.map((part) => (part !== null && typeof part === "object" && (part as { type?: unknown }).type === "text" ? String((part as { text?: unknown }).text ?? "") : "")).join("");
 }
 
+function callIdsOf(content: unknown): string[] {
+  if (!Array.isArray(content)) return [];
+  return content.flatMap((part: unknown) => {
+    const p = part as { type?: string; id?: string } | null;
+    return p !== null && typeof p === "object" && p.type === "toolCall" && typeof p.id === "string" ? [p.id] : [];
+  });
+}
+
 function firstMessage(entry: EntryLike): { content?: unknown } {
   return (entry.model?.[0] ?? {}) as { content?: unknown };
 }
@@ -147,7 +166,7 @@ export class AdapterConversation {
   async submit(request: AdapterRequest): Promise<SubmissionHandle> {
     if (request.kind === "command") throw new UnknownCommandError(request.name, SUPPORTED_COMMANDS);
     // Record the payload fingerprint before admission: a crash in between leaves a record for the same payload to retry.
-    const created = await this.claim(request.requestId, fingerprintOf(request));
+    const created = await this.claim(request, fingerprintOf(request));
     let submission: Submission;
     try {
       submission = await this.conversation.submit(
@@ -230,6 +249,8 @@ export class AdapterConversation {
       kind: entry.kind,
       role: (firstMessage(entry) as { role?: string }).role,
       text: textOf(firstMessage(entry).content),
+      stopReason: (firstMessage(entry) as { stopReason?: string }).stopReason,
+      toolCallIds: callIdsOf(firstMessage(entry).content),
       data: entry.data,
     }));
   }
@@ -253,11 +274,71 @@ export class AdapterConversation {
   }
 
   /**
-   * Abort the running request and withdraw queued ones. Minimal for now: F06c replaces it with scoped cancellation.
-   * Aborted requests settle as `unanswered` with reason `aborted`.
+   * Abort the running request and withdraw queued ones. The running request settles `unanswered` (reason `aborted`);
+   * queued requests settle the same way but are marked `retained`: they never started, nothing of theirs ran, and they
+   * stay available through `retainedRequests()` and `readmit()`. Nothing is re-run automatically. A partially streamed
+   * tool call is never executed, and Pi leaves it out of the context of later requests.
    */
-  async abort(): Promise<void> {
+  async abort(): Promise<AbortReport> {
+    const before = await this.abortedSubmissions();
     await this.conversation.abort(context);
+    const aborted: RequestId[] = [];
+    const retained: RequestId[] = [];
+    for (const [id, record] of await this.abortedSubmissions()) {
+      if (before.has(id) || record.requestId === undefined) continue;
+      (record.entry === undefined ? retained : aborted).push(record.requestId as RequestId);
+    }
+    return { aborted, retained };
+  }
+
+  /** Requests withdrawn before they started and not yet readmitted, in admission order. Read-only. */
+  async retainedRequests(): Promise<RetainedRequest[]> {
+    const state = await this.state();
+    const found: RetainedRequest[] = [];
+    for (const record of (await this.abortedSubmissions()).values()) {
+      if (record.entry !== undefined || record.requestId === undefined) continue;
+      const stored = state.requests[record.requestId];
+      if (stored?.request !== undefined && stored.readmittedAs === undefined) found.push({ requestId: record.requestId as RequestId, request: stored.request });
+    }
+    return found;
+  }
+
+  /**
+   * Submit a retained request again under a new request ID, an explicit controller decision. Idempotent for the same new
+   * ID; a different one is refused, so a request is never readmitted twice.
+   */
+  async readmit(id: RequestId, newId: RequestId): Promise<SubmissionHandle> {
+    const result = await this.lookup(id);
+    const record = await this.record(id);
+    if (result?.status !== "unanswered" || result.retained !== true || record?.request === undefined) {
+      throw new NotRetainedError(`request "${id}" was not withdrawn before starting, or its payload is unavailable`);
+    }
+    // Claim first, in one commit: exactly one new ID can win, concurrently or across a crash. Only then submit; a retry
+    // with the same new ID is idempotent. After a crash between the two steps the request no longer shows as retained,
+    // so the controller must repeat the call with the same new ID.
+    let claimedBy: string | undefined;
+    await this.conversation.commit(async (tx) => {
+      const state = (await tx.doc(Requests, this.conversation.id)) as unknown as RequestsState;
+      const stored = state.requests[id];
+      if (stored === undefined) return;
+      if (stored.readmittedAs === undefined) stored.readmittedAs = newId;
+      claimedBy = stored.readmittedAs;
+    }, context);
+    if (claimedBy !== newId) throw new AlreadyReadmittedError(`request "${id}" was already readmitted as "${claimedBy}"`);
+    return this.submit({ ...record.request, requestId: newId });
+  }
+
+  private async abortedSubmissions(): Promise<Map<number, SettledSubmissionRecord>> {
+    const found = new Map<number, SettledSubmissionRecord>();
+    let cursor;
+    for (;;) {
+      const page = await this.storage.scanSubmissions({ conversationId: this.conversation.id, status: "unanswered" }, 100, cursor, context);
+      for (const record of page.items) {
+        if (record.type === "input" && record.status === "unanswered" && record.reason === "aborted") found.set(record.id, record);
+      }
+      if (page.next === undefined) return found;
+      cursor = page.next;
+    }
   }
 
   /** Compact the conversation's model-visible context now. Older entries stay in storage and results stay readable. */
@@ -277,13 +358,14 @@ export class AdapterConversation {
   }
 
   /** Records the payload fingerprint for a request ID; returns whether this call created the record. */
-  private async claim(id: RequestId, fingerprint: string): Promise<boolean> {
+  private async claim(request: RetainedRequest["request"], fingerprint: string): Promise<boolean> {
+    const id = request.requestId;
     let conflict = false;
     let created = false;
     await this.conversation.commit(async (tx) => {
       const state = (await tx.doc(Requests, this.conversation.id)) as unknown as RequestsState;
       const existing = state.requests[id];
-      if (existing === undefined) { state.requests[id] = { fingerprint }; created = true; }
+      if (existing === undefined) { state.requests[id] = { fingerprint, request: JSON.parse(JSON.stringify(request)) as RetainedRequest["request"] }; created = true; }
       else if (!fingerprintsMatch(existing.fingerprint, fingerprint)) conflict = true;
     }, context);
     if (conflict) throw new RequestIdConflictError(`request ID "${id}" was already used with different content`);
@@ -351,7 +433,9 @@ export class AdapterConversation {
     } else {
       const reason = mapReason(settled.reason);
       const detail = settled.detail === undefined ? settled.reason : `${settled.reason}: ${JSON.stringify(settled.detail)}`;
-      result = { status: "unanswered", requestId: id, reason, detail, toolCalls };
+      // Withdrawn by an abort before it was ever placed in the transcript: nothing of it ran.
+      const neverStarted = settled.reason === "aborted" && settled.entry === undefined;
+      result = { status: "unanswered", requestId: id, reason, detail, ...(neverStarted ? { retained: true as const } : {}), toolCalls };
     }
 
     // First writer wins, so concurrent callers and later calls all see one recorded result.
@@ -359,7 +443,11 @@ export class AdapterConversation {
       const state = (await tx.doc(Requests, this.conversation.id)) as unknown as RequestsState;
       const existing = state.requests[id];
       if (existing === undefined) state.requests[id] = { result };
-      else if (existing.result === undefined) existing.result = result;
+      else if (existing.result === undefined) {
+        existing.result = result;
+        // The payload is only needed to readmit a request that never started.
+        if (!(result.status === "unanswered" && result.retained === true)) delete existing.request;
+      }
     }, context);
     return (await this.record(id))?.result ?? result;
   }

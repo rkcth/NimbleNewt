@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, test } from "node:test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, Type } from "@earendil-works/pi-ai";
 import { openNodeJsonlStorage } from "@earendil-works/pi-durable/storage/jsonl/node";
 import { requestId } from "@nimblenewt/contracts";
 import { PiAdapter } from "./index.js";
@@ -143,4 +143,32 @@ test("lookup() reads a settled request after a restart without starting interrup
   await new Promise((resolve) => setTimeout(resolve, 500));
   assert.equal(attemptsIn(log), 1, "lookup() started interrupted work");
   assert.equal(modelCalls, 0);
+});
+
+test("requests withdrawn by an abort are still retained after a restart and can be readmitted by the new process", async () => {
+  const dir = scratch();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let started!: () => void;
+  const up = new Promise<void>((resolve) => { started = resolve; });
+  const hold = {
+    name: "hold", description: "Waits", parameters: Type.Object({}),
+    execute: async (_args: unknown, { signal }: { signal: AbortSignal | undefined }) => { signal?.addEventListener("abort", release); started(); await gate; return "held"; },
+  };
+  const first = await reopen(dir, [hold as never], [fauxAssistantMessage(fauxToolCall("hold", {}, { id: "h" }), { stopReason: "toolUse" })]);
+  const a = await first.root().submit(input("keep-a", "first"));
+  await up;
+  await first.root().submit(input("keep-b", "second"));
+  const report = await first.root().abort();
+  assert.deepEqual([report.aborted, report.retained], [["keep-a"], ["keep-b"]]);
+  await a.result();
+  await first.close();
+  cleanup.pop();
+
+  let modelCalls = 0;
+  const second = await reopen(dir, [], [() => { modelCalls += 1; return fauxAssistantMessage("second ran"); }]);
+  assert.deepEqual((await second.root().retainedRequests()).map((r) => [r.requestId, r.request.content]), [["keep-b", "second"]]);
+  assert.equal(modelCalls, 0);
+  const result = await (await second.root().readmit(requestId("keep-b"), requestId("keep-b-again"))).result();
+  assert.deepEqual([result.status, result.status === "completed" && result.text, modelCalls], ["completed", "second ran", 1]);
 });

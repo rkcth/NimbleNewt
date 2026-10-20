@@ -41,6 +41,11 @@ export type SemanticResult =
       readonly reason: UnansweredReason;
       /** The runtime's own reason string and detail, kept verbatim for diagnosis. */
       readonly detail: string;
+      /**
+       * Present when the request was withdrawn before it ever started (for example it was queued when the conversation
+       * was aborted). It did nothing and is kept so the controller can readmit it deliberately; it never runs by itself.
+       */
+      readonly retained?: true;
       readonly toolCalls: readonly ToolCallOutcome[];
     }
   /** The request ran but violated the adapter's contract. It is never reported as `completed`. */
@@ -81,4 +86,18 @@ export interface BranchRequest {
    * first created and then fixed for that request ID.
    */
   readonly at?: number;
+}
+
+/** Outcome of aborting a conversation: which requests were stopped mid-run and which were withdrawn before starting. */
+export interface AbortReport {
+  /** Requests that had started and were aborted. */
+  readonly aborted: readonly RequestId[];
+  /** Queued requests withdrawn before they started; each stays available for readmission. */
+  readonly retained: readonly RequestId[];
+}
+
+/** A request withdrawn before it started, with the payload needed to readmit it. */
+export interface RetainedRequest {
+  readonly requestId: RequestId;
+  readonly request: Extract<AdapterRequest, { kind: "input" | "update" }>;
 }
