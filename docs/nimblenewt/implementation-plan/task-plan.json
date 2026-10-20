@@ -1376,7 +1376,7 @@
         "C02"
       ],
       "deliverable": "Documented contracts, pagination and command results",
-      "acceptance_and_verification": "Chat/API clients see same scoped facts; stale revisions and duplicate command semantics verified; accepted differs from completed",
+      "acceptance_and_verification": "Chat/API clients see same scoped facts; stale revisions and duplicate command semantics verified; accepted differs from completed; the controller start-up path (first built here) runs the F04h environment check: detectEnvironment with the PostgreSQL server version, startupCheck with the override from overrideRequested, print its output, pass allowUnsupportedServer to the PostgreSQL adapter, call recordOverride; an unsupported environment refuses to start and an overridden one is audited",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",

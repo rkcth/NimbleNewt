@@ -599,7 +599,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Parent:** N07a / AII-519.
 - **Blockers:** S01, A01, C02.
 - **Deliverable:** Documented contracts, pagination and command results.
-- **Acceptance and verification:** Chat/API clients see same scoped facts; stale revisions and duplicate command semantics verified; accepted differs from completed.
+- **Acceptance and verification:** Chat/API clients see same scoped facts; stale revisions and duplicate command semantics verified; accepted differs from completed; the controller start-up path (first built here) runs the F04h environment check: detectEnvironment with the PostgreSQL server version, startupCheck with the override from overrideRequested, print its output, pass allowUnsupportedServer to the PostgreSQL adapter, call recordOverride; an unsupported environment refuses to start and an overridden one is audited.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### U02 — Implement durable conversation API and transport

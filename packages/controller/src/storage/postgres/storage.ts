@@ -1,4 +1,6 @@
 import pg from "pg";
+import { SUPPORTED_ENVIRONMENT } from "../../environment/supported.js";
+import { checkEnvironment, detectEnvironment, refusalMessage, type Problem } from "../../environment/check.js";
 import { StorageError } from "../errors.js";
 import { operationHash } from "../hash.js";
 import { canonicalJson, compareCodePoints, parseJson } from "../json.js";
@@ -30,6 +32,14 @@ export interface PostgresOptions {
   readonly statementTimeoutMs?: number;
   /** For the migration qualification only: the migrations to apply instead of this version's own. Production code never sets it. */
   readonly migrations?: readonly Migration[];
+  /**
+   * Start on a server older than the supported minimum instead of refusing (card F04h). The operator sets this with the same switch as the
+   * rest of the environment check (`--allow-unsupported-environment`); nothing else about the adapter changes. The problem is available
+   * from `unsupportedServer` so start-up can print and audit it.
+   */
+  readonly allowUnsupportedServer?: boolean;
+  /** For the qualification of the version check only: a minimum server version number stricter than the supported one (a lower value is refused). Production code never sets it. */
+  readonly minimumServerVersionNum?: number;
 }
 
 /** The server and session settings in force, read back after they were applied. */
@@ -54,7 +64,7 @@ export interface PostgresSettings {
  * Oldest server version this build accepts: PostgreSQL 17 and above, the owner's decision of 2026-10-20 (card F04g). Older majors are
  * refused at open. They are verified separately and reported, not supported (docs: f04g-postgres-versions.md).
  */
-export const MINIMUM_SERVER_VERSION_NUM = 170000;
+export const MINIMUM_SERVER_VERSION_NUM = SUPPORTED_ENVIRONMENT.postgres.minimumMajor * 10000;
 let serverFloor = MINIMUM_SERVER_VERSION_NUM;
 
 /**
@@ -113,20 +123,30 @@ const types = { getTypeParser: (oid: number, format?: "text" | "binary") => (oid
  */
 export class PostgresStorage implements ControllerStorage {
   readonly #pool: pg.Pool;
-  readonly #options: Required<Omit<PostgresOptions, "connectionString" | "migrations">>;
+  readonly #options: Required<Omit<PostgresOptions, "connectionString" | "migrations" | "allowUnsupportedServer" | "minimumServerVersionNum">>;
+  readonly #version: { readonly allowUnsupported: boolean; readonly minimum: number | undefined };
+  #unsupportedServer: Problem | undefined;
   #closed = false;
   #poolError: Error | undefined;
 
-  private constructor(pool: pg.Pool, options: Required<Omit<PostgresOptions, "connectionString" | "migrations">>) {
+  private constructor(pool: pg.Pool, options: Required<Omit<PostgresOptions, "connectionString" | "migrations" | "allowUnsupportedServer" | "minimumServerVersionNum">>, version: { allowUnsupported: boolean; minimum: number | undefined }) {
     this.#pool = pool;
     this.#options = options;
+    this.#version = version;
     pool.on("error", (error) => { this.#poolError = error; }); // an idle connection dropped; the pool discards it and the next use reconnects
   }
+
+  /** The reason the server is older than the supported minimum, when it was accepted anyway because `allowUnsupportedServer` was set; undefined otherwise. Start-up prints and audits it. */
+  get unsupportedServer(): Problem | undefined { return this.#unsupportedServer; }
 
   /** Connects, verifies the server settings, and creates or checks the schema. */
   static async open(options: PostgresOptions): Promise<PostgresStorage> {
     if (typeof options.connectionString !== "string" || !/^postgres(?:ql)?:\/\//.test(options.connectionString)) {
       throw new StorageError("invalid_input", "connectionString: must be a postgres:// URL", { path: "connectionString" });
+    }
+    // The enforced minimum can only be made stricter: a lower value would be a way to skip the refusal without any override being recorded.
+    if (options.minimumServerVersionNum !== undefined && (!Number.isSafeInteger(options.minimumServerVersionNum) || options.minimumServerVersionNum < MINIMUM_SERVER_VERSION_NUM)) {
+      throw new StorageError("invalid_input", `minimumServerVersionNum: must be a whole number of at least ${MINIMUM_SERVER_VERSION_NUM}; the supported minimum cannot be lowered here (use allowUnsupportedServer, which is recorded)`, { path: "minimumServerVersionNum" });
     }
     const schema = options.schema ?? "nimblenewt";
     if (!SCHEMA_NAME.test(schema)) throw new StorageError("invalid_input", "schema: must be lower-case letters, digits and underscores, starting with a letter (at most 41 characters)", { path: "schema" });
@@ -152,7 +172,7 @@ export class PostgresStorage implements ControllerStorage {
       // Session settings applied to every connection by the server at startup: our schema, durable commits, bounded waits.
       options: `-c search_path=${schema} -c synchronous_commit=on -c default_transaction_isolation=read\\ committed -c lock_timeout=${resolved.lockTimeoutMs} -c statement_timeout=${resolved.statementTimeoutMs} -c idle_in_transaction_session_timeout=${resolved.statementTimeoutMs}`,
     });
-    const store = new PostgresStorage(pool, resolved);
+    const store = new PostgresStorage(pool, resolved, { allowUnsupported: options.allowUnsupportedServer === true, minimum: options.minimumServerVersionNum });
     try {
       await store.#verifyServer();
       await store.#migrate(options.migrations ?? MIGRATIONS);
@@ -165,8 +185,13 @@ export class PostgresStorage implements ControllerStorage {
 
   async #verifyServer(): Promise<void> {
     const s = await this.settings({ skipSchema: true });
-    const tooOld = serverVersionProblem(s.serverVersionNum, s.serverVersion);
-    if (tooOld !== undefined) throw new StorageError("unavailable", tooOld);
+    const floor = this.#version.minimum ?? serverFloor;
+    if (s.serverVersionNum < floor) {
+      const problems = checkEnvironment({ ...detectEnvironment(), postgresVersion: s.serverVersion }).filter((p) => p.item === "PostgreSQL");
+      const problem = problems[0] ?? { item: "PostgreSQL" as const, found: s.serverVersion, supported: `${Math.floor(floor / 10000)} or newer`, howToTest: `run \`node scripts/postgres-versions.mjs ${Math.floor(s.serverVersionNum / 10000)}\` from a checkout of this version` };
+      if (!this.#version.allowUnsupported) throw new StorageError("unavailable", refusalMessage([problem]));
+      this.#unsupportedServer = problem;
+    }
     if (s.encoding !== "UTF8") throw new StorageError("unavailable", `the database encoding is ${s.encoding}, not UTF8; the controller stores JSON text and needs a UTF8 database (create it with ENCODING 'UTF8'; on Windows the default is a legacy code page)`);
     if (s.fsync !== "on" || s.fullPageWrites !== "on") throw new StorageError("unavailable", `the PostgreSQL server is configured without durable writes (fsync=${s.fsync}, full_page_writes=${s.fullPageWrites}); refusing to store controller state on it`);
     if (s.synchronousCommit !== "on") throw new StorageError("unavailable", `synchronous_commit is "${s.synchronousCommit}", not "on", so commits would be acknowledged before they are flushed`);
