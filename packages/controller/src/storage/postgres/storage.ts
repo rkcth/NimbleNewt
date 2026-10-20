@@ -8,7 +8,8 @@ import type {
   OperationResult, Page, StoredOperation, TimerClaim, TimerRecord, Timestamp,
 } from "../types.js";
 import { classify, isConnectionLoss } from "./errors.js";
-import { SCHEMA_SQL, SCHEMA_VERSION } from "./schema.js";
+import { migrationChecksum, planMigrations, type JournalEntry, type Migration } from "../migrations.js";
+import { JOURNAL_SQL, MIGRATIONS } from "./schema.js";
 
 export interface PostgresOptions {
   /**
@@ -27,6 +28,8 @@ export interface PostgresOptions {
   readonly lockTimeoutMs?: number;
   /** How long a single statement may run. Default 30000. */
   readonly statementTimeoutMs?: number;
+  /** For the migration qualification only: the migrations to apply instead of this version's own. Production code never sets it. */
+  readonly migrations?: readonly Migration[];
 }
 
 /** The server and session settings in force, read back after they were applied. */
@@ -91,11 +94,11 @@ const types = { getTypeParser: (oid: number, format?: "text" | "binary") => (oid
  */
 export class PostgresStorage implements ControllerStorage {
   readonly #pool: pg.Pool;
-  readonly #options: Required<Omit<PostgresOptions, "connectionString">>;
+  readonly #options: Required<Omit<PostgresOptions, "connectionString" | "migrations">>;
   #closed = false;
   #poolError: Error | undefined;
 
-  private constructor(pool: pg.Pool, options: Required<Omit<PostgresOptions, "connectionString">>) {
+  private constructor(pool: pg.Pool, options: Required<Omit<PostgresOptions, "connectionString" | "migrations">>) {
     this.#pool = pool;
     this.#options = options;
     pool.on("error", (error) => { this.#poolError = error; }); // an idle connection dropped; the pool discards it and the next use reconnects
@@ -133,7 +136,7 @@ export class PostgresStorage implements ControllerStorage {
     const store = new PostgresStorage(pool, resolved);
     try {
       await store.#verifyServer();
-      await store.#ensureSchema();
+      await store.#migrate(options.migrations ?? MIGRATIONS);
       return store;
     } catch (error) {
       await pool.end().catch(() => undefined);
@@ -150,22 +153,99 @@ export class PostgresStorage implements ControllerStorage {
     if (s.isolation !== "read committed") throw new StorageError("unavailable", `the session isolation level is "${s.isolation}", not "read committed"`);
   }
 
-  async #ensureSchema(): Promise<void> {
+  /**
+   * Brings the schema up to date, one journaled migration at a time (rules in `../migrations.ts`). One connection holds a
+   * session-level advisory lock for the whole phase, so two processes opening at once migrate one after the other (the second finds
+   * nothing left to do), and the lock disappears with the connection if the process dies. A schema that has tables but no journal was
+   * not created by NimbleNewt and is refused untouched, as is a database from a newer version or with an edited migration.
+   */
+  async #migrate(migrations: readonly Migration[]): Promise<void> {
     const name = this.#options.schema;
-    await this.#writeTransaction(async (tx) => {
-      await tx.q("SELECT pg_advisory_xact_lock(7306457, hashtext($1))", [`nimblenewt:${name}`]);
-      await tx.q(`CREATE SCHEMA IF NOT EXISTS ${name}`);
-      const exists = await tx.q("SELECT to_regclass($1) AS t", [`${name}.schema_info`]);
-      if (exists[0]!.t === null) {
-        const others = await tx.q("SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = $1", [name]);
-        if (count(others[0]!, "n") > 0) throw new StorageError("unavailable", `schema "${name}" already has tables that NimbleNewt did not create`);
-        await tx.q(SCHEMA_SQL);
-        return;
+    this.#usable();
+    let client: pg.PoolClient;
+    try { client = await this.#pool.connect(); } catch (error) { throw classify(error); }
+    const ignore = () => undefined;
+    client.on("error", ignore);
+    let broken = false;
+    const q = async (sql: string, params?: unknown[]): Promise<Row[]> => (await client.query(sql, params)).rows as Row[];
+    // Waiting for another process's migration is not an error and a migration may legitimately run long, so the wait is a poll of
+    // pg_try_advisory_lock, never a blocking lock call: a session blocked in a statement holds a snapshot, and CREATE INDEX
+    // CONCURRENTLY in the running migration waits for every such snapshot, which would be a deadlock. The statements of this phase
+    // are exempt from the session's statement timeout (restored afterwards).
+    const lock = async (): Promise<void> => {
+      const patience = Date.now() + 15 * 60_000;
+      while (!(await q("SELECT pg_try_advisory_lock(7306457, hashtext($1)) AS got", [`nimblenewt:${name}`]))[0]!.got) {
+        if (Date.now() > patience) throw new StorageError("retryable", "another process has been migrating this database for over 15 minutes; try again later");
+        await new Promise((resolve) => setTimeout(resolve, 50));
       }
-      const version = count((await tx.q("SELECT version FROM schema_info WHERE singleton = 1"))[0]!, "version");
-      if (version > SCHEMA_VERSION) throw new StorageError("unavailable", `the database has schema version ${version}, newer than this version of NimbleNewt understands (${SCHEMA_VERSION}); upgrade NimbleNewt or restore a matching backup`);
-      if (version < SCHEMA_VERSION) throw new StorageError("unavailable", `the database has schema version ${version}, which needs a migration this version does not have`);
-    }, "retryable");
+      try {
+        await q("SET statement_timeout = 0");
+      } catch (error) {
+        // The lock is held by this connection; do not hand the connection back to the pool still holding it.
+        await q("SELECT pg_advisory_unlock(7306457, hashtext($1))", [`nimblenewt:${name}`]).catch(() => { broken = true; });
+        throw error;
+      }
+    };
+    try {
+      await lock();
+      try {
+        // 1. The schema and its journal. A schema with tables but no journal is somebody else's.
+        await q("BEGIN");
+        try {
+          if ((await q("SELECT 1 AS x FROM pg_namespace WHERE nspname = $1", [name])).length === 0) await q(`CREATE SCHEMA ${name}`);
+          const journalExists = (await q("SELECT to_regclass($1) AS t", [`${name}.schema_migrations`]))[0]!.t !== null;
+          if (!journalExists) {
+            if (count((await q("SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = $1", [name]))[0]!, "n") > 0) {
+              throw new StorageError("unavailable", `schema "${name}" already has tables but no schema journal: either NimbleNewt did not create them, or they were created by a development build from before schema journals (card F04); recreate the schema. Nothing was changed.`);
+            }
+            await q(JOURNAL_SQL);
+          }
+          await q("COMMIT");
+        } catch (error) {
+          await q("ROLLBACK").catch(() => undefined);
+          throw error;
+        }
+        // 2. One migration per round, until none is left. Every round must make progress, so the loop is bounded: a migration whose journal
+        // entry does not stick (for example, statements that delete it) would otherwise be planned again forever.
+        for (let rounds = 1; ; rounds++) {
+          if (rounds > migrations.length + 2) throw new StorageError("unavailable", "the schema migrations are not making progress: a migration was applied but the journal does not show it; stopping instead of repeating it forever");
+          await q("BEGIN");
+          let committed = false;
+          try {
+            const journal = (await q("SELECT version, name, checksum, state FROM schema_migrations ORDER BY version")).map((r): JournalEntry => ({ version: count(r, "version"), name: text(r, "name"), checksum: text(r, "checksum"), state: text(r, "state") as JournalEntry["state"] }));
+            const plan = planMigrations(migrations, journal);
+            const next = plan.resume ?? plan.pending[0];
+            if (next === undefined) { await q("COMMIT"); committed = true; return; }
+            const record = (state: "running" | "done"): Promise<Row[]> => q("INSERT INTO schema_migrations (version, name, checksum, state, started_at, finished_at) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (version) DO UPDATE SET state = excluded.state, finished_at = excluded.finished_at",
+              [next.version, next.name, migrationChecksum(next), state, new Date().toISOString(), state === "done" ? new Date().toISOString() : null]);
+            if (next.transactional !== false) {
+              // Statements and journal entry commit together: an interruption leaves the database exactly as it was.
+              for (const statement of next.statements) await q(statement);
+              await record("done");
+              await q("COMMIT"); committed = true;
+              continue;
+            }
+            // Not transactional: journal it as running (committed), run its idempotent statements on their own, then mark it done.
+            if (plan.resume === undefined) await record("running");
+            await q("COMMIT"); committed = true;
+            for (const statement of next.statements) await q(statement);
+            await q("UPDATE schema_migrations SET state = 'done', finished_at = $1 WHERE version = $2", [new Date().toISOString(), next.version]);
+          } catch (error) {
+            if (!committed) await q("ROLLBACK").catch(() => undefined);
+            throw error;
+          }
+        }
+      } finally {
+        await q("RESET statement_timeout").catch(() => { broken = true; });
+        await q("SELECT pg_advisory_unlock(7306457, hashtext($1))", [`nimblenewt:${name}`]).catch(() => { broken = true; });
+      }
+    } catch (error) {
+      broken = broken || isConnectionLoss(error);
+      throw error;
+    } finally {
+      client.off("error", ignore);
+      client.release(broken);
+    }
   }
 
   /** The server and session settings in force, read back from the database. */
@@ -173,17 +253,22 @@ export class PostgresStorage implements ControllerStorage {
     const show = async (client: pg.PoolClient, name: string): Promise<string> => String((await client.query(`SHOW ${name}`)).rows[0]![name]);
     let client: pg.PoolClient;
     try { client = await this.#pool.connect(); } catch (error) { throw classify(error); }
+    const ignore = () => undefined; // a dropped connection also emits an error event; the failing query reports it
+    client.on("error", ignore);
+    let broken = false;
     try {
-      const version = options.skipSchema === true ? 0 : count((await client.query("SELECT version FROM schema_info WHERE singleton = 1", [])).rows[0] as Row, "version");
+      const version = options.skipSchema === true ? 0 : count((await client.query("SELECT COALESCE(MAX(version), 0)::int AS v FROM schema_migrations WHERE state = 'done'", [])).rows[0] as Row, "v");
       return {
         serverVersion: await show(client, "server_version"), serverVersionNum: Number(await show(client, "server_version_num")), encoding: String((await client.query("SELECT pg_encoding_to_char(encoding) AS e FROM pg_database WHERE datname = current_database()")).rows[0]!.e), schema: this.#options.schema, schemaVersion: version,
         synchronousCommit: await show(client, "synchronous_commit"), fsync: await show(client, "fsync"), fullPageWrites: await show(client, "full_page_writes"),
         isolation: await show(client, "default_transaction_isolation"), maxConnections: this.#options.maxConnections, lockTimeoutMs: this.#options.lockTimeoutMs, statementTimeoutMs: this.#options.statementTimeoutMs,
       };
     } catch (error) {
+      broken = isConnectionLoss(error);
       throw classify(error);
     } finally {
-      client.release();
+      client.off("error", ignore);
+      client.release(broken);
     }
   }
 

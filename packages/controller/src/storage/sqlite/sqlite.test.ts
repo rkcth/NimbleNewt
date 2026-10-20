@@ -8,8 +8,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { commitOperation, isStorageError, runStorageConformance, type OperationInput } from "../index.js";
 import { classify } from "./errors.js";
+import { registry } from "../qualification/migration-registry.js";
 import { networkFilesystemProblem } from "./filesystem.js";
-import { SCHEMA_VERSION, SqliteStorage } from "./index.js";
+import { LATEST_VERSION, SqliteStorage } from "./index.js";
 
 const T0 = "2026-10-19T12:00:00.000Z";
 const child = fileURLToPath(new URL("./testing/child.js", import.meta.url));
@@ -33,13 +34,27 @@ runStorageConformance({
   },
 });
 
+// The same fixtures on a database that was created at layout 1 and then upgraded through synthetic later layouts: the adapter must
+// behave identically on the new structure.
+runStorageConformance({
+  name: "SqliteStorage (upgraded through synthetic migrations 2 and 3)",
+  open: async () => {
+    const dir = scratch();
+    directories.push(dir);
+    const path = join(dir, "controller.sqlite");
+    await (await SqliteStorage.open({ path, migrations: registry("sqlite", "v1") })).close();
+    const storage = await SqliteStorage.open({ path, migrations: registry("sqlite", "v123") });
+    return { storage, close: async () => { await storage.close(); remove(dir); } };
+  },
+});
+
 // ---- settings, schema, locations ---------------------------------------------------------------------------
 test("durability and safety settings are applied and read back", async () => {
   const dir = scratch();
   try {
     const storage = await SqliteStorage.open({ path: join(dir, "db.sqlite"), busyTimeoutMs: 1234 });
     const settings = storage.settings();
-    assert.deepEqual({ ...settings, sqliteVersion: "x" }, { sqliteVersion: "x", schemaVersion: SCHEMA_VERSION, journalMode: "wal", synchronous: "FULL", foreignKeys: true, busyTimeoutMs: 1234 });
+    assert.deepEqual({ ...settings, sqliteVersion: "x" }, { sqliteVersion: "x", schemaVersion: LATEST_VERSION, journalMode: "wal", synchronous: "FULL", foreignKeys: true, busyTimeoutMs: 1234 });
     assert.match(settings.sqliteVersion, /^3\.\d+\.\d+/);
     await storage.close();
     // the settings are per connection and must be re-applied on every open
@@ -72,15 +87,15 @@ test("refuses a newer schema, a foreign database, and unsuitable paths, without 
     const seed = await SqliteStorage.open({ path: newer });
     await seed.close();
     const raw = new DatabaseSync(newer);
-    raw.exec(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);
+    raw.exec(`INSERT INTO schema_migrations (version, name, checksum, state, started_at, finished_at) VALUES (${LATEST_VERSION + 1}, 'from_the_future', 'x', 'done', 't', 't')`);
     raw.close();
-    await assert.rejects(SqliteStorage.open({ path: newer }), (e) => isStorageError(e, "unavailable") && /newer than this version/.test((e as Error).message));
+    await assert.rejects(SqliteStorage.open({ path: newer }), (e) => isStorageError(e, "unavailable") && /newer than the latest this version of NimbleNewt knows/.test((e as Error).message));
 
     const foreign = join(dir, "foreign.sqlite");
     const other = new DatabaseSync(foreign);
     other.exec("CREATE TABLE something_else (x)");
     other.close();
-    await assert.rejects(SqliteStorage.open({ path: foreign }), (e) => isStorageError(e, "unavailable") && /did not create/.test((e as Error).message));
+    await assert.rejects(SqliteStorage.open({ path: foreign }), (e) => isStorageError(e, "unavailable") && /no schema journal.*development build from before schema journals/.test((e as Error).message));
     const check = new DatabaseSync(foreign);
     assert.deepEqual(check.prepare("SELECT name FROM sqlite_schema WHERE type = 'table'").all().map((r) => r.name), ["something_else"]);
     check.close();

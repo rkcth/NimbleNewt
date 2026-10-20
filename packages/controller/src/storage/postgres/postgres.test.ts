@@ -5,7 +5,8 @@ import { setTimeout as sleep } from "node:timers/promises";
 import pg from "pg";
 import { commitOperation, isStorageError, runStorageConformance, type OperationInput } from "../index.js";
 import { classify, isConnectionLoss } from "./errors.js";
-import { PostgresStorage, SCHEMA_VERSION } from "./index.js";
+import { LATEST_VERSION, PostgresStorage } from "./index.js";
+import { registry } from "../qualification/migration-registry.js";
 import { FaultProxy } from "./testing/proxy.js";
 import { startEmbeddedServer, startTestServer, withClient, type TestServer } from "./testing/server.js";
 
@@ -47,13 +48,26 @@ runStorageConformance({
   },
 });
 
+// The same fixtures on a schema created at layout 1 and then upgraded through synthetic later layouts (a transactional migration that
+// adds a column and an index, and a non-transactional one that builds an index concurrently).
+runStorageConformance({
+  name: "PostgresStorage (upgraded through synthetic migrations 2 and 3)",
+  open: async () => {
+    const s = await server();
+    const schema = schemaName();
+    await (await PostgresStorage.open({ connectionString: s.url(), schema, migrations: registry("postgres", "v1") })).close();
+    const storage = await PostgresStorage.open({ connectionString: s.url(), schema, migrations: registry("postgres", "v123") });
+    return { storage, close: async () => { await storage.close(); await dropSchema(s.url(), schema); } };
+  },
+});
+
 // ---- settings, schema, connection problems ------------------------------------------------------------------------
 test("the server and session settings are verified and read back", async () => {
   const { storage, schema, close } = await fresh({ maxConnections: 7, lockTimeoutMs: 1234, statementTimeoutMs: 5678 });
   try {
     const s = await storage.settings();
     assert.deepEqual({ ...s, serverVersion: "x", serverVersionNum: 0 }, {
-      serverVersion: "x", serverVersionNum: 0, encoding: "UTF8", schema, schemaVersion: SCHEMA_VERSION, synchronousCommit: "on", fsync: "on", fullPageWrites: "on", isolation: "read committed",
+      serverVersion: "x", serverVersionNum: 0, encoding: "UTF8", schema, schemaVersion: LATEST_VERSION, synchronousCommit: "on", fsync: "on", fullPageWrites: "on", isolation: "read committed",
       maxConnections: 7, lockTimeoutMs: 1234, statementTimeoutMs: 5678,
     });
     assert.ok(s.serverVersionNum >= 140000);
@@ -81,14 +95,15 @@ test("refuses a newer schema, a schema of foreign tables, and bad options, witho
   const { storage, schema, close } = await fresh();
   try {
     await storage.close();
-    await withClient(s.url(), async (c) => { await c.query(`UPDATE ${schema}.schema_info SET version = ${SCHEMA_VERSION + 1}`); });
-    await assert.rejects(PostgresStorage.open({ connectionString: s.url(), schema }), (e) => isStorageError(e, "unavailable") && /newer than this version/.test((e as Error).message));
-    await withClient(s.url(), async (c) => { await c.query(`UPDATE ${schema}.schema_info SET version = 0`); });
-    await assert.rejects(PostgresStorage.open({ connectionString: s.url(), schema }), (e) => isStorageError(e, "unavailable") && /needs a migration/.test((e as Error).message));
+    await withClient(s.url(), async (c) => { await c.query(`INSERT INTO ${schema}.schema_migrations (version, name, checksum, state, started_at, finished_at) VALUES (${LATEST_VERSION + 1}, 'from_the_future', 'x', 'done', 't', 't')`); });
+    await assert.rejects(PostgresStorage.open({ connectionString: s.url(), schema }), (e) => isStorageError(e, "unavailable") && /newer than the latest this version of NimbleNewt knows/.test((e as Error).message));
+    await withClient(s.url(), async (c) => { await c.query(`DELETE FROM ${schema}.schema_migrations WHERE version > ${LATEST_VERSION}`); });
+    await withClient(s.url(), async (c) => { await c.query(`UPDATE ${schema}.schema_migrations SET checksum = 'edited' WHERE version = 1`); });
+    await assert.rejects(PostgresStorage.open({ connectionString: s.url(), schema }), (e) => isStorageError(e, "unavailable") && /was changed after it was applied/.test((e as Error).message));
 
     const foreign = schemaName();
     await withClient(s.url(), async (c) => { await c.query(`CREATE SCHEMA ${foreign}; CREATE TABLE ${foreign}.something_else (x int)`); });
-    await assert.rejects(PostgresStorage.open({ connectionString: s.url(), schema: foreign }), (e) => isStorageError(e, "unavailable") && /did not create/.test((e as Error).message));
+    await assert.rejects(PostgresStorage.open({ connectionString: s.url(), schema: foreign }), (e) => isStorageError(e, "unavailable") && /no schema journal.*development build from before schema journals/.test((e as Error).message));
     const tables = await withClient(s.url(), async (c) => (await c.query("SELECT table_name FROM information_schema.tables WHERE table_schema = $1", [foreign])).rows.map((r) => r.table_name));
     assert.deepEqual(tables, ["something_else"]);
     await dropSchema(s.url(), foreign);

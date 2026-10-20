@@ -17,7 +17,13 @@ export const ALLOWED = {
  * Only these folders may talk to a database. Everything else (domain services, API, workers) uses the typed storage
  * contract, so no SQL, driver or connection can leak into domain code (card F04a).
  */
-export const DATABASE_FOLDERS = ["controller/src/storage/sqlite/", "controller/src/storage/postgres/"];
+export const DATABASE_FOLDERS = [
+  "controller/src/storage/sqlite/",
+  "controller/src/storage/postgres/",
+  // Qualification tooling (synthetic migrations, layout fixtures, workload reports) must speak to both databases to test them. It is
+  // test support that no domain service imports.
+  "controller/src/storage/qualification/",
+];
 const DATABASE_DRIVERS = new Set(["node:sqlite", "sqlite3", "better-sqlite3", "pg", "pg-pool", "postgres", "mysql", "mysql2", "@electric-sql/pglite", "embedded-postgres", "knex", "kysely", "drizzle-orm", "typeorm", "sequelize", "@prisma/client"]);
 /** A tripwire for SQL written in source: statement forms in upper case anywhere in a file. */
 const SQL_TEXT = /\b(?:INSERT\s+INTO|DELETE\s+FROM|UPDATE\s+\S+\s+SET|MERGE\s+INTO|ON\s+CONFLICT|CREATE\s+(?:TABLE|INDEX|UNIQUE\s+INDEX)|ALTER\s+TABLE|DROP\s+TABLE|SELECT\s[^;'"`\n]{1,200}\sFROM)\b/;
@@ -80,6 +86,10 @@ export function checkBoundaries(packagesDir, allowed = ALLOWED) {
           for (const [, specifier] of text.matchAll(SPECIFIER)) if (DATABASE_DRIVERS.has(specifier) || DATABASE_DRIVERS.has(packageName(specifier))) errors.push(`${dir}: ${where} imports the database driver ${specifier}; only ${DATABASE_FOLDERS.join(" and ")} may`);
         }
         for (const [, specifier] of text.matchAll(SPECIFIER)) {
+          // qualification/ may hold SQL (see DATABASE_FOLDERS), so only test files and qualification/ itself may import from it.
+          if (specifier.startsWith(".") && /(?:^|\/)qualification\//.test(specifier) && !where.startsWith("controller/src/storage/qualification/") && !TEST_ONLY.test(where)) {
+            errors.push(`${dir}: ${where} imports ${specifier}; qualification/ is test support, and only test files and qualification/ itself may import from it`);
+          }
           if (specifier.startsWith(".") || specifier.startsWith("node:")) continue;
           const name = packageName(specifier);
           if (!permitted.includes(name)) errors.push(`${dir}: ${relative(packagesDir, file)} imports ${name}, which is not allowed`);

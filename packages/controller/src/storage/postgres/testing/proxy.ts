@@ -26,6 +26,8 @@ export class FaultProxy {
   #ordinalFault: (OrdinalFault & { fired: boolean }) | undefined;
   /** Statements seen since the last `arm`/`resetCount`. */
   statements = 0;
+  /** When set, the start of each statement seen (first 100 characters of the message) is appended, for debugging a changing count. */
+  trace: string[] | undefined;
   fired = 0;
   port = 0;
 
@@ -80,6 +82,7 @@ export class FaultProxy {
         if (type === "P") inPrepared = true;
         if (startsStatement) {
           this.statements += 1;
+          this.trace?.push(`${this.statements}: ${message.toString("latin1").replace(/[^\x20-\x7e]+/g, " ").slice(0, 100)}`);
           const fault = this.#ordinalFault;
           if (fault !== undefined && !fault.fired && fault.ordinal === this.statements) {
             fault.fired = true;

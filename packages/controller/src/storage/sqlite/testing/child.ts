@@ -7,6 +7,7 @@ import { commitOperation } from "../../commit.js";
 import { StorageError } from "../../errors.js";
 import type { OperationInput } from "../../types.js";
 import { ACTIONS, type BoundaryAction } from "../../qualification/boundaries.js";
+import { registry, type RegistryName } from "../../qualification/migration-registry.js";
 import { SqliteStorage } from "../storage.js";
 
 const [mode, database, a, b, c] = process.argv.slice(2) as [string, string, string?, string?, string?];
@@ -16,6 +17,23 @@ const base = (operationId: string): OperationInput => ({
   completeDeliveries: [], completeTimers: [], settleEffects: [],
 });
 const say = (line: string) => process.stdout.write(`${line}\n`);
+
+// The migration mode opens (and so migrates) the database with the named synthetic migrations, killed at an exact statement.
+if (mode === "migrate") {
+  const [when, ordinalText, registryName] = [a!, b!, c as RegistryName];
+  const target = ordinalText === "none" ? 0 : Number(ordinalText);
+  let last = 0;
+  const storage = await SqliteStorage.open({
+    path: database, busyTimeoutMs: 20_000, migrations: registry("sqlite", registryName),
+    testHooks: { statement: (phase, _sql, ordinal) => {
+      last = Math.max(last, ordinal);
+      if (target !== 0 && ordinal === target && phase === when) process.kill(process.pid, "SIGKILL");
+    } },
+  });
+  say(`completed ${last}`);
+  await storage.close();
+  process.exit(0);
+}
 
 // The crash-boundary mode opens its own storage with a hook that kills this process at an exact statement.
 if (mode === "boundary") {

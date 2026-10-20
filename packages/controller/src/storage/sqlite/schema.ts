@@ -1,14 +1,12 @@
-/**
- * The SQLite schema of the controller store, layout 1. Everything the contract promises is enforced here as well as in code:
- * unique operation, delivery, effect and timer IDs are primary keys; sequence numbers are unique; states are checked.
- * Text columns use SQLite's default BINARY collation, which orders by UTF-8 bytes and so by code point, as the contract
- * requires. Bodies are canonical JSON text. A journalled migration runner replaces this single layout in card F04: that
- * runner must take `PRAGMA user_version` over with its own journal table, so that an interrupted migration can be detected
- * and resumed; until then the version is only a guard.
- */
-export const SCHEMA_VERSION = 1;
+import { assertValidMigrations, type Migration } from "../migrations.js";
 
-export const SCHEMA_SQL = `
+/**
+ * The SQLite schema of the controller store as an ordered list of journaled migrations (see `../migrations.ts` for the rules).
+ * Migration 1 creates the first layout. Everything the contract promises is enforced here as well as in code: unique operation,
+ * delivery, effect and timer IDs are primary keys; sequence numbers are unique; states are checked. Text columns use SQLite's default
+ * BINARY collation, which orders by UTF-8 bytes and so by code point, as the contract requires. Bodies are canonical JSON text.
+ */
+const INITIAL_SQL = `
 CREATE TABLE state (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
   epoch INTEGER NOT NULL CHECK (epoch >= 0),
@@ -97,3 +95,23 @@ CREATE TABLE timers (
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX timers_open ON timers (due_at, timer_id) WHERE state IN ('pending', 'claimed');
 `;
+
+/** The journal of applied migrations. Created by the runner itself before any migration runs; not part of migration 1. */
+export const JOURNAL_SQL = `CREATE TABLE IF NOT EXISTS schema_migrations (
+  version INTEGER PRIMARY KEY CHECK (version >= 1),
+  name TEXT NOT NULL,
+  checksum TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('running', 'done')),
+  started_at TEXT NOT NULL,
+  finished_at TEXT
+) STRICT`;
+
+/** The statements of a SQL script, one per entry (the script has no semicolons inside strings). */
+const split = (script: string): string[] => script.split(/;\s*\n/).map((statement) => statement.trim().replace(/;$/, "")).filter((statement) => statement !== "");
+
+/** The migrations this version of NimbleNewt applies to a SQLite controller database. */
+export const MIGRATIONS: readonly Migration[] = [{ version: 1, name: "initial_layout", statements: split(INITIAL_SQL) }];
+assertValidMigrations(MIGRATIONS);
+
+/** The newest layout this version knows. */
+export const LATEST_VERSION = MIGRATIONS.length;

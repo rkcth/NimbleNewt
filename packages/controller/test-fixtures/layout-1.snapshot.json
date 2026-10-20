@@ -1,0 +1,308 @@
+{
+  "epoch": 1,
+  "items": [
+    {
+      "kind": "item",
+      "id": "t1",
+      "revision": 2,
+      "body": {
+        "state": "done"
+      },
+      "createdAt": "2026-10-19T12:00:00.000Z",
+      "updatedAt": "2026-10-19T12:05:00.000Z"
+    },
+    {
+      "kind": "item",
+      "id": "t2",
+      "revision": 1,
+      "body": {
+        "state": "new"
+      },
+      "createdAt": "2026-10-19T12:05:00.000Z",
+      "updatedAt": "2026-10-19T12:05:00.000Z"
+    },
+    {
+      "kind": "item",
+      "id": "t3",
+      "revision": 1,
+      "body": {},
+      "createdAt": "2026-10-19T12:00:00.000Z",
+      "updatedAt": "2026-10-19T12:00:00.000Z"
+    }
+  ],
+  "groups": [
+    {
+      "kind": "grp",
+      "id": "g1",
+      "revision": 1,
+      "body": {},
+      "createdAt": "2026-10-19T12:00:00.000Z",
+      "updatedAt": "2026-10-19T12:00:00.000Z"
+    }
+  ],
+  "audit": [
+    {
+      "seq": 1,
+      "operationId": "seed-op",
+      "correlationId": "seed",
+      "actor": "seeder",
+      "at": "2026-10-19T12:00:00.000Z",
+      "type": "seed",
+      "detail": {}
+    },
+    {
+      "seq": 2,
+      "operationId": "rich",
+      "correlationId": "corr-rich",
+      "actor": "handler",
+      "at": "2026-10-19T12:05:00.000Z",
+      "type": "task.done",
+      "subject": {
+        "kind": "item",
+        "id": "t1"
+      },
+      "detail": {
+        "by": "handler"
+      }
+    },
+    {
+      "seq": 3,
+      "operationId": "rich",
+      "correlationId": "corr-rich",
+      "actor": "handler",
+      "at": "2026-10-19T12:05:00.000Z",
+      "type": "task.created",
+      "subject": {
+        "kind": "item",
+        "id": "t2"
+      },
+      "detail": {}
+    },
+    {
+      "seq": 4,
+      "operationId": "rich",
+      "correlationId": "corr-rich",
+      "actor": "handler",
+      "at": "2026-10-19T12:05:00.000Z",
+      "type": "effect.settled",
+      "subject": {
+        "kind": "effect",
+        "id": "e0"
+      },
+      "detail": {
+        "outcome": "confirmed",
+        "previous": "intended"
+      }
+    }
+  ],
+  "deliveries": [
+    {
+      "deliveryId": "d0",
+      "seq": 1,
+      "destination": "x",
+      "orderingKey": "k1",
+      "priority": 5,
+      "aggregate": {
+        "kind": "item",
+        "id": "t1"
+      },
+      "aggregateRevision": 1,
+      "payload": {
+        "n": 0
+      },
+      "state": "delivered",
+      "attempts": 1,
+      "nextAttemptAt": "2026-10-19T12:00:00.000Z",
+      "receipt": {
+        "ok": true
+      },
+      "deliveredAt": "2026-10-19T12:05:00.000Z"
+    },
+    {
+      "deliveryId": "c1",
+      "seq": 2,
+      "destination": "z",
+      "priority": 5,
+      "aggregate": {
+        "kind": "item",
+        "id": "t3"
+      },
+      "aggregateRevision": 1,
+      "payload": {
+        "n": 0
+      },
+      "state": "pending",
+      "attempts": 0,
+      "nextAttemptAt": "2026-10-19T12:00:00.000Z"
+    },
+    {
+      "deliveryId": "n1",
+      "seq": 3,
+      "destination": "x",
+      "orderingKey": "k1",
+      "priority": 5,
+      "aggregate": {
+        "kind": "item",
+        "id": "t1"
+      },
+      "aggregateRevision": 2,
+      "payload": {
+        "n": 1
+      },
+      "state": "pending",
+      "attempts": 0,
+      "nextAttemptAt": "2026-10-19T12:05:00.000Z"
+    },
+    {
+      "deliveryId": "n2",
+      "seq": 4,
+      "destination": "y",
+      "priority": 9,
+      "aggregate": {
+        "kind": "item",
+        "id": "t2"
+      },
+      "aggregateRevision": 1,
+      "payload": {
+        "n": 2
+      },
+      "state": "pending",
+      "attempts": 0,
+      "nextAttemptAt": "2026-10-19T12:05:00.000Z"
+    }
+  ],
+  "effects": [
+    {
+      "effectId": "e0",
+      "operationId": "seed-op",
+      "target": "repo:main",
+      "inputDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+      "status": "confirmed",
+      "evidence": {
+        "sha": "abc"
+      },
+      "createdAt": "2026-10-19T12:00:00.000Z",
+      "updatedAt": "2026-10-19T12:05:00.000Z"
+    },
+    {
+      "effectId": "e1",
+      "operationId": "rich",
+      "attemptId": "a1",
+      "target": "repo:main",
+      "inputDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+      "reconciliationHandle": "h1",
+      "status": "intended",
+      "createdAt": "2026-10-19T12:05:00.000Z",
+      "updatedAt": "2026-10-19T12:05:00.000Z"
+    }
+  ],
+  "timers": [
+    {
+      "timerId": "tm0",
+      "dueAt": "2026-10-19T12:00:00.000Z",
+      "payload": {},
+      "state": "completed",
+      "attempts": 1
+    },
+    {
+      "timerId": "tm1",
+      "dueAt": "2026-10-19T12:00:00.000Z",
+      "payload": {},
+      "state": "cancelled",
+      "attempts": 0
+    },
+    {
+      "timerId": "tm9",
+      "dueAt": "2026-10-19T13:00:00.000Z",
+      "aggregate": {
+        "kind": "item",
+        "id": "t2"
+      },
+      "payload": {
+        "kind": "deadline"
+      },
+      "state": "pending",
+      "attempts": 0
+    }
+  ],
+  "operations": [
+    {
+      "operationId": "seed-op",
+      "requestHash": "7f002854d850dcb5557b0c1c42102d8dac08eb5755ad818b6b9eb7b2706c3151",
+      "actor": "seeder",
+      "correlationId": "seed",
+      "at": "2026-10-19T12:00:00.000Z",
+      "result": {
+        "auditSeqs": [
+          1
+        ],
+        "epoch": 1,
+        "operationId": "seed-op",
+        "replayed": false,
+        "revisions": [
+          {
+            "ref": {
+              "id": "t1",
+              "kind": "item"
+            },
+            "revision": 1
+          },
+          {
+            "ref": {
+              "id": "t3",
+              "kind": "item"
+            },
+            "revision": 1
+          },
+          {
+            "ref": {
+              "id": "g1",
+              "kind": "grp"
+            },
+            "revision": 1
+          }
+        ]
+      }
+    },
+    {
+      "operationId": "rich",
+      "requestHash": "ef410a2885d2c0d3932ef3b30b20b5a9f2df7943c7d587902797b7930e25e614",
+      "actor": "handler",
+      "correlationId": "corr-rich",
+      "at": "2026-10-19T12:05:00.000Z",
+      "result": {
+        "auditSeqs": [
+          2,
+          3,
+          4
+        ],
+        "epoch": 1,
+        "operationId": "rich",
+        "replayed": false,
+        "revisions": [
+          {
+            "ref": {
+              "id": "t1",
+              "kind": "item"
+            },
+            "revision": 2
+          },
+          {
+            "ref": {
+              "id": "t2",
+              "kind": "item"
+            },
+            "revision": 1
+          },
+          {
+            "ref": {
+              "id": "g1",
+              "kind": "grp"
+            },
+            "revision": 1
+          }
+        ]
+      }
+    }
+  ]
+}

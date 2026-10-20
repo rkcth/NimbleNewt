@@ -123,3 +123,14 @@ test("exact pins may carry a pre-release tag, ranges never pass", () => {
     assert.equal(errors.some((e) => /must be pinned to an exact version/.test(e)), !ok, range);
   }
 });
+
+test("production code cannot import qualification/ (it may hold SQL); tests and qualification/ itself can", () => {
+  const bad = fixture((d) => addSource(d, "controller/src/storage/domain.ts", 'import { seedWorld } from "./qualification/boundaries.js";\n'));
+  assert.ok(bad.some((e) => /domain\.ts imports \.\/qualification\/boundaries\.js; qualification\/ is test support/.test(e)), bad.join("\n"));
+  const ok = fixture((d) => {
+    addSource(d, "controller/src/storage/x.test.ts", 'import { seedWorld } from "./qualification/boundaries.js";\n');
+    addSource(d, "controller/src/storage/sqlite/testing/helper.ts", 'import { seedWorld } from "../../qualification/boundaries.js";\n');
+    addSource(d, "controller/src/storage/qualification/other.ts", 'import { seedWorld } from "./boundaries.js";\n');
+  });
+  assert.deepEqual(ok.filter((e) => /qualification/.test(e)), []);
+});

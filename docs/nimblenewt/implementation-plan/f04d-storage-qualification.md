@@ -8,9 +8,10 @@ Records what was run against the controller storage backends, what it showed, an
 **Nothing here measures how many real agents NimbleNewt can run.** The load is synthetic, touches storage only (no model calls, no
 workers, no network between controller and database), and the numbers belong to one machine.
 
-**Status.** This card is held at "implemented, awaiting sign-off" because the PostgreSQL suites currently fail in CI on one cell
-(Windows with Node 22.19; the other five cells pass), and the workload was run on Linux only. It becomes "implemented" when a CI run
-is green on all six cells.
+**Status.** Implemented. For a while this card was held at "awaiting sign-off" because the PostgreSQL suites failed in CI on one cell (Windows with
+Node 22.19): that runner executes jobs as an administrator and PostgreSQL refuses to start under administrative permissions, so the test server is now
+started through `pg_ctl` on Windows, and the Windows runs then showed that PostgreSQL's default database encoding there cannot store all legal JSON, so
+the adapter now requires a UTF8 database. CI run 39373563539 is green on all six cells. The workload measurements were taken on Linux only.
 
 ## 1. Parity: three implementations, one behaviour
 

@@ -194,8 +194,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F04c — Implement PostgreSQL controller storage adapter
 
 - **Parent:** N02 / AII-252.
-- **Status:** implemented-awaiting-signoff; commits `257e630`; record [implementation-notes.md](implementation-notes.md).
-- **Progress note:** PostgreSQL controller storage adapter on pg 8.23.1: bounded pool, READ COMMITTED with row-level rules (ON CONFLICT, conditional UPDATE, FOR SHARE epoch fence, SKIP LOCKED claims, counter-row sequence numbers), explicit verified server settings, driver-error classification. Passes the shared conformance suite and PostgreSQL-specific concurrency, deadlock, lock-timeout, pool-bound and connection-cut tests against a real PostgreSQL 17.10 server. Only 17.10 qualified; supported versions are an open owner decision; Windows/macOS runs and throughput not yet evidenced. Held awaiting a CI run that is green on all six cells: the PostgreSQL suite fails on windows-latest with Node 22.19.0 (runs 39364258449 and 39364988274); the other five cells pass.
+- **Status:** implemented; commits `257e630`; CI runs 39373563539; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** PostgreSQL controller storage adapter on pg 8.23.1: bounded pool, READ COMMITTED with row-level rules (ON CONFLICT, conditional UPDATE, FOR SHARE epoch fence, SKIP LOCKED claims, counter-row sequence numbers), explicit verified server settings, driver-error classification. Passes the shared conformance suite and PostgreSQL-specific concurrency, deadlock, lock-timeout, pool-bound and connection-cut tests against a real PostgreSQL 17.10 server. Only 17.10 qualified; supported versions are an open owner decision; Windows/macOS runs and throughput not yet evidenced. The PostgreSQL suites were red on windows-latest until the embedded test server was started through pg_ctl (the runner is an administrator) and the database was required to be UTF8; CI run 39373563539 is green on all six cells.
 - **Blockers:** F04a.
 - **Deliverable:** PostgreSQL adapter and schema with bounded pool and retry policy.
 - **Acceptance and verification:** Shared fixtures pass on real PostgreSQL; competing claims preserve ownership and ordering; deadlock/serialization retries and ambiguous commit handled without duplicated admission.
@@ -204,8 +204,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F04d — Qualify storage adapter parity and contention
 
 - **Parent:** N02 / AII-252.
-- **Status:** implemented-awaiting-signoff; commits `c0f714f`; record [f04d-storage-qualification.md](f04d-storage-qualification.md).
-- **Progress note:** Parity (seeded differential test across the reference store, SQLite and PostgreSQL), crash at every statement boundary on both backends, PostgreSQL immediate-shutdown recovery, and a workload report (4 active, 32-active-equivalent, 100 idle hosts, hot row) with latency, event-loop stalls, conflicts and pool pressure; a synthetic storage-only load on one Linux machine, no claim about real-agent capacity. Windows/macOS performance, power loss and remote PostgreSQL not evidenced. Held awaiting a CI run that is green on all six cells (PostgreSQL suites fail on windows-latest with Node 22.19.0).
+- **Status:** implemented; commits `c0f714f`; CI runs 39373563539; record [f04d-storage-qualification.md](f04d-storage-qualification.md).
+- **Progress note:** Parity (seeded differential test across the reference store, SQLite and PostgreSQL), crash at every statement boundary on both backends, PostgreSQL immediate-shutdown recovery, and a workload report (4 active, 32-active-equivalent, 100 idle hosts, hot row) with latency, event-loop stalls, conflicts and pool pressure; a synthetic storage-only load on one Linux machine, no claim about real-agent capacity. Windows/macOS performance, power loss and remote PostgreSQL not evidenced. CI run 39373563539 is green on all six cells (the workload report itself was run on Linux only).
 - **Blockers:** F04b, F04c.
 - **Deliverable:** Identical fault suite and workload reports for both backends.
 - **Acceptance and verification:** Crash at every atomic boundary; interrupted connection and uncertain commit; duplicate messages, stale epochs and per-task ordering; baseline four active and 32-active-equivalent stress plus100 idle; record latency/contention without claiming real-agent capacity.
@@ -214,6 +214,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F04 — Define storage schema migration runners
 
 - **Parent:** N02 / AII-252.
+- **Status:** implemented-awaiting-signoff; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Journaled, checksummed schema migrations on both backends: transactional and idempotent non-transactional steps, refusal of newer databases, edited migrations, journal gaps and foreign databases, advisory-lock serialisation on PostgreSQL, committed layout-1 fixtures. Upgrade behaviour is qualified with synthetic later layouts (the production list has one migration), including a crash at every statement of an upgrade on both backends. Held awaiting a CI run that is green on all six cells (the PostgreSQL suites fail on windows-latest with Node 22.19.0).
 - **Blockers:** F04d.
 - **Deliverable:** Backend-specific versioned schema migration journals.
 - **Acceptance and verification:** Interrupted schema migration recoverable on both databases; incompatible downgrade rejected; constraints enforce unique operation and delivery IDs; upgrades preserve fixture state.

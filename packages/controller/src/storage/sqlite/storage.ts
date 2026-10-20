@@ -11,7 +11,8 @@ import type {
 } from "../types.js";
 import { classify, isBusy } from "./errors.js";
 import { assertLocalFilesystem } from "./filesystem.js";
-import { SCHEMA_SQL, SCHEMA_VERSION } from "./schema.js";
+import { migrationChecksum, planMigrations, type JournalEntry, type Migration } from "../migrations.js";
+import { JOURNAL_SQL, MIGRATIONS } from "./schema.js";
 
 export interface SqliteOptions {
   /** Path of the database file on local storage. `:memory:` is refused: a controller database must be durable. */
@@ -24,6 +25,10 @@ export interface SqliteOptions {
    * Never set in production.
    */
   readonly testHooks?: { readonly statement?: (phase: "before" | "after", sql: string, ordinal: number) => void };
+  /**
+   * For the migration qualification only: the migrations to apply instead of this version's own. Production code never sets it.
+   */
+  readonly migrations?: readonly Migration[];
 }
 
 /** The durability and safety settings in force, read back from the database after they were applied. */
@@ -90,7 +95,7 @@ export class SqliteStorage implements ControllerStorage {
       db = new DatabaseSync(absolute, { timeout: busyTimeoutMs, enableForeignKeyConstraints: true });
       const store = new SqliteStorage(db, absolute, busyTimeoutMs, options.testHooks);
       store.#configure();
-      store.#ensureSchema();
+      store.#migrate(options.migrations ?? MIGRATIONS);
       return store;
     } catch (error) {
       try { db?.close(); } catch { /* already unusable */ }
@@ -109,21 +114,70 @@ export class SqliteStorage implements ControllerStorage {
     if (settings.synchronous !== "FULL" || !settings.foreignKeys) throw new StorageError("unavailable", `the durability settings did not take effect: ${JSON.stringify(settings)}`);
   }
 
-  #ensureSchema(): void {
-    this.#writeTransaction(() => {
-      const version = (this.#db.prepare("PRAGMA user_version").get() as Row).user_version as number;
-      const tables = (this.#db.prepare("SELECT count(*) AS n FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").get() as Row).n as number;
-      if (version === 0 && tables === 0) {
-        this.#db.exec(SCHEMA_SQL);
-        this.#db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
-      } else if (version === 0) {
-        throw new StorageError("unavailable", "the file is a database that NimbleNewt did not create (it has tables but no schema version)");
-      } else if (version > SCHEMA_VERSION) {
-        throw new StorageError("unavailable", `the database has schema version ${version}, newer than this version of NimbleNewt understands (${SCHEMA_VERSION}); upgrade NimbleNewt or restore a matching backup`);
-      } else if (version < SCHEMA_VERSION) {
-        throw new StorageError("unavailable", `the database has schema version ${version}, which needs a migration this version does not have`);
+  /**
+   * Brings the schema up to date, one journaled migration at a time (rules in `../migrations.ts`). The whole phase is numbered for the
+   * crash qualification. A new database gets the journal and every migration; a database that has tables but no journal was not
+   * created by NimbleNewt and is refused untouched; one from a newer version, or with an edited migration, is refused untouched.
+   */
+  #migrate(migrations: readonly Migration[]): void {
+    this.#ordinal = 0;
+    this.#inWrite = true;
+    const at = (): string => new Date().toISOString();
+    const exec = (sql: string): void => this.#step(sql, () => { this.#db.exec(sql); });
+    const begin = (): void => exec("BEGIN IMMEDIATE");
+    const commit = (): void => exec("COMMIT");
+    try {
+      // 1. The journal. A file with tables but no journal is somebody else's database.
+      begin();
+      try {
+        const tables = (this.#get("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'") !== undefined);
+        const journalExists = this.#get("SELECT 1 AS x FROM sqlite_schema WHERE type = 'table' AND name = 'schema_migrations'") !== undefined;
+        if (!journalExists) {
+          if (tables) throw new StorageError("unavailable", "the file has tables but no schema journal: either NimbleNewt did not create it, or it was created by a development build from before schema journals (card F04); recreate it. Nothing was changed.");
+          exec(JOURNAL_SQL);
+        }
+        commit();
+      } catch (error) {
+        this.#rollback();
+        throw error;
       }
-    }, "retryable");
+      // 2. One migration per round, until none is left. Every round must make progress, so the loop is bounded: a migration whose journal
+      // entry does not stick (for example, statements that delete it) would otherwise be planned again forever.
+      for (let rounds = 1; ; rounds++) {
+        if (rounds > migrations.length + 2) throw new StorageError("unavailable", "the schema migrations are not making progress: a migration was applied but the journal does not show it; stopping instead of repeating it forever");
+        begin();
+        let committed = false;
+        try {
+          const journal = this.#all("SELECT version, name, checksum, state FROM schema_migrations ORDER BY version").map((r): JournalEntry => ({ version: count(r, "version"), name: text(r, "name"), checksum: text(r, "checksum"), state: text(r, "state") as JournalEntry["state"] }));
+          const plan = planMigrations(migrations, journal);
+          const next = plan.resume ?? plan.pending[0];
+          if (next === undefined) { commit(); committed = true; return; }
+          const record = (state: "running" | "done"): void => {
+            this.#run("INSERT INTO schema_migrations (version, name, checksum, state, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (version) DO UPDATE SET state = excluded.state, finished_at = excluded.finished_at",
+              next.version, next.name, migrationChecksum(next), state, at(), state === "done" ? at() : null);
+          };
+          if (next.transactional !== false) {
+            // Statements and journal entry commit together: an interruption leaves the database exactly as it was.
+            for (const statement of next.statements) exec(statement);
+            record("done");
+            commit(); committed = true;
+            continue;
+          }
+          // Not transactional: journal it as running (committed), run its idempotent statements on their own, then mark it done.
+          if (plan.resume === undefined) record("running");
+          commit(); committed = true;
+          for (const statement of next.statements) exec(statement);
+          begin();
+          this.#run("UPDATE schema_migrations SET state = 'done', finished_at = ? WHERE version = ?", at(), next.version);
+          commit();
+        } catch (error) {
+          if (!committed) this.#rollback();
+          throw error;
+        }
+      }
+    } finally {
+      this.#inWrite = false;
+    }
   }
 
   /** The settings in force, read back from the database. */
@@ -132,7 +186,7 @@ export class SqliteStorage implements ControllerStorage {
     const sync = ["OFF", "NORMAL", "FULL", "EXTRA"][one("PRAGMA synchronous").synchronous as number] ?? "UNKNOWN";
     return {
       sqliteVersion: text(one("SELECT sqlite_version() AS v"), "v"),
-      schemaVersion: count(one("PRAGMA user_version"), "user_version"),
+      schemaVersion: count(one("SELECT count(*) AS n FROM sqlite_schema WHERE type = 'table' AND name = 'schema_migrations'"), "n") === 0 ? 0 : count(one("SELECT COALESCE(MAX(version), 0) AS v FROM schema_migrations WHERE state = 'done'"), "v"),
       journalMode: text(one("PRAGMA journal_mode"), "journal_mode"),
       synchronous: sync,
       foreignKeys: one("PRAGMA foreign_keys").foreign_keys === 1,

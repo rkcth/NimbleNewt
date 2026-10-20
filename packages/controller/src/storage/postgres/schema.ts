@@ -1,22 +1,16 @@
-/**
- * The PostgreSQL schema of the controller store, layout 1, created inside a dedicated schema (default `nimblenewt`). The same
- * promises as the SQLite layout, enforced by the database as well: unique operation, delivery, effect and timer IDs are
- * primary keys; sequence numbers are unique; states are checked. Every text column that is compared or ordered uses the
- * binary `"C"` collation, so ordering is by code point whatever the server's locale. Bodies are canonical JSON stored as
- * `text` (not `json`/`jsonb`) so the text and the request hash round-trip byte for byte. A journalled migration runner replaces
- * this single layout in card F04: it must take `schema_info` over with its own journal so interrupted migrations are detectable.
- */
-export const SCHEMA_VERSION = 1;
+import { assertValidMigrations, type Migration } from "../migrations.js";
 
+/**
+ * The PostgreSQL schema of the controller store as an ordered list of journaled migrations (see `../migrations.ts` for the rules),
+ * created inside a dedicated schema (default `nimblenewt`). Migration 1 creates the first layout, with the same promises as the SQLite
+ * layout, enforced by the database as well: unique operation, delivery, effect and timer IDs are primary keys; sequence numbers are
+ * unique; states are checked. Every text column that is compared or ordered uses the binary `"C"` collation, so ordering is by code
+ * point whatever the server's locale. Bodies are canonical JSON stored as `text` (not `json`/`jsonb`) so the text and the request hash
+ * round-trip byte for byte.
+ */
 const T = 'text COLLATE "C"';
 
-export const SCHEMA_SQL = `
-CREATE TABLE schema_info (
-  singleton integer PRIMARY KEY CHECK (singleton = 1),
-  version integer NOT NULL
-);
-INSERT INTO schema_info (singleton, version) VALUES (1, ${SCHEMA_VERSION});
-
+const INITIAL_SQL = `
 CREATE TABLE state (
   singleton integer PRIMARY KEY CHECK (singleton = 1),
   epoch bigint NOT NULL CHECK (epoch >= 0),
@@ -110,3 +104,23 @@ CREATE TABLE timers (
 );
 CREATE INDEX timers_open ON timers (due_at, timer_id) WHERE state IN ('pending', 'claimed');
 `;
+
+/** The journal of applied migrations. Created by the runner itself before any migration runs; not part of migration 1. */
+export const JOURNAL_SQL = `CREATE TABLE IF NOT EXISTS schema_migrations (
+  version integer PRIMARY KEY CHECK (version >= 1),
+  name ${T} NOT NULL,
+  checksum ${T} NOT NULL,
+  state ${T} NOT NULL CHECK (state IN ('running', 'done')),
+  started_at ${T} NOT NULL,
+  finished_at ${T}
+)`;
+
+/** The statements of a SQL script, one per entry (the script has no semicolons inside strings). */
+const split = (script: string): string[] => script.split(/;\s*\n/).map((statement) => statement.trim().replace(/;$/, "")).filter((statement) => statement !== "");
+
+/** The migrations this version of NimbleNewt applies to a PostgreSQL controller database. */
+export const MIGRATIONS: readonly Migration[] = [{ version: 1, name: "initial_layout", statements: split(INITIAL_SQL) }];
+assertValidMigrations(MIGRATIONS);
+
+/** The newest layout this version knows. */
+export const LATEST_VERSION = MIGRATIONS.length;

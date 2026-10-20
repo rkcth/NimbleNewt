@@ -1,0 +1,281 @@
+{
+  "ddl": [
+    "CREATE TABLE IF NOT EXISTS schema_migrations (\n  version integer PRIMARY KEY CHECK (version >= 1),\n  name text COLLATE \"C\" NOT NULL,\n  checksum text COLLATE \"C\" NOT NULL,\n  state text COLLATE \"C\" NOT NULL CHECK (state IN ('running', 'done')),\n  started_at text COLLATE \"C\" NOT NULL,\n  finished_at text COLLATE \"C\"\n)",
+    "CREATE TABLE state (\n  singleton integer PRIMARY KEY CHECK (singleton = 1),\n  epoch bigint NOT NULL CHECK (epoch >= 0),\n  holder text COLLATE \"C\"\n)",
+    "INSERT INTO state (singleton, epoch, holder) VALUES (1, 0, NULL)",
+    "CREATE TABLE counters (\n  singleton integer PRIMARY KEY CHECK (singleton = 1),\n  audit_seq bigint NOT NULL CHECK (audit_seq >= 0),\n  delivery_seq bigint NOT NULL CHECK (delivery_seq >= 0)\n)",
+    "INSERT INTO counters (singleton, audit_seq, delivery_seq) VALUES (1, 0, 0)",
+    "CREATE TABLE aggregates (\n  kind text COLLATE \"C\" NOT NULL,\n  id text COLLATE \"C\" NOT NULL,\n  revision bigint NOT NULL CHECK (revision >= 1),\n  body text COLLATE \"C\" NOT NULL,\n  created_at text COLLATE \"C\" NOT NULL,\n  updated_at text COLLATE \"C\" NOT NULL,\n  PRIMARY KEY (kind, id)\n)",
+    "CREATE TABLE operations (\n  operation_id text COLLATE \"C\" PRIMARY KEY,\n  request_hash text COLLATE \"C\" NOT NULL,\n  actor text COLLATE \"C\" NOT NULL,\n  correlation_id text COLLATE \"C\" NOT NULL,\n  at text COLLATE \"C\" NOT NULL,\n  result text COLLATE \"C\" NOT NULL\n)",
+    "CREATE TABLE audit (\n  seq bigint PRIMARY KEY,\n  operation_id text COLLATE \"C\" NOT NULL REFERENCES operations (operation_id),\n  correlation_id text COLLATE \"C\" NOT NULL,\n  actor text COLLATE \"C\" NOT NULL,\n  at text COLLATE \"C\" NOT NULL,\n  type text COLLATE \"C\" NOT NULL,\n  subject_kind text COLLATE \"C\",\n  subject_id text COLLATE \"C\",\n  detail text COLLATE \"C\" NOT NULL\n)",
+    "CREATE TABLE deliveries (\n  delivery_id text COLLATE \"C\" PRIMARY KEY,\n  seq bigint NOT NULL UNIQUE,\n  destination text COLLATE \"C\" NOT NULL,\n  ordering_key text COLLATE \"C\",\n  priority integer NOT NULL CHECK (priority BETWEEN 0 AND 9),\n  aggregate_kind text COLLATE \"C\" NOT NULL,\n  aggregate_id text COLLATE \"C\" NOT NULL,\n  aggregate_revision bigint NOT NULL,\n  payload text COLLATE \"C\" NOT NULL,\n  state text COLLATE \"C\" NOT NULL CHECK (state IN ('pending', 'claimed', 'delivered')),\n  attempts integer NOT NULL CHECK (attempts >= 0),\n  next_attempt_at text COLLATE \"C\" NOT NULL,\n  claimed_until text COLLATE \"C\",\n  token text COLLATE \"C\",\n  last_error text COLLATE \"C\",\n  receipt text COLLATE \"C\",\n  delivered_at text COLLATE \"C\"\n)",
+    "CREATE INDEX deliveries_open ON deliveries (destination, next_attempt_at, priority DESC, seq) WHERE state <> 'delivered'",
+    "CREATE INDEX deliveries_open_key ON deliveries (destination, ordering_key, seq) WHERE state <> 'delivered' AND ordering_key IS NOT NULL",
+    "CREATE TABLE effects (\n  effect_id text COLLATE \"C\" PRIMARY KEY,\n  operation_id text COLLATE \"C\" NOT NULL REFERENCES operations (operation_id),\n  attempt_id text COLLATE \"C\",\n  target text COLLATE \"C\" NOT NULL,\n  input_digest text COLLATE \"C\" NOT NULL,\n  reconciliation_handle text COLLATE \"C\",\n  status text COLLATE \"C\" NOT NULL CHECK (status IN ('intended', 'uncertain', 'confirmed', 'failed')),\n  evidence text COLLATE \"C\",\n  created_at text COLLATE \"C\" NOT NULL,\n  updated_at text COLLATE \"C\" NOT NULL\n)",
+    "CREATE TABLE timers (\n  timer_id text COLLATE \"C\" PRIMARY KEY,\n  due_at text COLLATE \"C\" NOT NULL,\n  aggregate_kind text COLLATE \"C\",\n  aggregate_id text COLLATE \"C\",\n  payload text COLLATE \"C\" NOT NULL,\n  state text COLLATE \"C\" NOT NULL CHECK (state IN ('pending', 'claimed', 'completed', 'cancelled')),\n  attempts integer NOT NULL CHECK (attempts >= 0),\n  claimed_until text COLLATE \"C\",\n  token text COLLATE \"C\"\n)",
+    "CREATE INDEX timers_open ON timers (due_at, timer_id) WHERE state IN ('pending', 'claimed')"
+  ],
+  "rows": {
+    "state": [
+      {
+        "singleton": 1,
+        "epoch": "1",
+        "holder": "controller"
+      }
+    ],
+    "counters": [
+      {
+        "singleton": 1,
+        "audit_seq": "4",
+        "delivery_seq": "4"
+      }
+    ],
+    "operations": [
+      {
+        "operation_id": "rich",
+        "request_hash": "ef410a2885d2c0d3932ef3b30b20b5a9f2df7943c7d587902797b7930e25e614",
+        "actor": "handler",
+        "correlation_id": "corr-rich",
+        "at": "2026-10-19T12:05:00.000Z",
+        "result": "{\"auditSeqs\":[2,3,4],\"epoch\":1,\"operationId\":\"rich\",\"replayed\":false,\"revisions\":[{\"ref\":{\"id\":\"t1\",\"kind\":\"item\"},\"revision\":2},{\"ref\":{\"id\":\"t2\",\"kind\":\"item\"},\"revision\":1},{\"ref\":{\"id\":\"g1\",\"kind\":\"grp\"},\"revision\":1}]}"
+      },
+      {
+        "operation_id": "seed-op",
+        "request_hash": "7f002854d850dcb5557b0c1c42102d8dac08eb5755ad818b6b9eb7b2706c3151",
+        "actor": "seeder",
+        "correlation_id": "seed",
+        "at": "2026-10-19T12:00:00.000Z",
+        "result": "{\"auditSeqs\":[1],\"epoch\":1,\"operationId\":\"seed-op\",\"replayed\":false,\"revisions\":[{\"ref\":{\"id\":\"t1\",\"kind\":\"item\"},\"revision\":1},{\"ref\":{\"id\":\"t3\",\"kind\":\"item\"},\"revision\":1},{\"ref\":{\"id\":\"g1\",\"kind\":\"grp\"},\"revision\":1}]}"
+      }
+    ],
+    "aggregates": [
+      {
+        "kind": "grp",
+        "id": "g1",
+        "revision": "1",
+        "body": "{}",
+        "created_at": "2026-10-19T12:00:00.000Z",
+        "updated_at": "2026-10-19T12:00:00.000Z"
+      },
+      {
+        "kind": "item",
+        "id": "t3",
+        "revision": "1",
+        "body": "{}",
+        "created_at": "2026-10-19T12:00:00.000Z",
+        "updated_at": "2026-10-19T12:00:00.000Z"
+      },
+      {
+        "kind": "item",
+        "id": "t1",
+        "revision": "2",
+        "body": "{\"state\":\"done\"}",
+        "created_at": "2026-10-19T12:00:00.000Z",
+        "updated_at": "2026-10-19T12:05:00.000Z"
+      },
+      {
+        "kind": "item",
+        "id": "t2",
+        "revision": "1",
+        "body": "{\"state\":\"new\"}",
+        "created_at": "2026-10-19T12:05:00.000Z",
+        "updated_at": "2026-10-19T12:05:00.000Z"
+      }
+    ],
+    "audit": [
+      {
+        "seq": "1",
+        "operation_id": "seed-op",
+        "correlation_id": "seed",
+        "actor": "seeder",
+        "at": "2026-10-19T12:00:00.000Z",
+        "type": "seed",
+        "subject_kind": null,
+        "subject_id": null,
+        "detail": "{}"
+      },
+      {
+        "seq": "2",
+        "operation_id": "rich",
+        "correlation_id": "corr-rich",
+        "actor": "handler",
+        "at": "2026-10-19T12:05:00.000Z",
+        "type": "task.done",
+        "subject_kind": "item",
+        "subject_id": "t1",
+        "detail": "{\"by\":\"handler\"}"
+      },
+      {
+        "seq": "3",
+        "operation_id": "rich",
+        "correlation_id": "corr-rich",
+        "actor": "handler",
+        "at": "2026-10-19T12:05:00.000Z",
+        "type": "task.created",
+        "subject_kind": "item",
+        "subject_id": "t2",
+        "detail": "{}"
+      },
+      {
+        "seq": "4",
+        "operation_id": "rich",
+        "correlation_id": "corr-rich",
+        "actor": "handler",
+        "at": "2026-10-19T12:05:00.000Z",
+        "type": "effect.settled",
+        "subject_kind": "effect",
+        "subject_id": "e0",
+        "detail": "{\"outcome\":\"confirmed\",\"previous\":\"intended\"}"
+      }
+    ],
+    "deliveries": [
+      {
+        "delivery_id": "c1",
+        "seq": "2",
+        "destination": "z",
+        "ordering_key": null,
+        "priority": 5,
+        "aggregate_kind": "item",
+        "aggregate_id": "t3",
+        "aggregate_revision": "1",
+        "payload": "{\"n\":0}",
+        "state": "pending",
+        "attempts": 0,
+        "next_attempt_at": "2026-10-19T12:00:00.000Z",
+        "claimed_until": null,
+        "token": null,
+        "last_error": null,
+        "receipt": null,
+        "delivered_at": null
+      },
+      {
+        "delivery_id": "d0",
+        "seq": "1",
+        "destination": "x",
+        "ordering_key": "k1",
+        "priority": 5,
+        "aggregate_kind": "item",
+        "aggregate_id": "t1",
+        "aggregate_revision": "1",
+        "payload": "{\"n\":0}",
+        "state": "delivered",
+        "attempts": 1,
+        "next_attempt_at": "2026-10-19T12:00:00.000Z",
+        "claimed_until": null,
+        "token": "d0#1",
+        "last_error": null,
+        "receipt": "{\"ok\":true}",
+        "delivered_at": "2026-10-19T12:05:00.000Z"
+      },
+      {
+        "delivery_id": "n1",
+        "seq": "3",
+        "destination": "x",
+        "ordering_key": "k1",
+        "priority": 5,
+        "aggregate_kind": "item",
+        "aggregate_id": "t1",
+        "aggregate_revision": "2",
+        "payload": "{\"n\":1}",
+        "state": "pending",
+        "attempts": 0,
+        "next_attempt_at": "2026-10-19T12:05:00.000Z",
+        "claimed_until": null,
+        "token": null,
+        "last_error": null,
+        "receipt": null,
+        "delivered_at": null
+      },
+      {
+        "delivery_id": "n2",
+        "seq": "4",
+        "destination": "y",
+        "ordering_key": null,
+        "priority": 9,
+        "aggregate_kind": "item",
+        "aggregate_id": "t2",
+        "aggregate_revision": "1",
+        "payload": "{\"n\":2}",
+        "state": "pending",
+        "attempts": 0,
+        "next_attempt_at": "2026-10-19T12:05:00.000Z",
+        "claimed_until": null,
+        "token": null,
+        "last_error": null,
+        "receipt": null,
+        "delivered_at": null
+      }
+    ],
+    "effects": [
+      {
+        "effect_id": "e0",
+        "operation_id": "seed-op",
+        "attempt_id": null,
+        "target": "repo:main",
+        "input_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+        "reconciliation_handle": null,
+        "status": "confirmed",
+        "evidence": "{\"sha\":\"abc\"}",
+        "created_at": "2026-10-19T12:00:00.000Z",
+        "updated_at": "2026-10-19T12:05:00.000Z"
+      },
+      {
+        "effect_id": "e1",
+        "operation_id": "rich",
+        "attempt_id": "a1",
+        "target": "repo:main",
+        "input_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+        "reconciliation_handle": "h1",
+        "status": "intended",
+        "evidence": null,
+        "created_at": "2026-10-19T12:05:00.000Z",
+        "updated_at": "2026-10-19T12:05:00.000Z"
+      }
+    ],
+    "timers": [
+      {
+        "timer_id": "tm0",
+        "due_at": "2026-10-19T12:00:00.000Z",
+        "aggregate_kind": null,
+        "aggregate_id": null,
+        "payload": "{}",
+        "state": "completed",
+        "attempts": 1,
+        "claimed_until": null,
+        "token": "tm0#1"
+      },
+      {
+        "timer_id": "tm1",
+        "due_at": "2026-10-19T12:00:00.000Z",
+        "aggregate_kind": null,
+        "aggregate_id": null,
+        "payload": "{}",
+        "state": "cancelled",
+        "attempts": 0,
+        "claimed_until": null,
+        "token": null
+      },
+      {
+        "timer_id": "tm9",
+        "due_at": "2026-10-19T13:00:00.000Z",
+        "aggregate_kind": "item",
+        "aggregate_id": "t2",
+        "payload": "{\"kind\":\"deadline\"}",
+        "state": "pending",
+        "attempts": 0,
+        "claimed_until": null,
+        "token": null
+      }
+    ],
+    "schema_migrations": [
+      {
+        "version": 1,
+        "name": "initial_layout",
+        "checksum": "55f32a795fc7a54ff6f2743f0749b459226247e2d3304f00679b44a887e862f4",
+        "state": "done",
+        "started_at": "2026-10-20T04:34:00.818Z",
+        "finished_at": "2026-10-20T04:34:00.818Z"
+      }
+    ]
+  }
+}
