@@ -33,3 +33,13 @@ export class ConversationBusyError extends PiAdapterError {
     super(`conversation ${conversationId} is busy; the request was not admitted`);
   }
 }
+
+/** The conversation has no completed turn to branch from yet. */
+export class NoBranchPointError extends PiAdapterError {
+  override readonly name = "NoBranchPointError";
+}
+
+/** The requested branch point is not a completed-turn boundary of this conversation. */
+export class InvalidBranchPointError extends PiAdapterError {
+  override readonly name = "InvalidBranchPointError";
+}

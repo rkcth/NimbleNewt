@@ -57,7 +57,28 @@ export type SemanticResult =
 /** What to do with an input that arrives while the conversation is already working. */
 export type WhenBusy = "followUp" | "steer" | "reject";
 
+/** Where a selected update came from, kept as provenance on the entry it creates. */
+export interface UpdateSource {
+  readonly conversationId: number;
+  readonly entryId: number;
+}
+
 /** Requests an adapter accepts. */
 export type AdapterRequest =
   | { readonly kind: "input"; readonly requestId: RequestId; readonly content: string; readonly whenBusy?: WhenBusy }
+  /**
+   * A deliberately selected update to a task's context (for example a decision made in an inquiry). It is placed in the
+   * transcript as its own kind of entry, so provenance is visible, and is applied once per request ID.
+   */
+  | { readonly kind: "update"; readonly requestId: RequestId; readonly content: string; readonly source?: UpdateSource; readonly whenBusy?: WhenBusy }
   | { readonly kind: "command"; readonly requestId: RequestId; readonly name: string; readonly args?: { readonly [key: string]: JsonValue } };
+
+/** Create a side conversation (an inquiry branch) from a task's context. Idempotent by request ID. */
+export interface BranchRequest {
+  readonly requestId: RequestId;
+  /**
+   * Entry to branch after. Must be a completed-turn boundary. Defaults to the latest one, resolved when the branch is
+   * first created and then fixed for that request ID.
+   */
+  readonly at?: number;
+}

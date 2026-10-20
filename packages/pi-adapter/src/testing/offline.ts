@@ -15,9 +15,12 @@ export interface OfflineModels {
 }
 
 /** A scripted model provider with no network or credentials. Test processes also run under scripts/offline-guard.mjs. */
-export function createOfflineModels(): OfflineModels {
+export function createOfflineModels(options: { readonly contextWindow?: number } = {}): OfflineModels {
   const models = createModels();
-  const faux = fauxProvider({ provider: OFFLINE_PROVIDER, models: [{ id: OFFLINE_MODEL }] });
+  const faux = fauxProvider({
+    provider: OFFLINE_PROVIDER,
+    models: [{ id: OFFLINE_MODEL, ...(options.contextWindow === undefined ? {} : { contextWindow: options.contextWindow }) }],
+  });
   models.setProvider(faux.provider);
   return { models, faux };
 }

@@ -349,3 +349,11 @@ test("a steered request shares the run but each tool call is counted once, for t
   assert.deepEqual([ra.status, text(ra), ra.toolCalls.map((c) => c.callId)], ["completed", "final", ["c1"]]);
   assert.deepEqual([rb.status, text(rb), rb.toolCalls.map((c) => c.callId)], ["completed", "final", ["c2"]]);
 });
+
+test("recorded(), lookup() and a branch lookup work on a conversation that has never recorded anything", async () => {
+  const { adapter } = await open();
+  const fresh = adapter.root();
+  assert.equal(await fresh.recorded(requestId("none")), undefined);
+  assert.equal(await fresh.lookup(requestId("none")), undefined);
+  assert.deepEqual(await fresh.transcript(), []);
+});

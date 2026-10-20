@@ -1,12 +1,13 @@
-import type { AdapterRequest, RequestId, SemanticResult, ToolCallOutcome } from "@nimblenewt/contracts";
+import type { AdapterRequest, BranchRequest, RequestId, SemanticResult, ToolCallOutcome } from "@nimblenewt/contracts";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { Models, Static, TSchema } from "@earendil-works/pi-ai";
 import {
   ConversationBusy, Harness, createRegistry, defineDoc, defineExtension, defineTool,
   type Conversation, type SettledSubmissionRecord, type Storage, type Submission,
 } from "@earendil-works/pi-durable";
-import { ConversationBusyError, InvalidToolError, RequestIdConflictError, UnknownCommandError } from "./errors.js";
-import { fingerprintOf, mapReason } from "./results.js";
+import { INPUT_KINDS, turnBoundaries } from "./branches.js";
+import { ConversationBusyError, InvalidBranchPointError, InvalidToolError, NoBranchPointError, RequestIdConflictError, UnknownCommandError } from "./errors.js";
+import { fingerprintOf, fingerprintsMatch, mapReason } from "./results.js";
 import { assertSupportedRuntime, type RuntimeInfo } from "./runtime.js";
 
 /** Commands the adapter accepts. None exist yet; F06 adds branch, checkpoint and abort commands. */
@@ -62,9 +63,37 @@ interface RequestRecord {
   fingerprint?: string;
   result?: SemanticResult;
 }
+/** A branch created for a request ID: the child conversation and the entry it forked after. */
+interface BranchRecord {
+  childId: number;
+  forkedAt: number;
+}
 interface RequestsState {
   requests: Record<string, RequestRecord>;
+  branches?: Record<string, BranchRecord>;
 }
+
+/** One entry of a conversation's history, as the adapter exposes it for inspection. */
+export interface TranscriptEntry {
+  readonly id: number;
+  readonly kind: string;
+  /** Role of the entry's first model message, if it has one. */
+  readonly role: string | undefined;
+  /** Text of that message. */
+  readonly text: string;
+  /** Application data attached to the entry (for example an update's source). */
+  readonly data: unknown;
+}
+
+/** A side conversation created from a task's context. */
+export interface AdapterBranch {
+  readonly conversation: AdapterConversation;
+  /** The parent entry the branch forked after; the branch's context is the parent's as of this entry. */
+  readonly forkedAt: number;
+}
+
+/** Thrown inside the fork's creating commit to roll it back when another call already created this branch. */
+class BranchAlreadyExists extends Error {}
 
 const Requests = defineDoc<RequestsState & Record<string, never>>({
   kind: "nimblenewt.requests",
@@ -122,7 +151,14 @@ export class AdapterConversation {
     let submission: Submission;
     try {
       submission = await this.conversation.submit(
-        { type: "input", content: request.content, requestId: request.requestId, ...(request.whenBusy === undefined ? {} : { whenBusy: request.whenBusy }) },
+        {
+          type: "input",
+          content: request.content,
+          requestId: request.requestId,
+          ...(request.whenBusy === undefined ? {} : { whenBusy: request.whenBusy }),
+          // An update is placed as its own kind of entry, so provenance is in the transcript; the model still sees the text.
+          ...(request.kind === "update" ? { entry: { kind: "nimblenewt.update", data: { source: request.source === undefined ? null : { conversationId: request.source.conversationId, entryId: request.source.entryId } } } } : {}),
+        },
         context,
       );
     } catch (error) {
@@ -134,6 +170,68 @@ export class AdapterConversation {
       throw error;
     }
     return { requestId: request.requestId, submissionId: submission.id, result: () => this.resultOf(request.requestId, submission) };
+  }
+
+  /**
+   * Create a side conversation from this task's context, for an inquiry that must not disturb the task. The branch sees
+   * the parent's history up to a completed-turn boundary (by default the latest), shares nothing afterwards, and leaves
+   * the parent untouched. Idempotent by request ID: repeating the request returns the same branch. A turn still in
+   * progress is not part of the branch, because forking inside it would leave a tool call without its result.
+   */
+  async branch(request: BranchRequest): Promise<AdapterBranch> {
+    const id = request.requestId;
+    const existing = await this.branchRecord(id);
+    if (existing !== undefined) return this.reopenBranch(existing, request);
+
+    const boundaries = turnBoundaries(await this.scan(0, undefined));
+    const at = request.at ?? boundaries.at(-1);
+    if (at === undefined) throw new NoBranchPointError(`conversation ${this.id} has no completed turn to branch from`);
+    if (!boundaries.includes(at)) throw new InvalidBranchPointError(`entry ${at} is not a completed-turn boundary of conversation ${this.id}`);
+    try {
+      const child = await this.conversation.fork(at as never, {
+        ownership: { kind: "ownerless" },
+        // Runs in the fork's creating commit, so the branch and its request record exist together or not at all.
+        init: async (tx, childId) => {
+          const state = (await tx.doc(Requests, this.conversation.id)) as unknown as RequestsState;
+          state.branches ??= {};
+          if (state.branches[id] !== undefined) throw new BranchAlreadyExists();
+          state.branches[id] = { childId: childId as number, forkedAt: at };
+        },
+      }, context);
+      return { conversation: new AdapterConversation(this.harness, child, this.storage), forkedAt: at };
+    } catch (error) {
+      if (!(error instanceof BranchAlreadyExists)) throw error;
+      const winner = await this.branchRecord(id);
+      if (winner === undefined) throw error;
+      return this.reopenBranch(winner, request);
+    }
+  }
+
+  private async branchRecord(id: RequestId): Promise<BranchRecord | undefined> {
+    return (await this.state()).branches?.[id];
+  }
+
+  private async reopenBranch(record: BranchRecord, request: BranchRequest): Promise<AdapterBranch> {
+    if (request.at !== undefined && request.at !== record.forkedAt) {
+      throw new RequestIdConflictError(`request ID "${request.requestId}" already created a branch at entry ${record.forkedAt}, not ${request.at}`);
+    }
+    const child = await this.harness.conversation(record.childId as never, context);
+    if (child === undefined) throw new InvalidBranchPointError(`branch conversation ${record.childId} no longer exists`);
+    return { conversation: new AdapterConversation(this.harness, child, this.storage), forkedAt: record.forkedAt };
+  }
+
+  /**
+   * The conversation's full history in order, including entries compacted out of the model's view and entries inherited
+   * from a parent up to the fork point. Read-only: it does not start the scheduler.
+   */
+  async transcript(): Promise<TranscriptEntry[]> {
+    return (await this.scan(0, undefined)).map((entry) => ({
+      id: entry.id,
+      kind: entry.kind,
+      role: (firstMessage(entry) as { role?: string }).role,
+      text: textOf(firstMessage(entry).content),
+      data: entry.data,
+    }));
   }
 
   /** The recorded result of a request that has already settled and been read; `undefined` otherwise. Never waits. */
@@ -168,9 +266,14 @@ export class AdapterConversation {
     await this.harness.waitForTask(task, context);
   }
 
+  /** The adapter's document for this conversation; empty when nothing has been recorded yet. */
+  private async state(): Promise<RequestsState> {
+    const state = (await this.harness.snapshot(Requests, this.conversation.id, context)) as unknown as RequestsState | undefined;
+    return state ?? { requests: {} };
+  }
+
   private async record(id: RequestId): Promise<RequestRecord | undefined> {
-    const state = (await this.harness.snapshot(Requests, this.conversation.id, context)) as unknown as RequestsState;
-    return state.requests[id];
+    return (await this.state()).requests[id];
   }
 
   /** Records the payload fingerprint for a request ID; returns whether this call created the record. */
@@ -181,7 +284,7 @@ export class AdapterConversation {
       const state = (await tx.doc(Requests, this.conversation.id)) as unknown as RequestsState;
       const existing = state.requests[id];
       if (existing === undefined) { state.requests[id] = { fingerprint }; created = true; }
-      else if (existing.fingerprint !== undefined && existing.fingerprint !== fingerprint) conflict = true;
+      else if (!fingerprintsMatch(existing.fingerprint, fingerprint)) conflict = true;
     }, context);
     if (conflict) throw new RequestIdConflictError(`request ID "${id}" was already used with different content`);
     return created;
@@ -232,7 +335,7 @@ export class AdapterConversation {
     const ownCalls = async (): Promise<ToolCallOutcome[]> => {
       if (settled.entry === undefined) return [];
       const last = settled.status === "done" ? (settled.answer as number) - 1 : undefined;
-      const entries = await this.scan((settled.entry as number) + 1, last, (e) => e.kind === "pi.user");
+      const entries = await this.scan((settled.entry as number) + 1, last, (e) => INPUT_KINDS.has(e.kind));
       return entries.filter((e) => e.kind === "pi.tool-result").map(toolOutcome);
     };
     const toolCalls = await ownCalls();
