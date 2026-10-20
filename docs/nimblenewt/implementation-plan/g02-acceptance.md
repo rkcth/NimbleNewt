@@ -60,6 +60,13 @@ Known limits that are not capabilities: the digest in a checkpoint detects accid
 
 ## QA checklist for the Mac, Windows and Paperclip runs
 
+### Automated QA run (no Paperclip needed)
+
+The owner chose to keep this QA out of Paperclip for now. The `QA` workflow (`.github/workflows/qa.yml`) is started by hand from the Actions tab ("Run workflow", with the number of runs, default 5). On fresh ubuntu, macOS and Windows GitHub-hosted runners × Node 22.19.0 and 24.21.0 it checks out into a path containing a space (`nn check`), runs `npm ci`, and runs `scripts/qa.mjs`, which repeats `npm test` and records, per machine: OS, architecture, Node and npm versions, commit, whether the working tree was clean, the totals of every run (pass, fail, cancelled), the gate messages, the platform line of the "G02 environment" test, whether `package-lock.json` or any tracked file changed, and whether every run on the machine reported the same number of tests and packages (a package silently not running fails the record). The full logs, `qa-evidence.json` and `qa-summary.md` are uploaded as an artifact (kept 90 days) and the summary is shown on the run page. The same script runs by hand on any machine: `npm ci` then `node scripts/qa.mjs --runs=5`.
+
+What this covers of the checklist below: steps 2 (fresh checkout, path with a space), 3 (install and run, totals), 4 (five repeats) and 6 (failure tails are in the record). What it cannot cover: step 5 (the runners are virtual machines, with whatever antivirus the runner image has), real hardware, and anything that needs a person. The sign-off boxes below therefore stay unticked until the owner has seen a passing record and decides; a passing automated run is evidence for that decision, not the decision. Running the script by hand on the owner's own Mac and Windows machines is what would cover real hardware.
+
+
 A **Paperclip run** is the same checklist carried out by a Paperclip agent on a machine it controls, with its results posted as a comment on the Paperclip issue for this card (G02 is a child of N03, **AII-253**) and any failure raised as a typed blocker on that issue. Paperclip imported the task plan as unassigned Backlog under N00 (AII-250), which stays closed until the owner opens it; a Paperclip QA run therefore needs the owner to assign it explicitly.
 
 Goal: confirm the suite on real machines and report anything CI cannot show. CI already runs the same commands on hosted runners, so the value here is real hardware, real antivirus/filesystem behaviour and a fresh checkout.

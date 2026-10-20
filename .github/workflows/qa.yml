@@ -1,0 +1,55 @@
+name: QA
+
+# Independent QA run, started by hand from the Actions tab (never by a push). On each operating system it takes a fresh checkout
+# in a path that contains a space, installs from the lockfile, and repeats `npm test` several times (scripts/qa.mjs), then
+# uploads the evidence record. It is the scripted form of the G02 QA checklist; it is evidence for the owner, not an acceptance.
+# Runners are GitHub-hosted virtual machines, so this does not replace a run on the owner's own hardware.
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: Consecutive `npm test` runs per machine (1 to 20)
+        default: "5"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  qa:
+    name: QA ${{ matrix.os }} / node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: ["22.19.0", "24.21.0"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: nn check
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+      # Install scripts are disabled by .npmrc; the lockfile is authoritative.
+      - run: npm ci
+        working-directory: nn check
+      - name: Repeat npm test and record evidence
+        working-directory: nn check
+        shell: bash
+        env:
+          QA_RUNS: ${{ inputs.runs }}
+        run: node scripts/qa.mjs "--runs=$QA_RUNS" "--out=$RUNNER_TEMP/qa-output"
+      - name: Show the summary
+        if: always()
+        shell: bash
+        run: if [ -f "$RUNNER_TEMP/qa-output/qa-summary.md" ]; then cat "$RUNNER_TEMP/qa-output/qa-summary.md" >> "$GITHUB_STEP_SUMMARY"; else echo "No evidence was produced; see the job log." >> "$GITHUB_STEP_SUMMARY"; fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: qa-evidence-${{ matrix.os }}-node${{ matrix.node }}
+          path: ${{ runner.temp }}/qa-output
+          if-no-files-found: warn
+          retention-days: 90
