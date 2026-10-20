@@ -52,8 +52,8 @@ test("listBranches shows a conversation's branches in creation order with their 
   const second = await parent.branch({ requestId: requestId("b-2") });
   await parent.discardBranch(requestId("b-1"));
   assert.deepEqual(await parent.listBranches(), [
-    { requestId: "b-1", conversationId: first.conversation.id, forkedAt: first.forkedAt, discarded: true },
-    { requestId: "b-2", conversationId: second.conversation.id, forkedAt: second.forkedAt, discarded: false },
+    { requestId: "b-1", kind: "inquiry", conversationId: first.conversation.id, forkedAt: first.forkedAt, discarded: true },
+    { requestId: "b-2", kind: "inquiry", conversationId: second.conversation.id, forkedAt: second.forkedAt, discarded: false },
   ]);
 });
 
@@ -146,7 +146,7 @@ test("a submission already in flight when a branch is discarded never runs in it
     storage: new MemoryStorage(), models: offline.models, model: OFFLINE_MODEL_REF, tools: [counted],
     // Holds the next submission after its request ID is claimed and before Pi has seen it: the window in which a discard
     // (mark, then abort) can complete entirely, so that Pi has nothing to abort and its commit queue cannot order the two.
-    beforeAdmission: async () => { const wait = holdNext; holdNext = 0; if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait)); },
+    testHooks: { beforeAdmission: async () => { const wait = holdNext; holdNext = 0; if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait)); } },
   });
   cleanup.push(() => adapter.close());
   offline.faux.setResponses([fauxAssistantMessage("task answer")]);
@@ -184,4 +184,19 @@ test("discarding a branch discards its own branches too, and aborts their work",
   assert.equal((await running.result()).status, "unanswered");
   assert.deepEqual((await child.conversation.listBranches()).map((b) => b.discarded), [true]);
   await assert.rejects(grandchild.conversation.submit(input("grand-more", "again")), BranchDiscardedError);
+});
+
+test("restored checkpoints and inquiry branches are limited separately", async () => {
+  const { adapter } = await finishedTask({ maxActiveBranches: 1 });
+  const parent = adapter.root();
+  const checkpoint = await parent.checkpoint();
+  await parent.branch({ requestId: requestId("inq-1") });
+  await assert.rejects(parent.branch({ requestId: requestId("inq-2") }), TooManyBranchesError);
+  // The inquiry does not use up the restore slot, and vice versa.
+  const restored = await adapter.restoreCheckpoint(checkpoint, requestId("rest-1"));
+  assert.equal(restored.discarded, false);
+  await assert.rejects(adapter.restoreCheckpoint(checkpoint, requestId("rest-2")), TooManyBranchesError);
+  assert.deepEqual((await parent.listBranches()).map((b) => [b.requestId, b.kind]), [["inq-1", "inquiry"], ["rest-1", "restore"]]);
+  await parent.discardBranch(requestId("rest-1"));
+  assert.equal((await adapter.restoreCheckpoint(checkpoint, requestId("rest-2"))).discarded, false);
 });

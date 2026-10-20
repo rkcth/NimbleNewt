@@ -136,6 +136,8 @@ export interface InterruptedWork {
 export interface BranchInfo {
   /** The request ID the branch was created under. */
   readonly requestId: RequestId;
+  /** Why it exists: a side inquiry, or a restored checkpoint. The two are limited separately. */
+  readonly kind: "inquiry" | "restore";
   readonly conversationId: number;
   /** The parent entry the branch forked after. */
   readonly forkedAt: number;
@@ -158,7 +160,10 @@ export interface Checkpoint {
   readonly digest: string;
   /** Exact version of the agent runtime the history was written by. */
   readonly runtimeVersion: string;
-  /** Version of these shared contracts when the checkpoint was taken. */
+  /**
+   * Version of these shared contracts when the checkpoint was taken. Informational: validity depends on the record layout
+   * (`format`), the digest algorithm and the runtime's history compatibility, not on unrelated contract changes.
+   */
   readonly contractsVersion: number;
 }
 
@@ -173,3 +178,90 @@ export type CheckpointRejection =
 export type CheckpointVerdict =
   | { readonly valid: true }
   | { readonly valid: false; readonly reason: CheckpointRejection; readonly detail: string };
+
+/** One entry of a conversation's history, as exposed for inspection. */
+export interface TranscriptEntry {
+  readonly id: number;
+  readonly kind: string;
+  /** Role of the entry's first model message, if it has one. */
+  readonly role: string | undefined;
+  /** Text of that message. */
+  readonly text: string;
+  /** Why the message ended (assistant messages), for example `stop`, `toolUse` or `aborted`. */
+  readonly stopReason: string | undefined;
+  /** IDs of the tool calls the message makes (assistant messages). */
+  readonly toolCallIds: readonly string[];
+  /** Application data attached to the entry (for example an update's source). */
+  readonly data: unknown;
+}
+
+/** The controller's decision after reviewing interrupted work: one reviewed step, recorded in the audit trail. */
+export interface RecoveryDecision {
+  /** Conversations whose interrupted work is abandoned; everything else resumes. */
+  readonly abandon: readonly number[];
+  /** Why, in the decider's words. Required. */
+  readonly reason: string;
+  /** Who decided (a user, a supervisor agent, a policy name). Required. */
+  readonly decidedBy: string;
+}
+
+/** What happened, for the controller's audit trail. Emitted after the action has taken effect. */
+export type AuditEvent =
+  | { readonly type: "abort"; readonly at: number; readonly conversationId: number; readonly report: AbortReport }
+  | { readonly type: "readmit"; readonly at: number; readonly conversationId: number; readonly requestId: RequestId; readonly newRequestId: RequestId }
+  | { readonly type: "discard_branch"; readonly at: number; readonly conversationId: number; readonly branchRequestId: RequestId; readonly report: AbortReport }
+  | { readonly type: "restore_checkpoint"; readonly at: number; readonly checkpoint: Checkpoint; readonly branchRequestId: RequestId; readonly newConversationId: number }
+  | { readonly type: "recover"; readonly at: number; readonly decision: RecoveryDecision; readonly found: InterruptedWork };
+
+/** An admitted request, as the controller sees it. */
+export interface SubmissionPort {
+  readonly requestId: RequestId;
+  readonly submissionId: number;
+  /** Waits for the request to settle and returns its recorded result. Refused while interrupted work is held. */
+  result(): Promise<SemanticResult>;
+}
+
+/** A side conversation created from a task's context. */
+export interface BranchPort {
+  readonly conversation: ConversationPort;
+  readonly forkedAt: number;
+  readonly discarded: boolean;
+}
+
+/**
+ * Everything a controller may do with one conversation. Harness-agnostic: it names only contract types, so a controller
+ * written against it does not depend on Pi Durable, and a different runtime can implement it.
+ */
+export interface ConversationPort {
+  readonly id: number;
+  submit(request: AdapterRequest): Promise<SubmissionPort>;
+  /** The recorded result of a request that has settled and been read; never waits. */
+  recorded(requestId: RequestId): Promise<SemanticResult | undefined>;
+  /** Read-only status: the result if the request has settled, `undefined` otherwise; never waits, never resumes work. */
+  lookup(requestId: RequestId): Promise<SemanticResult | undefined>;
+  abort(): Promise<AbortReport>;
+  retainedRequests(): Promise<RetainedRequest[]>;
+  readmit(requestId: RequestId, newRequestId: RequestId): Promise<SubmissionPort>;
+  branch(request: BranchRequest): Promise<BranchPort>;
+  listBranches(): Promise<BranchInfo[]>;
+  discardBranch(requestId: RequestId): Promise<AbortReport>;
+  checkpoint(options?: { readonly at?: number }): Promise<Checkpoint>;
+  verifyCheckpoint(checkpoint: Checkpoint): Promise<CheckpointVerdict>;
+  transcript(): Promise<TranscriptEntry[]>;
+}
+
+/** What a controller may do with a runtime as a whole, including recovery after a crash. */
+export interface RuntimePort {
+  root(): ConversationPort;
+  conversation(id: number): Promise<ConversationPort | undefined>;
+  /** Interrupted work found when the runtime opened its storage, per conversation. Read-only. */
+  interrupted(): Promise<InterruptedWork>;
+  /**
+   * The one reviewed recovery step: abandon the listed conversations' interrupted work and resume the rest, recorded as a
+   * single audit event with what was found. Only valid while interrupted work is held.
+   */
+  recover(decision: RecoveryDecision): Promise<void>;
+  verifyCheckpoint(checkpoint: Checkpoint): Promise<CheckpointVerdict>;
+  restoreCheckpoint(checkpoint: Checkpoint, requestId: RequestId): Promise<BranchPort>;
+  close(): Promise<void>;
+}

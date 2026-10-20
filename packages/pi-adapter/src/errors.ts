@@ -98,3 +98,8 @@ export class CheckpointRejectedError extends PiAdapterError {
     super(`checkpoint rejected (${reason}): ${detail}`);
   }
 }
+
+/** A recovery decision cannot be carried out as given (unknown conversation, missing reason or decider). */
+export class InvalidRecoveryError extends PiAdapterError {
+  override readonly name = "InvalidRecoveryError";
+}

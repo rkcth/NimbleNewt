@@ -8,8 +8,8 @@ import { afterEach, test } from "node:test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { openNodeJsonlStorage } from "@earendil-works/pi-durable/storage/jsonl/node";
-import { requestId } from "@nimblenewt/contracts";
-import { InterruptedWorkError, NotHeldError, PiAdapter } from "./index.js";
+import { requestId, type AuditEvent } from "@nimblenewt/contracts";
+import { InterruptedWorkError, InvalidRecoveryError, NotHeldError, PiAdapter } from "./index.js";
 import { twoConversationTools } from "./testing/crash-fixture.js";
 import { OFFLINE_MODEL_REF, createOfflineModels } from "./testing/offline.js";
 
@@ -38,7 +38,7 @@ function interruptedStorage(): { dir: string; ids: { root: number; branch: numbe
   return { dir, ids: JSON.parse(readFileSync(join(dir, "ids.json"), "utf8")) as { root: number; branch: number } };
 }
 
-async function reopen(dir: string, options: { holdInterrupted?: boolean } = {}) {
+async function reopen(dir: string, options: { holdInterrupted?: boolean; audit?: (event: AuditEvent) => void } = {}) {
   const offline = createOfflineModels();
   let modelCalls = 0;
   const seen: string[] = [];
@@ -154,7 +154,7 @@ test("a discarded branch's interrupted work is abandoned automatically on releas
   const { adapter } = await reopen(dir);
 
   // The crash window: the branch was marked discarded, then the process died before its work was aborted.
-  await adapter.root().markBranchDiscarded(requestId("side"));
+  await adapter.root().markBranchDiscardedForTests(requestId("side"));
   const report = await adapter.interrupted();
   assert.deepEqual(report.conversations.map((c) => [c.conversationId, c.discarded]), [[ids.root, false], [ids.branch, true]]);
 
@@ -164,4 +164,32 @@ test("a discarded branch's interrupted work is abandoned automatically on releas
   assert.equal(count(dir, "toolB"), 1, "the discarded branch's interrupted tool ran again");
   const branch = await adapter.conversation(ids.branch);
   await until(async () => (await branch?.lookup(requestId("req-b")))?.status === "unanswered", "the discarded branch's request to settle");
+});
+
+test("recover() is one reviewed step: it validates the decision, abandons, releases, and records what was found", async () => {
+  const { dir, ids } = interruptedStorage();
+  const events: AuditEvent[] = [];
+  const { adapter } = await reopen(dir, { audit: (event) => { events.push(event); } });
+  const decision = { abandon: [ids.root], reason: "the root task was cancelled by the owner", decidedBy: "rob" };
+
+  await assert.rejects(adapter.recover({ ...decision, reason: " " }), InvalidRecoveryError);
+  await assert.rejects(adapter.recover({ ...decision, decidedBy: "" }), InvalidRecoveryError);
+  await assert.rejects(adapter.recover({ ...decision, abandon: [987654] }), InvalidRecoveryError);
+  assert.equal((await adapter.interrupted()).held, true, "a refused decision must change nothing");
+  assert.equal(events.length, 0);
+  await sleep(300);
+  assert.deepEqual([count(dir, "toolA"), count(dir, "toolB")], [1, 1]);
+
+  const found = await adapter.interrupted();
+  await adapter.recover(decision);
+  assert.equal((await adapter.interrupted()).held, false);
+  assert.deepEqual(events.map((e) => e.type), ["recover"]);
+  const event = events[0]!;
+  assert.ok(event.type === "recover");
+  assert.deepEqual([event.decision, event.found], [decision, found]);
+
+  const branch = await adapter.conversation(ids.branch);
+  await until(async () => (await branch?.lookup(requestId("req-b")))?.status === "completed", "the kept conversation to resume");
+  assert.deepEqual([count(dir, "toolA"), count(dir, "toolB")], [1, 2], "only the kept conversation's tool ran again");
+  await assert.rejects(adapter.recover(decision), NotHeldError, "recovery cannot be repeated once the hold is released");
 });

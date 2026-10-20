@@ -82,7 +82,9 @@ test("a checkpoint is rejected, with a reason, when it cannot be trusted", async
   };
   assert.equal(await reasons({ ...afterFirst, format: 2 }), "unsupported_format");
   assert.equal(await reasons({ ...afterFirst, runtimeVersion: "1.2.0" }), "incompatible_runtime");
-  assert.equal(await reasons({ ...afterFirst, contractsVersion: 999 }), "incompatible_runtime");
+  // The contracts version is informational: an unrelated contract change must not invalidate checkpoints.
+  assert.equal(await reasons({ ...afterFirst, contractsVersion: 999 }), "valid");
+  assert.equal(await reasons({ ...afterFirst, digest: afterFirst.digest.replace("v1:", "v2:") }), "unsupported_format");
   assert.equal(await reasons({ ...afterFirst, conversationId: 424242 }), "unknown_conversation");
   assert.equal(await reasons({ ...afterFirst, at: 999999 }), "unknown_entry");
   const userEntry = (await conversation.transcript()).find((e) => e.kind === "pi.user");

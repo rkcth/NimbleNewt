@@ -1,5 +1,5 @@
 import type {
-  AbortReport, AdapterRequest, BranchInfo, BranchRequest, Checkpoint, CheckpointVerdict, InterruptedWork, RequestId, RetainedRequest, SemanticResult, ToolCallOutcome, UpdateSource,
+  AbortReport, AdapterRequest, AuditEvent, BranchInfo, BranchRequest, Checkpoint, CheckpointVerdict, ConversationPort, InterruptedWork, RecoveryDecision, RequestId, RetainedRequest, RuntimePort, SemanticResult, ToolCallOutcome, TranscriptEntry, UpdateSource,
 } from "@nimblenewt/contracts";
 import type { JsonValue } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
@@ -9,10 +9,10 @@ import {
   type Conversation, type SettledSubmissionRecord, type Storage, type Submission, type SubmissionDraft,
 } from "@earendil-works/pi-durable";
 import { startsRequestSegment, turnBoundaries } from "./branches.js";
-import { digestHistory } from "./checkpoints.js";
+import { CHECKPOINT_DIGEST_PREFIX, digestHistory } from "./checkpoints.js";
 import {
   AlreadyReadmittedError, BranchDiscardedError, CheckpointRejectedError, ConversationBusyError, InvalidBranchPointError, InvalidToolError, NoBranchPointError, NotRetainedError,
-  InterruptedWorkError, InvalidReadmissionError, NotHeldError, RequestIdConflictError, TooManyBranchesError, UnknownCommandError,
+  InterruptedWorkError, InvalidReadmissionError, InvalidRecoveryError, NotHeldError, RequestIdConflictError, TooManyBranchesError, UnknownCommandError,
 } from "./errors.js";
 import { fingerprintOf, fingerprintsMatch, mapReason } from "./results.js";
 import { CONTRACTS_VERSION } from "@nimblenewt/contracts";
@@ -49,8 +49,8 @@ export interface PiAdapterOptions {
   /** Pi Durable harness settings, for example compaction thresholds. */
   readonly settings?: NonNullable<Parameters<typeof Harness.open>[1]["settings"]>;
   /**
-   * Most branches (side conversations) a conversation may have open at once; discarded branches do not count.
-   * Default 8. Branches are cheap but each is a full conversation the controller must eventually review or discard.
+   * Most branches (side conversations) of each kind, inquiries and restored checkpoints counted separately, a conversation
+   * may have open at once; discarded branches do not count. Default 8. Branches are cheap but each is a full conversation the controller must eventually review or discard.
    */
   readonly maxActiveBranches?: number;
   /**
@@ -66,11 +66,19 @@ export interface PiAdapterOptions {
    */
   readonly holdInterrupted?: boolean;
   /**
-   * Test seam, not part of the supported API: called for every input submission after its request ID has been claimed and
-   * before it is handed to Pi, so a test can hold a submission in that window deterministically.
+   * Receives an audit event after each controller-reviewed action has taken effect (abort, readmission, discarding a
+   * branch, restoring a checkpoint, recovery). Awaited; if it throws, the error reaches the caller although the action
+   * has already happened, so a controller that must not lose audit records should make its sink durable and retrying.
+   */
+  readonly audit?: (event: AuditEvent) => void | Promise<void>;
+  /**
+   * Test seams, not part of the supported API.
    * @internal
    */
-  readonly beforeAdmission?: (conversationId: number) => Promise<void>;
+  readonly testHooks?: {
+    /** Called for every input submission after its request ID is claimed and before it is handed to Pi. */
+    readonly beforeAdmission?: (conversationId: number) => Promise<void>;
+  };
   /** Receives Pi Durable's non-fatal reports (for example a throwing listener). */
   readonly onReport?: (error: unknown) => void;
   /** Override runtime detection; for tests of the unsupported-runtime path. */
@@ -105,28 +113,14 @@ interface BranchRecord {
   childId: number;
   forkedAt: number;
   discarded?: boolean;
+  /** Absent on records written before restores existed, which are inquiries. */
+  kind?: "inquiry" | "restore";
 }
 interface RequestsState {
   requests: Record<string, RequestRecord>;
   branches?: Record<string, BranchRecord>;
   /** Set on a branch conversation's own document when it has been discarded. */
   discarded?: boolean;
-}
-
-/** One entry of a conversation's history, as the adapter exposes it for inspection. */
-export interface TranscriptEntry {
-  readonly id: number;
-  readonly kind: string;
-  /** Role of the entry's first model message, if it has one. */
-  readonly role: string | undefined;
-  /** Text of that message. */
-  readonly text: string;
-  /** Why the message ended (assistant messages), for example `stop`, `toolUse` or `aborted`. */
-  readonly stopReason: string | undefined;
-  /** IDs of the tool calls the message makes (assistant messages). */
-  readonly toolCallIds: readonly string[];
-  /** Application data attached to the entry (for example an update's source). */
-  readonly data: unknown;
 }
 
 /** A side conversation created from a task's context. */
@@ -239,6 +233,7 @@ interface Shared {
   readonly abortedInputs: "frame" | "keep";
   readonly maxActiveBranches: number;
   readonly beforeAdmission: ((conversationId: number) => Promise<void>) | undefined;
+  readonly audit: ((event: AuditEvent) => void | Promise<void>) | undefined;
   /** Conversations with an abort in progress: new submissions wait for the abort and its framing to finish. */
   readonly aborting: Map<number, Promise<unknown>>;
   /** Submissions in progress per conversation, so a discard can wait for ones that already passed its check. */
@@ -246,12 +241,16 @@ interface Shared {
 }
 
 /** One Pi conversation: the root task conversation now, inquiry branches and task contexts from F06b. */
-export class AdapterConversation {
+export class AdapterConversation implements ConversationPort {
   /** @internal Use `PiAdapter.root()` or `PiAdapter.conversation()`. */
   constructor(private readonly harness: Harness, private readonly conversation: Conversation, private readonly shared: Shared) {}
 
   get id(): number {
     return this.conversation.id;
+  }
+
+  private async emit(event: AuditEvent): Promise<void> {
+    await this.shared.audit?.(event);
   }
 
   /**
@@ -308,7 +307,7 @@ export class AdapterConversation {
     if ((await this.state()).discarded === true) {
       const admitted = await submission.status(context);
       if (admitted.status === "queued") await this.harness.abortSubmission(submission.id, context, this.conversation.id);
-      else if (admitted.status === "placed") await this.abort();
+      else if (admitted.status === "placed") await this.abortQuietly();
       throw new BranchDiscardedError(this.id);
     }
     return { requestId: request.requestId, submissionId: submission.id, result: () => this.resultOf(request.requestId, submission) };
@@ -321,6 +320,11 @@ export class AdapterConversation {
    * progress is not part of the branch, because forking inside it would leave a tool call without its result.
    */
   async branch(request: BranchRequest): Promise<AdapterBranch> {
+    return this.createBranch(request, "inquiry");
+  }
+
+  /** @internal Shared by `branch()` and checkpoint restore, which are limited separately. */
+  async createBranch(request: BranchRequest, kind: "inquiry" | "restore"): Promise<AdapterBranch> {
     const id = request.requestId;
     const existing = await this.branchRecord(id);
     if (existing !== undefined) return this.reopenBranch(existing, request);
@@ -339,9 +343,10 @@ export class AdapterConversation {
           state.branches ??= {};
           if (state.branches[id] !== undefined) throw new BranchAlreadyExists();
           // Counted in the creating commit, so concurrent creators cannot exceed the limit between them.
-          const active = Object.values(state.branches).filter((b) => b.discarded !== true).length;
+          // Inquiries and restored checkpoints are limited separately, so a burst of one cannot starve the other.
+          const active = Object.values(state.branches).filter((b) => b.discarded !== true && (b.kind ?? "inquiry") === kind).length;
           if (active >= this.shared.maxActiveBranches) throw new BranchLimitReached();
-          state.branches[id] = { childId: childId as number, forkedAt: at };
+          state.branches[id] = { childId: childId as number, forkedAt: at, kind };
         },
       }, context);
       return { conversation: new AdapterConversation(this.harness, child, this.shared), forkedAt: at, discarded: false };
@@ -358,7 +363,7 @@ export class AdapterConversation {
   async listBranches(): Promise<BranchInfo[]> {
     const branches = (await this.state()).branches ?? {};
     return Object.entries(branches)
-      .map(([requestId, record]) => ({ requestId: requestId as RequestId, conversationId: record.childId, forkedAt: record.forkedAt, discarded: record.discarded === true }))
+      .map(([requestId, record]) => ({ requestId: requestId as RequestId, kind: record.kind ?? "inquiry", conversationId: record.childId, forkedAt: record.forkedAt, discarded: record.discarded === true }))
       .sort((a, b) => a.conversationId - b.conversationId);
   }
 
@@ -369,7 +374,7 @@ export class AdapterConversation {
    */
   async discardBranch(requestId: RequestId): Promise<AbortReport> {
     await this.shared.hold.assertRunnable();
-    const record = await this.markBranchDiscarded(requestId);
+    const record = await this.markBranch(requestId);
     // A submission that passed its "discarded" check before the mark may still be being admitted; let it finish so the
     // abort below sees it and stops it. (Submissions from other adapter instances are withdrawn by the re-check after
     // admission instead.)
@@ -377,7 +382,7 @@ export class AdapterConversation {
     const childConversation = await this.harness.conversation(record.childId as never, context);
     if (childConversation === undefined) return { aborted: [], retained: [] };
     const child = new AdapterConversation(this.harness, childConversation, this.shared);
-    const report = await child.abort();
+    const report = await child.abortQuietly();
     // Discarding closes the whole subtree: the branch's own branches are discarded too.
     const aborted = [...report.aborted];
     const retained = [...report.retained];
@@ -387,14 +392,18 @@ export class AdapterConversation {
       aborted.push(...nestedReport.aborted);
       retained.push(...nestedReport.retained);
     }
-    return { aborted, retained };
+    const merged = { aborted, retained };
+    await this.emit({ type: "discard_branch", at: Date.now(), conversationId: this.id, branchRequestId: requestId, report: merged });
+    return merged;
   }
 
-  /**
-   * Marks a branch discarded in one commit (the parent's record and the branch's own document); nothing else changes.
-   * @internal Exposed for tests of the crash window between marking and aborting.
-   */
-  async markBranchDiscarded(requestId: RequestId): Promise<BranchRecord> {
+  /** Test seam for the crash window between marking a branch discarded and aborting its work. @internal */
+  async markBranchDiscardedForTests(requestId: RequestId): Promise<void> {
+    await this.markBranch(requestId);
+  }
+
+  /** Marks a branch discarded in one commit (the parent's record and the branch's own document); nothing else changes. */
+  private async markBranch(requestId: RequestId): Promise<BranchRecord> {
     const record = await this.branchRecord(requestId);
     if (record === undefined) throw new InvalidBranchPointError(`no branch was created under request ID "${requestId}"`);
     await this.conversation.commit(async (tx) => {
@@ -454,8 +463,9 @@ export class AdapterConversation {
   async verifyCheckpoint(checkpoint: Checkpoint): Promise<CheckpointVerdict> {
     const reject = (reason: Extract<CheckpointVerdict, { valid: false }>["reason"], detail: string): CheckpointVerdict => ({ valid: false, reason, detail });
     if (checkpoint.format !== 1) return reject("unsupported_format", `checkpoint format ${String(checkpoint.format)} is not understood`);
-    if (checkpoint.runtimeVersion !== PINNED_PI_DURABLE_VERSION || checkpoint.contractsVersion !== CONTRACTS_VERSION) {
-      return reject("incompatible_runtime", `checkpoint is from runtime ${checkpoint.runtimeVersion} / contracts ${checkpoint.contractsVersion}; this adapter supports ${PINNED_PI_DURABLE_VERSION} / ${CONTRACTS_VERSION} only (no forward migration yet)`);
+    if (!checkpoint.digest.startsWith(CHECKPOINT_DIGEST_PREFIX)) return reject("unsupported_format", `digest algorithm "${checkpoint.digest.split(":").slice(0, 2).join(":")}" is not understood`);
+    if (checkpoint.runtimeVersion !== PINNED_PI_DURABLE_VERSION) {
+      return reject("incompatible_runtime", `checkpoint is from runtime ${checkpoint.runtimeVersion}; this adapter supports ${PINNED_PI_DURABLE_VERSION} only (no forward migration yet)`);
     }
     if (checkpoint.conversationId !== this.id) return reject("unknown_conversation", `checkpoint is for conversation ${checkpoint.conversationId}, not ${this.id}`);
     const prefix = await this.scan(0, checkpoint.at);
@@ -506,6 +516,13 @@ export class AdapterConversation {
    * tool call is never executed, and Pi leaves it out of the context of later requests.
    */
   async abort(): Promise<AbortReport> {
+    const report = await this.abortQuietly();
+    await this.emit({ type: "abort", at: Date.now(), conversationId: this.id, report });
+    return report;
+  }
+
+  /** `abort()` without its audit event, for aborts that are part of a larger audited action. */
+  private async abortQuietly(): Promise<AbortReport> {
     await this.shared.hold.assertRunnable();
     const running = this.abortAndFrame();
     this.shared.aborting.set(this.id, running);
@@ -593,7 +610,9 @@ export class AdapterConversation {
     }, context);
     if (claimedBy !== newId) throw new AlreadyReadmittedError(`request "${id}" was already readmitted as "${claimedBy}"`);
     try {
-      return await this.submit({ ...record.request, requestId: newId });
+      const handle = await this.submit({ ...record.request, requestId: newId });
+      await this.emit({ type: "readmit", at: Date.now(), conversationId: this.id, requestId: id, newRequestId: newId });
+      return handle;
     } catch (error) {
       // A typed refusal means nothing was admitted under the new ID, so give the claim back and let the controller retry
       // with another ID. Other errors leave the claim: the outcome is unknown and a retry with this ID is idempotent.
@@ -760,7 +779,7 @@ export class AdapterConversation {
 }
 
 /** Maps NimbleNewt requests onto a pinned Pi Durable harness and Pi results back to semantic results. */
-export class PiAdapter {
+export class PiAdapter implements RuntimePort {
   private constructor(private readonly harness: Harness, private readonly rootConversation: Conversation, private readonly shared: Shared) {}
 
   static async open(options: PiAdapterOptions): Promise<PiAdapter> {
@@ -805,7 +824,8 @@ export class PiAdapter {
       hold: new Hold(interrupted && options.holdInterrupted !== false, harness),
       abortedInputs: options.abortedInputs ?? "frame",
       maxActiveBranches: options.maxActiveBranches ?? 8,
-      beforeAdmission: options.beforeAdmission,
+      beforeAdmission: options.testHooks?.beforeAdmission,
+      audit: options.audit,
       aborting: new Map(),
       submitting: new Map(),
     });
@@ -842,7 +862,28 @@ export class PiAdapter {
     const verdict = await this.verifyCheckpoint(checkpoint);
     if (!verdict.valid) throw new CheckpointRejectedError(verdict.reason, verdict.detail);
     const conversation = await this.conversation(checkpoint.conversationId);
-    return conversation!.branch({ requestId, at: checkpoint.at });
+    const restored = await conversation!.createBranch({ requestId, at: checkpoint.at }, "restore");
+    await this.shared.audit?.({ type: "restore_checkpoint", at: Date.now(), checkpoint, branchRequestId: requestId, newConversationId: restored.conversation.id });
+    return restored;
+  }
+
+  /**
+   * The one reviewed recovery step: abandon the listed conversations' interrupted work, then release the hold so the rest
+   * resumes, recorded as a single `recover` audit event that includes exactly what was found. Prefer it to calling
+   * `abandonInterrupted` and `releaseHold` separately. Only valid while interrupted work is held (`NotHeldError`);
+   * `InvalidRecoveryError` for a conversation with no interrupted work or a missing reason or decider.
+   */
+  async recover(decision: RecoveryDecision): Promise<void> {
+    if (!this.shared.hold.held) throw new NotHeldError("nothing to recover: no interrupted work is being held");
+    if (decision.reason.trim() === "" || decision.decidedBy.trim() === "") throw new InvalidRecoveryError("a recovery decision needs a reason and who decided");
+    const found = await this.interrupted();
+    const known = new Set(found.conversations.map((c) => c.conversationId));
+    for (const id of decision.abandon) {
+      if (!known.has(id)) throw new InvalidRecoveryError(`conversation ${id} has no interrupted work to abandon`);
+    }
+    if (decision.abandon.length > 0) await this.abandonInterrupted(decision.abandon);
+    await this.releaseHold();
+    await this.shared.audit?.({ type: "recover", at: Date.now(), decision, found });
   }
 
   /**
@@ -910,7 +951,8 @@ export class PiAdapter {
   /**
    * End the hold and start the scheduler: interrupted work that was not abandoned runs again (tools declared replay-safe
    * re-run; others are reported to the model as interrupted). Interrupted work of discarded branches is abandoned first,
-   * automatically. Also the way to start the scheduler when nothing is held.
+   * automatically. Also the way to start the scheduler when nothing is held. Async: callers must await it, because the
+   * hold only ends once the abandonment is done; a call made before that fails safely with `InterruptedWorkError`.
    * Pi's scheduler is harness-wide, so this resumes every conversation that was not abandoned.
    */
   async releaseHold(): Promise<void> {
