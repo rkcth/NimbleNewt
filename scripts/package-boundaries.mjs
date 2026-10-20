@@ -26,7 +26,8 @@ const SQL_LITERAL = /\b(?:insert\s+into|delete\s+from|update\s+\S+\s+set|merge\s
 const LITERALS = /"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`/g;
 const hasSql = (text) => SQL_TEXT.test(text) || (text.match(LITERALS) ?? []).some((literal) => SQL_LITERAL.test(literal));
 
-const SPECIFIER = /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)["']([^"']+)["']/g;
+// `(?<![-\w.$])` keeps command-line flags such as "--import" from being read as import statements.
+const SPECIFIER = /(?:\bfrom\s*|(?<![-\w.$])import\s*\(?\s*|\brequire\s*\(\s*)["']([^"']+)["']/g;
 const EXACT = /^\d+\.\d+\.\d+$/;
 
 function packageName(specifier) {

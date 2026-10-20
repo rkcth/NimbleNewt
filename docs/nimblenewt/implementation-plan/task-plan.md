@@ -184,6 +184,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F04b — Implement SQLite controller storage adapter
 
 - **Parent:** N02 / AII-252.
+- **Status:** implemented; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** SQLite controller storage adapter on node:sqlite: WAL, synchronous FULL, bounded busy timeout, BEGIN IMMEDIATE writes, schema-level uniqueness, best-effort network-filesystem refusal. Passes the shared conformance suite and multi-process contention and SIGKILL tests on Linux. Power-loss durability, Windows/macOS runs (CI) and throughput are not yet evidenced.
 - **Blockers:** F04a.
 - **Deliverable:** Local SQLite adapter and schema with explicit durability settings.
 - **Acceptance and verification:** Shared semantic fixtures pass; bounded busy handling and rollback; no network filesystem; short transactions and process-crash recovery verified.

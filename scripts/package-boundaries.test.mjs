@@ -95,3 +95,10 @@ test("allows SQL and drivers inside the adapter folders, and ordinary words else
   const errors = fixture((d) => addSource(d, "controller/src/domain/words.ts", "// select the rows from the list; insert into the queue; delete from memory; update the doc and set it\n/* it's fine to say update x set y */\nexport const x = \"choose the best from the menu\";\n"));
   assert.deepEqual(errors.filter((e) => /contains SQL/.test(e)), []);
 });
+
+test("a command-line flag such as --import is not mistaken for an import statement", () => {
+  const errors = fixture((d) => addSource(d, "controller/src/flags.ts", 'export const args = ["--import", guard, "x.js"];\nexport const more = ["--import", "y"];\n'));
+  assert.deepEqual(errors.filter((e) => /flags\.ts/.test(e)), []);
+  const real = fixture((d) => addSource(d, "controller/src/real.ts", 'import x from "left-pad";\nconst y = await import("right-pad");\n'));
+  assert.ok(real.some((e) => e.includes("left-pad")) && real.some((e) => e.includes("right-pad")), real.join("\n"));
+});
