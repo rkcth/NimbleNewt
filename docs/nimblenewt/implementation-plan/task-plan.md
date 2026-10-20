@@ -204,7 +204,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F04d — Qualify storage adapter parity and contention
 
 - **Parent:** N02 / AII-252.
-- **Status:** implemented-awaiting-signoff; commits `011e0a0`; record [f04d-storage-qualification.md](f04d-storage-qualification.md).
+- **Status:** implemented-awaiting-signoff; commits `c0f714f`; record [f04d-storage-qualification.md](f04d-storage-qualification.md).
 - **Progress note:** Parity (seeded differential test across the reference store, SQLite and PostgreSQL), crash at every statement boundary on both backends, PostgreSQL immediate-shutdown recovery, and a workload report (4 active, 32-active-equivalent, 100 idle hosts, hot row) with latency, event-loop stalls, conflicts and pool pressure; a synthetic storage-only load on one Linux machine, no claim about real-agent capacity. Windows/macOS performance, power loss and remote PostgreSQL not evidenced. Held awaiting a CI run that is green on all six cells (PostgreSQL suites fail on windows-latest with Node 22.19.0).
 - **Blockers:** F04b, F04c.
 - **Deliverable:** Identical fault suite and workload reports for both backends.
