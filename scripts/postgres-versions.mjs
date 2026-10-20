@@ -20,6 +20,13 @@ const TESTS = [
   "storage/parity.test.js", "storage/workload.test.js",
 ];
 
+/** Names of failing tests in Node's spec output (`✖ name (12ms)`) or TAP output (`not ok 3 - name`), each once, at most 20. */
+export function failingNames(log) {
+  const spec = [...log.matchAll(/^\s*✖ (.+?) \(\d[\d.]*ms\)\s*$/gm)].map((m) => m[1]);
+  const tap = [...log.matchAll(/^\s*not ok \d+ - (.+?)\s*$/gm)].map((m) => m[1]);
+  return [...spec, ...tap].filter((name, i, all) => all.indexOf(name) === i).slice(0, 20);
+}
+
 /** The major version in a server version string such as "17.10", or undefined. */
 export const majorOf = (serverVersion) => { const m = /^(\d+)\./.exec(String(serverVersion).trim()); return m === null ? undefined : Number(m[1]); };
 
@@ -80,7 +87,7 @@ export async function main(argv) {
   writeFileSync(join(outDir, `pg${major}.log`), log);
   const totals = parseTotals(log);
   const v = verdict(major, totals, result.status ?? -1);
-  const failing = [...log.matchAll(/^(?:\s*)✖ (.+?) \(\d/gm)].map((m) => m[1]).filter((name, i, all) => all.indexOf(name) === i).slice(0, 20);
+  const failing = failingNames(log);
   const record = {
     major, serverVersion, supported: v.supported, result: v.label, totals, seconds: Math.round((Date.now() - started) / 100) / 10,
     failing, machine: { os: `${os.type()} ${os.release()}`, arch: process.arch, node: process.version }, commit: run("git", ["rev-parse", "HEAD"], { cwd: root }).stdout.trim(),

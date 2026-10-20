@@ -7,5 +7,5 @@ export { validateOperation } from "./validate.js";
 export { MemoryStorage } from "./memory.js";
 export { runStorageConformance, type StorageHarness } from "./conformance.js";
 export { FaultInjectingStorage, type ScriptedFault } from "./faults.js";
-export { SqliteStorage, type SqliteOptions, type SqliteSettings } from "./sqlite/index.js";
+export { SqliteStorage, SqliteWorkerStorage, type SqliteOptions, type SqliteSettings, type SqliteWorkerOptions } from "./sqlite/index.js";
 export { PostgresStorage, type PostgresOptions, type PostgresSettings } from "./postgres/index.js";

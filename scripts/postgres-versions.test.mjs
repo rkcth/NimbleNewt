@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { MAJORS, SUPPORTED_FROM, majorOf, probeProblem, verdict } from "./postgres-versions.mjs";
+import { MAJORS, SUPPORTED_FROM, failingNames, majorOf, probeProblem, verdict } from "./postgres-versions.mjs";
 
 const totals = (over = {}) => ({ tests: 236, pass: 236, fail: 0, cancelled: 0, skipped: 0, todo: 0, blocks: 1, ...over });
 const here = (path) => fileURLToPath(new URL(path, import.meta.url));
@@ -42,4 +42,11 @@ test("a run is trusted only when the server that actually answered is the reques
   assert.match(probeProblem(14, "17.10") ?? "", /PostgreSQL 17, not the requested 14/);
   assert.match(probeProblem(15, "unknown (the server did not start)") ?? "", /could not read the version/);
   assert.match(probeProblem(18, "") ?? "", /could not read the version/);
+});
+
+test("failing test names are found in spec and TAP output, once each", () => {
+  const spec = "✔ fine (1.2ms)\n✖ a server was killed (9392.2976ms)\n  AssertionError\n✖ failing tests:\n✖ a server was killed (9392.2976ms)\n";
+  assert.deepEqual(failingNames(spec), ["a server was killed"]);
+  assert.deepEqual(failingNames("ok 1 - fine\nnot ok 2 - the second one\n  ---\nnot ok 3 - the third\n"), ["the second one", "the third"]);
+  assert.deepEqual(failingNames("all good"), []);
 });
