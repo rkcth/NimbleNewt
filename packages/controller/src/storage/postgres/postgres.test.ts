@@ -581,11 +581,13 @@ test("a server killed by an immediate shutdown while work is in flight loses not
         await sleep(5);
       }
     })();
-    await sleep(500);
+    // Wait for some acknowledged work rather than a fixed time: a slow Windows runner acknowledged only 4 operations in 500 ms (QA run 39429205965).
+    for (const deadline = Date.now() + 20_000; acknowledged.size < 5 && Date.now() < deadline;) await sleep(25);
     const before = acknowledged.size;
     assert.ok(before >= 5, `only ${before} operations were acknowledged before the crash`);
     await s.crashAndRestart();
     await sleep(1000);
+    for (const deadline = Date.now() + 30_000; acknowledged.size <= before && Date.now() < deadline;) await sleep(50); // a slow runner may need longer than a second to ride out the restart
     const after = acknowledged.size;
     stop = true;
     await writer;

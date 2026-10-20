@@ -9,6 +9,7 @@ import type { OperationInput } from "../../types.js";
 import { ACTIONS, type BoundaryAction } from "../../qualification/boundaries.js";
 import { registry, type RegistryName } from "../../qualification/migration-registry.js";
 import { SqliteStorage } from "../storage.js";
+import { SqliteWorkerStorage } from "../worker-storage.js";
 
 const [mode, database, a, b, c] = process.argv.slice(2) as [string, string, string?, string?, string?];
 const T0 = "2026-10-19T12:00:00.000Z";
@@ -52,6 +53,20 @@ if (mode === "boundary") {
   armed = true;
   await ACTIONS[actionName].run(storage);
   say(`completed ${last}`);
+  await storage.close();
+  process.exit(0);
+}
+
+// The same crash-boundary run through the worker-thread adapter: the whole process is killed from inside the worker at the statement.
+if (mode === "boundary-worker") {
+  const [when, ordinalText, actionName] = [a!, b!, c as BoundaryAction["name"]];
+  const target = ordinalText === "none" ? 0 : Number(ordinalText);
+  const storage = await SqliteWorkerStorage.open({
+    path: database, busyTimeoutMs: 20_000,
+    testCrash: target === 0 ? { when: "before", ordinal: 0, mode: "count" } : { when: when as "before" | "after", ordinal: target, mode: "kill" },
+  });
+  await ACTIONS[actionName].run(storage);
+  say(`completed ${await storage.testStatementCount()}`);
   await storage.close();
   process.exit(0);
 }

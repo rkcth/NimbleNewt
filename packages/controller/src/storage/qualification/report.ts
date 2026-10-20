@@ -3,7 +3,7 @@ import os from "node:os";
 import { join } from "node:path";
 import { PostgresStorage } from "../postgres/index.js";
 import { startEmbeddedServer, withClient } from "../postgres/testing/server.js";
-import { SqliteStorage } from "../sqlite/index.js";
+import { SqliteStorage, SqliteWorkerStorage } from "../sqlite/index.js";
 import { SCENARIOS, assertInvariants, runWorkload, type WorkloadResult, type WorkloadSpec } from "./workload.js";
 
 /**
@@ -57,6 +57,19 @@ export async function buildReport(scenarios: readonly WorkloadSpec[], baseDirect
     }
     backends.sqlite = { settings: sqlite.settings(), results };
     await sqlite.close();
+
+    // The same scenarios with the database on its own thread (card F04f): compare the event-loop delay and the throughput.
+    const threaded: WorkloadResult[] = [];
+    let threadedSettings: unknown;
+    for (const [i, spec] of scenarios.entries()) {
+      const store = await SqliteWorkerStorage.open({ path: join(dir, `worker-${i}.sqlite`) });
+      threadedSettings = await store.settings();
+      const result = await runWorkload(store, spec);
+      assertInvariants(result);
+      threaded.push(result);
+      await store.close();
+    }
+    backends["sqlite-worker"] = { settings: threadedSettings, results: threaded };
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }

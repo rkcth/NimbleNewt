@@ -215,7 +215,27 @@ sequence; check at hundreds of thousands of rows).
 * **SQLite and the event loop.** If the SQLite backend is to serve a controller that also serves HTTP and inquiries, its commits
   should run off the main thread (a worker thread owning the connection) or be grouped, or `synchronous = NORMAL` could be accepted
   (with its power-loss tradeoff, which G01 does not yet decide). This is a design change, not done here.
-  **Decided by the owner 2026-10-20:** worker thread, `synchronous=FULL` kept; tracked as card F04f.
+  **Decided by the owner 2026-10-20:** worker thread, `synchronous=FULL` kept; done in card F04f, see section 7.
 * **Pool size and hot aggregates** for PostgreSQL deployments, and whether the design needs a rule against many agents writing one
   record.
 * **Minimum hardware and supported database versions:** the owner decided on 2026-10-20 to support PostgreSQL 17 and above (verification on older majors is card F04g) and to claim only the platforms CI covers (see G01). This record gives one data point; the numeric defaults remain provisional and unvalidated.
+
+## 7. Addendum (card F04f): the same workload with SQLite on its own thread
+
+`SqliteWorkerStorage` runs the unchanged `SqliteStorage` on a worker thread (`synchronous = FULL` kept). The same scenarios were run on the same machine (NVMe ext4, not tmpfs, shared and busy: load average about 9 on 12 cores) twice, in the same process as the in-thread SQLite and PostgreSQL runs of that report: [`run1`](evidence/f04f-sqlite-worker-run1.json), [`run2`](evidence/f04f-sqlite-worker-run2.json) (they hold all three backends; the F04d runs above remain the reference for PostgreSQL). Numbers are run1 / run2.
+
+| Scenario | Event-loop delay p99 in-thread | on the worker | Transitions per second in-thread | on the worker |
+| --- | --- | --- | --- | --- |
+| Baseline: 4 active, 100 idle hosts | 106 / 87 ms | 2.0 / 1.8 ms | 30.8 / 36.1 | 43.7 / 41.5 |
+| Stress: 32 active equivalents, 100 idle hosts | 437 / 454 ms | 2.1 / 1.9 ms | 44.6 / 44.9 | 40.9 / 44.7 |
+| Hot row: 32 active all updating one record | 472 / 554 ms | 2.5 / 2.1 ms | 41.5 / 33.4 | 33.9 / 33.3 |
+
+What this shows, and what it does not:
+
+* **The stall is gone.** The controller's event loop stays responsive (p99 about 2 ms, maximum 5 to 11 ms) while commits are made, where in-thread it was blocked for 100 to 1000 ms. This is what the card was for.
+* **Write throughput is no lower.** Under stress and with the hot row the figures are comparable; at baseline the worker was higher in both runs (30.8 / 36.1 against 43.7 / 41.5 transitions a second), plausibly because stalls of the in-thread event loop delayed the agents' own next steps. It is still bounded by the flush at every commit (about 6 ms, so roughly 40 to 45 transitions a second on this disk).
+* **Per-call latency, as a caller feels it, is longer than the in-thread table suggests, and the in-thread figures were misleading.** In-thread, a call is timed only while it runs (p50 about 6 ms for a transition) and the time other tasks spent waiting for the blocked event loop shows up as event-loop delay instead. On the worker the same waiting shows up in the call: with 32 loops a transition has a median of about 280 ms and a claim-and-complete about 1.1 s, because every call, reads included, waits its turn in one first-in-first-out queue behind commits of about 6 ms each. At 4 active loops it is 35 ms.
+* **Inquiries wait behind writes** (median about 550 to 590 ms in the stress scenario; in-thread they were fast per call but waited for the event loop, up to the p99 above). A second, read-only connection would let reads run beside the writer (WAL allows it); that is a follow-up, not done here.
+* **Hot row.** A single record updated by every agent produced about 12,000 revision conflicts retried by the caller in 15 s on the worker against 496 in-thread, and transition latency of 6 to 7 seconds at p99. In-thread the blocked event loop let agents run almost one at a time, which hid most of the contention. The worker shows what that workload really costs; the design question of many agents writing one record stands (section 6).
+* **Crash behaviour was re-qualified**, not assumed: the same 30/6/4/5-statement crash matrices pass with the process killed from inside the worker thread, a worker thread that stops mid-write fails the waiting write as `uncertain_commit` and later calls as `unavailable`, and a reopened store finds the write complete or absent (tests in `sqlite/worker.test.ts` and `sqlite/worker-qualification.test.ts`).
+* Not measured: Windows and macOS (functional suites run there in CI; these numbers are Linux only), power loss, memory use of a second thread's connection, and workloads with a separate read connection.
