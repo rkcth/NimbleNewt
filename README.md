@@ -89,11 +89,11 @@ NimbleNewt is under development. The lifecycle and context behavior above is the
 
 Durable continuity uses recorded histories, tool results, notes, decisions, artifacts and checkpoints. These are distinct from arbitrary process-memory snapshots, hidden model state or a provider's live KV cache. Restore native history where supported and expose fidelity limits when reconstructing from portable records. Exact bit-for-bit continuation, zero latency and universal cache retention are not promised.
 
-Suspend must settle or explicitly track in-flight operations before declaring readiness. A blocked or uncertain effect cannot be treated as successful cleanup. Return must recheck relevant changes, ownership, permissions and lifecycle gates. Authorized peers' published work records are read-only; private scratch requires an explicit grant. See the [operational contracts](docs/nimblenewt/operational-contracts.md) and [full design](docs/nimblenewt/README.md) for these engineering boundaries.
+Suspend must settle or explicitly track in-flight operations before declaring readiness. A blocked or uncertain effect cannot be treated as successful cleanup. Return must recheck relevant changes, ownership, permissions and lifecycle gates. Authorized peers' published work records are read-only; private scratch requires an explicit grant. See the [operational contracts](docs/nimblenewt/operational-contracts.md) and [full design](docs/nimblenewt/README.md) for these engineering boundaries. The controller's versioned state API (the one door chat and API clients share) is documented in [api-v1](docs/nimblenewt/api-v1.md).
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **27 of 113 tasks implemented**, 3 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **35 of 113 tasks implemented**, 3 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -192,19 +192,19 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 21
 
-- [ ] **A02** Implement revisioned grants and restrictions _(needs A01)_
+- [x] **A02** Implement revisioned grants and restrictions _(needs A01)_
 - [ ] **A03** Implement selected sandbox launcher _(needs A01, F03)_
 - [x] **C01** Implement separated task/chat/meeting histories _(needs S01, S06, A01, F06)_
-- [ ] **H01** Implement worker enrollment and observation _(needs A01, S02)_
+- [x] **H01** Implement worker enrollment and observation _(needs A01, S02)_
 
 ### Phase 22
 
 - [ ] **A04** Implement protected filesystem and Git bridge _(needs A03, S05)_
-- [ ] **A05** Implement exact-operation review admission _(needs A02, S05, F07)_
-- [ ] **C02** Implement bounded source-backed retrieval _(needs C01)_
+- [x] **A05** Implement exact-operation review admission _(needs A02, S05, F07)_
+- [x] **C02** Implement bounded source-backed retrieval _(needs C01)_
 - [ ] **H02** Implement subordinate remote work/artifact transport _(needs H01, S06, A03)_
-- [ ] **H03** Implement priority admission and reserved control capacity _(needs S08, H01)_
-- [ ] **R01** Implement model routing and capability policy _(needs F05, A02, F02)_
+- [x] **H03** Implement priority admission and reserved control capacity _(needs S08, H01)_
+- [x] **R01** Implement model routing and capability policy _(needs F05, A02, F02)_
 - [ ] **T01** Implement immutable tool/skill catalog and attribution _(needs F07, A03, C01)_
 
 ### Phase 23
@@ -212,10 +212,10 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **A06** Implement human pre-commit gate and attribution _(needs A04, A05)_
 - [ ] **C03** Capture read/write/search dependency manifests _(needs S06, A04, C01)_
 - [ ] **G05** Prove selected isolation boundary per OS _(needs A03, A04)_
-- [ ] **H04** Implement durable inquiries and correlation _(needs S04, C01, H03)_
+- [x] **H04** Implement durable inquiries and correlation _(needs S04, C01, H03)_
 - [ ] **H07** Implement idle host polling and capability placement _(needs H02, H03)_
 - [ ] **T03** Implement approved MCP client connections _(needs T01, A01, S05)_
-- [ ] **U01** Implement versioned state query/write API _(needs S01, A01, C02)_
+- [x] **U01** Implement versioned state query/write API _(needs S01, A01, C02)_
 
 ### Phase 24
 

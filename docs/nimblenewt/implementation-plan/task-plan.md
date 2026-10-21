@@ -391,6 +391,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### A02 — Implement revisioned grants and restrictions
 
 - **Parent:** N06 / AII-256.
+- **Status:** implemented; commits `9d9bd0f`; CI runs 39539534019; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Direct and standing grants (action, project, optional single resource, optional window, the wording they came from) with revisions and owner-only revocation; derived grants that rest on a grant the holder has, can never be wider or outlive it, and fall with it; restrictions that beat every grant, can be limited to one resource or apply to everyone but the owner, and can be lifted or expire. Authentication returns the principal with its grant records and restrictions already loaded, and a non-owner with no snapshot is refused. Limits stated in the notes: changes show from the next snapshot, the grant-record readers are not access-checked until an API exposes them, and nothing yet creates derived grants automatically. Reviewed and approved by an AI review session (Claude Opus) after two rounds; six-cell CI green.
 - **Blockers:** A01.
 - **Deliverable:** Direct, derived and standing grants with expiry/revocation.
 - **Acceptance and verification:** Necessary scoped actions covered without redundant approval; unrelated resource and expired scope denied; conflicting restriction wins.
@@ -415,6 +417,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### A05 — Implement exact-operation review admission
 
 - **Parent:** N06 / AII-256.
+- **Status:** implemented; commits `2b1c861`; CI runs 39544119701; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** A review is bound to one operation: the tool, its arguments, its script, its target and a digest of the grants and restrictions that bear on it, worked out from stored state. Just before the operation runs, admission recomputes all of it and refuses, naming what changed, if anything differs, if the approval has expired, been withdrawn or used, or if the executor no longer holds the grant itself: an approval waives the review and adds no capability. An approval admits one execution, safe under concurrency. Limits stated: the target is bound by name, not version; one admission can slip through at the instant a grant is revoked; the controller-side executor, not the agent, must call admit, and nothing calls it yet. Reviewed and approved by an AI review session (Claude Opus); CI: the first run failed one cell (Windows, Node 24) in a different, flaky storage-workload assertion about scheduling in a 1.5 s timed run; the re-run of that job (same commit, so the old assertion) passed, which shows the failure was intermittent. The assertion was relaxed in a later commit; that commit needs its own green run.
 - **Blockers:** A02, S05, F07.
 - **Deliverable:** Review binding to command, script, target and policy versions.
 - **Acceptance and verification:** Changed arguments/script/resource/revocation invalidates verdict before execution; reviewer cannot expand capability.
@@ -441,6 +445,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### C02 — Implement bounded source-backed retrieval
 
 - **Parent:** N07 / AII-257.
+- **Status:** implemented; commits `a0cde39`; CI runs 39541408250; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Word search over the desk records and histories the caller may read, with a validated cursor, a scan cap and snippets cut on character boundaries; links that resolve to the original only for a reader who may read it (missing and unreadable look alike); summaries that keep a digest of each original (text, title, status), report current, changed or unavailable, and are withheld from a reader who cannot read every original; and context assembly that fills a character budget in order and lists everything it left out. Everything reads through the desk and history services, so permissions are checked at read time. Limits stated: word matching only, not ranked or semantic; the 2,000-item scan cap is implemented but not exercised by a test. The first CI run failed one Windows cell in an unrelated Pi adapter test (a fixed sleep assumed the stream had started); the re-run of that job passed and the test was made deterministic in 2b1c861. Reviewed and approved by an AI review session (Claude Opus); CI green on the re-run.
 - **Blockers:** C01.
 - **Deliverable:** Cursor retrieval, summaries and full-source links.
 - **Acceptance and verification:** Summary resolves original evidence; permissions enforced on search/snippets/links; context budget bounded without hiding missing sources.
@@ -529,6 +535,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H01 — Implement worker enrollment and observation
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `c521b1e`; CI runs 39540257755; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** A host is an enrolled host principal that announces its capabilities and sends heartbeats with increasing sequence numbers, stamped with the controller's own clock; status reports identity (active or revoked) and freshness (fresh, stale, unknown). Rotating a credential ends objects obtained before it; a revoked host is refused even with an object it still holds; a host on a new credential restarts its sequence. Nothing in the service writes an assignment, so a silent, rotated or revoked host never silently releases its tasks (tested). Limit stated: any host with attempt.work in a project can report progress on its tasks until H03/A04 link workers to hosts. Reviewed and approved by an AI review session (Claude Opus) after two rounds; six-cell CI green.
 - **Blockers:** A01, S02.
 - **Deliverable:** Host identity, heartbeat/progress reports and freshness.
 - **Acceptance and verification:** Disconnected host shown stale; identity rotation and revoked host denied; ownership not silently released.
@@ -545,6 +553,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H03 — Implement priority admission and reserved control capacity
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `3bede99`; CI runs 39542360108; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** One durable admission record: four productive attempts in total, two per host and two places reserved for inquiries and reviews, with each host's declared CPUs and memory counted for productive work, a bounded queue ordered by priority then arrival, and a patience rule so a request passed over too often is served first and holds back only what it waits for (its own host, or the lane). Stopping never needs capacity. Waiting requests whose host is lowered or disabled are withdrawn with a reason instead of waiting for ever. Spawning is bounded by depth and live children. Limits stated: the requested figures are counted, not measured; the dispatcher names the host and checks its freshness; the single record serialises decisions; callers are plain actor strings until the API wrapper. Reviewed and approved by an AI review session (Claude Opus) after two rounds, which found and fixed three real defects (cross-host blocking by a starved request, a request waiting for ever after capacity was lowered, reviews waiting behind productive work on a busy host); six-cell CI green.
 - **Blockers:** S08, H01.
 - **Deliverable:** Fair bounded queue with accepted initial 4 productive attempts total, 2 per host and 2 inquiry/review capacity.
 - **Acceptance and verification:** Workload saturation cannot starve stop/revoke or review; limits apply to CPU/memory/concurrency; no unbounded recursive spawning.
@@ -553,6 +563,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H04 — Implement durable inquiries and correlation
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `e9e49bf`; CI runs 39543357347; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** A principal working on a task asks another a question carried in a side chat that never enters the task's history; the inquiry is a durable record whose ID is the correlation in every step; the addressee alone answers, the asker closes or withdraws it, and an open typed wait on the task is answered with it. Asking, waiting and answering never touch the assignment (tested). A crash part-way through an answer is finished by a retry under any command ID (tested by making the chat step die once). Context is links resolved per viewer, so what a viewer may not read is absent; open inquiries per asker per task are bounded under concurrency. Limits stated: nothing starts the addressee's work or asks the admission service for a place; no expiry of unanswered inquiries; withdrawing does not cancel a linked wait. Reviewed and approved by an AI review session (Claude Opus) after two rounds; six-cell CI green.
 - **Blockers:** S04, C01, H03.
 - **Deliverable:** Side-conversation requests, replies and completion.
 - **Acceptance and verification:** Ask/answer while main attempt waits without ownership transfer; restart preserves correlation; unauthorized context absent.
@@ -609,6 +621,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### R01 — Implement model routing and capability policy
 
 - **Parent:** N08 / AII-258.
+- **Status:** implemented; commits `e7a294e`; CI runs 39540870400; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** One durable routing table (providers, routes with context size and capabilities, ordered profiles, role-to-profile) with owner-only changes that need the current revision and exclusions of providers or routes. Selection reads the table at each dispatch, so a disabled or excluded provider is out of the next attempt, retry or helper call; routes that cannot carry the context or lack a capability, cloud routes for data that may not leave, and paid routes without spending authorization are skipped with the reason; with no eligible route nothing is invented. A new table cannot drop or rename an excluded name. Limits stated: the caller supplies the data-sharing and spending authorizations, reading the configuration document into a table is a later step, and nothing probes route health. Reviewed and approved by an AI review session (Claude Opus) after two rounds; six-cell CI green.
 - **Blockers:** F05, A02, F02.
 - **Deliverable:** Role-aware ordered routes and exclusion rules.
 - **Acceptance and verification:** Disabled provider excluded immediately for new dispatch; incompatible context/tool capability skipped; data-sharing restrictions honored.
@@ -625,6 +639,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### U01 — Implement versioned state query/write API
 
 - **Parent:** N07a / AII-519.
+- **Status:** implemented; commits `ec294b3`; CI runs 39545034241; record [api-v1.md](api-v1.md).
+- **Progress note:** One door for chat and API clients: StateApi authenticates a credential, scopes every fact to the principal's grants and answers in one strict envelope (version 1, idempotent command IDs, revision checks, pagination, errors with codes); a command's response separates accepted from completed (assigning a task is accepted but not completed until the worker acts). The contract document is generated from the operation table and a test fails if it is stale. startController is the first start-up path: it runs the environment check before opening anything, refuses an unsupported environment or PostgreSQL server unless the override is given, prints the notice and audits the override once per epoch. Limits stated: no network listener, TLS, sessions, rate or size limits (the transport cards); the operation set is the state that exists today. Reviewed and approved by an AI review session (Claude Opus); six-cell CI green.
 - **Blockers:** S01, A01, C02.
 - **Deliverable:** Documented contracts, pagination and command results.
 - **Acceptance and verification:** Chat/API clients see same scoped facts; stale revisions and duplicate command semantics verified; accepted differs from completed; the controller start-up path (first built here) runs the F04h environment check: detectEnvironment with the PostgreSQL server version, startupCheck with the override from overrideRequested, print its output, pass allowUnsupportedServer to the PostgreSQL adapter, call recordOverride; an unsupported environment refuses to start and an overridden one is audited.
