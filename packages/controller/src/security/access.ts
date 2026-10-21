@@ -18,7 +18,7 @@ export const ACTIONS = [
   "desk.write", "desk.read", "desk.scratch.read",
   "history.append", "history.read",
   "review.request", "review.decide", "review.policy.write",
-  "config.read", "config.write", "routing.write",
+  "config.read", "config.write", "routing.write", "recovery.read",
   "conversation.start", "conversation.send", "conversation.receive", "conversation.request-action", "conversation.urgent",
   "principal.manage",
   "agent.manage", "agent.read",
@@ -30,6 +30,12 @@ export type Action = (typeof ACTIONS)[number];
 
 /** Whether an action may be held by a `client` principal: a single named conversation action, never `*` or a prefix that could grow to cover others. */
 export const clientMayHold = (action: string): boolean => /^conversation\.[a-z][a-z-]*$/.test(action);
+
+/** Whether an action may be held by a service principal (the recovery service): a single named `recovery.*` action. */
+export const serviceMayHold = (action: string): boolean => /^recovery\.[a-z][a-z-]*$/.test(action);
+
+/** Whether a principal of this kind may hold this action at all, however it is granted. Clients and services are confined to their own families; the other kinds are not limited here. */
+export const mayHold = (kind: string, action: string): boolean => (kind === "client" ? clientMayHold(action) : kind === "service" ? serviceMayHold(action) : true);
 
 export const covers = (grantAction: string, action: string): boolean =>
   grantAction === "*" || grantAction === action || (grantAction.endsWith(".*") && action.startsWith(grantAction.slice(0, -1)));

@@ -20,7 +20,7 @@ interface Ctx {
   url: string; call(method: string, path: string, init?: { token?: string; body?: unknown; headers?: Record<string, string>; rawBody?: string; host?: string; idem?: boolean }): Promise<Reply>;
   ann: { token: string; principal: Principal }; ext: { token: string; principal: Principal }; project: string; owner: { token: string };
   principals: PrincipalService; conversations: ConversationService; states: Map<string, Availability>;
-  start(extra?: Partial<TransportOptions>): Promise<ConversationTransport>; transport: ConversationTransport; hostToken: string; ownerPrincipal: Principal;
+  start(extra?: Partial<TransportOptions>): Promise<ConversationTransport>; transport: ConversationTransport; hostToken: string; serviceToken: string; ownerPrincipal: Principal;
   revoke(id: string): Promise<void>;
 }
 
@@ -38,7 +38,7 @@ for (const backend of backends) {
         const ownerPrincipal = await principals.authenticate(bootstrap.token);
         const project = (await projects.createProject({ commandId: key("p"), actor: "owner:rob", name: "P" })).id;
         const grants = (p: string): Grant[] => ["conversation.start", "conversation.send", "conversation.receive"].map((action) => ({ action, project: p }));
-        const login = async (kind: "agent" | "client" | "host", name: string, g: Grant[]) => {
+        const login = async (kind: "agent" | "client" | "host" | "service", name: string, g: Grant[]) => {
           await principals.enroll(ownerPrincipal, { commandId: key("e"), kind, name, grants: g });
           const token = (await principals.issueCredential(ownerPrincipal, `${kind}:${name}`)).token;
           return { token, principal: await principals.authenticate(token) };
@@ -46,6 +46,7 @@ for (const backend of backends) {
         const ann = await login("agent", "ann", grants(project));
         const ext = await login("client", "ext", grants(project));
         const host = await login("host", "h1", []);
+        const service = await login("service", "recovery", [{ action: "recovery.read", project: "*" }]);
         const start = async (extra: Partial<TransportOptions> = {}) => { const t = await ConversationTransport.listen({ conversations, principals, ...extra }); running.push(t); return t; };
         const transport = await start();
         const send = (tp: ConversationTransport) => (method: string, path: string, init: { token?: string; body?: unknown; headers?: Record<string, string>; rawBody?: string; host?: string; idem?: boolean } = {}): Promise<Reply> =>
@@ -64,7 +65,7 @@ for (const backend of backends) {
           });
         const ctxCa = { value: undefined as string | undefined };
         const c: Ctx = {
-          url: transport.url, call: send(transport), ann, ext, project, owner: { token: bootstrap.token }, principals, conversations, states, transport, hostToken: host.token, ownerPrincipal,
+          url: transport.url, call: send(transport), ann, ext, project, owner: { token: bootstrap.token }, principals, conversations, states, transport, hostToken: host.token, serviceToken: service.token, ownerPrincipal,
           start: async (extra) => { const t = await start(extra); if (extra?.tls !== undefined) ctxCa.value = extra.tls.cert as string; c.call = send(t); c.url = t.url; return t; },
           revoke: async (id) => { const f = await world.storage.getAggregate({ kind: "principal", id }); await principals.disable(ownerPrincipal, { commandId: key("dis"), principalId: id, expectedRevision: f!.revision }); },
         };
@@ -137,6 +138,7 @@ for (const backend of backends) {
       assert.deepEqual([reply.status, reply.body.error.code, reply.headers["www-authenticate"]], [401, "unauthenticated", "Bearer"]);
     }
     assert.equal((await probe(c.hostToken)).status, 403);
+    assert.equal((await probe(c.serviceToken)).status, 403, "the recovery service has no use for the conversation API");
     assert.equal((await probe(c.ext.token)).status, 200);
     await c.revoke("client:ext");
     const after = await probe(c.ext.token);

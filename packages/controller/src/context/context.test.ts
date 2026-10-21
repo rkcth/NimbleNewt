@@ -99,7 +99,8 @@ for (const backend of backends) {
     assert.equal((await desks.list(ann, { limit: 10 })).items.length, 1);
     const reviewer = await agent("rev", [{ action: "desk.scratch.read", project: a }]);
     assert.equal((await desks.read(reviewer, scratch.id)).title, "thinking", "an explicit scratch grant is honoured");
-    assert.ok(await desks.read(owner, scratch.id), "the installation owner may read (human inspection policy is still to be defined)");
+    // The installation owner is not exempt from the ordinary rule: reading unpublished records goes through audited inspection (card A10).
+    await refuses("forbidden", () => desks.read(owner, scratch.id));
   });
 
   suite("a record belongs to one project: writing, reading and superseding do not cross projects", async ({ desks, agent, a, b, ta, tb }) => {

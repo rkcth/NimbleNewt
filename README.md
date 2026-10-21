@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **42 of 153 tasks implemented**, 2 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **42 of 154 tasks implemented**, 2 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -243,6 +243,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 26
 
+- [ ] **A10b** Implement per-task credentials for agents serving several projects _(needs A10, A01)_
 - [ ] **C06** Implement optional inference-cache capability adapters _(needs C05)_
 - [ ] **H02** Implement subordinate remote work/artifact transport _(needs H01, S06, A03, H12)_
 - [ ] **H13** Implement event source adapters and watchers _(needs H06, H01, R02)_
@@ -338,7 +339,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **Q03** Implement documentation impact and release evidence links _(needs Q02, C02)_
 - [ ] **Q04** Implement defect tracking, review cycles and overrides _(needs Q02, C08)_
 - [ ] **X01** Run integrated crash and handoff campaign _(needs S09, V02, H02, Q02, K03, G04, H12, T07, K06, L06)_
-- [ ] **X02** Run policy, isolation and adversarial campaign _(needs A06, U04, T05, Q02, G05, A07, A09, A10, T08, T09, P05, H05b)_
+- [ ] **X02** Run policy, isolation and adversarial campaign _(needs A06, U04, T05, Q02, G05, A07, A09, A10, T08, T09, P05, H05b, A10b)_
 - [ ] **Y03** QA checkpoint 3: first complete chat-driven workflow _(needs U07, M02, P02, P03, Q02, K03)_
 
 ### Phase 36

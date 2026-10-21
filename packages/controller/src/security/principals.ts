@@ -2,16 +2,17 @@ import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/typ
 import { DomainError } from "../domain/errors.js";
 import { onlyKnown, type View } from "../domain/model.js";
 import { CommandRunner, view, type CommandMeta, type RunnerOptions } from "../domain/runner.js";
-import { clientMayHold } from "./access.js";
+import { mayHold } from "./access.js";
 import { effectiveOf } from "./grants.js";
 import { credentialIdOf, hashSecret, makeToken, newSecret, parseToken, verifySecret, type StoredCredential } from "./credentials.js";
 
 /**
+ * `service` is a trusted controller service such as the recovery service (card A10): it holds only `recovery.*` actions, cannot be addressed in a conversation and cannot use the conversation API.
  * `client` is an external agent or service that talks to NimbleNewt agents through the conversation API (card U02). It is not a worker: the only actions it can ever hold are
  * the `conversation.*` ones, whoever grants them and however, so joining a thread gives it no tool, task or file capability.
  */
-export type PrincipalKind = "owner" | "agent" | "host" | "client";
-export const PRINCIPAL_KINDS: readonly PrincipalKind[] = ["owner", "agent", "host", "client"];
+export type PrincipalKind = "owner" | "agent" | "host" | "client" | "service";
+export const PRINCIPAL_KINDS: readonly PrincipalKind[] = ["owner", "agent", "host", "client", "service"];
 
 /** What a principal may do: an action (a dotted name such as `task.create`, or `*`) within a project (an ID, or `*` for every project and for actions that belong to none). */
 export interface Grant {
@@ -140,10 +141,10 @@ export class PrincipalService {
     requireOwner(owner);
     return this.#runner.command("principal.enroll", { ...command, actor: owner.id }, async () => {
       onlyKnown(command, ["commandId", "kind", "name", "grants"]);
-      const kind = command.kind === "agent" || command.kind === "host" || command.kind === "client" ? command.kind : invalid("kind", "must be agent, host or client (there is one owner, created at installation)");
+      const kind = command.kind === "agent" || command.kind === "host" || command.kind === "client" || command.kind === "service" ? command.kind : invalid("kind", "must be agent, host, client or service (there is one owner, created at installation)");
       const name = nameOf(command.name);
       const given = command.grants === undefined ? [] : grants(command.grants);
-      if (kind === "client") for (const g of given) if (!clientMayHold(g.action)) invalid("grants", `a client may hold only conversation actions, not ${g.action}`);
+      for (const g of given) if (!mayHold(kind, g.action)) invalid("grants", `${kind === "client" ? "a client may hold only conversation actions" : kind === "service" ? "a service may hold only recovery actions" : "that action is not allowed"}, not ${g.action}`);
       const id = principalIdOf(kind, name);
       const body: PrincipalBody = { kind, name, state: "active", grants: given, createdBy: owner.id };
       return {
@@ -158,7 +159,7 @@ export class PrincipalService {
     requireOwner(owner);
     return this.#update(owner, "principal.grants", command, (body) => {
       const next = grants(command.grants);
-      if (body.kind === "client") for (const g of next) if (!clientMayHold(g.action)) invalid("grants", `a client may hold only conversation actions, not ${g.action}`);
+      for (const g of next) if (!mayHold(body.kind, g.action)) invalid("grants", `${body.kind === "client" ? "a client may hold only conversation actions" : "a service may hold only recovery actions"}, not ${g.action}`);
       return { ...body, grants: next };
     }, { grants: grants(command.grants).length });
   }

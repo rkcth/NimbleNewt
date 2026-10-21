@@ -7,6 +7,7 @@ import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
+import { PublicationService } from "./publication.js";
 
 export type DeskKind = "plan" | "progress" | "evidence" | "decision" | "note";
 export const DESK_KINDS: readonly DeskKind[] = ["plan", "progress", "evidence", "decision", "note"];
@@ -27,6 +28,11 @@ export interface DeskRecordBody {
   readonly visibility: DeskVisibility;
   /** The record this one replaces, in the same project and on the same desk. */
   readonly supersedes?: string;
+  /** The records this one cites (card A10). Each was readable by the writer, and each is in this project or in one the owner opened a path from. */
+  readonly sources?: readonly string[];
+  /** The record this one was copied from, and the original at the root of any chain of copies. A copy's claims are the original's, not independent evidence. */
+  readonly copiedFrom?: string;
+  readonly origin?: { readonly recordId: string; readonly owner: string; readonly projectId: string };
 }
 
 export interface WriteDeskRecord extends NoActor {
@@ -39,6 +45,16 @@ export interface WriteDeskRecord extends NoActor {
   /** `draft` (default) or `accepted`. */
   readonly status?: "draft" | "accepted";
   readonly supersedes?: string;
+  /** Desk records this one cites. */
+  readonly sources?: readonly string[];
+}
+
+export interface CopyDeskRecord extends NoActor {
+  readonly recordId: string;
+  /** The project to copy into. Default: the original's. Another project needs a path the owner opened. */
+  readonly projectId?: string;
+  /** Default `private`: a copy lands in the copier's scratch until it is deliberately published. */
+  readonly visibility?: DeskVisibility;
 }
 
 export interface ReviseDeskRecord extends NoActor {
@@ -73,19 +89,21 @@ function plain(value: unknown, field: string, max: number, min = 1): string {
  */
 export class DeskService {
   readonly #runner: CommandRunner;
+  readonly #paths: PublicationService;
 
-  private constructor(runner: CommandRunner) {
+  private constructor(runner: CommandRunner, paths: PublicationService) {
     this.#runner = runner;
+    this.#paths = paths;
   }
 
   static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions = {}): DeskService {
-    return new DeskService(new CommandRunner(storage, epoch, options));
+    return new DeskService(new CommandRunner(storage, epoch, options), PublicationService.withEpoch(storage, epoch, options));
   }
 
   async write(principal: Principal, command: WriteDeskRecord): Promise<{ id: string; revision: number; replayed: boolean }> {
     if (principal.kind !== "agent") throw new DomainError("forbidden", `${principal.id} has no desk; desks belong to agents`);
     return this.#runner.command("desk.write", { commandId: scopedCommandId(principal.id, command.commandId), actor: principal.id }, async () => {
-      onlyKnown(command, ["commandId", "projectId", "taskId", "kind", "title", "body", "visibility", "status", "supersedes"]);
+      onlyKnown(command, ["commandId", "projectId", "taskId", "kind", "title", "body", "visibility", "status", "supersedes", "sources"]);
       const projectId = checkProjectId(command.projectId);
       const taskId = command.taskId === undefined ? undefined : checkTaskId(command.taskId);
       const kind = (DESK_KINDS as readonly string[]).includes(command.kind) ? command.kind : invalid("kind", `must be one of ${DESK_KINDS.join(", ")}`);
@@ -94,9 +112,10 @@ export class DeskService {
       const visibility = command.visibility === "shared" || command.visibility === "private" ? command.visibility : invalid("visibility", "must be shared or private");
       const status = command.status === undefined ? "draft" : command.status === "draft" || command.status === "accepted" ? command.status : invalid("status", "must be draft or accepted");
       const supersedes = command.supersedes === undefined ? undefined : typeof command.supersedes === "string" && RECORD_ID.test(command.supersedes) ? command.supersedes : invalid("supersedes", "is not a desk record ID");
+      const sources = command.sources === undefined ? undefined : citedIds(command.sources);
       if (!allows(principal, "desk.write", projectId)) throw new DomainError("forbidden", `${principal.id} may not desk.write in ${projectId}`);
       return {
-        payload: { projectId, ...(taskId === undefined ? {} : { taskId }), kind, title, body, visibility, status, ...(supersedes === undefined ? {} : { supersedes }) },
+        payload: { projectId, ...(taskId === undefined ? {} : { taskId }), kind, title, body, visibility, status, ...(supersedes === undefined ? {} : { supersedes }), ...(sources === undefined ? {} : { sources }) },
         build: async () => {
           const project = await this.#runner.get("project", projectId);
           if (project === undefined) throw new DomainError("not_found", `project ${projectId} does not exist`);
@@ -111,9 +130,10 @@ export class DeskService {
             if (old === undefined || oldBody === undefined || oldBody.owner !== principal.id || oldBody.projectId !== projectId) throw new DomainError("invalid_command", "supersedes: must name one of your own records in the same project", { field: "supersedes" });
             changes.push({ type: "update", ref: { kind: "desk-record", id: supersedes }, expectedRevision: old.revision, body: { ...oldBody, status: "superseded" } as unknown as JsonObject });
           }
+          if (sources !== undefined) await this.#checkCitations(principal, sources, projectId);
           const id = derivedId("dsk", scopedCommandId(principal.id, command.commandId));
           const ref: AggregateRef = { kind: "desk-record", id };
-          const record: DeskRecordBody = { owner: principal.id, projectId, ...(taskId === undefined ? {} : { taskId }), kind, title, body, status, visibility, ...(supersedes === undefined ? {} : { supersedes }) };
+          const record: DeskRecordBody = { owner: principal.id, projectId, ...(taskId === undefined ? {} : { taskId }), kind, title, body, status, visibility, ...(supersedes === undefined ? {} : { supersedes }), ...(sources === undefined ? {} : { sources }) };
           return { ref, creates: true, changes: [{ type: "create", ref, body: record as unknown as JsonObject }, ...changes], detail: { projectId, kind, visibility, status } };
         },
       };
@@ -152,12 +172,96 @@ export class DeskService {
     }).then((r) => ({ id: r.id, revision: r.revision, replayed: r.replayed }));
   }
 
+
+  /** Whether the principal may read the record now: the ordinary rule, and, for another agent's private scratch read on a scratch grant, the installation's inspection policy (a `denied` policy stops such grants too). */
+  async #readable(principal: Principal, record: DeskRecordBody): Promise<boolean> {
+    if (!canRead(principal, record)) return false;
+    if (record.visibility !== "private" || record.owner === principal.id) return true;
+    const policy = (await this.#runner.get("inspection-policy", "installation"))?.body as unknown as { scratch?: string } | undefined;
+    return policy?.scratch !== "denied";
+  }
+
+  /** Every cited record must be one the writer can read, and in this project or in one the owner has opened a path from. One answer for a record that is missing and one that is not readable. */
+  async #checkCitations(principal: Principal, sources: readonly string[], projectId: string): Promise<void> {
+    for (const id of sources) {
+      const found = await this.#runner.get("desk-record", id);
+      const record = found?.body as unknown as DeskRecordBody | undefined;
+      if (found === undefined || record === undefined || !(await this.#readable(principal, record))) throw new DomainError("invalid_command", `sources: ${id} is not a record you can read`, { field: "sources" });
+      if (!(await this.#paths.isOpen(record.projectId, projectId))) throw new DomainError("forbidden", `sources: ${id} belongs to ${record.projectId}, and the owner has not opened a path from there to ${projectId}`);
+    }
+  }
+
+  /**
+   * Copies a record the principal can read onto its own desk. The copy is its own record (draft, private unless asked otherwise) that cites the original, keeps the original's identity at the
+   * root (`origin`), and stays in the original's project unless the owner opened a path to another. Copying never makes a record the copier's own work: its claims remain the original's.
+   */
+  async copy(principal: Principal, command: CopyDeskRecord): Promise<{ id: string; revision: number; replayed: boolean }> {
+    if (principal.kind !== "agent") throw new DomainError("forbidden", `${principal.id} has no desk; desks belong to agents`);
+    return this.#runner.command("desk.copy", { commandId: scopedCommandId(principal.id, command.commandId), actor: principal.id }, async () => {
+      onlyKnown(command, ["commandId", "recordId", "projectId", "visibility"]);
+      const sourceId = typeof command.recordId === "string" && RECORD_ID.test(command.recordId) ? command.recordId : invalid("recordId", "is not a desk record ID");
+      const targetProject = command.projectId === undefined ? undefined : checkProjectId(command.projectId);
+      const visibility = command.visibility === undefined ? "private" : command.visibility === "shared" || command.visibility === "private" ? command.visibility : invalid("visibility", "must be shared or private");
+      return {
+        payload: { recordId: sourceId, ...(targetProject === undefined ? {} : { projectId: targetProject }), visibility },
+        build: async () => {
+          const found = await this.#runner.get("desk-record", sourceId);
+          const source = found?.body as unknown as DeskRecordBody | undefined;
+          if (found === undefined || source === undefined || !(await this.#readable(principal, source))) throw new DomainError("forbidden", `${principal.id} may not copy that record`);
+          // A copy is never more public than what it was copied from: a private record or a draft can only be copied into private scratch.
+          const publishable = source.visibility === "shared" && source.status !== "draft";
+          if (visibility === "shared" && !publishable) throw new DomainError("invalid_command", "visibility: a private record or a draft can be copied only into your own private scratch; publish your own account of it instead", { field: "visibility" });
+          const projectId = targetProject ?? source.projectId;
+          if (!allows(principal, "desk.write", projectId)) throw new DomainError("forbidden", `${principal.id} may not desk.write in ${projectId}`);
+          if (!(await this.#paths.isOpen(source.projectId, projectId))) throw new DomainError("forbidden", `the owner has not opened a path from ${source.projectId} to ${projectId}; a record does not move between projects on an agent's say-so`);
+          const id = derivedId("dsk", scopedCommandId(principal.id, command.commandId));
+          const ref: AggregateRef = { kind: "desk-record", id };
+          const origin = source.origin ?? { recordId: sourceId, owner: source.owner, projectId: source.projectId };
+          const record: DeskRecordBody = { owner: principal.id, projectId, kind: source.kind, title: source.title, body: source.body, status: "draft", visibility, sources: [sourceId], copiedFrom: sourceId, origin };
+          return { ref, creates: true, changes: [{ type: "create", ref, body: record as unknown as JsonObject }], detail: { projectId, copiedFrom: sourceId, origin: origin.recordId } };
+        },
+      };
+    }).then((r) => ({ id: r.id, revision: r.revision, replayed: r.replayed }));
+  }
+
+  /**
+   * How many of these records are independent evidence. A copy, and a copy of a copy, stand on the original they came from, so they count with it, not apart from it. Only records the
+   * principal can read are counted; one it cannot read is listed as unavailable.
+   */
+  async independence(principal: Principal, recordIds: readonly string[]): Promise<{ independent: number; groups: { origin: string; records: string[] }[]; unavailable: string[] }> {
+    const ids = citedIds(recordIds);
+    const groups = new Map<string, string[]>();
+    const unavailable: string[] = [];
+    for (const id of ids) {
+      const found = await this.#runner.get("desk-record", id);
+      const record = found?.body as unknown as DeskRecordBody | undefined;
+      if (found === undefined || record === undefined || !(await this.#readable(principal, record))) { unavailable.push(id); continue; }
+      const root = record.origin?.recordId ?? id;
+      groups.set(root, [...(groups.get(root) ?? []), id]);
+    }
+    return { independent: groups.size, groups: [...groups].map(([origin, records]) => ({ origin, records })), unavailable };
+  }
+
+  /**
+   * The text of a record, for registering it as a skill or tool or running it (cards T01 and T06 call this first). Only the agent's own, accepted, original work qualifies: content from
+   * another desk, and a copy of it, is data and never becomes executable by being read. (Retyped text cannot be told from original work here; the review of a new tool is what covers that.)
+   */
+  async executableSource(principal: Principal, recordId: string): Promise<{ id: string; revision: number; body: string }> {
+    const found = typeof recordId === "string" && RECORD_ID.test(recordId) ? await this.#runner.get("desk-record", recordId) : undefined;
+    const record = found?.body as unknown as DeskRecordBody | undefined;
+    if (found === undefined || record === undefined || !(await this.#readable(principal, record))) throw new DomainError("forbidden", `${principal.id} may not use that record`);
+    if (record.owner !== principal.id) throw new DomainError("forbidden", "content from another agent's desk cannot be registered or run as a skill or tool; it is data");
+    if (record.origin !== undefined || record.copiedFrom !== undefined) throw new DomainError("forbidden", `this record is a copy of ${record.origin?.owner ?? "another desk"}'s content, which cannot be registered or run as a skill or tool`);
+    if (record.status !== "accepted") throw new DomainError("invalid_command", "only an accepted record can be registered or run", { field: "recordId" });
+    return { id: found.id, revision: found.revision, body: record.body };
+  }
+
   /** The record, if the principal may read it; otherwise `forbidden`, the same whether or not it exists (except for the installation owner, who gets `not_found` for a missing one). */
   async read(principal: Principal, recordId: string): Promise<View<DeskRecordBody>> {
     const found = typeof recordId === "string" && RECORD_ID.test(recordId) ? await this.#runner.get("desk-record", recordId) : undefined;
     if (found === undefined) throw principal.kind === "owner" ? new DomainError("not_found", "no such record") : new DomainError("forbidden", `${principal.id} may not read that record`);
     const record = found.body as unknown as DeskRecordBody;
-    if (!canRead(principal, record)) throw new DomainError("forbidden", `${principal.id} may not read that record`);
+    if (!(await this.#readable(principal, record))) throw new DomainError("forbidden", `${principal.id} may not read that record`);
     return view<DeskRecordBody>(found);
   }
 
@@ -172,7 +276,7 @@ export class DeskService {
         const record = aggregate.body as unknown as DeskRecordBody;
         if (query.ownerId !== undefined && record.owner !== query.ownerId) continue;
         if (query.projectId !== undefined && record.projectId !== query.projectId) continue;
-        if (!canRead(principal, record)) continue;
+        if (!(await this.#readable(principal, record))) continue;
         items.push(view<DeskRecordBody>(aggregate));
         if (items.length >= query.limit) return { items, next: aggregate.id };
       }
@@ -186,9 +290,17 @@ export class DeskService {
 export function canRead(principal: Principal, record: DeskRecordBody): boolean {
   if (record.owner === principal.id) return true;
   // A broad grant (`*`, `desk.*`) is not enough to read another agent's private scratch: it takes a grant that names it.
-  if (record.visibility === "private") return allowsExactly(principal, "desk.scratch.read", record.projectId);
+  // The installation owner is not exempt: reading another agent's private scratch goes through audited inspection (card A10), not through this ordinary read.
+  if (record.visibility === "private") return principal.kind !== "owner" && allowsExactly(principal, "desk.scratch.read", record.projectId);
   if (record.status === "draft") return false;
   return allows(principal, "desk.read", record.projectId);
+}
+
+/** A list of at most 20 distinct desk record IDs. */
+function citedIds(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > 20) return invalid("sources", "must be a list of at most 20 desk record IDs");
+  const out = value.map((v, i) => (typeof v === "string" && RECORD_ID.test(v) ? v : invalid(`sources[${i}]`, "is not a desk record ID")));
+  return [...new Set(out)].sort();
 }
 
 void MODEL_LIMITS;

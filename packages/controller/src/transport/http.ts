@@ -154,8 +154,8 @@ export class ConversationTransport {
       if (error instanceof DomainError && error.code === "unauthenticated") throw unauthenticated;
       throw error;
     }
-    // Hosts are workers; they have no business here.
-    if (principal.kind === "host") throw new HttpError(403, "forbidden", "this credential cannot use the conversation API");
+    // Hosts are workers and services are the controller's own; neither has any business here.
+    if (principal.kind === "host" || principal.kind === "service") throw new HttpError(403, "forbidden", "this credential cannot use the conversation API");
     return principal;
   }
 

@@ -33,7 +33,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06 |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
 | N05 / AII-255 | L05, L01, L02, L03, L04, L06, H08 |
-| N06 / AII-256 | G05, A01, A02, A03, A04, A05, A06, A07, A08, A09, A10 |
+| N06 / AII-256 | G05, A01, A02, A03, A04, A05, A06, A07, A08, A09, A10, A10b |
 | N07 / AII-257 | C01, C02, C04, C05, C07, C08, C09 |
 | N08 / AII-258 | R01, R02, R03, R04, R05 |
 | N09 / AII-259 | U03, U04, U05, U06, U07, U09, U08, U10, U11 |
@@ -496,8 +496,16 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 
 - **Parent:** N06 / AII-256.
 - **Blockers:** C02, A02, H11.
-- **Deliverable:** Owner inspection policy for agents' private desks and scratch (as decided by the owner before release), a trusted recovery-service principal, source-project labels on desk records and derived data, and per-task credentials for agents serving several projects (operational-contracts 91-95; README 247, 253-257, 261; organization-and-workers 15).
-- **Acceptance and verification:** Owner inspection follows the recorded policy and is audited; the recovery service reads scratch and recovery records under a service principal no peer or conversation can use; a desk record carrying restricted-source references cannot be published into another project's scope; copies, embeddings, summaries and indexes inherit source restrictions; a record cites its original source identity and copied claims do not count as independent evidence; content read from another desk cannot be registered or executed as a skill or tool; credentials are issued per task, not per agent.
+- **Deliverable:** Owner inspection policy for agents' private desks and scratch (as decided by the owner before release), a trusted recovery-service principal, source-project labels on desk records and derived data, publication paths between projects, and provenance for copies (operational-contracts 91-95; README 247, 253-257, 261; organization-and-workers 15).
+- **Acceptance and verification:** Owner inspection follows the recorded policy and is audited; the recovery service reads scratch and recovery records under a service principal no peer or conversation can use; a desk record carrying restricted-source references cannot be published into another project's scope; copies, embeddings, summaries and indexes inherit source restrictions; a record cites its original source identity and copied claims do not count as independent evidence; content read from another desk cannot be registered or executed as a skill or tool.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### A10b — Implement per-task credentials for agents serving several projects
+
+- **Parent:** N06 / AII-256.
+- **Blockers:** A10, A01.
+- **Deliverable:** Task-scoped credentials and retrieval.
+- **Acceptance and verification:** Credentials are issued per task, not per agent: a task credential carries only the grants of the task's project and the task, and no other project's records, grants or credentials can be reached with it; a credential ends with its task or when revoked and is refused at once afterwards; an agent serving two projects holds a separate credential for each task and one cannot be used for the other; retrieval and publication use the task credential (operational-contracts 91-95, split from A10).
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### C01 — Implement separated task/chat/meeting histories
@@ -533,7 +541,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Parent:** N07 / AII-257.
 - **Blockers:** C02, C03, F06.
 - **Deliverable:** Checkpoint manifest and structured continuation builder; the manifest also holds summary lineage, source ranges, compression state, branch relationships, message cursor, routing and environment revisions and adapter metadata, with credentials only as references.
-- **Acceptance and verification:** Timeout preserves artifacts, decisions, pending effects, budget and next step; non-checkpointable tool exposure explicitly recorded; resume after restart and after a model change continues the same conversation identity; a disk-full or failed durability check never yields a checkpoint reported complete; no secret appears in a checkpoint.
+- **Acceptance and verification:** Timeout preserves artifacts, decisions, pending effects, budget and next step; non-checkpointable tool exposure explicitly recorded; resume after restart and after a model change continues the same conversation identity; a disk-full or failed durability check never yields a checkpoint reported complete; no secret appears in a checkpoint; the recovery service reads scratch and recovery records only through InspectionService.recoveryRead, which leaves a record the agent can see.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### C05 — Implement retained context branches and selective updates
@@ -557,7 +565,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Parent:** N07 / AII-257.
 - **Blockers:** C04, R01.
 - **Deliverable:** Per-model context budgets enforced at dispatch, a single startup-context builder with cut-and-archive, a resume guard, a bounded summariser with a fallback, tool-output caps, hand-off from durable facts, overflow as its own failure class, and budget-aware inquiry branches (requirements and the compaction decision in context-window-stalls.md).
-- **Acceptance and verification:** Using the scripted offline model with a small context window: a first prompt over 25% of the window is cut by the builder (newest items, human words, permissions and goal kept whole, the cut archived and linked) or refused with a blocker, never sent; an attempt over 60% of the window is not resumed but restarted from the continuation record; a summariser that hangs hits its own short timeout and either uses the fallback route or ends the attempt as context_overflow without hanging; a tool result larger than the configured per-tool limit (lower than Pi's 50 KB default, also for MCP tools and non-text results) is truncated with the remainder paginated or archived; compaction stays Pi's own, automatic (owner decision 2026-10-21; the deviation from the explicit-compaction design is recorded) but bounded by explicit stream timeouts and retries plus a short summary limit and a fallback summariser through the beforeCompact hook (Pi has no setting for either) (a restart in the middle of the hook neither duplicates nor loses the summary), and the first call's size includes Pi's system prompt and tool schemas; a crash after a confirmed effect and before the hand-off still yields a hand-off written from the ledger and artifacts; repeated overflow stops with a visible blocker; an inquiry on a task over its model's budget uses the compaction boundary plus retrieval and says so; limits are configurable and checked against the provider's reported usage; the budget reserves the expected response size; falling back to a smaller-window route rebuilds the context view and blocks with a visible reason if essential constraints do not fit; a second compressor on the same context is refused at registration; summary lineage is recorded and earlier owner decisions stay retrievable after repeated compactions and after model fallback.
+- **Acceptance and verification:** Using the scripted offline model with a small context window: a first prompt over 25% of the window is cut by the builder (newest items, human words, permissions and goal kept whole, the cut archived and linked) or refused with a blocker, never sent; an attempt over 60% of the window is not resumed but restarted from the continuation record; a summariser that hangs hits its own short timeout and either uses the fallback route or ends the attempt as context_overflow without hanging; a tool result larger than the configured per-tool limit (lower than Pi's 50 KB default, also for MCP tools and non-text results) is truncated with the remainder paginated or archived; compaction stays Pi's own, automatic (owner decision 2026-10-21; the deviation from the explicit-compaction design is recorded) but bounded by explicit stream timeouts and retries plus a short summary limit and a fallback summariser through the beforeCompact hook (Pi has no setting for either) (a restart in the middle of the hook neither duplicates nor loses the summary), and the first call's size includes Pi's system prompt and tool schemas; a crash after a confirmed effect and before the hand-off still yields a hand-off written from the ledger and artifacts; repeated overflow stops with a visible blocker; an inquiry on a task over its model's budget uses the compaction boundary plus retrieval and says so; limits are configurable and checked against the provider's reported usage; the budget reserves the expected response size; falling back to a smaller-window route rebuilds the context view and blocks with a visible reason if essential constraints do not fit; a second compressor on the same context is refused at registration; summary lineage is recorded and earlier owner decisions stay retrievable after repeated compactions and after model fallback; any compressed view, index or embedding keeps the source project and origin of what it was made from and is readable only by someone who can read every source (A10).
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### C08 — Implement owner decision records and correction propagation
@@ -975,7 +983,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Parent:** N13 / AII-263.
 - **Blockers:** F07, A03, C01.
 - **Deliverable:** System/shared/personal artifacts and usage records; manifest schema (purpose, input and output schema, entry point, interpreter, OS and architecture, dependency versions, requested access, resource limits, cancellation and recovery behaviour).
-- **Acceptance and verification:** Exact instructional and executable versions recorded; personal edits cannot mutate shared release; logs obey audience boundaries; a skill without an executable grant cannot run anything; a tool unavailable on a host reports why before run time.
+- **Acceptance and verification:** Exact instructional and executable versions recorded; personal edits cannot mutate shared release; logs obey audience boundaries; a skill without an executable grant cannot run anything; a tool unavailable on a host reports why before run time; a skill or tool can be registered only from the registering agent's own accepted original work (DeskService.executableSource refuses another desk's content and copies of it).
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### T02 — Implement review/promotion/deprecation and retention
@@ -1111,7 +1119,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Parent:** N15 / AII-265.
 - **Blockers:** Q01, A06, C03, H05, C08.
 - **Deliverable:** Self-check/QA records and stale-evidence propagation; review policy (scope, triggers including periodic and incident, required checks, whether independent review gates completion) and a project QA view.
-- **Acceptance and verification:** Reviewer inspects actual version; changed dependency invalidates affected test/review; role title grants no access; a verdict cites the current acceptance-criteria and decision revisions and a rejection must cite an unmet owner requirement; a team vote cannot override an owner decision and work bound to a superseded decision fails review (C08); findings record environment, criteria revision and time; passed, failed, blocked and not-run are distinct and absent evidence fails the gate; invalidation schedules revalidation.
+- **Acceptance and verification:** Reviewer inspects actual version; changed dependency invalidates affected test/review; role title grants no access; a verdict cites the current acceptance-criteria and decision revisions and a rejection must cite an unmet owner requirement; a team vote cannot override an owner decision and work bound to a superseded decision fails review (C08); findings record environment, criteria revision and time; passed, failed, blocked and not-run are distinct and absent evidence fails the gate; invalidation schedules revalidation; independent evidence is counted by original source (DeskService.independence): a copy and the original are one source.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### Q03 — Implement documentation impact and release evidence links
@@ -1215,7 +1223,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Parent:** N17 / AII-267.
 - **Blockers:** K01, S06, C02.
 - **Deliverable:** Retention, export and deletion policy and runner covering derived data (summaries, indexes, caches) and backups, per-agent and per-project storage quotas, and reserved capacity for shutdown and recovery records (operational-contracts 129; pitfalls-and-safeguards 125; README 247, 641; design-decisions 73).
-- **Acceptance and verification:** Material referenced by a resumable task or by replay is never deleted and shows as retained; a user-requested deletion removes or marks derived summaries, indexes and cached replies and records how backups are handled; export excludes secrets; archived work restores; with the disk near full the next checkpoint and shutdown and recovery records still write and a disk-full checkpoint is never reported successful; quotas enforced with visible warnings; retention configurable.
+- **Acceptance and verification:** Material referenced by a resumable task or by replay is never deleted and shows as retained; a user-requested deletion removes or marks derived summaries, indexes and cached replies and records how backups are handled; export excludes secrets; archived work restores; with the disk near full the next checkpoint and shutdown and recovery records still write and a disk-full checkpoint is never reported successful; quotas enforced with visible warnings; retention configurable; deleting or archiving a source carries to its derived copies, summaries, indexes and embeddings, which keep their source project and origin (A10).
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### K07 — Implement maintenance windows and update orchestration
@@ -1253,7 +1261,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### X02 — Run policy, isolation and adversarial campaign
 
 - **Parent:** N18 / AII-268.
-- **Blockers:** A06, U04, T05, Q02, G05, A07, A09, A10, T08, T09, P05, H05b.
+- **Blockers:** A06, U04, T05, Q02, G05, A07, A09, A10, T08, T09, P05, H05b, A10b.
 - **Deliverable:** Scope/revocation/escape/injection and review-race evidence.
 - **Acceptance and verification:** Alternate shell/tool/MCP/API paths cannot bypass grants or human gate; reviewer outage cannot authorize work; a project named NimbleNewt gains no authority over the installation or updater; no outbound telemetry, issue, PR or report leaves without explicit scoped authorization (network capture); agent B cannot reach suspended agent A's scratch through file paths, search or artifact links, repeated after restart and harness change.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
