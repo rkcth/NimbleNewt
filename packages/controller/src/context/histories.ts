@@ -169,6 +169,25 @@ export class HistoryService {
     return { entries, count };
   }
 
+  /** The history scopes of a project that the principal may read, in ID order. A page can hold fewer than `limit` while `next` is present (unreadable scopes are skipped). */
+  async listScopes(principal: Principal, query: { projectId: string; afterId?: string; limit: number }): Promise<{ items: View<ScopeBody>[]; next?: string }> {
+    checkProjectId(query.projectId);
+    const items: View<ScopeBody>[] = [];
+    let after = query.afterId;
+    for (let reads = 0; reads < 20; reads++) {
+      const page = await this.#runner.list("history-scope", { ...(after === undefined ? {} : { afterId: after }), limit: 500 });
+      for (const aggregate of page) {
+        after = aggregate.id;
+        const body = aggregate.body as unknown as ScopeBody;
+        if (body.projectId !== query.projectId || !this.#mayUse(principal, body, "read")) continue;
+        items.push(view<ScopeBody>(aggregate));
+        if (items.length >= query.limit) return { items, next: aggregate.id };
+      }
+      if (page.length < 500) return { items };
+    }
+    return { items, ...(after === undefined ? {} : { next: after }) };
+  }
+
   async getScope(principal: Principal, scopeId: string, taskId?: string): Promise<View<ScopeBody> | undefined> {
     await this.#scopeFor(principal, scopeId, taskId, "read");
     const found = await this.#runner.get("history-scope", scopeId);
