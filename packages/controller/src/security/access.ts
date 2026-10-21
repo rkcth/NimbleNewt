@@ -15,6 +15,8 @@ export const ACTIONS = [
   "artifact.publish", "artifact.read",
   "effect.perform",
   "wait.manage", "blocker.manage",
+  "desk.write", "desk.read", "desk.scratch.read",
+  "history.append", "history.read",
   "principal.manage",
 ] as const;
 export type Action = (typeof ACTIONS)[number];
