@@ -101,6 +101,11 @@ export function startupCheck(facts: EnvironmentFacts, options: { allowUnsupporte
   const problems = checkEnvironment(facts);
   if (problems.length === 0) return { problems, overridden: false, output: [] };
   if (!options.allowUnsupported) throw new UnsupportedEnvironmentError(problems);
+  return overriddenCheck(problems);
+}
+
+/** The result of starting with the override for these problems: the loud notice, and the problems to audit. */
+export function overriddenCheck(problems: readonly Problem[]): StartupCheck {
   return {
     problems, overridden: true,
     output: [`WARNING: starting in an unsupported environment because the override was given (${OVERRIDE_FLAG} or ${OVERRIDE_ENV}):`, ...problems.map((p) => `  - ${p.item}: found ${p.found}; supported: ${p.supported}.`), "Behaviour is otherwise unchanged. This is recorded in the audit log."],

@@ -3,4 +3,5 @@ export {
   UnsupportedEnvironmentError, checkEnvironment, compareVersions, detectEnvironment, overrideRequested, refusalMessage, startupCheck,
   type EnvironmentFacts, type Problem, type StartupCheck,
 } from "./check.js";
+export { overriddenCheck } from "./check.js";
 export { recordOverride } from "./startup.js";

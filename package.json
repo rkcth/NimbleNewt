@@ -17,7 +17,8 @@
     "licenses:write": "node scripts/license-inventory.mjs --write",
     "licenses:check": "node scripts/license-inventory.mjs --check",
     "roadmap:write": "node scripts/roadmap.mjs --write",
-    "roadmap:check": "node scripts/roadmap.mjs --check"
+    "roadmap:check": "node scripts/roadmap.mjs --check",
+    "api:docs:write": "node scripts/api-docs.mjs --write"
   },
   "devDependencies": {
     "@types/node": "22.20.5",
