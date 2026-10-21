@@ -231,6 +231,8 @@ export class SandboxLauncher {
         clearTimeout(timer);
         if (poller !== undefined) clearInterval(poller);
         // Nothing the run started is left running after it; the result is given once that is done.
+        // A process that outlived the run may still hold the output pipes; closing our ends lets the launcher's own process exit instead of waiting on it for ever.
+        child.stdout.destroy(); child.stderr.destroy();
         void sweep().catch(() => undefined).then(() => resolve({ exitCode, signal, timedOut, killed, stdout: Buffer.concat(chunks.out).toString("utf8"), stderr: Buffer.concat(chunks.err).toString("utf8"), truncated, durationMs: Date.now() - started }));
       };
       child.once("close", finish);

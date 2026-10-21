@@ -137,11 +137,11 @@ describe("Seatbelt on macOS", { skip: onMac ? false : "macOS only" }, () => {
   });
 
   ifUsable("read-only inputs can be read and not changed", async () => {
-    const tools = dir("tools"); writeFileSync(join(tools, "tool.txt"), "tool-text");
+    const tools = dir("tools"); writeFileSync(join(tools, "tool.txt"), "tool-text\n");
     const r = recipe({ readOnly: [{ host: tools, guest: "/inputs/tools" }] });
     const result = await run(`/bin/cat ${tools}/tool.txt; ( echo x > ${tools}/tool.txt ) 2>/dev/null && echo CHANGED; /bin/rm ${tools}/tool.txt 2>/dev/null && echo REMOVED; echo end`, r);
     assert.equal(result.stdout.trim(), "tool-text\nend", result.stdout + result.stderr);
-    assert.equal(readFileSync(join(tools, "tool.txt"), "utf8"), "tool-text");
+    assert.equal(readFileSync(join(tools, "tool.txt"), "utf8"), "tool-text\n");
   });
 
   const marker = (): string => `${3000 + Math.floor(Math.random() * 9000)}.${Math.floor(Math.random() * 1e9)}`;
@@ -155,10 +155,10 @@ describe("Seatbelt on macOS", { skip: onMac ? false : "macOS only" }, () => {
     assert.equal(left, "", `processes survived:\n${left}`);
   });
 
-  ifUsable("a process that left the run and whose parent then exited is found and ended when the run ends", async () => {
+  ifUsable("a process that left the run and outlived the process that started it is found and ended when the run ends", async () => {
     const m = marker();
-    // The parent starts the detached child, stays up long enough to be seen, and exits first.
-    const result = await run(`/usr/bin/perl -e 'use POSIX; if (fork() == 0) { POSIX::setsid(); exec "/bin/sleep", "${m}" }' ; /bin/sleep 1.5`, recipe(), { timeoutMs: 20_000 });
+    // The shell starts a child that leaves the process group, stays up long enough for that child to be seen, and exits first.
+    const result = await run(`/usr/bin/perl -e 'use POSIX; POSIX::setsid(); exec "/bin/sleep", "${m}"' & /bin/sleep 1.5`, recipe(), { timeoutMs: 20_000 });
     assert.equal(result.timedOut, false);
     const { execFileSync } = await import("node:child_process");
     let left = "";

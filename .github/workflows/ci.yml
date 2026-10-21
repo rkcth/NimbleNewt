@@ -32,6 +32,10 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           echo "NIMBLENEWT_REQUIRE_SANDBOX=1" >> "$GITHUB_ENV"
+      # macOS: the Seatbelt sandbox tests (card A03) must run too; sandbox-exec ships with the system.
+      - name: Require the macOS sandbox tests
+        if: runner.os == 'macOS'
+        run: echo "NIMBLENEWT_REQUIRE_SANDBOX=1" >> "$GITHUB_ENV"
       # Install scripts are disabled by .npmrc; the lockfile is authoritative.
       - run: npm ci
       # Builds, checks package boundaries and the license inventory, then runs all tests under the

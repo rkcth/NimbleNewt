@@ -665,3 +665,9 @@ A10 is split like H05 and U02: the per-task credentials are card **A10b** (X02 d
 - **Embeddings and indexes**: none exist yet; search reads live records with the reader's rights each time, so it inherits restrictions by construction. The clause that an index, embedding or compressed view keeps its source project and origin and is readable only by someone who can read every source is now on C07 (context compression) and K06 (retention and deletion of derived data).
 - **Stated limits**: the owner still reads chats unaudited (C01; A10 covers desks and scratch); a path closed at the very moment of a copy or citation can still let that one through; the policy cannot take back a copy made while a grant worked.
 - **Not here**: credentials per task (A10b).
+
+### A03 part 2, after the first real macOS runs (2026-10-21)
+
+- **What the Mac showed**: on a hosted macOS 26.6.2 machine the first profile killed every program at launch. A hand-started diagnostic (`sandbox-diagnose.yml`, `scripts/seatbelt-diagnose.mjs`) found the sandbox denying `file-read-data /` (the root directory entry itself); one literal rule fixed it (Apple's own `system.sb` baseline also worked but is far broader, so it is not imported). With it, the confinement checks pass on the Mac: writes outside the agent's directories and reads of the secret are denied, and the sandbox log shows outbound network attempts denied.
+- **Found by CI on the Mac**: a process that outlives the run and holds the output pipes kept the launcher's own process from exiting (a hung Node 24 job); the launcher now closes its ends of the pipes when a run ends. The detached-child test was rebuilt so the shell stays alive long enough for the child to be seen (a child whose parent exits before the first 250 ms look is still the stated limit).
+- **Required from now on**: the macOS cells of CI and QA set `NIMBLENEWT_REQUIRE_SANDBOX=1`, so a Mac run where the sandbox cannot work fails instead of skipping.
