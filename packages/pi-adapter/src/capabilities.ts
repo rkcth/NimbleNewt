@@ -1,3 +1,5 @@
+import type { HarnessDeclaration } from "@nimblenewt/contracts";
+
 /**
  * What the Pi adapter supports and what it does not, in a form dependent work can check. G02 records this list; a feature
  * whose acceptance needs an unsupported capability is blocked until the capability exists, not silently built on a gap.
@@ -107,3 +109,16 @@ export const UNSUPPORTED_CAPABILITIES: readonly UnsupportedCapability[] = [
     blocks: ["K01", "X08"],
   },
 ];
+
+/**
+ * What the controller needs to know about Pi Durable when it chooses where a task may run (card F08), derived from the two lists above so that it cannot drift from the G02 record:
+ * Pi continues a conversation from its own storage after a restart (`restart-recovery` is supported), cannot export a conversation's history (`portable-history-export` is unsupported)
+ * and aborts only a whole conversation (`cancel-single-request` is unsupported).
+ */
+export const PI_DECLARATION: HarnessDeclaration = {
+  harness: "pi",
+  nativeContinuation: SUPPORTED_CAPABILITIES.some((c) => c.id === "restart-recovery"),
+  portableReconstruction: !UNSUPPORTED_CAPABILITIES.some((c) => c.id === "portable-history-export"),
+  checkpointExport: !UNSUPPORTED_CAPABILITIES.some((c) => c.id === "portable-history-export"),
+  abort: UNSUPPORTED_CAPABILITIES.some((c) => c.id === "cancel-single-request") ? "conversation" : "request",
+};

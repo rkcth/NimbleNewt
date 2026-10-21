@@ -39,6 +39,11 @@ export interface AdmitAttempt extends CommandMeta {
   /** The generation the claimant believes is current, and the claimant, which must be that generation's owner. */
   readonly generation: number;
   readonly owner: Owner;
+  /**
+   * The harness the attempt will run in (card F08). When given, the attempt is admitted only if the service's attempt gate accepts it for this task, which is how a durable task is
+   * kept off a harness that could not recover it. Left out, nothing is checked: the dispatcher always names it.
+   */
+  readonly harness?: string;
 }
 export interface FinishAttempt extends CommandMeta {
   readonly taskId: string;
@@ -75,19 +80,26 @@ const FINAL = new Set(["done", "cancelled"]);
  * - **Observation is not ownership.** `observeActivity` records that a worker was seen working, whatever generation it claims; it
  *   never changes the assignment, and it is marked `current` only when the generation matches.
  */
+/** Options of the assignment service. `attemptGate` answers, for a task and the harness named (undefined when none was), why the attempt may not run (or undefined when it may). */
+export interface AssignmentOptions extends RunnerOptions {
+  readonly attemptGate?: (taskId: string, harness: string | undefined) => Promise<string | undefined>;
+}
+
 export class AssignmentService {
   readonly #runner: CommandRunner;
   readonly #projects: ProjectService;
+  readonly #gate: AssignmentOptions["attemptGate"];
 
-  private constructor(runner: CommandRunner, projects: ProjectService) {
+  private constructor(runner: CommandRunner, projects: ProjectService, gate: AssignmentOptions["attemptGate"]) {
     this.#runner = runner;
     this.#projects = projects;
+    this.#gate = gate;
   }
 
   /** The service writes under `epoch` (the controller's one epoch, shared with `projects`). */
-  static withEpoch(storage: ControllerStorage, epoch: number, projects: ProjectService, options: RunnerOptions = {}): AssignmentService {
+  static withEpoch(storage: ControllerStorage, epoch: number, projects: ProjectService, options: AssignmentOptions = {}): AssignmentService {
     if (projects.epoch !== epoch) throw new DomainError("invalid_command", "epoch: must be the epoch the project service writes under", { field: "epoch" });
-    return new AssignmentService(new CommandRunner(storage, epoch, options), projects);
+    return new AssignmentService(new CommandRunner(storage, epoch, options), projects, options.attemptGate);
   }
 
   get epoch(): number { return this.#runner.epoch; }
@@ -176,14 +188,21 @@ export class AssignmentService {
   /** Admits the owner's attempt. Of two competing admissions on the same assignment revision, one commits. */
   admitAttempt(command: AdmitAttempt): Promise<CommandResult> {
     return this.#runner.command("attempt.admit", command, async (meta) => {
-      onlyKnown(command, ["commandId", "actor", "taskId", "expectedRevision", "generation", "owner"]);
+      onlyKnown(command, ["commandId", "actor", "taskId", "expectedRevision", "generation", "owner", "harness"]);
       const taskId = checkTaskId(command.taskId);
       const expected = checkRevision(command.expectedRevision);
       const claimedGeneration = checkGeneration(command.generation);
       const who = checkOwner(command.owner);
+      const harness = command.harness === undefined ? undefined : text(command.harness, "harness", { min: 1, max: 40 });
       return {
-        payload: { taskId, expectedRevision: expected, generation: claimedGeneration, owner: who as unknown as JsonObject },
+        payload: { taskId, expectedRevision: expected, generation: claimedGeneration, owner: who as unknown as JsonObject, ...(harness === undefined ? {} : { harness }) },
         build: async (): Promise<Built> => {
+          // With a gate configured every admission is checked, named harness or not (the gate decides whether an unnamed one is acceptable). A harness is named only where it can be
+          // checked: with no gate configured an attempt that names one is refused, never let through; one that names none is the old unchecked call.
+          if (this.#gate !== undefined || harness !== undefined) {
+            const why = this.#gate === undefined ? `no harness is configured, so ${harness} cannot be checked for task ${taskId}` : await this.#gate(taskId, harness);
+            if (why !== undefined) throw new DomainError("invalid_command", why, { field: "harness" });
+          }
           const { body: task, revision: taskRevision } = await this.#openTask(taskId);
           if (task.state !== "ready" && task.state !== "in_progress") throw new DomainError("invalid_command", `task ${taskId} is ${task.state}; only a ready or in-progress task can be worked on`, { field: "taskId" });
           const ref: AggregateRef = { kind: "assignment", id: assignmentIdOf(taskId) };

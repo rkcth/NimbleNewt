@@ -4,6 +4,7 @@ import { WaitService } from "../domain/waits.js";
 import { DeskService, HistoryService, RetrievalService } from "../context/index.js";
 import { UnsupportedEnvironmentError, detectEnvironment, overrideRequested, overriddenCheck, startupCheck, recordOverride, type EnvironmentFacts, type StartupCheck } from "../environment/index.js";
 import { AgentService } from "../agents/index.js";
+import { HarnessCatalog, type HarnessDeclaration } from "../harness/index.js";
 import { BlockerService } from "../domain/blockers.js";
 import { ContractService, WaitGraphService } from "../planning/index.js";
 import { InquiryService } from "../inquiries/index.js";
@@ -30,6 +31,8 @@ export interface StartOptions {
   readonly facts?: EnvironmentFacts;
   /** For tests: called with errors that are not part of the API contract. */
   readonly onInternalError?: (error: unknown) => void;
+  /** The harnesses this installation ships (card F08). None by default: an attempt that names a harness is then refused. The first release ships Pi only. */
+  readonly harnesses?: readonly HarnessDeclaration[];
 }
 
 export interface Controller {
@@ -39,7 +42,7 @@ export interface Controller {
   readonly check: StartupCheck;
   readonly services: {
     readonly principals: PrincipalService; readonly grants: GrantService; readonly projects: ProjectService; readonly assignments: AssignmentService;
-    readonly waits: WaitService; readonly desks: DeskService; readonly histories: HistoryService; readonly retrieval: RetrievalService; readonly inquiries: InquiryService; readonly agents: AgentService; readonly contracts: ContractService; readonly graph: WaitGraphService;
+    readonly waits: WaitService; readonly desks: DeskService; readonly histories: HistoryService; readonly retrieval: RetrievalService; readonly inquiries: InquiryService; readonly agents: AgentService; readonly harnesses: HarnessCatalog; readonly contracts: ContractService; readonly graph: WaitGraphService;
   };
   close(): Promise<void>;
 }
@@ -87,17 +90,18 @@ export async function startController(options: StartOptions): Promise<Controller
     await recordOverride(storage, epoch, check);
     const principals = PrincipalService.withEpoch(storage, epoch);
     const grants = GrantService.withEpoch(storage, epoch);
-    const assignments = AssignmentService.withEpoch(storage, epoch, projects);
+    const catalog = HarnessCatalog.of(options.harnesses ?? []);
+    const contracts = ContractService.withEpoch(storage, epoch);
+    const assignments = AssignmentService.withEpoch(storage, epoch, projects, { attemptGate: async (taskId, harness) => catalog.checkAttempt(await contracts.recoveryOf(taskId), harness) });
     const waits = WaitService.withEpoch(storage, epoch, assignments);
     const desks = DeskService.withEpoch(storage, epoch);
     const histories = HistoryService.withEpoch(storage, epoch);
     const retrieval = RetrievalService.withEpoch(storage, epoch, desks, histories);
     const inquiries = InquiryService.withEpoch(storage, epoch, { histories, retrieval, waits, assignments });
     const agents = AgentService.withEpoch(storage, epoch);
-    const contracts = ContractService.withEpoch(storage, epoch);
     const graph = WaitGraphService.withEpoch(storage, epoch, contracts, BlockerService.withEpoch(storage, epoch));
     const api = new StateApi({ principals, projects, assignments, retrieval, inquiries, agents, contracts, graph, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
-    return { api, storage, epoch, check, services: { principals, grants, projects, assignments, waits, desks, histories, retrieval, inquiries, agents, contracts, graph }, close: () => storage.close() };
+    return { api, storage, epoch, check, services: { principals, grants, projects, assignments, waits, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph }, close: () => storage.close() };
   } catch (error) {
     await storage.close().catch(() => undefined);
     throw error;

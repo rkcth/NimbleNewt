@@ -100,13 +100,17 @@ for (const backend of backends) {
     await refuses("forbidden", () => c.contracts.setContract(editor, { commandId: cid("c"), taskId: t, expectedVersion: 1, difficulty: "expert" }));
     await refuses("forbidden", () => c.contracts.setContract(editor, { commandId: cid("c"), taskId: t, expectedVersion: 1, priority: 9 }));
     await refuses("forbidden", () => c.contracts.setContract(editor, { commandId: cid("c"), taskId: t, expectedVersion: 1, workClass: "PC" }));
-    await c.contracts.setContract(planner, { commandId: cid("c"), taskId: t, expectedVersion: 1, workClass: "PC", priority: 9, difficulty: "expert" });
+    // Lowering the recovery requirement says losing the work is acceptable: it needs planning authority, raising it does not.
+    await refuses("forbidden", () => c.contracts.setContract(editor, { commandId: cid("c"), taskId: t, expectedVersion: 1, recovery: "none" }));
+    await c.contracts.setContract(editor, { commandId: cid("c"), taskId: t, expectedVersion: 1, recovery: "portable-reconstruction" });
+    await refuses("forbidden", () => c.contracts.setContract(editor, { commandId: cid("c"), taskId: t, expectedVersion: 2, recovery: "native-continuation" }));
+    await c.contracts.setContract(planner, { commandId: cid("c"), taskId: t, expectedVersion: 2, workClass: "PC", priority: 9, difficulty: "expert", recovery: "none" });
     const now = (await c.contracts.get(c.owner, t))!;
     assert.deepEqual([now.workClass, now.priority, now.difficulty], ["PC", 9, "expert"]);
     // Sending a value the contract already has asks for no authority for that field.
-    await c.contracts.setContract(editor, { commandId: cid("c"), taskId: t, expectedVersion: 2, priority: 9, expectedResult: "x" });
+    await c.contracts.setContract(editor, { commandId: cid("c"), taskId: t, expectedVersion: 3, priority: 9, expectedResult: "x" });
     const audit = (await c.storage.listAudit({ afterSeq: 0, limit: 1000 })).filter((e) => e.type === "contract.set").map((e) => e.actor);
-    assert.deepEqual(audit, ["agent:editor", "agent:planner", "agent:editor"], "each change is audited under the one who made it");
+    assert.deepEqual(audit, ["agent:editor", "agent:editor", "agent:planner", "agent:editor"], "each change is audited under the one who made it");
   });
 
   suite("a grant for one task does not cover another, and a task of an unreadable project looks missing", async (c) => {

@@ -304,6 +304,7 @@ Arguments:
 - `workClass` (optional): `P` or `PC`
 - `requiredEvidence` (optional): list of text
 - `permissions` (optional): action names the work may use, at most
+- `recovery` (optional): `none`, `native-continuation` (default) or `portable-reconstruction`: what the task needs from its harness to be recovered
 
 Result: `{ id, revision (the new version), replayed }`.
 

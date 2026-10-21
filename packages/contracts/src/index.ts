@@ -314,3 +314,5 @@ export interface StorageInfo {
   /** True if the storage had no marker (written by an earlier or foreign process) and the controller adopted it after a scan. */
   readonly adoptedUnmarked: boolean;
 }
+
+export * from "./harness.js";

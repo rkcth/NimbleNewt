@@ -3,6 +3,7 @@ import { derivedId } from "../domain/ids.js";
 import { onlyKnown, projectId as checkProjectId, taskId as checkTaskId, text, type View } from "../domain/model.js";
 import { CommandRunner, view, type Built, type CommandResult, type RunnerOptions } from "../domain/runner.js";
 import type { TaskBody } from "../domain/model.js";
+import { RECOVERY_REQUIREMENTS, type RecoveryRequirement } from "../harness/declarations.js";
 import { allows } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal, PrincipalBody } from "../security/principals.js";
@@ -25,6 +26,8 @@ export interface ContractFields {
   readonly requiredEvidence: readonly string[];
   /** Action names the task's work may use, at most; it narrows, it never grants. Stored now; the tool path (cards T06 and H12) is what enforces it. */
   readonly permissions: readonly string[];
+  /** What the task needs from its harness to be recovered after a restart (card F08); checked when an attempt is admitted. Durable by default. */
+  readonly recovery: RecoveryRequirement;
 }
 
 export interface ContractBody extends ContractFields {
@@ -48,10 +51,10 @@ export interface DependencyBody {
   readonly createdBy: string;
 }
 
-export const DEFAULT_CONTRACT: ContractFields = { acceptanceCriteria: [], priority: 5, budget: {}, workClass: "P", requiredEvidence: [], permissions: [] };
+export const DEFAULT_CONTRACT: ContractFields = { acceptanceCriteria: [], priority: 5, budget: {}, workClass: "P", requiredEvidence: [], permissions: [], recovery: "native-continuation" };
 export const CONTRACT_LIMITS = { result: 4000, criterion: 500, criteria: 50, evidence: 30, evidenceItem: 200, permissions: 100, scan: 5000, budgetMax: 1_000_000 } as const;
 const ACTION = /^(?:\*|[a-z][a-z0-9-]*(?:\.[a-z0-9-]+)*(?:\.\*)?)$/;
-const FIELDS = ["expectedResult", "acceptanceCriteria", "priority", "difficulty", "budget", "workClass", "requiredEvidence", "permissions"] as const;
+const FIELDS = ["expectedResult", "acceptanceCriteria", "priority", "difficulty", "budget", "workClass", "requiredEvidence", "permissions", "recovery"] as const;
 
 const TASK_ID = /^task-[a-z2-7]{20}$/;
 const taskIdAt = (v: unknown, field: string): string => (typeof v === "string" && TASK_ID.test(v) ? v : invalid(field, "is not a task ID"));
@@ -75,6 +78,7 @@ function parsePatch(source: Record<string, unknown>): Patch {
   }
   if (source["difficulty"] !== undefined) out["difficulty"] = source["difficulty"] === null ? null : (DIFFICULTIES as readonly string[]).includes(source["difficulty"] as string) ? source["difficulty"] : invalid("difficulty", `must be one of ${DIFFICULTIES.join(", ")}`);
   if (source["workClass"] !== undefined) out["workClass"] = source["workClass"] === "P" || source["workClass"] === "PC" ? source["workClass"] : invalid("workClass", "must be P or PC");
+  if (source["recovery"] !== undefined) out["recovery"] = (RECOVERY_REQUIREMENTS as readonly string[]).includes(source["recovery"] as string) ? source["recovery"] : invalid("recovery", `must be one of ${RECOVERY_REQUIREMENTS.join(", ")}`);
   if (source["permissions"] !== undefined) {
     const perms = source["permissions"];
     if (!Array.isArray(perms) || perms.length > CONTRACT_LIMITS.permissions) invalid("permissions", `must be a list of at most ${CONTRACT_LIMITS.permissions} action names`);
@@ -132,7 +136,7 @@ export class ContractService {
     const out: View<ContractVersionBody>[] = [];
     for (let v = 1; v <= versions; v++) {
       const found = await this.#runner.get("task-contract-version", `${taskId}.${v}`);
-      if (found !== undefined) out.push(view<ContractVersionBody>(found));
+      if (found !== undefined) out.push({ ...view<ContractVersionBody>(found), ...(((found.body as unknown as ContractVersionBody).recovery) === undefined ? { recovery: DEFAULT_CONTRACT.recovery } : {}) });
     }
     return out;
   }
@@ -163,7 +167,8 @@ export class ContractService {
           let changed = false;
           for (const [key, value] of Object.entries(patch)) {
             if (sameJson(value, (base as unknown as Record<string, unknown>)[key] ?? null)) continue;
-            this.#authorize(by, key as (typeof FIELDS)[number], task.projectId, taskId);
+            const rank = (r: unknown): number => RECOVERY_REQUIREMENTS.indexOf((r ?? DEFAULT_CONTRACT.recovery) as RecoveryRequirement);
+            this.#authorize(by, key as (typeof FIELDS)[number], task.projectId, taskId, key === "recovery" && rank(value) < rank((base as unknown as Record<string, unknown>)["recovery"]));
             changed = true;
             if (value === null) delete next[key]; else next[key] = value;
           }
@@ -182,14 +187,21 @@ export class ContractService {
     });
   }
 
+  /** What the task needs from its harness to be recovered (the default for a task with no contract). */
+  async recoveryOf(taskId: string): Promise<RecoveryRequirement> {
+    const stored = await this.#runner.get("task-contract", taskId);
+    return (stored?.body as unknown as ContractBody | undefined)?.recovery ?? DEFAULT_CONTRACT.recovery;
+  }
+
   /** The priority admission should use for the task now. A change takes effect at the next decision that asks; versions already stored keep the priority they had. */
   async priorityOf(taskId: string): Promise<number> {
     const stored = await this.#runner.get("task-contract", taskId);
     return (stored?.body as unknown as ContractBody | undefined)?.priority ?? DEFAULT_CONTRACT.priority;
   }
 
-  #authorize(by: Principal, field: (typeof FIELDS)[number], project: string, taskId: string): void {
-    const action = field === "priority" ? "task.priority.write" : field === "difficulty" ? "task.difficulty.write" : field === "workClass" ? "task.class.write" : "task.contract.write";
+  #authorize(by: Principal, field: (typeof FIELDS)[number], project: string, taskId: string, lowersRecovery = false): void {
+    // Lowering what a task needs to be recovered says that losing its work is acceptable: a planning decision, like the P or PC class.
+    const action = field === "priority" ? "task.priority.write" : field === "difficulty" ? "task.difficulty.write" : field === "workClass" || (field === "recovery" && lowersRecovery) ? "task.class.write" : "task.contract.write";
     if (!allows(by, action, project, { resource: { kind: "task", id: taskId } })) throw new DomainError("forbidden", `${by.id} may not change ${field} of ${taskId}`);
   }
 
@@ -198,7 +210,8 @@ export class ContractService {
     const b = stored?.body as unknown as ContractBody | undefined;
     if (b === undefined) return { ...DEFAULT_CONTRACT, taskId, projectId, version: 0 };
     const { changedBy: _c, ...rest } = b;
-    return rest;
+    // A version stored before a field existed reads with that field's default.
+    return { ...DEFAULT_CONTRACT, ...rest };
   }
 
   /** The task when the caller may read it, otherwise undefined: a task of a project the caller cannot read looks like a missing one. */

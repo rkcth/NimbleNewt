@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { SUPPORTED_CAPABILITIES, UNSUPPORTED_CAPABILITIES } from "./index.js";
+import { PI_DECLARATION, SUPPORTED_CAPABILITIES, UNSUPPORTED_CAPABILITIES } from "./index.js";
 
 const planPath = fileURLToPath(new URL("../../../docs/nimblenewt/implementation-plan/task-plan.md", import.meta.url));
 
@@ -41,4 +41,8 @@ test("the G02 acceptance record lists every unsupported capability and the cards
     assert.ok(row, `g02-acceptance.md does not list ${capability.id}`);
     for (const card of capability.blocks) assert.ok(row.includes(card), `g02-acceptance.md row for ${capability.id} omits blocked card ${card}`);
   }
+});
+
+test("the Pi declaration says what the G02 record says (the controller's checks run on it in the integration tests)", () => {
+  assert.deepEqual(PI_DECLARATION, { harness: "pi", nativeContinuation: true, portableReconstruction: false, checkpointExport: false, abort: "conversation" });
 });
