@@ -26,6 +26,24 @@ export function diagnose(logs) {
   return [...seen.values()].sort((a, b) => b.runs - a.runs || a.name.localeCompare(b.name));
 }
 
+/** The slowest tests of a log, from Node's spec lines (`✔ name (123.4ms)`) and TAP output (`ok 3 - name` then `duration_ms: 123.4`). A test that contains others also shows, so this is a guide, not a profile. */
+export function slowest(log, count = 10) {
+  const found = [];
+  const lines = log.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const spec = /^\s*[✔✖] (.+?) \(([\d.]+)ms\)\s*$/.exec(lines[i]);
+    if (spec !== null) { found.push({ name: spec[1], ms: Number(spec[2]) }); continue; }
+    const tap = /^\s*(?:not )?ok \d+ - (.+?)\s*$/.exec(lines[i]);
+    if (tap === null) continue;
+    for (let j = i + 1; j < Math.min(i + 8, lines.length); j++) {
+      const d = /^\s*duration_ms: ([\d.]+)/.exec(lines[j]);
+      if (d !== null) { found.push({ name: tap[1], ms: Number(d[1]) }); break; }
+      if (/^\s*(?:not )?ok \d+ - /.test(lines[j])) break;
+    }
+  }
+  return found.sort((a, b) => b.ms - a.ms).slice(0, count);
+}
+
 function diskInfo(directory) {
   // `diskutil info` wants the volume, not a folder inside it: on macOS find the device with `df` first.
   const device = process.platform === "darwin" ? spawnSync("df", ["-P", directory], { encoding: "utf8" }).stdout?.trim().split("\n").pop()?.split(/\s+/)[0] : undefined;
@@ -57,6 +75,9 @@ export function main(argv) {
     "",
     found.length === 0 ? "No failing test names were found in the logs." : "Failing tests (runs failed / name):",
     ...found.flatMap((f) => [`  ${f.runs}/${logs.length}  ${f.name}`, ...f.detail.map((l) => `        ${l}`)]),
+    "",
+    "Slowest tests in the first run (seconds; a test that contains others also shows):",
+    ...(logs[0] === undefined ? [] : slowest(logs[0]).map((t) => `  ${(t.ms / 1000).toFixed(1).padStart(7)}  ${t.name.slice(0, 110)}`)),
     "",
     "Disk holding the folder:",
     ...(evidence?.environment?.checkoutFilesystem === undefined ? [] : [`  recorded by the QA run: ${JSON.stringify(evidence.environment.checkoutFilesystem)}`]),
