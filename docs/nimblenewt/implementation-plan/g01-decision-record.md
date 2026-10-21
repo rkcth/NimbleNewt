@@ -76,3 +76,12 @@ Given by the owner in conversation with the implementing AI session; recorded he
 3. ~~Minimum OS versions and architectures~~ Decided 2026-10-20 as what CI covers; exact OS release floors decided as the CI runner releases (macOS floor confirmed by the owner 2026-10-21), with refuse-unless-overridden behaviour (F04h); real-hardware qualification moved to the last plan item (D04).
 4. Production and improvement budgets (provisional, configurable storage defaults decided 2026-10-20) and the proposed defaults in the design register that the owner has not set (P/PC allocation, meeting cadence, voting rules, lifecycle limits, update windows).
 5. Acceptance of the G02 milestone and its default decisions (aborted-input framing, update behaviour, branch and task limits, the interrupted-work hold).
+
+## Open owner decisions from the documentation audit (2026-10-21)
+
+A requirement-by-requirement audit of the product documents against the task cards added 38 cards (the plan now has 151). It also found places where the documents leave a policy open. These are recorded here for the owner; none is decided, and the recommendations are an AI session's suggestions.
+
+- **Owner inspection of private desks and scratch** (README "Activity history and replay", operational contracts): the documents say only that the policy is to be specified and that the boundary between agents stays intact. Built provisionally in C01: the owner may read all agents' private scratch and join any chat, but not read their drafts or write to their desks. Recommendation: the owner may read anything, every read is audited and visible to the agent; decide before the inspection card (A10).
+- **Second harness in the first release:** recommended no (Pi only, with the capability declaration and refusal kept).
+- **Retention defaults, backup deletion, recovery objectives; notification delivery; meeting quorum and seconding; amendments, points of order and sealed positions; agents building candidate releases of NimbleNewt itself; simulation mode; direct versus mediated workspace editing; default cleanup deadline; model thinking in replay (recommended: not shown, as the documents say); supported filesystems and Linux distributions; first-release MVP selection:** see [the audit record](documentation-audit-2026-10-21.md), section 3; each needs an owner answer before its card starts.
+

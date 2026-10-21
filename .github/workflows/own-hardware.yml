@@ -1,0 +1,49 @@
+name: Own hardware
+
+# Runs on the owner's own machines (self-hosted runners), started by hand from the Actions tab and only from main.
+# It never runs on a push or a pull request: this repository is public, and a runner on a personal machine must not execute code
+# from anyone else's branch or fork. Today it only checks that each runner works and records what the machine is (the probe);
+# the sandbox and containment checks (cards A03, A04, G05) are added as further jobs here once those cards exist.
+# This file's guards do not protect a runner from OTHER workflow files: see docs/nimblenewt/own-hardware-runners.md.
+# Runner labels: `nimblenewt-mac`, `nimblenewt-windows`, `nimblenewt-linux` (see docs/nimblenewt/own-hardware-runners.md).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: own-hardware
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: Probe ${{ matrix.label }}
+    if: github.repository == 'rkcth/NimbleNewt' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, "${{ matrix.label }}"]
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        label: [nimblenewt-mac, nimblenewt-windows]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Record the machine
+        shell: bash
+        run: |
+          echo "## ${{ matrix.label }}" >> "$GITHUB_STEP_SUMMARY"
+          { echo '```'; node -p "[process.platform, process.arch, process.version, require('os').release()].join(' ')"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      # Install scripts are disabled by .npmrc; the lockfile is authoritative.
+      - run: npm ci
+      - name: One run of the whole suite
+        shell: bash
+        run: node scripts/qa.mjs --runs=1 "--out=$RUNNER_TEMP/qa-output"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: own-hardware-${{ matrix.label }}
+          path: ${{ runner.temp }}/qa-output
+          if-no-files-found: warn
+          retention-days: 90
