@@ -2,7 +2,7 @@
 
 October 17, 2026: Rob approved the implementation plan at revision `aaa9f0ddd11d92bfdedbb93fa926f7b9312870de`. See [the approval record](approval.md). Implementation execution remains held at N00. The earlier authorization to reconcile and synchronize documents and task definitions remains in effect.
 
-The current plan uses TypeScript, Pi Durable behind an adapter, SQLite and PostgreSQL controller backends, subordinate remote workers, conversational policy, strong isolation by default and a derived approval default (changed October 21, 2026), controlled controller promotion and coordinated snapshot backups. Tests must run against actual NimbleNewt code. Earlier probes establish feasibility only.
+The current plan uses TypeScript, Pi Durable behind an adapter, SQLite and PostgreSQL controller backends, subordinate remote workers, conversational policy, strong isolation by default and strict approval on a new installation with setup offering the derived profile (changed October 21, 2026), controlled controller promotion and coordinated snapshot backups. Tests must run against actual NimbleNewt code. Earlier probes establish feasibility only.
 
 The 105-card DAG now separates design recording from component implementation, actual-code qualification, integrated fault testing and release acceptance. Implementation has since started on the Pi-first path (see Progress below); until a card is marked implemented in task-plan.json, it is not complete. PostgreSQL failover, combined recovery, cross-OS isolation and full-product release tests remain implementation work. Version pins and OS capabilities are qualified by the implementing cards.
 

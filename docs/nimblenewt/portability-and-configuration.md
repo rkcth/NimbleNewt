@@ -51,7 +51,7 @@ Normal setup and administration must not require source edits. Provide UI contro
 | Environments and repositories | Harness, execution backend, workspace bindings, data locations, shared resources, and limits supported by that backend. |
 | Tools and extensions | Catalog entries, permissions, approved versions, installation/restart status, and rollback choices. |
 | Shared toolbox | Scoped maintainer assignments, role/team/all-agent audiences, read-only source inspection, personal forks, improvement proposals and diffs, published versions, compatibility, revocation, and rollback. |
-| Approval policy | Derived default profile with an optional strict preset; per-project/environment/action grants; human, agent-review or automatic execution modes; mandatory human commit review; expiry/revocation; effective policy and trusted decision provenance. Private deployment grants stay outside public defaults. |
+| Approval policy | Strict at first install with setup offering the derived profile; per-project/environment/action grants; human, agent-review or automatic execution modes; mandatory human commit review; expiry/revocation; effective policy and trusted decision provenance. Private deployment grants stay outside public defaults. |
 | Learning | Candidate triggers, deduplication/triage limits, experiment budgets, adoption scope, monitoring and retirement conditions. |
 | Quality assurance | Own-work, assigned-review, and project/team scope; reviewer assignments, triggers, evidence requirements, independent-review gates, and escalation rules. |
 | Operations | Meeting schedules and timezone, notifications, budgets, retention, and lifecycle preparation limits. |

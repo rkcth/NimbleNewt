@@ -53,7 +53,7 @@ export interface NimbleNewtConfig {
     readonly difficulty: Readonly<Record<string, readonly string[]>>;
   };
   readonly api: { readonly remoteExposure: boolean };
-  /** The approval profile (card A07 builds the policy engine behind it): `derived` (the default) lets an explicit instruction authorize what it reasonably needs; `strict` asks at every consequential step; `autonomous` acts within grants. */
+  /** The approval profile (card A07 builds the policy engine behind it): `strict` (the default for a new installation) asks at every consequential step; `derived` lets an explicit instruction authorize what it reasonably needs and is offered by first-run setup (the owner's own installation sets it in private configuration); `autonomous` acts within grants. */
   readonly approvals: { readonly preset: "derived" | "strict" | "autonomous"; readonly grants: readonly Grant[] };
 }
 
@@ -284,7 +284,7 @@ export function withDefaults(raw: Record<string, unknown>): Record<string, unkno
     execution: { isolation: "strong", ...execution },
     api: { remoteExposure: false, ...api },
     // The first release called the strict profile "tight"; an old document keeps that meaning under its new name (it never silently becomes looser).
-    approvals: { preset: "derived", grants: [], ...approvals, ...(approvals.preset === "tight" ? { preset: "strict" } : {}) },
+    approvals: { preset: "strict", grants: [], ...approvals, ...(approvals.preset === "tight" ? { preset: "strict" } : {}) },
   };
 }
 
