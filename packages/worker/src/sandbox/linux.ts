@@ -56,6 +56,7 @@ export function bubblewrapBackend(options: BubblewrapOptions = {}): SandboxBacke
   return {
     name: "bubblewrap",
     plan,
+    guestView: (recipe) => ({ workdir: GUEST.work, home: GUEST.home, scratch: GUEST.scratch, tmp: "/tmp", inputs: recipe.readOnly.map((m) => ({ host: m.host, guest: m.guest })) }),
     async health(): Promise<BackendHealth> {
       let version: string;
       try {

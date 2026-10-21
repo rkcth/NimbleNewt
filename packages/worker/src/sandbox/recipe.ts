@@ -137,6 +137,8 @@ export function normalizeRecipe(recipe: SandboxRecipe, protectedPaths: readonly 
   for (const [name, value] of entries) {
     if (!ENV_NAME.test(name)) return bad(`env: ${JSON.stringify(name)} is not a valid variable name`);
     if (RESERVED_ENV.has(name)) return bad(`env: ${name} is set by the launcher`);
+    // Library-loading variables change what a program loads before it does anything, including the sandbox launcher itself.
+    if (/^(?:DYLD_|LD_|LDR_)/.test(name)) return bad(`env: ${name} would change how programs load libraries and is never passed on`);
     if (typeof value !== "string" || value.length > MAX_ENV_VALUE || value.includes("\0")) return bad(`env: ${name} must be a string of at most ${MAX_ENV_VALUE} characters`);
   }
   const names = recipe.protectedSubpaths ?? [".git"];

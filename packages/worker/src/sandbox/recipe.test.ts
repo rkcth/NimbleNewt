@@ -84,7 +84,7 @@ test("mounts may not overlap each other, and guest paths are confined to /inputs
 test("only the none network is accepted, and the environment is a plain bounded set of names", () => {
   refused({ ...base(), network: "host" }, [], /network/);
   refused({ ...base(), network: undefined }, [], /network/);
-  for (const name of ["1BAD", "has space", "A=B", "", "HOME", "PATH", "TMPDIR"]) refused({ ...base(), env: { [name]: "x" } }, [], /env/);
+  for (const name of ["1BAD", "has space", "A=B", "", "HOME", "PATH", "TMPDIR", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "LD_PRELOAD", "LD_LIBRARY_PATH"]) refused({ ...base(), env: { [name]: "x" } }, [], /env/);
   refused({ ...base(), env: { A: 5 } }, [], /env/);
   refused({ ...base(), env: { A: "x".repeat(5000) } }, [], /env/);
   refused({ ...base(), env: { A: "a\0b" } }, [], /env/);

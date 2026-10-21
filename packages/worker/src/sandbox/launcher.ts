@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import type { SandboxBackend, SpawnPlan } from "./backend.js";
+import type { GuestView, SandboxBackend, SpawnPlan } from "./backend.js";
 import { bubblewrapBackend } from "./linux.js";
+import { seatbeltBackend } from "./seatbelt.js";
 import { SandboxError } from "./errors.js";
 import { canonical, normalizeRecipe, protectedPathsFor, sha256, type NormalizedRecipe, type SandboxMode, type SandboxRecipe } from "./recipe.js";
 
@@ -70,6 +71,8 @@ export interface SandboxRun {
   readonly runId: string;
   readonly mode: SandboxMode;
   readonly recipeRevision: string;
+  /** Where the agent finds its checkout, home, scratch, temporary directory and inputs. */
+  readonly guest: GuestView;
   /** Ends the process and everything it started. Safe to call more than once. */
   kill(): void;
   readonly result: Promise<RunResult>;
@@ -81,7 +84,7 @@ const MAX_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 
 function defaultBackend(platform: NodeJS.Platform): SandboxBackend | undefined {
-  return platform === "linux" ? bubblewrapBackend() : undefined;
+  return platform === "linux" ? bubblewrapBackend() : platform === "darwin" ? seatbeltBackend() : undefined;
 }
 
 /**
@@ -171,10 +174,10 @@ export class SandboxLauncher {
     };
     try { await this.#config.audit(record); } catch (error) { throw new SandboxError("audit_failed", `the launch could not be recorded, so it did not happen: ${(error as Error).message}`, { cause: error }); }
     // Planned only now, after the record is written, so the checks the plan repeats run as close to the start as possible.
-    return this.#start(runId, recipe, makePlan(), timeoutMs, maxOutputBytes);
+    return this.#start(runId, recipe, makePlan(), recipe.mode === "sandboxed" ? this.#backend : undefined, timeoutMs, maxOutputBytes);
   }
 
-  #start(runId: string, recipe: NormalizedRecipe, plan: SpawnPlan, timeoutMs: number, maxOutputBytes: number): SandboxRun {
+  #start(runId: string, recipe: NormalizedRecipe, plan: SpawnPlan, backend: SandboxBackend | undefined, timeoutMs: number, maxOutputBytes: number): SandboxRun {
     const started = Date.now();
     const child = spawn(plan.file, [...plan.args], { env: { ...plan.env }, ...(plan.cwd === undefined ? {} : { cwd: plan.cwd }), stdio: ["ignore", "pipe", "pipe"], detached: true, windowsHide: true });
     const chunks = { out: [] as Buffer[], err: [] as Buffer[] };
@@ -190,11 +193,32 @@ export class SandboxLauncher {
     let killed = false;
     let timedOut = false;
     let ended = false;
-    const killTree = (): void => {
-      if (ended) return;
-      // The process group first (it holds the launcher's own children), then the child itself; the sandbox's private process list ends with its first process.
+    const finalKill = (): void => {
+      // The process group first (it holds the launcher's own children), then the child itself; a sandbox with a private process list ends with its first process.
       if (child.pid !== undefined) { try { process.kill(-child.pid, "SIGKILL"); } catch { /* already gone */ } }
       try { child.kill("SIGKILL"); } catch { /* already gone */ }
+    };
+    // Without a private process list, every descendant seen while the run goes is remembered with its start time, so one whose parent has since exited (and was handed to launchd) is still
+    // found at the end. A process id can be reused by an unrelated program, so a remembered process is ended only if it is still the one that was seen (same start time).
+    const seen = new Map<number, string>();
+    const track = async (): Promise<void> => {
+      if (child.pid === undefined || backend?.descendants === undefined) return;
+      for (const p of await backend.descendants(child.pid).catch(() => [] as readonly { pid: number; started: string }[])) seen.set(p.pid, p.started);
+    };
+    const sweep = async (): Promise<void> => {
+      if (seen.size === 0 || backend?.startTimes === undefined) return;
+      const now = await backend.startTimes([...seen.keys()]).catch(() => new Map<number, string>());
+      for (const [p, started] of [...seen].reverse()) {
+        if (now.get(p) === started) { try { process.kill(p, "SIGKILL"); } catch { /* already gone */ } }
+      }
+      seen.clear();
+    };
+    const poller = backend?.descendants === undefined ? undefined : setInterval(() => { void track(); }, 250);
+    poller?.unref();
+    const killTree = (): void => {
+      if (ended) return;
+      if (child.pid === undefined || backend?.descendants === undefined) { finalKill(); return; }
+      void track().then(sweep).catch(() => undefined).finally(finalKill);
     };
     const timer = setTimeout(() => { timedOut = true; killTree(); }, timeoutMs);
 
@@ -205,14 +229,17 @@ export class SandboxLauncher {
         settled = true;
         ended = true;
         clearTimeout(timer);
-        resolve({ exitCode, signal, timedOut, killed, stdout: Buffer.concat(chunks.out).toString("utf8"), stderr: Buffer.concat(chunks.err).toString("utf8"), truncated, durationMs: Date.now() - started });
+        if (poller !== undefined) clearInterval(poller);
+        // Nothing the run started is left running after it; the result is given once that is done.
+        void sweep().catch(() => undefined).then(() => resolve({ exitCode, signal, timedOut, killed, stdout: Buffer.concat(chunks.out).toString("utf8"), stderr: Buffer.concat(chunks.err).toString("utf8"), truncated, durationMs: Date.now() - started }));
       };
       child.once("close", finish);
       // A trusted-host child that started its own session can outlive its parent and keep the output pipes open; after a short drain the result is given anyway.
       child.once("exit", (code, signal) => { setTimeout(() => finish(code, signal), EXIT_DRAIN_MS).unref(); });
       child.once("error", (error) => { ended = true; clearTimeout(timer); resolve({ exitCode: null, signal: null, timedOut, killed, stdout: "", stderr: `could not start: ${error.message}`, truncated: false, durationMs: Date.now() - started }); });
     });
-    const run: SandboxRun = { runId, mode: recipe.mode, recipeRevision: recipe.revision, kill: () => { killed = true; killTree(); }, result };
+    const guest: GuestView = backend?.guestView(recipe) ?? { workdir: recipe.workdir, home: recipe.home, scratch: recipe.scratch, tmp: recipe.scratch, inputs: recipe.readOnly.map((m) => ({ host: m.host, guest: m.host })) };
+    const run: SandboxRun = { runId, mode: recipe.mode, recipeRevision: recipe.revision, guest, kill: () => { killed = true; killTree(); }, result };
     this.#live.add(run);
     void result.then(() => this.#live.delete(run));
     return run;

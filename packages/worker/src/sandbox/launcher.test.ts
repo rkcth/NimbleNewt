@@ -41,8 +41,9 @@ describe("sandbox launcher (bubblewrap)", () => {
     process.env["HOME"] = fakeHome; // the service user's credential places are looked up here
     process.env["NN_TEST_SECRET"] = "must-not-reach-the-agent";
     launcher = await SandboxLauncher.create({ protectedPaths: [secretDir], audit: (r) => { records.push(r); } });
-    usable = launcher.capacity.available;
-    if (!usable && required) assert.fail(`the sandbox is required but unusable: ${launcher.capacity.reason}`);
+    // This file's cases are written for the bubblewrap guest layout (/work, /home/agent); the macOS backend has its own file.
+    usable = launcher.capacity.available && launcher.capacity.backend === "bubblewrap";
+    if (!usable && required && process.platform === "linux") assert.fail(`the sandbox is required but unusable: ${launcher.capacity.reason}`);
   });
   after(() => { if (originalHome === undefined) delete process.env["HOME"]; else process.env["HOME"] = originalHome; delete process.env["NN_TEST_SECRET"]; });
 
@@ -280,18 +281,45 @@ describe("failing closed", () => {
     assert.equal(audited.length, 0);
   });
 
-  test("an OS with no backend yet has no capacity", async () => {
-    for (const platform of ["darwin", "win32"] as const) {
-      const launcher = await SandboxLauncher.create({ platform, protectedPaths: [], audit });
-      assert.equal(launcher.capacity.available, false);
-      assert.match(launcher.capacity.reason ?? "", new RegExp(`no sandbox backend for ${platform}`));
-      await assert.rejects(launcher.launch({ recipe: recipe(), command: ["/bin/true"], timeoutMs: 1000, maxOutputBytes: 100 }), (e: unknown) => e instanceof SandboxError && e.code === "unavailable");
+  test("an OS with no backend yet has no capacity; macOS has Seatbelt, which a machine without it cannot use", async () => {
+    const windows = await SandboxLauncher.create({ platform: "win32", protectedPaths: [], audit });
+    assert.equal(windows.capacity.available, false);
+    assert.match(windows.capacity.reason ?? "", /no sandbox backend for win32/);
+    await assert.rejects(windows.launch({ recipe: recipe(), command: ["/bin/true"], timeoutMs: 1000, maxOutputBytes: 100 }), (e: unknown) => e instanceof SandboxError && e.code === "unavailable");
+    // Asking for the macOS backend on a machine that is not a Mac finds no sandbox-exec and so no capacity.
+    if (process.platform !== "darwin") {
+      const mac = await SandboxLauncher.create({ platform: "darwin", protectedPaths: [], audit });
+      assert.deepEqual([mac.capacity.available, mac.capacity.backend], [false, "seatbelt"]);
+      assert.match(mac.capacity.reason ?? "", /not found/);
     }
+  });
+
+  test("a remembered process is ended only if it is still the one that was seen: a reused process id is left alone", async () => {
+    const { spawn } = await import("node:child_process");
+    const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch { return false; } };
+    const bystander = spawn("/bin/sleep", ["60"], { stdio: "ignore" });
+    const sameOne = spawn("/bin/sleep", ["60"], { stdio: "ignore" });
+    try {
+      for (const [process_, shown, expectKilled] of [[bystander, "some other start time", false], [sameOne, "seen at the start", true]] as const) {
+        const backend: SandboxBackend = {
+          name: "fake-tracking", health: async () => ({ healthy: true, backend: "fake-tracking" }),
+          plan: () => ({ file: "/bin/sh", args: ["-c", "/bin/sleep 1"], env: {} }),
+          guestView: () => ({ workdir: "/w", home: "/h", scratch: "/s", tmp: "/t", inputs: [] }),
+          descendants: async () => [{ pid: process_.pid!, started: "seen at the start" }],
+          startTimes: async (pids) => new Map(pids.map((p) => [p, shown])),
+        };
+        const launcher = await SandboxLauncher.create({ backend, protectedPaths: [], audit });
+        const result = await (await launcher.launch({ recipe: recipe(), command: ["/bin/true"], timeoutMs: 20_000, maxOutputBytes: 100 })).result;
+        assert.equal(result.exitCode, 0);
+        await new Promise((r) => setTimeout(r, 200));
+        assert.equal(alive(process_.pid!), !expectKilled, `process ${process_.pid} killed=${!alive(process_.pid!)} expected ${expectKilled}`);
+      }
+    } finally { bystander.kill("SIGKILL"); sameOne.kill("SIGKILL"); }
   });
 
   test("a backend whose health check fails or throws gives no capacity, and recheck picks up recovery", async () => {
     let healthy = false;
-    const backend: SandboxBackend = { name: "fake", health: async () => (healthy ? { healthy: true, backend: "fake" } : { healthy: false, backend: "fake", reason: "probe failed" }), plan: () => ({ file: "/bin/true", args: [], env: {} }) };
+    const backend: SandboxBackend = { name: "fake", health: async () => (healthy ? { healthy: true, backend: "fake" } : { healthy: false, backend: "fake", reason: "probe failed" }), plan: () => ({ file: "/bin/true", args: [], env: {} }), guestView: () => ({ workdir: "/w", home: "/h", scratch: "/s", tmp: "/t", inputs: [] }) };
     const launcher = await SandboxLauncher.create({ backend, protectedPaths: [], audit });
     assert.deepEqual([launcher.capacity.available, launcher.capacity.reason], [false, "probe failed"]);
     healthy = true;
