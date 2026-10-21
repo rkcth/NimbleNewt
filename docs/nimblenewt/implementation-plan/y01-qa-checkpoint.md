@@ -1,6 +1,6 @@
 # Y01: QA checkpoint 1, the durable core
 
-Status: **automated part passing; Mac, Linux and Windows five-repeat runs all passed; awaiting the owner's final acceptance.** The owner confirmed the three QA checkpoints on 2026-10-20 ([G01 record](g01-decision-record.md), decision 11). This record is evidence for the owner's decision, written by an AI session; it is not the final acceptance. The macOS, Windows and Linux boxes below were ticked on 2026-10-21 by the implementing session at the owner's direction (each says on what); the final "Owner accepts QA checkpoint 1" box is not ticked.
+Status: **automated part passing; Mac, Linux and Windows five-repeat runs all passed; accepted by the owner on 2026-10-21.** The owner confirmed the three QA checkpoints on 2026-10-20 ([G01 record](g01-decision-record.md), decision 11). This record is evidence for the owner's decision, written by an AI session; the acceptance itself is the owner's, recorded in the last box. The macOS, Windows and Linux boxes below were ticked on 2026-10-21 by the implementing session at the owner's direction (each says on what); the final "Owner accepts QA checkpoint 1" box was ticked later the same day at the owner's direction.
 
 ## Scope
 
@@ -78,15 +78,15 @@ See [s09-acceptance-report.md](s09-acceptance-report.md): the path from a chat-c
 - Waits with deadlines, timers and delivery retries are not on the crash-enumerated path (they have their own tests, and run in the cross-platform suite).
 - Power loss, disk-full and network faults are not simulated; a PostgreSQL server death in the slice path is covered only by the earlier F04c/F04d suites.
 - One crash per run; no real chat API, remote worker, sandbox, tool-using model or network is in the path.
-- The OS release floors used by the environment check are the lowest releases seen in CI (not yet confirmed by the owner).
+- The OS release floors used by the environment check are the lowest releases seen in CI (the macOS floor, Darwin 25, was confirmed by the owner on 2026-10-21, with the override kept).
 
 ## For the owner
 
-To cover real hardware, on each of the Mac, the Windows machine and a Linux machine: clone the repository into a path with a space, `npm ci`, then `node scripts/qa.mjs --runs=5`, and send the `qa-evidence` output (or the last 80 lines of any failure). Or record a waiver for this checkpoint. Y01 stays awaiting the owner's final acceptance. **On 2026-10-21 the owner allowed work to continue before that acceptance** ("we can consider it to have passed and you can continue on"), so A01 and the cards after it are being built; a failure in the owner's five Windows repeats stops new work until it is fixed.
+To cover real hardware, on each of the Mac, the Windows machine and a Linux machine: clone the repository into a path with a space, `npm ci`, then `node scripts/qa.mjs --runs=5`, and send the `qa-evidence` output (or the last 80 lines of any failure). Or record a waiver for this checkpoint. **On 2026-10-21 the owner allowed work to continue before giving the final acceptance** ("we can consider it to have passed and you can continue on"), so A01 and the cards after it were built; a failure in the owner's five Windows repeats would have stopped new work until fixed. The five repeats passed and the owner then accepted the checkpoint (last box below).
 
 ## Sign-off
 
 - [x] macOS (real hardware): the owner's own run on a Mac mini, Darwin 25.5.0 arm64, Node 22.23.2, commit `e318c62`, 0 of 5 runs failed (after one failed round at `93bf822` caused by a test-hook race, fixed). Ticked on 2026-10-21 at the owner's direction ("I did the mac test for Y01").
 - [x] Windows (real hardware): ticked on 2026-10-21 by the implementing session at the owner's instruction ("mark it so"); the owner's five repeats then passed (5 of 5 at `7d7078a`): considered passed (Windows 11 10.0.26200 x64, Node 22.20.0; one-repeat passes at commits `d0c4823` and `7d7078a` and at a later commit, 311.4 s).
 - [x] Linux (any distribution beyond the CI runner): the development server (Ubuntu 26.04.1, kernel 7.0, ext4/NVMe), commit `7d7078a`, 5 of 5 repeats passed, run by the implementing session at the owner's request. Ticked on 2026-10-21 at the owner's direction ("I thought you did the linux test").
-- [ ] Owner accepts QA checkpoint 1, or records a waiver of the real-hardware part: ______
+- [x] Owner accepts QA checkpoint 1, or records a waiver of the real-hardware part: accepted. Ticked on 2026-10-21 by the implementing session at the owner's direction ("Yes I thought we decided this last night I had sent you the windows run afterwards and also newer mac run"), on the strength of the owner's two Mac 5 of 5 runs (the newer at `8a99800`), the owner's Windows 5 of 5 runs and the Linux 5 of 5 run.
