@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **42 of 154 tasks implemented**, 2 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **44 of 154 tasks implemented**, 2 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -232,12 +232,12 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 ### Phase 25
 
 - [ ] **A08** Implement per-agent environments _(needs A03, T01, H11)_
-- [ ] **A10** Implement private-record inspection and cross-project information boundaries _(needs C02, A02, H11)_
+- [x] **A10** Implement private-record inspection and cross-project information boundaries _(needs C02, A02, H11)_
 - [ ] **C05** Implement retained context branches and selective updates _(needs C04, H04)_
 - [ ] **C07** Enforce context budgets and stall-proof compaction _(needs C04, R01)_
 - [ ] **H12** Implement the local worker runtime and attempt dispatcher _(needs A03, A05, R01, S05, C04, F08, H03)_
 - [ ] **R02** Implement fallback and cumulative budget accounting _(needs R01, S05, C04)_
-- [ ] **U02b** Implement the conversation transport and remote exposure _(needs U02)_
+- [x] **U02b** Implement the conversation transport and remote exposure _(needs U02)_
 - [x] **U10** Implement layered configuration, effective values and change history _(needs F02, R01, U01, H11)_
 - [ ] **V01** Implement health and progress stall detection _(needs H01, S08, C04, H11)_
 

@@ -17,7 +17,7 @@ The first integrated runtime acceptance gate is retained task context: pause, an
 - One human owner, durable agent identities, separate task contexts and incidental conversation, and explicit ownership retention during Pause/Suspend.
 - Separation of assignment from observed activity, and of submission from accepted delivery.
 - Version-bound evidence, resume reconciliation against changed inputs, immutable tool/skill artifacts, and permission checks after restart.
-- Tight public authorization defaults with contextual standing grants and private installation policy. Owner consent, technical review, and execution admission are already separate concepts.
+- Derived authorization by default (changed October 21, 2026 from tight public defaults) with contextual standing grants and private installation policy. Owner consent, technical review, and execution admission are already separate concepts.
 - Chat as the primary interface; direct APIs and inspection views as coexisting surfaces.
 - TypeScript as the primary implementation language, a portable public product, and all three desktop/server OS families as requirements.
 
@@ -393,7 +393,7 @@ Chat must include a deterministic command path for status, pause, stop, revoke, 
 
 Authorization answers “is this action within the owner's granted scope?” Technical review answers “is this concrete operation appropriate and safe?” Admission answers “are those decisions still valid for this exact operation now?” These are different records.
 
-Public defaults are tight. Rob's installation may start with pregranted scopes after their exact terms are recorded. A user may loosen only a project, resource, action class, time window, environment, or cost range. Restrictions and human-review requirements retain their precedence. Existing grants survive ordinary task switches and restarts; revocation takes effect at admission and cancels or bounds pending work according to the operation contract.
+(Replaced October 21, 2026: the default is now derived authorization, with the strict profile as an option; see authorization-and-delegation.md.) Rob's installation may start with pregranted scopes after their exact terms are recorded. A user may tighten or loosen a project, resource, action class, time window, environment, or cost range. Restrictions and human-review requirements retain their precedence. Existing grants survive ordinary task switches and restarts; revocation takes effect at admission and cancels or bounds pending work according to the operation contract.
 
 For command review, bind the verdict to executable, arguments, working directory, relevant environment/credential references, script content hashes, target identity, expected resource version, and policy revision. A reviewed shell string is insufficient if the script it invokes changes. Recheck before execution and prevent unchecked substitution. Reviewers use limited context, cannot approve their own request where independence is required, and cannot grant access the owner has not granted.
 

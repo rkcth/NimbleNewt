@@ -53,7 +53,8 @@ export interface NimbleNewtConfig {
     readonly difficulty: Readonly<Record<string, readonly string[]>>;
   };
   readonly api: { readonly remoteExposure: boolean };
-  readonly approvals: { readonly preset: "tight"; readonly grants: readonly Grant[] };
+  /** The approval profile (card A07 builds the policy engine behind it): `derived` (the default) lets an explicit instruction authorize what it reasonably needs; `strict` asks at every consequential step; `autonomous` acts within grants. */
+  readonly approvals: { readonly preset: "derived" | "strict" | "autonomous"; readonly grants: readonly Grant[] };
 }
 
 /** Initial operating limits accepted by the owner (decision D6). */
@@ -134,7 +135,7 @@ const SCHEMA: Schema = {
       kind: "object",
       optional: ["grants"],
       props: {
-        preset: { kind: "literal", value: "tight" },
+        preset: { kind: "enum", values: ["derived", "strict", "autonomous"] },
         grants: {
           kind: "array",
           items: {
@@ -282,7 +283,8 @@ export function withDefaults(raw: Record<string, unknown>): Record<string, unkno
     limits: { ...DEFAULT_LIMITS, ...limits },
     execution: { isolation: "strong", ...execution },
     api: { remoteExposure: false, ...api },
-    approvals: { preset: "tight", grants: [], ...approvals },
+    // The first release called the strict profile "tight"; an old document keeps that meaning under its new name (it never silently becomes looser).
+    approvals: { preset: "derived", grants: [], ...approvals, ...(approvals.preset === "tight" ? { preset: "strict" } : {}) },
   };
 }
 

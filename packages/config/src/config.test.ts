@@ -22,10 +22,18 @@ test("the public and private example profiles load, with defaults filled in", ()
   const pub = loadOk(example("public"));
   assert.equal(pub.profile, "public");
   assert.deepEqual(pub.limits, DEFAULT_LIMITS);
-  assert.deepEqual([pub.execution.isolation, pub.api.remoteExposure, pub.approvals.preset, pub.approvals.grants], ["strong", false, "tight", []]);
+  assert.deepEqual([pub.execution.isolation, pub.api.remoteExposure, pub.approvals.preset, pub.approvals.grants], ["strong", false, "derived", []]);
   const priv = loadOk(example("private"));
   assert.equal(priv.profile, "private");
   assert.equal(priv.approvals.grants.some((g) => g.visibility === "private"), true);
+});
+
+test("the approval preset is derived by default, strict and autonomous are options, and the old name tight keeps its meaning as strict", () => {
+  const base = parsed("public");
+  for (const preset of ["derived", "strict", "autonomous"]) assert.equal(loadOk({ ...base, approvals: { preset, grants: [] } }).approvals.preset, preset);
+  assert.equal(loadOk({ ...base, approvals: { grants: [] } }).approvals.preset, "derived");
+  assert.equal(loadOk({ ...base, approvals: { preset: "tight", grants: [] } }).approvals.preset, "strict", "an old document never becomes looser");
+  assert.ok(messages(loadConfig({ ...base, approvals: { preset: "loose", grants: [] } })).some((m) => m.startsWith("approvals.preset")));
 });
 
 test("the public example enables nothing that costs money or needs a credential", () => {
