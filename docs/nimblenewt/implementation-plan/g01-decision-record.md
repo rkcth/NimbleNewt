@@ -77,6 +77,13 @@ Given by the owner in conversation with the implementing AI session; recorded he
 4. Production and improvement budgets (provisional, configurable storage defaults decided 2026-10-20) and the proposed defaults in the design register that the owner has not set (P/PC allocation, meeting cadence, voting rules, lifecycle limits, update windows).
 5. Acceptance of the G02 milestone and its default decisions (aborted-input framing, update behaviour, branch and task limits, the interrupted-work hold).
 
+## Sandbox decisions, 2026-10-21 (owner, one at a time)
+
+- **Linux launcher (A03): bubblewrap.** The owner chose it over rootless containers and microVMs ("A sounds good"). Recommendation rationale (not the owner's words): it meets the stated boundary (scoped files, no credentials, controlled network, killable process tree) with the lightest install; the launcher refuses to advertise capacity where unprivileged user namespaces are unavailable (a consequence of the choice, not a separate decision); the launcher interface leaves room for a stronger backend later.
+- **Changing permissions on a running agent.** Controller-side grants and revocations apply at the agent's next call with no restart. Sandbox-level access (mounts, network, limits) is fixed at launch and recorded as a recipe revision. Widening starts a fresh sandbox from a checkpoint; narrowing takes effect before the next action.
+- **Revocation never destroys state** (the owner's concern was lost work or context; "Yes, write it down"). Order: freeze new calls, let in-flight calls settle (cancelled or uncertain ones go in the effect ledger), checkpoint, restart with the narrower recipe (A03 owns the launcher and quarantine; H12 owns the freeze, settle and checkpoint order). The checkout, home, scratch and conversation context are host-side and survive. Work under a path the agent lost is quarantined read-only for the owner. Only an emergency stop skips settle and checkpoint; the exposure then is the step in progress and context since the last checkpoint.
+- **Still open:** macOS launcher (Seatbelt recommended) and direct versus mediated workspace editing (OD-9, mediated recommended).
+
 ## Open owner decisions from the documentation audit (2026-10-21)
 
 A requirement-by-requirement audit of the product documents against the task cards added 38 cards (the plan now has 151). It also found places where the documents leave a policy open. These are recorded here for the owner; none is decided, and the recommendations are an AI session's suggestions.
