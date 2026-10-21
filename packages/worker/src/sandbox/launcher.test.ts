@@ -297,13 +297,14 @@ describe("failing closed", () => {
   test("a remembered process is ended only if it is still the one that was seen: a reused process id is left alone", async () => {
     const { spawn } = await import("node:child_process");
     const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch { return false; } };
-    const bystander = spawn("/bin/sleep", ["60"], { stdio: "ignore" });
-    const sameOne = spawn("/bin/sleep", ["60"], { stdio: "ignore" });
+    // Stand-in "descendants": real, harmless, long-lived processes that the test starts itself (the same on every OS).
+    const bystander = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
+    const sameOne = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
     try {
       for (const [process_, shown, expectKilled] of [[bystander, "some other start time", false], [sameOne, "seen at the start", true]] as const) {
         const backend: SandboxBackend = {
           name: "fake-tracking", health: async () => ({ healthy: true, backend: "fake-tracking" }),
-          plan: () => ({ file: "/bin/sh", args: ["-c", "/bin/sleep 1"], env: {} }),
+          plan: () => ({ file: process.execPath, args: ["-e", "setTimeout(() => {}, 700)"], env: {} }),
           guestView: () => ({ workdir: "/w", home: "/h", scratch: "/s", tmp: "/t", inputs: [] }),
           descendants: async () => [{ pid: process_.pid!, started: "seen at the start" }],
           startTimes: async (pids) => new Map(pids.map((p) => [p, shown])),

@@ -236,7 +236,7 @@ export class SandboxLauncher {
       child.once("close", finish);
       // A trusted-host child that started its own session can outlive its parent and keep the output pipes open; after a short drain the result is given anyway.
       child.once("exit", (code, signal) => { setTimeout(() => finish(code, signal), EXIT_DRAIN_MS).unref(); });
-      child.once("error", (error) => { ended = true; clearTimeout(timer); resolve({ exitCode: null, signal: null, timedOut, killed, stdout: "", stderr: `could not start: ${error.message}`, truncated: false, durationMs: Date.now() - started }); });
+      child.once("error", (error) => { ended = true; clearTimeout(timer); if (poller !== undefined) clearInterval(poller); resolve({ exitCode: null, signal: null, timedOut, killed, stdout: "", stderr: `could not start: ${error.message}`, truncated: false, durationMs: Date.now() - started }); });
     });
     const guest: GuestView = backend?.guestView(recipe) ?? { workdir: recipe.workdir, home: recipe.home, scratch: recipe.scratch, tmp: recipe.scratch, inputs: recipe.readOnly.map((m) => ({ host: m.host, guest: m.host })) };
     const run: SandboxRun = { runId, mode: recipe.mode, recipeRevision: recipe.revision, guest, kill: () => { killed = true; killTree(); }, result };

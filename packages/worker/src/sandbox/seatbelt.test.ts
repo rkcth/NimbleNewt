@@ -22,7 +22,8 @@ const recipe = (extra: Partial<SandboxRecipe> = {}): SandboxRecipe => {
 
 describe("the Seatbelt profile (any operating system)", () => {
   test("paths are parameters, never text in the profile, so no path can change the profile", () => {
-    const evil = dir('evil") (allow default) ("x');
+    // A name with quotes and brackets (Windows file names cannot hold a double quote, so there the same shape is made with a single quote).
+    const evil = dir(process.platform === "win32" ? "evil') (allow default) ('x" : 'evil") (allow default) ("x');
     const r = normalizeRecipe(recipe({ workdir: evil, readOnly: [{ host: dir("tools"), guest: "/inputs/tools" }] }), []);
     const profile = profileFor(r);
     assert.ok(!profile.includes("allow default"), profile);
@@ -43,7 +44,7 @@ describe("the Seatbelt profile (any operating system)", () => {
   test("a machine without sandbox-exec has no capacity and says why", async () => {
     const launcher = await SandboxLauncher.create({ backend: seatbeltBackend({ executable: "/nonexistent/sandbox-exec" }), protectedPaths: [], audit: () => undefined });
     assert.equal(launcher.capacity.available, false);
-    assert.match(launcher.capacity.reason ?? "", /not found|could not run/);
+    assert.match(launcher.capacity.reason ?? "", /not found/);
     await assert.rejects(launcher.launch({ recipe: recipe(), command: ["/bin/true"], timeoutMs: 1000, maxOutputBytes: 100 }), /no confined launch is possible/);
   });
 });

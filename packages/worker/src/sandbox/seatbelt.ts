@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,7 +12,7 @@ const run = promisify(execFile);
 const SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
 
 export interface SeatbeltOptions {
-  /** The program. Default: `/usr/bin/sandbox-exec`. */
+  /** The program, as an absolute path. Default: `/usr/bin/sandbox-exec`. */
   readonly executable?: string;
 }
 
@@ -104,6 +104,7 @@ export function seatbeltBackend(options: SeatbeltOptions = {}): SandboxBackend {
       return times;
     },
     async health(): Promise<BackendHealth> {
+      if (!existsSync(executable)) return { healthy: false, backend: "seatbelt", reason: `${executable} was not found; this system does not provide sandbox-exec` };
       let probe: string | undefined;
       try {
         probe = realpathSync(mkdtempSync(join(tmpdir(), "nimblenewt-probe-")));
@@ -127,7 +128,9 @@ export function seatbeltBackend(options: SeatbeltOptions = {}): SandboxBackend {
       } catch (error) {
         const e = error as NodeJS.ErrnoException & { stderr?: string };
         if (e.code === "ENOENT") return { healthy: false, backend: "seatbelt", reason: `${executable} was not found; this macOS does not provide sandbox-exec` };
-        return { healthy: false, backend: "seatbelt", reason: `sandbox-exec could not run a confined probe (${(e.stderr ?? e.message).trim().split("\n").slice(-2).join(" ")}). The tool is deprecated by Apple; a macOS update may have changed it` };
+        const extra = e as unknown as { stdout?: string; code?: number | string; signal?: string };
+        const detail = [`exit ${String(extra.code ?? "?")}`, extra.signal === undefined || extra.signal === null ? "" : `signal ${extra.signal}`, (e.stderr ?? "").trim().split("\n").slice(-2).join(" "), (extra.stdout ?? "").trim().slice(0, 100)].filter((x) => x !== "").join("; ");
+        return { healthy: false, backend: "seatbelt", reason: `sandbox-exec could not run a confined probe (${detail}). The tool is deprecated by Apple; a macOS update may have changed it` };
       } finally {
         if (probe !== undefined) rmSync(probe, { recursive: true, force: true });
       }

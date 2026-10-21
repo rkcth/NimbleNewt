@@ -1,0 +1,26 @@
+name: Sandbox diagnose
+
+# Started by hand from the Actions tab. On a GitHub-hosted Mac it runs the macOS sandbox (Seatbelt) probe step by step and prints what the sandbox denied, to correct the profile
+# (card A03). It changes nothing and uploads nothing.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    name: Seatbelt on a hosted Mac
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.19.0"
+      - run: npm ci
+      - run: npm run build
+      - name: Run the probe step by step
+        run: node scripts/seatbelt-diagnose.mjs
