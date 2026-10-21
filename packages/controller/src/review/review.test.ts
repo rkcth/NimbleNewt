@@ -47,10 +47,11 @@ for (const backend of backends) {
       } finally { await world.close(); }
     });
   const op = (extra: Partial<Operation> = {}): Operation => ({ name: "run-script", args: { cwd: "/work", flags: ["-x"] }, script: "echo hello\nrm -rf build\n", target: { kind: "workspace", id: "main" }, ...extra });
-  const ask = (review: ReviewService, who: Principal, task: string, operation: Operation = op()) => review.request(who, { commandId: cid("rq"), taskId: task, operation, note: "please check" });
+  const context = { toolVersion: "1.2.3", authoritySource: "task grant", expectedEffects: ["builds the project"], affectedResources: ["workspace:main"] };
+  const ask = (review: ReviewService, who: Principal, task: string, operation: Operation = op()) => review.request(who, { commandId: cid("rq"), taskId: task, operation, note: "please check", context });
   const approve = async (review: ReviewService, who: Principal, id: string, extra: Record<string, unknown> = {}) => {
     const v = (await review.get(who, id))!;
-    await review.decide(who, { commandId: cid("dc"), requestId: id, expectedRevision: v.revision, verdict: "approve", reason: "reviewed the script", ...extra });
+    await review.decide(who, { commandId: cid("dc"), requestId: id, expectedRevision: v.revision, verdict: "allow", reason: "reviewed the script", ...extra });
   };
 
   suite("the exact reviewed operation is admitted once; a repeat of the same call replays and a second use is refused", async ({ review, ann, rev, task }) => {
@@ -108,13 +109,13 @@ for (const backend of backends) {
     const r = await ask(review, ann, task);
     const selfReviewer = await agent("both", [{ action: "review.request", project: a }, { action: "attempt.work", project: a }, { action: "review.decide", project: a }]);
     const own = await ask(review, selfReviewer, task);
-    await refuses("forbidden", () => review.decide(selfReviewer, { commandId: cid("dc"), requestId: own.id, expectedRevision: 1, verdict: "approve", reason: "me" }), (e) => assert.match(e.message, /may not decide/));
-    await review.decide(owner, { commandId: cid("dc"), requestId: own.id, expectedRevision: 1, verdict: "approve", reason: "the owner may review what others request" });
+    await refuses("forbidden", () => review.decide(selfReviewer, { commandId: cid("dc"), requestId: own.id, expectedRevision: 1, verdict: "allow", reason: "me" }), (e) => assert.match(e.message, /may not decide/));
+    await review.decide(owner, { commandId: cid("dc"), requestId: own.id, expectedRevision: 1, verdict: "allow", reason: "the owner may review what others request" });
     assert.equal((await review.get(owner, own.id))!.decidedBy, "owner:rob");
     const outsider = await agent("outsider", [{ action: "review.decide", project: b }]);
-    await refuses("forbidden", () => review.decide(outsider, { commandId: cid("dc"), requestId: r.id, expectedRevision: 1, verdict: "approve", reason: "wrong project" }));
-    await refuses("forbidden", () => review.decide(mallory, { commandId: cid("dc"), requestId: r.id, expectedRevision: 1, verdict: "approve", reason: "no right" }));
-    await refuses("forbidden", () => review.decide(rev, { commandId: cid("dc"), requestId: "rev-aaaaaaaaaaaaaaaaaaaa", expectedRevision: 1, verdict: "approve", reason: "missing" }));
+    await refuses("forbidden", () => review.decide(outsider, { commandId: cid("dc"), requestId: r.id, expectedRevision: 1, verdict: "allow", reason: "wrong project" }));
+    await refuses("forbidden", () => review.decide(mallory, { commandId: cid("dc"), requestId: r.id, expectedRevision: 1, verdict: "allow", reason: "no right" }));
+    await refuses("forbidden", () => review.decide(rev, { commandId: cid("dc"), requestId: "rev-aaaaaaaaaaaaaaaaaaaa", expectedRevision: 1, verdict: "allow", reason: "missing" }));
     await approve(review, rev, r.id);
     await refuses("forbidden", () => review.admit(selfReviewer, { commandId: cid("ad"), requestId: r.id, operation: op() }), (e) => assert.match(e.message, /has no such review/));
     assert.equal(await review.get(mallory, r.id), undefined);
@@ -129,9 +130,9 @@ for (const backend of backends) {
     now += 61_000;
     await refuses("review_invalid", () => review.admit(ann, { commandId: cid("ad"), requestId: r.id, operation: op() }), (e) => assert.match(e.message, /expired at/));
     const d = await ask(review, ann, task);
-    await refuses("invalid_command", () => review.decide(rev, { commandId: cid("dc"), requestId: d.id, expectedRevision: 1, verdict: "approve", reason: "x", expiresAt: stamp(now - 1000) }), (e) => assert.match(e.message, /after now/));
-    await refuses("invalid_command", () => review.decide(rev, { commandId: cid("dc"), requestId: d.id, expectedRevision: 1, verdict: "approve", reason: "x", expiresAt: stamp(now + 25 * 3_600_000) }), (e) => assert.match(e.message, /within 24 hours/));
-    await refuses("invalid_command", () => review.decide(rev, { commandId: cid("dc"), requestId: d.id, expectedRevision: 1, verdict: "approve", reason: "x", expiresAt: "tomorrow" }));
+    await refuses("invalid_command", () => review.decide(rev, { commandId: cid("dc"), requestId: d.id, expectedRevision: 1, verdict: "allow", reason: "x", expiresAt: stamp(now - 1000) }), (e) => assert.match(e.message, /after now/));
+    await refuses("invalid_command", () => review.decide(rev, { commandId: cid("dc"), requestId: d.id, expectedRevision: 1, verdict: "allow", reason: "x", expiresAt: stamp(now + 25 * 3_600_000) }), (e) => assert.match(e.message, /within 24 hours/));
+    await refuses("invalid_command", () => review.decide(rev, { commandId: cid("dc"), requestId: d.id, expectedRevision: 1, verdict: "allow", reason: "x", expiresAt: "tomorrow" }));
     await review.decide(rev, { commandId: cid("dc"), requestId: d.id, expectedRevision: 1, verdict: "deny", reason: "too risky" });
     await refuses("review_invalid", () => review.admit(ann, { commandId: cid("ad"), requestId: d.id, operation: op() }), (e) => assert.match(e.message, /is denied, not approved/));
     const e = await ask(review, ann, task);

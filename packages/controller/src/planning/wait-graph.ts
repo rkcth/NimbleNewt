@@ -30,7 +30,7 @@ export interface CircularWait {
 
 export interface WaitGraphOptions extends RunnerOptions {
   /** More edges for the graph, such as reviews waiting for a designated reviewer (card H05 supplies them). */
-  readonly extraEdges?: (projectId: string) => Promise<readonly WaitEdge[]>;
+  readonly extraEdges?: (projectId: string, tasks: ReadonlyMap<string, { readonly state: string; readonly owner?: string }>) => Promise<readonly WaitEdge[]>;
   readonly scanLimit?: number;
 }
 
@@ -98,7 +98,7 @@ export class WaitGraphService {
       if (page.length < 500) break;
       after = page.at(-1)!.id;
     }
-    if (this.#extra !== undefined) edges.push(...(await this.#extra(projectId)).filter((e) => live(e.fromTask) && live(e.toTask) && e.fromTask !== e.toTask));
+    if (this.#extra !== undefined) edges.push(...(await this.#extra(projectId, tasks)).filter((e) => live(e.fromTask) && live(e.toTask) && e.fromTask !== e.toTask));
     return edges;
   }
 

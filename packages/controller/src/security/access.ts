@@ -17,7 +17,7 @@ export const ACTIONS = [
   "wait.manage", "blocker.manage",
   "desk.write", "desk.read", "desk.scratch.read",
   "history.append", "history.read",
-  "review.request", "review.decide",
+  "review.request", "review.decide", "review.policy.write",
   "principal.manage",
   "agent.manage", "agent.read",
   "task.contract.write", "task.priority.write", "task.difficulty.write", "task.class.write", "task.dependency.write",

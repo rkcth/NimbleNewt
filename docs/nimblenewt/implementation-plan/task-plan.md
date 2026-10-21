@@ -37,7 +37,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N07 / AII-257 | C01, C02, C04, C05, C07, C08, C09 |
 | N08 / AII-258 | R01, R02, R03, R04, R05 |
 | N09 / AII-259 | U03, U04, U05, U06, U07, U09, U08, U10, U11 |
-| N10 / AII-260 | H01, H02, H03, H04, H05, H06, H07, H09, H10, H11, H12, H13 |
+| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H07, H09, H10, H11, H12, H13 |
 | N11 / AII-261 | V01, V02 |
 | N12 / AII-262 | M01, M02, M03, M04, M05, M06 |
 | N13 / AII-263 | T01, T02, T03, T06, T07, T08, T09 |
@@ -465,7 +465,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Parent:** N06 / AII-256.
 - **Blockers:** A04, A05.
 - **Deliverable:** Staged-tree/base review and actor provenance.
-- **Acceptance and verification:** Reviewed tree commits; changed staged content/base requires new review; developer, agent, executor and reviewer identities retained; attribution also records grant source, commit identity and later integration history; externally verified review references are accepted; no forged authorship.
+- **Acceptance and verification:** Reviewed tree commits; changed staged content/base requires new review; developer, agent, executor and reviewer identities retained; attribution also records grant source, commit identity and later integration history; externally verified review references are accepted; no forged authorship; a reviewer who commits to the version under review is recorded as a contributor automatically (H05 contributors are self-reported until then).
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### A07 — Implement action classes, default policy and effective-policy view
@@ -667,7 +667,15 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Parent:** N10 / AII-260.
 - **Blockers:** H04, A05.
 - **Deliverable:** Independent reviewer selection, fallback and wait graph.
-- **Acceptance and verification:** Self-review rejected when independence required; cyclic reviewers detected; outage waits or uses authorized fallback; no implicit approval; a review request carries tool version, arguments, working directory, environment revision, affected resources, script hashes, expected effects, authority source, budget and bounded context with secrets redacted, and missing essential context forbids allow; verdicts are allow, deny, request-context or requires-owner-decision; a reviewer reaches a safe boundary and pauses its own task without reassignment, and held reviewers are never woken; requests carry a deadline and escalation and block only the gated change; a reviewer who commits to the version under review becomes a contributor and cannot approve it; queue delay, latency, false blocks, missed hazards and cost are recorded; a redundant request matched to an existing grant is cleared with recorded authority and a mandatory human gate is never converted to an agent gate; reviewer edges are supplied to the S10 wait-for graph (WaitGraphService extraEdges: a task waiting for a review waits on the reviewer's unfinished tasks), and a ring through a review is found by the circular-wait detector, shown by a test.
+- **Acceptance and verification:** Self-review rejected when independence required; cyclic reviewers detected; outage waits or uses authorized fallback; no implicit approval; a review request carries tool version, arguments, working directory, environment revision, affected resources, script hashes, expected effects, authority source, budget and bounded context with secrets redacted, and missing essential context forbids allow; verdicts are allow, deny, request-context or requires-owner-decision; requests carry a deadline and escalation and block only the gated change; a reviewer who commits to the version under review becomes a contributor and cannot approve it; queue delay, latency, false blocks, missed hazards and cost are recorded; a redundant request matched to an unexpired, unused approval of the identical operation is cleared with recorded authority and a mandatory human gate is never converted to an agent gate; reviewer edges are supplied to the S10 wait-for graph (WaitGraphService extraEdges: a task waiting for a review waits on the reviewer's unfinished tasks), and a ring through a review is found by the circular-wait detector, shown by a test.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### H05b — Implement reviewer pause and hold behaviour
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H05, L01.
+- **Deliverable:** Lifecycle-aware reviewer routing.
+- **Acceptance and verification:** A reviewer reaches a safe boundary and pauses its own task without reassignment (the review it was on waits for it); held, paused or stopped reviewers are never woken to review and are skipped when a reviewer is chosen; a review whose reviewer is then held keeps its place and moves on under the project policy when the deadline passes, never by implicit approval; a lost reviewer host is told apart from a slow reviewer; split from H05, whose routing, verdicts, contributors, escalation and figures do not need the lifecycle.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### H06 — Implement event subscriptions and gap recovery
@@ -1231,7 +1239,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### X02 — Run policy, isolation and adversarial campaign
 
 - **Parent:** N18 / AII-268.
-- **Blockers:** A06, U04, T05, Q02, G05, A07, A09, A10, T08, T09, P05.
+- **Blockers:** A06, U04, T05, Q02, G05, A07, A09, A10, T08, T09, P05, H05b.
 - **Deliverable:** Scope/revocation/escape/injection and review-race evidence.
 - **Acceptance and verification:** Alternate shell/tool/MCP/API paths cannot bypass grants or human gate; reviewer outage cannot authorize work; a project named NimbleNewt gains no authority over the installation or updater; no outbound telemetry, issue, PR or report leaves without explicit scoped authorization (network capture); agent B cannot reach suspended agent A's scratch through file paths, search or artifact links, repeated after restart and harness change.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
