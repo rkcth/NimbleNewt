@@ -2,11 +2,16 @@ import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/typ
 import { DomainError } from "../domain/errors.js";
 import { onlyKnown, type View } from "../domain/model.js";
 import { CommandRunner, view, type CommandMeta, type RunnerOptions } from "../domain/runner.js";
+import { clientMayHold } from "./access.js";
 import { effectiveOf } from "./grants.js";
 import { credentialIdOf, hashSecret, makeToken, newSecret, parseToken, verifySecret, type StoredCredential } from "./credentials.js";
 
-export type PrincipalKind = "owner" | "agent" | "host";
-export const PRINCIPAL_KINDS: readonly PrincipalKind[] = ["owner", "agent", "host"];
+/**
+ * `client` is an external agent or service that talks to NimbleNewt agents through the conversation API (card U02). It is not a worker: the only actions it can ever hold are
+ * the `conversation.*` ones, whoever grants them and however, so joining a thread gives it no tool, task or file capability.
+ */
+export type PrincipalKind = "owner" | "agent" | "host" | "client";
+export const PRINCIPAL_KINDS: readonly PrincipalKind[] = ["owner", "agent", "host", "client"];
 
 /** What a principal may do: an action (a dotted name such as `task.create`, or `*`) within a project (an ID, or `*` for every project and for actions that belong to none). */
 export interface Grant {
@@ -135,9 +140,10 @@ export class PrincipalService {
     requireOwner(owner);
     return this.#runner.command("principal.enroll", { ...command, actor: owner.id }, async () => {
       onlyKnown(command, ["commandId", "kind", "name", "grants"]);
-      const kind = command.kind === "agent" || command.kind === "host" ? command.kind : invalid("kind", "must be agent or host (there is one owner, created at installation)");
+      const kind = command.kind === "agent" || command.kind === "host" || command.kind === "client" ? command.kind : invalid("kind", "must be agent, host or client (there is one owner, created at installation)");
       const name = nameOf(command.name);
       const given = command.grants === undefined ? [] : grants(command.grants);
+      if (kind === "client") for (const g of given) if (!clientMayHold(g.action)) invalid("grants", `a client may hold only conversation actions, not ${g.action}`);
       const id = principalIdOf(kind, name);
       const body: PrincipalBody = { kind, name, state: "active", grants: given, createdBy: owner.id };
       return {
@@ -150,7 +156,11 @@ export class PrincipalService {
   /** Replaces a principal's grants (the owner only). The change takes effect for the next authentication. */
   async setGrants(owner: Principal, command: NoActor & { principalId: string; expectedRevision: number; grants: readonly Grant[] }): Promise<void> {
     requireOwner(owner);
-    return this.#update(owner, "principal.grants", command, (body) => ({ ...body, grants: grants(command.grants) }), { grants: grants(command.grants).length });
+    return this.#update(owner, "principal.grants", command, (body) => {
+      const next = grants(command.grants);
+      if (body.kind === "client") for (const g of next) if (!clientMayHold(g.action)) invalid("grants", `a client may hold only conversation actions, not ${g.action}`);
+      return { ...body, grants: next };
+    }, { grants: grants(command.grants).length });
   }
 
   /** Disables a principal: every later authentication fails, whatever its secret. */

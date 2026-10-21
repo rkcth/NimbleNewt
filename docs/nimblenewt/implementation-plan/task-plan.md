@@ -48,7 +48,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N18 / AII-268 | G06, X09, X10, X01, X02, X03, X04, X05, X06, X07, X08, Y01, Y02, Y03 |
 | N19 / AII-269 | D01, D02, D03, D04 |
 | N07a / AII-519 | U01, U13, T04 |
-| N10a / AII-520 | U02, U12, T05 |
+| N10a / AII-520 | U02, U02b, U12, T05 |
 | N16a / AII-615 | B02, B03, B04, B05 |
 
 ## Cards
@@ -473,7 +473,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Parent:** N06 / AII-256.
 - **Blockers:** A02, A05, F02.
 - **Deliverable:** Action-class catalogue (inspect, mutate, external send, publish, spend, install executable, access change, commit, push, merge, deploy), the public tight default policy, presets (direct approval, delegated agent review, automatic) and strict, derived and autonomous profiles, an optional all-command human gate, grant fields for spend limit, environment, maintenance window, delegation allowance and conditions, and an effective-policy and preview query (authorization-and-delegation 3-19, 37; operational-contracts 87; README 106).
-- **Acceptance and verification:** A fresh install requires direct approval for every consequential class; an unknown action goes to review, never auto-allowed; enabling the all-command gate gates every execution; drafting never publishes, and publish, external send and spend are granted separately per account and audience; an accepted proposal does not authorize downstream push, merge or deploy; relaxation scoped by environment, window or budget changes only that scope; a preset change keeps narrower human-review rules; a permissive project cannot weaken a locked installation restriction; effective policy shows source grants, inherited restrictions and effect time, and preview reports the practical effect before apply; a materially broader action, likely danger or unexpected spend needs a new decision while a standing grant survives handoff and restart without a prompt.
+- **Acceptance and verification:** A fresh install requires direct approval for every consequential class; an unknown action goes to review, never auto-allowed; enabling the all-command gate gates every execution; drafting never publishes, and publish, external send and spend are granted separately per account and audience; an accepted proposal does not authorize downstream push, merge or deploy; relaxation scoped by environment, window or budget changes only that scope; a preset change keeps narrower human-review rules; a permissive project cannot weaken a locked installation restriction; effective policy shows source grants, inherited restrictions and effect time, and preview reports the practical effect before apply; a materially broader action, likely danger or unexpected spend needs a new decision while a standing grant survives handoff and restart without a prompt; a conversation action request (U02 stores it with needsAuthorization) is evaluated as a request under the effective policy, and nothing is executed because a message asked.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### A08 — Implement per-agent environments
@@ -589,7 +589,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Parent:** N05 / AII-255.
 - **Blockers:** C04, A02, S08, L05.
 - **Deliverable:** Durable pause gates and permitted background result collection.
-- **Acceptance and verification:** Pause retains owner and blocks new foreground work across restart; background result recorded without unpausing; observed execution state (pausing, stopping, recovery-required, unreachable) is recorded apart from lifecycle intent; agent-level Pause spans all the agent's task contexts while a task-level Pause still allows a separately authorized response or meeting task; a manual Pause never gains an automatic return; queued messages and state updates reach a paused agent's inbox without resuming it; each request records actor, scope, mode, operation ID and policy revision; a paused agent keeps its tasks despite an idle replacement, an urgent deadline or elapsed time.
+- **Acceptance and verification:** Pause retains owner and blocks new foreground work across restart; background result recorded without unpausing; observed execution state (pausing, stopping, recovery-required, unreachable) is recorded apart from lifecycle intent; agent-level Pause spans all the agent's task contexts while a task-level Pause still allows a separately authorized response or meeting task; a manual Pause never gains an automatic return; queued messages and state updates reach a paused agent's inbox without resuming it; each request records actor, scope, mode, operation ID and policy revision; a paused agent keeps its tasks despite an idle replacement, an urgent deadline or elapsed time; supplies the conversation availability hook, so a paused agent's messages are queued and an incoming message never lifts a hold.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### L02 — Implement Suspend and graceful Stop
@@ -665,6 +665,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H05 — Implement review routing and wait-cycle prevention
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `a1190a4`; CI runs 39666500873; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** A project policy (independence, designated reviewers, authorized fallbacks, deadline, tools reserved for the owner) decides who may review. A request is routed at once to the least-loaded eligible reviewer (never the requester or a contributor) or waits; nothing is approved by waiting, and a late review moves to the next reviewer and finally to the owner. Four verdicts; allow needs the essential context; contributors cannot approve and an approver who becomes one is withdrawn; a tool the owner reserves stays the owner's even for reviews already open or approved; repeat requests are cleared against an unexpired unused approval; figures kept; reviewer edges feed the S10 wait graph and a ring through a review is found. The pause and hold behaviour is split into H05b. Limits stated in the notes: contributors are self-reported, essential context is the requester's word, no state-API operations or timer yet. Reviewed and approved by an AI review session (Claude Opus) after two rounds; six-cell CI green.
 - **Blockers:** H04, A05.
 - **Deliverable:** Independent reviewer selection, fallback and wait graph.
 - **Acceptance and verification:** Self-review rejected when independence required; cyclic reviewers detected; outage waits or uses authorized fallback; no implicit approval; a review request carries tool version, arguments, working directory, environment revision, affected resources, script hashes, expected effects, authority source, budget and bounded context with secrets redacted, and missing essential context forbids allow; verdicts are allow, deny, request-context or requires-owner-decision; requests carry a deadline and escalation and block only the gated change; a reviewer who commits to the version under review becomes a contributor and cannot approve it; queue delay, latency, false blocks, missed hazards and cost are recorded; a redundant request matched to an unexpired, unused approval of the identical operation is cleared with recorded authority and a mandatory human gate is never converted to an agent gate; reviewer edges are supplied to the S10 wait-for graph (WaitGraphService extraEdges: a task waiting for a review waits on the reviewer's unfinished tasks), and a ring through a review is found by the circular-wait detector, shown by a test.
@@ -796,12 +798,20 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** Chat/API clients see same scoped facts; stale revisions and duplicate command semantics verified; accepted differs from completed; the controller start-up path (first built here) runs the F04h environment check: detectEnvironment with the PostgreSQL server version, startupCheck with the override from overrideRequested, print its output, pass allowUnsupportedServer to the PostgreSQL adapter, call recordOverride; an unsupported environment refuses to start and an overridden one is audited.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
-### U02 — Implement durable conversation API and transport
+### U02 — Implement durable conversation service (threads, messages, cursors, delivery states)
 
 - **Parent:** N10a / AII-520.
 - **Blockers:** U01, H04.
-- **Deliverable:** Thread/message/cursor API and chosen streaming/polling transport.
-- **Acceptance and verification:** Either side initiates; disconnect/restart resumes without duplicate turns; live connection never owns history; remote exposure is opt-in with local binding by default and TLS; scoped revocable client credentials for external agents, with the authenticated client recorded apart from the claimed sender; an external client gains no tool, task or filesystem capability; sender, recipient discovery, project scope, message type and delegated authority are checked, content is treated as untrusted and action requests go to authorization; request rate and size limits and backpressure; a paused or stopped agent's lifecycle gate applies to API calls.
+- **Deliverable:** Thread/message/cursor service with delivery states, limits and client principals.
+- **Acceptance and verification:** Either side initiates; disconnect/restart resumes without duplicate turns; live connection never owns history; scoped revocable client credentials for external agents (a client principal that can hold only conversation actions), with the authenticated client recorded apart from the claimed sender; an external client gains no tool, task or filesystem capability; sender, recipient discovery, project scope, message type and delegated authority are checked, content is treated as untrusted and action requests go to authorization; message size, recipient queue, per-sender rate, reply-chain depth and no-owner run limits bound traffic; accepted, delivered, handled and answered are distinct states; a message to a paused, suspended or stopped recipient is kept and reported as queued and a sender that is not available cannot send (the lifecycle arrives through the availability hook that L01 supplies).
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### U02b — Implement the conversation transport and remote exposure
+
+- **Parent:** N10a / AII-520.
+- **Blockers:** U02.
+- **Deliverable:** Chosen transport (authenticated HTTPS requests with cursor-based long-polling, server-sent events optional) and the opt-in remote listener.
+- **Acceptance and verification:** Remote exposure is opt-in with local binding by default and TLS; client credentials are checked on every request and a revoked client is refused on its next request; request rate and size limits and backpressure at the transport; a dropped connection loses nothing and the client resumes from its cursor; the same permissions and results as in-process callers on macOS, Linux and Windows; a paused or stopped agent's lifecycle gate applies to API calls; the transport choice is recorded in the decision register.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### U03 — Implement owner chat command interpretation
@@ -991,7 +1001,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### T05 — Implement MCP durable conversation adapter
 
 - **Parent:** N10a / AII-520.
-- **Blockers:** U02, T04.
+- **Blockers:** U02, U02b, T04.
 - **Deliverable:** Two-way conversation tools with stable IDs/cursors.
 - **Acceptance and verification:** Both initiation directions survive reconnect; no duplicate turns or cross-scope leakage; protocol session not task owner; a protocol-version upgrade preserves thread IDs, cursors and audit history.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

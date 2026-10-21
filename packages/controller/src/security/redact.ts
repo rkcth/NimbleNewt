@@ -15,7 +15,7 @@ function sensitiveName(name: string): boolean {
 }
 // <principal id>.<43-character base64url secret>, bearer tokens, and common provider key shapes.
 const SHAPES: readonly RegExp[] = [
-  /\b(?:owner|agent|host):[a-z0-9][a-z0-9-]{0,39}\.[A-Za-z0-9_-]{43}\b/g,
+  /\b(?:owner|agent|host|client):[a-z0-9][a-z0-9-]{0,39}\.[A-Za-z0-9_-]{43}\b/g,
   /\bBearer\s+[A-Za-z0-9._~+/=-]{16,}/gi,
   /\bsk-[A-Za-z0-9_-]{16,}\b/g,
   /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g,

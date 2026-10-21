@@ -1169,7 +1169,7 @@
         "F02"
       ],
       "deliverable": "Action-class catalogue (inspect, mutate, external send, publish, spend, install executable, access change, commit, push, merge, deploy), the public tight default policy, presets (direct approval, delegated agent review, automatic) and strict, derived and autonomous profiles, an optional all-command human gate, grant fields for spend limit, environment, maintenance window, delegation allowance and conditions, and an effective-policy and preview query (authorization-and-delegation 3-19, 37; operational-contracts 87; README 106)",
-      "acceptance_and_verification": "A fresh install requires direct approval for every consequential class; an unknown action goes to review, never auto-allowed; enabling the all-command gate gates every execution; drafting never publishes, and publish, external send and spend are granted separately per account and audience; an accepted proposal does not authorize downstream push, merge or deploy; relaxation scoped by environment, window or budget changes only that scope; a preset change keeps narrower human-review rules; a permissive project cannot weaken a locked installation restriction; effective policy shows source grants, inherited restrictions and effect time, and preview reports the practical effect before apply; a materially broader action, likely danger or unexpected spend needs a new decision while a standing grant survives handoff and restart without a prompt",
+      "acceptance_and_verification": "A fresh install requires direct approval for every consequential class; an unknown action goes to review, never auto-allowed; enabling the all-command gate gates every execution; drafting never publishes, and publish, external send and spend are granted separately per account and audience; an accepted proposal does not authorize downstream push, merge or deploy; relaxation scoped by environment, window or budget changes only that scope; a preset change keeps narrower human-review rules; a permissive project cannot weaken a locked installation restriction; effective policy shows source grants, inherited restrictions and effect time, and preview reports the practical effect before apply; a materially broader action, likely danger or unexpected spend needs a new decision while a standing grant survives handoff and restart without a prompt; a conversation action request (U02 stores it with needsAuthorization) is evaluated as a request under the effective policy, and nothing is executed because a message asked",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -1457,7 +1457,7 @@
         "L05"
       ],
       "deliverable": "Durable pause gates and permitted background result collection",
-      "acceptance_and_verification": "Pause retains owner and blocks new foreground work across restart; background result recorded without unpausing; observed execution state (pausing, stopping, recovery-required, unreachable) is recorded apart from lifecycle intent; agent-level Pause spans all the agent's task contexts while a task-level Pause still allows a separately authorized response or meeting task; a manual Pause never gains an automatic return; queued messages and state updates reach a paused agent's inbox without resuming it; each request records actor, scope, mode, operation ID and policy revision; a paused agent keeps its tasks despite an idle replacement, an urgent deadline or elapsed time",
+      "acceptance_and_verification": "Pause retains owner and blocks new foreground work across restart; background result recorded without unpausing; observed execution state (pausing, stopping, recovery-required, unreachable) is recorded apart from lifecycle intent; agent-level Pause spans all the agent's task contexts while a task-level Pause still allows a separately authorized response or meeting task; a manual Pause never gains an automatic return; queued messages and state updates reach a paused agent's inbox without resuming it; each request records actor, scope, mode, operation ID and policy revision; a paused agent keeps its tasks despite an idle replacement, an urgent deadline or elapsed time; supplies the conversation availability hook, so a paused agent's messages are queued and an incoming message never lifts a hold",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -1661,12 +1661,23 @@
       ],
       "deliverable": "Independent reviewer selection, fallback and wait graph",
       "acceptance_and_verification": "Self-review rejected when independence required; cyclic reviewers detected; outage waits or uses authorized fallback; no implicit approval; a review request carries tool version, arguments, working directory, environment revision, affected resources, script hashes, expected effects, authority source, budget and bounded context with secrets redacted, and missing essential context forbids allow; verdicts are allow, deny, request-context or requires-owner-decision; requests carry a deadline and escalation and block only the gated change; a reviewer who commits to the version under review becomes a contributor and cannot approve it; queue delay, latency, false blocks, missed hazards and cost are recorded; a redundant request matched to an unexpired, unused approval of the identical operation is cleared with recorded authority and a mandatory human gate is never converted to an agent gate; reviewer edges are supplied to the S10 wait-for graph (WaitGraphService extraEdges: a task waiting for a review waits on the reviewer's unfinished tasks), and a ring through a review is found by the circular-wait detector, shown by a test",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "a1190a4"
+        ],
+        "ci_runs": [
+          "39666500873"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "A project policy (independence, designated reviewers, authorized fallbacks, deadline, tools reserved for the owner) decides who may review. A request is routed at once to the least-loaded eligible reviewer (never the requester or a contributor) or waits; nothing is approved by waiting, and a late review moves to the next reviewer and finally to the owner. Four verdicts; allow needs the essential context; contributors cannot approve and an approver who becomes one is withdrawn; a tool the owner reserves stays the owner's even for reviews already open or approved; repeat requests are cleared against an unexpired unused approval; figures kept; reviewer edges feed the S10 wait graph and a ring through a review is found. The pause and hold behaviour is split into H05b. Limits stated in the notes: contributors are self-reported, essential context is the requester's word, no state-API operations or timer yet. Reviewed and approved by an AI review session (Claude Opus) after two rounds; six-cell CI green.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "H05b",
@@ -1991,13 +2002,30 @@
       "id": "U02",
       "parent": "N10a",
       "existing_issue": "AII-520",
-      "title": "Implement durable conversation API and transport",
+      "title": "Implement durable conversation service (threads, messages, cursors, delivery states)",
       "depends_on": [
         "U01",
         "H04"
       ],
-      "deliverable": "Thread/message/cursor API and chosen streaming/polling transport",
-      "acceptance_and_verification": "Either side initiates; disconnect/restart resumes without duplicate turns; live connection never owns history; remote exposure is opt-in with local binding by default and TLS; scoped revocable client credentials for external agents, with the authenticated client recorded apart from the claimed sender; an external client gains no tool, task or filesystem capability; sender, recipient discovery, project scope, message type and delegated authority are checked, content is treated as untrusted and action requests go to authorization; request rate and size limits and backpressure; a paused or stopped agent's lifecycle gate applies to API calls",
+      "deliverable": "Thread/message/cursor service with delivery states, limits and client principals",
+      "acceptance_and_verification": "Either side initiates; disconnect/restart resumes without duplicate turns; live connection never owns history; scoped revocable client credentials for external agents (a client principal that can hold only conversation actions), with the authenticated client recorded apart from the claimed sender; an external client gains no tool, task or filesystem capability; sender, recipient discovery, project scope, message type and delegated authority are checked, content is treated as untrusted and action requests go to authorization; message size, recipient queue, per-sender rate, reply-chain depth and no-owner run limits bound traffic; accepted, delivered, handled and answered are distinct states; a message to a paused, suspended or stopped recipient is kept and reported as queued and a sender that is not available cannot send (the lifecycle arrives through the availability hook that L01 supplies)",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "U02b",
+      "parent": "N10a",
+      "existing_issue": "AII-520",
+      "title": "Implement the conversation transport and remote exposure",
+      "depends_on": [
+        "U02"
+      ],
+      "deliverable": "Chosen transport (authenticated HTTPS requests with cursor-based long-polling, server-sent events optional) and the opt-in remote listener",
+      "acceptance_and_verification": "Remote exposure is opt-in with local binding by default and TLS; client credentials are checked on every request and a revoked client is refused on its next request; request rate and size limits and backpressure at the transport; a dropped connection loses nothing and the client resumes from its cursor; the same permissions and results as in-process callers on macOS, Linux and Windows; a paused or stopped agent's lifecycle gate applies to API calls; the transport choice is recorded in the decision register",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -2465,6 +2493,7 @@
       "title": "Implement MCP durable conversation adapter",
       "depends_on": [
         "U02",
+        "U02b",
         "T04"
       ],
       "deliverable": "Two-way conversation tools with stable IDs/cursors",

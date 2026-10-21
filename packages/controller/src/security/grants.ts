@@ -3,7 +3,7 @@ import { derivedId } from "../domain/ids.js";
 import { onlyKnown, revision as checkRevision, text, type View } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
-import { allows, covers } from "./access.js";
+import { allows, clientMayHold, covers } from "./access.js";
 import { scopedCommandId } from "./credentials.js";
 import type { NoActor, Principal, Restriction } from "./principals.js";
 import { redactText } from "./redact.js";
@@ -85,7 +85,7 @@ export interface RestrictInput extends NoActor {
 export const GRANT_LIMITS = { basis: 1000, reason: 1000, action: 60 } as const;
 const ACTION = /^(?:\*|[a-z][a-z0-9-]*(?:\.[a-z0-9-]+)*(?:\.\*)?)$/;
 const PROJECT = /^(?:\*|proj-[a-z2-7]{20})$/;
-const PRINCIPAL = /^(?:owner|agent|host):[a-z0-9][a-z0-9-]{0,39}$/;
+const PRINCIPAL = /^(?:owner|agent|host|client):[a-z0-9][a-z0-9-]{0,39}$/;
 const GRANT_ID = /^grt-[a-z2-7]{20}$/;
 const RESTRICTION_ID = /^rst-[a-z2-7]{20}$/;
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -163,6 +163,7 @@ export class GrantService {
         payload: { grantee, action, project, ...(resource === undefined ? {} : { resource: resource as unknown as JsonObject }), source, basis, ...(notBefore === undefined ? {} : { notBefore }), ...(expiresAt === undefined ? {} : { expiresAt }) },
         build: async () => {
           if ((await this.#runner.get("principal", grantee)) === undefined) throw new DomainError("not_found", `principal ${grantee} does not exist`);
+          if (grantee.startsWith("client:") && !clientMayHold(action)) throw new DomainError("invalid_command", `action: a client may hold only conversation actions, not ${action}`, { field: "action" });
           const ref: AggregateRef = { kind: "grant-record", id: derivedId("grt", scopedCommandId(owner.id, command.commandId)) };
           const body: GrantRecordBody = { grantee, action, project, ...(resource === undefined ? {} : { resource }), source, decidedBy: owner.id, basis, ...(notBefore === undefined ? {} : { notBefore }), ...(expiresAt === undefined ? {} : { expiresAt }), state: "active" };
           return { ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { grantee, action, project, source } };

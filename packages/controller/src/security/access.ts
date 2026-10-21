@@ -18,11 +18,17 @@ export const ACTIONS = [
   "desk.write", "desk.read", "desk.scratch.read",
   "history.append", "history.read",
   "review.request", "review.decide", "review.policy.write",
+  "conversation.start", "conversation.send", "conversation.receive", "conversation.request-action", "conversation.urgent",
   "principal.manage",
   "agent.manage", "agent.read",
   "task.contract.write", "task.priority.write", "task.difficulty.write", "task.class.write", "task.dependency.write",
 ] as const;
 export type Action = (typeof ACTIONS)[number];
+
+/** Whether an action may be held by a `client` principal: a single named conversation action, never `*` or a prefix that could grow to cover others. */
+
+/** Whether an action may be held by a `client` principal: a single named conversation action, never `*` or a prefix that could grow to cover others. */
+export const clientMayHold = (action: string): boolean => /^conversation\.[a-z][a-z-]*$/.test(action);
 
 export const covers = (grantAction: string, action: string): boolean =>
   grantAction === "*" || grantAction === action || (grantAction.endsWith(".*") && action.startsWith(grantAction.slice(0, -1)));

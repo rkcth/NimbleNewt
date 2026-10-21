@@ -24,7 +24,7 @@ function base32(bytes: Uint8Array, chars: number): string {
  * answer, a duplicate delivery) names the same record instead of creating a second one, and no one chooses or guesses identities.
  * 100 bits: collisions are not a practical concern, and one would be reported as a command conflict, never as a merge.
  */
-export function derivedId(prefix: "proj" | "task" | "art" | "att" | "inb" | "eff" | "blk" | "slot" | "dfail" | "wait" | "rp" | "agt" | "team" | "dep" | "dsk" | "grt" | "hst" | "inq" | "req" | "rev" | "rst" | "sum", commandId: string): string {
+export function derivedId(prefix: "proj" | "task" | "art" | "att" | "inb" | "eff" | "blk" | "slot" | "dfail" | "wait" | "rp" | "agt" | "team" | "dep" | "dsk" | "grt" | "hst" | "inq" | "req" | "rev" | "rst" | "sum" | "thr", commandId: string): string {
   return `${prefix}-${base32(createHash("sha256").update(`${prefix}\0${commandId}`).digest(), 20)}`;
 }
 

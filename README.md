@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **39 of 152 tasks implemented**, 2 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **40 of 153 tasks implemented**, 2 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -223,11 +223,11 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 - [ ] **C04** Implement safe-boundary continuation capture _(needs C02, C03, F06)_
 - [ ] **G06** Qualify actual Windows implementation _(needs G02, G03, G05, F03)_
-- [ ] **H05** Implement review routing and wait-cycle prevention _(needs H04, A05)_
+- [x] **H05** Implement review routing and wait-cycle prevention _(needs H04, A05)_
 - [ ] **H06** Implement event subscriptions and gap recovery _(needs S07, C03)_
 - [x] **H11** Implement agent, team and role records _(needs A02, C01, R01, U01)_
 - [ ] **T04** Implement controller-backed MCP state adapter _(needs U01, T03)_
-- [ ] **U02** Implement durable conversation API and transport _(needs U01, H04)_
+- [ ] **U02** Implement durable conversation service (threads, messages, cursors, delivery states) _(needs U01, H04)_
 
 ### Phase 25
 
@@ -237,7 +237,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **C07** Enforce context budgets and stall-proof compaction _(needs C04, R01)_
 - [ ] **H12** Implement the local worker runtime and attempt dispatcher _(needs A03, A05, R01, S05, C04, F08, H03)_
 - [ ] **R02** Implement fallback and cumulative budget accounting _(needs R01, S05, C04)_
-- [ ] **T05** Implement MCP durable conversation adapter _(needs U02, T04)_
+- [ ] **U02b** Implement the conversation transport and remote exposure _(needs U02)_
 - [ ] **U10** Implement layered configuration, effective values and change history _(needs F02, R01, U01, H11)_
 - [ ] **V01** Implement health and progress stall detection _(needs H01, S08, C04, H11)_
 
@@ -249,6 +249,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **L05** Implement generation interruption and late-result handling _(needs C05, F06, A02)_
 - [ ] **R03** Implement difficulty profiles and escalation _(needs R02, S10, H11)_
 - [ ] **R05** Implement cost and resource attribution and delegated budgets _(needs R02, H03, S10)_
+- [ ] **T05** Implement MCP durable conversation adapter _(needs U02, U02b, T04)_
 - [ ] **T06** Implement the protected agent tool bridge and execution service _(needs H12, T01)_
 - [ ] **U03** Implement owner chat command interpretation _(needs U01, U02, R02)_
 - [ ] **U11** Implement owner notifications _(needs U02, S08, U10)_
