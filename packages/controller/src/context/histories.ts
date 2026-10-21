@@ -4,6 +4,7 @@ import { onlyKnown, projectId as checkProjectId, taskId as checkTaskId, text, ty
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import { allows } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
+import { effectiveOf } from "../security/grants.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
@@ -96,7 +97,7 @@ export class HistoryService {
             if (stored === undefined) throw new DomainError("invalid_command", `participants: ${p} is not an enrolled principal`, { field: "participants" });
             const body = stored.body as unknown as { kind: Principal["kind"]; name: string; grants: Principal["grants"]; state: string };
             // A chat carries the project's information, so each participant must be someone who may read the project's histories.
-            if (body.state !== "active" || !allows({ id: p, kind: body.kind, name: body.name, grants: body.grants }, "history.read", projectId)) throw new DomainError("invalid_command", `participants: ${p} may not read the histories of project ${projectId}`, { field: "participants" });
+            if (body.state !== "active" || !allows(await effectiveOf(this.#runner, { id: p, kind: body.kind, name: body.name, grants: body.grants }, this.#runner.now()), "history.read", projectId)) throw new DomainError("invalid_command", `participants: ${p} may not read the histories of project ${projectId}`, { field: "participants" });
           }
           const ref: AggregateRef = { kind: "history-scope", id: derivedId("hst", `${type}\0${scopedCommandId(principal.id, command.commandId)}`) };
           const body: ScopeBody = { type, projectId, ...(taskId === undefined ? {} : { taskId }), participants, createdBy: principal.id, count: 0 };

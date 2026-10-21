@@ -173,7 +173,7 @@ export class SecureApi {
   async authorizeTool(toolName: string, taskId: string): Promise<void> {
     await this.#run(async () => {
       const task = await this.#d.projects.getTask(taskId);
-      if (task === undefined || !allows(this.#p, toolAction(toolName), task.projectId)) this.#hide();
+      if (task === undefined || !allows(this.#p, toolAction(toolName), task.projectId, { resource: { kind: "task", id: taskId } })) this.#hide();
     });
   }
 
@@ -195,7 +195,7 @@ export class SecureApi {
     const task = await this.#d.projects.getTask(taskId);
     if (task === undefined) return this.#hide();
     // A refusal on a record that exists must read exactly like a record that does not (and must not name the record's project).
-    if (!allows(this.#p, action, task.projectId)) return this.#hide();
+    if (!allows(this.#p, action, task.projectId, { resource: { kind: "task", id: taskId } })) return this.#hide();
     return task;
   }
 

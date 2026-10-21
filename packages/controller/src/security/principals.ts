@@ -2,6 +2,7 @@ import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/typ
 import { DomainError } from "../domain/errors.js";
 import { onlyKnown, type View } from "../domain/model.js";
 import { CommandRunner, view, type CommandMeta, type RunnerOptions } from "../domain/runner.js";
+import { effectiveOf } from "./grants.js";
 import { hashSecret, makeToken, newSecret, parseToken, verifySecret, type StoredCredential } from "./credentials.js";
 
 export type PrincipalKind = "owner" | "agent" | "host";
@@ -11,6 +12,21 @@ export const PRINCIPAL_KINDS: readonly PrincipalKind[] = ["owner", "agent", "hos
 export interface Grant {
   readonly action: string;
   readonly project: string;
+  /** Narrows the grant to one resource (such as one task). Without it the grant covers the whole project. */
+  readonly resource?: { readonly kind: string; readonly id: string };
+  /** The grant record this came from (card A02); absent for grants given at enrollment. */
+  readonly grantId?: string;
+  /** After this UTC time the grant no longer counts. */
+  readonly expiresAt?: string;
+}
+
+/** A prohibition that beats any grant (card A02). */
+export interface Restriction {
+  readonly action: string;
+  readonly project: string;
+  readonly resource?: { readonly kind: string; readonly id: string };
+  readonly restrictionId?: string;
+  readonly reason?: string;
 }
 
 export interface PrincipalBody {
@@ -29,6 +45,10 @@ export interface Principal {
   readonly kind: PrincipalKind;
   readonly name: string;
   readonly grants: readonly Grant[];
+  /** Standing prohibitions that apply to this principal; they win over grants. Filled by `GrantService.effective`. */
+  readonly restrictions?: readonly Restriction[];
+  /** When this snapshot of grants and restrictions was taken. */
+  readonly asOf?: string;
 }
 
 export interface IssuedCredential {
@@ -162,7 +182,8 @@ export class PrincipalService {
     const body = found?.body as unknown as PrincipalBody | undefined;
     const ok = await verifySecret(parsed?.secret, body?.credential);
     if (!ok || found === undefined || body === undefined || body.state !== "active") throw refusal();
-    return { id: found.id, kind: body.kind, name: body.name, grants: body.grants };
+    // The principal comes with its grant records and restrictions as of now; take a new one for each request so a revocation or restriction shows.
+    return effectiveOf(this.#runner, { id: found.id, kind: body.kind, name: body.name, grants: body.grants }, this.#clockNow());
   }
 
   async get(principalId: string): Promise<(View<Omit<PrincipalBody, "credential">> & { hasCredential: boolean }) | undefined> {
