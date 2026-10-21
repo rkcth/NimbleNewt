@@ -32,6 +32,8 @@ export function profileFor(recipe: NormalizedRecipe): string {
     "(allow signal (target self))",
     "(allow sysctl-read)",
     "(allow file-read-metadata)",
+    // Every program reads the root directory itself when it starts (found by running the profile on a Mac: without this even /usr/bin/true is killed at launch).
+    '(allow file-read-data (literal "/"))',
     '(allow file-read* (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/System") (subpath "/Library/Frameworks") (subpath "/Library/Developer/CommandLineTools") (subpath "/Library/Preferences/Logging") (subpath "/private/etc") (subpath "/private/var/db/dyld") (subpath "/private/var/db/timezone") (subpath "/private/var/select"))',
     '(allow file-read* file-write* (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper") (literal "/dev/tty") (regex #"^/dev/fd/"))',
     '(allow file-read* (literal "/dev/random") (literal "/dev/urandom"))',
