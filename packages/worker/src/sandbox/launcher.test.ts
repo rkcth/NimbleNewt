@@ -80,10 +80,13 @@ describe("sandbox launcher (bubblewrap)", () => {
   });
 
   ifUsable("host paths that were not mounted are invisible: the controller's data and the service user's credentials", async () => {
-    const result = await sh(`cat ${secretFile} 2>&1; ls ${secretDir} 2>&1; ls ${root} 2>&1; cat ${fakeHome}/.ssh/id_nimblenewt_test 2>&1; find / -name 'id_nimblenewt_test' -o -name controller.db 2>/dev/null; echo end`);
+    // A decoy with the secret's name inside the agent's own scratch is the positive control: the search must find that one and nothing else.
+    const r = recipe();
+    writeFileSync(join(r.scratch, "controller.db"), "decoy");
+    const result = await sh(`cat ${secretFile} 2>&1; ls ${secretDir} 2>&1; ls ${root} 2>&1; cat ${fakeHome}/.ssh/id_nimblenewt_test 2>&1; echo found:; find / \\( -path /proc -o -path /sys -o -path /usr -o -path /dev \\) -prune -o \\( -name 'id_nimblenewt_test' -o -name controller.db \\) -print 2>/dev/null; echo end`, r);
     assert.ok(!result.stdout.includes("TOP-SECRET") && !result.stdout.includes("PRIVATE-KEY"), result.stdout);
     assert.match(result.stdout, /No such file or directory/);
-    assert.ok(result.stdout.trim().endsWith("end") && !result.stdout.includes("controller.db\n"));
+    assert.equal(result.stdout.split("found:\n")[1]?.trim(), "/scratch/controller.db\nend", result.stdout);
   });
 
   ifUsable("a symbolic link in the checkout cannot lead out of the sandbox", async () => {

@@ -42,7 +42,7 @@ test("paths that are not plain, real, existing locations are refused", () => {
 });
 
 test("system directories, the service user's home and credential places cannot be mounted", () => {
-  for (const system of ["/", "/usr", "/etc", "/proc", "/dev", "/tmp", "/home"]) refused({ ...base(), workdir: system }, [], /system directory|home|does not exist/);
+  for (const system of ["/", "/usr", "/etc", "/proc", "/dev", "/tmp", "/home"]) refused({ ...base(), workdir: system }, [], /system directory|home|does not exist|symbolic link|normalised/);
   refused({ ...base(), scratch: homedir() }, [], /home/);
 });
 

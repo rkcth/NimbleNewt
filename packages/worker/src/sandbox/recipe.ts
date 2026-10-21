@@ -50,7 +50,7 @@ const MAX_ENV_VALUE = 4096;
 const MAX_ENV_ENTRIES = 64;
 const SUBPATH = /^[A-Za-z0-9._-]{1,100}$/;
 /** Host directories no mount may be, or contain: the whole system, other users, or the places devices and runtime state live. */
-const NEVER_BIND = ["/", "/proc", "/sys", "/dev", "/run", "/boot", "/etc", "/var", "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/home", "/root", "/tmp", "/srv", "/opt", "/mnt", "/media"];
+const NEVER_BIND = ["/", "/proc", "/sys", "/dev", "/run", "/boot", "/etc", "/var", "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/home", "/root", "/tmp", "/srv", "/opt", "/mnt", "/media", "/System", "/Library", "/Applications", "/Users", "/Volumes", "/private", "/private/etc", "/private/var", "/private/tmp"];
 /** Trees nothing inside may be mounted from: kernel and runtime state (another process's environment lives under /proc) and the superuser's files. */
 const NEVER_INSIDE = ["/proc", "/sys", "/dev", "/run", "/boot", "/root"];
 /** Where users' homes live; only the service user's own may be reached into (and still not its credential places). */
