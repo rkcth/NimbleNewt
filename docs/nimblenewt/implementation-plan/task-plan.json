@@ -1140,6 +1140,24 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "C07",
+      "parent": "N07",
+      "existing_issue": "AII-257",
+      "title": "Enforce context budgets and stall-proof compaction",
+      "depends_on": [
+        "C04",
+        "R01"
+      ],
+      "deliverable": "Per-model context budgets enforced at dispatch, a single startup-context builder with cut-and-archive, a resume guard, a bounded summariser with a fallback, tool-output caps, hand-off from durable facts, overflow as its own failure class, and budget-aware inquiry branches (requirements and the compaction-ownership decision in context-window-stalls.md)",
+      "acceptance_and_verification": "Using the scripted offline model with a small context window: a first prompt over 25% of the window is cut by the builder (newest items, human words, permissions and goal kept whole, the cut archived and linked) or refused with a blocker, never sent; an attempt over 60% of the window is not resumed but restarted from the continuation record; a summariser that hangs hits its own short timeout and either uses the fallback route or ends the attempt as context_overflow without hanging; a tool result larger than the configured per-tool limit (lower than Pi's 50 KB default, also for MCP tools and non-text results) is truncated with the remainder paginated or archived; compaction is owned by the controller through the beforeCompact hook (recorded, time-limited, configurable summariser) (a restart in the middle of the hook neither duplicates nor loses the summary) or its deviation from the explicit-compaction design is recorded, and the first call's size includes Pi's system prompt and tool schemas; a crash after a confirmed effect and before the hand-off still yields a hand-off written from the ledger and artifacts; repeated overflow stops with a visible blocker; an inquiry on a task over its model's budget uses the compaction boundary plus retrieval and says so; limits are configurable and checked against the provider's reported usage",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "L05",
       "parent": "N05",
       "existing_issue": "AII-255",
@@ -2161,7 +2179,8 @@
         "K03",
         "C06",
         "L05",
-        "G09"
+        "G09",
+        "C07"
       ],
       "deliverable": "Recorded scenario from project creation to accepted delivery and recovery",
       "acceptance_and_verification": "All administration accomplished through chat; direct API edit coexists; interruption and restart retain progress; meetings/learning/operations exercised",

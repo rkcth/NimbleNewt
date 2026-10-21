@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **25 of 112 tasks implemented**, 3 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **25 of 113 tasks implemented**, 3 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -229,6 +229,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 ### Phase 25
 
 - [ ] **C05** Implement retained context branches and selective updates _(needs C04, H04)_
+- [ ] **C07** Enforce context budgets and stall-proof compaction _(needs C04, R01)_
 - [ ] **R02** Implement fallback and cumulative budget accounting _(needs R01, S05, C04)_
 - [ ] **T05** Implement MCP durable conversation adapter _(needs U02, T04)_
 - [ ] **V01** Implement health and progress stall detection _(needs H01, S08, C04)_
@@ -326,7 +327,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 41
 
-- [ ] **X03** Run chat-only complete product workflow _(needs U05, U06, U07, M02, P03, Q03, B05, K03, C06, L05, G09)_
+- [ ] **X03** Run chat-only complete product workflow _(needs U05, U06, U07, M02, P03, Q03, B05, K03, C06, L05, G09, C07)_
 
 ### Phase 42
 

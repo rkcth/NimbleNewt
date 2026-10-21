@@ -34,7 +34,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, C03 |
 | N05 / AII-255 | L05, L01, L02, L03, L04, H08 |
 | N06 / AII-256 | G05, A01, A02, A03, A04, A05, A06 |
-| N07 / AII-257 | C01, C02, C04, C05 |
+| N07 / AII-257 | C01, C02, C04, C05, C07 |
 | N08 / AII-258 | R01, R02 |
 | N09 / AII-259 | U03, U04, U05, U06, U07 |
 | N10 / AII-260 | H01, H02, H03, H04, H05, H06, H07, H09, H10 |
@@ -474,6 +474,14 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** Cache eviction/incompatibility falls back without context loss; quota/privacy enforced; pin/fork/decoder-resume advertised separately; engine changes require measured gap and separate scoped patch.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
+### C07 — Enforce context budgets and stall-proof compaction
+
+- **Parent:** N07 / AII-257.
+- **Blockers:** C04, R01.
+- **Deliverable:** Per-model context budgets enforced at dispatch, a single startup-context builder with cut-and-archive, a resume guard, a bounded summariser with a fallback, tool-output caps, hand-off from durable facts, overflow as its own failure class, and budget-aware inquiry branches (requirements and the compaction-ownership decision in context-window-stalls.md).
+- **Acceptance and verification:** Using the scripted offline model with a small context window: a first prompt over 25% of the window is cut by the builder (newest items, human words, permissions and goal kept whole, the cut archived and linked) or refused with a blocker, never sent; an attempt over 60% of the window is not resumed but restarted from the continuation record; a summariser that hangs hits its own short timeout and either uses the fallback route or ends the attempt as context_overflow without hanging; a tool result larger than the configured per-tool limit (lower than Pi's 50 KB default, also for MCP tools and non-text results) is truncated with the remainder paginated or archived; compaction is owned by the controller through the beforeCompact hook (recorded, time-limited, configurable summariser) (a restart in the middle of the hook neither duplicates nor loses the summary) or its deviation from the explicit-compaction design is recorded, and the first call's size includes Pi's system prompt and tool schemas; a crash after a confirmed effect and before the hand-off still yields a hand-off written from the ledger and artifacts; repeated overflow stops with a visible blocker; an inquiry on a task over its model's budget uses the compaction boundary plus retrieval and says so; limits are configurable and checked against the provider's reported usage.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
 ### L05 — Implement generation interruption and late-result handling
 
 - **Parent:** N05 / AII-255.
@@ -901,7 +909,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### X03 — Run chat-only complete product workflow
 
 - **Parent:** N18 / AII-268.
-- **Blockers:** U05, U06, U07, M02, P03, Q03, B05, K03, C06, L05, G09.
+- **Blockers:** U05, U06, U07, M02, P03, Q03, B05, K03, C06, L05, G09, C07.
 - **Deliverable:** Recorded scenario from project creation to accepted delivery and recovery.
 - **Acceptance and verification:** All administration accomplished through chat; direct API edit coexists; interruption and restart retain progress; meetings/learning/operations exercised.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

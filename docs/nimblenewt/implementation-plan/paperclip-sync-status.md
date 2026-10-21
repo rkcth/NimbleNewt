@@ -25,3 +25,5 @@ October 19, 2026: card statuses and progress evidence (commits, CI runs) were ad
 - Not changed: N00 (AII-250) and its hold, every assignment, every other Backlog card. No agent was woken: all touched cards were unassigned with no running work.
 
 The Paperclip board now holds 135 NimbleNewt cards: 17 done and 118 Backlog. `paperclip-import.json` is unchanged. It still maps only the original 105 cards and carries the SHA-256 of the October 16 manifest. The seven cards above, and the status of the completed ones, are recorded here and in each card's comments rather than in that file.
+
+2026-10-21: card C07 (enforce context budgets and stall-proof compaction, from the Paperclip team's context-window stall report) was added to the plan; like F04f to F04h, Y01 to Y03 and D04 it is not in Paperclip.
