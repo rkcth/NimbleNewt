@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "license": "MIT",
-  "description": "Placeholder: worker host service (not yet implemented).",
+  "description": "Worker host service: sandbox launcher (card A03); the rest of the worker is not yet implemented.",
   "type": "module",
   "exports": {
     ".": {
@@ -13,5 +13,8 @@
   },
   "files": [
     "dist"
-  ]
+  ],
+  "scripts": {
+    "test": "node ../../scripts/run-package-tests.mjs"
+  }
 }
