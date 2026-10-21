@@ -683,12 +683,23 @@
       ],
       "deliverable": "Harness adapter capability declaration (native continuation, portable reconstruction, checkpoint export, abort semantics) with the Pi declaration taken from the G02 record, and a per-task recovery requirement checked at admission (README 59, 85-87, 193)",
       "acceptance_and_verification": "A fake second harness passes the same contract suite through its declaration; admission refuses a durable task whose recovery requirement the selected harness lacks, with a visible reason; a harness without state export is marked unsupported for durable tasks; the Pi declaration matches the G02 record including its unsupported capabilities; only the Pi adapter is a shipped harness unless the owner widens scope",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "a6aec3e"
+        ],
+        "ci_runs": [
+          "39617517980"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Harness capability declarations: a harness states whether it continues a conversation natively, can have it rebuilt from exported records, can export checkpoints and what an abort stops; the Pi declaration is derived from the G02 capability lists (native continuation yes, portable reconstruction no, whole-conversation abort) and the controller's checks run on it in the integration tests. A harness with neither recovery path is unsupported for durable tasks. A task's contract carries the recovery it needs (default native continuation; lowering it needs planning authority), and attempt admission refuses a harness that lacks it with the missing capability named; with a gate configured every attempt is checked and an unnamed harness is accepted only for work that may be lost. The installer builds the catalog (Pi only ships). The \"fake second harness\" is met at the level of declarations, not a running second runtime; the reading of \"state export\" as \"no way to recover\" is an open owner decision (G01 record). A contract revision changed at the same moment as an admission is not checked (noted gap). CI run 39617517980 is green on all six cells.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "F09",
@@ -986,12 +997,23 @@
       ],
       "deliverable": "Versioned task contract fields (expected result, acceptance criteria, priority, difficulty, budget, P/PC class, required evidence, permissions) and task dependency edges with responsible agents, changed only by revisioned commands (README 148, 159; operational-contracts 17; production-and-capacity 9; pitfalls-and-safeguards 65)",
       "acceptance_and_verification": "A contract change creates a new revision with history; dependency cycles rejected; an agent without a grant cannot edit another team's dependencies or a task's difficulty; a wait-for graph across task dependencies, inquiries and reviews detects circular waits beyond reviewer cycles and opens a blocker naming who can unblock; a priority change takes effect at the next admission decision without rewriting history; a P/PC class change is an audited command needing planning authority; tasks created before the new fields keep working",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "2e75b44"
+        ],
+        "ci_runs": [
+          "39615958968"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Versioned task contracts (expected result, acceptance criteria, priority, difficulty, budget, P or PC class, required evidence, permissions): every change stores a new version and keeps the old ones, a task with none reads as the defaults, and priority, difficulty, the class and the general fields each need their own authority (narrowable to one task). Dependencies between tasks of a project are refused when they would make a cycle, also when added at the same moment (one registry record per project). A task-level wait-for graph over dependencies and open inquiries finds circular waits and opens one blocker per ring (a ring that re-forms gets a new one); one agent working through its own dependent tasks is not a ring. Two clauses are carried by other cards and named in their acceptance: reviews in the wait-for graph (H05, through the extraEdges hook) and a priority change reordering already-queued requests (H12); the permission list is stored, and enforced by the tool path (T06, H12). Seven API operations (api-v1.md regenerated). CI run 39615958968 is green on all six cells.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "A01",

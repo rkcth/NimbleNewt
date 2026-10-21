@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **37 of 151 tasks implemented**, 2 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **39 of 151 tasks implemented**, 2 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -164,7 +164,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 14
 
-- [ ] **F08** Declare harness capabilities and enforce per-task recovery requirements _(needs F06, S02)_
+- [x] **F08** Declare harness capabilities and enforce per-task recovery requirements _(needs F06, S02)_
 - [x] **S04** Implement durable inbox and duplicate handling _(needs S03, S02)_
 
 ### Phase 15
@@ -206,7 +206,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [x] **C02** Implement bounded source-backed retrieval _(needs C01)_
 - [x] **H03** Implement priority admission and reserved control capacity _(needs S08, H01)_
 - [x] **R01** Implement model routing and capability policy _(needs F05, A02, F02)_
-- [ ] **S10** Implement task contracts and the task dependency graph _(needs S01, S08, A02)_
+- [x] **S10** Implement task contracts and the task dependency graph _(needs S01, S08, A02)_
 - [ ] **T01** Implement immutable tool/skill catalog and attribution _(needs F07, A03, C01)_
 
 ### Phase 23
