@@ -25,6 +25,9 @@ export async function hashSecret(secret: string, issuedAt: string): Promise<Stor
   return { algorithm: "scrypt-v1", salt: salt.toString("base64url"), hash: (await derive(secret, salt)).toString("base64url"), issuedAt };
 }
 
+/** A public identifier of one stored credential (a digest of its salt): it changes whenever the credential does and reveals nothing usable. */
+export const credentialIdOf = (stored: StoredCredential): string => createHash("sha256").update(`credential\0${stored.salt}`).digest("hex").slice(0, 24);
+
 /** Constant-time check of a presented secret against a stored credential. Anything malformed is simply "no". */
 export async function verifySecret(secret: unknown, stored: StoredCredential | undefined): Promise<boolean> {
   // Always do the same work, so a missing credential or a wrong-shaped secret takes about as long as a wrong one.

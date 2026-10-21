@@ -3,7 +3,7 @@ import { DomainError } from "../domain/errors.js";
 import { onlyKnown, type View } from "../domain/model.js";
 import { CommandRunner, view, type CommandMeta, type RunnerOptions } from "../domain/runner.js";
 import { effectiveOf } from "./grants.js";
-import { hashSecret, makeToken, newSecret, parseToken, verifySecret, type StoredCredential } from "./credentials.js";
+import { credentialIdOf, hashSecret, makeToken, newSecret, parseToken, verifySecret, type StoredCredential } from "./credentials.js";
 
 export type PrincipalKind = "owner" | "agent" | "host";
 export const PRINCIPAL_KINDS: readonly PrincipalKind[] = ["owner", "agent", "host"];
@@ -49,6 +49,8 @@ export interface Principal {
   readonly restrictions?: readonly Restriction[];
   /** When this snapshot of grants and restrictions was taken. */
   readonly asOf?: string;
+  /** Which credential this principal authenticated with (a digest of the stored credential, which changes whenever the credential does). Rotating the credential changes it, so work done with an older object can be refused. Absent on an object that did not come from authentication. */
+  readonly credentialId?: string;
 }
 
 export interface IssuedCredential {
@@ -183,7 +185,7 @@ export class PrincipalService {
     const ok = await verifySecret(parsed?.secret, body?.credential);
     if (!ok || found === undefined || body === undefined || body.state !== "active") throw refusal();
     // The principal comes with its grant records and restrictions as of now; take a new one for each request so a revocation or restriction shows.
-    return effectiveOf(this.#runner, { id: found.id, kind: body.kind, name: body.name, grants: body.grants }, this.#clockNow());
+    return effectiveOf(this.#runner, { id: found.id, kind: body.kind, name: body.name, grants: body.grants, ...(body.credential === undefined ? {} : { credentialId: credentialIdOf(body.credential) }) }, this.#clockNow());
   }
 
   async get(principalId: string): Promise<(View<Omit<PrincipalBody, "credential">> & { hasCredential: boolean }) | undefined> {
