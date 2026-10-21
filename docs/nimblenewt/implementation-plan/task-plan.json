@@ -2197,12 +2197,23 @@
       ],
       "deliverable": "Controller-backed configuration service: layered precedence (installation, team or agent, task override) constrained by authority, effective-value resolver with source and lock state, drafts versus applied revisions with actor history, configuration-document to routing-table binding, combination validation and stated take-effect timing (portability-and-configuration 63-73, 93-94; design-decisions 61; pitfalls-and-safeguards 35)",
       "acceptance_and_verification": "Every value reports its effective source layer and lock state; a task override cannot re-enable a globally disabled provider or widen authority; history shows actor and revision; a draft is distinct from the applied revision and a failed apply is never shown active; each change states when it takes effect (next request, after the current operation, after Suspend and restart); fallback cycles, missing routes, a PC target outside its floor and ceiling and impossible time, resource or permission settings are rejected; the configuration document loads into the R01 routing table and UI reorder and supervisor reorder produce the same routing revision; reload preserves Pause, ownership and pending decisions",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "cdc0071"
+        ],
+        "ci_runs": [
+          "39672565731"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Layered configuration (installation, team, agent, task): settings are defined in code, a default is overridden by the more specific layer, a restriction can only be narrowed (a denial only grows), and a layer can lock a setting. Changes are staged and applied as a whole after the combination is checked; a refused apply changes nothing in force and keeps the reasons. Every value reports its source layer, lock and when a change starts to count; history keeps who and what. A task is judged with the agent working it. The configuration document binds to the routing table, and a reorder from the screen or from the coordinator agent goes through one path and gives the same revision. Applying configuration touches only configuration (assignment and task untouched, tested); the clauses that it also leaves a pause and pending decisions in place are carried by L01 and C08. Limits stated in the notes: no screens or state-API operations yet. Reviewed and approved by an AI review session (Claude Opus) after two rounds; six-cell CI green.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "U11",

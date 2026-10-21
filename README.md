@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **41 of 153 tasks implemented**, 2 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **42 of 153 tasks implemented**, 2 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -238,7 +238,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **H12** Implement the local worker runtime and attempt dispatcher _(needs A03, A05, R01, S05, C04, F08, H03)_
 - [ ] **R02** Implement fallback and cumulative budget accounting _(needs R01, S05, C04)_
 - [ ] **U02b** Implement the conversation transport and remote exposure _(needs U02)_
-- [ ] **U10** Implement layered configuration, effective values and change history _(needs F02, R01, U01, H11)_
+- [x] **U10** Implement layered configuration, effective values and change history _(needs F02, R01, U01, H11)_
 - [ ] **V01** Implement health and progress stall detection _(needs H01, S08, C04, H11)_
 
 ### Phase 26

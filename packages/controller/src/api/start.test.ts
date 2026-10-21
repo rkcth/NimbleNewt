@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { request as httpRequest } from "node:http";
 import { after, test } from "node:test";
 import { OVERRIDE_ENV, OVERRIDE_FLAG, UnsupportedEnvironmentError, type EnvironmentFacts } from "../environment/index.js";
 import { startTestServer, withClient, type TestServer } from "../storage/postgres/testing/server.js";
@@ -29,6 +30,28 @@ test("a supported environment starts silently, records no override, and serves t
     const r = await c.api.handle(issued.token, { v: API_VERSION, op: "project.list" });
     assert.ok(r.ok);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("the conversation listener is off unless asked for, local when asked, serves the owner, and is closed with the controller", async () => {
+  const d = dir();
+  const get = (url: string, token: string): Promise<number> => new Promise((resolve, reject) => {
+    const r = httpRequest(new URL("/v1/unread", url), { headers: { authorization: `Bearer ${token}` } }, (res) => { res.resume(); res.on("end", () => resolve(res.statusCode!)); });
+    r.on("error", reject); r.end();
+  });
+  const plain = await startController({ storage: { kind: "sqlite", path: join(d, "a.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported });
+  try { assert.equal(plain.conversationUrl, undefined); } finally { await plain.close(); }
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "b.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, conversationTransport: {} });
+  let url: string;
+  try {
+    url = c.conversationUrl!;
+    assert.match(url, /^http:\/\/127\.0\.0\.1:\d+$/);
+    const owner = (await c.services.principals.bootstrapOwner({ name: "rob" })).token;
+    assert.equal(await get(url, owner), 200);
+    assert.equal(await get(url, "x".repeat(40)), 401);
+  } finally { await c.close(); }
+  await assert.rejects(get(url, "x".repeat(40)), /ECONNREFUSED|socket hang up|ECONNRESET/);
+  await assert.rejects(startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, conversationTransport: { host: "0.0.0.0" } }), /remote exposure is off/);
+  rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 test("an unsupported environment refuses to start, says how to test and how to override, and creates nothing", async () => {

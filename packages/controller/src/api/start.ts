@@ -13,6 +13,11 @@ import { SqliteStorage } from "../storage/sqlite/index.js";
 import { PostgresStorage } from "../storage/postgres/index.js";
 import type { ControllerStorage } from "../storage/types.js";
 import { StateApi } from "./state-api.js";
+import { ConfigurationService } from "../configuration/index.js";
+import { ConversationService, type Availability } from "../conversations/index.js";
+import { ReviewService } from "../review/index.js";
+import { RoutingService } from "../routing/index.js";
+import { ConversationTransport, type TransportOptions } from "../transport/index.js";
 
 export type StorageChoice =
   | { readonly kind: "sqlite"; readonly path: string }
@@ -33,6 +38,13 @@ export interface StartOptions {
   readonly onInternalError?: (error: unknown) => void;
   /** The harnesses this installation ships (card F08). None by default: an attempt that names a harness is then refused. The first release ships Pi only. */
   readonly harnesses?: readonly HarnessDeclaration[];
+  /**
+   * Opens the conversation listener (card U02b). Off unless given. Local only by default; a remote listener needs `allowRemote`, TLS and `publicHosts` (see `TransportOptions`).
+   * The listener is closed with the controller.
+   */
+  readonly conversationTransport?: Omit<TransportOptions, "conversations" | "principals">;
+  /** What the lifecycle says about a principal (cards L01 and L02 supply it). Default: everyone is available. */
+  readonly availability?: (principalId: string) => Promise<Availability>;
 }
 
 export interface Controller {
@@ -42,8 +54,10 @@ export interface Controller {
   readonly check: StartupCheck;
   readonly services: {
     readonly principals: PrincipalService; readonly grants: GrantService; readonly projects: ProjectService; readonly assignments: AssignmentService;
-    readonly waits: WaitService; readonly desks: DeskService; readonly histories: HistoryService; readonly retrieval: RetrievalService; readonly inquiries: InquiryService; readonly agents: AgentService; readonly harnesses: HarnessCatalog; readonly contracts: ContractService; readonly graph: WaitGraphService;
+    readonly waits: WaitService; readonly desks: DeskService; readonly histories: HistoryService; readonly retrieval: RetrievalService; readonly inquiries: InquiryService; readonly agents: AgentService; readonly harnesses: HarnessCatalog; readonly contracts: ContractService; readonly graph: WaitGraphService; readonly reviews: ReviewService; readonly conversations: ConversationService; readonly configuration: ConfigurationService; readonly routing: RoutingService;
   };
+  /** The conversation listener's address, when it was asked for. */
+  readonly conversationUrl?: string;
   close(): Promise<void>;
 }
 
@@ -99,9 +113,18 @@ export async function startController(options: StartOptions): Promise<Controller
     const retrieval = RetrievalService.withEpoch(storage, epoch, desks, histories);
     const inquiries = InquiryService.withEpoch(storage, epoch, { histories, retrieval, waits, assignments });
     const agents = AgentService.withEpoch(storage, epoch);
-    const graph = WaitGraphService.withEpoch(storage, epoch, contracts, BlockerService.withEpoch(storage, epoch));
+    const reviews = ReviewService.withEpoch(storage, epoch);
+    const graph = WaitGraphService.withEpoch(storage, epoch, contracts, BlockerService.withEpoch(storage, epoch), { extraEdges: (projectId, tasks) => reviews.waitEdges(projectId, tasks) });
+    const routing = RoutingService.withEpoch(storage, epoch);
+    const configuration = ConfigurationService.withEpoch(storage, epoch, { routing });
+    const conversations = ConversationService.withEpoch(storage, epoch, options.availability === undefined ? {} : { availability: options.availability });
     const api = new StateApi({ principals, projects, assignments, retrieval, inquiries, agents, contracts, graph, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
-    return { api, storage, epoch, check, services: { principals, grants, projects, assignments, waits, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph }, close: () => storage.close() };
+    const transport = options.conversationTransport === undefined ? undefined : await ConversationTransport.listen({ ...options.conversationTransport, conversations, principals });
+    return {
+      api, storage, epoch, check, services: { principals, grants, projects, assignments, waits, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, reviews, conversations, configuration, routing },
+      ...(transport === undefined ? {} : { conversationUrl: transport.url }),
+      close: async () => { await transport?.close(); await storage.close(); },
+    };
   } catch (error) {
     await storage.close().catch(() => undefined);
     throw error;
