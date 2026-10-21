@@ -347,7 +347,7 @@ const ACTION_CLASSES_TEXT = "inspect, workspace-edit, mutate, external-send, pub
 function grantView(id: string, body: GrantRecordBody): GrantView {
   const t = body.terms;
   return {
-    id, action: body.action,
+    id, action: body.action, source: body.rootSource ?? body.source,
     ...(t?.environments === undefined ? {} : { environments: t.environments }), ...(t?.spendLimit === undefined ? {} : { spendLimit: t.spendLimit }),
     ...(t?.window === undefined ? {} : { window: t.window }), ...(t?.audiences === undefined ? {} : { audiences: t.audiences }),
   };

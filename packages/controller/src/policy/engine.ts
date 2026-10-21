@@ -50,6 +50,8 @@ export interface GrantView {
   readonly spendLimit?: number;
   readonly window?: { readonly start: string; readonly end: string; readonly days?: readonly number[] };
   readonly audiences?: readonly string[];
+  /** How the grant came about (`standing` for one made from a proposal or a standing rule). A standing grant never waives what stays a decision, however exactly it names it. */
+  readonly source?: string;
 }
 
 export interface PolicyRequest {
@@ -156,6 +158,7 @@ export function evaluate(policy: PolicyView, request: PolicyRequest, held: reado
   for (const grant of held) {
     const match = approves(grant, request.tool, request.cls);
     if (!match.covers) continue;
+    if (decisions.length > 0 && grant.source === "standing") { reasons.push(`grant ${grant.id} is a standing grant and cannot waive what stays a decision (${decisions.join("; ")})`); continue; }
     if (decisions.length > 0 && !match.exact) { reasons.push(`grant ${grant.id} is a wildcard and cannot waive what stays a decision (${decisions.join("; ")})`); continue; }
     if (request.cls === "deploy" && tier === "live" && !(grant.environments ?? []).includes("customer-live")) { reasons.push(`grant ${grant.id} does not name customer-live, which a live deployment needs`); continue; }
     const terms = termsMet(grant, request);

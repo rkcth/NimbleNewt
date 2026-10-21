@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **44 of 155 tasks implemented**, 2 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **45 of 155 tasks implemented**, 2 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -212,7 +212,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 ### Phase 23
 
 - [ ] **A06** Implement human pre-commit gate and attribution _(needs A04, A05)_
-- [ ] **A07** Implement action classes, default policy and effective-policy view _(needs A02, A05, F02)_
+- [x] **A07** Implement action classes, default policy and effective-policy view _(needs A02, A05, F02)_
 - [ ] **C03** Capture read/write/search dependency manifests _(needs S06, A04, C01)_
 - [ ] **G05** Prove selected isolation boundary per OS _(needs A03, A04)_
 - [x] **H04** Implement durable inquiries and correlation _(needs S04, C01, H03)_

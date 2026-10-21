@@ -49,6 +49,8 @@ export interface GrantRecordBody {
   readonly notBefore?: string;
   readonly expiresAt?: string;
   readonly terms?: GrantTerms;
+  /** For a derived grant: how the grant at the root of its chain came about (`direct` or `standing`), so what a standing grant may not do a derived copy may not either. */
+  readonly rootSource?: "direct" | "standing";
   readonly state: "active" | "revoked";
   readonly revokedBy?: string;
   readonly revokedReason?: string;
@@ -246,12 +248,15 @@ export class GrantService {
           let depth = 1;
           for (let p: GrantRecordBody | undefined = parent; p?.source === "derived" && depth <= MAX_DEPTH; depth++) p = p.parentId === undefined ? undefined : ((await this.#runner.get("grant-record", p.parentId))?.body as unknown as GrantRecordBody | undefined);
           if (depth > MAX_DEPTH) throw new DomainError("forbidden", `derivation is limited to ${MAX_DEPTH} levels`);
+          // Waiving a question is the owner's decision: an agent does not derive an approval grant, and a derived grant keeps every term of its parent.
+          if (action.startsWith("approve.") && principal.kind !== "owner") throw new DomainError("forbidden", "an approval grant is derived only by the owner");
           const until = expiresAt ?? parent.expiresAt;
           const candidate = { action, project, ...(resource === undefined ? {} : { resource }), ...(parent.notBefore === undefined ? {} : { notBefore: parent.notBefore }), ...(until === undefined ? {} : { expiresAt: until }) };
           if (!within(candidate, parent)) throw new DomainError("forbidden", "a derived grant cannot be wider than the grant it rests on (action, project, resource or time)");
           const ref: AggregateRef = { kind: "grant-record", id: derivedId("grt", scopedCommandId(principal.id, command.commandId)) };
           const body: GrantRecordBody = {
             grantee: parent.grantee, action, project, ...(resource === undefined ? {} : { resource }), source: "derived", decidedBy: principal.id, basis, parentId,
+            ...(parent.terms === undefined ? {} : { terms: parent.terms }), rootSource: parent.source === "derived" ? (parent.rootSource ?? "direct") : parent.source,
             ...(parent.notBefore === undefined ? {} : { notBefore: parent.notBefore }), ...(until === undefined ? {} : { expiresAt: until }), state: "active",
           };
           return {
