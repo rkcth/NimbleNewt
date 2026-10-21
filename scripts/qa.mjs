@@ -6,7 +6,7 @@
 // record is evidence for the owner, who signs the card.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -166,6 +166,8 @@ export function main(argv) {
   const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
   const outDir = resolve(flag("out") ?? join(root, "qa-output"));
   mkdirSync(outDir, { recursive: true });
+  // Files left by an earlier run in this folder would be read as part of this one (an interrupted run would otherwise sit beside the old evidence).
+  for (const f of readdirSync(outDir)) if (/^run-\d+\.log$/.test(f) || f === "qa-evidence.json" || f === "qa-summary.md" || f === "diagnosis.txt") rmSync(join(outDir, f), { force: true });
   const env = environment(root);
   const record = { commit: git(["rev-parse", "HEAD"], root), startedAt: new Date().toISOString(), environment: env, requestedRuns: runs, runs: [], passed: false };
   for (let run = 1; run <= runs; run++) {

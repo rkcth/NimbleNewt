@@ -64,7 +64,11 @@ export function main(argv) {
   const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
   const dir = resolve(argv[0] ?? join(root, "qa-output"));
   if (!existsSync(dir)) { console.error(`no such folder: ${dir}`); return 2; }
-  const logs = readdirSync(dir).filter((f) => /^run-\d+\.log$/.test(f)).sort().map((f) => readFileSync(join(dir, f), "utf8"));
+  // Only the logs of the run the evidence describes: a folder reused by an earlier run can hold older logs (an older `qa.mjs` did not clear them).
+  let listed;
+  try { listed = JSON.parse(readFileSync(join(dir, "qa-evidence.json"), "utf8")).runs?.map((r) => r.logFile); } catch { listed = undefined; }
+  const names = (Array.isArray(listed) && listed.length > 0 ? listed : readdirSync(dir).filter((f) => /^run-\d+\.log$/.test(f)).sort()).filter((f) => existsSync(join(dir, f)));
+  const logs = names.map((f) => readFileSync(join(dir, f), "utf8"));
   const found = diagnose(logs);
   let evidence;
   try { evidence = existsSync(join(dir, "qa-evidence.json")) ? JSON.parse(readFileSync(join(dir, "qa-evidence.json"), "utf8")) : undefined; } catch { evidence = null; }

@@ -49,6 +49,15 @@ The owner ran `node scripts/qa.mjs --runs=5` on a Mac mini (Darwin 25.5.0, Apple
 
 What the Mac run does not tell us: the file system of the external drive (the QA record says "not detected"; `qa.mjs` now asks `df` then `mount` on macOS, and `qa-diagnose.mjs` asks `df` then `diskutil info <device>`; both macOS branches are untested here because the author has no Mac and fall back safely); whether the checkout path having no space matters (this run used a path without a space, unlike the hosted runs); and the Windows and Linux real hardware.
 
+## Real hardware so far: the owner's Windows machine
+
+The owner ran `node scripts/qa.mjs --runs=1` on their Windows machine (Windows_NT 10.0.26200 x64, Node v22.20.0, commit `d0c4823`, repository in a path without a space) and sent the QA lines and the output of `scripts/qa-diagnose.mjs`, reported here as the owner's reports of script output.
+
+- **One repeat passed**: "run 1/1: pass in 365.4 s (1490 of 1492 tests)". This is one repeat, not five, so the Windows box below stays unticked; the two tests not counted are most likely the skipped ones (the blob-store symlink tests, which need privileges on Windows, as on the hosted runners; the owner did not say).
+- **The slowest tests there are the PostgreSQL ones** (a migration-upgrade crash test 128 s, a connection-cut crash test 84 s, the PostgreSQL storage conformance run 79 s and 61 s), consistent with forced disk flushes and process starts being slow on Windows; this is a reading of the timings, not a profile.
+- **An older log in the same folder showed a failure that is not from that run.** The diagnosis said "runs read: 5" for a 1-run result: the folder still held logs `run-2` to `run-5` from an earlier, 5-run attempt at an unknown earlier commit, and one of them showed `reconcile.test.js` failing with `EBUSY: resource busy or locked, rmdir '...\nn-test-pg-...\data'`: the test PostgreSQL server's temporary data folder could not be deleted at the end (a Windows lock after the server stopped, typically a lingering handle or the antivirus scanner). That is a cleanup failure in the test harness, not a product failure, but it failed a whole test file. Fixed in the test harness (not yet re-run on the owner's machine): cleanup retries for about ten seconds, and a folder that still cannot be removed because of a lock is reported and left for the operating system's temp cleanup instead of failing the test, but only if the server's pid file is gone (a server that is still running, or any other error, still fails). `qa.mjs` now clears the old logs, evidence and summary at the start, and `qa-diagnose.mjs` reads only the logs the evidence lists, so a reused folder cannot mix runs.
+- The Windows version (10.0.26200, Windows 11 25H2) is above the environment check's Windows floor (build 26100).
+
 ## What the crash enumeration covers
 
 See [s09-acceptance-report.md](s09-acceptance-report.md): the path from a chat-command stub to a worker result is crashed at each of 129 enumerated boundaries and must recover to the state a clean run produces (all 129 on the reference store and SQLite, a spread on worker-thread SQLite and PostgreSQL, 10 real SIGKILLs, and 18 real SIGKILLs with the real Pi adapter including with the model request in flight). The environment check refuses, and an override starts and is audited, for the operating system, Node and PostgreSQL ([F04h notes](implementation-notes.md)).
@@ -69,6 +78,6 @@ To cover real hardware, on each of the Mac, the Windows machine and a Linux mach
 ## Sign-off
 
 - [ ] macOS (real hardware): ______  (commit, Node, date). Evidence reported by the owner: Mac mini, Darwin 25.5.0 arm64, Node 22.23.2, commit `e318c62`, 0 of 5 runs failed (after one failed round caused by a test-hook race, fixed). The box is the owner's to tick.
-- [ ] Windows (real hardware): ______
+- [ ] Windows (real hardware): ______  Evidence reported by the owner: Windows 11 (10.0.26200) x64, Node 22.20.0, commit `d0c4823`, 1 repeat passed (not yet the 5 repeats). The box is the owner's to tick.
 - [ ] Linux (any distribution beyond the CI runner): ______
 - [ ] Owner accepts QA checkpoint 1, or records a waiver of the real-hardware part: ______

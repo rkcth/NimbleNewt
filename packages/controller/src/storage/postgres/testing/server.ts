@@ -7,6 +7,21 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 /** A PostgreSQL server for tests. Either one the caller supplies, or a real one started from the `embedded-postgres` binaries. */
+/**
+ * Deletes a test server's folder. On Windows the folder can stay locked for a while after the server stops (the server's last handles, the
+ * antivirus scanner, the indexer): that is retried for about ten seconds, and if it still cannot be removed it is reported and left for the
+ * operating system's temp cleanup. A leftover temp folder is not a test failure (an owner's Windows run failed a whole test file on `EBUSY: rmdir`).
+ */
+function removeTree(directory: string): void {
+  try { rmSync(directory, { recursive: true, force: true, maxRetries: 40, retryDelay: 250 }); } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    // Only a lock is tolerated, and only if the server is really gone (a running server keeps its pid file); anything else is a real failure.
+    const serverStillThere = existsSync(join(directory, "data", "postmaster.pid"));
+    if ((code !== "EBUSY" && code !== "EPERM" && code !== "ENOTEMPTY") || serverStillThere) throw error;
+    console.warn(`# could not remove the temporary test server folder ${directory}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 export interface TestServer {
   readonly kind: "embedded" | "external";
   /** A connection string for the named database on this server. */
@@ -204,7 +219,7 @@ export async function startEmbeddedServer(flags: readonly string[] = [], baseDir
     await step("creating the test database", 30_000, async () => { await withClient(url("postgres"), async (c) => { await c.query('CREATE DATABASE "nimblenewt_test"'); }); });
   } catch (error) {
     await launcher.stop().catch(() => undefined);
-    rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    removeTree(directory);
     throw error;
   }
   return {
@@ -212,7 +227,7 @@ export async function startEmbeddedServer(flags: readonly string[] = [], baseDir
     url,
     version: async () => (await withClient(url(), async (c) => String((await c.query("SHOW server_version")).rows[0]!.server_version))),
     stop: async () => {
-      try { await launcher.stop(); } finally { rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
+      try { await launcher.stop(); } finally { removeTree(directory); }
     },
     crashAndRestart: async () => {
       pgCtl(["stop", "-D", dataDirectory, "-m", "immediate", "-w", "-t", "60"]);
