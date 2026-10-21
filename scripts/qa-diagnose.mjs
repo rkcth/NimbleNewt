@@ -44,6 +44,19 @@ export function slowest(log, count = 10) {
   return found.sort((a, b) => b.ms - a.ms).slice(0, count);
 }
 
+/** Lines of a log that look like trouble even when no test failed (warnings from the test helpers, locked files, errors printed by tools), each once with a count, most frequent first. */
+export function noisy(log, count = 8) {
+  const seen = new Map();
+  for (const line of log.split(/\r?\n/)) {
+    if (!/could not remove|EBUSY|EPERM|EACCES|ENOSPC|ENOTEMPTY|npm (?:error|warn)|\bERR_|Error:|\bwarn(?:ing)?\b|timed out|FATAL|panic/i.test(line)) continue;
+    const key = line.replace(/\d{4}-\d{2}-\d{2}T[\d:.]+Z?/g, "").replace(/\s+/g, " ").trim().slice(0, 200);
+    // Not trouble: test names, Node's own notice about experimental SQLite, the test names that contain the word, and the test PostgreSQL servers' log (the suites provoke FATAL and ERROR lines on purpose).
+    if (key === "" || /^[✔✖]|^ok \d|^not ok \d|^# Subtest|\(Use `node|ExperimentalWarning|^# \[embedded-postgres\] server:/.test(key)) continue;
+    seen.set(key, (seen.get(key) ?? 0) + 1);
+  }
+  return [...seen.entries()].sort((a, b) => b[1] - a[1]).slice(0, count).map(([text, times]) => ({ text, times }));
+}
+
 function diskInfo(directory) {
   // `diskutil info` wants the volume, not a folder inside it: on macOS find the device with `df` first.
   const device = process.platform === "darwin" ? spawnSync("df", ["-P", directory], { encoding: "utf8" }).stdout?.trim().split("\n").pop()?.split(/\s+/)[0] : undefined;
@@ -80,6 +93,10 @@ export function main(argv) {
     found.length === 0 ? "No failing test names were found in the logs." : "Failing tests (runs failed / name):",
     ...found.flatMap((f) => [`  ${f.runs}/${logs.length}  ${f.name}`, ...f.detail.map((l) => `        ${l}`)]),
     "",
+    "Lines that look like trouble, even where no test failed (count / line):",
+    ...(() => { const lines = noisy(logs.join("\n")); return lines.length === 0 ? ["  none"] : lines.map((n) => `  ${String(n.times).padStart(4)}  ${n.text}`); })(),
+    "",
+    ...(evidence === undefined || evidence === null ? ["The run did not finish writing its summary, so here is the end of the last log (what was on screen):", ...(logs.length === 0 ? ["  (no logs)"] : (logs[logs.length - 1] ?? "").trimEnd().split(/\r?\n/).slice(-18).map((l) => `  | ${l.slice(0, 200)}`)), ""] : []),
     "Slowest tests in the first run (seconds; a test that contains others also shows):",
     ...(logs[0] === undefined ? [] : slowest(logs[0]).map((t) => `  ${(t.ms / 1000).toFixed(1).padStart(7)}  ${t.name.slice(0, 110)}`)),
     "",

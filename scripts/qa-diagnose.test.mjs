@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { diagnose, slowest } from "./qa-diagnose.mjs";
+import { diagnose, noisy, slowest } from "./qa-diagnose.mjs";
 
 const spec = (names) => names.map((n) => `✔ passing (1ms)\n✖ ${n} (12.5ms)\n  AssertionError [ERR_ASSERTION]: boom\n    at x\n`).join("");
 const tap = (name) => `ok 1 - fine\nnot ok 2 - ${name}\n  ---\n  error: 'wrong'\n  expected: 1\n  actual: 2\n  ...\n`;
@@ -33,4 +33,14 @@ test("the slowest tests come out of both spec and TAP output, longest first", ()
   const tap = "ok 1 - quick\n  ---\n  duration_ms: 3\n  ...\nok 2 - heavy\n  ---\n  duration_ms: 1500.5\n  type: 'test'\n  ...\n";
   assert.deepEqual(slowest(tap, 1), [{ name: "heavy", ms: 1500.5 }]);
   assert.deepEqual(slowest("nothing here"), []);
+});
+
+test("warnings and errors that are not test failures are listed once each with a count", () => {
+  const log = "✔ fine (1ms)\n# could not remove the temporary test server folder C:\\x: EBUSY: resource busy\n# could not remove the temporary test server folder C:\\x: EBUSY: resource busy\nnpm warn deprecated node-domexception@1.0.0: use X\nok 3 - the test named Error: handling\n";
+  const found = noisy(log);
+  assert.equal(found[0].times, 2);
+  assert.match(found[0].text, /could not remove/);
+  assert.ok(found.some((f) => /npm warn deprecated/.test(f.text)));
+  assert.ok(!found.some((f) => /^ok 3/.test(f.text)), "a passing test whose name mentions Error is not noise");
+  assert.deepEqual(noisy("all good\n"), []);
 });
