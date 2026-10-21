@@ -313,7 +313,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 ### Phase 32
 
 - [ ] **K03** Implement migration recovery and rollback limits _(needs K02, G03)_
-- [ ] **K07** Implement maintenance windows and update orchestration _(needs K02, K01, L06, U11)_
+- [ ] **K07** Implement maintenance windows and update orchestration _(needs K02, K01, L06, U11, G05)_
 - [ ] **P02** Implement isolated coding workspaces and integration _(needs P01, A04, L04, Y02, H12)_
 - [ ] **P03** Implement non-code and sandbox operations adapters _(needs P01, T01, S05, Y02, H12)_
 - [ ] **T08** Implement shared toolbox audiences, personal copies and patch proposals _(needs T02, T06, M02, U08)_
