@@ -1,0 +1,2 @@
+export { CONFIG_LIMITS, ConfigurationService, type ConfigurationOptions, type EffectiveConfiguration, type SettingEntry, type HistoryEntry, type LayerBody, type ResolvedSetting, type Scope } from "./configuration.js";
+export { DEFAULT_COMBINERS, DEFAULT_SETTINGS, LAYER_ORDER, definitionFor, type Combiner, type CombineContext, type Effect, type LayerKind, type SettingDefinition } from "./settings.js";

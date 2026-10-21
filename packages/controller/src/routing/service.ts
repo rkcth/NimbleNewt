@@ -1,6 +1,7 @@
 import { DomainError } from "../domain/errors.js";
 import { onlyKnown, revision as checkRevision, text, type View } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
+import { allowsExactly } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
@@ -135,7 +136,8 @@ export class RoutingService {
     return { ...selectRoute(found.body as unknown as RoutingBody, checked), revision: found.revision };
   }
 
+  /** The owner, or a principal the owner gave `routing.write` (for example the coordinator agent); nobody else changes routing. */
   #requireOwner(principal: Principal): void {
-    if (principal.kind !== "owner") throw new DomainError("forbidden", `${principal.id} is not the owner; only the owner changes routing`);
+    if (!allowsExactly(principal, "routing.write", "*")) throw new DomainError("forbidden", `${principal.id} may not change routing; only the owner, or someone the owner gave routing.write`);
   }
 }

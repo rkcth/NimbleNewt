@@ -11,6 +11,7 @@ export * from "./planning/index.js";
 export * from "./api/index.js";
 export * from "./review/index.js";
 export * from "./conversations/index.js";
+export * from "./configuration/index.js";
 export * from "./routing/index.js";
 export * from "./security/index.js";
 export * from "./context/index.js";
