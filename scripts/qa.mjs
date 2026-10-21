@@ -97,6 +97,15 @@ function filesystemType(dir) {
     const r = spawnSync("stat", ["-f", "-c", "%T", dir], { encoding: "utf8" });
     if (r.status === 0) return r.stdout.trim();
   }
+  if (process.platform === "darwin") {
+    // `df` names the device the folder lives on; `mount` says what file system is mounted there, for example "apfs" or "exfat".
+    const df = spawnSync("df", ["-P", dir], { encoding: "utf8" });
+    const device = df.status === 0 ? df.stdout.trim().split("\n").pop()?.split(/\s+/)[0] : undefined;
+    const mounted = device === undefined ? undefined : spawnSync("mount", [], { encoding: "utf8" }).stdout?.split("\n").find((l) => l.startsWith(`${device} on `));
+    const type = mounted === undefined ? undefined : /\(([^,)]+)/.exec(mounted)?.[1];
+    // "noowners" (the default on external volumes) changes how permission tests behave, so it is kept in the record.
+    if (type !== undefined) return /\bnoowners\b/.test(mounted ?? "") ? `${type} (noowners)` : type;
+  }
   return "not detected";
 }
 

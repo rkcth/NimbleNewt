@@ -27,7 +27,9 @@ export function diagnose(logs) {
 }
 
 function diskInfo(directory) {
-  const attempts = process.platform === "darwin" ? [["diskutil", ["info", directory]]] : process.platform === "win32" ? [] : [["df", ["-T", directory]]];
+  // `diskutil info` wants the volume, not a folder inside it: on macOS find the device with `df` first.
+  const device = process.platform === "darwin" ? spawnSync("df", ["-P", directory], { encoding: "utf8" }).stdout?.trim().split("\n").pop()?.split(/\s+/)[0] : undefined;
+  const attempts = process.platform === "darwin" ? (device === undefined ? [] : [["diskutil", ["info", device]]]) : process.platform === "win32" ? [] : [["df", ["-T", directory]]];
   for (const [command, args] of attempts) {
     const result = spawnSync(command, args, { encoding: "utf8" });
     if (result.status !== 0) continue;
