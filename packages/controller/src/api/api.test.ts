@@ -7,6 +7,7 @@ import { AssignmentService } from "../domain/assignments.js";
 import { ProjectService } from "../domain/service.js";
 import { WaitService } from "../domain/waits.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
+import { AgentService } from "../agents/index.js";
 import { InquiryService } from "../inquiries/index.js";
 import { PrincipalService, type Grant } from "../security/index.js";
 import { API_VERSION, OPERATIONS, PAGE, StateApi, renderApiDocs, type ApiResponse } from "./index.js";
@@ -38,7 +39,8 @@ for (const backend of backends) {
         const retrieval = RetrievalService.withEpoch(world.storage, projects.epoch, desks, histories, options);
         const inquiries = InquiryService.withEpoch(world.storage, projects.epoch, { histories, retrieval, waits, assignments }, options);
         const internal: unknown[] = [];
-        const deps = { principals, projects, assignments, retrieval, inquiries, onInternalError: (e: unknown) => { internal.push(e); } };
+        const agents = AgentService.withEpoch(world.storage, projects.epoch, options);
+        const deps = { principals, projects, assignments, retrieval, inquiries, agents, onInternalError: (e: unknown) => { internal.push(e); } };
         const api = new StateApi(wrap === undefined ? deps : wrap(deps));
         const ownerToken = (await principals.bootstrapOwner({ name: "rob" })).token;
         const owner = await principals.authenticate(ownerToken);
@@ -71,6 +73,26 @@ for (const backend of backends) {
     assert.equal((await fails(ownerToken, command("project.create", { name: "P", surprise: 1 }))).code, "invalid_command");
     const done = await ok(ownerToken, command("project.create", { name: "P" }));
     assert.deepEqual([done.v, done.op, done.accepted, done.completed], [1, "project.create", true, true]);
+  });
+
+  suite("agents, teams and roles are managed through the API; a caller without agent.manage is refused and reads look like missing", async ({ ownerToken, agent, ok, fails }) => {
+    const nobody = await agent("nobody", []);
+    const manager = await agent("manager", [{ action: "agent.manage", project: "*" }]);
+    await fails(nobody, command("agent.create", { friendlyName: "X" }));
+    await ok(manager, command("role.define", { name: "lead", capabilities: ["project.read"] }));
+    const team = await ok(manager, command("team.create", { name: "Core" }));
+    const created = await ok(manager, command("agent.create", { friendlyName: "Ann", roles: ["lead"], teamId: team.result["id"] as string }));
+    assert.equal(created.completed, true);
+    const id = created.result["id"] as string;
+    assert.equal((await ok(ownerToken, query("agent.get", { agentId: id }))).result["item"] !== undefined, true);
+    assert.equal((await fails(nobody, query("agent.get", { agentId: id }))).code, "not_found");
+    assert.equal((await fails(nobody, query("agent.list"))).code, "forbidden");
+    assert.equal(((await ok(manager, query("agent.list", { teamId: team.result["id"] as string }))).result["items"] as unknown[]).length, 1);
+    assert.equal(((await ok(manager, query("role.list"))).result["items"] as unknown[]).length, 1);
+    const revision = created.result["revision"] as number;
+    await ok(manager, command("agent.update", { agentId: id, expectedRevision: revision, friendlyName: "Anna", supervisorId: null }));
+    assert.equal((await fails(manager, command("agent.update", { agentId: id, expectedRevision: revision, friendlyName: "Stale" }))).code, "stale_revision");
+    assert.equal((await fails(manager, query("agent.list", { state: "gone" }))).field, "args.state");
   });
 
   suite("authentication: a bad, rotated or missing credential is refused alike, and nothing about the request leaks", async ({ api, fails, ownerToken }) => {

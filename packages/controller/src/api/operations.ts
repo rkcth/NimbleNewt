@@ -1,6 +1,7 @@
 import { DomainError } from "../domain/errors.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import type { ProjectService } from "../domain/service.js";
+import type { AgentService } from "../agents/index.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { RetrievalService } from "../context/index.js";
 import type { Principal } from "../security/principals.js";
@@ -12,6 +13,7 @@ export interface Context {
   readonly secure: SecureApi;
   readonly retrieval: RetrievalService;
   readonly inquiries: InquiryService;
+  readonly agents: AgentService;
   readonly projects: ProjectService;
   readonly assignments: AssignmentService;
 }
@@ -73,6 +75,24 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, ["taskId"]); return found("task", await c.secure.getTask(str(a, "taskId"))); } },
   { name: "task.list", kind: "query", summary: "Tasks the caller may read. Only the installation owner may list across projects; anyone else names the project.", args: { "projectId?": "the project (required unless the caller is the owner)", "limit?": `1 to ${PAGE.max}, default ${PAGE.default}`, "after?": "the `next` of the previous page" }, result: "`{ items, next? }`.",
     run: async (c, a) => { only(a, ["projectId", "limit", "after"]); return page(await c.secure.listTasks({ limit: limitOf(a), ...(optStr(a, "projectId") === undefined ? {} : { projectId: optStr(a, "projectId")! }), ...(optStr(a, "after") === undefined ? {} : { afterId: optStr(a, "after")! }) })); } },
+  { name: "agent.get", kind: "query", summary: "One agent record. The owner, a holder of `agent.read` or `agent.manage`, and the agent itself may ask; anyone else gets `not_found`.", args: { agentId: "the agent's ID" }, result: "`{ item }`: the agent (friendly name, roles, team, supervisor, state, identity), with its revision.",
+    run: async (c, a) => { only(a, ["agentId"]); return found("agent", await c.agents.get(c.principal, str(a, "agentId"))); } },
+  { name: "agent.list", kind: "query", summary: "Agent records (needs `agent.read` or `agent.manage`).", args: { "teamId?": "only this team's members", "state?": "`active` or `retired`", "limit?": `1 to ${PAGE.max}, default ${PAGE.default}`, "after?": "the `next` of the previous page" }, result: "`{ items, next? }`.",
+    run: async (c, a) => { only(a, ["teamId", "state", "limit", "after"]); const raw = optStr(a, "state"); if (raw !== undefined && raw !== "active" && raw !== "retired") invalid("args.state", "must be active or retired"); const state = raw as "active" | "retired" | undefined; return page(await c.agents.list(c.principal, { limit: limitOf(a), ...(optStr(a, "teamId") === undefined ? {} : { teamId: optStr(a, "teamId")! }), ...(state === undefined ? {} : { state }), ...(optStr(a, "after") === undefined ? {} : { afterId: optStr(a, "after")! }) })); } },
+  { name: "team.list", kind: "query", summary: "Teams (needs `agent.read` or `agent.manage`).", args: { "limit?": `1 to ${PAGE.max}, default ${PAGE.default}`, "after?": "the `next` of the previous page" }, result: "`{ items, next? }`.",
+    run: async (c, a) => { only(a, ["limit", "after"]); return page(await c.agents.listTeams(c.principal, { limit: limitOf(a), ...(optStr(a, "after") === undefined ? {} : { afterId: optStr(a, "after")! }) })); } },
+  { name: "role.list", kind: "query", summary: "Role templates: each name, the capability bundle it stands for and the roles it excludes (needs `agent.read` or `agent.manage`). A role grants nothing by itself.", args: { "limit?": `1 to ${PAGE.max}, default ${PAGE.default}`, "after?": "the `next` of the previous page" }, result: "`{ items, next? }`.",
+    run: async (c, a) => { only(a, ["limit", "after"]); return page(await c.agents.listRoles(c.principal, { limit: limitOf(a), ...(optStr(a, "after") === undefined ? {} : { afterId: optStr(a, "after")! }) })); } },
+  { name: "agent.create", kind: "command", summary: "Creates an agent with a new durable ID and its own identity (no grants, no credential). Needs `agent.manage`.", args: { friendlyName: "a label for people (it may change and repeat)", "roles?": "role names", "teamId?": "a team", "supervisorId?": "the agent it reports to", "defaultProfile?": "a routing profile name", "permittedOverrides?": "what its profile may be overridden for", "environment?": "an environment name", "persona?": "style text (no effect on permissions)" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => written(await c.agents.create(c.principal, { commandId: need(id), ...(a as object) } as never)) },
+  { name: "agent.update", kind: "command", summary: "Changes fields of an agent (the revision you read must still be current; `null` clears teamId, supervisorId, defaultProfile, environment or persona). Needs `agent.manage`.", args: { agentId: "the agent", expectedRevision: "the revision you read", "friendlyName?": "new label", "roles?": "the full list of role names", "teamId?": "team or null", "supervisorId?": "agent or null", "defaultProfile?": "profile name or null", "permittedOverrides?": "list", "environment?": "name or null", "persona?": "text or null" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => written(await c.agents.update(c.principal, { commandId: need(id), ...(a as object) } as never)) },
+  { name: "agent.retire", kind: "command", summary: "Retires an agent and disables its identity. Refused while active agents report to it. Its ID is never reused; tasks it owns stay assigned to it until explicitly transferred. Any holder of `agent.manage` may retire any agent.", args: { agentId: "the agent", expectedRevision: "the revision you read" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => written(await c.agents.retire(c.principal, { commandId: need(id), ...(a as object) } as never)) },
+  { name: "team.create", kind: "command", summary: "Creates a team, optionally under another team. Needs `agent.manage`.", args: { name: "the team's name", "parentTeamId?": "the team it sits under" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => written(await c.agents.createTeam(c.principal, { commandId: need(id), ...(a as object) } as never)) },
+  { name: "role.define", kind: "command", summary: "Defines a role template, or replaces one when `expectedRevision` is given. Needs `agent.manage`.", args: { name: "the role's name", capabilities: "action names the role stands for (granting is separate)", "excludes?": "roles that may not be combined with it", "description?": "what it is for", "expectedRevision?": "the revision you read, to replace an existing role" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => written(await c.agents.defineRole(c.principal, { commandId: need(id), ...(a as object) } as never)) },
   { name: "assignment.get", kind: "query", summary: "Who owns a task, at which generation, and its state. This is where a deferred command (`task.assign`) is seen to complete.", args: { taskId: "the task's ID" }, result: "`{ item }`: the assignment (owner, generation, state, revision).",
     run: async (c, a) => { only(a, ["taskId"]); return found("assignment", await c.secure.getAssignment(str(a, "taskId"))); } },
   { name: "assignment.history", kind: "query", summary: "Every generation of a task's assignment, oldest first.", args: { taskId: "the task's ID" }, result: "`{ items }`.",

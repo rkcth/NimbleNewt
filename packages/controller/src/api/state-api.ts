@@ -3,6 +3,7 @@ import { isStorageError } from "../storage/errors.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import type { ProjectService } from "../domain/service.js";
 import type { RetrievalService } from "../context/index.js";
+import type { AgentService } from "../agents/index.js";
 import type { InquiryService } from "../inquiries/index.js";
 import { SecureApi } from "../security/secured.js";
 import type { PrincipalService } from "../security/principals.js";
@@ -37,6 +38,7 @@ export interface StateApiDeps {
   readonly assignments: AssignmentService;
   readonly retrieval: RetrievalService;
   readonly inquiries: InquiryService;
+  readonly agents: AgentService;
   /** Called with errors that are not part of the contract (so they are not shown to the client). */
   readonly onInternalError?: (error: unknown) => void;
 }
@@ -73,7 +75,7 @@ export class StateApi {
       if ("commandId" in args || "actor" in args) throw new DomainError("invalid_command", "args: commandId goes beside the arguments, and the caller is the authenticated principal", { field: "args" });
       const context: Context = {
         principal, secure: new SecureApi(principal, { projects: this.#deps.projects, assignments: this.#deps.assignments }),
-        retrieval: this.#deps.retrieval, inquiries: this.#deps.inquiries, projects: this.#deps.projects, assignments: this.#deps.assignments,
+        retrieval: this.#deps.retrieval, inquiries: this.#deps.inquiries, agents: this.#deps.agents, projects: this.#deps.projects, assignments: this.#deps.assignments,
       };
       const result = await operation.run(context, args, request.commandId);
       if (operation.kind === "query") return { v: API_VERSION, op: request.op, ok: true, result };

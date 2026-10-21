@@ -75,6 +75,51 @@ Arguments:
 
 Result: `{ items, next? }`.
 
+#### `agent.get`
+
+One agent record. The owner, a holder of `agent.read` or `agent.manage`, and the agent itself may ask; anyone else gets `not_found`.
+
+Arguments:
+
+- `agentId`: the agent's ID
+
+Result: `{ item }`: the agent (friendly name, roles, team, supervisor, state, identity), with its revision.
+
+#### `agent.list`
+
+Agent records (needs `agent.read` or `agent.manage`).
+
+Arguments:
+
+- `teamId` (optional): only this team's members
+- `state` (optional): `active` or `retired`
+- `limit` (optional): 1 to 100, default 20
+- `after` (optional): the `next` of the previous page
+
+Result: `{ items, next? }`.
+
+#### `team.list`
+
+Teams (needs `agent.read` or `agent.manage`).
+
+Arguments:
+
+- `limit` (optional): 1 to 100, default 20
+- `after` (optional): the `next` of the previous page
+
+Result: `{ items, next? }`.
+
+#### `role.list`
+
+Role templates: each name, the capability bundle it stands for and the roles it excludes (needs `agent.read` or `agent.manage`). A role grants nothing by itself.
+
+Arguments:
+
+- `limit` (optional): 1 to 100, default 20
+- `after` (optional): the `next` of the previous page
+
+Result: `{ items, next? }`.
+
 #### `assignment.get`
 
 Who owns a task, at which generation, and its state. This is where a deferred command (`task.assign`) is seen to complete.
@@ -130,6 +175,88 @@ Arguments:
 Result: `{ items, next? }`.
 
 ### Commands
+
+#### `agent.create`
+
+Creates an agent with a new durable ID and its own identity (no grants, no credential). Needs `agent.manage`.
+
+Arguments:
+
+- `friendlyName`: a label for people (it may change and repeat)
+- `roles` (optional): role names
+- `teamId` (optional): a team
+- `supervisorId` (optional): the agent it reports to
+- `defaultProfile` (optional): a routing profile name
+- `permittedOverrides` (optional): what its profile may be overridden for
+- `environment` (optional): an environment name
+- `persona` (optional): style text (no effect on permissions)
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `agent.update`
+
+Changes fields of an agent (the revision you read must still be current; `null` clears teamId, supervisorId, defaultProfile, environment or persona). Needs `agent.manage`.
+
+Arguments:
+
+- `agentId`: the agent
+- `expectedRevision`: the revision you read
+- `friendlyName` (optional): new label
+- `roles` (optional): the full list of role names
+- `teamId` (optional): team or null
+- `supervisorId` (optional): agent or null
+- `defaultProfile` (optional): profile name or null
+- `permittedOverrides` (optional): list
+- `environment` (optional): name or null
+- `persona` (optional): text or null
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `agent.retire`
+
+Retires an agent and disables its identity. Refused while active agents report to it. Its ID is never reused; tasks it owns stay assigned to it until explicitly transferred. Any holder of `agent.manage` may retire any agent.
+
+Arguments:
+
+- `agentId`: the agent
+- `expectedRevision`: the revision you read
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `team.create`
+
+Creates a team, optionally under another team. Needs `agent.manage`.
+
+Arguments:
+
+- `name`: the team's name
+- `parentTeamId` (optional): the team it sits under
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `role.define`
+
+Defines a role template, or replaces one when `expectedRevision` is given. Needs `agent.manage`.
+
+Arguments:
+
+- `name`: the role's name
+- `capabilities`: action names the role stands for (granting is separate)
+- `excludes` (optional): roles that may not be combined with it
+- `description` (optional): what it is for
+- `expectedRevision` (optional): the revision you read, to replace an existing role
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
 
 #### `project.create`
 

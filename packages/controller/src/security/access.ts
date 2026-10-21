@@ -19,6 +19,7 @@ export const ACTIONS = [
   "history.append", "history.read",
   "review.request", "review.decide",
   "principal.manage",
+  "agent.manage", "agent.read",
 ] as const;
 export type Action = (typeof ACTIONS)[number];
 
