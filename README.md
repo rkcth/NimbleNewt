@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **44 of 154 tasks implemented**, 2 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **44 of 155 tasks implemented**, 2 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -231,6 +231,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 25
 
+- [ ] **A07b** Implement standing-rule proposals and approval-load measurement _(needs A07, A05, H05)_
 - [ ] **A08** Implement per-agent environments _(needs A03, T01, H11)_
 - [x] **A10** Implement private-record inspection and cross-project information boundaries _(needs C02, A02, H11)_
 - [ ] **C05** Implement retained context branches and selective updates _(needs C04, H04)_
@@ -309,7 +310,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **H10** Implement distributed agent capacity and fan-in limits _(needs H07, H09, H03, R05)_
 - [ ] **K02** Implement deterministic release staging and activation _(needs K01, F02, T02)_
 - [ ] **P06** Implement project and agent retirement and archival _(needs P01, H11, L03, K06)_
-- [ ] **U08** Implement settings and administration views _(needs U07, U10, A07, F09, H11, R03, T03)_
+- [ ] **U08** Implement settings and administration views _(needs U07, U10, A07, F09, H11, R03, T03, A07b)_
 - [ ] **X09** Implement external release-test job protocol _(needs H07, H09, F03, S06)_
 - [ ] **Y02** QA checkpoint 2: isolation, stop and recovery _(needs G05, G06, A06, L04, H09)_
 

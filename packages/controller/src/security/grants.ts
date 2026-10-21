@@ -17,6 +17,21 @@ export interface ResourceRef {
   readonly id: string;
 }
 
+/**
+ * What a grant is conditional on (card A07). A grant with no terms covers its action everywhere in its project. Terms narrow it: the environments it applies to, the most it may spend, the
+ * hours it applies in, the audiences it may send to or publish for, whether the grantee may hand a part of it on, and free-text conditions the owner stated (kept for explanation; a person
+ * or an agent reviewer judges them, the engine does not).
+ */
+export interface GrantTerms {
+  readonly environments?: readonly string[];
+  readonly spendLimit?: number;
+  /** Hours of the day, UTC, in which the grant applies, and optionally the days of the week (0 is Sunday). */
+  readonly window?: { readonly start: string; readonly end: string; readonly days?: readonly number[] };
+  readonly audiences?: readonly string[];
+  readonly delegation?: boolean;
+  readonly conditions?: readonly string[];
+}
+
 export interface GrantRecordBody {
   /** The principal that holds the authority. */
   readonly grantee: string;
@@ -33,9 +48,43 @@ export interface GrantRecordBody {
   readonly parentId?: string;
   readonly notBefore?: string;
   readonly expiresAt?: string;
+  readonly terms?: GrantTerms;
   readonly state: "active" | "revoked";
   readonly revokedBy?: string;
   readonly revokedReason?: string;
+}
+
+const ENVIRONMENT = /^[a-z][a-z0-9-]{0,39}$/;
+const HHMM = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+/** Checks the terms of a grant; absent fields are left out. */
+export function checkTerms(value: unknown): GrantTerms | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return invalid("terms", "must be an object");
+  const e = value as Record<string, unknown>;
+  for (const key of Object.keys(e)) if (!["environments", "spendLimit", "window", "audiences", "delegation", "conditions"].includes(key)) invalid(`terms.${key}`, "is not a grant term");
+  const list = (v: unknown, field: string, one: (x: unknown, f: string) => string, max: number): string[] => {
+    if (!Array.isArray(v) || v.length > max) return invalid(field, `must be a list of at most ${max} entries`);
+    return [...new Set(v.map((x, i) => one(x, `${field}[${i}]`)))].sort();
+  };
+  const out: { -readonly [K in keyof GrantTerms]: GrantTerms[K] } = {};
+  if (e["environments"] !== undefined) out.environments = list(e["environments"], "terms.environments", (x, f) => (typeof x === "string" && ENVIRONMENT.test(x) ? x : invalid(f, "must be an environment name such as development")), 10);
+  if (e["spendLimit"] !== undefined) {
+    const v = e["spendLimit"];
+    out.spendLimit = typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1e9 ? v : invalid("terms.spendLimit", "must be a number from 0 to 1000000000");
+  }
+  if (e["window"] !== undefined) {
+    const w = e["window"] as Record<string, unknown>;
+    if (w === null || typeof w !== "object" || Array.isArray(w)) invalid("terms.window", "must be an object with start and end");
+    for (const key of Object.keys(w)) if (!["start", "end", "days"].includes(key)) invalid(`terms.window.${key}`, "is not a window field");
+    const start = typeof w["start"] === "string" && HHMM.test(w["start"]) ? w["start"] : invalid("terms.window.start", "must be a time such as 09:00 (UTC)");
+    const end = typeof w["end"] === "string" && HHMM.test(w["end"]) ? w["end"] : invalid("terms.window.end", "must be a time such as 17:30 (UTC)");
+    const days = w["days"] === undefined ? undefined : (Array.isArray(w["days"]) && w["days"].length <= 7 && w["days"].every((d) => Number.isInteger(d) && d >= 0 && d <= 6) ? [...new Set(w["days"] as number[])].sort() : invalid("terms.window.days", "must be days of the week, 0 (Sunday) to 6"));
+    out.window = { start, end, ...(days === undefined ? {} : { days }) };
+  }
+  if (e["audiences"] !== undefined) out.audiences = list(e["audiences"], "terms.audiences", (x, f) => (typeof x === "string" && /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,99}$/.test(x) ? x : invalid(f, "must be an account or audience name")), 50);
+  if (e["delegation"] !== undefined) out.delegation = typeof e["delegation"] === "boolean" ? e["delegation"] : invalid("terms.delegation", "must be true or false");
+  if (e["conditions"] !== undefined) out.conditions = list(e["conditions"], "terms.conditions", (x, f) => plain(x, f, 300), 20);
+  return Object.keys(out).length === 0 ? undefined : out;
 }
 
 /** A standing prohibition that beats any grant (card A02): for one principal or for everyone but the owner. */
@@ -62,6 +111,7 @@ export interface GrantInput extends NoActor {
   readonly basis: string;
   readonly notBefore?: string;
   readonly expiresAt?: string;
+  readonly terms?: GrantTerms;
 }
 
 export interface DeriveInput extends NoActor {
@@ -149,7 +199,8 @@ export class GrantService {
   async grant(owner: Principal, command: GrantInput): Promise<{ id: string; revision: number; replayed: boolean }> {
     requireOwner(owner);
     return this.#runner.command("grant.create", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => {
-      onlyKnown(command, ["commandId", "grantee", "action", "project", "resource", "source", "basis", "notBefore", "expiresAt"]);
+      onlyKnown(command, ["commandId", "grantee", "action", "project", "resource", "source", "basis", "notBefore", "expiresAt", "terms"]);
+      const terms = checkTerms(command.terms);
       const grantee = typeof command.grantee === "string" && PRINCIPAL.test(command.grantee) && !command.grantee.startsWith("owner:") ? command.grantee : invalid("grantee", "must be an agent or host ID (the owner needs no grant)");
       const action = checkAction(command.action);
       const project = checkProject(command.project);
@@ -160,12 +211,12 @@ export class GrantService {
       const expiresAt = checkTime(command.expiresAt, "expiresAt");
       if (notBefore !== undefined && expiresAt !== undefined && expiresAt <= notBefore) invalid("expiresAt", "must be after notBefore");
       return {
-        payload: { grantee, action, project, ...(resource === undefined ? {} : { resource: resource as unknown as JsonObject }), source, basis, ...(notBefore === undefined ? {} : { notBefore }), ...(expiresAt === undefined ? {} : { expiresAt }) },
+        payload: { grantee, action, project, ...(resource === undefined ? {} : { resource: resource as unknown as JsonObject }), source, basis, ...(notBefore === undefined ? {} : { notBefore }), ...(expiresAt === undefined ? {} : { expiresAt }), ...(terms === undefined ? {} : { terms: terms as unknown as JsonObject }) },
         build: async () => {
           if ((await this.#runner.get("principal", grantee)) === undefined) throw new DomainError("not_found", `principal ${grantee} does not exist`);
           if (!mayHold(grantee.slice(0, grantee.indexOf(":")), action)) throw new DomainError("invalid_command", `action: ${grantee.startsWith("service:") ? "a service may hold only recovery actions" : "a client may hold only conversation actions"}, not ${action}`, { field: "action" });
           const ref: AggregateRef = { kind: "grant-record", id: derivedId("grt", scopedCommandId(owner.id, command.commandId)) };
-          const body: GrantRecordBody = { grantee, action, project, ...(resource === undefined ? {} : { resource }), source, decidedBy: owner.id, basis, ...(notBefore === undefined ? {} : { notBefore }), ...(expiresAt === undefined ? {} : { expiresAt }), state: "active" };
+          const body: GrantRecordBody = { grantee, action, project, ...(resource === undefined ? {} : { resource }), source, decidedBy: owner.id, basis, ...(notBefore === undefined ? {} : { notBefore }), ...(expiresAt === undefined ? {} : { expiresAt }), ...(terms === undefined ? {} : { terms }), state: "active" };
           return { ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { grantee, action, project, source } };
         },
       };
@@ -296,6 +347,11 @@ export class GrantService {
     return effectiveOf(this.#runner, principal, now);
   }
 
+  /** The grant records a principal holds at `now`, with their terms (for the approval policy). */
+  held(principalId: string, now: string): Promise<{ id: string; body: GrantRecordBody }[]> {
+    return heldRecords(this.#runner, principalId, now);
+  }
+
   /** Why an action is or is not allowed for a principal at `now`: the answer is `allows` itself; the grant or restriction named is the one that decides it. */
   async explain(principal: Principal, action: string, project: string | undefined, now: string, resource?: ResourceRef): Promise<{ allowed: boolean; because: string }> {
     const p = await this.effective(principal, now);
@@ -312,6 +368,24 @@ export class GrantService {
 
 /** The depth of a derived grant's chain of parents (0 for a grant that is not derived); a missing parent counts as the limit. */
 export const MAX_DEPTH = 8;
+
+/** The grant records a principal holds at `now` (active, in time, and for a derived grant resting on a parent that holds and contains it). */
+export async function heldRecords(runner: CommandRunner, principalId: string, now: string): Promise<{ id: string; body: GrantRecordBody }[]> {
+  const byId = new Map<string, GrantRecordBody>();
+  const mine: { id: string; body: GrantRecordBody }[] = [];
+  for (let after: string | undefined; ;) {
+    const page = await runner.list("grant-record", { ...(after === undefined ? {} : { afterId: after }), limit: 500 });
+    for (const a of page) { const b = a.body as unknown as GrantRecordBody; byId.set(a.id, b); if (b.grantee === principalId) mine.push({ id: a.id, body: b }); after = a.id; }
+    if (page.length < 500) break;
+  }
+  const holds = (body: GrantRecordBody, depth: number): boolean => {
+    if (body.state !== "active" || (body.notBefore !== undefined && body.notBefore > now) || (body.expiresAt !== undefined && body.expiresAt <= now)) return false;
+    if (body.source !== "derived") return true;
+    const parent = body.parentId === undefined ? undefined : byId.get(body.parentId);
+    return parent !== undefined && depth < MAX_DEPTH && holds(parent, depth + 1) && within(body, parent);
+  };
+  return mine.filter(({ body }) => holds(body, 0));
+}
 
 /** Takes the snapshot described at `GrantService.effective`. Shared with authentication so that no authenticated principal is ever without its restrictions. */
 export async function effectiveOf(runner: CommandRunner, principal: Principal, now: string): Promise<Principal> {
