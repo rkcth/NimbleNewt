@@ -10,7 +10,7 @@ import type { ControllerStorage } from "../../storage/types.js";
 import { EffectService, type EffectBridge } from "../effects.js";
 
 const [mode, directory] = process.argv.slice(2) as [string, string];
-const kill = (): never => { process.kill(process.pid, "SIGKILL"); return undefined as never; };
+const kill = (): never => { (process.kill(process.pid, "SIGKILL"), Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)); return undefined as never; };
 const log = join(directory, "outside.log");
 
 export const outsideLines = (): string[] => (existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean) : []);

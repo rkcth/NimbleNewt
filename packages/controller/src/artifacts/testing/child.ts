@@ -14,7 +14,7 @@ import { SqliteStorage } from "../../storage/sqlite/index.js";
 import type { ControllerStorage } from "../../storage/types.js";
 
 const [mode, directory] = process.argv.slice(2) as [string, string];
-const kill = (): never => { process.kill(process.pid, "SIGKILL"); return undefined as never; };
+const kill = (): never => { (process.kill(process.pid, "SIGKILL"), Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)); return undefined as never; };
 
 let renames = 0;
 const blobs = await FileBlobStore.open({

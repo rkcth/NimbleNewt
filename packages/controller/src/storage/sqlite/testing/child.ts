@@ -2,6 +2,7 @@
  * Child process for the SQLite tests. Usage: node child.js <mode> <database> [args...]. It prints one line per event so the
  * parent can see exactly what was acknowledged before it kills or inspects the process.
  */
+// A self-kill is followed by a wait that never returns: the signal takes a moment to land (longer on some machines), and the code must not run on past the crash point meanwhile.
 import { setTimeout as sleep } from "node:timers/promises";
 import { commitOperation } from "../../commit.js";
 import { StorageError } from "../../errors.js";
@@ -28,7 +29,7 @@ if (mode === "migrate") {
     path: database, busyTimeoutMs: 20_000, migrations: registry("sqlite", registryName),
     testHooks: { statement: (phase, _sql, ordinal) => {
       last = Math.max(last, ordinal);
-      if (target !== 0 && ordinal === target && phase === when) process.kill(process.pid, "SIGKILL");
+      if (target !== 0 && ordinal === target && phase === when) (process.kill(process.pid, "SIGKILL"), Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0));
     } },
   });
   say(`completed ${last}`);
@@ -47,7 +48,7 @@ if (mode === "boundary") {
     testHooks: { statement: (phase, _sql, ordinal) => {
       if (!armed) return;
       last = Math.max(last, ordinal);
-      if (target !== 0 && ordinal === target && phase === when) process.kill(process.pid, "SIGKILL");
+      if (target !== 0 && ordinal === target && phase === when) (process.kill(process.pid, "SIGKILL"), Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0));
     } },
   });
   armed = true;

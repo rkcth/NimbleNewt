@@ -16,7 +16,7 @@ import { ProjectService } from "../service.js";
 
 const [mode, directory] = process.argv.slice(2) as [string, string];
 const T = "2026-10-20T10:00:00.000Z";
-const kill = (): never => { process.kill(process.pid, "SIGKILL"); return undefined as never; };
+const kill = (): never => { (process.kill(process.pid, "SIGKILL"), Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)); return undefined as never; };
 
 const real = await SqliteStorage.open({ path: join(directory, "db.sqlite"), busyTimeoutMs: 20_000 });
 const storage: ControllerStorage = new Proxy(real, {

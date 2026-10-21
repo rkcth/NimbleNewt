@@ -9,7 +9,7 @@ import { Chaos } from "./chaos.js";
 import { Clock, runPath, startProcess } from "./pipeline.js";
 
 const [directory, crashAt] = process.argv.slice(2) as [string, string];
-const chaos = new Chaos(Number(crashAt), () => process.kill(process.pid, "SIGKILL"));
+const chaos = new Chaos(Number(crashAt), () => (process.kill(process.pid, "SIGKILL"), Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)));
 const storage = await SqliteStorage.open({ path: join(directory, "db.sqlite"), busyTimeoutMs: 20_000 });
 const clock = new Clock();
 const slice = await startProcess({ storage, directory, chaos, clock: clock.now }, "child");

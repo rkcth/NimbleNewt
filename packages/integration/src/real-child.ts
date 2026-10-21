@@ -10,7 +10,7 @@ import { openAdapter, piConversation } from "./conversation.js";
 
 const [directory, crashAt] = process.argv.slice(2) as [string, string];
 const { Chaos, Clock, runPath, startProcess, ANSWER } = sliceHarness;
-const chaos = new Chaos(Number(crashAt), () => process.kill(process.pid, "SIGKILL"));
+const chaos = new Chaos(Number(crashAt), () => (process.kill(process.pid, "SIGKILL"), Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)));
 const storage = await SqliteStorage.open({ path: join(directory, "db.sqlite"), busyTimeoutMs: 20_000 });
 const { adapter } = await openAdapter(join(directory, "pi"), ANSWER);
 const slice = await startProcess({ storage, directory, chaos, clock: new Clock().now, conversation: () => piConversation(adapter) }, "child");

@@ -21,7 +21,7 @@ export function effectTool(logFile: string, options: { killFirstAttempt: boolean
     ...(options.replay === undefined ? {} : { replay: options.replay }),
     execute: async () => {
       appendFileSync(logFile, "attempt\n");
-      if (options.killFirstAttempt && attemptsIn(logFile) === 1) process.kill(process.pid, "SIGKILL");
+      if (options.killFirstAttempt && attemptsIn(logFile) === 1) (process.kill(process.pid, "SIGKILL"), Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0));
       return EFFECT_OUTPUT;
     },
   };
@@ -44,7 +44,7 @@ export function twoConversationTools(dir: string, options: { child: boolean }): 
         log("toolB");
         if (options.child) {
           while (!existsSync(join(dir, "toolA.log"))) await new Promise((resolve) => setTimeout(resolve, 20));
-          process.kill(process.pid, "SIGKILL");
+          (process.kill(process.pid, "SIGKILL"), Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0));
         }
         return "B-DONE";
       },

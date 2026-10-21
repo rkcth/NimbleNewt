@@ -30,7 +30,12 @@ try {
         if (!armed) return;
         statements = Math.max(statements, ordinal);
         if (crash.mode === "count" || phase !== crash.when || ordinal !== crash.ordinal) return;
-        if (crash.mode === "kill") process.kill(process.pid, "SIGKILL"); // the whole process, as a power cut or `kill -9` would
+        if (crash.mode === "kill") {
+          process.kill(process.pid, "SIGKILL"); // the whole process, as a power cut or `kill -9` would
+          // The signal is delivered to the process, not to this thread, and takes a moment: on a fast machine this thread could run on and reach the
+          // next statements (even COMMIT) before the process dies, and then the crash point would not be where the test says it is. Stop here until it does.
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+        }
         else process.exit(1); // only this worker thread: the controller must notice and report it
       } },
     }),
