@@ -178,12 +178,16 @@ test("G02 abort during streaming of partial tool arguments: no tool runs, queued
   const { runtime, faux, events } = await openRuntime(scratch("g02-stream"), { tools: [danger as unknown as AdapterTool], slow: true });
   const conversation = runtime.root();
   let answered = 0;
+  let streaming = false;
   faux.setResponses([
-    fauxAssistantMessage(fauxToolCall("danger", { payload: "x".repeat(400) }, { id: "partial-call" }), { stopReason: "toolUse" }),
+    () => { streaming = true; return fauxAssistantMessage(fauxToolCall("danger", { payload: "x".repeat(400) }, { id: "partial-call" }), { stopReason: "toolUse" }); },
     () => { answered += 1; return fauxAssistantMessage("queued request ran"); },
   ]);
   const running = await conversation.submit(input("stream-1", "start the dangerous thing"));
   await conversation.submit(input("queued-1", "do this afterwards"));
+  // Wait for the model's response to have begun (a slow machine may take a while to get there), then let a little of the arguments stream: the whole stream takes several seconds.
+  for (let waited = 0; !streaming && waited < 20_000; waited += 25) await sleep(25);
+  assert.ok(streaming, "the model response never started");
   await sleep(400); // part-way through the arguments (asserted below)
   const report = await conversation.abort();
   assert.deepEqual([report.aborted, report.retained], [["stream-1"], ["queued-1"]]);

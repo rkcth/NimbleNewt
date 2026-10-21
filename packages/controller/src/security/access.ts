@@ -17,6 +17,7 @@ export const ACTIONS = [
   "wait.manage", "blocker.manage",
   "desk.write", "desk.read", "desk.scratch.read",
   "history.append", "history.read",
+  "review.request", "review.decide",
   "principal.manage",
 ] as const;
 export type Action = (typeof ACTIONS)[number];

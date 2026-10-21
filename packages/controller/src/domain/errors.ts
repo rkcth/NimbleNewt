@@ -19,7 +19,7 @@
  * - `unavailable`: storage could not complete the command (busy beyond the retry budget, unreachable). The command may be retried
  *   with the same command ID: it applies once.
  */
-export type DomainErrorCode = "invalid_command" | "command_conflict" | "stale_revision" | "not_found" | "invalid_transition" | "stale_epoch" | "integrity" | "fenced" | "payload_changed" | "effect_uncertain" | "effect_busy" | "wait_closed" | "unauthenticated" | "forbidden" | "unavailable";
+export type DomainErrorCode = "invalid_command" | "command_conflict" | "stale_revision" | "not_found" | "invalid_transition" | "stale_epoch" | "integrity" | "fenced" | "payload_changed" | "effect_uncertain" | "effect_busy" | "wait_closed" | "unauthenticated" | "forbidden" | "unavailable" | "review_invalid";
 
 export class DomainError extends Error {
   readonly code: DomainErrorCode;
