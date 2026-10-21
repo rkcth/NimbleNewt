@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { commitOperation, isStorageError, runStorageConformance, type OperationInput } from "../index.js";
 import { registry } from "../qualification/migration-registry.js";
@@ -213,4 +214,32 @@ test("a writer blocked by another process fails as retryable within the bound wh
     assert.equal((await commitOperation(storage, create("t1"))).replayed, false);
     await storage.close();
   } finally { remove(dir); }
+});
+
+// ---- the worker keeps the controller's own thread free ---------------------------------------------------------------
+// The reason for the worker thread (card F04f) is that a storage call which has to wait cannot stall the thread that serves everything
+// else. This holds a write lock from outside so that the worker's write must wait out its busy timeout, and requires that the controller's
+// thread keeps running timers meanwhile. It does not depend on how fast the machine is: the wait is long by construction, and a single
+// timer tick during it is enough. In-thread storage would block the whole wait and see none.
+test("a write that has to wait for a lock does not stop the controller's own thread", async () => {
+  const dir = scratch();
+  let holder: DatabaseSync | undefined;
+  let storage: SqliteWorkerStorage | undefined;
+  try {
+    const path = join(dir, "db.sqlite");
+    storage = await SqliteWorkerStorage.open({ path, busyTimeoutMs: 600 });
+    await storage.acquireEpoch({ holder: "x", at: T0 });
+    holder = new DatabaseSync(path);
+    holder.exec("BEGIN IMMEDIATE");
+    let ticks = 0;
+    const timer = setInterval(() => { ticks += 1; }, 20);
+    try {
+      await assert.rejects(storage.applyOperation(create("blocked")), (e) => isStorageError(e, "retryable"));
+    } finally { clearInterval(timer); }
+    assert.ok(ticks >= 1, "the controller's thread ran no timer while the worker waited for the lock");
+    holder.exec("ROLLBACK");
+    holder.close();
+    holder = undefined;
+    await storage.applyOperation(create("after"));
+  } finally { try { holder?.close(); } catch { /* already closed */ } await storage?.close().catch(() => undefined); remove(dir); }
 });

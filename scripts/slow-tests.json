@@ -1,0 +1,9 @@
+{
+  "comment": "Test files the fast tier leaves out (suffix of the compiled path). They are the long qualification and workload runs; the full `npm test` still runs them, and CI and the QA runs use the full suite.",
+  "files": [
+    "storage/postgres/qualification.test.js",
+    "storage/postgres/migration.test.js",
+    "storage/sqlite/worker-qualification.test.js",
+    "storage/workload.test.js"
+  ]
+}
