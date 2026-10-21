@@ -120,6 +120,36 @@ Arguments:
 
 Result: `{ items, next? }`.
 
+#### `contract.get`
+
+A task's contract as it stands (expected result, acceptance criteria, priority, difficulty, budget, P or PC class, required evidence, permissions). A task with none reads as the defaults at version 0.
+
+Arguments:
+
+- `taskId`: the task
+
+Result: `{ item }`: the contract with its `version`.
+
+#### `contract.history`
+
+Every stored version of a task's contract, oldest first.
+
+Arguments:
+
+- `taskId`: the task
+
+Result: `{ items }`.
+
+#### `dependency.list`
+
+What a task depends on, and which tasks depend on it.
+
+Arguments:
+
+- `taskId`: the task
+
+Result: `{ item: { dependsOn, dependents } }`.
+
 #### `assignment.get`
 
 Who owns a task, at which generation, and its state. This is where a deferred command (`task.assign`) is seen to complete.
@@ -255,6 +285,66 @@ Arguments:
 - `expectedRevision` (optional): the revision you read, to replace an existing role
 
 Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `contract.set`
+
+Changes fields of a task's contract; each change stores a new version. Priority, difficulty and the P or PC class each need their own authority.
+
+Arguments:
+
+- `taskId`: the task
+- `expectedVersion`: the version you read (0 if none)
+- `expectedResult` (optional): text or null
+- `acceptanceCriteria` (optional): list of text
+- `priority` (optional): 0 to 9, higher first
+- `difficulty` (optional): `trivial`, `easy`, `medium`, `hard`, `expert` or null
+- `budget` (optional): `{ maxAttempts?, maxMinutes?, maxCost? }`
+- `workClass` (optional): `P` or `PC`
+- `requiredEvidence` (optional): list of text
+- `permissions` (optional): action names the work may use, at most
+
+Result: `{ id, revision (the new version), replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `dependency.add`
+
+Makes a task depend on another task of the same project. Refused if it would make a cycle. Needs `task.dependency.write` for the dependent task.
+
+Arguments:
+
+- `taskId`: the dependent task
+- `prerequisiteId`: the task it depends on
+- `responsible` (optional): the agent answerable for the prerequisite
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `dependency.remove`
+
+Removes a dependency. Needs `task.dependency.write` for the dependent task.
+
+Arguments:
+
+- `taskId`: the dependent task
+- `prerequisiteId`: the task it depended on
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `waits.detect`
+
+Looks for tasks waiting for each other in a ring (through task dependencies and open inquiries) and opens a blocker for each ring. Needs `blocker.manage`.
+
+Arguments:
+
+- `projectId`: the project
+
+Result: `{ cycles }`: each ring's tasks and agents, the waits that form it and its blocker.
 
 Completion: finished when accepted (`completed: true`).
 

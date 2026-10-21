@@ -8,6 +8,8 @@ import { ProjectService } from "../domain/service.js";
 import { WaitService } from "../domain/waits.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { AgentService } from "../agents/index.js";
+import { BlockerService } from "../domain/blockers.js";
+import { ContractService, WaitGraphService } from "../planning/index.js";
 import { InquiryService } from "../inquiries/index.js";
 import { PrincipalService, type Grant } from "../security/index.js";
 import { API_VERSION, OPERATIONS, PAGE, StateApi, renderApiDocs, type ApiResponse } from "./index.js";
@@ -40,7 +42,9 @@ for (const backend of backends) {
         const inquiries = InquiryService.withEpoch(world.storage, projects.epoch, { histories, retrieval, waits, assignments }, options);
         const internal: unknown[] = [];
         const agents = AgentService.withEpoch(world.storage, projects.epoch, options);
-        const deps = { principals, projects, assignments, retrieval, inquiries, agents, onInternalError: (e: unknown) => { internal.push(e); } };
+        const contracts = ContractService.withEpoch(world.storage, projects.epoch, options);
+        const graph = WaitGraphService.withEpoch(world.storage, projects.epoch, contracts, BlockerService.withEpoch(world.storage, projects.epoch, options), options);
+        const deps = { principals, projects, assignments, retrieval, inquiries, agents, contracts, graph, onInternalError: (e: unknown) => { internal.push(e); } };
         const api = new StateApi(wrap === undefined ? deps : wrap(deps));
         const ownerToken = (await principals.bootstrapOwner({ name: "rob" })).token;
         const owner = await principals.authenticate(ownerToken);
@@ -93,6 +97,25 @@ for (const backend of backends) {
     await ok(manager, command("agent.update", { agentId: id, expectedRevision: revision, friendlyName: "Anna", supervisorId: null }));
     assert.equal((await fails(manager, command("agent.update", { agentId: id, expectedRevision: revision, friendlyName: "Stale" }))).code, "stale_revision");
     assert.equal((await fails(manager, query("agent.list", { state: "gone" }))).field, "args.state");
+  });
+
+  suite("contracts and dependencies go through the API with their own authorities", async ({ ownerToken, agent, ok, fails }) => {
+    const project = (await ok(ownerToken, command("project.create", { name: "P" }))).result["id"] as string;
+    const t1 = (await ok(ownerToken, command("task.create", { projectId: project, title: "one" }))).result["id"] as string;
+    const t2 = (await ok(ownerToken, command("task.create", { projectId: project, title: "two" }))).result["id"] as string;
+    const editor = await agent("editor", [{ action: "task.read", project }, { action: "task.contract.write", project }, { action: "task.dependency.write", project }]);
+    assert.equal(((await ok(editor, query("contract.get", { taskId: t1 }))).result["item"] as { version: number }).version, 0);
+    await ok(editor, command("contract.set", { taskId: t1, expectedVersion: 0, acceptanceCriteria: ["works"] }));
+    assert.equal((await fails(editor, command("contract.set", { taskId: t1, expectedVersion: 1, priority: 9 }))).code, "forbidden");
+    assert.equal((await ok(ownerToken, command("contract.set", { taskId: t1, expectedVersion: 1, priority: 9 }))).result["revision"], 2);
+    assert.equal(((await ok(editor, query("contract.history", { taskId: t1 }))).result["items"] as unknown[]).length, 2);
+    await ok(editor, command("dependency.add", { taskId: t1, prerequisiteId: t2 }));
+    assert.equal((await fails(editor, command("dependency.add", { taskId: t2, prerequisiteId: t1 }))).code, "invalid_command");
+    const deps = (await ok(editor, query("dependency.list", { taskId: t2 }))).result["item"] as { dependents: unknown[] };
+    assert.equal(deps.dependents.length, 1);
+    await ok(editor, command("dependency.remove", { taskId: t1, prerequisiteId: t2 }));
+    assert.equal((await fails(editor, command("waits.detect", { projectId: project }))).code, "forbidden");
+    assert.deepEqual((await ok(ownerToken, command("waits.detect", { projectId: project }))).result["cycles"], []);
   });
 
   suite("authentication: a bad, rotated or missing credential is refused alike, and nothing about the request leaks", async ({ api, fails, ownerToken }) => {

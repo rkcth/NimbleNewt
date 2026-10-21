@@ -3,6 +3,7 @@ import type { AssignmentService } from "../domain/assignments.js";
 import type { ProjectService } from "../domain/service.js";
 import type { AgentService } from "../agents/index.js";
 import type { InquiryService } from "../inquiries/index.js";
+import type { ContractService, WaitGraphService } from "../planning/index.js";
 import type { RetrievalService } from "../context/index.js";
 import type { Principal } from "../security/principals.js";
 import type { SecureApi } from "../security/secured.js";
@@ -14,6 +15,8 @@ export interface Context {
   readonly retrieval: RetrievalService;
   readonly inquiries: InquiryService;
   readonly agents: AgentService;
+  readonly contracts: ContractService;
+  readonly graph: WaitGraphService;
   readonly projects: ProjectService;
   readonly assignments: AssignmentService;
 }
@@ -93,6 +96,20 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => written(await c.agents.createTeam(c.principal, { commandId: need(id), ...(a as object) } as never)) },
   { name: "role.define", kind: "command", summary: "Defines a role template, or replaces one when `expectedRevision` is given. Needs `agent.manage`.", args: { name: "the role's name", capabilities: "action names the role stands for (granting is separate)", "excludes?": "roles that may not be combined with it", "description?": "what it is for", "expectedRevision?": "the revision you read, to replace an existing role" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
     run: async (c, a, id) => written(await c.agents.defineRole(c.principal, { commandId: need(id), ...(a as object) } as never)) },
+  { name: "contract.get", kind: "query", summary: "A task's contract as it stands (expected result, acceptance criteria, priority, difficulty, budget, P or PC class, required evidence, permissions). A task with none reads as the defaults at version 0.", args: { taskId: "the task" }, result: "`{ item }`: the contract with its `version`.",
+    run: async (c, a) => { only(a, ["taskId"]); return found("task", await c.contracts.get(c.principal, str(a, "taskId"))); } },
+  { name: "contract.history", kind: "query", summary: "Every stored version of a task's contract, oldest first.", args: { taskId: "the task" }, result: "`{ items }`.",
+    run: async (c, a) => { only(a, ["taskId"]); const items = await c.contracts.history(c.principal, str(a, "taskId")); if (items === undefined) throw new DomainError("not_found", "no such task"); return asJson({ items }); } },
+  { name: "dependency.list", kind: "query", summary: "What a task depends on, and which tasks depend on it.", args: { taskId: "the task" }, result: "`{ item: { dependsOn, dependents } }`.",
+    run: async (c, a) => { only(a, ["taskId"]); return found("task", await c.contracts.dependencies(c.principal, str(a, "taskId"))); } },
+  { name: "contract.set", kind: "command", summary: "Changes fields of a task's contract; each change stores a new version. Priority, difficulty and the P or PC class each need their own authority.", args: { taskId: "the task", expectedVersion: "the version you read (0 if none)", "expectedResult?": "text or null", "acceptanceCriteria?": "list of text", "priority?": "0 to 9, higher first", "difficulty?": "`trivial`, `easy`, `medium`, `hard`, `expert` or null", "budget?": "`{ maxAttempts?, maxMinutes?, maxCost? }`", "workClass?": "`P` or `PC`", "requiredEvidence?": "list of text", "permissions?": "action names the work may use, at most" }, result: "`{ id, revision (the new version), replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => written(await c.contracts.setContract(c.principal, { commandId: need(id), ...(a as object) } as never)) },
+  { name: "dependency.add", kind: "command", summary: "Makes a task depend on another task of the same project. Refused if it would make a cycle. Needs `task.dependency.write` for the dependent task.", args: { taskId: "the dependent task", prerequisiteId: "the task it depends on", "responsible?": "the agent answerable for the prerequisite" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => written(await c.contracts.addDependency(c.principal, { commandId: need(id), ...(a as object) } as never)) },
+  { name: "dependency.remove", kind: "command", summary: "Removes a dependency. Needs `task.dependency.write` for the dependent task.", args: { taskId: "the dependent task", prerequisiteId: "the task it depended on" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => written(await c.contracts.removeDependency(c.principal, { commandId: need(id), ...(a as object) } as never)) },
+  { name: "waits.detect", kind: "command", summary: "Looks for tasks waiting for each other in a ring (through task dependencies and open inquiries) and opens a blocker for each ring. Needs `blocker.manage`.", args: { projectId: "the project" }, result: "`{ cycles }`: each ring's tasks and agents, the waits that form it and its blocker.", completion: { kind: "completed" },
+    run: async (c, a, id) => asJson(await c.graph.detect(c.principal, { commandId: need(id), ...(a as object) } as never)) },
   { name: "assignment.get", kind: "query", summary: "Who owns a task, at which generation, and its state. This is where a deferred command (`task.assign`) is seen to complete.", args: { taskId: "the task's ID" }, result: "`{ item }`: the assignment (owner, generation, state, revision).",
     run: async (c, a) => { only(a, ["taskId"]); return found("assignment", await c.secure.getAssignment(str(a, "taskId"))); } },
   { name: "assignment.history", kind: "query", summary: "Every generation of a task's assignment, oldest first.", args: { taskId: "the task's ID" }, result: "`{ items }`.",

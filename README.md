@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **36 of 151 tasks implemented**, 2 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **37 of 151 tasks implemented**, 2 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -225,7 +225,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **G06** Qualify actual Windows implementation _(needs G02, G03, G05, F03)_
 - [ ] **H05** Implement review routing and wait-cycle prevention _(needs H04, A05)_
 - [ ] **H06** Implement event subscriptions and gap recovery _(needs S07, C03)_
-- [ ] **H11** Implement agent, team and role records _(needs A02, C01, R01, U01)_
+- [x] **H11** Implement agent, team and role records _(needs A02, C01, R01, U01)_
 - [ ] **T04** Implement controller-backed MCP state adapter _(needs U01, T03)_
 - [ ] **U02** Implement durable conversation API and transport _(needs U01, H04)_
 

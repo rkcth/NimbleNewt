@@ -12,10 +12,11 @@ import { CommandRunner, view, type CommandMeta, type CommandResult, type RunnerO
  * - `wait_overdue`: a typed wait passed its deadline (card S08).
  * - `scan_failure`: a repair scan could not process one item for a reason retrying will not fix (a malformed record); the item is skipped until a person looks.
  * - `runtime_hold`: the conversation runtime restarted holding unfinished work that is not the attempt's own; a person reviews and recovers it (card S09).
+ * - `circular_wait`: agents wait for each other in a ring (through task dependencies or open inquiries), so none of them can proceed on its own (card S10).
  * - `unexplained_block`: a task is blocked and nothing says why or what happens next (card S08).
  */
-export type BlockerType = "manual_hold" | "delivery_exhausted" | "effect_uncertain" | "wait_overdue" | "scan_failure" | "unexplained_block" | "runtime_hold";
-export const BLOCKER_TYPES: readonly BlockerType[] = ["manual_hold", "delivery_exhausted", "effect_uncertain", "wait_overdue", "scan_failure", "unexplained_block", "runtime_hold"];
+export type BlockerType = "manual_hold" | "delivery_exhausted" | "effect_uncertain" | "wait_overdue" | "scan_failure" | "unexplained_block" | "runtime_hold" | "circular_wait";
+export const BLOCKER_TYPES: readonly BlockerType[] = ["manual_hold", "delivery_exhausted", "effect_uncertain", "wait_overdue", "scan_failure", "unexplained_block", "runtime_hold", "circular_wait"];
 
 export interface BlockerBody {
   readonly type: BlockerType;

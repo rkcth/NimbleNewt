@@ -20,6 +20,7 @@ export const ACTIONS = [
   "review.request", "review.decide",
   "principal.manage",
   "agent.manage", "agent.read",
+  "task.contract.write", "task.priority.write", "task.difficulty.write", "task.class.write", "task.dependency.write",
 ] as const;
 export type Action = (typeof ACTIONS)[number];
 
