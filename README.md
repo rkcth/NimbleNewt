@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **25 of 113 tasks implemented**, 3 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **27 of 113 tasks implemented**, 3 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -188,13 +188,13 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 20
 
-- [ ] **A01** Implement authenticated principals and capabilities _(needs S01, F02, S09, Y01)_
+- [x] **A01** Implement authenticated principals and capabilities _(needs S01, F02, S09, Y01)_
 
 ### Phase 21
 
 - [ ] **A02** Implement revisioned grants and restrictions _(needs A01)_
 - [ ] **A03** Implement selected sandbox launcher _(needs A01, F03)_
-- [ ] **C01** Implement separated task/chat/meeting histories _(needs S01, S06, A01, F06)_
+- [x] **C01** Implement separated task/chat/meeting histories _(needs S01, S06, A01, F06)_
 - [ ] **H01** Implement worker enrollment and observation _(needs A01, S02)_
 
 ### Phase 22
