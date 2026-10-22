@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **47 of 157 tasks implemented**, 2 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **51 of 157 tasks implemented**, 2 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -194,9 +194,9 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 ### Phase 21
 
 - [x] **A02** Implement revisioned grants and restrictions _(needs A01)_
-- [ ] **A03** Implement selected sandbox launcher _(needs A01, F03)_
+- [x] **A03** Implement selected sandbox launcher _(needs A01, F03)_
 - [x] **C01** Implement separated task/chat/meeting histories _(needs S01, S06, A01, F06)_
-- [ ] **F09** Implement per-OS secret store backends _(needs F02, A01)_
+- [x] **F09** Implement per-OS secret store backends _(needs F02, A01)_
 - [x] **H01** Implement worker enrollment and observation _(needs A01, S02)_
 
 ### Phase 22
@@ -245,7 +245,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 26
 
-- [ ] **A07c** Implement the strict-to-derived profile suggestion _(needs A07, A07b)_
+- [x] **A07c** Implement the strict-to-derived profile suggestion _(needs A07, A07b)_
 - [x] **A10b** Implement per-task credentials for agents serving several projects _(needs A10, A01)_
 - [ ] **C06** Implement optional inference-cache capability adapters _(needs C05)_
 - [ ] **H02** Implement subordinate remote work/artifact transport _(needs H01, S06, A03, H12)_
@@ -256,7 +256,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **T05** Implement MCP durable conversation adapter _(needs U02, U02b, T04)_
 - [ ] **T06** Implement the protected agent tool bridge and execution service _(needs H12, T01)_
 - [ ] **U03** Implement owner chat command interpretation _(needs U01, U02, R02)_
-- [ ] **U11** Implement owner notifications _(needs U02, S08, U10)_
+- [x] **U11** Implement owner notifications _(needs U02, S08, U10)_
 
 ### Phase 27
 
