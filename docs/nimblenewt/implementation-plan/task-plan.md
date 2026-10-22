@@ -44,7 +44,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N14 / AII-264 | P01, P02, P03, P04, P05, P06, P07 |
 | N15 / AII-265 | Q01, Q02, Q03, Q04 |
 | N16 / AII-266 | B01 |
-| N17 / AII-267 | K01, K02, K03, K04, K05, K06, K06b, K07 |
+| N17 / AII-267 | K01, K01b, K01c, K01d, K02, K03, K04, K05, K06, K06b, K07 |
 | N18 / AII-268 | G06, X09, X10, X01, X02, X03, X04, X05, X06, X07, X08, Y01, Y02, Y03 |
 | N19 / AII-269 | D01, D02, D03, D04 |
 | N07a / AII-519 | U01, U13, T04 |
@@ -1264,8 +1264,32 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 
 - **Parent:** N17 / AII-267.
 - **Blockers:** S06, F04, L02, S05.
-- **Deliverable:** Both-backend manifested backup/export and restore runner including Pi state; nightly backups retaining 7 daily and 4 weekly copies plus pre-upgrade snapshot.
+- **Deliverable:** Both-backend manifested backup/export and restore runner including Pi state; nightly backups retaining 7 daily and 4 weekly copies plus pre-upgrade snapshot, and a 'back up now' command; first-release backup is this simple built-in one (owner decision 2026-10-22), the configurable system is K01c.
 - **Acceptance and verification:** Portable recovery folder from consistent database snapshots and Pi/artifact manifest; coordinate maintenance barrier across stores; restore into empty install verifies artifacts/versions; separate secret recovery; uncertain later effects not replayed; interrupted backup never labeled complete; never sync live SQLite files as backup.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### K01b — Implement encrypted backups with passcode and recovery-file unlock
+
+- **Parent:** N17 / AII-267.
+- **Blockers:** K01, T02.
+- **Deliverable:** Public-key encrypted backup (first release; owner decision 2026-10-22): the server holds only a public key and cannot decrypt; the private key is wrapped by a passcode (Argon2id), a downloadable recovery file or printable recovery code, and any number of extra passcodes; scope setting 'secrets only' (default off, the owner turns it on) or 'everything'; nothing needed to recover lives only on the server.
+- **Acceptance and verification:** Turning it on requires proving the recovery file decrypts a test value; either passcode or file alone restores on a new machine from the backup alone; adding or removing a passcode needs no re-encryption of old backups; a stolen server or backup alone reveals nothing; a scheduled backup runs unattended; every three months the system asks the owner to prove a passcode or the file still works; no passcode hints; losing every unlock method is stated plainly at setup (secrets only: secrets lost, the rest restores; everything: the backup is unreadable); the owner can set a new passcode while running and unlocked, which protects later backups only; rotating the keypair is recorded.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### K01c — Implement the full configurable backup system (before 1.0)
+
+- **Parent:** N17 / AII-267.
+- **Blockers:** K01b, K06, U11.
+- **Deliverable:** Owner-configurable backups before 1.0, not needed for the first release: targets (local folder, other disk, off-machine), schedules, retention counts, verification restores and failure notifications, all settable by chatting with the supervisor (owner decision 2026-10-22).
+- **Acceptance and verification:** A backup target can be added, tested and removed by chat; a failed or missed backup notifies the owner; a periodic test restore proves a backup is usable; counts and schedule changes are owner-only and recorded; secrets and the encryption scope follow K01b.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### K01d — Implement backup scope tiers (optional, after the first release)
+
+- **Parent:** N17 / AII-267.
+- **Blockers:** K01c, K06b.
+- **Deliverable:** Optional: leave bulk records out of backups by age and kind (for example logs, scratch output and transcripts of tasks finished more than an owner-set time ago), set by chatting with the supervisor (owner decision 2026-10-22; backup scope is separate from live retention).
+- **Acceptance and verification:** Off by default; audit and decisions are always included, as is anything a resumable task or replay still references; a restore reports what was left out by scope rather than looking complete; the live system's retention is unaffected; a scope change is owner-only and recorded.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### K02 — Implement deterministic release staging and activation
@@ -1431,7 +1455,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D04 — Run detailed real-world QA on macOS, Linux and Windows
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** D03, K06b.
+- **Blockers:** D03, K06b, K01d.
 - **Deliverable:** Automated and manual QA run on the completed product on the owner's real macOS and Windows machines and on Linux, with a written plan and evidence for each platform.
 - **Acceptance and verification:** Detailed plan agreed with the owner before the run: install from a clean checkout and from the release artifact, full automated suite repeated, real-agent trial with a real model provider approved by the owner, long-running and restart scenarios, crash and power-loss style kills, unattended operation, antivirus and filesystem behaviour on Windows, sleep and network change on laptops, every supported PostgreSQL major released in the last three years re-verified, supported OS release floors confirmed; results recorded per platform; failures raised as typed blockers; this is the last item of the plan and the owner accepts it; accepted only if the real-agent trial meets the approval-load targets (no more than three owner decisions per working day after the first week, no stall that reaches unrelated work).
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
