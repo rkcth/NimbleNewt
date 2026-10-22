@@ -1554,13 +1554,32 @@
       "id": "C07",
       "parent": "N07",
       "existing_issue": "AII-257",
-      "title": "Enforce context budgets and stall-proof compaction",
+      "title": "Implement context budgets, the startup builder and stall-proof helpers",
       "depends_on": [
         "C04",
         "R01"
       ],
-      "deliverable": "Per-model context budgets enforced at dispatch, a single startup-context builder with cut-and-archive, a resume guard, a bounded summariser with a fallback, tool-output caps, hand-off from durable facts, overflow as its own failure class, and budget-aware inquiry branches (requirements and the compaction decision in context-window-stalls.md)",
-      "acceptance_and_verification": "Using the scripted offline model with a small context window: a first prompt over 25% of the window is cut by the builder (newest items, human words, permissions and goal kept whole, the cut archived and linked) or refused with a blocker, never sent; an attempt over 60% of the window is not resumed but restarted from the continuation record; a summariser that hangs hits its own short timeout and either uses the fallback route or ends the attempt as context_overflow without hanging; a tool result larger than the configured per-tool limit (lower than Pi's 50 KB default, also for MCP tools and non-text results) is truncated with the remainder paginated or archived; compaction stays Pi's own, automatic (owner decision 2026-10-21; the deviation from the explicit-compaction design is recorded) but bounded by explicit stream timeouts and retries plus a short summary limit and a fallback summariser through the beforeCompact hook (Pi has no setting for either) (a restart in the middle of the hook neither duplicates nor loses the summary), and the first call's size includes Pi's system prompt and tool schemas; a crash after a confirmed effect and before the hand-off still yields a hand-off written from the ledger and artifacts; repeated overflow stops with a visible blocker; an inquiry on a task over its model's budget uses the compaction boundary plus retrieval and says so; limits are configurable and checked against the provider's reported usage; the budget reserves the expected response size; falling back to a smaller-window route rebuilds the context view and blocks with a visible reason if essential constraints do not fit; a second compressor on the same context is refused at registration; summary lineage is recorded and earlier owner decisions stay retrievable after repeated compactions and after model fallback; any compressed view, index or embedding keeps the source project and origin of what it was made from and is readable only by someone who can read every source (A10)",
+      "deliverable": "Per-model context budgets, a single startup-context builder with cut-and-archive, a resume guard, tool-output caps with paging, hand-off from durable facts, overflow as its own failure class, and budget-aware inquiry branch planning (requirements 1, 2, 3, 5, 6, 7 and 8 and the budget numbers of context-window-stalls.md; split on 2026-10-22: the Pi-side and dispatch wiring is C07b)",
+      "acceptance_and_verification": "Using a small context window (131,072 tokens): a first prompt over 25% of the window is cut by the builder (newest items, human words, permissions and goal kept whole, the cut archived with a matching digest) or refused with a blocker, never sent, and the fixed part of the first call counts; an attempt over 60% of the window is not resumed but restarted from the continuation record; a tool result larger than the per-tool limit (about 16,000 characters on that window, with images and other non-text results counted) is truncated with the remainder kept and paged; a hand-off is written from the ledger, artifacts, checkpoint and last state with credentials removed; context failures are classified as context_overflow; an inquiry on a task over its model's budget uses the compaction boundary plus retrieval and says so; shares and characters per token are configurable and validated",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "C07b",
+      "parent": "N07",
+      "existing_issue": "AII-257",
+      "title": "Wire context budgets into dispatch and bound compaction",
+      "depends_on": [
+        "C07",
+        "C04",
+        "R01"
+      ],
+      "deliverable": "Enforcement at dispatch of the C07 budgets (the startup limit and the working limit: startup plus likely tool output plus the reply reserve at most 60% of the window) with the first call measured against the provider's reported usage (Pi's system prompt and tool schemas included) and the reply reserve; explicit stream timeouts and retries, a short summary limit and a fallback summariser through Pi's beforeCompact hook, restart-safe; tool output limits applied to Pi's tools and to MCP tools; repeated overflow ends in a visible blocker; the hand-off written when an attempt ends without one (split from C07 on 2026-10-22)",
+      "acceptance_and_verification": "A summariser that hangs hits its own short timeout and either uses the fallback route or ends the attempt as context_overflow without hanging; a restart in the middle of the hook neither duplicates nor loses the summary; the first call's size includes Pi's system prompt and tool schemas and is checked against the provider's reported usage; falling back to a smaller-window route rebuilds the context view and blocks with a visible reason if essential constraints do not fit; a second compressor on the same context is refused at registration; summary lineage is recorded and earlier owner decisions stay retrievable after repeated compactions and after model fallback; any compressed view, index or embedding keeps the source project and origin and is readable only by someone who can read every source (A10); a crash after a confirmed effect and before the hand-off still yields a hand-off written from the ledger and artifacts; repeated overflow stops with a visible blocker",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -2012,6 +2031,7 @@
         "A03",
         "A05",
         "R01",
+        "C07b",
         "S05",
         "C04",
         "F08",

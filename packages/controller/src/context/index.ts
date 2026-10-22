@@ -3,3 +3,4 @@ export { HISTORY_LIMITS, HistoryService, type AppendEntry, type EntryBody, type 
 export { RETRIEVAL_LIMITS, RetrievalService, type Assembled, type Hit, type ResolvedSource, type ResolvedSummary, type SearchResult, type SourceRef, type SourceState, type SummaryBody, type Wanted } from "./retrieval.js";
 export { InspectionService, type InspectionBody, type InspectionPolicyBody } from "./inspection.js";
 export { PublicationService, pathIdOf, type PublicationPathBody } from "./publication.js";
+export * from "./budget.js";
