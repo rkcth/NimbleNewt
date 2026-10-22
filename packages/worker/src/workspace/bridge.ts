@@ -211,17 +211,7 @@ export class WorkspaceBridge {
       try { await mkdir(lock); await writeFile(join(lock, "owner"), token); break; } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw new WorkspaceError("unavailable", "the lock could not be taken");
         const age = await lstat(lock).then((s) => Date.now() - s.mtimeMs).catch(() => 0);
-        if (age > BRIDGE_LIMITS.staleLockMs) {
-          const aside = `${lock}.stale-${randomBytes(6).toString("hex")}`;
-          // Only one waiter's rename can succeed.
-          if (await rename(lock, aside).then(() => true, () => false)) {
-            // What was moved aside must really be the stale lock: if another waiter had already replaced it, give the fresh one back.
-            const moved = await lstat(aside).then((s) => Date.now() - s.mtimeMs).catch(() => Number.POSITIVE_INFINITY);
-            if (moved <= BRIDGE_LIMITS.staleLockMs) await rename(aside, lock).catch(() => rm(aside, { recursive: true, force: true }));
-            else await rm(aside, { recursive: true, force: true });
-          }
-          continue;
-        }
+        if (age > BRIDGE_LIMITS.staleLockMs && (await this.#clearStale(lock))) continue;
         if (Date.now() > until) throw new WorkspaceError("unavailable", "another change to this file is in progress");
         await new Promise((r) => setTimeout(r, 15 + Math.random() * 25));
       }
@@ -232,5 +222,25 @@ export class WorkspaceBridge {
       const mine = await readFile(join(lock, "owner"), "utf8").then((t) => t === token, () => false);
       if (mine) await rm(lock, { recursive: true, force: true });
     }
+  }
+
+  /**
+   * Clears a lock whose holder is gone. Only one waiter at a time may do so (a second lock, taken with `mkdir`, serialises thieves), and the thief looks at the lock again once it holds that lock, so a
+   * lock another waiter took a moment ago (fresh) is never removed. Returns whether it is worth trying the lock again.
+   */
+  async #clearStale(lock: string): Promise<boolean> {
+    const steal = `${lock}.steal`;
+    try { await mkdir(steal); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") return false;
+      // A thief that died leaves its lock behind; one that has held it far longer than any removal takes is cleared the plain way.
+      const held = await lstat(steal).then((s) => Date.now() - s.mtimeMs).catch(() => 0);
+      if (held > BRIDGE_LIMITS.staleLockMs * 3) await rm(steal, { recursive: true, force: true });
+      return false;
+    }
+    try {
+      const age = await lstat(lock).then((s) => Date.now() - s.mtimeMs).catch(() => undefined);
+      if (age !== undefined && age > BRIDGE_LIMITS.staleLockMs) await rm(lock, { recursive: true, force: true });
+      return true;
+    } finally { await rm(steal, { recursive: true, force: true }); }
   }
 }

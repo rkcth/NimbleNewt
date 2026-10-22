@@ -150,7 +150,10 @@ export class InboxService {
         const guard = found === undefined ? undefined : { assignmentId: found.id, revision: found.revision };
         const task = typeof event.taskId === "string" ? await this.#runner.get("task", event.taskId) : undefined;
         const taskState = (task?.body as unknown as TaskBody | undefined)?.state;
-        if (found === undefined || current === undefined || owner === undefined || current.state !== "assigned" || current.owner === undefined || current.generation !== event.generation || current.owner.kind !== owner.kind || current.owner.id !== owner.id) decision = { outcome: "superseded", ...(guard === undefined ? {} : { guard }) };
+        // The active attempt may be this very message's, created by a concurrent call between the check above and the read of the assignment: that is an admission whatever has happened to the task since,
+        // and never another owner's attempt (its ID is derived from this message).
+        if (current?.activeAttemptId === myAttempt) decision = { outcome: "admitted", attemptId: myAttempt };
+        else if (found === undefined || current === undefined || owner === undefined || current.state !== "assigned" || current.owner === undefined || current.generation !== event.generation || current.owner.kind !== owner.kind || current.owner.id !== owner.id) decision = { outcome: "superseded", ...(guard === undefined ? {} : { guard }) };
         else if (taskState === "done" || taskState === "cancelled") decision = { outcome: "task_closed", ...(guard === undefined ? {} : { guard }) };
         else if (taskState !== "ready" && taskState !== "in_progress") return { messageId, outcome: "deferred", replayed: false };
         else if (current.activeAttemptId !== undefined) decision = { outcome: "already_active", attemptId: current.activeAttemptId, ...(guard === undefined ? {} : { guard }) };
