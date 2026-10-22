@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **63 of 166 tasks implemented**, 2 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **63 of 168 tasks implemented**, 2 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -108,6 +108,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 ### Phase 2
 
 - [x] **G07** Record current architecture and executable task manifest _(needs G01)_
+- [ ] **M00** Prototype the meeting protocol and run meeting experiments _(needs G01)_
 
 ### Phase 3
 
@@ -247,7 +248,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [x] **A07c** Implement the strict-to-derived profile suggestion _(needs A07, A07b)_
 - [x] **A08b** Enforce per-agent resource limits in the sandbox _(needs A08, A03)_
 - [x] **A10b** Implement per-task credentials for agents serving several projects _(needs A10, A01)_
-- [ ] **C06** Implement optional inference-cache capability adapters _(needs C05)_
+- [ ] **C06** Implement inference-cache adapters with per-backend tuning _(needs C05)_
 - [ ] **C07b** Wire context budgets into dispatch and bound compaction _(needs C07, C04, R01)_
 - [ ] **H13** Implement event source adapters and watchers _(needs H06, H01, R02)_
 - [ ] **L05** Implement generation interruption and late-result handling _(needs C05, F06, A02)_
@@ -259,10 +260,10 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 27
 
+- [ ] **C06b** Make Pi agent prompts cache-stable across context switches _(needs C06, F05, F06)_
 - [ ] **C08** Implement owner decision records and correction propagation _(needs C03, C07, U03, H06)_
 - [ ] **G09** Prove retained-context inquiry and mid-generation interruption _(needs C05, L05)_
 - [ ] **G10** Benchmark native backend caching and branch markers _(needs C06)_
-- [ ] **H12** Implement the local worker runtime and attempt dispatcher _(needs A03, A05, R01, C07b, S05, C04, F08, H03)_
 - [ ] **L01** Implement Pause and background settlement _(needs C04, A02, S08, L05)_
 - [ ] **M01** Implement durable meeting scheduling and agendas _(needs H04, U03)_
 - [ ] **P01** Implement repository-independent projects and responsibilities _(needs U03, S01)_
@@ -273,29 +274,33 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 ### Phase 28
 
 - [ ] **G04** Prove supporting durable engine integration _(needs S09, F04d, F04f, F04g, G09)_
-- [ ] **H02** Implement subordinate remote work/artifact transport _(needs H01, S06, A03, H12)_
 - [ ] **H05b** Implement reviewer pause and hold behaviour _(needs H05, L01)_
+- [ ] **H12** Implement the local worker runtime and attempt dispatcher _(needs A03, A05, R01, C07b, C06b, S05, C04, F08, H03)_
 - [ ] **M02** Implement votes, decisions and meeting summaries _(needs M01, A02, C02, C08)_
 - [ ] **M03** Implement stand-up preparation, briefs and agenda items _(needs M01, C02, U03)_
 - [ ] **M04** Implement meeting attendance and return to work _(needs M01, L01, L05, H04)_
-- [ ] **T06** Implement the protected agent tool bridge and execution service _(needs H12, T01)_
 - [ ] **U12** Implement agent messages, delivery classes and interruption budget _(needs U02, S08, L05, M01)_
 
 ### Phase 29
 
+- [ ] **H02** Implement subordinate remote work/artifact transport _(needs H01, S06, A03, H12)_
+- [ ] **M05** Implement meeting facilitation and owner control _(needs M04, M02, U03, M00)_
+- [ ] **T06** Implement the protected agent tool bridge and execution service _(needs H12, T01)_
+
+### Phase 30
+
 - [ ] **C09** Capture activity records and decision explanations _(needs C04, C08, T06, S05)_
 - [ ] **H07** Implement idle host polling and capability placement _(needs H02, H03)_
-- [ ] **M05** Implement meeting facilitation and owner control _(needs M04, M02, U03)_
-- [ ] **M06** Implement meeting procedure, roster, quorum and ballots _(needs M02, A02, C08, T06)_
+- [ ] **M06** Implement meeting procedure, roster, quorum and ballots _(needs M02, A02, C08, T06, M00)_
 - [ ] **T07** Implement durable job records and job control _(needs T06, S05)_
 - [ ] **T09** Implement command namespaces and alias dispatch _(needs T06, H11, U03)_
 
-### Phase 30
+### Phase 31
 
 - [ ] **L02** Implement Suspend and graceful Stop _(needs L01, T07)_
 - [ ] **U09** Implement read-only activity timeline and replay views _(needs C09, U05, A10)_
 
-### Phase 31
+### Phase 32
 
 - [ ] **A09** Implement reviewed environment changes and maintenance requests _(needs A08, A05, H05, L02, T06)_
 - [ ] **H08** Implement remote disconnect watchdog and hard stop _(needs H02, L02)_
@@ -304,7 +309,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **L04** Implement checked resume and evidence invalidation _(needs C03, L02, A02)_
 - [ ] **U06** Implement deterministic recovery chat controls _(needs U01, L02, A02)_
 
-### Phase 32
+### Phase 33
 
 - [ ] **F04e** Implement chat-controlled controller database transfer _(needs F04, K01, F06)_
 - [ ] **H09** Implement reconnect reconciliation and primary epochs _(needs H08, L04, S05)_
@@ -316,7 +321,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **U07** Qualify responsive web chat over private networking _(needs U03, U06, A01, R05)_
 - [ ] **V02** Implement bounded supervisor recovery _(needs V01, L03, L04, R02, H05)_
 
-### Phase 33
+### Phase 34
 
 - [ ] **H10** Implement distributed agent capacity and fan-in limits _(needs H07, H09, H03, R05)_
 - [ ] **K01c** Implement the full configurable backup system (before 1.0) _(needs K01b, K06, U11)_
@@ -328,7 +333,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **X09** Implement external release-test job protocol _(needs H07, H09, F03, S06)_
 - [ ] **Y02** QA checkpoint 2: isolation, stop and recovery _(needs G05, G06, A06, L04, H09, A03b, A08b)_
 
-### Phase 34
+### Phase 35
 
 - [ ] **K01d** Implement backup scope tiers (optional, after the first release) _(needs K01c, K06b)_
 - [ ] **K03** Implement migration recovery and rollback limits _(needs K02, G03)_
@@ -337,7 +342,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **P03** Implement non-code and sandbox operations adapters _(needs P01, T01, S05, Y02, H12)_
 - [ ] **T08** Implement shared toolbox audiences, personal copies and patch proposals _(needs T02, T06, M02, U08)_
 
-### Phase 35
+### Phase 36
 
 - [ ] **D02** Finish developer/API/security and license guidance _(needs T05, K03, F03)_
 - [ ] **G11** Qualify the Pi Durable runtime upgrade path _(needs G03, F07, K07)_
@@ -346,12 +351,12 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **P07** Implement simulation mode _(needs P03, R02, T03)_
 - [ ] **Q01** Implement deliverable submission and acceptance _(needs S06, U01, P02, P03, S10)_
 
-### Phase 36
+### Phase 37
 
 - [ ] **Q02** Implement independent QA and dependency-bound evidence _(needs Q01, A06, C03, H05, C08)_
 - [ ] **U13** Expose lifecycle, decisions, deliverables and activity through the state API _(needs U01, L02, Q01, C08, C09)_
 
-### Phase 37
+### Phase 38
 
 - [ ] **Q03** Implement documentation impact and release evidence links _(needs Q02, C02)_
 - [ ] **Q04** Implement defect tracking, review cycles and overrides _(needs Q02, C08)_
@@ -359,58 +364,58 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **X02** Run policy, isolation and adversarial campaign _(needs A06, U04, T05, Q02, G05, A07, A09, A10, T08, T09, P05, H05b, A10b)_
 - [ ] **Y03** QA checkpoint 3: first complete chat-driven workflow _(needs U07, M02, P02, P03, Q02, K03)_
 
-### Phase 38
+### Phase 39
 
 - [ ] **B01** Implement production/improvement budget admission _(needs H03, R02, Q01, Y03, R05)_
 - [ ] **K04** Implement selected standby replication and recovery watermarks _(needs K01, K03, H09, Y03)_
 
-### Phase 39
+### Phase 40
 
 - [ ] **B02** Implement observations and provenance deduplication _(needs B01, H06, C01)_
 - [ ] **K05** Implement fenced primary promotion and recovery chat _(needs K04, U06)_
 
-### Phase 40
+### Phase 41
 
 - [ ] **B03** Implement versioned lessons and triage _(needs B02, T01)_
 - [ ] **G08** Prove remote stop and failover authority contracts _(needs H09, K05)_
 
-### Phase 41
+### Phase 42
 
 - [ ] **B04** Implement bounded baseline experiments _(needs B03, Q02, A08)_
 - [ ] **X10** Run partition and remote-worker safety campaign _(needs X09, H10, K05, G08)_
 
-### Phase 42
+### Phase 43
 
 - [ ] **B05** Implement scoped adoption and monitored withdrawal _(needs B04, T02, L04)_
 
-### Phase 43
+### Phase 44
 
 - [ ] **X03** Run chat-only complete product workflow _(needs U05, U06, U07, M02, P03, Q03, B05, K03, C06, L05, G09, C07, U09, U11, U12, U13, M03, M05, M06, R03, R04, P04, P06, P07, Q04, U08, H13, L06)_
 
-### Phase 44
+### Phase 45
 
 - [ ] **D01** Finish installation and chat-first user guidance _(needs X03, Q03, U11b)_
 - [ ] **X04** Qualify fresh macOS release candidate _(needs X01, X02, X03, X09, F03)_
 - [ ] **X05** Qualify fresh Linux release candidate _(needs X01, X02, X03, X09, F03)_
 - [ ] **X06** Qualify fresh Windows release candidate _(needs X01, X02, X03, X09, F03, G06)_
 
-### Phase 45
+### Phase 46
 
 - [ ] **X07** Measure load, inquiry latency and budget behavior _(needs X04, X05, X06)_
 
-### Phase 46
+### Phase 47
 
 - [ ] **X08** Run representative soak and independent release audit _(needs X07, X10, F04e, G10, K07, G11)_
 
-### Phase 47
+### Phase 48
 
 - [ ] **D03** Approve release readiness and publication decision _(needs X08, D01, D02, F04h)_
 
-### Phase 48
+### Phase 49
 
 - [ ] **D04** Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
 
-### Phase 49
+### Phase 50
 
 - [ ] **D05** Close the plan: every optional item built or deferred by the owner _(needs D04, K06b, K01d, P02b)_
 _Note: F01 started before its prerequisite planning records G01 and G07 were formally closed; G01 is still not fully closed._
