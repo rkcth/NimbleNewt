@@ -8,7 +8,7 @@ export const ALLOWED = {
   config: [],
   registry: [],
   "pi-adapter": ["@nimblenewt/contracts", "@earendil-works/chord", "@earendil-works/pi-ai", "@earendil-works/pi-durable"],
-  controller: ["pg", "@types/pg", "embedded-postgres"],
+  controller: ["pg", "@types/pg", "embedded-postgres", "@nimblenewt/registry"],
   api: [],
   worker: [],
   ui: [],

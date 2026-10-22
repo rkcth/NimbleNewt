@@ -23,6 +23,7 @@
     "qualify": "node dist/storage/qualification/report.js"
   },
   "dependencies": {
+    "@nimblenewt/registry": "0.0.0",
     "pg": "8.23.1"
   },
   "devDependencies": {
