@@ -109,6 +109,8 @@ export class GitBridge {
     if (state.dirty) throw new WorkspaceError("stale", `the checkout holds ${state.entries.length} changed or new file(s); it was left as it was`);
     const sharedGit = await this.#sharedGitDir(options.shared);
     await this.#run(["fetch", "--no-tags", "--no-recurse-submodules", sharedGit, options.commit], { gitDir: options.gitDir, allowFile: true });
+    // Status does not write the index (optional locks are off), so a file touched but unchanged still looks modified to read-tree: refresh the stat information first.
+    await this.#run(["update-index", "-q", "--really-refresh"], { gitDir: options.gitDir, workTree: options.checkout });
     await this.#run(["read-tree", "-m", "-u", await this.#base(options.gitDir), options.commit], { gitDir: options.gitDir, workTree: options.checkout });
     await this.#run(["update-ref", "refs/nn/base", options.commit], { gitDir: options.gitDir });
     await this.#run(["update-ref", "HEAD", options.commit], { gitDir: options.gitDir });

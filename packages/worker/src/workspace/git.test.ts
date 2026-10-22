@@ -212,3 +212,18 @@ test("a file whose only change is its mode is reported and skipped, not rewritte
     await assert.rejects(() => w.git.integrate({ gitDir: w.gitDir, checkout: w.checkout, bridge: w.bridge, author: "agent:ann", reason: "x" }), (e: unknown) => e instanceof WorkspaceError && /big\.dat/.test(e.message));
   } finally { await w.done(); }
 });
+
+test("a file that was touched or rewritten with the same content does not count as work, and a refresh goes through", { skip }, async () => {
+  const w = await world();
+  try {
+    const { utimes } = await import("node:fs/promises");
+    await writeFile(join(w.shared, "README.md"), "moved on\n"); sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "second");
+    const next = await w.git.head(w.shared);
+    const later = new Date(Date.now() + 60_000);
+    await writeFile(join(w.checkout, "src", "a.ts"), "export const a = 1;\n");
+    await utimes(join(w.checkout, "src", "b.ts"), later, later);
+    assert.deepEqual(await w.git.status({ gitDir: w.gitDir, checkout: w.checkout }), { dirty: false, entries: [] });
+    assert.deepEqual(await w.git.refresh({ shared: w.shared, commit: next, gitDir: w.gitDir, checkout: w.checkout }), { base: next });
+    assert.equal(await readFile(join(w.checkout, "README.md"), "utf8"), "moved on\n");
+  } finally { await w.done(); }
+});
