@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **63 of 164 tasks implemented**, 2 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **63 of 165 tasks implemented**, 2 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -340,6 +340,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 - [ ] **D02** Finish developer/API/security and license guidance _(needs T05, K03, F03)_
 - [ ] **G11** Qualify the Pi Durable runtime upgrade path _(needs G03, F07, K07)_
+- [ ] **P02b** Implement optional work-in-progress branch backup (after the first release) _(needs P02, A06, A07, F09)_
 - [ ] **P05** Implement external contribution and pull-request workflow _(needs P02, A06, A07, T03, F09)_
 - [ ] **P07** Implement simulation mode _(needs P03, R02, T03)_
 - [ ] **Q01** Implement deliverable submission and acceptance _(needs S06, U01, P02, P03, S10)_
@@ -410,7 +411,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 49
 
-- [ ] **D05** Close the plan: every optional item built or deferred by the owner _(needs D04, K06b, K01d)_
+- [ ] **D05** Close the plan: every optional item built or deferred by the owner _(needs D04, K06b, K01d, P02b)_
 _Note: F01 started before its prerequisite planning records G01 and G07 were formally closed; G01 is still not fully closed._
 
 ## More detail

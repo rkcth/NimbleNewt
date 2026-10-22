@@ -2992,6 +2992,26 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "P02b",
+      "parent": "N14",
+      "existing_issue": "AII-264",
+      "title": "Implement optional work-in-progress branch backup (after the first release)",
+      "depends_on": [
+        "P02",
+        "A06",
+        "A07",
+        "F09"
+      ],
+      "deliverable": "Optional, off by default (owner decision 2026-10-22): regularly commit and push an agent's uncommitted workspace changes to a dedicated work-in-progress branch namespace on a remote the owner configured, so unfinished work does not live on one machine only",
+      "acceptance_and_verification": "Off unless the owner turns it on per project by chatting with the supervisor, which records one standing owner approval (A07) scoped to exactly that remote and that project's work-in-progress namespace, revocable, so scheduled pushes need no per-push approval and any push outside that scope takes the normal approval path; pushes never go to a protected or target branch; each commit is made from a temporary index in the controller's own git directory with the controller as committer and the A06 identity trailers (Developer, Executor, NimbleNewt-Task) plus NimbleNewt-WIP: unreviewed and never the Reviewed-by or Reviewed-via trailers, so the agent's index, branches and authorship are untouched; work-in-progress commits are never merged, integrated or treated as reviewed work (integration still goes through A06 and P02); before each push the files are scanned for credential patterns (redaction), the F09 secret values in use and known key formats, and a blocked file is left out and reported; a restore of the workspace from the branch matches the last successful push; a failed push is reported and never counted as a backup",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "P03",
       "parent": "N14",
       "existing_issue": "AII-264",
@@ -3801,10 +3821,11 @@
       "depends_on": [
         "D04",
         "K06b",
-        "K01d"
+        "K01d",
+        "P02b"
       ],
-      "deliverable": "Final bookkeeping after real-world QA: each optional, after-the-first-release card (K06b, K01d) is either built or recorded as deferred by the owner, and the plan is marked complete",
-      "acceptance_and_verification": "D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so K06b and K01d may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards",
+      "deliverable": "Final bookkeeping after real-world QA: each optional, after-the-first-release card (K06b, K01d, P02b) is either built or recorded as deferred by the owner, and the plan is marked complete",
+      "acceptance_and_verification": "D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so K06b, K01d and P02b may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",

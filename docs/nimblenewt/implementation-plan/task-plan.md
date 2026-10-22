@@ -41,7 +41,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N11 / AII-261 | V01, V02 |
 | N12 / AII-262 | M01, M02, M03, M04, M05, M06 |
 | N13 / AII-263 | T01, T02, T03, T06, T07, T08, T09 |
-| N14 / AII-264 | P01, P02, P03, P04, P05, P06, P07 |
+| N14 / AII-264 | P01, P02, P02b, P03, P04, P05, P06, P07 |
 | N15 / AII-265 | Q01, Q02, Q03, Q04 |
 | N16 / AII-266 | B01 |
 | N17 / AII-267 | K01, K01b, K01c, K01d, K02, K03, K04, K05, K06, K06b, K07 |
@@ -1148,6 +1148,14 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** Dirty/untracked work survives interruption; conflicting integration revalidates evidence; no metadata pollution of target checkout; the task workspace admits only repositories in the task's access scope and records the initial working state; an accepted proposal (a suggestion, not an instruction) never authorizes a downstream push, merge or deploy.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
+### P02b — Implement optional work-in-progress branch backup (after the first release)
+
+- **Parent:** N14 / AII-264.
+- **Blockers:** P02, A06, A07, F09.
+- **Deliverable:** Optional, off by default (owner decision 2026-10-22): regularly commit and push an agent's uncommitted workspace changes to a dedicated work-in-progress branch namespace on a remote the owner configured, so unfinished work does not live on one machine only.
+- **Acceptance and verification:** Off unless the owner turns it on per project by chatting with the supervisor, which records one standing owner approval (A07) scoped to exactly that remote and that project's work-in-progress namespace, revocable, so scheduled pushes need no per-push approval and any push outside that scope takes the normal approval path; pushes never go to a protected or target branch; each commit is made from a temporary index in the controller's own git directory with the controller as committer and the A06 identity trailers (Developer, Executor, NimbleNewt-Task) plus NimbleNewt-WIP: unreviewed and never the Reviewed-by or Reviewed-via trailers, so the agent's index, branches and authorship are untouched; work-in-progress commits are never merged, integrated or treated as reviewed work (integration still goes through A06 and P02); before each push the files are scanned for credential patterns (redaction), the F09 secret values in use and known key formats, and a blocked file is left out and reported; a restore of the workspace from the branch matches the last successful push; a failed push is reported and never counted as a backup.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
 ### P03 — Implement non-code and sandbox operations adapters
 
 - **Parent:** N14 / AII-264.
@@ -1463,9 +1471,9 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** D04, K06b, K01d.
-- **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (K06b, K01d) is either built or recorded as deferred by the owner, and the plan is marked complete.
-- **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so K06b and K01d may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
+- **Blockers:** D04, K06b, K01d, P02b.
+- **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (K06b, K01d, P02b) is either built or recorded as deferred by the owner, and the plan is marked complete.
+- **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so K06b, K01d and P02b may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### Y01 — QA checkpoint 1: durable core
