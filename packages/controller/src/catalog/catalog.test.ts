@@ -158,7 +158,7 @@ for (const backend of backends) {
     assert.equal((await c.cat.usage(ann, { projectId: c.a })).items.length, 1);
     const paged = await c.cat.usage(c.owner, { projectId: c.a, limit: 1 });
     assert.deepEqual([paged.items.length, paged.next !== undefined], [1, true]);
-    assert.deepEqual((await c.cat.usage(c.owner, { projectId: c.a, limit: 1, after: paged.next })).items, []);
+    assert.deepEqual((await c.cat.usage(c.owner, { projectId: c.a, limit: 1, after: paged.next! })).items, []);
     await refuses("forbidden", () => c.cat.usage(c.reader, { projectId: c.a }));
     assert.deepEqual((await c.cat.usage(c.reader, { projectId: c.b })).items, [], "another project's readers see nothing of A");
     await refuses("forbidden", () => c.cat.usage(c.ben, { projectId: c.a }));
