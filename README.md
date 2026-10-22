@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **51 of 157 tasks implemented**, 2 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **53 of 157 tasks implemented**, 2 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -202,13 +202,13 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 ### Phase 22
 
 - [ ] **A03b** Implement the Windows Sandbox launcher _(needs A03)_
-- [ ] **A04** Implement protected filesystem and Git bridge _(needs A03, S05)_
+- [x] **A04** Implement protected filesystem and Git bridge _(needs A03, S05)_
 - [x] **A05** Implement exact-operation review admission _(needs A02, S05, F07)_
 - [x] **C02** Implement bounded source-backed retrieval _(needs C01)_
 - [x] **H03** Implement priority admission and reserved control capacity _(needs S08, H01)_
 - [x] **R01** Implement model routing and capability policy _(needs F05, A02, F02)_
 - [x] **S10** Implement task contracts and the task dependency graph _(needs S01, S08, A02)_
-- [ ] **T01** Implement immutable tool/skill catalog and attribution _(needs F07, A03, C01)_
+- [x] **T01** Implement immutable tool/skill catalog and attribution _(needs F07, A03, C01)_
 
 ### Phase 23
 
