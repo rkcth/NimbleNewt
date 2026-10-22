@@ -170,7 +170,7 @@ for (const backend of backends) {
   });
 
   suite("requests are rate limited per client and per address, and long-polls are capped, with a reason and a time to retry", async (c) => {
-    const t = await c.start({ limits: { perPrincipalPerMinute: 5, perAddressPerMinute: 1000, pollsPerPrincipal: 2, pollsTotal: 3, maxWaitMs: 3000 } });
+    const t = await c.start({ limits: { perPrincipalPerMinute: 5, perAddressPerMinute: 1000, pollsPerPrincipal: 2, pollsTotal: 3, maxWaitMs: 8000 } });
     void t;
     const thread = (await c.call("POST", "/v1/threads", { token: c.ann.token, body: { projectId: c.project, subject: "limits", to: ["client:ext"], text: "x" } })).body.threadId;
     const results: number[] = [];
@@ -180,9 +180,9 @@ for (const backend of backends) {
     assert.equal(limited.status, 429);
     assert.ok(Number(limited.headers["retry-after"]) >= 1);
     // The owner has its own allowance; long-polls: two per client, three in all.
-    const polls = [1, 2, 3].map(() => c.call("GET", `/v1/threads/${thread}/messages?after=1&wait=1500`, { token: c.owner.token }));
+    const polls = [1, 2, 3].map(() => c.call("GET", `/v1/threads/${thread}/messages?after=1&wait=6000`, { token: c.owner.token }));
     await new Promise((r) => setTimeout(r, 300));
-    const refused = await c.call("GET", `/v1/threads/${thread}/messages?after=1&wait=1500`, { token: c.owner.token });
+    const refused = await c.call("GET", `/v1/threads/${thread}/messages?after=1&wait=6000`, { token: c.owner.token });
     assert.deepEqual([refused.status, refused.body.error.code], [503, "too_many_polls"]);
     assert.ok((await Promise.all(polls)).some((p) => p.status === 200 || p.status === 429 || p.status === 503));
     // Addresses are limited before anything is checked, so guessing credentials is slow.
