@@ -16,7 +16,7 @@ const dir = (name: string): string => { const p = join(root, name); mkdirSync(p,
 const recipe = (): SandboxRecipe => { const n = ++counter; return { mode: "sandboxed", workdir: dir(`w${n}`), home: dir(`h${n}`), scratch: dir(`s${n}`), readOnly: [], network: "none", env: {}, protectedSubpaths: [] }; };
 
 const base = { file: "bwrap", args: ["--x", "--", "/bin/sh"], env: {} };
-const caps = (extra: Partial<LimitCapabilities>): LimitCapabilities => ({ platform: "linux", cgroupScope: false, prlimit: false, taskset: false, passEnv: { XDG_RUNTIME_DIR: "/run/user/1000" }, ...extra });
+const caps = (extra: Partial<LimitCapabilities>): LimitCapabilities => ({ platform: "linux", cgroupScope: false, escapeDollar: true, prlimit: false, taskset: false, passEnv: { XDG_RUNTIME_DIR: "/run/user/1000" }, ...extra });
 
 describe("resource limits: the plan", () => {
   test("limits are validated and may not take the controller's share of the machine", () => {
@@ -39,6 +39,8 @@ describe("resource limits: the plan", () => {
     // A dollar sign in the command reaches the program as written (systemd would otherwise expand it).
     const dollars = limitedPlan({ ...base, args: ["-c", "echo ${#x} $i"] }, { memoryMb: 64 }, caps({ cgroupScope: true }));
     assert.equal(dollars.plan.args.at(-1), "echo $${#x} $$i");
+    // Where this systemd passes the line through as written, nothing is doubled.
+    assert.equal(limitedPlan({ ...base, args: ["-c", "echo ${#x} $i"] }, { memoryMb: 64 }, caps({ cgroupScope: true, escapeDollar: false })).plan.args.at(-1), "echo ${#x} $i");
   });
 
   test("without one: memory falls back to an address-space cap, cpus to an affinity mask, and the process count is reported as not enforced", () => {
@@ -124,7 +126,7 @@ describe("resource limits: real processes (Linux)", () => {
     // Without a user systemd scope (a CI container, say) the limit is reported as not enforced instead, which is also what must be on the record.
     if (records.at(-1)!.limits[0]!.enforced === "none") return;
     assert.ok(Number(out.stdout.trim().split("\n").pop()) <= 12, `${out.stdout} ${out.stderr.slice(0, 100)}`);
-  }, async () => { const c = await detectLimitCapabilities(); return c.cgroupScope ? c : caps({ platform: "linux", cgroupScope: false }); });
+  }, async () => { const c = await detectLimitCapabilities(); return c.cgroupScope ? c : caps({ platform: "linux", cgroupScope: false, escapeDollar: false }); });
 
   ifLinux("cpus: the affinity mask leaves the process one core (where there is no cgroup scope)", async (launcher) => {
     const out = await sh(launcher, "grep Cpus_allowed_list /proc/self/status", { cpus: 1 });

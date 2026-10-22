@@ -35,6 +35,8 @@ export interface LimitCapabilities {
   readonly platform: NodeJS.Platform;
   /** `systemd-run --user --scope` with cgroup limits works (Linux with a user systemd and cgroup v2 delegation). */
   readonly cgroupScope: boolean;
+  /** This systemd expands `$NAME` in a scope's command line, so a literal dollar sign must be written `$$` (newer versions do; older ones pass the line through as written). Found by trying. */
+  readonly escapeDollar: boolean;
   readonly prlimit: boolean;
   readonly taskset: boolean;
   /** Environment names a user systemd needs to reach its manager. */
@@ -73,11 +75,22 @@ async function works(file: string, args: string[], env: NodeJS.ProcessEnv): Prom
 
 /** Finds out, by trying, what limits this host can apply. */
 export async function detectLimitCapabilities(platform: NodeJS.Platform = process.platform): Promise<LimitCapabilities> {
-  if (platform !== "linux") return { platform, cgroupScope: false, prlimit: false, taskset: false, passEnv: {} };
+  if (platform !== "linux") return { platform, cgroupScope: false, escapeDollar: false, prlimit: false, taskset: false, passEnv: {} };
   const passEnv: Record<string, string> = {};
   for (const name of ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]) { const v = process.env[name]; if (v !== undefined) passEnv[name] = v; }
   const cgroupScope = await works("systemd-run", ["--user", "--scope", "--quiet", "--collect", "-p", "TasksMax=100", "-p", "MemoryMax=64M", "--", "/bin/true"], { ...passEnv, PATH: "/usr/bin:/bin" });
-  return { platform, cgroupScope, prlimit: await works("prlimit", ["--nofile=64", "--", "/bin/true"], { PATH: "/usr/bin:/bin" }), taskset: await works("taskset", ["-c", "0", "/bin/true"], { PATH: "/usr/bin:/bin" }), passEnv };
+  // Whether this systemd expands $ in a scope's command line is found by trying. An inconclusive answer means the scope is not used (a wrong guess could expand the agent's own variables).
+  let escapeDollar = false;
+  let usable = cgroupScope;
+  if (cgroupScope) {
+    try {
+      const out = await run("systemd-run", ["--user", "--scope", "--quiet", "--collect", "--", "/usr/bin/printf", "%s", "x$$y"], { timeout: 8000, env: { ...passEnv, PATH: "/usr/bin:/bin" } });
+      if (out.stdout === "x$y") escapeDollar = true;
+      else if (out.stdout === "x$$y") escapeDollar = false;
+      else usable = false;
+    } catch { usable = false; }
+  }
+  return { platform, cgroupScope: usable, escapeDollar, prlimit: await works("prlimit", ["--nofile=64", "--", "/bin/true"], { PATH: "/usr/bin:/bin" }), taskset: await works("taskset", ["-c", "0", "/bin/true"], { PATH: "/usr/bin:/bin" }), passEnv };
 }
 
 export interface LimitedPlan { readonly plan: SpawnPlan; readonly report: readonly LimitEnforcement[] }
@@ -125,8 +138,8 @@ export function limitedPlan(plan: SpawnPlan, limits: ResourceLimits, caps: Limit
   let file = plan.file; let args = [...plan.args]; let env = { ...plan.env };
   if (prl.length > 0) { args = [...prl, "--", file, ...args]; file = "prlimit"; }
   if (affinity !== undefined) { args = ["-c", Array.from({ length: affinity }, (_, i) => i).join(","), file, ...args]; file = "taskset"; }
-  // systemd expands $NAME and ${NAME} in a command line, so a literal dollar sign is written $$.
-  if (scope.length > 0) { args = ["--user", "--scope", "--quiet", "--collect", ...scope, "--", file, ...args].map((a, i, all) => (i > all.indexOf("--") ? a.replaceAll("$", "$$$$") : a)); file = "systemd-run"; env = { ...env, ...caps.passEnv, PATH: "/usr/bin:/bin" }; }
+  // Some systemd versions expand $NAME and ${NAME} in a command line, so a literal dollar sign is written $$ there (found by trying).
+  if (scope.length > 0) { args = ["--user", "--scope", "--quiet", "--collect", ...scope, "--", file, ...args].map((a, i, all) => (caps.escapeDollar && i > all.indexOf("--") ? a.replaceAll("$", "$$$$") : a)); file = "systemd-run"; env = { ...env, ...caps.passEnv, PATH: "/usr/bin:/bin" }; }
   else if (file !== plan.file) env = { ...env, PATH: "/usr/bin:/bin" };
   return { plan: { ...plan, file, args, env }, report };
 }

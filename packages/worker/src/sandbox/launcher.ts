@@ -183,7 +183,7 @@ export class SandboxLauncher {
     }
 
     const runId = randomUUID();
-    const caps = this.#limitCaps ?? { platform: this.#config.platform ?? process.platform, cgroupScope: false, prlimit: false, taskset: false, passEnv: {} };
+    const caps = this.#limitCaps ?? { platform: this.#config.platform ?? process.platform, cgroupScope: false, escapeDollar: false, prlimit: false, taskset: false, passEnv: {} };
     const limited = limitedPlan(makePlan(), limits, caps);
     if (request.requireEnforced === true) {
       const weak = limited.report.filter((r) => r.enforced !== "full");
