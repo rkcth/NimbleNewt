@@ -284,7 +284,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 ### Phase 29
 
 - [ ] **H02** Implement subordinate remote work/artifact transport _(needs H01, S06, A03, H12)_
-- [ ] **M05** Implement meeting facilitation and owner control _(needs M04, M02, U03, M00)_
+- [ ] **M05** Implement meeting facilitation and owner control _(needs M04, M02, U03, M00, A10)_
 - [ ] **T06** Implement the protected agent tool bridge and execution service _(needs H12, T01)_
 
 ### Phase 30
