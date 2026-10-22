@@ -3373,7 +3373,25 @@
         "C02"
       ],
       "deliverable": "Retention, export and deletion policy and runner covering derived data (summaries, indexes, caches) and backups, per-agent and per-project storage quotas, and reserved capacity for shutdown and recovery records (operational-contracts 129; pitfalls-and-safeguards 125; README 247, 641; design-decisions 73)",
-      "acceptance_and_verification": "Material referenced by a resumable task or by replay is never deleted and shows as retained; a user-requested deletion removes or marks derived summaries, indexes and cached replies and records how backups are handled; export excludes secrets; archived work restores; with the disk near full the next checkpoint and shutdown and recovery records still write and a disk-full checkpoint is never reported successful; quotas enforced with visible warnings; retention configurable; deleting or archiving a source carries to its derived copies, summaries, indexes and embeddings, which keep their source project and origin (A10)",
+      "acceptance_and_verification": "Material referenced by a resumable task or by replay is never deleted and shows as retained; a user-requested deletion removes or marks derived summaries, indexes and cached replies and records how backups are handled; export excludes secrets; archived work restores; with the disk near full the next checkpoint and shutdown and recovery records still write and a disk-full checkpoint is never reported successful; quotas enforced with visible warnings; retention configurable, and the owner changes any retention value by chatting with the supervisor (owner-only, recorded, confirmed back with the old and new value; owner decision 2026-10-22); deleting or archiving a source carries to its derived copies, summaries, indexes and embeddings, which keep their source project and origin (A10)",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "K06b",
+      "parent": "N17",
+      "existing_issue": "AII-267",
+      "title": "Implement tiered retention (optional, after the first release)",
+      "depends_on": [
+        "K06",
+        "C02"
+      ],
+      "deliverable": "Optional tiered retention: per-kind tiers (for example keep audit and decisions forever, expire bulk logs, scratch output and old transcripts after owner-set ages, optionally archive before expiry), set by chatting with the supervisor (owner decision 2026-10-22; provisional-defaults Retention)",
+      "acceptance_and_verification": "Off by default so nothing is deleted unless the owner enables a tier; audit and anything a resumable task or replay references is never expired; an expiry shows what it will remove before it runs and records what it removed; a tier change is owner-only and recorded; archive then restore returns the original; derived copies follow their source (K06)",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -3709,7 +3727,8 @@
       "existing_issue": "AII-269",
       "title": "Run detailed real-world QA on macOS, Linux and Windows",
       "depends_on": [
-        "D03"
+        "D03",
+        "K06b"
       ],
       "deliverable": "Automated and manual QA run on the completed product on the owner's real macOS and Windows machines and on Linux, with a written plan and evidence for each platform",
       "acceptance_and_verification": "Detailed plan agreed with the owner before the run: install from a clean checkout and from the release artifact, full automated suite repeated, real-agent trial with a real model provider approved by the owner, long-running and restart scenarios, crash and power-loss style kills, unattended operation, antivirus and filesystem behaviour on Windows, sleep and network change on laptops, every supported PostgreSQL major released in the last three years re-verified, supported OS release floors confirmed; results recorded per platform; failures raised as typed blockers; this is the last item of the plan and the owner accepts it; accepted only if the real-agent trial meets the approval-load targets (no more than three owner decisions per working day after the first week, no stall that reaches unrelated work)",

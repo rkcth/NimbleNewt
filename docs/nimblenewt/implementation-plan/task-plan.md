@@ -44,7 +44,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N14 / AII-264 | P01, P02, P03, P04, P05, P06, P07 |
 | N15 / AII-265 | Q01, Q02, Q03, Q04 |
 | N16 / AII-266 | B01 |
-| N17 / AII-267 | K01, K02, K03, K04, K05, K06, K07 |
+| N17 / AII-267 | K01, K02, K03, K04, K05, K06, K06b, K07 |
 | N18 / AII-268 | G06, X09, X10, X01, X02, X03, X04, X05, X06, X07, X08, Y01, Y02, Y03 |
 | N19 / AII-269 | D01, D02, D03, D04 |
 | N07a / AII-519 | U01, U13, T04 |
@@ -1305,7 +1305,15 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Parent:** N17 / AII-267.
 - **Blockers:** K01, S06, C02.
 - **Deliverable:** Retention, export and deletion policy and runner covering derived data (summaries, indexes, caches) and backups, per-agent and per-project storage quotas, and reserved capacity for shutdown and recovery records (operational-contracts 129; pitfalls-and-safeguards 125; README 247, 641; design-decisions 73).
-- **Acceptance and verification:** Material referenced by a resumable task or by replay is never deleted and shows as retained; a user-requested deletion removes or marks derived summaries, indexes and cached replies and records how backups are handled; export excludes secrets; archived work restores; with the disk near full the next checkpoint and shutdown and recovery records still write and a disk-full checkpoint is never reported successful; quotas enforced with visible warnings; retention configurable; deleting or archiving a source carries to its derived copies, summaries, indexes and embeddings, which keep their source project and origin (A10).
+- **Acceptance and verification:** Material referenced by a resumable task or by replay is never deleted and shows as retained; a user-requested deletion removes or marks derived summaries, indexes and cached replies and records how backups are handled; export excludes secrets; archived work restores; with the disk near full the next checkpoint and shutdown and recovery records still write and a disk-full checkpoint is never reported successful; quotas enforced with visible warnings; retention configurable, and the owner changes any retention value by chatting with the supervisor (owner-only, recorded, confirmed back with the old and new value; owner decision 2026-10-22); deleting or archiving a source carries to its derived copies, summaries, indexes and embeddings, which keep their source project and origin (A10).
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### K06b — Implement tiered retention (optional, after the first release)
+
+- **Parent:** N17 / AII-267.
+- **Blockers:** K06, C02.
+- **Deliverable:** Optional tiered retention: per-kind tiers (for example keep audit and decisions forever, expire bulk logs, scratch output and old transcripts after owner-set ages, optionally archive before expiry), set by chatting with the supervisor (owner decision 2026-10-22; provisional-defaults Retention).
+- **Acceptance and verification:** Off by default so nothing is deleted unless the owner enables a tier; audit and anything a resumable task or replay references is never expired; an expiry shows what it will remove before it runs and records what it removed; a tier change is owner-only and recorded; archive then restore returns the original; derived copies follow their source (K06).
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### K07 — Implement maintenance windows and update orchestration
@@ -1423,7 +1431,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D04 — Run detailed real-world QA on macOS, Linux and Windows
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** D03.
+- **Blockers:** D03, K06b.
 - **Deliverable:** Automated and manual QA run on the completed product on the owner's real macOS and Windows machines and on Linux, with a written plan and evidence for each platform.
 - **Acceptance and verification:** Detailed plan agreed with the owner before the run: install from a clean checkout and from the release artifact, full automated suite repeated, real-agent trial with a real model provider approved by the owner, long-running and restart scenarios, crash and power-loss style kills, unattended operation, antivirus and filesystem behaviour on Windows, sleep and network change on laptops, every supported PostgreSQL major released in the last three years re-verified, supported OS release floors confirmed; results recorded per platform; failures raised as typed blockers; this is the last item of the plan and the owner accepts it; accepted only if the real-agent trial meets the approval-load targets (no more than three owner decisions per working day after the first week, no stall that reaches unrelated work).
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

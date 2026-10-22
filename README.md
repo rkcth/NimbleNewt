@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **63 of 159 tasks implemented**, 2 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **63 of 160 tasks implemented**, 2 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -319,6 +319,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 - [ ] **H10** Implement distributed agent capacity and fan-in limits _(needs H07, H09, H03, R05)_
 - [ ] **K02** Implement deterministic release staging and activation _(needs K01, F02, T02)_
+- [ ] **K06b** Implement tiered retention (optional, after the first release) _(needs K06, C02)_
 - [ ] **P06** Implement project and agent retirement and archival _(needs P01, H11, L03, K06)_
 - [ ] **U08** Implement settings and administration views _(needs U07, U10, A07, F09, H11, R03, T03, A07b, A07c)_
 - [ ] **X09** Implement external release-test job protocol _(needs H07, H09, F03, S06)_
@@ -402,7 +403,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 48
 
-- [ ] **D04** Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
+- [ ] **D04** Run detailed real-world QA on macOS, Linux and Windows _(needs D03, K06b)_
 _Note: F01 started before its prerequisite planning records G01 and G07 were formally closed; G01 is still not fully closed._
 
 ## More detail
