@@ -5,7 +5,7 @@ import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { ReviewService } from "../review/index.js";
 import { GrantService, PrincipalService, type Principal } from "../security/index.js";
-import { PolicyService, ProfileSuggestionService } from "./index.js";
+import { PolicyService, ProfileSuggestionService, TRIAL_DAYS } from "./index.js";
 
 after(stopServer);
 
@@ -76,8 +76,8 @@ for (const backend of backends) {
     await refuses("stale_revision", () => c.suggestion.answer(c.owner, { commandId: cid("a"), answer: "not-now", expectedRevision: 4 }));
     await refuses("invalid_command", () => c.suggestion.answer(c.owner, { commandId: cid("a"), answer: "maybe" as never, expectedRevision: 0 }));
     const later = { commandId: cid("a"), answer: "not-now" as const, expectedRevision: 0 };
-    assert.deepEqual(await c.suggestion.answer(c.owner, later), { switched: false });
-    assert.deepEqual(await c.suggestion.answer(c.owner, later), { switched: false }, "a repeat is answered from the record");
+    assert.deepEqual(await c.suggestion.answer(c.owner, later), { switched: false, reverted: false });
+    assert.deepEqual(await c.suggestion.answer(c.owner, later), { switched: false, reverted: false }, "a repeat is answered from the record");
     assert.equal((await c.policy.effective(c.owner))!.profile, "strict");
     const after = await c.suggestion.check(c.owner);
     assert.deepEqual([after.due, after.approvalsSince, after.revision], [false, 0, 1]);
@@ -88,8 +88,8 @@ for (const backend of backends) {
     const again = await c.suggestion.check(c.owner);
     assert.deepEqual([again.due, again.approvalsSince, again.revision], [true, 3, 1]);
     const yes = { commandId: cid("a"), answer: "switch" as const, expectedRevision: 1 };
-    assert.deepEqual(await c.suggestion.answer(c.owner, yes), { switched: true });
-    assert.deepEqual(await c.suggestion.answer(c.owner, yes), { switched: true });
+    assert.deepEqual(await c.suggestion.answer(c.owner, yes), { switched: true, reverted: false });
+    assert.deepEqual(await c.suggestion.answer(c.owner, yes), { switched: true, reverted: false });
     assert.equal((await c.policy.effective(c.owner))!.profile, "derived");
     for (let i = 0; i < 6; i++) await c.approve();
     assert.equal((await c.suggestion.check(c.owner)).due, false, "never in derived");
@@ -116,12 +116,12 @@ for (const backend of backends) {
     await refuses("unavailable", () => service.answer(c.owner, answer));
     assert.equal((await c.policy.effective(c.owner))!.profile, "strict", "recorded, not carried out");
     // A new command ID finishes it: the question is not asked again, the recorded answer is carried out.
-    assert.deepEqual(await service.answer(c.owner, { commandId: cid("a"), answer: "switch", expectedRevision: 1 }), { switched: true });
+    assert.deepEqual(await service.answer(c.owner, { commandId: cid("a"), answer: "switch", expectedRevision: 1 }), { switched: true, reverted: false });
     assert.equal((await c.policy.effective(c.owner))!.profile, "derived");
     // A late replay of the first answer changes nothing, even after the owner went back to strict by hand.
     const current = (await c.policy.effective(c.owner))!.revisions.installation;
     await c.policy.set(c.owner, { commandId: cid("p"), scope: "installation", profile: "strict", expectedRevision: current });
-    assert.deepEqual(await service.answer(c.owner, answer), { switched: true });
+    assert.deepEqual(await service.answer(c.owner, answer), { switched: true, reverted: false });
     assert.equal((await c.policy.effective(c.owner))!.profile, "strict");
   });
 
@@ -140,8 +140,61 @@ for (const backend of backends) {
     for (let i = 0; i < 3; i++) await c.approve();
     const due = await c.suggestion.check(c.owner);
     assert.equal(due.due, true);
-    assert.deepEqual(await c.suggestion.answer(c.owner, { commandId: cid("a"), answer: "switch", expectedRevision: due.revision }), { switched: true });
+    assert.deepEqual(await c.suggestion.answer(c.owner, { commandId: cid("a"), answer: "switch", expectedRevision: due.revision }), { switched: true, reverted: false });
     const effective = (await c.policy.effective(c.owner))!;
     assert.deepEqual([effective.profile, effective.cells["commit.free"]!.mode, effective.cells["commit.free"]!.source], ["derived", "owner", "installation override"]);
+  });
+
+  suite("the question offers switch (permanent, the default), a seven-day trial and not now; a trial that ends asks again: keep (the default), seven more days, or back to strict; nothing reverts by itself", async (c) => {
+    for (let i = 0; i < 3; i++) await c.approve();
+    const due = await c.suggestion.check(c.owner);
+    assert.deepEqual([due.kind, due.answers], ["switch", ["switch", "trial", "not-now"]]);
+    await refuses("invalid_command", () => c.suggestion.answer(c.owner, { commandId: cid("a"), answer: "keep", expectedRevision: 0 }));
+    await refuses("invalid_command", () => c.suggestion.answer(c.owner, { commandId: cid("a"), answer: "revert", expectedRevision: 0 }));
+    assert.deepEqual(await c.suggestion.answer(c.owner, { commandId: cid("a"), answer: "trial", expectedRevision: 0 }), { switched: true, reverted: false });
+    assert.equal((await c.policy.effective(c.owner))!.profile, "derived");
+    assert.equal((await c.suggestion.check(c.owner)).due, false, "not asked during the trial");
+    minutes((TRIAL_DAYS * 24 - 1) * 60);
+    assert.equal((await c.suggestion.check(c.owner)).due, false);
+    minutes(2 * 60);
+    const ended = await c.suggestion.check(c.owner);
+    assert.deepEqual([ended.due, ended.kind, ended.answers], [true, "trial-ended", ["keep", "extend", "revert"]]);
+    assert.ok(ended.preview!.notes.some((x) => /profile goes from derived to strict/.test(x)));
+    // Unanswered, it stays derived: nothing changes by itself.
+    minutes(30 * 24 * 60);
+    assert.equal((await c.policy.effective(c.owner))!.profile, "derived");
+    assert.equal((await c.suggestion.check(c.owner)).due, true);
+    await refuses("invalid_command", () => c.suggestion.answer(c.owner, { commandId: cid("a"), answer: "switch", expectedRevision: ended.revision }));
+    // Seven more days, then asked again.
+    assert.deepEqual(await c.suggestion.answer(c.owner, { commandId: cid("a"), answer: "extend", expectedRevision: ended.revision }), { switched: false, reverted: false });
+    assert.equal((await c.suggestion.check(c.owner)).due, false);
+    minutes(TRIAL_DAYS * 24 * 60 + 1);
+    const again = await c.suggestion.check(c.owner);
+    assert.equal(again.kind, "trial-ended");
+    // Back to strict: the profile goes back, and the strict question comes again only after three more approvals.
+    const back = { commandId: cid("a"), answer: "revert" as const, expectedRevision: again.revision };
+    assert.deepEqual(await c.suggestion.answer(c.owner, back), { switched: false, reverted: true });
+    assert.deepEqual(await c.suggestion.answer(c.owner, back), { switched: false, reverted: true }, "a repeat changes nothing");
+    assert.equal((await c.policy.effective(c.owner))!.profile, "strict");
+    assert.equal((await c.suggestion.check(c.owner)).due, false);
+    for (let i = 0; i < 3; i++) await c.approve();
+    const next = await c.suggestion.check(c.owner);
+    assert.equal(next.kind, "switch");
+    // A second trial, kept for good: never asked again.
+    await c.suggestion.answer(c.owner, { commandId: cid("a"), answer: "trial", expectedRevision: next.revision });
+    minutes(TRIAL_DAYS * 24 * 60 + 1);
+    const finish = await c.suggestion.check(c.owner);
+    assert.deepEqual(await c.suggestion.answer(c.owner, { commandId: cid("a"), answer: "keep", expectedRevision: finish.revision }), { switched: false, reverted: false });
+    assert.equal((await c.policy.effective(c.owner))!.profile, "derived");
+    minutes(400 * 24 * 60);
+    assert.equal((await c.suggestion.check(c.owner)).due, false, "kept: no trial left to end");
+  });
+
+  suite("switchNow (from a proposal) switches a strict installation permanently or for a trial, and refuses anything else", async (c) => {
+    assert.deepEqual(await c.suggestion.switchNow(c.owner, { commandId: cid("s"), answer: "switch" }), { switched: true });
+    assert.equal((await c.policy.effective(c.owner))!.profile, "derived");
+    await refuses("invalid_command", () => c.suggestion.switchNow(c.owner, { commandId: cid("s"), answer: "trial" }));
+    await refuses("invalid_command", () => c.suggestion.switchNow(c.owner, { commandId: cid("s"), answer: "revert" as never }));
+    await refuses("forbidden", () => c.suggestion.switchNow(c.ann, { commandId: cid("s"), answer: "switch" }));
   });
 }

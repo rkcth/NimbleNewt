@@ -5,7 +5,7 @@ import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { ReviewService } from "../review/index.js";
 import { GrantService, PrincipalService, type Grant, type Principal } from "../security/index.js";
-import { ApprovalLoadService, LOAD_LIMITS, PolicyService } from "./index.js";
+import { ApprovalLoadService, LOAD_LIMITS, PolicyService, ProfileSuggestionService } from "./index.js";
 
 after(stopServer);
 
@@ -45,7 +45,7 @@ for (const backend of backends) {
           return r.id;
         };
         await body({
-          load: ApprovalLoadService.withEpoch(world.storage, projects.epoch, grants, options), policy: PolicyService.withEpoch(world.storage, projects.epoch, grants, options), review, grants, owner, ann, ben, rev, a, task, approve,
+          load: ApprovalLoadService.withEpoch(world.storage, projects.epoch, grants, { ...options, profile: ProfileSuggestionService.withEpoch(world.storage, projects.epoch, PolicyService.withEpoch(world.storage, projects.epoch, grants, options), options) }), policy: PolicyService.withEpoch(world.storage, projects.epoch, grants, options), review, grants, owner, ann, ben, rev, a, task, approve,
         });
       } finally { await world.close(); }
     });
@@ -278,5 +278,27 @@ for (const backend of backends) {
     // A capability derived by the agent is still no approval.
     const cap = await c.grants.derive(c.ann, { commandId: cid("dv"), parentId: grantId, action: "approve.class.push", project: c.a, basis: "x" }).catch(() => undefined);
     assert.equal(cap, undefined);
+  });
+
+  suite("a proposal can be answered by switching to the derived profile instead of the 30-day grant: permanent by default, or a trial; no grant is made", async (c) => {
+    for (let i = 0; i < 3; i++) await c.approve(c.ann, "git-commit");
+    await c.load.propose(c.owner, { commandId: cid("pr") });
+    const [p] = await c.load.proposals(c.owner, "open");
+    await refuses("forbidden", () => c.load.acceptBySwitching(c.ann, { commandId: cid("sw"), proposalId: p!.id, expectedRevision: p!.revision }));
+    await refuses("invalid_command", () => c.load.acceptBySwitching(c.owner, { commandId: cid("sw"), proposalId: p!.id, expectedRevision: p!.revision, mode: "forever" as never }));
+    await refuses("stale_revision", () => c.load.acceptBySwitching(c.owner, { commandId: cid("sw"), proposalId: p!.id, expectedRevision: p!.revision + 3 }));
+    assert.equal((await c.policy.effective(c.owner))!.profile, "strict");
+    const id = cid("sw");
+    assert.deepEqual(await c.load.acceptBySwitching(c.owner, { commandId: id, proposalId: p!.id, expectedRevision: p!.revision }), { switched: true });
+    assert.equal((await c.policy.effective(c.owner))!.profile, "derived");
+    const [done] = await c.load.proposals(c.owner, "accepted");
+    assert.deepEqual([done!.via, done!.grantId], ["profile", undefined]);
+    assert.deepEqual(await c.load.acceptBySwitching(c.owner, { commandId: id, proposalId: p!.id, expectedRevision: p!.revision }), { switched: true }, "a repeat is answered from the record");
+    // Not on a derived installation, and a grant was not made.
+    for (let i = 0; i < 3; i++) await c.approve(c.ben, "git-push");
+    await c.load.propose(c.owner, { commandId: cid("pr") });
+    const q = (await c.load.proposals(c.owner, "open"))[0]!;
+    await refuses("invalid_command", () => c.load.acceptBySwitching(c.owner, { commandId: cid("sw"), proposalId: q.id, expectedRevision: q.revision, mode: "trial" }));
+    assert.equal((await c.policy.evaluate({ principalId: "agent:ann", projectId: c.a, tool: "git-commit" })).via !== "grant", true);
   });
 }

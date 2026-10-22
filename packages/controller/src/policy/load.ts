@@ -11,6 +11,7 @@ import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/typ
 import { ActionCatalog, type ActionClass, type Environment } from "./catalog.js";
 import type { Decision } from "./engine.js";
 import type { PolicyBody } from "./policy.js";
+import type { ProfileSuggestionService } from "./suggestion.js";
 
 /** A suggestion to turn a run of the same approval into a standing rule (card A07b). It changes nothing until the owner accepts it. */
 export interface ProposalBody {
@@ -29,6 +30,8 @@ export interface ProposalBody {
   readonly decidedAt?: string;
   readonly reason?: string;
   readonly grantId?: string;
+  /** How an accepted proposal was answered: by the suggested grant, or by switching the installation to the derived profile instead. */
+  readonly via?: "grant" | "profile";
   /** After a dismissal, no new proposal for the same thing before this time. */
   readonly quietUntil?: string;
 }
@@ -72,10 +75,12 @@ export class ApprovalLoadService {
   readonly #grants: GrantService;
   readonly #catalog: ActionCatalog;
 
-  private constructor(runner: CommandRunner, grants: GrantService, catalog: ActionCatalog) { this.#runner = runner; this.#grants = grants; this.#catalog = catalog; }
+  readonly #profile: ProfileSuggestionService | undefined;
 
-  static withEpoch(storage: ControllerStorage, epoch: number, grants: GrantService, options: RunnerOptions & { catalog?: ActionCatalog } = {}): ApprovalLoadService {
-    return new ApprovalLoadService(new CommandRunner(storage, epoch, options), grants, options.catalog ?? ActionCatalog.default);
+  private constructor(runner: CommandRunner, grants: GrantService, catalog: ActionCatalog, profile: ProfileSuggestionService | undefined) { this.#runner = runner; this.#grants = grants; this.#catalog = catalog; this.#profile = profile; }
+
+  static withEpoch(storage: ControllerStorage, epoch: number, grants: GrantService, options: RunnerOptions & { catalog?: ActionCatalog; profile?: ProfileSuggestionService } = {}): ApprovalLoadService {
+    return new ApprovalLoadService(new CommandRunner(storage, epoch, options), grants, options.catalog ?? ActionCatalog.default, options.profile);
   }
 
   /**
@@ -207,6 +212,31 @@ export class ApprovalLoadService {
       }));
     }
     return { grantId: grant.id };
+  }
+
+  /**
+   * The other way to answer a proposal: instead of the suggested 30-day grant, switch the installation to the derived profile, for good (`permanent`, the default) or for a seven-day trial.
+   * Needs a strict installation. The proposal is marked accepted by the profile and no grant is made.
+   */
+  async acceptBySwitching(owner: Principal, command: NoActor & { proposalId: string; expectedRevision: number; mode?: "permanent" | "trial" }): Promise<{ switched: boolean }> {
+    this.#shape(owner, command, ["commandId", "proposalId", "expectedRevision", "mode"]);
+    if (this.#profile === undefined) throw new DomainError("unavailable", "switching the profile is not available here");
+    if (command.mode !== undefined && command.mode !== "permanent" && command.mode !== "trial") invalid("mode", "must be permanent or trial");
+    // The proposal is marked first (judged inside the command, so a repeat is answered from the record); the switch follows and is itself idempotent, so a failure between the two is finished by repeating the call.
+    await this.#runner.command("approval.accept-by-profile", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
+      payload: { proposalId: command.proposalId, expectedRevision: command.expectedRevision, mode: command.mode ?? "permanent" },
+      build: async () => {
+        const current = await this.#runner.existing("standing-proposal", command.proposalId, command.expectedRevision);
+        const body = current.body as unknown as ProposalBody;
+        if (body.state !== "open") throw new DomainError("invalid_command", `proposal ${current.id} is ${body.state}`, { field: "proposalId" });
+        if (!(await this.#profile!.isStrict(owner))) throw new DomainError("invalid_command", "only a strict installation can be switched to the derived profile", { field: "proposalId" });
+        const ref: AggregateRef = { kind: "standing-proposal", id: current.id };
+        const next: ProposalBody = { ...body, state: "accepted", via: "profile", decidedBy: owner.id, decidedAt: this.#runner.now() };
+        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject }], detail: { via: "profile" } };
+      },
+    }));
+    const { switched } = await this.#profile.switchNow(owner, { commandId: `${command.commandId}.profile`, answer: command.mode === "trial" ? "trial" : "switch" });
+    return { switched };
   }
 
   /** The owner turns a proposal down; the same one is not offered again for a while, and then only after a newer approval. */
