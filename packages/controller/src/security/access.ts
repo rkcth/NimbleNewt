@@ -20,7 +20,7 @@ export const ACTIONS = [
   "review.request", "review.decide", "review.policy.write",
   "config.read", "config.write", "routing.write", "recovery.read",
   "conversation.start", "conversation.send", "conversation.receive", "conversation.request-action", "conversation.urgent",
-  "principal.manage",
+  "principal.manage", "notification.emit",
   "agent.manage", "agent.read",
   "task.contract.write", "task.priority.write", "task.difficulty.write", "task.class.write", "task.dependency.write",
 ] as const;
