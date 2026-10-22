@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **46 of 155 tasks implemented**, 2 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **47 of 156 tasks implemented**, 2 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -244,7 +244,8 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 26
 
-- [ ] **A10b** Implement per-task credentials for agents serving several projects _(needs A10, A01)_
+- [ ] **A07c** Implement the strict-to-derived profile suggestion _(needs A07, A07b)_
+- [x] **A10b** Implement per-task credentials for agents serving several projects _(needs A10, A01)_
 - [ ] **C06** Implement optional inference-cache capability adapters _(needs C05)_
 - [ ] **H02** Implement subordinate remote work/artifact transport _(needs H01, S06, A03, H12)_
 - [ ] **H13** Implement event source adapters and watchers _(needs H06, H01, R02)_
@@ -310,7 +311,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **H10** Implement distributed agent capacity and fan-in limits _(needs H07, H09, H03, R05)_
 - [ ] **K02** Implement deterministic release staging and activation _(needs K01, F02, T02)_
 - [ ] **P06** Implement project and agent retirement and archival _(needs P01, H11, L03, K06)_
-- [ ] **U08** Implement settings and administration views _(needs U07, U10, A07, F09, H11, R03, T03, A07b)_
+- [ ] **U08** Implement settings and administration views _(needs U07, U10, A07, F09, H11, R03, T03, A07b, A07c)_
 - [ ] **X09** Implement external release-test job protocol _(needs H07, H09, F03, S06)_
 - [ ] **Y02** QA checkpoint 2: isolation, stop and recovery _(needs G05, G06, A06, L04, H09)_
 

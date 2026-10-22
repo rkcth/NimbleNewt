@@ -33,7 +33,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06 |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
 | N05 / AII-255 | L05, L01, L02, L03, L04, L06, H08 |
-| N06 / AII-256 | G05, A01, A02, A03, A04, A05, A06, A07, A07b, A08, A09, A10, A10b |
+| N06 / AII-256 | G05, A01, A02, A03, A04, A05, A06, A07, A07b, A07c, A08, A09, A10, A10b |
 | N07 / AII-257 | C01, C02, C04, C05, C07, C08, C09 |
 | N08 / AII-258 | R01, R02, R03, R04, R05 |
 | N09 / AII-259 | U03, U04, U05, U06, U07, U09, U08, U10, U11 |
@@ -488,6 +488,14 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** Approving the same class in the same scope repeatedly (provisionally three times) produces a standing-rule proposal scoped to project, class and environment, expiring and revocable, with a preview of what it would have covered; the owner accepts it into a standing grant or dismisses it; it is never applied unasked and never proposed for a class the policy reserves for the owner or one that needs an exact-operation review (tested: a mandatory-human tool is never proposed); the effective-policy view shows how many asks each rule would have caused; owner decisions per day, how long asks wait, the share decided by rule, agent review and owner, and every pending ask with its age are recorded and returned for the approval-load view (U08); an accepted proposal (a suggestion, not an instruction) never authorizes a downstream push, merge or deploy (the proposal workflow cards T08 and P02 carry that clause).
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
+### A07c — Implement the strict-to-derived profile suggestion
+
+- **Parent:** N06 / AII-256.
+- **Blockers:** A07, A07b.
+- **Deliverable:** Profile-switch suggestion.
+- **Acceptance and verification:** On an installation in the strict profile, after every third approval the owner gives (provisional; the same count as standing-rule proposals) the system asks once whether the owner wants to change to the derived profile, showing in plain words what would change (the effective-policy preview of A07); the answer is recorded, a "not now" is not asked again until three further approvals, nothing is switched automatically, and the suggestion is never made in derived or autonomous profiles or when the installation locks the profile; the owner's own installation (started derived by private configuration) never sees it; the suggestion is delivered through the digest (U11) and the first-run/settings views (U08) (tested: counts only owner approvals, repeats only after three more, a switch is made only by the owner's explicit answer).
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
 ### A08 — Implement per-agent environments
 
 - **Parent:** N06 / AII-256.
@@ -517,6 +525,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### A10b — Implement per-task credentials for agents serving several projects
 
 - **Parent:** N06 / AII-256.
+- **Status:** implemented; commits `99147e5`; CI runs 39697698169; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Credentials are issued per agent and task by the owner, not per agent: a task credential carries only the grants of the task's project (a grant for every project is narrowed to it, a grant for another task is dropped) and the access checks refuse any other project, any other task where a check names the task and every action that belongs to no project, even for a principal whose grants were not cut down. Rules that decide by who owns a record, and services that look the caller up again by ID, keep the credential inside its task (desks, reviews, conversations, inquiries, inspections, grant derivation). It ends at once when revoked, expired, its task is done or cancelled, or the agent is disabled; reissuing replaces the old one; the secret is stored only as a hash and one task's secret is no use for another. The state API accepts it. Limits stated: within the task's project it is no narrower than the agent; credentials are not ended actively when a task completes; the configuration own-layer refusal has no test. Reviewed and approved by an AI review session (Claude Opus) after two rounds; six-cell CI green.
 - **Blockers:** A10, A01.
 - **Deliverable:** Task-scoped credentials and retrieval.
 - **Acceptance and verification:** Credentials are issued per task, not per agent: a task credential carries only the grants of the task's project and the task, and no other project's records, grants or credentials can be reached with it; a credential ends with its task or when revoked and is refused at once afterwards; an agent serving two projects holds a separate credential for each task and one cannot be used for the other; retrieval and publication use the task credential (operational-contracts 91-95, split from A10).
@@ -891,7 +901,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### U08 — Implement settings and administration views
 
 - **Parent:** N09 / AII-259.
-- **Blockers:** U07, U10, A07, F09, H11, R03, T03, A07b.
+- **Blockers:** U07, U10, A07, F09, H11, R03, T03, A07b, A07c.
 - **Deliverable:** Browser settings views over the same configuration service as chat and API for providers, routes, local inference endpoints, difficulty profiles, agents and teams, approval policy, API access, operations, P/PC, MCP connections and secrets; later cards add their own areas to these views (portability-and-configuration 43-63, 89-92; README 15, 74).
 - **Acceptance and verification:** A fresh install is configured entirely through the UI with no source edits and no target-repository files; UI and chat edits yield the same durable revision; editable, inherited and locked values are shown with their source; secrets are entered write-only; invalid values are rejected with path-addressed errors; compatibility and migration status shows affected agents and operations; settings persist across restart on macOS, Linux and Windows; the views show the sandbox mechanism each host uses and flag a weaker boundary (macOS Seatbelt is process-level with weaker limits than Linux) wherever the owner chooses or reviews where work runs (G01 decision 2026-10-21); an approval-load view: owner decisions per day, how long asks wait, and the share decided by standing rule, agent review and owner, with every pending ask and its age; first-run setup explains the derived profile in plain words, recommends it for testing and development work, and asks whether to switch from the strict profile a new installation starts in; the same question is asked in chat setup for an installation with no browser UI, the answer is recorded and either profile can be chosen later; first run applies the configuration's approvals.preset when no approval policy exists yet (a private profile may say derived), before it asks the setup question.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

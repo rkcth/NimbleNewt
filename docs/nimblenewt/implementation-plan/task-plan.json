@@ -1219,6 +1219,24 @@
       }
     },
     {
+      "id": "A07c",
+      "parent": "N06",
+      "existing_issue": "AII-256",
+      "title": "Implement the strict-to-derived profile suggestion",
+      "depends_on": [
+        "A07",
+        "A07b"
+      ],
+      "deliverable": "Profile-switch suggestion",
+      "acceptance_and_verification": "On an installation in the strict profile, after every third approval the owner gives (provisional; the same count as standing-rule proposals) the system asks once whether the owner wants to change to the derived profile, showing in plain words what would change (the effective-policy preview of A07); the answer is recorded, a \"not now\" is not asked again until three further approvals, nothing is switched automatically, and the suggestion is never made in derived or autonomous profiles or when the installation locks the profile; the owner's own installation (started derived by private configuration) never sees it; the suggestion is delivered through the digest (U11) and the first-run/settings views (U08) (tested: counts only owner approvals, repeats only after three more, a switch is made only by the owner's explicit answer)",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "A08",
       "parent": "N06",
       "existing_issue": "AII-256",
@@ -1299,12 +1317,23 @@
       ],
       "deliverable": "Task-scoped credentials and retrieval",
       "acceptance_and_verification": "Credentials are issued per task, not per agent: a task credential carries only the grants of the task's project and the task, and no other project's records, grants or credentials can be reached with it; a credential ends with its task or when revoked and is refused at once afterwards; an agent serving two projects holds a separate credential for each task and one cannot be used for the other; retrieval and publication use the task credential (operational-contracts 91-95, split from A10)",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "99147e5"
+        ],
+        "ci_runs": [
+          "39697698169"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Credentials are issued per agent and task by the owner, not per agent: a task credential carries only the grants of the task's project (a grant for every project is narrowed to it, a grant for another task is dropped) and the access checks refuse any other project, any other task where a check names the task and every action that belongs to no project, even for a principal whose grants were not cut down. Rules that decide by who owns a record, and services that look the caller up again by ID, keep the credential inside its task (desks, reviews, conversations, inquiries, inspections, grant derivation). It ends at once when revoked, expired, its task is done or cancelled, or the agent is disabled; reissuing replaces the old one; the secret is stored only as a hash and one task's secret is no use for another. The state API accepts it. Limits stated: within the task's project it is no narrower than the agent; credentials are not ended actively when a task completes; the configuration own-layer refusal has no test. Reviewed and approved by an AI review session (Claude Opus) after two rounds; six-cell CI green.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "C01",
@@ -2255,7 +2284,8 @@
         "H11",
         "R03",
         "T03",
-        "A07b"
+        "A07b",
+        "A07c"
       ],
       "deliverable": "Browser settings views over the same configuration service as chat and API for providers, routes, local inference endpoints, difficulty profiles, agents and teams, approval policy, API access, operations, P/PC, MCP connections and secrets; later cards add their own areas to these views (portability-and-configuration 43-63, 89-92; README 15, 74)",
       "acceptance_and_verification": "A fresh install is configured entirely through the UI with no source edits and no target-repository files; UI and chat edits yield the same durable revision; editable, inherited and locked values are shown with their source; secrets are entered write-only; invalid values are rejected with path-addressed errors; compatibility and migration status shows affected agents and operations; settings persist across restart on macOS, Linux and Windows; the views show the sandbox mechanism each host uses and flag a weaker boundary (macOS Seatbelt is process-level with weaker limits than Linux) wherever the owner chooses or reviews where work runs (G01 decision 2026-10-21); an approval-load view: owner decisions per day, how long asks wait, and the share decided by standing rule, agent review and owner, with every pending ask and its age; first-run setup explains the derived profile in plain words, recommends it for testing and development work, and asks whether to switch from the strict profile a new installation starts in; the same question is asked in chat setup for an installation with no browser UI, the answer is recorded and either profile can be chosen later; first run applies the configuration's approvals.preset when no approval policy exists yet (a private profile may say derived), before it asks the setup question",

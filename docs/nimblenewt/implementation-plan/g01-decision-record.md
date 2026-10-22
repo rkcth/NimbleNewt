@@ -101,3 +101,10 @@ A requirement-by-requirement audit of the product documents against the task car
 - **Second harness in the first release:** recommended no (Pi only, with the capability declaration and refusal kept).
 - **Retention defaults, backup deletion, recovery objectives; notification delivery; meeting quorum and seconding; amendments, points of order and sealed positions; agents building candidate releases of NimbleNewt itself; simulation mode; default cleanup deadline; model thinking in replay (recommended: not shown, as the documents say); supported filesystems and Linux distributions; first-release MVP selection:** see [the audit record](documentation-audit-2026-10-21.md), section 3; each needs an owner answer before its card starts.
 
+
+## Owner answers, 2026-10-22
+
+- **Profiles confirmed.** New installations start strict; first-run setup explains the derived profile and asks whether to switch; only the owner's own installation starts derived (private configuration); the derived starter preset leans toward asking less.
+- **Strict asks about switching.** On a strict installation, after every third approval the owner gives, the system asks once whether to move to the derived profile, with a plain-words preview of what would change. Never automatic; "not now" is not asked again until three further approvals. New card **A07c**.
+- **Test cadence.** Each task is checked with its own tests (all four backends where it touches storage), the package-boundary check and an AI review (Claude Opus). The full suite and the full six-cell CI run are done once at the end of a work session (for example after "do ten tasks"), and anything that fails is fixed before the session is closed; a card counts as done in the plan only after a green full run is on record. Pushes still start CI; the session does not stop to wait on it after each task.
+- **Paperclip import.** The owner had another Claude copy import the new cards. This session could not verify it (the Paperclip CLI here has no company or credentials configured, and credentials were not searched for); verification is still open. A07c is not in Paperclip.
