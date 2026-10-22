@@ -4,3 +4,4 @@ export { formatErrors, loadConfig, type LoadResult } from "./load.js";
 export { CONFIG_MIGRATIONS, migrateConfig, type ConfigMigration, type MigrationResult } from "./migrate.js";
 export { Secret, describeConfig, directorySecrets, environmentSecrets, memorySecrets, resolveSecrets, secretReferences, type ResolvedSecrets, type SecretResolver } from "./secrets.js";
 export { validate, type ConfigError, type Schema } from "./schema.js";
+export { SecretStoreError, chooseSecretStore, linuxSecretServiceStore, macosKeychainStore, protectedFileStore, windowsDpapiStore, type SecretStore, type SecretStoreFailure } from "./secret-stores/index.js";

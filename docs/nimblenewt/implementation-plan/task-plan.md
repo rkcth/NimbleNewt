@@ -33,7 +33,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06 |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
 | N05 / AII-255 | L05, L01, L02, L03, L04, L06, H08 |
-| N06 / AII-256 | G05, A01, A02, A03, A04, A05, A06, A07, A07b, A07c, A08, A09, A10, A10b |
+| N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A08, A09, A10, A10b |
 | N07 / AII-257 | C01, C02, C04, C05, C07, C08, C09 |
 | N08 / AII-258 | R01, R02, R03, R04, R05 |
 | N09 / AII-259 | U03, U04, U05, U06, U07, U09, U08, U10, U11 |
@@ -439,7 +439,15 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Parent:** N06 / AII-256.
 - **Blockers:** A01, F03.
 - **Deliverable:** OS-specific constrained worker launch and trusted-host mode.
-- **Acceptance and verification:** Escape fixture denied on each OS; mode visible in audit; trusted-host option requires explicit configured authority; fail closed when the Windows session/client is unavailable; advertise capacity only after launcher health checks; keep supervisor code outside guest-writable staging; provision narrow per-job share ACLs; verify package publisher/version and working directory; qualify VM fallback only if Sandbox cannot meet service lifecycle needs; support explicit owner-opt-in auto-login/lock mode with local credential entry, verified lock gating and clear session-dependent capability; never enable it by default; the Linux launcher uses bubblewrap (G01 decision 2026-10-21) and refuses to advertise capacity when unprivileged user namespaces are unavailable; the sandbox recipe (mounts, network, limits) is fixed at launch and every launch records it as a revision; changing the recipe, wider or narrower, restarts the sandbox with the new recipe (the freeze, settle and checkpoint order around that restart is H12's); nothing durable lives only inside the sandbox (checkout, home and scratch are host-side and survive a sandbox restart); work under a path the agent just lost is quarantined read-only for the owner, never deleted or silently merged; a hard kill is reserved for an emergency stop (G01 decision 2026-10-21); the macOS launcher uses Seatbelt profiles (deny by default, scoped files, controlled network, killable process tree), fails closed with no advertised capacity if the profile cannot be applied, and documents that macOS confinement is process-level, shows denied paths as present but unreadable, and has weaker CPU, memory and process limits than Linux.
+- **Acceptance and verification:** Escape fixture denied on each OS that has a backend (Linux and macOS here; Windows is A03b); mode visible in audit; trusted-host option requires explicit configured authority; advertise capacity only after launcher health checks; the Linux launcher uses bubblewrap (G01 decision 2026-10-21) and refuses to advertise capacity when unprivileged user namespaces are unavailable; the sandbox recipe (mounts, network, limits) is fixed at launch and every launch records it as a revision; changing the recipe, wider or narrower, restarts the sandbox with the new recipe (the freeze, settle and checkpoint order around that restart is H12's); nothing durable lives only inside the sandbox (checkout, home and scratch are host-side and survive a sandbox restart); work under a path the agent just lost is quarantined read-only for the owner, never deleted or silently merged; a hard kill is reserved for an emergency stop (G01 decision 2026-10-21); the macOS launcher uses Seatbelt profiles (deny by default, scoped files, controlled network, killable process tree), fails closed with no advertised capacity if the profile cannot be applied, and documents that macOS confinement is process-level, shows denied paths as present but unreadable, and has weaker CPU, memory and process limits than Linux.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### A03b — Implement the Windows Sandbox launcher
+
+- **Parent:** N06 / AII-256.
+- **Blockers:** A03.
+- **Deliverable:** Windows Sandbox launcher and its session-dependent lifecycle.
+- **Acceptance and verification:** Escape fixture denied on Windows; mode visible in audit; fail closed when the Windows session/client is unavailable; keep supervisor code outside guest-writable staging; provision narrow per-job share ACLs; verify package publisher/version and working directory; qualify VM fallback only if Sandbox cannot meet service lifecycle needs; support explicit owner-opt-in auto-login/lock mode with local credential entry, verified lock gating and clear session-dependent capability; never enable it by default; (split from A03 on 2026-10-22 so the Linux and macOS launcher, the recipe and the quarantine could be finished and relied on; the Windows launcher needs real Windows hardware to qualify).
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### A04 — Implement protected filesystem and Git bridge
@@ -1385,7 +1393,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### Y02 — QA checkpoint 2: isolation, stop and recovery
 
 - **Parent:** N18 / AII-268.
-- **Blockers:** G05, G06, A06, L04, H09.
+- **Blockers:** G05, G06, A06, L04, H09, A03b.
 - **Deliverable:** Cross-platform QA of the sandbox and protected filesystem, human pre-commit gate, pause, stop, release and checked resume, and remote reconnect with primary epochs, before the cards that run agent work on them (P02, P03) are built.
 - **Acceptance and verification:** Scenario set run on Linux, macOS and Windows with real sandbox launchers: escape and path-trick attempts refused, pause and stop settle with no unfinished tool action, resume invalidates stale evidence, a worker lost mid-task is fenced and reconciled with no duplicate protected effect, Windows implementation qualified on real Windows; evidence recorded per platform. Each checkpoint has two parts: an automated part (an integration scenario set run by the QA workflow on Linux, macOS and Windows with crash and restart kills, extended from scripts/qa.mjs) that must pass, and a real-hardware run on the owner's Mac, Windows and Linux machines that the owner runs and signs off. Failures are raised as typed blockers and fixed before the layers above are built; the owner may waive the real-hardware part for a checkpoint explicitly, and the waiver is recorded. Not a substitute for the final D04.; the checkpoint reports owner decisions per day, counted from the audit log (commands whose actor is the owner, per day), and any stall that reached unrelated work.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

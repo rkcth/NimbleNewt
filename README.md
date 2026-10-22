@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **47 of 156 tasks implemented**, 2 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **47 of 157 tasks implemented**, 2 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -201,6 +201,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 22
 
+- [ ] **A03b** Implement the Windows Sandbox launcher _(needs A03)_
 - [ ] **A04** Implement protected filesystem and Git bridge _(needs A03, S05)_
 - [x] **A05** Implement exact-operation review admission _(needs A02, S05, F07)_
 - [x] **C02** Implement bounded source-backed retrieval _(needs C01)_
@@ -313,7 +314,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **P06** Implement project and agent retirement and archival _(needs P01, H11, L03, K06)_
 - [ ] **U08** Implement settings and administration views _(needs U07, U10, A07, F09, H11, R03, T03, A07b, A07c)_
 - [ ] **X09** Implement external release-test job protocol _(needs H07, H09, F03, S06)_
-- [ ] **Y02** QA checkpoint 2: isolation, stop and recovery _(needs G05, G06, A06, L04, H09)_
+- [ ] **Y02** QA checkpoint 2: isolation, stop and recovery _(needs G05, G06, A06, L04, H09, A03b)_
 
 ### Phase 32
 

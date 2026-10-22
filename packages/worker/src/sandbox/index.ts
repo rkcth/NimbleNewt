@@ -4,3 +4,4 @@ export type { BackendHealth, GuestView, SandboxBackend, SpawnPlan } from "./back
 export { seatbeltBackend, profileFor, type SeatbeltOptions } from "./seatbelt.js";
 export { bubblewrapBackend, type BubblewrapOptions } from "./linux.js";
 export { SandboxLauncher, type Capacity, type LaunchRecord, type LaunchRequest, type LauncherConfig, type RunResult, type SandboxRun } from "./launcher.js";
+export { listQuarantined, quarantine, readQuarantined, type QuarantineHooks, type QuarantineRecord } from "./quarantine.js";
