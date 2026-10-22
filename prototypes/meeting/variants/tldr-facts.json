@@ -1,0 +1,19 @@
+{
+  "name": "tldr-facts",
+  "firstRound": "open",
+  "rounds": 2,
+  "transcriptMode": "tldr",
+  "fullTail": 1,
+  "promptOrder": "shared-first",
+  "chairQuestions": 2,
+  "deskCheck": true,
+  "tokenLimit": 220,
+  "objectionCheck": true,
+  "maxObjectionReruns": 2,
+  "parallel": 4,
+  "tldrStyle": "facts",
+  "summaryWords": 60,
+  "summarizeAbove": 70,
+  "chairNotes": true,
+  "chairReminders": 2
+}

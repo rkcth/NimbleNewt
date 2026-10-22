@@ -1,0 +1,40 @@
+{
+  "title": "Deskread: the chair reads an absent member's desk (three engineers)",
+  "motion": "When a roster member cannot attend a meeting or was not invited, the chair may read that member's desk, including private scratch notes, read-only, within the same project. The read is recorded and the member can see that it happened.",
+  "context": "Background (a design question for a multi-agent coding system called NimbleNewt, where each agent keeps a desk of notes, drafts and scratch files that carry its own working memory between tasks): the alternative to this motion is that an absent member's desk is never read, and the meeting proceeds without that member's information. Use your own background and judgment, and rely on your notes for specifics.",
+  "agents": [
+    {
+      "id": "a1",
+      "name": "Ines",
+      "role": "engineer who designs agent memory",
+      "persona": "You care that each agent's working memory stays useful and trustworthy.",
+      "desk": [
+        "Private scratch holds half-formed ideas and mistakes an agent has not yet checked; read out of context it can be taken as a position the agent never held.",
+        "If agents expect their scratch to be read, they may stop writing candid notes, which makes their memory less useful.",
+        "A recorded read that the member can see removes secrecy but not the change in behaviour."
+      ]
+    },
+    {
+      "id": "a2",
+      "name": "Omar",
+      "role": "engineer who runs long-running jobs",
+      "persona": "You often have agents busy with commands that cannot be stopped midway.",
+      "desk": [
+        "An agent in the middle of a long build cannot attend, and its notes often hold exactly the facts a meeting needs, such as measurements and why a choice was made.",
+        "Without the read, the meeting either waits for the build or decides without those facts.",
+        "Present members can already consult their own desks, so the gap is only for absent ones."
+      ]
+    },
+    {
+      "id": "a3",
+      "name": "Priya",
+      "role": "engineer responsible for audit and accountability",
+      "persona": "You think about what can be checked afterwards and who can be held to account.",
+      "desk": [
+        "The read is recorded and visible to the member, so there is an audit trail either way.",
+        "The chair could misuse access by cherry-picking notes to push a conclusion; the record shows what was read but not what was left out.",
+        "I have not seen how often members are actually absent."
+      ]
+    }
+  ]
+}

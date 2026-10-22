@@ -1,0 +1,1 @@
+{ "name": "agent-first-order", "firstRound": "open", "rounds": 2, "transcriptMode": "full", "promptOrder": "agent-first", "chairQuestions": 2, "deskCheck": true, "tokenLimit": 220, "objectionCheck": true, "maxObjectionReruns": 2, "parallel": 4 }

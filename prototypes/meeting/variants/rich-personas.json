@@ -1,0 +1,15 @@
+{
+  "name": "rich-personas",
+  "firstRound": "open",
+  "rounds": 2,
+  "transcriptMode": "full",
+  "promptOrder": "shared-first",
+  "chairQuestions": 2,
+  "deskCheck": true,
+  "tokenLimit": 220,
+  "objectionCheck": true,
+  "maxObjectionReruns": 2,
+  "parallel": 4,
+  "richPersonas": true,
+  "deskFromStart": true
+}

@@ -1,0 +1,1 @@
+{ "name": "tldr-chain", "firstRound": "open", "rounds": 2, "transcriptMode": "tldr", "fullTail": 1, "promptOrder": "shared-first", "chairQuestions": 2, "deskCheck": true, "tokenLimit": 220, "objectionCheck": true, "maxObjectionReruns": 2, "parallel": 4 }

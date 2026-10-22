@@ -13,3 +13,6 @@ dist/
 test.log
 qa-output/
 pg-versions-output/
+
+# meeting prototype run output (transcripts and logs)
+prototypes/meeting/runs/

@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **63 of 168 tasks implemented**, 2 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **63 of 171 tasks implemented**, 2 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -248,6 +248,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [x] **A07c** Implement the strict-to-derived profile suggestion _(needs A07, A07b)_
 - [x] **A08b** Enforce per-agent resource limits in the sandbox _(needs A08, A03)_
 - [x] **A10b** Implement per-task credentials for agents serving several projects _(needs A10, A01)_
+- [ ] **C01b** Implement the shared working-notes tier _(needs C01, A02, A10)_
 - [ ] **C06** Implement inference-cache adapters with per-backend tuning _(needs C05)_
 - [ ] **C07b** Wire context budgets into dispatch and bound compaction _(needs C07, C04, R01)_
 - [ ] **H13** Implement event source adapters and watchers _(needs H06, H01, R02)_
@@ -284,13 +285,14 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 ### Phase 29
 
 - [ ] **H02** Implement subordinate remote work/artifact transport _(needs H01, S06, A03, H12)_
-- [ ] **M05** Implement meeting facilitation and owner control _(needs M04, M02, U03, M00, A10)_
+- [ ] **M05** Implement meeting facilitation and owner control _(needs M04, M02, U03, M00, A10, C01b)_
 - [ ] **T06** Implement the protected agent tool bridge and execution service _(needs H12, T01)_
 
 ### Phase 30
 
 - [ ] **C09** Capture activity records and decision explanations _(needs C04, C08, T06, S05)_
 - [ ] **H07** Implement idle host polling and capability placement _(needs H02, H03)_
+- [ ] **M05b** Prove meeting desk reads are read-only and recorded per file _(needs M05, C01b)_
 - [ ] **M06** Implement meeting procedure, roster, quorum and ballots _(needs M02, A02, C08, T06, M00)_
 - [ ] **T07** Implement durable job records and job control _(needs T06, S05)_
 - [ ] **T09** Implement command namespaces and alias dispatch _(needs T06, H11, U03)_
@@ -361,7 +363,6 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **Q03** Implement documentation impact and release evidence links _(needs Q02, C02)_
 - [ ] **Q04** Implement defect tracking, review cycles and overrides _(needs Q02, C08)_
 - [ ] **X01** Run integrated crash and handoff campaign _(needs S09, V02, H02, Q02, K03, G04, H12, T07, K06, L06)_
-- [ ] **X02** Run policy, isolation and adversarial campaign _(needs A06, U04, T05, Q02, G05, A07, A09, A10, T08, T09, P05, H05b, A10b)_
 - [ ] **Y03** QA checkpoint 3: first complete chat-driven workflow _(needs U07, M02, P02, P03, Q02, K03)_
 
 ### Phase 39
@@ -390,32 +391,37 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 44
 
+- [ ] **B06** Implement optional agent work on NimbleNewt itself (off by default, asked ahead, owner-approved launch) _(needs B05, A10b, A08, K02, C09, H05)_
 - [ ] **X03** Run chat-only complete product workflow _(needs U05, U06, U07, M02, P03, Q03, B05, K03, C06, L05, G09, C07, U09, U11, U12, U13, M03, M05, M06, R03, R04, P04, P06, P07, Q04, U08, H13, L06)_
 
 ### Phase 45
 
 - [ ] **D01** Finish installation and chat-first user guidance _(needs X03, Q03, U11b)_
+- [ ] **X02** Run policy, isolation and adversarial campaign _(needs A06, U04, T05, Q02, G05, A07, A09, A10, T08, T09, P05, H05b, A10b, M05b, B06)_
+
+### Phase 46
+
 - [ ] **X04** Qualify fresh macOS release candidate _(needs X01, X02, X03, X09, F03)_
 - [ ] **X05** Qualify fresh Linux release candidate _(needs X01, X02, X03, X09, F03)_
 - [ ] **X06** Qualify fresh Windows release candidate _(needs X01, X02, X03, X09, F03, G06)_
 
-### Phase 46
+### Phase 47
 
 - [ ] **X07** Measure load, inquiry latency and budget behavior _(needs X04, X05, X06)_
 
-### Phase 47
+### Phase 48
 
 - [ ] **X08** Run representative soak and independent release audit _(needs X07, X10, F04e, G10, K07, G11)_
 
-### Phase 48
+### Phase 49
 
 - [ ] **D03** Approve release readiness and publication decision _(needs X08, D01, D02, F04h)_
 
-### Phase 49
+### Phase 50
 
 - [ ] **D04** Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
 
-### Phase 50
+### Phase 51
 
 - [ ] **D05** Close the plan: every optional item built or deferred by the owner _(needs D04, K06b, K01d, P02b)_
 _Note: F01 started before its prerequisite planning records G01 and G07 were formally closed; G01 is still not fully closed._

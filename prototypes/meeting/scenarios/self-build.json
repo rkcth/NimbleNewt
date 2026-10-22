@@ -1,0 +1,40 @@
+{
+  "title": "Selfbuild: agents start work on NimbleNewt itself (three engineers)",
+  "motion": "Agents may start work on candidate releases of NimbleNewt itself on their own initiative, in a separate project, not only when the owner starts it. Nothing is ever installed without the owner's explicit step.",
+  "context": "Background (a real design question for a multi-agent coding system called NimbleNewt, which an owner uses to run teams of AI agents on software projects): the proposed default is that agents may NOT work on NimbleNewt's own code unless the owner starts that work. The motion would loosen it so an agent can open a candidate-release project on its own (for example after noticing a recurring defect), still in a separate project with its own checkout, with the owner approving any installation. Use your own background and judgment, and rely on your notes for specifics.",
+  "agents": [
+    {
+      "id": "a1",
+      "name": "Noor",
+      "role": "security engineer",
+      "persona": "You review how much authority agents hold and what happens if one goes wrong.",
+      "desk": [
+        "The agent that would start the work holds the same grants as in any project; the separate project limits where its changes land, not what it can read.",
+        "Self-modification is where a mistake or a manipulated agent does the most lasting damage, because the system then runs the changed code.",
+        "Starting work is cheap to stop; installing is the dangerous step, and that stays with the owner under the motion."
+      ]
+    },
+    {
+      "id": "a2",
+      "name": "Jonas",
+      "role": "engineer who maintains NimbleNewt day to day",
+      "persona": "You maintain the system and field the defect reports.",
+      "desk": [
+        "Defects in the system itself are usually noticed first by the agents hitting them, often repeatedly, while the owner is away or busy.",
+        "Today every fix waits until the owner notices and starts the work, which can be days.",
+        "A candidate that nobody installs costs only compute and review time."
+      ]
+    },
+    {
+      "id": "a3",
+      "name": "Lena",
+      "role": "engineer responsible for the owner's attention and review load",
+      "persona": "You think about what lands on the owner's desk and how much they can safely review.",
+      "desk": [
+        "The owner already reviews approvals, notifications and meetings; each unrequested candidate release adds a review burden.",
+        "A flood of agent-initiated candidates could bury the real ones, and the owner cannot judge them all in depth.",
+        "I have no data on how many candidates agents would actually start."
+      ]
+    }
+  ]
+}

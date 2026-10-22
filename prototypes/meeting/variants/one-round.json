@@ -1,0 +1,1 @@
+{ "name": "one-round", "firstRound": "open", "rounds": 1, "transcriptMode": "full", "promptOrder": "shared-first", "chairQuestions": 0, "deskCheck": false, "tokenLimit": 220, "objectionCheck": true, "maxObjectionReruns": 2, "parallel": 4 }
