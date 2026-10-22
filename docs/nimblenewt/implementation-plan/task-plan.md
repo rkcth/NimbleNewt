@@ -477,6 +477,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### A06 — Implement human pre-commit gate and attribution
 
 - **Parent:** N06 / AII-256.
+- **Status:** implemented; commits `9004a56`; CI runs 39726115373; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Human pre-commit gate: a commit permit bound to the staged tree, base and the file list; actor provenance and trailers the agent cannot forge; review-before-commit and external-review acceptance; integration recorded. Reviewed and approved by an AI review session (Claude Opus); full six-cell CI green.
 - **Blockers:** A04, A05.
 - **Deliverable:** Staged-tree/base review and actor provenance.
 - **Acceptance and verification:** Reviewed tree commits; changed staged content/base requires new review; developer, agent, executor and reviewer identities retained; attribution also records grant source, commit identity and later integration history; externally verified review references are accepted; no forged authorship; a reviewer who commits to the version under review is recorded as a contributor automatically (H05 contributors are self-reported until then).
@@ -515,6 +517,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### A08 — Implement per-agent environments
 
 - **Parent:** N06 / AII-256.
+- **Status:** implemented; commits `9004a56`; CI runs 39726115373; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Per-agent environments: numbered manifest revisions, activation integrity, pins, rollback, resource-limit validation and home authorization. The limits themselves are enforced by A08b. Reviewed and approved by an AI review session (Claude Opus); full six-cell CI green.
 - **Blockers:** A03, T01, H11.
 - **Deliverable:** Common maintained base plus per-agent persistent home, configuration, package area and skill library; environment manifest (installed versions, approved capabilities, configuration revisions) whose revisions are referenced by attempts and checkpoints, with package artifacts or reproducible inputs retained; per-agent CPU, memory, disk and process limits (README 62, 146, 339-349, 637; pitfalls-and-safeguards 87).
 - **Acceptance and verification:** Changing agent A's environment leaves B's tools, configuration and files unchanged; each attempt and checkpoint records the environment revision it ran with and resumes on it after restart; rollback to a prior revision works; another agent's home is denied; protected extensions load only from controller-owned read-only artifacts and the loader configuration is not agent-writable; reserved-tool integrity is verified before an environment is accepted and activation stops on failure.
@@ -523,6 +527,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### A08b — Enforce per-agent resource limits in the sandbox
 
 - **Parent:** N06 / AII-256.
+- **Status:** implemented; commits `8c2f91c`, `632888f`, `4bf38fc`; CI runs 39726115373; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Per-agent resource limits in the sandbox: memory, process count and CPU through a user systemd scope with address-space and affinity fallbacks, disk as a per-file cap, headroom reserved for the controller, and every launch records per limit whether it was enforced in full, in part or not at all. The first CI run found that older systemd versions do not expand dollar signs in a scope's command line; the capability probe now finds out by trying (632888f). The same run's Windows Node 24 cell exceeded the 30-minute job limit and a timing-dependent long-poll test; the limit is now 50 minutes and the test no longer depends on runner speed (4bf38fc). Reviewed and approved by an AI review session (Claude Opus); full six-cell CI green. Windows and macOS enforcement are not built and are reported as not enforced.
 - **Blockers:** A08, A03.
 - **Deliverable:** CPU, memory, disk and process-count limits carried into the sandbox recipe and enforced per OS.
 - **Acceptance and verification:** CPU, memory, disk and process-count limit fixtures enforced with headroom reserved for the controller; each launch records which limits were enforced and by what, and a limit the host cannot enforce is reported, never silently skipped; (split from A08 on 2026-10-22: A08 holds the environment manifests, revisions, pins, rollback, integrity checks and limit validation).
@@ -579,6 +585,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### C03 — Capture read/write/search dependency manifests
 
 - **Parent:** N04 / AII-254.
+- **Status:** implemented; commits `f3c3d51`; CI runs 39726115373; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Dependency manifests per task: file, directory, search, record, decision, tool-version, environment, external, MCP resource and negative lookups, judged only for readers who may read what they name; unobserved entries are never reported unchanged; entries recorded for unreadable records are marked unverified. Reviewed and approved by an AI review session (Claude Opus); full six-cell CI green.
 - **Blockers:** S06, A04, C01.
 - **Deliverable:** Resource identities, hashes, query scopes and event cursors.
 - **Acceptance and verification:** Detect changed/deleted/non-Git inputs and new directory members; unknown coverage and expired cursor remain explicit; dependency kinds include decisions, shared records, tool and environment versions, external resources and negative lookups; MCP resource reads are recorded with server, URI, hash or ETag and observation time; external dependencies use conditional reads or authoritative queries, otherwise freshness uncertainty is recorded.
@@ -587,6 +595,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### C04 — Implement safe-boundary continuation capture
 
 - **Parent:** N07 / AII-257.
+- **Status:** implemented; commits `972884e`; CI runs 39726115373; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Safe-boundary continuation capture: checkpoint reference, artifacts, decisions, pending effects, budget, next step and manifest; no secrets; complete only when a host verified durability; resume keeps the conversation identity across restart and model change; scratch read for recovery only through InspectionService.recoveryRead. Reviewed and approved by an AI review session (Claude Opus); full six-cell CI green.
 - **Blockers:** C02, C03, F06.
 - **Deliverable:** Checkpoint manifest and structured continuation builder; the manifest also holds summary lineage, source ranges, compression state, branch relationships, message cursor, routing and environment revisions and adapter metadata, with credentials only as references.
 - **Acceptance and verification:** Timeout preserves artifacts, decisions, pending effects, budget and next step; non-checkpointable tool exposure explicitly recorded; resume after restart and after a model change continues the same conversation identity; a disk-full or failed durability check never yields a checkpoint reported complete; no secret appears in a checkpoint; the recovery service reads scratch and recovery records only through InspectionService.recoveryRead, which leaves a record the agent can see.
@@ -611,6 +621,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### C07 — Implement context budgets, the startup builder and stall-proof helpers
 
 - **Parent:** N07 / AII-257.
+- **Status:** implemented; commits `70edf25`; CI runs 39726115373; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Context budgets and stall-proof helpers: per-model budgets, the startup builder with cut-and-archive and a blocker, resume guard, tool-output limiting with paging, hand-off from durable facts, context_overflow classification and inquiry-branch planning. The Pi-side and dispatch wiring is the new card C07b. Reviewed and approved by an AI review session (Claude Opus); full six-cell CI green.
 - **Blockers:** C04, R01.
 - **Deliverable:** Per-model context budgets, a single startup-context builder with cut-and-archive, a resume guard, tool-output caps with paging, hand-off from durable facts, overflow as its own failure class, and budget-aware inquiry branch planning (requirements 1, 2, 3, 5, 6, 7 and 8 and the budget numbers of context-window-stalls.md; split on 2026-10-22: the Pi-side and dispatch wiring is C07b).
 - **Acceptance and verification:** Using a small context window (131,072 tokens): a first prompt over 25% of the window is cut by the builder (newest items, human words, permissions and goal kept whole, the cut archived with a matching digest) or refused with a blocker, never sent, and the fixed part of the first call counts; an attempt over 60% of the window is not resumed but restarted from the continuation record; a tool result larger than the per-tool limit (about 16,000 characters on that window, with images and other non-text results counted) is truncated with the remainder kept and paged; a hand-off is written from the ledger, artifacts, checkpoint and last state with credentials removed; context failures are classified as context_overflow; an inquiry on a task over its model's budget uses the compaction boundary plus retrieval and says so; shares and characters per token are configurable and validated.
@@ -747,6 +759,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H06 — Implement event subscriptions and gap recovery
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `0df5bc6`; CI runs 39726115373; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Event subscriptions with gap recovery: numbered per-stream events, cursors with batching and key collapsing, reconcile on missing, skipped or expired events, no wake through a manual hold or cooldown, causation chains with loop suppression, backpressure from subscribers the controller relies on. Limits stated: no idle expiry of abandoned critical watchers. Reviewed and approved by an AI review session (Claude Opus); full six-cell CI green.
 - **Blockers:** S07, C03.
 - **Deliverable:** Scoped subscription cursors, dedup and batching.
 - **Acceptance and verification:** Missing/duplicate/out-of-order events and retention expiry trigger reconciliation; incoming event never lifts manual hold; per-subscription cooldowns; the causation chain is recorded and self-triggered loops suppressed; producers are slowed when queues are full.
@@ -823,6 +837,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### R02 — Implement fallback and cumulative budget accounting
 
 - **Parent:** N08 / AII-258.
+- **Status:** implemented; commits `c463aff`; CI runs 39726115373; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Provider failure classification, bounded fallback and task budgets: credit, rate-limit and outage failures choose the next eligible route (four attempts at most), hopeless failures are not retried elsewhere, exhausted routes are a visible wait, an uncertain effect holds the call and confirmed effects are never repeated, spend is summed per task and a task over its budget does not begin a call. Reviewed and approved by an AI review session (Claude Opus); full six-cell CI green.
 - **Blockers:** R01, S05, C04.
 - **Deliverable:** Provider failure classification and bounded fallback.
 - **Acceptance and verification:** Credit/rate/outage failures choose eligible route; exhausted routes become visible wait; no repeated external effect on fallback.
@@ -1059,6 +1075,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### T03 — Implement approved MCP client connections
 
 - **Parent:** N13 / AII-263.
+- **Status:** implemented; commits `f3c3d51`; CI runs 39726115373; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Approved MCP client connections: owner registration with a pinned protocol revision, launch plan with nothing inherited or a TLS address with a scoped credential reference, catalog snapshots with changed capabilities held until accepted, pinned and recorded calls. Limits stated: the form of a host name is checked, DNS rebinding is refused at connect time by the worker (clause on H12). Reviewed and approved by an AI review session (Claude Opus); full six-cell CI green.
 - **Blockers:** T01, A01, S05, F09.
 - **Deliverable:** Local/remote MCP registration, credential refs and catalog snapshots; connection record (protocol and transport version, trusted administrator, audience, scope, allowed capabilities) covering tools, resources and prompts; supported MCP revision, transport and SDK pin list.
 - **Acceptance and verification:** Unapproved server denied; catalog changes rechecked; effect uncertainty and prompt injection fixtures handled; local servers launch through the A03 launcher with only granted environment variables and no inherited secrets and remote servers need TLS and scoped credentials; each call is pinned to server identity, protocol version and catalogue revision or records observation time and uncertainty, checks the lifecycle gate first and appears in task-linked activity with server, capability, outcome and uncertainty for permitted readers; resource reads enter C03 manifests; protected tools work with no MCP server.
@@ -1067,6 +1085,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### T04 — Implement controller-backed MCP state adapter
 
 - **Parent:** N07a / AII-519.
+- **Status:** implemented; commits `0df5bc6`; CI runs 39726115373; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The state API through MCP: JSON-RPC adapter with tools generated from the operation table, resources for projects and tasks, the same authentication, scoping and idempotency as every other client. No transport framing yet. Reviewed and approved by an AI review session (Claude Opus); full six-cell CI green.
 - **Blockers:** U01, T03.
 - **Deliverable:** Scoped resources and revisioned state operations.
 - **Acceptance and verification:** Same admission and privacy as native API; reconnect cannot duplicate state mutation; unsupported protocol fails clearly.

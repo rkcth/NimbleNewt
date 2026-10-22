@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **53 of 159 tasks implemented**, 2 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **63 of 159 tasks implemented**, 2 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -212,32 +212,32 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 23
 
-- [ ] **A06** Implement human pre-commit gate and attribution _(needs A04, A05)_
+- [x] **A06** Implement human pre-commit gate and attribution _(needs A04, A05)_
 - [x] **A07** Implement action classes, default policy and effective-policy view _(needs A02, A05, F02)_
-- [ ] **C03** Capture read/write/search dependency manifests _(needs S06, A04, C01)_
+- [x] **C03** Capture read/write/search dependency manifests _(needs S06, A04, C01)_
 - [ ] **G05** Prove selected isolation boundary per OS _(needs A03, A04)_
 - [x] **H04** Implement durable inquiries and correlation _(needs S04, C01, H03)_
-- [ ] **T03** Implement approved MCP client connections _(needs T01, A01, S05, F09)_
+- [x] **T03** Implement approved MCP client connections _(needs T01, A01, S05, F09)_
 - [x] **U01** Implement versioned state query/write API _(needs S01, A01, C02)_
 
 ### Phase 24
 
-- [ ] **C04** Implement safe-boundary continuation capture _(needs C02, C03, F06)_
+- [x] **C04** Implement safe-boundary continuation capture _(needs C02, C03, F06)_
 - [ ] **G06** Qualify actual Windows implementation _(needs G02, G03, G05, F03)_
 - [x] **H05** Implement review routing and wait-cycle prevention _(needs H04, A05)_
-- [ ] **H06** Implement event subscriptions and gap recovery _(needs S07, C03)_
+- [x] **H06** Implement event subscriptions and gap recovery _(needs S07, C03)_
 - [x] **H11** Implement agent, team and role records _(needs A02, C01, R01, U01)_
-- [ ] **T04** Implement controller-backed MCP state adapter _(needs U01, T03)_
+- [x] **T04** Implement controller-backed MCP state adapter _(needs U01, T03)_
 - [x] **U02** Implement durable conversation service (threads, messages, cursors, delivery states) _(needs U01, H04)_
 
 ### Phase 25
 
 - [x] **A07b** Implement standing-rule proposals and approval-load measurement _(needs A07, A05, H05)_
-- [ ] **A08** Implement per-agent environments _(needs A03, T01, H11)_
+- [x] **A08** Implement per-agent environments _(needs A03, T01, H11)_
 - [x] **A10** Implement private-record inspection and cross-project information boundaries _(needs C02, A02, H11)_
 - [ ] **C05** Implement retained context branches and selective updates _(needs C04, H04)_
-- [ ] **C07** Implement context budgets, the startup builder and stall-proof helpers _(needs C04, R01)_
-- [ ] **R02** Implement fallback and cumulative budget accounting _(needs R01, S05, C04)_
+- [x] **C07** Implement context budgets, the startup builder and stall-proof helpers _(needs C04, R01)_
+- [x] **R02** Implement fallback and cumulative budget accounting _(needs R01, S05, C04)_
 - [x] **U02b** Implement the conversation transport and remote exposure _(needs U02)_
 - [x] **U10** Implement layered configuration, effective values and change history _(needs F02, R01, U01, H11)_
 - [ ] **V01** Implement health and progress stall detection _(needs H01, S08, C04, H11)_
@@ -245,7 +245,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 ### Phase 26
 
 - [x] **A07c** Implement the strict-to-derived profile suggestion _(needs A07, A07b)_
-- [ ] **A08b** Enforce per-agent resource limits in the sandbox _(needs A08, A03)_
+- [x] **A08b** Enforce per-agent resource limits in the sandbox _(needs A08, A03)_
 - [x] **A10b** Implement per-task credentials for agents serving several projects _(needs A10, A01)_
 - [ ] **C06** Implement optional inference-cache capability adapters _(needs C05)_
 - [ ] **C07b** Wire context budgets into dispatch and bound compaction _(needs C07, C04, R01)_
