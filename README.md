@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **63 of 165 tasks implemented**, 2 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **63 of 166 tasks implemented**, 2 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -324,6 +324,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **K06b** Implement tiered retention (optional, after the first release) _(needs K06, C02)_
 - [ ] **P06** Implement project and agent retirement and archival _(needs P01, H11, L03, K06)_
 - [ ] **U08** Implement settings and administration views _(needs U07, U10, A07, F09, H11, R03, T03, A07b, A07c)_
+- [ ] **U11b** Implement notification levels, the Needs you view and escalation to Urgent _(needs U11, A07b, H05, M03, H12, K01, H01, H09, A08)_
 - [ ] **X09** Implement external release-test job protocol _(needs H07, H09, F03, S06)_
 - [ ] **Y02** QA checkpoint 2: isolation, stop and recovery _(needs G05, G06, A06, L04, H09, A03b, A08b)_
 
@@ -388,7 +389,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 44
 
-- [ ] **D01** Finish installation and chat-first user guidance _(needs X03, Q03)_
+- [ ] **D01** Finish installation and chat-first user guidance _(needs X03, Q03, U11b)_
 - [ ] **X04** Qualify fresh macOS release candidate _(needs X01, X02, X03, X09, F03)_
 - [ ] **X05** Qualify fresh Linux release candidate _(needs X01, X02, X03, X09, F03)_
 - [ ] **X06** Qualify fresh Windows release candidate _(needs X01, X02, X03, X09, F03, G06)_
