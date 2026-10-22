@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { resolveSecrets, secretReferences } from "../secrets.js";
 import { validateConfig } from "../config.js";
+import type { Ran } from "./store.js";
 import { MAX_SECRET_BYTES, SecretStoreError, chooseSecretStore, linuxSecretServiceStore, macosKeychainStore, protectedFileStore, windowsDpapiStore, type SecretStore } from "./index.js";
 
 const VALUE = "p@ss \"quoted\" 'single' $HOME `tick` \\back ünïcode ✓\nsecond line";
@@ -124,6 +125,31 @@ contract("macOS Keychain", async () => {
   return { store: macosKeychainStore({ keychain, service: "nimblenewt-test" }), done: async () => { try { execFileSync("security", ["delete-keychain", keychain]); } catch { /* already gone */ } await rm(dir, { recursive: true, force: true }); } };
 }, mac);
 
+test("macOS Keychain: a damaged or mixed entry is refused by name and never returned as a secret", { skip: mac }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "nn-kc-"));
+  const keychain = join(dir, "damaged.keychain-db");
+  try {
+    execFileSync("security", ["create-keychain", "-p", "pw", keychain]);
+    execFileSync("security", ["unlock-keychain", "-p", "pw", keychain]);
+    const store = macosKeychainStore({ keychain, service: "nimblenewt-test" });
+    const value = "x".repeat(1500);
+    await store.set("dmg.one", value);
+    assert.equal(await store.resolve("dmg.one"), value);
+    const header = execFileSync("security", ["find-generic-password", "-s", "nimblenewt-test", "-a", "dmg.one", "-w", keychain], { encoding: "utf8" }).trim();
+    const generation = header.split(":")[1]!;
+    // One part replaced by something else, as a half-finished or interleaved write would leave it.
+    execFileSync("security", ["add-generic-password", "-U", "-s", "nimblenewt-test", "-a", `dmg.one~${generation}~1`, "-w", "QUJD", keychain]);
+    await assert.rejects(() => store.resolve("dmg.one"), (e) => e instanceof SecretStoreError && e.reference === "dmg.one" && /damaged/.test(e.message));
+    // A header in another format is refused too, and a rewrite repairs the entry.
+    execFileSync("security", ["add-generic-password", "-U", "-s", "nimblenewt-test", "-a", "dmg.one", "-w", "junk", keychain]);
+    await assert.rejects(() => store.resolve("dmg.one"), (e) => e instanceof SecretStoreError && /damaged/.test(e.message));
+    await store.set("dmg.one", "repaired");
+    assert.equal(await store.resolve("dmg.one"), "repaired");
+    assert.equal(await store.remove("dmg.one"), true);
+    assert.equal(await store.resolve("dmg.one"), undefined);
+  } finally { try { execFileSync("security", ["delete-keychain", keychain]); } catch { /* gone */ } await rm(dir, { recursive: true, force: true }); }
+});
+
 test("macOS Keychain: a locked keychain is reported as locked, by name, with no value", { skip: mac }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "nn-kc-"));
   const keychain = join(dir, "locked.keychain-db");
@@ -135,6 +161,93 @@ test("macOS Keychain: a locked keychain is reported as locked, by name, with no 
     execFileSync("security", ["lock-keychain", keychain]);
     await assert.rejects(() => store.resolve("locked.one"), (e) => e instanceof SecretStoreError && (e.code === "locked" || e.code === "unavailable") /* hosted runners differ in how a locked keychain answers */ && e.reference === "locked.one" && !e.message.includes("hidden-value"));
   } finally { try { execFileSync("security", ["delete-keychain", keychain]); } catch { /* gone */ } await rm(dir, { recursive: true, force: true }); }
+});
+
+
+// ---- the Keychain logic, against an in-memory stand-in for `security`, on every platform ------------------------------------------------
+/** Understands the few `security` commands the store uses. `failLine` makes the k-th line of a `-i` session fail (the session carries on, as the real tool does); `quiet` makes it fail without saying so. */
+function fakeSecurity(options: { failLine?: number; falseAlarm?: boolean } = {}) {
+  const items = new Map<string, string>();
+  const words = (line: string): string[] => [...line.matchAll(/"([^"]*)"/g)].map((m) => m[1]!);
+  const ok = (stdout = ""): Ran => ({ code: 0, stdout, stderr: "", timedOut: false, missing: false });
+  const arg = (args: readonly string[], flag: string): string => args[args.indexOf(flag) + 1]!;
+  let session = 0;
+  const run = async (_program: string, args: readonly string[], input: string | undefined): Promise<Ran> => {
+    if (args[0] === "find-generic-password") { const v = items.get(arg(args, "-a")); return v === undefined ? { code: 44, stdout: "", stderr: "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.", timedOut: false, missing: false } : ok(`${v}\n`); }
+    if (args[0] === "delete-generic-password") return items.delete(arg(args, "-a")) ? ok() : { code: 44, stdout: "", stderr: "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.", timedOut: false, missing: false };
+    if (args[0] === "-i") {
+      let said = ""; let n = 0;
+      session += 1;
+      for (const line of (input ?? "").split("\n").filter(Boolean)) {
+        const w = words(line); n += 1;
+        if (options.failLine === n) { said += `security: SecKeychainItemCreateFromContent: failed on ${w[w.indexOf("-a") + 1]}\n`; continue; }
+        items.set(w[w.indexOf("-a") + 1]!, w[w.indexOf("-w") + 1]!);
+      }
+      if (options.falseAlarm) said += "security: SecKeychainSomething: spurious warning\n";
+      return { code: 0, stdout: said, stderr: "", timedOut: false, missing: false };
+    }
+    return ok();
+  };
+  return { run, items, get sessions() { return session; } };
+}
+
+test("Keychain logic: a long value is chunked and round-trips; the old generation is removed; remove leaves nothing", async () => {
+  const fake = fakeSecurity();
+  const store = macosKeychainStore({ run: fake.run, service: "t" });
+  const big = "é".repeat(MAX_SECRET_BYTES / 2 - 1) + "ab";
+  await store.set("big.one", big);
+  assert.equal(await store.resolve("big.one"), big);
+  assert.ok([...fake.items.keys()].every((k) => k === "big.one" || /^big\.one~[0-9a-f]{16}~\d+$/.test(k)));
+  await store.set("big.one", "small");
+  assert.equal(await store.resolve("big.one"), "small");
+  assert.equal(fake.items.size, 2, "one header and one chunk: the old generation is gone");
+  assert.equal(await store.remove("big.one"), true);
+  assert.equal(fake.items.size, 0);
+  assert.equal(await store.resolve("big.one"), undefined);
+});
+
+test("Keychain logic: a chunk that fails to write leaves the old value whole, and the new parts are cleaned up", async () => {
+  const good = fakeSecurity();
+  const store = macosKeychainStore({ run: good.run, service: "t" });
+  await store.set("k.one", "x".repeat(1500));
+  // The same store, but the second line of the next write fails and the session carries on to write the header.
+  const failing = fakeSecurity({ failLine: 2 });
+  for (const [k, v] of good.items) failing.items.set(k, v);
+  const unlucky = macosKeychainStore({ run: failing.run, service: "t" });
+  await assert.rejects(() => unlucky.set("k.one", "y".repeat(1500)), (e) => e instanceof SecretStoreError && e.reference === "k.one");
+  assert.equal(await unlucky.resolve("k.one"), "x".repeat(1500), "the old value is still the one in force");
+  assert.deepEqual([...failing.items.keys()].sort(), [...good.items.keys()].sort(), "nothing of the failed write is left behind");
+  // A first write that fails leaves no entry at all.
+  const first = fakeSecurity({ failLine: 1 });
+  await assert.rejects(() => macosKeychainStore({ run: first.run, service: "t" }).set("k.two", "z".repeat(900)), SecretStoreError);
+  assert.equal(first.items.size, 0);
+});
+
+test("Keychain logic: a false alarm in the output does not destroy a value that was written whole", async () => {
+  const fake = fakeSecurity({ falseAlarm: true });
+  const store = macosKeychainStore({ run: fake.run, service: "t" });
+  await store.set("k.three", "kept");
+  assert.equal(await store.resolve("k.three"), "kept");
+});
+
+test("Keychain logic: damaged parts, a missing part and a foreign header are refused by name, never returned", async () => {
+  const fake = fakeSecurity();
+  const store = macosKeychainStore({ run: fake.run, service: "t" });
+  await store.set("k.four", "w".repeat(1500));
+  const parts = [...fake.items.keys()].filter((k) => k !== "k.four");
+  fake.items.set(parts[1]!, "QUJD");
+  await assert.rejects(() => store.resolve("k.four"), (e) => e instanceof SecretStoreError && e.reference === "k.four" && /damaged/.test(e.message));
+  fake.items.delete(parts[1]!);
+  await assert.rejects(() => store.resolve("k.four"), (e) => e instanceof SecretStoreError && /damaged/.test(e.message));
+  fake.items.set("k.four", "junk");
+  await assert.rejects(() => store.resolve("k.four"), (e) => e instanceof SecretStoreError && /damaged/.test(e.message));
+  await store.set("k.four", "repaired");
+  assert.equal(await store.resolve("k.four"), "repaired");
+  assert.ok(!(await store.resolve("k.four"))!.includes("w"));
+});
+
+test("Keychain logic: a keychain path that could break out of the quotes is refused", () => {
+  for (const bad of ['a"b', "a\\b", "a\nb"]) assert.throws(() => macosKeychainStore({ keychain: bad }), (e) => e instanceof SecretStoreError && e.code === "invalid");
 });
 
 // ---- Windows DPAPI --------------------------------------------------------------------------------------------------------------------
@@ -172,6 +285,7 @@ test("the store for a host: Keychain on macOS, DPAPI on Windows, otherwise the S
 test("the first choice of store is kept: a later start uses it, or fails naming it, and never quietly switches", async () => {
   const dir = await mkdtemp(join(tmpdir(), "nn-keep-"));
   try {
+    if (process.platform === "win32") return; // the choice records and checks the store the host really has; the Linux cases are for POSIX hosts
     const first = await chooseSecretStore({ dataDir: dir, platform: "linux" });
     const again = await chooseSecretStore({ dataDir: dir, platform: "linux" });
     assert.equal(again.store.kind, first.store.kind);
