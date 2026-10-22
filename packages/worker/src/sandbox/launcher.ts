@@ -5,6 +5,7 @@ import type { GuestView, SandboxBackend, SpawnPlan } from "./backend.js";
 import { bubblewrapBackend } from "./linux.js";
 import { seatbeltBackend } from "./seatbelt.js";
 import { SandboxError } from "./errors.js";
+import { DEFAULT_HEADROOM, checkHeadroom, checkLimits, detectLimitCapabilities, limitedPlan, type Headroom, type LimitCapabilities, type LimitEnforcement, type ResourceLimits } from "./limits.js";
 import { canonical, normalizeRecipe, protectedPathsFor, sha256, type NormalizedRecipe, type SandboxMode, type SandboxRecipe } from "./recipe.js";
 
 /** What is written to the audit trail before every launch (card A03: the mode is visible there). */
@@ -20,6 +21,8 @@ export interface LaunchRecord {
   readonly authority?: string;
   /** Protected names that did not exist in the workdir and so could not be bound read-only. */
   readonly unprotectedSubpaths: readonly string[];
+  /** How each limit asked for was handled (card A08b): enforced fully, partly or not at all, and by what. A limit is never absent from this list without being absent from the request. */
+  readonly limits: readonly LimitEnforcement[];
 }
 
 export interface Capacity {
@@ -42,6 +45,10 @@ export interface LauncherConfig {
   readonly audit: (record: LaunchRecord) => void | Promise<void>;
   readonly clock?: () => string;
   readonly platform?: NodeJS.Platform;
+  /** What is kept back for the controller and the host out of the machine; agents' limits may not exceed the rest. Default 1 core and 1 GiB. */
+  readonly headroom?: Headroom;
+  /** What this host can enforce. Default: found by trying (at creation and on `recheck`). */
+  readonly limitCapabilities?: LimitCapabilities;
 }
 
 export interface LaunchRequest {
@@ -52,6 +59,10 @@ export interface LaunchRequest {
   readonly timeoutMs: number;
   /** Each of stdout and stderr is cut at this many bytes (1 to 64 MiB). */
   readonly maxOutputBytes: number;
+  /** Resource limits for this run. */
+  readonly limits?: ResourceLimits;
+  /** Refuse the launch unless every limit asked for is enforced in full. Without it a limit the host cannot enforce is reported in the launch record and the run goes ahead. */
+  readonly requireEnforced?: boolean;
 }
 
 export interface RunResult {
@@ -98,6 +109,7 @@ export class SandboxLauncher {
   readonly #protectedPaths: readonly string[];
   readonly #clock: () => string;
   #capacity: Capacity;
+  #limitCaps: LimitCapabilities | undefined;
   readonly #live = new Set<SandboxRun>();
   #stopped = false;
 
@@ -118,6 +130,7 @@ export class SandboxLauncher {
     const backend = config.backend ?? defaultBackend(platform);
     const launcher = new SandboxLauncher(config, backend, { available: false, reason: "not checked yet", checkedAt: (config.clock ?? (() => new Date().toISOString()))() });
     await launcher.recheck();
+    launcher.#limitCaps = config.limitCapabilities ?? await detectLimitCapabilities(platform);
     return launcher;
   }
 
@@ -151,6 +164,8 @@ export class SandboxLauncher {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) throw new SandboxError("invalid_recipe", "timeoutMs: a whole number from 1 ms to 24 hours");
     if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 1 || maxOutputBytes > MAX_OUTPUT_BYTES) throw new SandboxError("invalid_recipe", "maxOutputBytes: a whole number from 1 to 64 MiB");
     const recipe = normalizeRecipe(request.recipe, this.#protectedPaths);
+    const limits = request.limits === undefined ? {} : checkLimits(request.limits);
+    checkHeadroom(limits, this.#config.headroom ?? DEFAULT_HEADROOM);
 
     let makePlan: () => SpawnPlan;
     let backendName: string;
@@ -168,13 +183,20 @@ export class SandboxLauncher {
     }
 
     const runId = randomUUID();
+    const caps = this.#limitCaps ?? { platform: this.#config.platform ?? process.platform, cgroupScope: false, prlimit: false, taskset: false, passEnv: {} };
+    const limited = limitedPlan(makePlan(), limits, caps);
+    if (request.requireEnforced === true) {
+      const weak = limited.report.filter((r) => r.enforced !== "full");
+      if (weak.length > 0) throw new SandboxError("unavailable", `these limits cannot be fully enforced on this host: ${weak.map((r) => `${r.limit} (${r.detail})`).join("; ")}`);
+    }
     const record: LaunchRecord = {
+      limits: limited.report,
       at: this.#clock(), runId, mode: recipe.mode, backend: backendName, recipeRevision: recipe.revision,
       commandDigest: sha256(canonical(command)), ...(authority === undefined ? {} : { authority }), unprotectedSubpaths: recipe.unprotectedSubpaths,
     };
     try { await this.#config.audit(record); } catch (error) { throw new SandboxError("audit_failed", `the launch could not be recorded, so it did not happen: ${(error as Error).message}`, { cause: error }); }
     // Planned only now, after the record is written, so the checks the plan repeats run as close to the start as possible.
-    return this.#start(runId, recipe, makePlan(), recipe.mode === "sandboxed" ? this.#backend : undefined, timeoutMs, maxOutputBytes);
+    return this.#start(runId, recipe, limitedPlan(makePlan(), limits, caps).plan, recipe.mode === "sandboxed" ? this.#backend : undefined, timeoutMs, maxOutputBytes);
   }
 
   #start(runId: string, recipe: NormalizedRecipe, plan: SpawnPlan, backend: SandboxBackend | undefined, timeoutMs: number, maxOutputBytes: number): SandboxRun {
