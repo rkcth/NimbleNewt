@@ -1,3 +1,4 @@
+import { createHash, randomBytes } from "node:crypto";
 import { execFile } from "node:child_process";
 import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -11,6 +12,10 @@ import { open } from "node:fs/promises";
 
 export const GIT_LIMITS = { output: 16 * 1024 * 1024, timeoutMs: 120_000, files: 10_000, fileBytes: 8 * 1024 * 1024 } as const;
 const COMMIT = /^[0-9a-f]{40}$/;
+
+/** A digest of a list of staged files in the one form the controller and the worker both compute: sorted by path, each as {"op","path"}. */
+export const filesDigest = (files: readonly { path: string; op: "write" | "delete" }[]): string =>
+  createHash("sha256").update(JSON.stringify([...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)).map((f) => ({ op: f.op, path: f.path })))).digest("hex");
 
 /**
  * Git as the controller runs it against an agent's checkout (card A04, part 2). The checkout is a plain directory of files with **no `.git` in it**: its repository lives in a separate git directory the
@@ -51,11 +56,11 @@ export class GitBridge {
     ];
   }
 
-  async #run(args: readonly string[], options: { gitDir?: string; workTree?: string; input?: string; allowFile?: boolean } = {}): Promise<{ stdout: string; stderr: string }> {
+  async #run(args: readonly string[], options: { gitDir?: string; workTree?: string; input?: string; allowFile?: boolean; env?: NodeJS.ProcessEnv } = {}): Promise<{ stdout: string; stderr: string }> {
     const locator = [...(options.gitDir === undefined ? [] : ["--git-dir", options.gitDir]), ...(options.workTree === undefined ? [] : ["--work-tree", options.workTree])];
     const flags = this.#flags().map((f) => (options.allowFile === true && f === "protocol.file.allow=never" ? "protocol.file.allow=always" : f === "protocol.allow=never" && options.allowFile === true ? "protocol.allow=user" : f));
     return new Promise((resolveRun, reject) => {
-      const child = execFile(this.#git, [...locator, ...flags, ...args], { env: this.#env(), maxBuffer: GIT_LIMITS.output, timeout: GIT_LIMITS.timeoutMs, windowsHide: true, encoding: "utf8", cwd: options.workTree ?? this.#empty }, (error, stdout, stderr) => {
+      const child = execFile(this.#git, [...locator, ...flags, ...args], { env: { ...this.#env(), ...(options.env ?? {}) }, maxBuffer: GIT_LIMITS.output, timeout: GIT_LIMITS.timeoutMs, windowsHide: true, encoding: "utf8", cwd: options.workTree ?? this.#empty }, (error, stdout, stderr) => {
         if (error === null) return resolveRun({ stdout, stderr });
         const code = (error as NodeJS.ErrnoException).code;
         if (code === "ENOENT") return reject(new WorkspaceError("unavailable", "git is not installed on this host"));
@@ -107,11 +112,14 @@ export class GitBridge {
   async refresh(options: { shared: string; commit: string; gitDir: string; checkout: string }): Promise<{ base: string }> {
     const state = await this.status(options);
     if (state.dirty) throw new WorkspaceError("stale", `the checkout holds ${state.entries.length} changed or new file(s); it was left as it was`);
+    // Commits made in the checkout that have not been carried into the shared workspace are work too (they would be lost when the branch moves).
+    const head = (await this.#run(["rev-parse", "--verify", "HEAD"], { gitDir: options.gitDir })).stdout.trim();
+    if (head !== (await this.#base(options.gitDir))) throw new WorkspaceError("stale", "the checkout holds commits that have not been integrated into the shared workspace; it was left as it was");
     const sharedGit = await this.#sharedGitDir(options.shared);
     await this.#run(["fetch", "--no-tags", "--no-recurse-submodules", sharedGit, options.commit], { gitDir: options.gitDir, allowFile: true });
     // Status does not write the index (optional locks are off), so a file touched but unchanged still looks modified to read-tree: refresh the stat information first.
     await this.#run(["update-index", "-q", "--really-refresh"], { gitDir: options.gitDir, workTree: options.checkout });
-    await this.#run(["read-tree", "-m", "-u", await this.#base(options.gitDir), options.commit], { gitDir: options.gitDir, workTree: options.checkout });
+    await this.#run(["read-tree", "-m", "-u", (await this.#run(["rev-parse", "--verify", "HEAD"], { gitDir: options.gitDir })).stdout.trim(), options.commit], { gitDir: options.gitDir, workTree: options.checkout });
     await this.#run(["update-ref", "refs/nn/base", options.commit], { gitDir: options.gitDir });
     await this.#run(["update-ref", "HEAD", options.commit], { gitDir: options.gitDir });
     return { base: options.commit };
@@ -127,27 +135,36 @@ export class GitBridge {
    */
   async changes(options: { gitDir: string; checkout: string }): Promise<{ path: string; op: "write" | "delete"; baseVersion: string; modeOnly: boolean }[]> {
     await this.#refuseGitData(options.checkout);
-    const state = await this.status(options);
-    if (state.entries.length > GIT_LIMITS.files) throw new WorkspaceError("invalid_path", `more than ${GIT_LIMITS.files} files changed`);
     const base = await this.#base(options.gitDir);
+    // The net difference from the base, committed or not, ignored or not: a throwaway index is filled from the base and then with everything in the checkout.
+    const index = join(options.gitDir, `nn-index-${randomBytes(6).toString("hex")}`);
+    let listing: string[];
+    try {
+      await this.#run(["read-tree", base], { gitDir: options.gitDir, env: { GIT_INDEX_FILE: index } });
+      await this.#run(["add", "-A", "-f"], { gitDir: options.gitDir, workTree: options.checkout, env: { GIT_INDEX_FILE: index } });
+      listing = (await this.#run(["diff", "--cached", "--name-status", "-z", "--no-renames", base], { gitDir: options.gitDir, env: { GIT_INDEX_FILE: index } })).stdout.split("\0").filter(Boolean);
+      const modes = (await this.#run(["ls-files", "-s", "-z"], { gitDir: options.gitDir, env: { GIT_INDEX_FILE: index } })).stdout.split("\0").filter(Boolean);
+      for (const line of modes) { const mode = line.slice(0, 6); if (mode === "120000" || mode === "160000") throw new WorkspaceError("link_refused", `${JSON.stringify(line.slice(line.indexOf("\t") + 1).slice(0, 80))} is a link or a submodule entry, which the bridge does not carry`); }
+    } finally { await rm(index, { force: true }); }
+    if (listing.length / 2 > GIT_LIMITS.files) throw new WorkspaceError("invalid_path", `more than ${GIT_LIMITS.files} files changed`);
     const out: { path: string; op: "write" | "delete"; baseVersion: string; modeOnly: boolean }[] = [];
-    for (const e of state.entries) {
-      const parts = e.path.split("/");
-      if (touchesGit(parts)) throw new WorkspaceError("protected_path", `${JSON.stringify(e.path.slice(0, 80))} is or lies inside Git's own data; the whole change was refused`);
-      const deleted = e.code.includes("D");
-      let baseVersion = ABSENT;
-      let modeOnly = false;
-      if (!e.code.includes("?") && !e.code.includes("!") && !e.code.includes("A")) {
-        const bytes = await this.#baseBytes(options.gitDir, e.path, e.path);
+    for (let i = 0; i + 1 < listing.length; i += 2) {
+      const code = listing[i]!; const path = listing[i + 1]!;
+      if (touchesGit(path.split("/"))) throw new WorkspaceError("protected_path", `${JSON.stringify(path.slice(0, 80))} is or lies inside Git's own data; the whole change was refused`);
+      if (code === "T") throw new WorkspaceError("link_refused", `${JSON.stringify(path.slice(0, 80))} changed kind (a file became a link or the reverse)`);
+      const deleted = code === "D";
+      let baseVersion = ABSENT; let modeOnly = false;
+      if (code !== "A") {
+        const bytes = await this.#baseBytes(options.gitDir, path, path);
         if (bytes !== undefined) {
           baseVersion = versionOf(bytes);
           if (!deleted) {
-            const safe = await resolveSafe(options.checkout, e.path).catch(() => undefined);
-            if (safe?.exists === "file") modeOnly = (await this.#readChecked(safe.absolute, e.path)).equals(bytes);
+            const safe = await resolveSafe(options.checkout, path).catch(() => undefined);
+            if (safe?.exists === "file") modeOnly = (await this.#readChecked(safe.absolute, path)).equals(bytes);
           }
         }
       }
-      out.push({ path: e.path, op: deleted ? "delete" : "write", baseVersion, modeOnly });
+      out.push({ path, op: deleted ? "delete" : "write", baseVersion, modeOnly });
     }
     return out;
   }
@@ -212,6 +229,71 @@ export class GitBridge {
     return new Promise((resolveBlob, reject) => {
       execFile(this.#git, [...this.#flags(), "--git-dir", gitDir, "cat-file", "blob", `${base}:${path}`], { env: this.#env(), encoding: "buffer", maxBuffer: GIT_LIMITS.fileBytes + 1, windowsHide: true, cwd: this.#empty }, (error, stdout) => (error === null ? resolveBlob(stdout as unknown as Buffer) : reject(new WorkspaceError("invalid_path", `the base version of ${JSON.stringify(shown.slice(0, 80))} could not be read (it may be larger than the ${GIT_LIMITS.fileBytes} bytes a change may carry)`))));
     });
+  }
+
+  /**
+   * Stages the checkout for review: everything the agent changed that git does not ignore is added to the checkout's own index, and the tree it makes, the base commit and the list of staged files
+   * are returned (with the files an ignore rule keeps out, so that nothing is unseen). A Git-named entry, a link or a submodule entry anywhere refuses the whole thing. The tree ID is what a
+   * reviewer approves and what `commit` will insist on.
+   */
+  async stage(options: { gitDir: string; checkout: string }): Promise<{ base: string; tree: string; files: { path: string; op: "write" | "delete" }[]; ignored: string[] }> {
+    await this.#refuseGitData(options.checkout);
+    await this.#run(["add", "-A"], { gitDir: options.gitDir, workTree: options.checkout });
+    const listing = (await this.#run(["ls-files", "-s", "-z"], { gitDir: options.gitDir })).stdout.split("\0").filter(Boolean);
+    for (const line of listing) {
+      const mode = line.slice(0, 6);
+      const path = line.slice(line.indexOf("\t") + 1);
+      if (mode === "120000" || mode === "160000") throw new WorkspaceError("link_refused", `${JSON.stringify(path.slice(0, 80))} is a link or a submodule entry, which a commit through the bridge does not carry`);
+    }
+    // A commit builds on the checkout's own head (an earlier commit of its own, or the base the checkout started from).
+    const base = (await this.#run(["rev-parse", "--verify", "HEAD"], { gitDir: options.gitDir })).stdout.trim();
+    const tree = (await this.#run(["write-tree"], { gitDir: options.gitDir })).stdout.trim();
+    const diff = (await this.#run(["diff", "--cached", "--name-status", "-z", "--no-renames", base], { gitDir: options.gitDir })).stdout.split("\0").filter(Boolean);
+    const files: { path: string; op: "write" | "delete" }[] = [];
+    for (let i = 0; i + 1 < diff.length; i += 2) files.push({ path: diff[i + 1]!, op: diff[i] === "D" ? "delete" : "write" });
+    if (files.length > GIT_LIMITS.files) throw new WorkspaceError("invalid_path", `more than ${GIT_LIMITS.files} files are staged`);
+    const status = await this.status(options);
+    return { base, tree, files, ignored: status.entries.filter((e) => e.code === "!!").map((e) => e.path) };
+  }
+
+  /**
+   * Makes the commit a permit allows, and only that one: the checkout is staged again and must make exactly the reviewed tree on exactly the reviewed base. The author, the committer and the
+   * trailers are the permit's (they come from the controller's records), so the agent supplies none of them. Returns the commit's ID, whose parent is the base.
+   */
+  async commit(options: { gitDir: string; checkout: string; permit: { base: string; tree: string; filesDigest: string; message: string; author: { name: string; email: string }; committer: { name: string; email: string }; trailers: readonly string[] } }): Promise<{ commitId: string; parent: string }> {
+    const permit = options.permit;
+    if (!COMMIT.test(permit.base) || !COMMIT.test(permit.tree)) throw new WorkspaceError("invalid_path", "a permit names a full base commit and tree");
+    const staged = await this.stage(options);
+    const changed = [staged.base !== permit.base ? "the base commit" : "", staged.tree !== permit.tree ? "the staged tree" : "", filesDigest(staged.files) !== permit.filesDigest ? "the list of files the reviewer was shown" : ""].filter(Boolean);
+    if (changed.length > 0) throw new WorkspaceError("stale", `this is not the reviewed commit: ${changed.join(" and ")} changed; nothing was committed`);
+    const message = `${permit.message.replace(/\s+$/u, "")}\n\n${permit.trailers.join("\n")}\n`;
+    const env = { GIT_AUTHOR_NAME: permit.author.name, GIT_AUTHOR_EMAIL: permit.author.email, GIT_COMMITTER_NAME: permit.committer.name, GIT_COMMITTER_EMAIL: permit.committer.email };
+    const commitId = (await this.#run(["commit-tree", permit.tree, "-p", permit.base, "-F", "-"], { gitDir: options.gitDir, input: message, env })).stdout.trim();
+    if (!COMMIT.test(commitId)) throw new WorkspaceError("unavailable", "git did not return a commit ID");
+    // The checkout's branch moves only from the reviewed base to the new commit.
+    await this.#run(["update-ref", "HEAD", commitId, permit.base], { gitDir: options.gitDir });
+    return { commitId, parent: permit.base };
+  }
+
+  /**
+   * After the agent's work has been carried into the shared workspace (`integrate`), says so: when everything is committed and every changed file in the shared workspace is now what the checkout
+   * holds, the base moves to the checkout's head, so a refresh no longer counts those commits as unintegrated. Returns whether it moved, and the paths still differing when it did not.
+   */
+  async markIntegrated(options: { gitDir: string; checkout: string; bridge: WorkspaceBridge }): Promise<{ moved: boolean; differing: string[] }> {
+    const state = await this.status(options);
+    if (state.dirty) return { moved: false, differing: state.entries.map((e) => e.path) };
+    const differing: string[] = [];
+    for (const c of await this.changes(options)) {
+      const shared = await options.bridge.read(c.path).catch(() => ({ content: undefined, version: ABSENT }));
+      if (c.op === "delete") { if (shared.version !== ABSENT) differing.push(c.path); continue; }
+      const safe = await resolveSafe(options.checkout, c.path);
+      const mine = await this.#readChecked(safe.absolute, c.path);
+      if (shared.version !== versionOf(mine)) differing.push(c.path);
+    }
+    if (differing.length > 0) return { moved: false, differing };
+    const head = (await this.#run(["rev-parse", "--verify", "HEAD"], { gitDir: options.gitDir })).stdout.trim();
+    await this.#run(["update-ref", "refs/nn/base", head], { gitDir: options.gitDir });
+    return { moved: true, differing: [] };
   }
 
   /** The ID of a commit in the shared repository's current head (the controller's own read). */

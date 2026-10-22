@@ -20,7 +20,7 @@ export const ACTIONS = [
   "review.request", "review.decide", "review.policy.write",
   "config.read", "config.write", "routing.write", "recovery.read",
   "conversation.start", "conversation.send", "conversation.receive", "conversation.request-action", "conversation.urgent",
-  "principal.manage", "notification.emit", "catalog.register", "catalog.revoke", "catalog.read",
+  "principal.manage", "notification.emit", "catalog.register", "catalog.revoke", "catalog.read", "environment.manage", "mcp.use",
   "agent.manage", "agent.read",
   "task.contract.write", "task.priority.write", "task.difficulty.write", "task.class.write", "task.dependency.write",
 ] as const;

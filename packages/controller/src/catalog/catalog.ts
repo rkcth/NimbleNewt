@@ -371,6 +371,27 @@ export class CatalogService {
     return record.body;
   }
 
+  /** Whether a catalog version exists, is not revoked and may be used by this principal (its own personal entries; shared and system ones with `catalog.read`; the owner anything live). For environments. */
+  async usableVersion(by: Principal, versionId: string): Promise<boolean> {
+    if (typeof versionId !== "string" || !/^cav-[a-z2-7]{20}$/.test(versionId)) return false;
+    const found = (await this.#runner.get("catalog-version", versionId))?.body as unknown as VersionBody | undefined;
+    if (found === undefined) return false;
+    const entry = (await this.#runner.get("catalog-entry", derivedId("cat", found.name)))?.body as unknown as EntryBody | undefined;
+    return entry !== undefined && this.#mayReadEntry(by, entry) && !entry.revoked.includes(found.version);
+  }
+
+  /**
+   * What a protected extension must be on disk: `sha256:` plus the digest of the executable source of the latest live system version of `nimblenewt.<name>`, or undefined. This is the value the
+   * environment's manifest names and the worker reports for the file it loads (a digest of that file's bytes).
+   */
+  async systemDigest(name: string): Promise<string | undefined> {
+    const parsed = parseName(name);
+    if (parsed === null || parsed.layer !== "protected") return undefined;
+    const live = await this.#latestLive(parsed.canonical);
+    const digest = live?.body.executable?.digest;
+    return digest === undefined ? undefined : `sha256:${digest}`;
+  }
+
   // ---- internals ------------------------------------------------------------------------------------------------------------
 
   /**

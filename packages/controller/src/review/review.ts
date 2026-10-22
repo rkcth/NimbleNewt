@@ -187,7 +187,7 @@ export class ReviewService {
         const body: ReviewBody = { binding, operation, ...(note === undefined ? {} : { note }), context, state: mandatory ? "owner-decision" : "pending", requestedAt: now };
         return {
           ref, creates: true,
-          changes: [...guard, { type: "create", ref, body: body as unknown as JsonObject }, { type: "create", ref: { kind: "review-route", id }, body: route as unknown as JsonObject }],
+          changes: [...guard, { type: "create", ref, body: body as unknown as JsonObject }, { type: "create", ref: { kind: "review-route", id }, body: route as unknown as JsonObject }, { type: "create", ref: { kind: `review-task-${taskId}`, id }, body: {} }],
           detail: { taskId, name: operation.name, argsDigest: binding.argsDigest, route: state, ...(chosen.assigned === undefined ? {} : { assigned: chosen.assigned }) },
         };
       },
@@ -339,6 +339,16 @@ export class ReviewService {
       },
     }));
     return { admitted: true, requestId: r.id, replayed: r.replayed };
+  }
+
+  /** The IDs of the reviews made for one task, in ID order (an index written with each review, so reading it never scans other tasks' reviews). */
+  async reviewIdsForTask(taskId: string, limit = 500): Promise<string[]> {
+    const out: string[] = [];
+    for (let after: string | undefined; ;) {
+      const page = await this.#runner.list(`review-task-${checkTaskId(taskId)}`, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const a of page) { after = a.id; out.push(a.id); if (out.length >= limit) return out; }
+      if (page.length < 200) return out;
+    }
   }
 
   /** A review, as seen by the requester, the reviewer who decided it, or the owner (anyone else gets `undefined`). */
