@@ -2,7 +2,7 @@ import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import { onlyKnown, projectId as checkProjectId, revision as checkRevision, text, type View } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
-import { allows } from "../security/access.js";
+import { allows, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import { effectiveOf } from "../security/grants.js";
 import type { NoActor, Principal, PrincipalBody } from "../security/principals.js";
@@ -166,7 +166,7 @@ export class ConversationService {
     if (query.afterSeq !== undefined && (!Number.isSafeInteger(query.afterSeq) || query.afterSeq < 0)) invalid("afterSeq", "must be a whole number, 0 or more");
     const found = await this.#runner.get("thread", threadId);
     const thread = found?.body as unknown as ThreadBody | undefined;
-    const fresh = await this.#fresh(by.id);
+    const fresh = await this.#fresh(by.id, by.taskScope);
     if (thread === undefined || fresh === undefined || !this.#mayRead(fresh, thread)) return undefined;
     const cursor = (await this.#runner.get("conversation-cursor", `${threadId}:${by.id}`))?.body as unknown as CursorBody | undefined;
     const deliveredSeq = cursor?.deliveredSeq ?? 0;
@@ -196,7 +196,7 @@ export class ConversationService {
     onlyKnown(command, ["commandId", "threadId", "upToSeq"]);
     const threadId = this.#threadId(command.threadId);
     if (!Number.isSafeInteger(command.upToSeq) || command.upToSeq < 1) invalid("upToSeq", "must be a whole number, 1 or more");
-    const fresh = await this.#fresh(by.id);
+    const fresh = await this.#fresh(by.id, by.taskScope);
     await this.#retrying(() => this.#runner.command("conversation.acknowledge", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
       payload: { threadId, upToSeq: command.upToSeq },
       build: async () => {
@@ -260,7 +260,7 @@ export class ConversationService {
   async thread(by: Principal, threadId: string): Promise<View<ThreadBody> | undefined> {
     const id = this.#threadId(threadId);
     const found = await this.#runner.get("thread", id);
-    const fresh = await this.#fresh(by.id);
+    const fresh = await this.#fresh(by.id, by.taskScope);
     if (found === undefined || fresh === undefined || !this.#mayRead(fresh, found.body as unknown as ThreadBody)) return undefined;
     return view<ThreadBody>(found);
   }
@@ -269,7 +269,7 @@ export class ConversationService {
   async threads(by: Principal, page: { afterId?: string; limit?: number } = {}): Promise<{ items: View<ThreadBody>[]; next?: string }> {
     const limit = page.limit ?? 20;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > CONVERSATION_LIMITS.page) invalid("limit", `must be a whole number from 1 to ${CONVERSATION_LIMITS.page}`);
-    const fresh = await this.#fresh(by.id);
+    const fresh = await this.#fresh(by.id, by.taskScope);
     if (fresh === undefined) return { items: [] };
     const items: View<ThreadBody>[] = [];
     let after = page.afterId;
@@ -296,7 +296,7 @@ export class ConversationService {
       build: async () => {
         const found = await this.#runner.get("thread", id);
         const thread = found?.body as unknown as ThreadBody | undefined;
-        if (found === undefined || thread === undefined || !(by.kind === "owner" || by.id === thread.startedBy)) throw new DomainError("forbidden", `${by.id} may not close that thread`);
+        if (found === undefined || thread === undefined || !(by.kind === "owner" || (by.id === thread.startedBy && inTaskScope(by, thread.projectId)))) throw new DomainError("forbidden", `${by.id} may not close that thread`);
         if (found.revision !== expected) throw new DomainError("stale_revision", `thread ${id} is at revision ${found.revision}, not ${expected}`, { currentRevision: found.revision });
         if (thread.state !== "open") throw new DomainError("invalid_command", `thread ${id} is already closed`, { field: "threadId" });
         const ref: AggregateRef = { kind: "thread", id };
@@ -325,7 +325,7 @@ export class ConversationService {
       payload: { threadId: input.threadId, ...(input.newThread === undefined ? {} : { projectId: input.newThread.projectId, subject: input.newThread.subject }), to: named ?? null, kind, priority, text: body, replyTo: replyTo ?? null, claimedSender: claimed ?? null },
       build: async () => {
         const now = this.#runner.now();
-        const sender = await this.#fresh(by.id);
+        const sender = await this.#fresh(by.id, by.taskScope);
         if (sender === undefined) throw new DomainError("unauthenticated", "the credential was not accepted");
         // The thread: new, or read now (its revision orders the sends).
         let thread: ThreadBody;
@@ -457,11 +457,12 @@ export class ConversationService {
   }
 
   /** The principal as stored now, with grants and restrictions loaded now. `undefined` if it is not an active principal. */
-  async #fresh(principalId: string): Promise<Principal | undefined> {
+  /** `scope` is passed when the principal is the caller, so a task credential stays inside its task when its grants are looked up again. */
+  async #fresh(principalId: string, scope?: Principal["taskScope"]): Promise<Principal | undefined> {
     const found = await this.#runner.get("principal", principalId);
     const body = found?.body as unknown as PrincipalBody | undefined;
     if (found === undefined || body === undefined || body.state !== "active") return undefined;
-    return effectiveOf(this.#runner, { id: found.id, kind: body.kind, name: body.name, grants: body.grants }, this.#runner.now());
+    return effectiveOf(this.#runner, { id: found.id, kind: body.kind, name: body.name, grants: body.grants, ...(scope === undefined ? {} : { taskScope: scope }) }, this.#runner.now());
   }
 
   /** Two senders at the same moment meet a revision check on the thread or a counter; the loser reads again. Only that race is retried: a command ID reused for a different command fails at once. */

@@ -1200,12 +1200,23 @@
       ],
       "deliverable": "Owner-decision tally, standing-rule proposals and the pending-asks and approval-load views",
       "acceptance_and_verification": "Approving the same class in the same scope repeatedly (provisionally three times) produces a standing-rule proposal scoped to project, class and environment, expiring and revocable, with a preview of what it would have covered; the owner accepts it into a standing grant or dismisses it; it is never applied unasked and never proposed for a class the policy reserves for the owner or one that needs an exact-operation review (tested: a mandatory-human tool is never proposed); the effective-policy view shows how many asks each rule would have caused; owner decisions per day, how long asks wait, the share decided by rule, agent review and owner, and every pending ask with its age are recorded and returned for the approval-load view (U08); an accepted proposal (a suggestion, not an instruction) never authorizes a downstream push, merge or deploy (the proposal workflow cards T08 and P02 carry that clause)",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "56b9ae7"
+        ],
+        "ci_runs": [
+          "39694347201"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Repeated approvals become one proposal for the owner instead of a pile of questions: three approvals by the owner of the same class of action for the same agent in the same project in a free environment (development or testing), within 90 days, open a proposal that lists exactly the approvals it is drawn from and suggests an expiring approval grant for that class, requester, project and environment. Never proposed for access changes, spending or installs, for tools the project reserves for the owner or for unclassified tools; accepting makes the grant (replay-safe, no second grant on a retry) and dismissing keeps the proposal quiet for 30 days and then only after a newer approval; an accepted one returns only after its grant has ended and the owner approves again. A standing grant, including a copy derived from it, never waives what stays a decision. Approval-load figures for the owner: decisions per day, how long asks waited, how much ran by rule, grant, agent review or owner, and every ask still waiting with its age. Limits stated: nothing records decisions yet (H12) or shows the figures (U08, U11). Reviewed and approved by an AI review session (Claude Opus) after three rounds; six-cell CI green.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "A08",

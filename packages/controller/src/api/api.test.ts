@@ -11,7 +11,7 @@ import { AgentService } from "../agents/index.js";
 import { BlockerService } from "../domain/blockers.js";
 import { ContractService, WaitGraphService } from "../planning/index.js";
 import { InquiryService } from "../inquiries/index.js";
-import { PrincipalService, type Grant } from "../security/index.js";
+import { PrincipalService, TaskCredentialService, type Grant, type Principal } from "../security/index.js";
 import { API_VERSION, OPERATIONS, PAGE, StateApi, renderApiDocs, type ApiResponse } from "./index.js";
 
 after(stopServer);
@@ -44,7 +44,8 @@ for (const backend of backends) {
         const agents = AgentService.withEpoch(world.storage, projects.epoch, options);
         const contracts = ContractService.withEpoch(world.storage, projects.epoch, options);
         const graph = WaitGraphService.withEpoch(world.storage, projects.epoch, contracts, BlockerService.withEpoch(world.storage, projects.epoch, options), options);
-        const deps = { principals, projects, assignments, retrieval, inquiries, agents, contracts, graph, onInternalError: (e: unknown) => { internal.push(e); } };
+        const taskCredentials = TaskCredentialService.withEpoch(world.storage, projects.epoch, options);
+        const deps = { principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, onInternalError: (e: unknown) => { internal.push(e); } };
         const api = new StateApi(wrap === undefined ? deps : wrap(deps));
         const ownerToken = (await principals.bootstrapOwner({ name: "rob" })).token;
         const owner = await principals.authenticate(ownerToken);
@@ -55,11 +56,28 @@ for (const backend of backends) {
         const call = (token: string, request: unknown) => api.handle(token, request);
         const ok = async (token: string, request: unknown) => { const r = await call(token, request); assert.ok(r.ok, JSON.stringify(r)); return r as Extract<ApiResponse, { ok: true }>; };
         const fails = async (token: string, request: unknown) => { const r = await call(token, request); assert.ok(!r.ok, `expected a refusal: ${JSON.stringify(r)}`); return (r as Extract<ApiResponse, { ok: false }>).error; };
-        await body({ api, ownerToken, internal, assignments, projects, agent, call, ok, fails });
+        await body({ api, ownerToken, internal, assignments, projects, agent, call, ok, fails, taskCredentials, owner } as never);
       } finally { await world.close(); }
     });
   const command = (op: string, args: Record<string, unknown>, commandId = cid("c")) => ({ v: API_VERSION, op, commandId, args });
   const query = (op: string, args: Record<string, unknown> = {}) => ({ v: API_VERSION, op, args });
+
+  suite("a task credential works at the API door and reaches only its task's project", async (c) => {
+    const { ok, fails, ownerToken, projects, agent } = c as never as { ok: (t: string, r: unknown) => Promise<{ result: { items?: { id: string }[]; item?: { id: string } } }>; fails: (t: string, r: unknown) => Promise<{ code: string }>; ownerToken: string; projects: ProjectService; agent: (n: string, g: Grant[]) => Promise<string> };
+    const { taskCredentials, owner } = c as never as { taskCredentials: TaskCredentialService; owner: Principal };
+    const a = (await projects.createProject({ commandId: cid("pa"), actor: "owner:rob", name: "A" })).id;
+    const b = (await projects.createProject({ commandId: cid("pb"), actor: "owner:rob", name: "B" })).id;
+    const ta = (await projects.createTask({ commandId: cid("t"), actor: "owner:rob", projectId: a, title: "in A" })).id;
+    const tb = (await projects.createTask({ commandId: cid("t"), actor: "owner:rob", projectId: b, title: "in B" })).id;
+    await agent("two", [{ action: "task.read", project: a }, { action: "task.read", project: b }, { action: "project.read", project: "*" }]);
+    const plain = (await taskCredentials.issue(owner, { commandId: cid("i"), taskId: ta, agentId: "agent:two" })).token;
+    assert.equal((await ok(plain, query("task.get", { taskId: ta }))).result.item?.id, ta);
+    assert.equal((await fails(plain, query("task.get", { taskId: tb }))).code, "forbidden");
+    assert.equal((await fails(plain, query("task.list", { projectId: b }))).code, "forbidden");
+    assert.deepEqual((await ok(plain, query("task.list", { projectId: a }))).result.items?.map((t) => t.id), [ta]);
+    assert.equal((await fails(plain.replace("tcr-", "tcr-x"), query("task.get", { taskId: ta }))).code, "unauthenticated");
+    assert.equal((await ok(ownerToken, query("task.get", { taskId: tb }))).result.item?.id, tb);
+  });
 
   suite("the envelope is strict: version, operation, arguments and command IDs are all checked", async ({ ownerToken, fails, ok }) => {
     assert.equal((await fails(ownerToken, { v: 2, op: "project.list" })).field, "v");

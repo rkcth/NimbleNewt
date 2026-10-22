@@ -248,6 +248,7 @@ export class GrantService {
           let depth = 1;
           for (let p: GrantRecordBody | undefined = parent; p?.source === "derived" && depth <= MAX_DEPTH; depth++) p = p.parentId === undefined ? undefined : ((await this.#runner.get("grant-record", p.parentId))?.body as unknown as GrantRecordBody | undefined);
           if (depth > MAX_DEPTH) throw new DomainError("forbidden", `derivation is limited to ${MAX_DEPTH} levels`);
+          if (principal.taskScope !== undefined && project !== principal.taskScope.projectId) throw new DomainError("forbidden", "a task credential derives grants for its own task's project only");
           // Waiving a question is the owner's decision: an agent does not derive an approval grant, and a derived grant keeps every term of its parent.
           if (action.startsWith("approve.") && principal.kind !== "owner") throw new DomainError("forbidden", "an approval grant is derived only by the owner");
           const until = expiresAt ?? parent.expiresAt;
@@ -421,7 +422,12 @@ export async function effectiveOf(runner: CommandRunner, principal: Principal, n
     }
     if (page.length < 500) break;
   }
-  return { ...principal, grants, restrictions, asOf: now };
+  const scope = principal.taskScope;
+  // A task credential keeps only the grants of its task's project, for that task or the whole project, and narrows a grant for every project to this one.
+  const kept = scope === undefined ? grants : grants
+    .filter((g) => (g.project === "*" || g.project === scope.projectId) && (g.resource === undefined || (g.resource.kind === "task" && g.resource.id === scope.taskId)))
+    .map((g) => ({ ...g, project: scope.projectId }));
+  return { ...principal, grants: kept, restrictions, asOf: now };
 }
 
 function requireOwner(principal: Principal): void {

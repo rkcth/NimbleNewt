@@ -302,7 +302,7 @@ export class PolicyService {
     const found = await this.#runner.get("principal", by.id);
     const body = found?.body as unknown as PrincipalBody | undefined;
     if (found === undefined || body === undefined || body.state !== "active") return false;
-    const eff = await this.#grants.effective({ id: found.id, kind: body.kind, name: body.name, grants: body.grants }, this.#runner.now());
+    const eff = await this.#grants.effective({ id: found.id, kind: body.kind, name: body.name, grants: body.grants, ...(by.taskScope === undefined ? {} : { taskScope: by.taskScope }) }, this.#runner.now());
     return allows(eff, "config.read", "*") || allows(eff, "config.write", "*");
   }
 

@@ -125,7 +125,7 @@ export class ConfigurationService {
     const unlock = this.#keys(command.unlock ?? [], "unlock");
     const setKeys = Object.keys(set);
     if (setKeys.length + remove.length + lock.length + unlock.length === 0) invalid("set", "nothing to stage");
-    const fresh = await this.#fresh(by.id);
+    const fresh = await this.#fresh(by.id, by.taskScope);
     const r = await this.#runner.command("config.stage", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
       payload: { layer, scopeId, expectedRevision: expected ?? null, set: set as JsonObject, remove, lock, unlock },
       build: async () => {
@@ -175,7 +175,7 @@ export class ConfigurationService {
     onlyKnown(command, ["commandId", "layer", "scopeId", "expectedRevision"]);
     const { layer, scopeId } = this.#target(command.layer, command.scopeId);
     const expected = checkRevision(command.expectedRevision);
-    const fresh = await this.#fresh(by.id);
+    const fresh = await this.#fresh(by.id, by.taskScope);
     await this.#runner.command("config.discard", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
       payload: { layer, scopeId, expectedRevision: expected },
       build: async () => {
@@ -200,7 +200,7 @@ export class ConfigurationService {
     onlyKnown(command, ["commandId", "layer", "scopeId", "expectedRevision"]);
     const { layer, scopeId } = this.#target(command.layer, command.scopeId);
     const expected = checkRevision(command.expectedRevision);
-    const fresh = await this.#fresh(by.id);
+    const fresh = await this.#fresh(by.id, by.taskScope);
     let outcome: { applied: boolean; problems: string[]; takesEffect: Record<string, Effect> } = { applied: false, problems: [], takesEffect: {} };
     const r = await this.#runner.command("config.apply", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
       payload: { layer, scopeId, expectedRevision: expected },
@@ -256,7 +256,7 @@ export class ConfigurationService {
   /** One layer as stored: what is in force, what is staged, the last refusal. For the owner and those who may write or read configuration. */
   async layer(by: Principal, layer: LayerKind, scopeId?: string): Promise<View<LayerBody> | undefined> {
     const target = this.#target(layer, scopeId);
-    const fresh = await this.#fresh(by.id);
+    const fresh = await this.#fresh(by.id, by.taskScope);
     if (!this.#mayRead(by, fresh, target.layer, target.scopeId)) return undefined;
     const found = await this.#runner.get("config-layer", layerIdOf(target.layer, target.scopeId));
     return found === undefined ? undefined : view<LayerBody>(found);
@@ -275,8 +275,8 @@ export class ConfigurationService {
     onlyKnown(scope, ["agentId", "taskId"]);
     if (scope.agentId !== undefined && !AGENT_ID.test(scope.agentId)) invalid("agentId", "is not an agent ID");
     if (scope.taskId !== undefined && !TASK_ID.test(scope.taskId)) invalid("taskId", "is not a task ID");
-    const fresh = await this.#fresh(by.id);
-    const ownScope = scope.agentId !== undefined && fresh?.kind === "agent" && by.id === `agent:${scope.agentId}`;
+    const fresh = await this.#fresh(by.id, by.taskScope);
+    const ownScope = scope.agentId !== undefined && fresh?.kind === "agent" && by.taskScope === undefined && by.id === `agent:${scope.agentId}`;
     if (!(by.kind === "owner" || ownScope || (fresh !== undefined && (allows(fresh, "config.read", "*") || allows(fresh, "config.write", "*"))))) return undefined;
     const chain: Link[] = [await this.#link("installation", "installation")];
     // A task asked about without an agent is read for the agent now working it, if there is one.
@@ -358,7 +358,7 @@ export class ConfigurationService {
     if (by.kind === "owner") return true;
     if (fresh === undefined) return false;
     if (allows(fresh, "config.read", "*") || allows(fresh, "config.write", "*")) return true;
-    return layer === "agent" && fresh.kind === "agent" && by.id === `agent:${scopeId}`;
+    return layer === "agent" && fresh.kind === "agent" && by.taskScope === undefined && by.id === `agent:${scopeId}`;
   }
 
   async #exists(layer: LayerKind, scopeId: string): Promise<void> {
@@ -450,10 +450,11 @@ export class ConfigurationService {
     return { values, problems: problems.slice(0, CONFIG_LIMITS.problems) };
   }
 
-  async #fresh(principalId: string): Promise<Principal | undefined> {
+  /** `scope` is passed when the principal is the caller, so a task credential stays inside its task when its grants are looked up again. */
+  async #fresh(principalId: string, scope?: Principal["taskScope"]): Promise<Principal | undefined> {
     const found = await this.#runner.get("principal", principalId);
     const body = found?.body as unknown as PrincipalBody | undefined;
     if (found === undefined || body === undefined || body.state !== "active") return undefined;
-    return effectiveOf(this.#runner, { id: found.id, kind: body.kind, name: body.name, grants: body.grants }, this.#runner.now());
+    return effectiveOf(this.#runner, { id: found.id, kind: body.kind, name: body.name, grants: body.grants, ...(scope === undefined ? {} : { taskScope: scope }) }, this.#runner.now());
   }
 }

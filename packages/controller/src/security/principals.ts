@@ -57,6 +57,8 @@ export interface Principal {
   readonly asOf?: string;
   /** Which credential this principal authenticated with (a digest of the stored credential, which changes whenever the credential does). Rotating the credential changes it, so work done with an older object can be refused. Absent on an object that did not come from authentication. */
   readonly credentialId?: string;
+  /** Set when the principal authenticated with a task credential (card A10b): it acts for one task of one project and nothing else. */
+  readonly taskScope?: { readonly taskId: string; readonly projectId: string };
 }
 
 export interface IssuedCredential {

@@ -49,6 +49,17 @@ export interface CheckOptions {
 const sameResource = (a: { kind: string; id: string }, b: { kind: string; id: string }): boolean => a.kind === b.kind && a.id === b.id;
 const projectMatches = (scope: string, project: string | undefined): boolean => scope === "*" || (project !== undefined && scope === project);
 
+/** A task credential reaches its task's project only, and no other task by resource; an action that belongs to no project is out of reach. */
+function outsideTask(principal: Principal, project: string | undefined, options: CheckOptions): boolean {
+  const scope = principal.taskScope;
+  if (scope === undefined) return false;
+  if (project !== scope.projectId) return true;
+  return options.resource !== undefined && options.resource.kind === "task" && options.resource.id !== scope.taskId;
+}
+
+/** False for a task credential asked about another project; true for every other principal. For rules decided by who a record belongs to, which `allows` does not see. */
+export const inTaskScope = (principal: Principal, projectId: string): boolean => principal.taskScope === undefined || principal.taskScope.projectId === projectId;
+
 /** Whether a standing restriction forbids it. A restriction that names a resource applies when the action is on that resource, or when the caller did not say which resource (the safe reading). */
 function restricted(principal: Principal, action: string, project: string | undefined, options: CheckOptions): boolean {
   return (principal.restrictions ?? []).some((r) => covers(r.action, action) && projectMatches(r.project, project) && (r.resource === undefined || options.resource === undefined || sameResource(r.resource, options.resource)));
@@ -60,6 +71,7 @@ function restricted(principal: Principal, action: string, project: string | unde
  */
 export function allows(principal: Principal, action: string, project: string | undefined, options: CheckOptions = {}): boolean {
   if (principal.kind === "owner") return true;
+  if (outsideTask(principal, project, options)) return false;
   // A principal that did not come from authentication (or `GrantService.effective`) has not had its restrictions loaded: it is refused rather than trusted.
   if (principal.asOf === undefined || restricted(principal, action, project, options)) return false;
   const now = options.now ?? new Date().toISOString();
@@ -70,6 +82,7 @@ export function allows(principal: Principal, action: string, project: string | u
 /** Whether a grant names this exact action (not through `*` or a prefix) in the project: used where a broad grant must not be enough, such as reading another agent's private scratch. */
 export function allowsExactly(principal: Principal, action: string, project: string | undefined, options: CheckOptions = {}): boolean {
   if (principal.kind === "owner") return true;
+  if (outsideTask(principal, project, options)) return false;
   if (principal.asOf === undefined || restricted(principal, action, project, options)) return false;
   const now = options.now ?? new Date().toISOString();
   return principal.grants.some((g) => g.action === action && projectMatches(g.project, project)

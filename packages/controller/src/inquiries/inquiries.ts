@@ -6,7 +6,7 @@ import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import type { WaitBody, WaitService } from "../domain/waits.js";
 import type { HistoryService } from "../context/histories.js";
 import type { RetrievalService, SourceRef } from "../context/retrieval.js";
-import { allows } from "../security/access.js";
+import { allows, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
@@ -223,7 +223,7 @@ export class InquiryService {
       for (const a of chunk) {
         after = a.id;
         const b = a.body as unknown as InquiryBody;
-        if (b.state !== "open" || (principal.kind !== "owner" && b.to !== principal.id)) continue;
+        if (b.state !== "open" || (principal.kind !== "owner" && (b.to !== principal.id || !inTaskScope(principal, b.projectId)))) continue;
         items.push(view<InquiryBody>(a));
         if (items.length >= limit) return { items, next: a.id };
       }
@@ -249,7 +249,7 @@ export class InquiryService {
         const current = await this.#runner.get("inquiry", id);
         const body = current?.body as unknown as InquiryBody | undefined;
         // Only the asker (or, to withdraw, the owner) may; anyone else, and a missing inquiry, get the same refusal.
-        const allowed = body !== undefined && (principal.id === body.asker || (to === "cancelled" && principal.kind === "owner"));
+        const allowed = body !== undefined && ((principal.id === body.asker && inTaskScope(principal, body.projectId)) || (to === "cancelled" && principal.kind === "owner"));
         if (current === undefined || body === undefined || !allowed) throw new DomainError("forbidden", `${principal.id} may not ${to === "closed" ? "close" : "cancel"} that inquiry`);
         if (current.revision !== expected) throw new DomainError("stale_revision", `inquiry ${id} is at revision ${current.revision}, not ${expected}`, { currentRevision: current.revision });
         if (to === "closed" ? body.state !== "answered" : body.state !== "open") throw new DomainError("invalid_command", `inquiry ${id} is ${body.state}; it cannot be ${to}`, { field: "inquiryId" });

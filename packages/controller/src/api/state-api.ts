@@ -8,6 +8,7 @@ import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
 import { SecureApi } from "../security/secured.js";
 import type { PrincipalService } from "../security/principals.js";
+import type { TaskCredentialService } from "../security/task-credentials.js";
 import type { JsonObject } from "../storage/types.js";
 import { OPERATION_BY_NAME, type Args, type Context } from "./operations.js";
 
@@ -42,6 +43,8 @@ export interface StateApiDeps {
   readonly agents: AgentService;
   readonly contracts: ContractService;
   readonly graph: WaitGraphService;
+  /** When present, a task credential (`tcr-…`) is accepted too and acts for its one task (card A10b). */
+  readonly taskCredentials?: TaskCredentialService;
   /** Called with errors that are not part of the contract (so they are not shown to the client). */
   readonly onInternalError?: (error: unknown) => void;
 }
@@ -69,7 +72,7 @@ export class StateApi {
   async handle(token: unknown, raw: unknown): Promise<ApiResponse> {
     const op = typeof raw === "object" && raw !== null && typeof (raw as { op?: unknown }).op === "string" ? (raw as { op: string }).op.slice(0, 60) : "";
     try {
-      const principal = await this.#deps.principals.authenticate(token);
+      const principal = this.#deps.taskCredentials !== undefined && typeof token === "string" && token.startsWith("tcr-") ? await this.#deps.taskCredentials.authenticate(token) : await this.#deps.principals.authenticate(token);
       const request = this.#parse(raw);
       const operation = OPERATION_BY_NAME.get(request.op);
       if (operation === undefined) throw new DomainError("invalid_command", `op: ${request.op.slice(0, 60)} is not an operation of API version ${API_VERSION}`, { field: "op" });

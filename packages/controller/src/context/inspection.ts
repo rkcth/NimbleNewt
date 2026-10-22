@@ -2,7 +2,7 @@ import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import { onlyKnown, revision as checkRevision, text, type View } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
-import { allowsExactly } from "../security/access.js";
+import { allowsExactly, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
@@ -133,7 +133,7 @@ export class InspectionService {
       for (const a of page) {
         after = a.id;
         const b = a.body as unknown as InspectionBody;
-        if (by.kind !== "owner" && b.recordOwner !== by.id) continue;
+        if (by.kind !== "owner" && (b.recordOwner !== by.id || !inTaskScope(by, b.projectId))) continue;
         if (query.recordOwner !== undefined && b.recordOwner !== query.recordOwner) continue;
         items.push(view<InspectionBody>(a));
         if (items.length >= limit) return { items, next: a.id };

@@ -8,7 +8,7 @@ import { HarnessCatalog, type HarnessDeclaration } from "../harness/index.js";
 import { BlockerService } from "../domain/blockers.js";
 import { ContractService, WaitGraphService } from "../planning/index.js";
 import { InquiryService } from "../inquiries/index.js";
-import { GrantService, PrincipalService } from "../security/index.js";
+import { GrantService, PrincipalService, TaskCredentialService } from "../security/index.js";
 import { SqliteStorage } from "../storage/sqlite/index.js";
 import { PostgresStorage } from "../storage/postgres/index.js";
 import type { ControllerStorage } from "../storage/types.js";
@@ -53,7 +53,7 @@ export interface Controller {
   readonly epoch: number;
   readonly check: StartupCheck;
   readonly services: {
-    readonly principals: PrincipalService; readonly grants: GrantService; readonly projects: ProjectService; readonly assignments: AssignmentService;
+    readonly principals: PrincipalService; readonly taskCredentials: TaskCredentialService; readonly grants: GrantService; readonly projects: ProjectService; readonly assignments: AssignmentService;
     readonly waits: WaitService; readonly desks: DeskService; readonly histories: HistoryService; readonly retrieval: RetrievalService; readonly inquiries: InquiryService; readonly agents: AgentService; readonly harnesses: HarnessCatalog; readonly contracts: ContractService; readonly graph: WaitGraphService; readonly reviews: ReviewService; readonly conversations: ConversationService; readonly configuration: ConfigurationService; readonly routing: RoutingService;
   };
   /** The conversation listener's address, when it was asked for. */
@@ -103,6 +103,7 @@ export async function startController(options: StartOptions): Promise<Controller
     const epoch = projects.epoch;
     await recordOverride(storage, epoch, check);
     const principals = PrincipalService.withEpoch(storage, epoch);
+    const taskCredentials = TaskCredentialService.withEpoch(storage, epoch);
     const grants = GrantService.withEpoch(storage, epoch);
     const catalog = HarnessCatalog.of(options.harnesses ?? []);
     const contracts = ContractService.withEpoch(storage, epoch);
@@ -118,10 +119,10 @@ export async function startController(options: StartOptions): Promise<Controller
     const routing = RoutingService.withEpoch(storage, epoch);
     const configuration = ConfigurationService.withEpoch(storage, epoch, { routing });
     const conversations = ConversationService.withEpoch(storage, epoch, options.availability === undefined ? {} : { availability: options.availability });
-    const api = new StateApi({ principals, projects, assignments, retrieval, inquiries, agents, contracts, graph, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
+    const api = new StateApi({ principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
     const transport = options.conversationTransport === undefined ? undefined : await ConversationTransport.listen({ ...options.conversationTransport, conversations, principals });
     return {
-      api, storage, epoch, check, services: { principals, grants, projects, assignments, waits, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, reviews, conversations, configuration, routing },
+      api, storage, epoch, check, services: { principals, taskCredentials, grants, projects, assignments, waits, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, reviews, conversations, configuration, routing },
       ...(transport === undefined ? {} : { conversationUrl: transport.url }),
       close: async () => { await transport?.close(); await storage.close(); },
     };

@@ -2,7 +2,7 @@ import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import { onlyKnown, projectId as checkProjectId, revision as checkRevision, taskId as checkTaskId, text, type TaskBody, type View } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
-import { allows, toolAction } from "../security/access.js";
+import { allows, inTaskScope, toolAction } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import { effectiveOf } from "../security/grants.js";
 import type { NoActor, Principal, PrincipalBody } from "../security/principals.js";
@@ -149,7 +149,7 @@ export class ReviewService {
     const context = checkContext(command.context, operation.script);
     const task = await this.#runner.get("task", taskId);
     const projectId = (task?.body as unknown as TaskBody | undefined)?.projectId;
-    const fresh = await this.#fresh(requester.id);
+    const fresh = await this.#fresh(requester.id, requester.taskScope);
     const resource = { kind: "task", id: taskId };
     // A task the requester may not work on reads exactly like one that does not exist.
     if (projectId === undefined || fresh === undefined || !allows(fresh, "review.request", projectId, { resource }) || !allows(fresh, "attempt.work", projectId, { resource })) throw new DomainError("forbidden", `${requester.id} may not ask for a review about that task`);
@@ -209,7 +209,7 @@ export class ReviewService {
     if (redactText(reason) !== reason) invalid("reason", "looks like a credential or key; those are not recorded in a review");
     if (command.expiresAt !== undefined && !(typeof command.expiresAt === "string" && TIMESTAMP.test(command.expiresAt))) invalid("expiresAt", "must be a UTC timestamp such as 2026-10-21T12:00:00.000Z");
     const cost = command.cost === undefined ? undefined : (typeof command.cost === "number" && Number.isFinite(command.cost) && command.cost >= 0 && command.cost <= ROUTING_LIMITS.cost ? command.cost : invalid("cost", `must be a number from 0 to ${ROUTING_LIMITS.cost}`));
-    const fresh = await this.#fresh(reviewer.id);
+    const fresh = await this.#fresh(reviewer.id, reviewer.taskScope);
     await this.#runner.command("review.decide", { commandId: scopedCommandId(reviewer.id, command.commandId), actor: reviewer.id }, async () => ({
       payload: { requestId: id, expectedRevision: expected, verdict, reason, ...(command.expiresAt === undefined ? {} : { expiresAt: command.expiresAt }), ...(cost === undefined ? {} : { cost }) },
       build: async () => {
@@ -281,7 +281,7 @@ export class ReviewService {
       build: async () => {
         const current = await this.#runner.get("review", id);
         const body = current?.body as unknown as ReviewBody | undefined;
-        if (current === undefined || body === undefined || !(principal.kind === "owner" || principal.id === body.decidedBy || principal.id === body.binding.requester)) throw new DomainError("forbidden", `${principal.id} may not withdraw that review`);
+        if (current === undefined || body === undefined || !(principal.kind === "owner" || (inTaskScope(principal, body.binding.projectId) && (principal.id === body.decidedBy || principal.id === body.binding.requester)))) throw new DomainError("forbidden", `${principal.id} may not withdraw that review`);
         if (current.revision !== expected) throw new DomainError("stale_revision", `review ${id} is at revision ${current.revision}, not ${expected}`, { currentRevision: current.revision });
         if (!["pending", "approved", "needs-context", "owner-decision"].includes(body.state)) throw new DomainError("invalid_command", `review ${id} is ${body.state}; it cannot be withdrawn`, { field: "requestId" });
         const next: ReviewBody = { ...body, state: "withdrawn", withdrawnBy: principal.id, reason };
@@ -312,7 +312,7 @@ export class ReviewService {
         const current = await this.#runner.get("review", id);
         const body = current?.body as unknown as ReviewBody | undefined;
         if (current === undefined || body === undefined || body.binding.requester !== executor.id) throw new DomainError("forbidden", `${executor.id} has no such review`);
-        const fresh = await this.#fresh(executor.id);
+        const fresh = await this.#fresh(executor.id, executor.taskScope);
         if (fresh === undefined) throw new DomainError("unauthenticated", "the credential was not accepted");
         if (body.state !== "approved") throw new DomainError("review_invalid", `review ${id} is ${body.state}, not approved`, { field: "requestId" });
         const policy = await this.#policy(body.binding.projectId);
@@ -346,7 +346,7 @@ export class ReviewService {
     const found = typeof requestId === "string" && REVIEW_ID.test(requestId) ? await this.#runner.get("review", requestId) : undefined;
     if (found === undefined) return undefined;
     const body = found.body as unknown as ReviewBody;
-    const fresh = await this.#fresh(principal.id);
+    const fresh = await this.#fresh(principal.id, principal.taskScope);
     const mayReview = fresh !== undefined && allows(fresh, "review.decide", body.binding.projectId);
     if (principal.kind !== "owner" && principal.id !== body.binding.requester && principal.id !== body.decidedBy && !mayReview) return undefined;
     return view<ReviewBody>(found);
@@ -359,7 +359,7 @@ export class ReviewService {
     onlyKnown(command, ["commandId", "projectId", "policy", "expectedRevision"]);
     const projectId = checkProjectId(command.projectId);
     const policy = checkPolicy(command.policy);
-    const fresh = await this.#fresh(by.id);
+    const fresh = await this.#fresh(by.id, by.taskScope);
     const expected = command.expectedRevision === undefined ? undefined : checkRevision(command.expectedRevision);
     await this.#runner.command("review.policy.set", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
       payload: { projectId, policy: policy as unknown as JsonObject, expectedRevision: expected ?? null },
@@ -382,7 +382,7 @@ export class ReviewService {
   /** The project's review policy (the defaults, at revision 0, when none was set). Readable by anyone who may request, decide or set policy there. */
   async getPolicy(principal: Principal, projectId: string): Promise<{ policy: ReviewPolicyBody; revision: number } | undefined> {
     const id = checkProjectId(projectId);
-    const fresh = await this.#fresh(principal.id);
+    const fresh = await this.#fresh(principal.id, principal.taskScope);
     if (fresh === undefined || !(allows(fresh, "review.policy.write", id) || allows(fresh, "review.decide", id) || allows(fresh, "review.request", id))) return undefined;
     const p = await this.#policy(id);
     return { policy: p.body, revision: p.revision };
@@ -403,7 +403,7 @@ export class ReviewService {
           const current = await this.#runner.get("review", id);
           const body = current?.body as unknown as ReviewBody | undefined;
           const routeAggregate = await this.#runner.get("review-route", id);
-          if (current === undefined || body === undefined || routeAggregate === undefined || !(principal.kind === "owner" || principal.id === body.binding.requester)) throw new DomainError("forbidden", `${principal.id} may not supply context for that review`);
+          if (current === undefined || body === undefined || routeAggregate === undefined || !(principal.kind === "owner" || (inTaskScope(principal, body.binding.projectId) && principal.id === body.binding.requester))) throw new DomainError("forbidden", `${principal.id} may not supply context for that review`);
           if (current.revision !== expected) throw new DomainError("stale_revision", `review ${id} is at revision ${current.revision}, not ${expected}`, { currentRevision: current.revision });
           if (body.state !== "needs-context") throw new DomainError("invalid_command", `review ${id} is ${body.state}; context can be supplied only when the reviewer has asked for it`, { field: "requestId" });
           const now = this.#runner.now();
@@ -439,7 +439,7 @@ export class ReviewService {
         const current = await this.#runner.get("review", id);
         const body = current?.body as unknown as ReviewBody | undefined;
         const routeAggregate = await this.#runner.get("review-route", id);
-        const fresh = await this.#fresh(principal.id);
+        const fresh = await this.#fresh(principal.id, principal.taskScope);
         if (current === undefined || body === undefined || routeAggregate === undefined || fresh === undefined) throw new DomainError("forbidden", `${principal.id} may not record a contributor on that review`);
         const resource = { kind: "task", id: body.binding.taskId };
         if (principal.kind !== "owner" && !allows(fresh, "attempt.work", body.binding.projectId, { resource })) throw new DomainError("forbidden", `${principal.id} may not record a contributor on that review`);
@@ -483,7 +483,7 @@ export class ReviewService {
   async sweep(by: Principal, command: NoActor & { projectId: string }): Promise<{ reassigned: string[]; escalated: string[]; assigned: string[]; more: boolean }> {
     onlyKnown(command, ["commandId", "projectId"]);
     const projectId = checkProjectId(command.projectId);
-    const fresh = await this.#fresh(by.id);
+    const fresh = await this.#fresh(by.id, by.taskScope);
     if (fresh === undefined || !allows(fresh, "review.policy.write", projectId)) throw new DomainError("forbidden", `${by.id} may not move reviews along in ${projectId}`);
     if ((await this.#runner.get("project", projectId)) === undefined) throw new DomainError("not_found", `project ${projectId} does not exist`);
     // Nothing to move is not a command: it changes nothing, so there is nothing to record.
@@ -559,7 +559,7 @@ export class ReviewService {
     if (command.falseBlock !== undefined && typeof command.falseBlock !== "boolean") invalid("falseBlock", "must be true or false");
     if (command.missedHazard !== undefined && typeof command.missedHazard !== "boolean") invalid("missedHazard", "must be true or false");
     if (command.falseBlock === undefined && command.missedHazard === undefined) invalid("falseBlock", "give falseBlock or missedHazard");
-    const fresh = await this.#fresh(by.id);
+    const fresh = await this.#fresh(by.id, by.taskScope);
     await this.#runner.command("review.outcome", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
       payload: { requestId: id, falseBlock: command.falseBlock ?? null, missedHazard: command.missedHazard ?? null },
       build: async () => {
@@ -578,7 +578,7 @@ export class ReviewService {
   /** The figures kept about reviewing in a project: counts by verdict, queue delay, latency, cost, false blocks and missed hazards. Needs `review.policy.write` there. */
   async metrics(by: Principal, projectId: string): Promise<{ reviews: number; decided: number; open: number; escalated: number; allowed: number; denied: number; falseBlocks: number; missedHazards: number; averageQueueMs: number | null; averageLatencyMs: number | null; totalCost: number }> {
     const id = checkProjectId(projectId);
-    const fresh = await this.#fresh(by.id);
+    const fresh = await this.#fresh(by.id, by.taskScope);
     if (fresh === undefined || !allows(fresh, "review.policy.write", id)) throw new DomainError("forbidden", `${by.id} may not read the review figures of ${id}`);
     const routes = (await this.#routesOf(id)).map((r) => r.body as unknown as ReviewRouteBody);
     const decided = routes.filter((r) => r.verdict !== undefined);
@@ -714,11 +714,12 @@ export class ReviewService {
   }
 
   /** The principal as stored now, with its grant records and restrictions loaded now (never a snapshot the caller holds). `undefined` if it is not an active principal. */
-  async #fresh(principalId: string): Promise<Principal | undefined> {
+  /** `scope` is passed when the principal is the caller, so a task credential stays inside its task when its grants are looked up again. */
+  async #fresh(principalId: string, scope?: Principal["taskScope"]): Promise<Principal | undefined> {
     const found = await this.#runner.get("principal", principalId);
     const body = found?.body as unknown as PrincipalBody | undefined;
     if (found === undefined || body === undefined || body.state !== "active") return undefined;
-    return effectiveOf(this.#runner, { id: found.id, kind: body.kind, name: body.name, grants: body.grants }, this.#runner.now());
+    return effectiveOf(this.#runner, { id: found.id, kind: body.kind, name: body.name, grants: body.grants, ...(scope === undefined ? {} : { taskScope: scope }) }, this.#runner.now());
   }
 
   #binding(principal: Principal, taskId: string, projectId: string, operation: Operation): Binding {

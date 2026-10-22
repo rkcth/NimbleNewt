@@ -2,7 +2,7 @@ import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import { LIMITS as MODEL_LIMITS, onlyKnown, projectId as checkProjectId, revision as checkRevision, taskId as checkTaskId, text, type View } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
-import { allows, allowsExactly } from "../security/access.js";
+import { allows, allowsExactly, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
@@ -176,7 +176,7 @@ export class DeskService {
   /** Whether the principal may read the record now: the ordinary rule, and, for another agent's private scratch read on a scratch grant, the installation's inspection policy (a `denied` policy stops such grants too). */
   async #readable(principal: Principal, record: DeskRecordBody): Promise<boolean> {
     if (!canRead(principal, record)) return false;
-    if (record.visibility !== "private" || record.owner === principal.id) return true;
+    if (record.visibility !== "private" || (record.owner === principal.id && inTaskScope(principal, record.projectId))) return true;
     const policy = (await this.#runner.get("inspection-policy", "installation"))?.body as unknown as { scratch?: string } | undefined;
     return policy?.scratch !== "denied";
   }
@@ -288,7 +288,7 @@ export class DeskService {
 
 /** Reading rules: private scratch is the owner's (or an explicit scratch grant); a draft is the owner's; the rest needs `desk.read` in the record's project. */
 export function canRead(principal: Principal, record: DeskRecordBody): boolean {
-  if (record.owner === principal.id) return true;
+  if (record.owner === principal.id && inTaskScope(principal, record.projectId)) return true;
   // A broad grant (`*`, `desk.*`) is not enough to read another agent's private scratch: it takes a grant that names it.
   // The installation owner is not exempt: reading another agent's private scratch goes through audited inspection (card A10), not through this ordinary read.
   if (record.visibility === "private") return principal.kind !== "owner" && allowsExactly(principal, "desk.scratch.read", record.projectId);
