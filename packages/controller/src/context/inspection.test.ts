@@ -51,15 +51,17 @@ for (const backend of backends) {
   const rec = (project: string, extra: Record<string, unknown> = {}) => ({ commandId: cid("w"), projectId: project, kind: "note" as const, title: "a note", body: "something worth keeping", visibility: "shared" as const, status: "accepted" as const, ...extra });
   const audit = async (c: Ctx, type: string) => (await c.world.storage.listAudit({ afterSeq: 0, limit: 1000 })).filter((e) => e.type === type);
 
-  suite("the owner reads another agent's scratch and drafts only by inspection, under the recorded policy, and every look is kept where the agent can see it", async (c) => {
+  suite("the owner reads everything the ordinary way; an inspection is an optional recorded look under the policy, kept where the agent can see it", async (c) => {
     const scratch = await c.desks.write(c.ann, rec(c.a, { visibility: "private", title: "thinking", body: "maybe the vendor is wrong" }));
     const draft = await c.desks.write(c.ann, rec(c.a, { status: "draft", title: "unfinished" }));
     const published = await c.desks.write(c.ann, rec(c.a, { title: "public" }));
-    // The ordinary read and listing do not show them to the owner.
-    await refuses("forbidden", () => c.desks.read(c.owner, scratch.id));
-    await refuses("forbidden", () => c.desks.read(c.owner, draft.id));
-    assert.deepEqual((await c.desks.list(c.owner, { ownerId: "agent:ann", limit: 10 })).items.map((i) => i.id), [published.id]);
-    assert.deepEqual((await c.retrieval.search(c.owner, { projectId: c.a, query: "vendor" })).hits, []);
+    // The owner reads them the ordinary way, with no reason and no record; peers still cannot.
+    assert.equal((await c.desks.read(c.owner, scratch.id)).body, "maybe the vendor is wrong");
+    assert.equal((await c.desks.read(c.owner, draft.id)).title, "unfinished");
+    assert.deepEqual((await c.desks.list(c.owner, { ownerId: "agent:ann", limit: 10 })).items.map((i) => i.id).sort(), [scratch.id, draft.id, published.id].sort());
+    assert.ok((await c.retrieval.search(c.owner, { projectId: c.a, query: "vendor" })).hits.length > 0);
+    assert.deepEqual((await c.inspection.inspections(c.ann)).items, [], "an ordinary read leaves nothing for the agent to see");
+    await refuses("forbidden", () => c.desks.read(c.ben, scratch.id));
     // Policy: allowed by default; only the owner changes it.
     assert.deepEqual(await c.inspection.policy(), { scratch: "allowed", revision: 0 });
     await refuses("forbidden", () => c.inspection.setPolicy(c.ann, { commandId: cid("p"), scratch: "denied" }));

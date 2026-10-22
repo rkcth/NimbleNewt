@@ -176,6 +176,7 @@ export class DeskService {
   /** Whether the principal may read the record now: the ordinary rule, and, for another agent's private scratch read on a scratch grant, the installation's inspection policy (a `denied` policy stops such grants too). */
   async #readable(principal: Principal, record: DeskRecordBody): Promise<boolean> {
     if (!canRead(principal, record)) return false;
+    if (principal.kind === "owner") return true;
     if (record.visibility !== "private" || (record.owner === principal.id && inTaskScope(principal, record.projectId))) return true;
     const policy = (await this.#runner.get("inspection-policy", "installation"))?.body as unknown as { scratch?: string } | undefined;
     return policy?.scratch !== "denied";
@@ -286,12 +287,13 @@ export class DeskService {
   }
 }
 
-/** Reading rules: private scratch is the owner's (or an explicit scratch grant); a draft is the owner's; the rest needs `desk.read` in the record's project. */
+/** Reading rules: the installation owner reads everything; private scratch and a draft are their agent's own (private scratch also with an explicit scratch grant); the rest needs `desk.read` in the record's project. */
 export function canRead(principal: Principal, record: DeskRecordBody): boolean {
+  // The installation owner reads everything: nothing on a desk is kept from the owner (owner decision 2026-10-22). Writing is another matter and stays with the record's own agent.
+  if (principal.kind === "owner") return true;
   if (record.owner === principal.id && inTaskScope(principal, record.projectId)) return true;
   // A broad grant (`*`, `desk.*`) is not enough to read another agent's private scratch: it takes a grant that names it.
-  // The installation owner is not exempt: reading another agent's private scratch goes through audited inspection (card A10), not through this ordinary read.
-  if (record.visibility === "private") return principal.kind !== "owner" && allowsExactly(principal, "desk.scratch.read", record.projectId);
+  if (record.visibility === "private") return allowsExactly(principal, "desk.scratch.read", record.projectId);
   if (record.status === "draft") return false;
   return allows(principal, "desk.read", record.projectId);
 }

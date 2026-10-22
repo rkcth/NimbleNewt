@@ -89,7 +89,7 @@ for (const backend of backends) {
     await refuses("invalid_command", () => desks.revise(ann, { commandId: cid("back"), recordId: draft.id, expectedRevision: 3, status: "accepted" }), (e) => assert.match(e.message, /stays superseded/));
   });
 
-  suite("private scratch is its owner's alone: peers and supervisors cannot read it or find it in a listing, unless an explicit grant says otherwise", async ({ desks, agent, a, owner }) => {
+  suite("private scratch is its agent's alone among agents: peers and supervisors cannot read it or find it in a listing, unless an explicit grant says otherwise; the installation owner reads it", async ({ desks, agent, a, owner }) => {
     const ann = await agent("ann", writer(a));
     const ben = await agent("ben", [...writer(a), { action: "desk.*", project: "*" }]);
     const scratch = await desks.write(ann, record(a, { visibility: "private", title: "thinking", body: "maybe the vendor is wrong" , status: "accepted"}));
@@ -99,8 +99,9 @@ for (const backend of backends) {
     assert.equal((await desks.list(ann, { limit: 10 })).items.length, 1);
     const reviewer = await agent("rev", [{ action: "desk.scratch.read", project: a }]);
     assert.equal((await desks.read(reviewer, scratch.id)).title, "thinking", "an explicit scratch grant is honoured");
-    // The installation owner is not exempt from the ordinary rule: reading unpublished records goes through audited inspection (card A10).
-    await refuses("forbidden", () => desks.read(owner, scratch.id));
+    // The installation owner reads everything, scratch included, with no reason asked (owner decision 2026-10-22).
+    assert.equal((await desks.read(owner, scratch.id)).body, "maybe the vendor is wrong");
+    assert.equal((await desks.list(owner, { ownerId: "agent:ann", limit: 10 })).items.length, 1);
   });
 
   suite("a record belongs to one project: writing, reading and superseding do not cross projects", async ({ desks, agent, a, b, ta, tb }) => {
