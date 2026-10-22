@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **63 of 163 tasks implemented**, 2 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **63 of 164 tasks implemented**, 2 awaiting sign-off.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -308,6 +308,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 - [ ] **F04e** Implement chat-controlled controller database transfer _(needs F04, K01, F06)_
 - [ ] **H09** Implement reconnect reconciliation and primary epochs _(needs H08, L04, S05)_
+- [ ] **K01b** Implement encrypted backups with passcode and recovery-file unlock _(needs K01, F09)_
 - [ ] **K06** Implement retention, quotas, archive, export and deletion _(needs K01, S06, C02)_
 - [ ] **L06** Implement team and system shutdown, reboot and resume policy _(needs L02, L03, H08, U06, H11)_
 - [ ] **P04** Implement ongoing responsibility checks, incidents and coverage _(needs P01, S08, H13, V01, L03)_
@@ -318,7 +319,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 ### Phase 33
 
 - [ ] **H10** Implement distributed agent capacity and fan-in limits _(needs H07, H09, H03, R05)_
-- [ ] **K01b** Implement encrypted backups with passcode and recovery-file unlock _(needs K01, T02)_
+- [ ] **K01c** Implement the full configurable backup system (before 1.0) _(needs K01b, K06, U11)_
 - [ ] **K02** Implement deterministic release staging and activation _(needs K01, F02, T02)_
 - [ ] **K06b** Implement tiered retention (optional, after the first release) _(needs K06, C02)_
 - [ ] **P06** Implement project and agent retirement and archival _(needs P01, H11, L03, K06)_
@@ -328,7 +329,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 34
 
-- [ ] **K01c** Implement the full configurable backup system (before 1.0) _(needs K01b, K06, U11)_
+- [ ] **K01d** Implement backup scope tiers (optional, after the first release) _(needs K01c, K06b)_
 - [ ] **K03** Implement migration recovery and rollback limits _(needs K02, G03)_
 - [ ] **K07** Implement maintenance windows and update orchestration _(needs K02, K01, L06, U11, G05)_
 - [ ] **P02** Implement isolated coding workspaces and integration _(needs P01, A04, L04, Y02, H12)_
@@ -339,7 +340,6 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 - [ ] **D02** Finish developer/API/security and license guidance _(needs T05, K03, F03)_
 - [ ] **G11** Qualify the Pi Durable runtime upgrade path _(needs G03, F07, K07)_
-- [ ] **K01d** Implement backup scope tiers (optional, after the first release) _(needs K01c, K06b)_
 - [ ] **P05** Implement external contribution and pull-request workflow _(needs P02, A06, A07, T03, F09)_
 - [ ] **P07** Implement simulation mode _(needs P03, R02, T03)_
 - [ ] **Q01** Implement deliverable submission and acceptance _(needs S06, U01, P02, P03, S10)_
@@ -406,7 +406,11 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 48
 
-- [ ] **D04** Run detailed real-world QA on macOS, Linux and Windows _(needs D03, K06b, K01d)_
+- [ ] **D04** Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
+
+### Phase 49
+
+- [ ] **D05** Close the plan: every optional item built or deferred by the owner _(needs D04, K06b, K01d)_
 _Note: F01 started before its prerequisite planning records G01 and G07 were formally closed; G01 is still not fully closed._
 
 ## More detail

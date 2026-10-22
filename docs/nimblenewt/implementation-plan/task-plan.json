@@ -711,7 +711,7 @@
         "A01"
       ],
       "deliverable": "Secret backends behind the F02 secret-reference resolver: macOS Keychain, Windows Credential Manager/DPAPI, Linux Secret Service with a documented, permission-checked file fallback (portability-and-configuration 31, 75)",
-      "acceptance_and_verification": "A secret is written through the API, chat or UI and never returned, echoed or logged; references resolve under the unattended service identity on macOS, Linux and Windows after logout and reboot; a missing or locked store fails with a clear error naming the reference; export and backup carry references only; a rotated secret is used from the next resolution without restart",
+      "acceptance_and_verification": "A secret is written through the API, chat or UI and never returned, echoed or logged; references resolve under the unattended service identity on macOS, Linux and Windows after logout and reboot; a missing or locked store fails with a clear error naming the reference; export and backup carry references only unless encrypted backup (K01b) is on; a rotated secret is used from the next resolution without restart",
       "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -3279,7 +3279,7 @@
         "S05"
       ],
       "deliverable": "Both-backend manifested backup/export and restore runner including Pi state; nightly backups retaining 7 daily and 4 weekly copies plus pre-upgrade snapshot, and a 'back up now' command; first-release backup is this simple built-in one (owner decision 2026-10-22), the configurable system is K01c",
-      "acceptance_and_verification": "Portable recovery folder from consistent database snapshots and Pi/artifact manifest; coordinate maintenance barrier across stores; restore into empty install verifies artifacts/versions; separate secret recovery; uncertain later effects not replayed; interrupted backup never labeled complete; never sync live SQLite files as backup",
+      "acceptance_and_verification": "Portable recovery folder from consistent database snapshots and Pi/artifact manifest; coordinate maintenance barrier across stores; restore into empty install verifies artifacts/versions; separate secret recovery (secret values go into a backup only when encrypted backup K01b is on); uncertain later effects not replayed; interrupted backup never labeled complete; never sync live SQLite files as backup",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -3294,10 +3294,10 @@
       "title": "Implement encrypted backups with passcode and recovery-file unlock",
       "depends_on": [
         "K01",
-        "T02"
+        "F09"
       ],
-      "deliverable": "Public-key encrypted backup (first release; owner decision 2026-10-22): the server holds only a public key and cannot decrypt; the private key is wrapped by a passcode (Argon2id), a downloadable recovery file or printable recovery code, and any number of extra passcodes; scope setting 'secrets only' (default off, the owner turns it on) or 'everything'; nothing needed to recover lives only on the server",
-      "acceptance_and_verification": "Turning it on requires proving the recovery file decrypts a test value; either passcode or file alone restores on a new machine from the backup alone; adding or removing a passcode needs no re-encryption of old backups; a stolen server or backup alone reveals nothing; a scheduled backup runs unattended; every three months the system asks the owner to prove a passcode or the file still works; no passcode hints; losing every unlock method is stated plainly at setup (secrets only: secrets lost, the rest restores; everything: the backup is unreadable); the owner can set a new passcode while running and unlocked, which protects later backups only; rotating the keypair is recorded",
+      "deliverable": "Public-key encrypted, authenticated backups (first release; owner decision 2026-10-22). Encrypted backup is off by default; when the owner turns it on the scope is 'secrets only' (the rest of the backup stays plaintext) unless they choose 'everything'. Each backup carries its key ID and, inside itself, the private key wrapped once per unlock method that existed when it was made: a passcode (Argon2id), a downloadable recovery file or printable recovery code, and any extra passcodes. The server keeps the public key and the wrapped copies, never the private key at rest",
+      "acceptance_and_verification": "Turning it on requires proving the recovery file unwraps a private key that matches the server's current public key; either a passcode or the file alone restores on a new machine from the backup alone; every backup uses authenticated encryption and is signed by a backup-signing key the server holds for unattended use (in the F09 secret store, not wrapped by a passcode), and a restore verifies the signature against a signing public key it already trusts (carried by the recovery file or the owner's records for each key generation, never taken from the backup being checked) and says plainly that authenticity is only as strong as the running server, because a compromised server can forge backups; the owner may also keep a manifest digest off the server as a stronger check for backups they export by hand; a stolen backup, or the server's backup-key material (public key and wrappers), cannot decrypt any backup without a passcode or the file; the server holds the unwrapped private key only in memory for one operation, never on disk, and says so (it sees the passcode at that moment); minimum passcode strength and Argon2id parameters (at least 64 MiB memory) are enforced and stored with each wrapper so they can be raised; a recovery code carries at least 128 bits; removing or replacing a passcode (for example after exposure) rotates the keypair, so later backups use a new key and the removed passcode opens only older backups, which the owner is told; each old key generation's wrapped key and recovery file are kept until the last backup under it has expired; a rotation issues a new recovery file or code and requires proving it as at setup; switching encryption off, narrowing the scope or replacing the public key is owner-only, recorded and announced (U11); every three months the system asks the owner to prove a passcode or the file still works; no passcode hints; losing every unlock method is stated plainly at setup (secrets only: secrets lost, the rest restores; everything: the backup is unreadable); a scheduled backup runs unattended",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -3782,12 +3782,29 @@
       "existing_issue": "AII-269",
       "title": "Run detailed real-world QA on macOS, Linux and Windows",
       "depends_on": [
-        "D03",
+        "D03"
+      ],
+      "deliverable": "Automated and manual QA run on the completed product on the owner's real macOS and Windows machines and on Linux, with a written plan and evidence for each platform",
+      "acceptance_and_verification": "Detailed plan agreed with the owner before the run: install from a clean checkout and from the release artifact, full automated suite repeated, real-agent trial with a real model provider approved by the owner, long-running and restart scenarios, crash and power-loss style kills, unattended operation, antivirus and filesystem behaviour on Windows, sleep and network change on laptops, every supported PostgreSQL major released in the last three years re-verified, supported OS release floors confirmed; results recorded per platform; failures raised as typed blockers; this is the last item before the plan is closed (D05) and the owner accepts it; accepted only if the real-agent trial meets the approval-load targets (no more than three owner decisions per working day after the first week, no stall that reaches unrelated work)",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "D05",
+      "parent": "N19",
+      "existing_issue": "AII-269",
+      "title": "Close the plan: every optional item built or deferred by the owner",
+      "depends_on": [
+        "D04",
         "K06b",
         "K01d"
       ],
-      "deliverable": "Automated and manual QA run on the completed product on the owner's real macOS and Windows machines and on Linux, with a written plan and evidence for each platform",
-      "acceptance_and_verification": "Detailed plan agreed with the owner before the run: install from a clean checkout and from the release artifact, full automated suite repeated, real-agent trial with a real model provider approved by the owner, long-running and restart scenarios, crash and power-loss style kills, unattended operation, antivirus and filesystem behaviour on Windows, sleep and network change on laptops, every supported PostgreSQL major released in the last three years re-verified, supported OS release floors confirmed; results recorded per platform; failures raised as typed blockers; this is the last item of the plan and the owner accepts it; accepted only if the real-agent trial meets the approval-load targets (no more than three owner decisions per working day after the first week, no stall that reaches unrelated work)",
+      "deliverable": "Final bookkeeping after real-world QA: each optional, after-the-first-release card (K06b, K01d) is either built or recorded as deferred by the owner, and the plan is marked complete",
+      "acceptance_and_verification": "D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so K06b and K01d may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",

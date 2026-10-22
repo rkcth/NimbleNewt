@@ -40,7 +40,7 @@ test("every dependency exists, none is on itself, and the graph has no cycle", (
 test("the plan has one root and one leaf, as recorded in G07", () => {
   const dependedOn = new Set(plan.tasks.flatMap((t) => t.depends_on));
   assert.deepEqual(plan.tasks.filter((t) => t.depends_on.length === 0).map((t) => t.id), ["G01"]);
-  assert.deepEqual(plan.tasks.filter((t) => !dependedOn.has(t.id)).map((t) => t.id), ["D04"]);
+  assert.deepEqual(plan.tasks.filter((t) => !dependedOn.has(t.id)).map((t) => t.id), ["D05"]);
 });
 
 test("a card marked implemented has every blocker implemented (or awaiting only sign-off), and carries evidence", () => {
