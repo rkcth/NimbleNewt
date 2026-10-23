@@ -36,6 +36,8 @@ import type { RecipeSummary, ToolGateway, WorkerTurnResult, TurnUsage, WorkOrder
 /** The record of live dispatches: the attempts that have a claim and have not finished. Ticks read it instead of scanning every dispatch ever made. */
 const LIVE: AggregateRef = { kind: "dispatch-live", id: "live" };
 const LIVE_MAX = 600;
+/** Where the scan of assignments stopped (card H12c): the next tick, of this process or of one after a restart, goes on from there instead of from the beginning. */
+const CURSOR: AggregateRef = { kind: "dispatch-cursor", id: "scan" };
 const ATTEMPT = /^att-[a-z2-7]{20}$/;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 
@@ -118,6 +120,8 @@ export interface TickReport {
   readonly reprioritized: number;
   readonly approvals: readonly { readonly attemptId: string; readonly operationId: string; readonly verdict: "approved" | "denied" | "expired" }[];
   readonly loops: readonly { readonly name: string; readonly ok: boolean; readonly error?: string }[];
+  /** New attempts whose checks or start threw (an agent record the revalidation cannot read, a store error). The attempt is skipped for this tick and the scan goes on, so one bad attempt cannot stop the rest; the driver records each. */
+  readonly failures: readonly { readonly taskId: string; readonly attemptId: string; readonly error: string }[];
   readonly scanned: number;
   /** True when the scan of assignments reached its end in this tick (so it saw every assignment since it began). */
   readonly complete: boolean;
@@ -151,9 +155,11 @@ export class DispatcherService {
   /** Names this dispatcher in the commands of its updates: two dispatchers that read one revision must not share a command (the second would be answered with the first's result). */
   readonly #instance = randomUUID().slice(0, 8);
   readonly #ending = new Set<Promise<unknown>>();
-  #cursor: string | undefined;
   #ticking: Promise<TickReport> | undefined;
   #scanStartedAt = 0;
+  #cursorSavedAt: number | undefined;
+  #cursor: string | undefined;
+  #cursorKnown = false;
 
   private constructor(runner: CommandRunner, deps: DispatcherDeps, options: AttemptDispatcherOptions) {
     this.#runner = runner;
@@ -195,6 +201,7 @@ export class DispatcherService {
     const skipped: { taskId: string; attemptId: string; check: DispatchCheck; reason: string }[] = [];
     const blocked: { taskId: string; attemptId: string; check: DispatchCheck; blockerId: string }[] = [];
     const approvals: { attemptId: string; operationId: string; verdict: "approved" | "denied" | "expired" }[] = [];
+    const failures: { taskId: string; attemptId: string; error: string }[] = [];
     const live = await this.#liveIds();
     // 1. Leases and time. A worker that stopped beating, or an attempt past its expiry, is over; its calls are settled through the ledger first.
     for (const id of live) {
@@ -222,10 +229,12 @@ export class DispatcherService {
     // 4. New attempts: a page of assignments from where the last tick stopped.
     const scan = await this.#scan();
     for (const found of scan.found) {
+      if (found.outcome.kind === "failed") { failures.push({ taskId: found.taskId, attemptId: found.attemptId, error: found.outcome.error }); continue; }
       if (found.outcome.kind === "claimed") {
         const d = await this.#load(found.attemptId);
         if (d === undefined) continue;
-        const next = await this.#advance(d);
+        const next = await this.#advance(d).catch((error: unknown): { kind: "failed"; error: string } => { if (isDomainError(error, "stale_epoch")) throw error; return { kind: "failed", error: errorText(error) }; });
+        if (next.kind === "failed") { failures.push({ taskId: found.taskId, attemptId: found.attemptId, error: next.error }); continue; }
         if (next.kind === "started") started.push(found.attemptId);
         else if (next.kind === "waiting") waiting.push(found.attemptId);
         else if (next.kind === "skipped") skipped.push({ taskId: found.taskId, attemptId: found.attemptId, check: next.check, reason: next.reason });
@@ -256,7 +265,46 @@ export class DispatcherService {
         loops.push({ name: loop.name, ok: false, error: error instanceof Error ? error.message.slice(0, 200) : "failed" });
       }
     }
-    return { at, started, waiting, skipped, blocked, lost, readmitted, reprioritized, approvals, loops, scanned: scan.scanned, complete: scan.complete };
+    return { at, started, waiting, skipped, blocked, lost, readmitted, reprioritized, approvals, loops, failures, scanned: scan.scanned, complete: scan.complete };
+  }
+
+  /**
+   * The controller is shutting down (card H12c). Each attempt that is running here has its calls settled, a checkpoint taken, its worker ended and its place given back, and goes back to `waiting`
+   * with the checkpoint to resume from: it is the same attempt, so a restart does not count against the attempts a task is allowed and no blocker is opened. Attempts that are waiting or parked
+   * are not touched (a parked attempt's pending approvals stay pending); the next controller finds them in the live list. One attempt that cannot be closed has its error returned; its lease runs
+   * out for the next controller.
+   */
+  async shutdown(): Promise<{ closed: number; errors: string[] }> {
+    const errors: string[] = [];
+    let closed = 0;
+    const by = this.#deps.principal;
+    for (const id of await this.#liveIds()) {
+      const d = await this.#load(id);
+      if (d === undefined || d.body.state !== "running") continue;
+      try {
+        await this.settle(by, id, { cancel: true }).catch(() => undefined);
+        const checkpoint = await this.#checkpoint(id, "the controller shut down").catch(() => undefined);
+        const current = (await this.#load(id))!;
+        await this.#live.get(id)?.handle.stop().catch(() => undefined);
+        this.#path.forget(id, current.body.parked);
+        if (current.body.requestId !== undefined) await this.#deps.admission.release({ commandId: `dpa-down:${id}:${current.body.requests ?? 0}`, actor: DISPATCHER_ACTOR, requestId: current.body.requestId, reason: "the controller shut down" }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
+        await this.#update(id, (x) => {
+          if (x.state !== "running") return x;
+          const { requestId: _r, lease: _l, ...rest } = x; void _r; void _l;
+          return { ...rest, state: "waiting", resumeNote: "the controller restarted; carry on from the checkpoint", ...(checkpoint === undefined ? {} : { resumeFrom: checkpoint }) };
+        });
+        closed++;
+      } catch (error) {
+        errors.push(`${id}: ${errorText(error)}`);
+      }
+    }
+    await this.dropWorkers();
+    return { closed, errors };
+  }
+
+  /** Ends the workers this process holds, with no write to the store (a fenced controller does not own the attempts any more; the new one finds them in the live list and their leases). */
+  async dropWorkers(): Promise<void> {
+    await Promise.allSettled([...this.#live.values()].map((l) => l.handle.stop()));
   }
 
   /** Resolves when every turn this dispatcher started has ended. */
@@ -464,17 +512,42 @@ export class DispatcherService {
 
   /** The next page of assignments; for each active attempt without a dispatch, runs the checks and claims it. */
   async #scan(): Promise<{ scanned: number; complete: boolean; found: { taskId: string; attemptId: string; outcome: ClaimOutcome }[] }> {
-    const page = await this.#runner.list("assignment", { ...(this.#cursor === undefined ? {} : { afterId: this.#cursor }), limit: this.#options.scanPage });
+    // The first scan of this process starts from the stored position (a restart goes on from there); after that the position is kept in memory and written to the store from time to time.
+    const saved = await this.#runner.get(CURSOR.kind, CURSOR.id);
+    const cursor = this.#cursorKnown ? this.#cursor : (saved?.body as unknown as { after?: string } | undefined)?.after;
+    const page = await this.#runner.list("assignment", { ...(cursor === undefined ? {} : { afterId: cursor }), limit: this.#options.scanPage });
     const found: { taskId: string; attemptId: string; outcome: ClaimOutcome }[] = [];
     for (const a of page) {
       const body = a.body as unknown as { taskId: string; state: string; activeAttemptId?: string; generation: number; owner?: { kind: string; id: string } };
       if (body.state !== "assigned" || body.activeAttemptId === undefined || body.owner?.kind !== "agent") continue;
       if ((await this.#load(body.activeAttemptId)) !== undefined) continue;
-      found.push({ taskId: body.taskId, attemptId: body.activeAttemptId, outcome: await this.#claim(body.taskId, body.activeAttemptId) });
+      // One attempt whose checks throw must not stop the page (and, with the cursor not moving, every later tick): it is reported as failed and the others go on. A deposed epoch stops everything.
+      const outcome = await this.#claim(body.taskId, body.activeAttemptId).catch((error: unknown): ClaimOutcome => { if (isDomainError(error, "stale_epoch")) throw error; return { kind: "failed", error: errorText(error) }; });
+      found.push({ taskId: body.taskId, attemptId: body.activeAttemptId, outcome });
     }
     const complete = page.length < this.#options.scanPage;
-    this.#cursor = complete ? undefined : page.at(-1)?.id;
+    // The cursor moves only after the page was worked, so a crash in between rescans the page (an attempt that has its dispatch is skipped) and never skips one that was not claimed.
+    const next = complete ? undefined : page.at(-1)?.id;
+    await this.#saveCursor(saved, next, found.length > 0);
+    this.#cursor = next;
+    this.#cursorKnown = true;
     return { scanned: page.length, complete, found };
+  }
+
+  /** Writes where the scan stopped. A lost race (another dispatcher under a newer epoch cannot write; a concurrent tick of this one cannot exist) is read again; nothing is written when it did not move. */
+  async #saveCursor(saved: { readonly revision: number; readonly body: unknown } | undefined, after: string | undefined, worked: boolean): Promise<void> {
+    const was = (saved?.body as unknown as { after?: string } | undefined)?.after;
+    if (was === after) return;
+    // Over many assignments the position moves every tick; writing each move would cost a write a tick for ever. The position is written when the page had attempts in it, when a pass ended, and at most once
+    // a minute otherwise: a restart that finds an older position scans a few empty pages again, which loses nothing.
+    const nowMs = Date.parse(this.#runner.now());
+    if (!worked && after !== undefined && this.#cursorSavedAt !== undefined && nowMs - this.#cursorSavedAt < 60_000) return;
+    this.#cursorSavedAt = nowMs;
+    const body = (after === undefined ? {} : { after }) as unknown as JsonObject;
+    await this.#runner.command("dispatch.cursor", { commandId: `dpa-cur:${saved?.revision ?? 0}:${this.#instance}`, actor: DISPATCHER_ACTOR }, async () => ({
+      payload: { after: after ?? null, revision: saved?.revision ?? 0 },
+      build: async () => ({ ref: CURSOR, creates: saved === undefined, changes: [saved === undefined ? { type: "create" as const, ref: CURSOR, body } : { type: "update" as const, ref: CURSOR, expectedRevision: saved.revision, body }], detail: { after: after ?? null } }),
+    }));
   }
 
   /** Runs the checks that come before a claim, in order; claims the attempt when they pass. */
@@ -845,7 +918,8 @@ export class DispatcherService {
   }
 }
 
-type ClaimOutcome = { kind: "claimed" } | { kind: "skipped"; check: DispatchCheck; reason: string } | { kind: "blocked"; check: DispatchCheck; blockerId: string };
+const errorText = (error: unknown): string => (error instanceof Error ? error.message : "failed").slice(0, 300);
+type ClaimOutcome = { kind: "failed"; error: string } | { kind: "claimed" } | { kind: "skipped"; check: DispatchCheck; reason: string } | { kind: "blocked"; check: DispatchCheck; blockerId: string };
 type AdvanceOutcome = { kind: "started" } | { kind: "waiting" } | { kind: "skipped"; check: DispatchCheck; reason: string } | { kind: "blocked"; check: DispatchCheck; blockerId: string };
 
 /** A limit of 0 states no limit; a limit that is set is used up when what was spent (and what may have been) reaches it. */

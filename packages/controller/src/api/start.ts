@@ -22,6 +22,7 @@ import { ConfigurationService } from "../configuration/index.js";
 import { ConversationService, type Availability } from "../conversations/index.js";
 import { ReviewService } from "../review/index.js";
 import { RoutingService } from "../routing/index.js";
+import { composeDispatch, type DispatchHandle, type DispatchStartOptions } from "./dispatch-compose.js";
 import { ConversationTransport, type TransportOptions } from "../transport/index.js";
 
 export type StorageChoice =
@@ -65,6 +66,11 @@ export interface StartOptions {
   readonly conversationTransport?: Omit<TransportOptions, "conversations" | "principals">;
   /** What the lifecycle says about a principal (cards L01 and L02 supply it). Default: everyone is available. */
   readonly availability?: (principalId: string) => Promise<Availability>;
+  /**
+   * Builds the attempt dispatcher and runs its loops (card H12c): the tick, the messages, attendance, stand-up, event and decision loops. Off unless given. The loops run only while this controller
+   * holds the primary epoch; a newer controller instance stops them here. See `DispatchStartOptions`.
+   */
+  readonly dispatch?: DispatchStartOptions;
 }
 
 export interface Controller {
@@ -80,6 +86,10 @@ export interface Controller {
     readonly principals: PrincipalService; readonly taskCredentials: TaskCredentialService; readonly grants: GrantService; readonly projects: ProjectService; readonly assignments: AssignmentService;
     readonly waits: WaitService; readonly desks: DeskService; readonly histories: HistoryService; readonly retrieval: RetrievalService; readonly inquiries: InquiryService; readonly agents: AgentService; readonly harnesses: HarnessCatalog; readonly contracts: ContractService; readonly graph: WaitGraphService; readonly resources: ProjectResourceService; readonly plans: ProjectPlanService; readonly responsibilities: ResponsibilityService; readonly reviews: ReviewService; readonly conversations: ConversationService; readonly configuration: ConfigurationService; readonly routing: RoutingService;
   };
+  /** The dispatcher and the driver of its loops, when `dispatch` was given and the dispatcher could be provisioned. */
+  readonly dispatch?: DispatchHandle;
+  /** Why the dispatcher was not built although it was asked for (for example the owner disabled `service:dispatcher`). */
+  readonly dispatchProblem?: string;
   /** The conversation listener's address, when it was asked for. */
   readonly conversationUrl?: string;
   close(): Promise<void>;
@@ -129,6 +139,7 @@ export async function startController(options: StartOptions): Promise<Controller
     storage = await SqliteStorage.open({ path: options.storage.path, allowNetworkFilesystem: override });
   }
 
+  let dispatch: DispatchHandle | undefined;
   try {
     const projects = await ProjectService.open(storage, { holder: options.holder ?? "controller" });
     const epoch = projects.epoch;
@@ -156,13 +167,25 @@ export async function startController(options: StartOptions): Promise<Controller
     const plans = ProjectPlanService.withEpoch(storage, epoch);
     const responsibilities = ResponsibilityService.withEpoch(storage, epoch);
     const api = new StateApi({ principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
+    let dispatchProblem: string | undefined;
+    if (options.dispatch !== undefined) {
+      try {
+        dispatch = await composeDispatch({ storage, epoch, options: options.dispatch, principals, grants, taskCredentials, projects, assignments, waits, contracts, catalog, routing, inquiries, agents, histories, reviews, ...(options.onInternalError === undefined ? {} : { onError: options.onInternalError }) });
+      } catch (error) {
+        // A dispatcher the owner disabled, or a store that failed here, must not keep the rest of the controller from starting; the operator is told, and the reason stays on the controller.
+        dispatchProblem = error instanceof Error ? error.message.slice(0, 300) : "the dispatcher could not be built";
+        print(`The dispatcher is not running: ${dispatchProblem}`);
+      }
+    }
     const transport = options.conversationTransport === undefined ? undefined : await ConversationTransport.listen({ ...options.conversationTransport, conversations, principals });
     return {
       api, storage, epoch, check, filesystems, prerequisites, services: { principals, taskCredentials, grants, projects, assignments, waits, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing },
+      ...(dispatch === undefined ? {} : { dispatch }), ...(dispatchProblem === undefined ? {} : { dispatchProblem }),
       ...(transport === undefined ? {} : { conversationUrl: transport.url }),
-      close: async () => { await transport?.close(); await storage.close(); },
+      close: async () => { await dispatch?.driver.stop(); await transport?.close(); await storage.close(); },
     };
   } catch (error) {
+    await dispatch?.driver.stop().catch(() => undefined);
     await storage.close().catch(() => undefined);
     throw error;
   }

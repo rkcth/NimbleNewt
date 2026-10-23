@@ -570,6 +570,13 @@ for (const backend of backends) {
     const other = await r.w.principals.authenticate((await r.w.principals.issueCredential(r.w.owner, "host:h2")).token);
     await refuses("forbidden", () => r.reopen().resume(other, { projectId: r.a }));
     await refuses("forbidden", () => r.reopen().resume(r.ann, { projectId: r.a }));
+    // A service other than the dispatcher is refused; the dispatcher's service principal (it holds no grant) may finish the corrections of any project from its loop.
+    await r.w.principals.enroll(r.w.owner, { commandId: cid("sv"), kind: "service", name: "recovery", grants: [] });
+    await r.w.principals.enroll(r.w.owner, { commandId: cid("sv"), kind: "service", name: "dispatcher", grants: [] });
+    const other_service = await r.w.principals.authenticate((await r.w.principals.issueCredential(r.w.owner, "service:recovery")).token);
+    const dispatcher = await r.w.principals.authenticate((await r.w.principals.issueCredential(r.w.owner, "service:dispatcher")).token);
+    await refuses("forbidden", () => r.reopen().resume(other_service, { projectId: r.a }));
+    assert.deepEqual(await r.reopen().resume(dispatcher, { projectId: r.a }), { done: 0, pending: 0, more: false, failures: [] });
     assert.deepEqual(await r.reopen().resume(r.host, { projectId: r.a }), { done: 0, pending: 0, more: false, failures: [] });
     assert.equal(await r.decisions.propagation(other, "dpr-00000000000000000000000000000000"), undefined);
   });

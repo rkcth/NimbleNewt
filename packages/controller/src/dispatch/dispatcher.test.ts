@@ -1049,4 +1049,66 @@ for (const backend of backends) {
     assert.deepEqual(outcome, ["command_conflict"]);
     assert.equal((await c.dispatcher.get(c.owner, attemptId!))!.calls, 1);
   });
+
+  suite("graceful restarts do not use up attempts: three shutdown and restart cycles leave the same attempt, no blocker, and a waiting attempt is left as it is", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, []));
+    const { taskId, attemptId } = await c.task("long job", ann);
+    const gates: { promise: Promise<void>; resolve: () => void }[] = [];
+    c.worker.script = async () => { const g = deferred<void>(); gates.push({ promise: g.promise, resolve: () => g.resolve() }); await g.promise; return { status: "completed", text: "late" }; };
+    let d = c.dispatcher;
+    for (let cycle = 1; cycle <= 3; cycle++) {
+      const report = await d.tick();
+      assert.deepEqual(report.started, [attemptId], `cycle ${cycle}: the same attempt starts again`);
+      assert.deepEqual(await d.shutdown(), { closed: 1, errors: [] });
+      gates.at(-1)!.resolve();
+      await d.idle();
+      const a = (await c.assignments.getAssignment(taskId))!;
+      assert.deepEqual([a.activeAttemptId, a.attempts], [attemptId, 1], "no new attempt was admitted");
+      const dispatch = (await d.get(c.owner, attemptId!))!;
+      assert.equal(dispatch.state, "waiting");
+      assert.ok(dispatch.resumeFrom !== undefined, "it resumes from the checkpoint");
+      assert.equal((await c.admission.snapshot()).running.length, 0, "its place was given back");
+      // A second shutdown with nothing running touches nothing.
+      const before = (await c.storage.getAggregate({ kind: "dispatch", id: dispatch.id }))!.revision;
+      assert.deepEqual(await d.shutdown(), { closed: 0, errors: [] });
+      assert.equal((await c.storage.getAggregate({ kind: "dispatch", id: dispatch.id }))!.revision, before);
+      d = c.restart();
+    }
+    assert.deepEqual((await c.storage.listAggregates("blocker", { limit: 10 })).length, 0, "no attempt-limit blocker");
+    c.worker.script = async () => ({ status: "completed", text: "done" });
+    const last = await d.tick();
+    await d.idle();
+    assert.deepEqual(last.started, [attemptId]);
+    assert.equal((await c.assignments.getAttempt(attemptId!))!.state, "succeeded");
+    assert.equal(c.worker.starts[3]!.resumeFrom !== undefined, true);
+  });
+
+  suite("a shutdown leaves a parked attempt and the owner's pending approval alone, and the approval still resumes it afterwards", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["git-push"]));
+    await c.task("push", ann);
+    const log = { applied: 0, reconciled: 0 };
+    const parked = deferred<ToolResult>();
+    let runs = 0;
+    c.worker.script = async ({ gateway, order }) => {
+      if (++runs === 2) return { status: "completed", text: `resumed: ${order.resumeNote ?? ""}` };
+      parked.resolve(await gateway.call(effectCall("push1", pushBridge(log)), { kind: "effect", effectKind: "git-push", target: "repo", input: {}, bridge: pushBridge(log) }));
+      return { status: "completed", text: "waiting", checkpoint: { saved: true } };
+    };
+    await c.dispatcher.tick();
+    const first = await parked.promise;
+    await c.dispatcher.idle();
+    const attemptId = c.worker.starts[0]!.attemptId;
+    assert.equal((await c.dispatcher.get(c.owner, attemptId))!.state, "parked");
+    assert.deepEqual(await c.dispatcher.shutdown(), { closed: 0, errors: [] });
+    const reviewId = (first as { reviewId: string }).reviewId;
+    assert.equal((await c.reviews.get(c.owner, reviewId))!.state, "owner-decision", "the request is still waiting for the owner");
+    assert.equal((await c.dispatcher.get(c.owner, attemptId))!.state, "parked");
+    const next = c.restart();
+    const review = (await c.reviews.get(c.owner, reviewId))!;
+    await c.reviews.decide(c.owner, { commandId: "dec", requestId: review.id, expectedRevision: review.revision, verdict: "allow", reason: "fine" });
+    await next.tick(); await next.idle();
+    await next.tick(); await next.idle();
+    assert.equal(c.worker.starts.length, 2, "the attempt went on after the restart");
+    assert.match(c.worker.starts[1]!.resumeNote ?? "", /approved/);
+  });
 }

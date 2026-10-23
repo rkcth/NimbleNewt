@@ -2,6 +2,7 @@ export { DISPATCH_KIND, DISPATCH_LIMITS, DISPATCHER_ACTOR, TERMINAL, operationKi
 export { DispatcherService, type DispatchCheck, type DispatcherDeps, type DispatcherLoop, type AttemptDispatcherOptions, type RecipeChange, type RouteChoice, type RouteResolver, type TickReport } from "./dispatcher.js";
 export { connectPublic, resolvePublic, type NameResolver, type Pinned } from "./network.js";
 export type { RecipeSummary, ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, WorkerTurnResult, TurnUsage, WorkOrder, WorkerHandle, WorkerHost } from "./ports.js";
+export { DRIVER_LIMITS, DispatchDriver, realTimer, type DriverError, type DriverOptions, type DriverStatus, type TimerPort } from "./driver.js";
 export { activeAgents, attendanceLoops, decisionLoops, eventLoops, messageLoops, projectIds, standupLoops } from "./loops.js";
 export { LocalWorker, catalogFacts, type AttemptRuntime, type BoundCall, type LocalWorkerOptions, type RuntimeFactory, type SandboxPort, type SandboxSession } from "./local-worker.js";
 export { CachePolicies, type AttemptCache, type CachePolicyDeps, type RouteEndpoint } from "./cache.js";

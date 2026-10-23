@@ -700,4 +700,16 @@ for (const backend of backends) {
     const three = (await c.meetings.openAgenda(c.owner, c.a, { limit: 5, afterId: two.next! }))!;
     assert.deepEqual([three.items.map((i) => i.topic), three.next], [["Second, calm"], undefined]);
   });
+
+  suite("the dispatcher's service principal lists the planned occurrences of a project it holds no grant in, for the preparation loop; no other service does", async (c) => {
+    await c.principals.enroll(c.owner, { commandId: cid("sv"), kind: "service", name: "recovery", grants: [] });
+    await c.principals.enroll(c.owner, { commandId: cid("sv"), kind: "service", name: "dispatcher", grants: [] });
+    const dispatcher = await c.principals.authenticate((await c.principals.issueCredential(c.owner, "service:dispatcher")).token);
+    const recovery = await c.principals.authenticate((await c.principals.issueCredential(c.owner, "service:recovery")).token);
+    await c.schedule();
+    at("2026-10-21T07:01:00.000Z");
+    const made = (await c.tickAll()).created[0]!.occurrenceId;
+    assert.deepEqual((await c.meetings.planned(dispatcher, c.a))!.items.map((i) => i.id), [made]);
+    assert.equal(await c.meetings.planned(recovery, c.a), undefined, "another service reads like a missing project");
+  });
 }

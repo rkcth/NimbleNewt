@@ -5,6 +5,7 @@ import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import type { Availability } from "../conversations/index.js";
 import type { InquiryService } from "../inquiries/inquiries.js";
 import { allows, inTaskScope } from "../security/access.js";
+import { DISPATCHER_PRINCIPAL } from "../security/task-credentials.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
@@ -989,7 +990,9 @@ export class MeetingService {
   /** The occurrences of one project's meetings that are still waiting (planned), oldest first, paged; `next` is where to continue. Needs `meeting.read`. */
   async planned(viewer: Principal, projectId: string, page: { afterId?: string; limit?: number } = {}): Promise<{ items: View<OccurrenceBody>[]; next?: string } | undefined> {
     const project = checkProjectId(projectId);
-    if (!this.#mayRead(viewer, project)) return undefined;
+    // The dispatcher's service principal lists every project's planned occurrences for the stand-up preparation loop (card H12c); it holds no meeting grant. Without this the loop would see nothing, silently.
+    const loop = viewer.kind === "service" && viewer.id === DISPATCHER_PRINCIPAL && viewer.taskScope === undefined;
+    if (!loop && !this.#mayRead(viewer, project)) return undefined;
     const limit = page.limit === undefined ? 20 : whole(page.limit, "limit", 1, MEETING_LIMITS.page);
     const open = await this.#open(project);
     const start = page.afterId === undefined ? 0 : open.ids.indexOf(page.afterId) + 1;

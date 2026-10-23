@@ -189,6 +189,35 @@ export class PrincipalService {
     return { principalId, token: makeToken(principalId, secret) };
   }
 
+  /**
+   * For the controller process itself, at start (card H12c): makes sure the dispatcher's service principal `service:dispatcher` exists and gives it a fresh credential, held in the process's memory
+   * only (it replaces any earlier one, so a second controller instance that starts later takes it over, as it takes over the epoch). This is how the owner is not asked to enrol the dispatcher.
+   * It keeps the grants the owner gave it (none by default). No API operation calls it and it takes no caller: only code that builds the services can run it, which is the trust that already decides who may write at all. A dispatcher
+   * the owner disabled is not re-enabled: this refuses (`forbidden`) and the controller runs without a dispatcher.
+   */
+  async provisionService(name: string): Promise<IssuedCredential> {
+    const id = principalIdOf("service", nameOf(name));
+    const secret = newSecret();
+    const credential = await hashSecret(secret, this.#clockNow());
+    const ref: AggregateRef = { kind: "principal", id };
+    for (let attempt = 1; ; attempt++) {
+      const current = await this.#runner.get("principal", id);
+      const before = current?.body as unknown as PrincipalBody | undefined;
+      if (before !== undefined && (before.kind !== "service" || before.state !== "active")) throw new DomainError("forbidden", `principal ${id} is not an active service; it is not provisioned again`);
+      const body: PrincipalBody = before === undefined ? { kind: "service", name, state: "active", grants: [], credential, createdBy: "controller" } : { ...before, credential };
+      try {
+        await this.#runner.command("principal.provision", { commandId: `provision:${randomId()}`, actor: "controller" }, async () => ({
+          payload: { principalId: id },
+          build: async () => ({ ref, creates: current === undefined, changes: [current === undefined ? { type: "create" as const, ref, body: body as unknown as JsonObject } : { type: "update" as const, ref, expectedRevision: current.revision, body: body as unknown as JsonObject }], detail: { principalId: id } }),
+        }));
+        return { principalId: id, token: makeToken(id, secret) };
+      } catch (error) {
+        if (attempt < 5 && error instanceof DomainError && (error.code === "stale_revision" || error.code === "invalid_command")) continue;
+        throw error;
+      }
+    }
+  }
+
   /** The principal a token proves, or `unauthenticated`. */
   async authenticate(token: unknown): Promise<Principal> {
     const parsed = parseToken(token);

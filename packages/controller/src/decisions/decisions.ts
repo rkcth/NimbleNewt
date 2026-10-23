@@ -10,6 +10,7 @@ import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import type { EventService } from "../events/events.js";
 import type { GenerationService } from "../generation/generation.js";
 import { allows, inTaskScope } from "../security/access.js";
+import { DISPATCHER_PRINCIPAL } from "../security/task-credentials.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
@@ -824,6 +825,8 @@ export class DecisionService implements DecisionGuard {
 
   /** The owner, or a host or service principal holding the action in this project (a host is scoped to the work it was given, not to every project). */
   #mayPass(by: Principal, projectId: string, action: "assignment.manage" | "assignment.read"): boolean {
+    // The dispatcher's service principal finishes pending corrections in every project from its loop (card H12c); a service may hold no `assignment.manage` grant, so it is named here, as in the host record's reads.
+    if (by.kind === "service" && by.id === DISPATCHER_PRINCIPAL && by.taskScope === undefined && action === "assignment.manage") return true;
     return by.kind === "owner" || ((by.kind === "host" || by.kind === "service") && inTaskScope(by, projectId) && allows(by, action, projectId));
   }
 
