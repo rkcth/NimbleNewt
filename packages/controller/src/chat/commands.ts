@@ -34,6 +34,10 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "agent.retire": { verb: "Retire agent", mode: "profile", revision: "agent" },
   "team.create": { verb: "Create team", mode: "apply" },
   "role.define": { verb: "Define role", mode: "propose" },
+  // Project resources, plan and responsibilities (card P01). A read-only bind of a location the owner typed in their own words follows the profile like other explicit orders; write access, an acknowledged overlap and anything quoted are shown first.
+  "resource.bind": { verb: "Bind resource", mode: "profile", needsProject: true },
+  "project.plan": { verb: "Plan project", mode: "apply", revision: "project", needsProject: true },
+  "responsibility.create": { verb: "Create responsibility", mode: "propose", needsProject: true },
 };
 
 /** Names the owner may use in place of an ID; each is resolved from records and an unclear match asks. */
@@ -56,6 +60,8 @@ export const AUTHORITY_FIELDS: Readonly<Record<string, readonly string[]>> = {
   "agent.update": ["roles", "supervisorId", "permittedOverrides", "defaultProfile"],
   "project.update": ["addRepositories"],
   "task.update": ["repositoryId"],
+  "project.plan": ["participants"],
+  "resource.bind": ["acknowledgeOverlap"],
 };
 
 /**
@@ -69,6 +75,7 @@ export const MOVE_VERBS: Readonly<Record<string, RegExp>> = {
   "agent.retire": /\b(retire|fire|let go|remove)/i,
   "dependency.remove": /\b(remove|delete|drop|unlink)/i,
   "task.release": /\b(release|give up|let go)/i,
+  "resource.bind": /\b(bind|add|attach|connect|link)/i,
   "task.transfer": /\b(transfer|hand over|reassign|move)/i,
   "task.assign": /\b(assign|give|allocate)/i,
 };
@@ -109,6 +116,7 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
   const spec = CHAT_OPS[op];
   if (spec === undefined) return undefined;
   if (draft) return "you asked for a draft";
+  if (op === "resource.bind" && args["access"] === "write") return "it gives write access";
   if ((AUTHORITY_FIELDS[op] ?? []).some((f) => args[f] !== undefined)) return "it changes what someone may do or where work is done";
   if (spec.mode === "propose") return op === "project.create" ? "a new project is drafted first" : "a role's capabilities are shown first";
   if (context.quoted && (!PLAIN_EDITS.has(op) || (op === "project.update" && args["state"] !== undefined))) return "your message carried quoted text, so this is shown first";
@@ -121,7 +129,7 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
 }
 
 /** Keys whose values name records or fixed choices; every other text in a command must be in the owner's own words. */
-const EXEMPT = new Set(["taskId", "projectId", "prerequisiteId", "agentId", "supervisorId", "teamId", "parentTeamId", "repositoryId", "expectedRevision", "expectedVersion", "to", "state", "workClass", "difficulty", "recovery", "kind", "priority"]);
+const EXEMPT = new Set(["taskId", "projectId", "prerequisiteId", "agentId", "supervisorId", "teamId", "parentTeamId", "repositoryId", "resourceId", "responsibilityId", "ownerId", "managed", "access", "expectedRevision", "expectedVersion", "to", "state", "workClass", "difficulty", "recovery", "kind", "priority"]);
 
 /** The first text value of a command's arguments that is not the owner's own words (and not a record reference or fixed choice), or undefined. */
 export function foreignValue(args: Readonly<Record<string, unknown>>, ownText: string, path = ""): string | undefined {

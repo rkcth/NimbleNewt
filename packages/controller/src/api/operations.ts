@@ -5,6 +5,7 @@ import type { AgentService } from "../agents/index.js";
 import type { WatchService } from "../events/handling.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
+import type { ProjectPlanService, ProjectResourceService, ResponsibilityService } from "../projects/index.js";
 import type { RetrievalService } from "../context/index.js";
 import type { Principal } from "../security/principals.js";
 import type { SecureApi } from "../security/secured.js";
@@ -22,6 +23,10 @@ export interface Context {
   readonly assignments: AssignmentService;
   /** Absent when the controller runs without event handling. */
   readonly watches?: WatchService;
+  /** Absent when the controller runs without project resources, plans and responsibilities (card P01). */
+  readonly resources?: ProjectResourceService;
+  readonly plans?: ProjectPlanService;
+  readonly responsibilities?: ResponsibilityService;
 }
 
 export type Args = Record<string, unknown>;
@@ -64,6 +69,11 @@ function limitOf(args: Args): number {
   return typeof v === "number" && Number.isSafeInteger(v) && v >= 1 && v <= PAGE.max ? v : invalid("args.limit", `must be a whole number from 1 to ${PAGE.max}`);
 }
 const watches = (c: Context): WatchService => c.watches ?? ((): never => { throw new DomainError("unavailable", "event handling is not configured"); })();
+const unavailable = (what: string): never => { throw new DomainError("unavailable", `${what} is not configured`); };
+const resources = (c: Context): ProjectResourceService => c.resources ?? unavailable("project resources");
+const plans = (c: Context): ProjectPlanService => c.plans ?? unavailable("project plans");
+const duties = (c: Context): ResponsibilityService => c.responsibilities ?? unavailable("responsibilities");
+const optNum = (args: Args, key: string): number | undefined => { const v = args[key]; return v === undefined ? undefined : (typeof v === "number" ? v : invalid(`args.${key}`, "must be a number")); };
 const need = (commandId: string | undefined): string => commandId ?? invalid("commandId", "is required for a command");
 const asJson = (value: unknown): JsonObject => JSON.parse(JSON.stringify(value)) as JsonObject;
 const page = (result: { items: unknown[]; next?: string; scanLimited?: boolean }): JsonObject => asJson({ items: result.items, ...(result.next === undefined ? {} : { next: result.next }), ...(result.scanLimited === true ? { scanLimited: true } : {}) });
@@ -147,6 +157,44 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => written(await c.secure.transferTask({ commandId: need(id), ...(a as object) } as never)) },
   { name: "task.release", kind: "command", summary: "Gives up a task's ownership. The record is changed at once; the previous owner's worker may keep running until its next fenced write is refused.", args: { taskId: "the task", expectedRevision: "the assignment's revision", "reason?": "why" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
     run: async (c, a, id) => written(await c.secure.releaseTask({ commandId: need(id), ...(a as object) } as never)) },
+
+  { name: "resource.list", kind: "query", summary: "The resources bound to a project (repositories, output folders, documents, services), each with its access scope.", args: { projectId: "the project", "state?": "`bound` or `unbound`" }, result: "`{ items }`.",
+    run: async (c, a) => { only(a, ["projectId", "state"]); const st = optStr(a, "state"); if (st !== undefined && st !== "bound" && st !== "unbound") invalid("args.state", "must be bound or unbound"); const items = await resources(c).list(c.principal, str(a, "projectId"), st === undefined ? {} : { state: st as never }); if (items === undefined) throw new DomainError("not_found", "no such project"); return asJson({ items }); } },
+  { name: "resource.get", kind: "query", summary: "One bound resource.", args: { resourceId: "the resource's ID" }, result: "`{ item }`.",
+    run: async (c, a) => { only(a, ["resourceId"]); return found("resource", await resources(c).get(c.principal, str(a, "resourceId"))); } },
+  { name: "checkout.get", kind: "query", summary: "The checkout a task works in, from records: the bound repository it names, with its location and scope. Refused with `checkout_changed` when a dispatched task's checkout has moved or been unbound.", args: { taskId: "the task" }, result: "`{ item }`.",
+    run: async (c, a) => { only(a, ["taskId"]); return found("task", await resources(c).resolveCheckout(c.principal, str(a, "taskId"))); } },
+  { name: "project.schedule", kind: "query", summary: "A project's due date and milestones against the clock now (`overdue` is computed, never stored; passing a date changes nothing).", args: { projectId: "the project" }, result: "`{ item }`.",
+    run: async (c, a) => { only(a, ["projectId"]); return found("project", await plans(c).schedule(c.principal, str(a, "projectId"))); } },
+  { name: "responsibility.get", kind: "query", summary: "One ongoing responsibility.", args: { responsibilityId: "the responsibility's ID" }, result: "`{ item }`.",
+    run: async (c, a) => { only(a, ["responsibilityId"]); return found("responsibility", await duties(c).get(c.principal, str(a, "responsibilityId"))); } },
+  { name: "responsibility.list", kind: "query", summary: "A project's ongoing responsibilities.", args: { projectId: "the project", "state?": "`active`, `paused` or `retired`" }, result: "`{ items }`.",
+    run: async (c, a) => { only(a, ["projectId", "state"]); const st = optStr(a, "state"); if (st !== undefined && st !== "active" && st !== "paused" && st !== "retired") invalid("args.state", "must be active, paused or retired"); const items = await duties(c).list(c.principal, str(a, "projectId"), st === undefined ? {} : { state: st as never }); if (items === undefined) throw new DomainError("not_found", "no such project"); return asJson({ items }); } },
+  { name: "responsibility.status", kind: "query", summary: "Where a responsibility stands against its schedule now: last check, next check due, whether it is overdue, whether now is inside a maintenance window. Starts nothing.", args: { responsibilityId: "the responsibility" }, result: "`{ item }`.",
+    run: async (c, a) => { only(a, ["responsibilityId"]); return found("responsibility", await duties(c).status(c.principal, str(a, "responsibilityId"))); } },
+  { name: "responsibility.history", kind: "query", summary: "A responsibility's operational history (checks, interventions, incidents, notes), oldest first.", args: { responsibilityId: "the responsibility", "afterSeq?": "the `next` of the previous page", "limit?": "1 to 100, default 20" }, result: "`{ items, next? }`.",
+    run: async (c, a) => { only(a, ["responsibilityId", "afterSeq", "limit"]); const r = await duties(c).history(c.principal, str(a, "responsibilityId"), { limit: limitOf(a), ...(optNum(a, "afterSeq") === undefined ? {} : { afterSeq: optNum(a, "afterSeq")! }) }); if (r === undefined) throw new DomainError("not_found", "no such responsibility"); return asJson(r); } },
+
+  { name: "resource.bind", kind: "command", summary: "Binds a resource to a project with an access scope (read by default). A repository bind also lists the repository for the project's tasks. Needs `resource.write` (and `resource.scope.write` for write access).", args: { projectId: "the project", kind: "`repository`, `output`, `document`, `service` or `other`", label: "a name, unique among the project's bound resources", locator: "where it is (a path, URL or name; never a credential)", "repositoryId?": "the project's handle for a repository (default: made from the label)", "access?": "`read` (default) or `write`", "paths?": "limit the scope to these paths below the resource", "acknowledgeOverlap?": "true to bind a location that contains or lies inside another project's binding (needs `resource.scope.write`)" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => written(await resources(c).bindResource(c.principal, { commandId: need(id), ...(a as object) } as never)) },
+  { name: "resource.move", kind: "command", summary: "Points a bound resource at another location (needs `resource.scope.write` too when its access is write or unlimited). Tasks already dispatched to it are not redirected: they refuse with `checkout_changed` until their checkout is confirmed.", args: { resourceId: "the resource", expectedRevision: "the revision you read", locator: "the new location", "acknowledgeOverlap?": "true to accept an overlap with another project's binding" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => written(await resources(c).moveResource(c.principal, { commandId: need(id), ...(a as object) } as never)) },
+  { name: "resource.scope", kind: "command", summary: "Replaces a resource's access scope for its project. Widening it needs `resource.scope.write`.", args: { resourceId: "the resource", expectedRevision: "the revision you read", access: "`read` or `write`", "paths?": "limit the scope to these paths" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => written(await resources(c).setScope(c.principal, { commandId: need(id), ...(a as object) } as never)) },
+  { name: "resource.unbind", kind: "command", summary: "Ends a binding (refused while a responsibility manages the resource or an unfinished task is dispatched against it).", args: { resourceId: "the resource", expectedRevision: "the revision you read" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => written(await resources(c).unbindResource(c.principal, { commandId: need(id), ...(a as object) } as never)) },
+  { name: "checkout.pin", kind: "command", summary: "Pins the checkout a task is dispatched against: the bound repository it names, at its current location. Needs `assignment.manage` for the task.", args: { taskId: "the task" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => written(await resources(c).pinCheckout(c.principal, { commandId: need(id), ...(a as object) } as never)) },
+  { name: "checkout.repin", kind: "command", summary: "Confirms the checkout a task now resolves to after a move or a change of its repository.", args: { taskId: "the task", expectedRevision: "the pin's revision" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => written(await resources(c).repinCheckout(c.principal, { commandId: need(id), ...(a as object) } as never)) },
+  { name: "project.plan", kind: "command", summary: "Sets a project's optional due date, workstreams, milestones and authorized participants (each given field replaces that field; `dueDate: null` clears it). A due date is information: passing it changes no state.", args: { projectId: "the project", expectedRevision: "the revision you read", "dueDate?": "`YYYY-MM-DD` or a UTC timestamp, or null", "workstreams?": "list of `{ id, name, description? }`", "milestones?": "list of `{ id, name, state?, dueDate?, workstreamId? }`", "participants?": "list of `{ principalId, role? }` (active agents; needs `project.participants.write`)" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => written(await plans(c).setPlan(c.principal, { commandId: need(id), ...(a as object) } as never)) },
+  { name: "responsibility.create", kind: "command", summary: "Creates an ongoing responsibility in a project. Naming the answerable agent or managed resources also needs `responsibility.assign`.", args: { projectId: "the project", title: "the title", objective: "what must continually be true or done", "desiredCondition?": "the condition to keep", "ownerId?": "the answerable agent (principal ID)", "managed?": "IDs of project resources it manages", "everyMinutes?": "how often to check", "eventSources?": "names of event sources", "permittedActions?": "action names its work may use at most", "maintenanceWindows?": "list of `{ days, start, end }` (UTC)", "escalation?": "`{ to, afterMinutes?, note? }`" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => written(await duties(c).create(c.principal, { commandId: need(id), ...(a as object) } as never)) },
+  { name: "responsibility.update", kind: "command", summary: "Changes a responsibility (the revision you read must still be current); `state` is active, paused or retired (final).", args: { responsibilityId: "the responsibility", expectedRevision: "the revision you read", "state?": "`active`, `paused` or `retired`", "title?": "new title", "objective?": "new objective", "desiredCondition?": "new condition", "ownerId?": "agent or null", "managed?": "resource IDs", "everyMinutes?": "minutes or null", "eventSources?": "names", "permittedActions?": "action names", "maintenanceWindows?": "windows", "escalation?": "escalation or null" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => written(await duties(c).update(c.principal, { commandId: need(id), ...(a as object) } as never)) },
+  { name: "responsibility.record", kind: "command", summary: "Adds a check, intervention, incident or note to a responsibility's history, optionally linked to the bounded task it produced.", args: { responsibilityId: "the responsibility", kind: "`check`, `intervention`, `incident` or `note`", summary: "what was found or done", "outcome?": "`ok`, `attention` or `failed`", "taskId?": "the task it produced" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => written(await duties(c).record(c.principal, { commandId: need(id), ...(a as object) } as never)) },
 ];
 
 export const OPERATION_BY_NAME: ReadonlyMap<string, Operation> = new Map(OPERATIONS.map((o) => [o.name, o]));

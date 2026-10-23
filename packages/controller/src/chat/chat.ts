@@ -487,8 +487,35 @@ export class ChatService {
       } else pins.push({ taskId: args["taskId"] as string, projectId: task.projectId, repositoryId });
       labels[repositoryId] = repositoryId;
     }
+    // A bind with no location: the record knows it only if exactly one unbound binding of that name exists; otherwise the owner is asked (it cannot be determined).
+    let fromRecord = false;
+    if (intent.op === "resource.bind" && args["locator"] === undefined) {
+      const label = typeof args["label"] === "string" ? args["label"].trim().toLowerCase() : "";
+      const old = label === "" || typeof args["projectId"] !== "string" ? [] : (await this.#unboundResources(token, args["projectId"])).filter((r) => String(r["label"]).trim().toLowerCase() === label);
+      if (old.length !== 1) return { ok: false, kind: "ask", question: `Where is "${String(args["label"] ?? "it").slice(0, 80)}"? Give its location (a path or address).`, options: [] };
+      args["locator"] = old[0]!["locator"];
+      if (args["kind"] === undefined) args["kind"] = old[0]!["kind"];
+      fromRecord = true;
+    }
+    // Participants may be named by agent name; the name is resolved from records to the agent's principal (exactly one active agent, else refused).
+    if (intent.op === "project.plan" && Array.isArray(args["participants"])) {
+      const agents = (await this.#listAll(token, "agent.list", { state: "active" }));
+      const resolved: unknown[] = [];
+      for (const raw of args["participants"] as unknown[]) {
+        const entry = raw !== null && typeof raw === "object" && !Array.isArray(raw) ? { ...(raw as Record<string, unknown>) } : undefined;
+        if (entry === undefined || entry["agentName"] === undefined) { resolved.push(raw); continue; }
+        if (entry["principalId"] !== undefined || typeof entry["agentName"] !== "string") return refuse("invalid_command", "name a participant by agentName or principalId, not both");
+        const matches = agents.filter((a) => String(a["friendlyName"]).trim().toLowerCase() === (entry["agentName"] as string).trim().toLowerCase());
+        if (matches.length !== 1) return refuse(matches.length === 0 ? "not_found" : "invalid_command", matches.length === 0 ? `no active agent called "${(entry["agentName"] as string).slice(0, 80)}"` : `more than one agent is called "${(entry["agentName"] as string).slice(0, 80)}"; use the agent's ID`);
+        delete entry["agentName"];
+        entry["principalId"] = matches[0]!["principalId"];
+        resolved.push(entry);
+      }
+      args["participants"] = resolved;
+    }
     steps.push({ op: intent.op, args, commandId: "" });
-    const reason = proposalReason(intent.op, args, intent.draft === true, { profile, quoted, said: ownerSaysMove(intent.op, args, words, ["taskId", "prerequisiteId", "projectId", "agentId"].flatMap((k) => (typeof args[k] === "string" && labels[args[k] as string] !== undefined ? [labels[args[k] as string] as string] : []))) });
+    const reasonBase = proposalReason(intent.op, args, intent.draft === true, { profile, quoted, said: ownerSaysMove(intent.op, args, words, ["taskId", "prerequisiteId", "projectId", "agentId"].flatMap((k) => (typeof args[k] === "string" && labels[args[k] as string] !== undefined ? [labels[args[k] as string] as string] : [])).concat(intent.op === "resource.bind" && typeof args["label"] === "string" ? [args["label"]] : [])) });
+    const reason = reasonBase ?? (fromRecord ? "the location comes from an earlier binding, not from your words, so it is shown first" : undefined);
     return { ok: true, steps, pins, labels, ...(projectId === undefined ? {} : { projectId }), ...(reason === undefined ? {} : { reason }), args, op: intent.op };
   }
 
@@ -537,6 +564,12 @@ export class ChatService {
     const wanted = title.trim().toLowerCase();
     const all = await this.#listAll(token, "task.list", { projectId });
     return all.filter((t) => (t["title"] as string).trim().toLowerCase() === wanted).map((t) => ({ id: t["id"] as string, state: t["state"] as string }));
+  }
+
+  /** The project's unbound resource bindings (the list operation takes no paging). */
+  async #unboundResources(token: string, projectId: string): Promise<Record<string, unknown>[]> {
+    const response = await this.#deps.api.handle(token, { v: API_VERSION, op: "resource.list", args: { projectId, state: "unbound" } });
+    return response.ok ? ((response.result["items"] ?? []) as Record<string, unknown>[]) : [];
   }
 
   /** Every item of a list operation, bounded (five pages). */
@@ -820,7 +853,9 @@ function recordOf(step: ChatStep): string | undefined {
   const a = step.args;
   switch (step.op) {
     case "task.update": case "task.transition": return `task:${a["taskId"] as string}`;
-    case "project.update": return `project:${a["projectId"] as string}`;
+    case "project.update": case "project.plan": return `project:${a["projectId"] as string}`;
+    // A new repository also changes the project's own record, so a later project command of the same message expects the next revision.
+    case "resource.bind": return a["kind"] === "repository" ? `project:${a["projectId"] as string}` : undefined;
     case "agent.update": return `agent:${a["agentId"] as string}`;
     case "contract.set": return `contract:${a["taskId"] as string}`;
     default: return undefined;

@@ -238,6 +238,90 @@ Arguments:
 
 Result: `{ items, next? }`.
 
+#### `resource.list`
+
+The resources bound to a project (repositories, output folders, documents, services), each with its access scope.
+
+Arguments:
+
+- `projectId`: the project
+- `state` (optional): `bound` or `unbound`
+
+Result: `{ items }`.
+
+#### `resource.get`
+
+One bound resource.
+
+Arguments:
+
+- `resourceId`: the resource's ID
+
+Result: `{ item }`.
+
+#### `checkout.get`
+
+The checkout a task works in, from records: the bound repository it names, with its location and scope. Refused with `checkout_changed` when a dispatched task's checkout has moved or been unbound.
+
+Arguments:
+
+- `taskId`: the task
+
+Result: `{ item }`.
+
+#### `project.schedule`
+
+A project's due date and milestones against the clock now (`overdue` is computed, never stored; passing a date changes nothing).
+
+Arguments:
+
+- `projectId`: the project
+
+Result: `{ item }`.
+
+#### `responsibility.get`
+
+One ongoing responsibility.
+
+Arguments:
+
+- `responsibilityId`: the responsibility's ID
+
+Result: `{ item }`.
+
+#### `responsibility.list`
+
+A project's ongoing responsibilities.
+
+Arguments:
+
+- `projectId`: the project
+- `state` (optional): `active`, `paused` or `retired`
+
+Result: `{ items }`.
+
+#### `responsibility.status`
+
+Where a responsibility stands against its schedule now: last check, next check due, whether it is overdue, whether now is inside a maintenance window. Starts nothing.
+
+Arguments:
+
+- `responsibilityId`: the responsibility
+
+Result: `{ item }`.
+
+#### `responsibility.history`
+
+A responsibility's operational history (checks, interventions, incidents, notes), oldest first.
+
+Arguments:
+
+- `responsibilityId`: the responsibility
+- `afterSeq` (optional): the `next` of the previous page
+- `limit` (optional): 1 to 100, default 20
+
+Result: `{ items, next? }`.
+
 ### Commands
 
 #### `agent.create`
@@ -498,6 +582,172 @@ Arguments:
 - `taskId`: the task
 - `expectedRevision`: the assignment's revision
 - `reason` (optional): why
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `resource.bind`
+
+Binds a resource to a project with an access scope (read by default). A repository bind also lists the repository for the project's tasks. Needs `resource.write` (and `resource.scope.write` for write access).
+
+Arguments:
+
+- `projectId`: the project
+- `kind`: `repository`, `output`, `document`, `service` or `other`
+- `label`: a name, unique among the project's bound resources
+- `locator`: where it is (a path, URL or name; never a credential)
+- `repositoryId` (optional): the project's handle for a repository (default: made from the label)
+- `access` (optional): `read` (default) or `write`
+- `paths` (optional): limit the scope to these paths below the resource
+- `acknowledgeOverlap` (optional): true to bind a location that contains or lies inside another project's binding (needs `resource.scope.write`)
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `resource.move`
+
+Points a bound resource at another location (needs `resource.scope.write` too when its access is write or unlimited). Tasks already dispatched to it are not redirected: they refuse with `checkout_changed` until their checkout is confirmed.
+
+Arguments:
+
+- `resourceId`: the resource
+- `expectedRevision`: the revision you read
+- `locator`: the new location
+- `acknowledgeOverlap` (optional): true to accept an overlap with another project's binding
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `resource.scope`
+
+Replaces a resource's access scope for its project. Widening it needs `resource.scope.write`.
+
+Arguments:
+
+- `resourceId`: the resource
+- `expectedRevision`: the revision you read
+- `access`: `read` or `write`
+- `paths` (optional): limit the scope to these paths
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `resource.unbind`
+
+Ends a binding (refused while a responsibility manages the resource or an unfinished task is dispatched against it).
+
+Arguments:
+
+- `resourceId`: the resource
+- `expectedRevision`: the revision you read
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `checkout.pin`
+
+Pins the checkout a task is dispatched against: the bound repository it names, at its current location. Needs `assignment.manage` for the task.
+
+Arguments:
+
+- `taskId`: the task
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `checkout.repin`
+
+Confirms the checkout a task now resolves to after a move or a change of its repository.
+
+Arguments:
+
+- `taskId`: the task
+- `expectedRevision`: the pin's revision
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `project.plan`
+
+Sets a project's optional due date, workstreams, milestones and authorized participants (each given field replaces that field; `dueDate: null` clears it). A due date is information: passing it changes no state.
+
+Arguments:
+
+- `projectId`: the project
+- `expectedRevision`: the revision you read
+- `dueDate` (optional): `YYYY-MM-DD` or a UTC timestamp, or null
+- `workstreams` (optional): list of `{ id, name, description? }`
+- `milestones` (optional): list of `{ id, name, state?, dueDate?, workstreamId? }`
+- `participants` (optional): list of `{ principalId, role? }` (active agents; needs `project.participants.write`)
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `responsibility.create`
+
+Creates an ongoing responsibility in a project. Naming the answerable agent or managed resources also needs `responsibility.assign`.
+
+Arguments:
+
+- `projectId`: the project
+- `title`: the title
+- `objective`: what must continually be true or done
+- `desiredCondition` (optional): the condition to keep
+- `ownerId` (optional): the answerable agent (principal ID)
+- `managed` (optional): IDs of project resources it manages
+- `everyMinutes` (optional): how often to check
+- `eventSources` (optional): names of event sources
+- `permittedActions` (optional): action names its work may use at most
+- `maintenanceWindows` (optional): list of `{ days, start, end }` (UTC)
+- `escalation` (optional): `{ to, afterMinutes?, note? }`
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `responsibility.update`
+
+Changes a responsibility (the revision you read must still be current); `state` is active, paused or retired (final).
+
+Arguments:
+
+- `responsibilityId`: the responsibility
+- `expectedRevision`: the revision you read
+- `state` (optional): `active`, `paused` or `retired`
+- `title` (optional): new title
+- `objective` (optional): new objective
+- `desiredCondition` (optional): new condition
+- `ownerId` (optional): agent or null
+- `managed` (optional): resource IDs
+- `everyMinutes` (optional): minutes or null
+- `eventSources` (optional): names
+- `permittedActions` (optional): action names
+- `maintenanceWindows` (optional): windows
+- `escalation` (optional): escalation or null
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `responsibility.record`
+
+Adds a check, intervention, incident or note to a responsibility's history, optionally linked to the bounded task it produced.
+
+Arguments:
+
+- `responsibilityId`: the responsibility
+- `kind`: `check`, `intervention`, `incident` or `note`
+- `summary`: what was found or done
+- `outcome` (optional): `ok`, `attention` or `failed`
+- `taskId` (optional): the task it produced
 
 Result: `{ id, revision, replayed }`.
 

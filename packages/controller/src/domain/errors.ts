@@ -16,10 +16,11 @@
  * - `unauthenticated`: no valid credential was presented (unknown principal, wrong secret and a disabled principal are not told apart) (card A01).
  * - `forbidden`: the caller is who it says it is, but may not do this, or not in this project, or named another actor (card A01).
  * - `integrity`: stored content is missing or does not match its recorded hash (artifacts, card S06). It must not be used.
+ * - `checkout_changed`: the checkout a task was dispatched against has moved, been unbound or is no longer the one the task names; the task is not redirected, and the owner must confirm the new one (card P01).
  * - `unavailable`: storage could not complete the command (busy beyond the retry budget, unreachable). The command may be retried
  *   with the same command ID: it applies once.
  */
-export type DomainErrorCode = "invalid_command" | "command_conflict" | "stale_revision" | "not_found" | "invalid_transition" | "stale_epoch" | "integrity" | "fenced" | "payload_changed" | "effect_uncertain" | "effect_busy" | "wait_closed" | "unauthenticated" | "forbidden" | "unavailable" | "review_invalid";
+export type DomainErrorCode = "invalid_command" | "command_conflict" | "stale_revision" | "not_found" | "invalid_transition" | "stale_epoch" | "integrity" | "fenced" | "payload_changed" | "effect_uncertain" | "effect_busy" | "wait_closed" | "unauthenticated" | "forbidden" | "unavailable" | "review_invalid" | "checkout_changed";
 
 export class DomainError extends Error {
   readonly code: DomainErrorCode;

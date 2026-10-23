@@ -46,7 +46,7 @@ const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
 const isLoopback = (host: string): boolean => LOOPBACK.has(host) || /^127(\.\d{1,3}){3}$/.test(host);
 const STATUS: Record<DomainErrorCode, number> = {
   invalid_command: 400, command_conflict: 409, stale_revision: 409, not_found: 404, invalid_transition: 409, stale_epoch: 503, integrity: 500, fenced: 409, payload_changed: 409,
-  effect_uncertain: 409, effect_busy: 409, wait_closed: 409, unauthenticated: 401, forbidden: 403, unavailable: 503, review_invalid: 409,
+  effect_uncertain: 409, effect_busy: 409, wait_closed: 409, unauthenticated: 401, forbidden: 403, unavailable: 503, review_invalid: 409, checkout_changed: 409,
 };
 
 class HttpError extends Error {

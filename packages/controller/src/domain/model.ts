@@ -14,12 +14,24 @@ export interface Repository {
   readonly label?: string;
 }
 
+/** A named strand of a project's work (card P01). Optional structure: nothing requires a project to have any. */
+export interface Workstream { readonly id: string; readonly name: string; readonly description?: string }
+/** A point in a project's plan. `dueDate` is information: passing it changes no state, and `reached` is set only by a command. */
+export interface Milestone { readonly id: string; readonly name: string; readonly state: "open" | "reached"; readonly dueDate?: string; readonly workstreamId?: string }
+/** An agent the owner has authorized to take part in the project (card P01). The record grants nothing by itself; grants are separate (A01). */
+export interface Participant { readonly principalId: string; readonly role?: string }
+
 export interface ProjectBody {
   readonly name: string;
   readonly goal: string;
   readonly state: ProjectState;
   readonly repositories: readonly Repository[];
   readonly createdBy: string;
+  /** Planning fields (card P01), set by the project-plan command and kept by every other project command. */
+  readonly dueDate?: string;
+  readonly workstreams?: readonly Workstream[];
+  readonly milestones?: readonly Milestone[];
+  readonly participants?: readonly Participant[];
 }
 
 // ---- tasks ---------------------------------------------------------------------------------------------------------------------

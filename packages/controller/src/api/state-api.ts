@@ -7,6 +7,7 @@ import type { AgentService } from "../agents/index.js";
 import type { WatchService } from "../events/handling.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
+import type { ProjectPlanService, ProjectResourceService, ResponsibilityService } from "../projects/index.js";
 import { SecureApi } from "../security/secured.js";
 import type { PrincipalService } from "../security/principals.js";
 import type { TaskCredentialService } from "../security/task-credentials.js";
@@ -46,6 +47,10 @@ export interface StateApiDeps {
   readonly graph: WaitGraphService;
   /** When present, event handling attempts can be listed and inspected (card H13). */
   readonly watches?: WatchService;
+  /** When present, project resources, plans and responsibilities can be used through the API (card P01). */
+  readonly resources?: ProjectResourceService;
+  readonly plans?: ProjectPlanService;
+  readonly responsibilities?: ResponsibilityService;
   /** When present, a task credential (`tcr-…`) is accepted too and acts for its one task (card A10b). */
   readonly taskCredentials?: TaskCredentialService;
   /** Called with errors that are not part of the contract (so they are not shown to the client). */
@@ -86,6 +91,9 @@ export class StateApi {
         principal, secure: new SecureApi(principal, { projects: this.#deps.projects, assignments: this.#deps.assignments }),
         retrieval: this.#deps.retrieval, inquiries: this.#deps.inquiries, agents: this.#deps.agents, contracts: this.#deps.contracts, graph: this.#deps.graph, projects: this.#deps.projects, assignments: this.#deps.assignments,
         ...(this.#deps.watches === undefined ? {} : { watches: this.#deps.watches }),
+        ...(this.#deps.resources === undefined ? {} : { resources: this.#deps.resources }),
+        ...(this.#deps.plans === undefined ? {} : { plans: this.#deps.plans }),
+        ...(this.#deps.responsibilities === undefined ? {} : { responsibilities: this.#deps.responsibilities }),
       };
       const result = await operation.run(context, args, request.commandId);
       if (operation.kind === "query") return { v: API_VERSION, op: request.op, ok: true, result };

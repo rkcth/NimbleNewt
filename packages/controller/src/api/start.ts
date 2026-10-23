@@ -11,6 +11,7 @@ import { AgentService } from "../agents/index.js";
 import { HarnessCatalog, type HarnessDeclaration } from "../harness/index.js";
 import { BlockerService } from "../domain/blockers.js";
 import { ContractService, WaitGraphService } from "../planning/index.js";
+import { ProjectPlanService, ProjectResourceService, ResponsibilityService } from "../projects/index.js";
 import { InquiryService } from "../inquiries/index.js";
 import { GrantService, PrincipalService, TaskCredentialService } from "../security/index.js";
 import { SqliteStorage, probeSqliteLibrary } from "../storage/sqlite/index.js";
@@ -77,7 +78,7 @@ export interface Controller {
   readonly prerequisites: readonly PrerequisiteReport[];
   readonly services: {
     readonly principals: PrincipalService; readonly taskCredentials: TaskCredentialService; readonly grants: GrantService; readonly projects: ProjectService; readonly assignments: AssignmentService;
-    readonly waits: WaitService; readonly desks: DeskService; readonly histories: HistoryService; readonly retrieval: RetrievalService; readonly inquiries: InquiryService; readonly agents: AgentService; readonly harnesses: HarnessCatalog; readonly contracts: ContractService; readonly graph: WaitGraphService; readonly reviews: ReviewService; readonly conversations: ConversationService; readonly configuration: ConfigurationService; readonly routing: RoutingService;
+    readonly waits: WaitService; readonly desks: DeskService; readonly histories: HistoryService; readonly retrieval: RetrievalService; readonly inquiries: InquiryService; readonly agents: AgentService; readonly harnesses: HarnessCatalog; readonly contracts: ContractService; readonly graph: WaitGraphService; readonly resources: ProjectResourceService; readonly plans: ProjectPlanService; readonly responsibilities: ResponsibilityService; readonly reviews: ReviewService; readonly conversations: ConversationService; readonly configuration: ConfigurationService; readonly routing: RoutingService;
   };
   /** The conversation listener's address, when it was asked for. */
   readonly conversationUrl?: string;
@@ -151,10 +152,13 @@ export async function startController(options: StartOptions): Promise<Controller
     const routing = RoutingService.withEpoch(storage, epoch, {}, {});
     const configuration = ConfigurationService.withEpoch(storage, epoch, { routing });
     const conversations = ConversationService.withEpoch(storage, epoch, options.availability === undefined ? {} : { availability: options.availability });
-    const api = new StateApi({ principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
+    const resources = ProjectResourceService.withEpoch(storage, epoch);
+    const plans = ProjectPlanService.withEpoch(storage, epoch);
+    const responsibilities = ResponsibilityService.withEpoch(storage, epoch);
+    const api = new StateApi({ principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
     const transport = options.conversationTransport === undefined ? undefined : await ConversationTransport.listen({ ...options.conversationTransport, conversations, principals });
     return {
-      api, storage, epoch, check, filesystems, prerequisites, services: { principals, taskCredentials, grants, projects, assignments, waits, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, reviews, conversations, configuration, routing },
+      api, storage, epoch, check, filesystems, prerequisites, services: { principals, taskCredentials, grants, projects, assignments, waits, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing },
       ...(transport === undefined ? {} : { conversationUrl: transport.url }),
       close: async () => { await transport?.close(); await storage.close(); },
     };
