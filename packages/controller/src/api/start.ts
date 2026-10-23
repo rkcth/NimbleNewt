@@ -99,9 +99,9 @@ export async function startController(options: StartOptions): Promise<Controller
   const override = overrideRequested(options.argv, options.env);
   const facts = options.facts ?? detectEnvironment();
   const dataDirectory = options.dataDirectory ?? (options.storage.kind === "sqlite" ? dirname(resolve(options.storage.path)) : undefined);
-  const filesystems = await checkFilesystems([...(dataDirectory === undefined ? [] : [{ role: "data directory" as const, path: dataDirectory }]), ...(options.workspaceRoots ?? []).map((path) => ({ role: "workspace" as const, path }))], options.filesystem === undefined ? {} : { detect: options.filesystem });
+  const filesystems = await checkFilesystems([...(dataDirectory === undefined ? [] : [{ role: "data directory" as const, path: dataDirectory }]), ...(options.workspaceRoots ?? []).map((path) => ({ role: "workspace" as const, path }))], { platform: facts.platform, ...(options.filesystem === undefined ? {} : { detect: options.filesystem }) });
   const needs: PrerequisiteNeed[] = ["start", options.storage.kind, ...(options.features ?? [])];
-  const prerequisites = await checkPrerequisites({ needs, probes: { ...realProbes({ sqlite: probeSqliteLibrary, postgres: probePostgresLibrary }), ...(options.probes ?? {}) } });
+  const prerequisites = await checkPrerequisites({ platform: facts.platform, needs, probes: { ...realProbes({ sqlite: probeSqliteLibrary, postgres: probePostgresLibrary }), ...(options.probes ?? {}) } });
   const distribution = options.distribution === undefined ? detectDistribution() : options.distribution ?? undefined;
   const host = hostLine(distribution, facts.platform, facts.arch);
   let check: StartupCheck;
