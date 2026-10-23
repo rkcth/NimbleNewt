@@ -7,6 +7,7 @@ import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { Principal, PrincipalService } from "../security/principals.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
+import type { Cite, StatusRequest } from "../status/index.js";
 import { CHAT_OPS, TITLE_KEYS, acceptedArgs, describe, foreignValue, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
 
@@ -58,6 +59,7 @@ type PlanItem =
   | { readonly i: number; readonly kind: "propose"; readonly proposalId: string; readonly steps: readonly ChatStep[]; readonly pins: readonly ChatPin[]; readonly preview: readonly string[]; readonly reason: string }
   | { readonly i: number; readonly kind: "focus"; readonly projectId: string; readonly preview: string }
   | { readonly i: number; readonly kind: "apply_proposal" | "discard_proposal"; readonly proposalId: string }
+  | { readonly i: number; readonly kind: "status"; readonly request: JsonObject }
   | { readonly i: number; readonly kind: "asked"; readonly question: string; readonly options: readonly string[]; /** For a question the service asked: which command (by position) and which argument the answer fills, and the answers that are allowed. */ readonly intentIndex?: number; readonly field?: string; readonly choices?: readonly string[] }
   | { readonly i: number; readonly kind: "held"; readonly preview: string }
   | { readonly i: number; readonly kind: "refused"; readonly code: string; readonly message: string }
@@ -65,7 +67,7 @@ type PlanItem =
 
 export interface Outcome {
   readonly i: number;
-  readonly status: "applied" | "proposed" | "asked" | "held" | "refused" | "ignored" | "focused" | "discarded";
+  readonly status: "applied" | "proposed" | "asked" | "held" | "refused" | "ignored" | "focused" | "discarded" | "answered";
   readonly op?: string;
   readonly commandId?: string;
   readonly id?: string;
@@ -81,6 +83,10 @@ export interface Outcome {
   readonly message?: string;
   readonly projectId?: string;
   readonly results?: readonly ChatStepResult[];
+  /** For a status answer (card U05): when it was read, and what the records say, each line with the records it comes from. A replay of the message returns this answer as it was, not a fresh one. */
+  readonly observedAt?: string;
+  readonly lines?: readonly { readonly text: string; readonly cites: readonly Cite[] }[];
+  readonly moreLines?: number;
 }
 
 export interface TurnBody {
@@ -127,6 +133,8 @@ export interface ChatDeps {
   readonly coordinatorToken?: () => Promise<string | undefined>;
   /** The approval policy (card A07): its profile decides whether an explicit order applies at once. Absent or unreadable: the strict profile, so a proposal. */
   readonly policy?: { effective(by: Principal, projectId?: string): Promise<{ readonly profile: string } | undefined> };
+  /** Status and blocker explanations (card U05). Absent: a status question is answered as unavailable; nothing else changes. */
+  readonly status?: { ask(by: Principal, request: StatusRequest): Promise<{ readonly observedAt: string; readonly lines: readonly { readonly text: string; readonly cites: readonly Cite[] }[] } | undefined> };
 }
 
 const MESSAGE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -336,6 +344,17 @@ export class ChatService {
       }
       if (intent.kind === "apply_proposal" || intent.kind === "discard_proposal") {
         push({ i, kind: intent.kind, proposalId: intent.proposalId });
+        continue;
+      }
+      if (intent.kind === "status") {
+        // A read: it changes nothing, so quoted material cannot make it do harm, but it still needs the owner's own words like everything else. The view that needs a project gets the one in focus.
+        const request: Record<string, unknown> = { ...intent.request };
+        if (request["projectId"] === undefined && ["changes", "delivered", "noticeboard"].includes(String(request["kind"]))) {
+          if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Say which project you mean." }); continue; }
+          request["projectId"] = currentFocus.projectId;
+        }
+        if (!isObject(request) || hasRefMarker(request)) { push({ i, kind: "refused", code: "invalid_command", message: "that question is not understood" }); continue; }
+        push({ i, kind: "status", request: asJson(request) });
         continue;
       }
       // Every text in the command must be the owner's own words (or a record, or a fixed choice): a model cannot add content the owner never said.
@@ -642,6 +661,15 @@ export class ChatService {
       case "held": return { i: item.i, status: "held", message: `Not done yet: ${item.preview}. It waits for the answer to the question.` };
       case "ignored": return { i: item.i, status: "ignored", message: item.reason };
       case "refused": return { i: item.i, status: "refused", code: item.code, message: item.message };
+      case "status": {
+        if (this.#deps.status === undefined) return { i: item.i, status: "refused", code: "unavailable", message: "status answers are not set up" };
+        try {
+          const answer = await this.#deps.status.ask(owner, item.request as unknown as StatusRequest);
+          if (answer === undefined) return { i: item.i, status: "refused", code: "not_found", message: "the records have nothing you may read for that" };
+          const shown = answer.lines.slice(0, CHAT_LIMITS.statusLines);
+          return { i: item.i, status: "answered", observedAt: answer.observedAt, lines: shown, ...(answer.lines.length > shown.length ? { moreLines: answer.lines.length - shown.length } : {}) };
+        } catch (error) { return refusal(item.i, error); }
+      }
       case "focus": {
         try { await this.setFocus(token, { commandId: `${turnId}-f${item.i}`, projectId: item.projectId }); } catch (error) { return refusal(item.i, error); }
         return { i: item.i, status: "focused", projectId: item.projectId };
@@ -913,6 +941,11 @@ export function replyOf(outcomes: readonly Outcome[]): string[] {
       case "refused": lines.push(`Not done (${o.code ?? "refused"}): ${o.message ?? ""}`); break;
       case "focused": lines.push(`Now focused on project ${o.projectId ?? ""}.`); break;
       case "discarded": lines.push(`Proposal ${o.proposalId ?? ""} discarded.`); break;
+      case "answered":
+        lines.push(`As of ${o.observedAt ?? "now"}, from the records:`);
+        for (const l of o.lines ?? []) lines.push(`${l.text} [${l.cites.map((c) => `${c.kind} ${c.id}`).join(", ")}]`);
+        if (o.moreLines !== undefined) lines.push(`${o.moreLines} more line${o.moreLines === 1 ? "" : "s"} not shown; ask for a narrower view.`);
+        break;
       case "proposed": lines.push(`Proposed, nothing has happened yet (${o.message ?? ""}). Proposal ${o.proposalId ?? ""}: ${(o.preview ?? []).join("; ")}. Say to apply it, or to discard it.`); break;
       case "applied": lines.push(o.proposalId !== undefined ? `Applied proposal ${o.proposalId}.` : `Done: ${o.op ?? ""}${o.completed === false ? `, accepted but not complete yet (${o.awaits ?? "waiting"})` : ""}.`); break;
     }

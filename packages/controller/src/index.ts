@@ -26,3 +26,4 @@ export * from "./continuation/index.js";
 
 export * from "./lifecycle/index.js";
 export * from "./chat/index.js";
+export * from "./status/index.js";

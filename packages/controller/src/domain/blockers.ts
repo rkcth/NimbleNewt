@@ -19,8 +19,23 @@ import { CommandRunner, view, type CommandMeta, type CommandResult, type RunnerO
 export type BlockerType = "manual_hold" | "delivery_exhausted" | "effect_uncertain" | "wait_overdue" | "scan_failure" | "unexplained_block" | "runtime_hold" | "circular_wait" | "context_overflow";
 export const BLOCKER_TYPES: readonly BlockerType[] = ["manual_hold", "delivery_exhausted", "effect_uncertain", "wait_overdue", "scan_failure", "unexplained_block", "runtime_hold", "circular_wait", "context_overflow"];
 
+/**
+ * What kind of obstacle a blocker is (card U05), so a status answer can say what stands in the way and the route out:
+ * - `technical`: something broke or cannot be known (a failed delivery, an uncertain effect). The default for every type except `manual_hold`.
+ * - `enforced_permission`: an enforced boundary (a grant, a gate) forbids it; the route is a grant or another way of doing it.
+ * - `policy_conflict`: configurable policies disagree; the route is an explicit policy change, never a quiet substitute decision.
+ * - `owner_hold`: a person said "do not touch this" (the default for `manual_hold`); only a person lifts it.
+ * - `preference`: a supervisor's or team's preference. It is not a boundary: on an outcome the owner decided it is shown as advice, never as a blocker.
+ */
+export type BlockerBasis = "technical" | "enforced_permission" | "policy_conflict" | "owner_hold" | "preference";
+export const BLOCKER_BASES: readonly BlockerBasis[] = ["technical", "enforced_permission", "policy_conflict", "owner_hold", "preference"];
+/** The basis a blocker has when its opener did not state one. */
+export const defaultBasis = (type: BlockerType): BlockerBasis => (type === "manual_hold" ? "owner_hold" : "technical");
+
 export interface BlockerBody {
   readonly type: BlockerType;
+  /** Absent: the default for the type (`defaultBasis`). */
+  readonly basis?: BlockerBasis;
   /** The thing that is stopped: for example `{ kind: "task", id }` or `{ kind: "delivery", id }`. */
   readonly subject: AggregateRef;
   readonly summary: string;
@@ -44,6 +59,8 @@ export interface OpenBlocker extends CommandMeta {
   readonly summary: string;
   readonly resolver: string;
   readonly nextReviewAt?: string;
+  /** What kind of obstacle it is (see `BlockerBasis`). Absent: the default for the type. */
+  readonly basis?: BlockerBasis;
 }
 export interface ResolveBlocker extends CommandMeta { readonly blockerId: string; readonly expectedRevision: number; readonly resolution: string }
 
@@ -84,14 +101,15 @@ export class BlockerService {
   /** Opens a blocker, or returns the one already open for this type and subject (`replayed: true`). */
   openBlocker(command: OpenBlocker): Promise<CommandResult> {
     return this.#runner.command("blocker.open", command, async (meta) => {
-      onlyKnown(command, ["commandId", "actor", "type", "subject", "summary", "resolver", "nextReviewAt"]);
+      onlyKnown(command, ["commandId", "actor", "type", "subject", "summary", "resolver", "nextReviewAt", "basis"]);
       const type = (BLOCKER_TYPES as readonly string[]).includes(command.type) ? command.type : invalid("type", `must be one of ${BLOCKER_TYPES.join(", ")}`);
       const subject = subjectRef(command.subject);
       const summary = text(command.summary, "summary", { min: 1, max: BLOCKER_LIMITS.summary, multiline: true });
       const resolver = text(command.resolver, "resolver", { min: 1, max: BLOCKER_LIMITS.resolver });
       const review = command.nextReviewAt === undefined ? undefined : typeof command.nextReviewAt === "string" && TIMESTAMP.test(command.nextReviewAt) ? command.nextReviewAt : invalid("nextReviewAt", "must be a UTC timestamp such as 2026-10-20T12:00:00.000Z");
+      const basis = command.basis === undefined ? undefined : (BLOCKER_BASES as readonly string[]).includes(command.basis) ? command.basis : invalid("basis", `must be one of ${BLOCKER_BASES.join(", ")}`);
       return {
-        payload: { type, subject: subject as unknown as JsonObject, summary, resolver, ...(review === undefined ? {} : { nextReviewAt: review }) },
+        payload: { type, subject: subject as unknown as JsonObject, summary, resolver, ...(review === undefined ? {} : { nextReviewAt: review }), ...(basis === undefined ? {} : { basis }) },
         build: async () => {
           const slotRef: AggregateRef = { kind: "blocker-slot", id: slotId(type, subject) };
           const slot = await this.#runner.get(slotRef.kind, slotRef.id);
@@ -104,7 +122,7 @@ export class BlockerService {
           const n = (body?.count ?? 0) + 1;
           const id = blockerIdFor(type, subject, n);
           const ref: AggregateRef = { kind: "blocker", id };
-          const blocker: BlockerBody = { type, subject, summary, resolver, state: "open", openedBy: meta.actor, openedAt: this.#runner.now(), ...(review === undefined ? {} : { nextReviewAt: review }) };
+          const blocker: BlockerBody = { type, ...(basis === undefined ? {} : { basis: basis as BlockerBasis }), subject, summary, resolver, state: "open", openedBy: meta.actor, openedAt: this.#runner.now(), ...(review === undefined ? {} : { nextReviewAt: review }) };
           const nextSlot: SlotBody = { type, subject, count: n, openId: id };
           return {
             ref, creates: true,

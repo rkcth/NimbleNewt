@@ -26,6 +26,8 @@ export type Intent =
   | { readonly kind: "switch_focus"; readonly projectName?: string; readonly projectId?: string; readonly evidence: string; readonly basis: "owner" | "quoted" }
   | { readonly kind: "apply_proposal"; readonly proposalId: string; readonly evidence: string; readonly basis: "owner" | "quoted" }
   | { readonly kind: "discard_proposal"; readonly proposalId: string; readonly evidence: string; readonly basis: "owner" | "quoted" }
+  /** A question about status (card U05): which view to read (`request.kind`, as `StatusService.ask` takes it). It reads records and changes nothing; the details are checked there, not trusted from the model. */
+  | { readonly kind: "status"; readonly request: Readonly<Record<string, unknown>>; readonly evidence: string; readonly basis: "owner" | "quoted" }
   | { readonly kind: "answer"; readonly turnId: string; readonly choice: string; readonly evidence: string; readonly basis: "owner" | "quoted" }
   | { readonly kind: "none"; readonly reason: string };
 
@@ -34,7 +36,7 @@ export interface ChatInterpreter {
   interpret(input: InterpreterInput): Promise<unknown>;
 }
 
-export const CHAT_LIMITS = { text: 4000, quoted: 10, quotedText: 4000, intents: 8, evidence: 500, question: 500, options: 10, option: 200, messageId: 100, summaryLines: 40, line: 400, steps: 40, planTasks: 20, turnsPerProject: 20, projects: 50, openProposals: 50, routes: 5, key: 30 } as const;
+export const CHAT_LIMITS = { text: 4000, quoted: 10, quotedText: 4000, intents: 8, evidence: 500, question: 500, options: 10, option: 200, messageId: 100, summaryLines: 40, line: 400, steps: 40, planTasks: 20, turnsPerProject: 20, projects: 50, openProposals: 50, routes: 5, statusLines: 30, key: 30 } as const;
 
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -74,6 +76,18 @@ export function checkIntents(raw: unknown): Intent[] {
       case "answer": {
         known(entry, ["kind", "turnId", "choice", "evidence", "basis"], f);
         return { kind: "answer", turnId: str(entry["turnId"], `${f}.turnId`, 80), choice: str(entry["choice"], `${f}.choice`, CHAT_LIMITS.option), evidence: str(entry["evidence"], `${f}.evidence`, CHAT_LIMITS.evidence), basis: basisOf(entry["basis"], `${f}.basis`) };
+      }
+      case "status": {
+        known(entry, ["kind", "request", "evidence", "basis"], f);
+        if (!isObject(entry["request"]) || typeof entry["request"]["kind"] !== "string") return invalid(`${f}.request`, "must be an object with a kind");
+        // The request is bounded here (a few short keys, no nesting); what it may mean is checked by the status service.
+        const req = entry["request"] as Record<string, unknown>;
+        if (Object.keys(req).length > 8) return invalid(`${f}.request`, "has too many fields");
+        for (const [k, v] of Object.entries(req)) {
+          if (k.length > 30 || !/^[A-Za-z]+$/.test(k)) return invalid(`${f}.request.${k}`, "is not a request field name");
+          if (!(typeof v === "number" || typeof v === "boolean" || (typeof v === "string" && v.length <= 200))) return invalid(`${f}.request.${k}`, "must be a number, true or false, or text of at most 200 characters");
+        }
+        return { kind: "status", request: entry["request"], evidence: str(entry["evidence"], `${f}.evidence`, CHAT_LIMITS.evidence), basis: basisOf(entry["basis"], `${f}.basis`) };
       }
       case "none": {
         known(entry, ["kind", "reason"], f);
