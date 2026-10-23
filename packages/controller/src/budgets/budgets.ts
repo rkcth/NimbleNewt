@@ -554,6 +554,19 @@ export class BudgetService {
     const id = checkTaskId(taskId);
     const task = (await this.#runner.get("task", id))?.body as unknown as TaskBody | undefined;
     if (task === undefined || !this.#mayRead(by, task.projectId, id)) return undefined;
+    return this.#reportOf(id);
+  }
+
+  /**
+   * The same report for the controller's own dispatcher (card H12), which holds the owner's authority for the controller's routine steps: owner, host or service only, never an agent or a task credential.
+   * It is how the policy gets the spend so far and how a tool call is refused when the budget is used up: from accounting, not from what the agent says.
+   */
+  async accounting(by: Principal, taskId: string): Promise<BudgetReport | undefined> {
+    if (!(by.kind === "owner" || by.kind === "host" || by.kind === "service") || by.taskScope !== undefined) throw new DomainError("forbidden", `${by.id} may not read budget accounting for the dispatcher`);
+    return this.#reportOf(checkTaskId(taskId));
+  }
+
+  async #reportOf(id: string): Promise<BudgetReport | undefined> {
     const link = (await this.#runner.get(LINK, id))?.body as unknown as { treeId: string } | undefined;
     if (link === undefined) return undefined;
     const tree = (await this.#tree(link.treeId)).body;

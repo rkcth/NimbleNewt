@@ -6,3 +6,4 @@ export { startTestServer, withClient, type TestServer } from "../storage/postgre
 export { FaultProxy, type OrdinalFault } from "../storage/postgres/testing/proxy.js";
 // Simulated cache servers (llama.cpp slots, vLLM salted blocks, a Claude-style breakpoint cache) for the cache proofs (cards C06, C06b).
 export { ClaudeSim, LlamaSim, VllmSim } from "../inference-cache/simulators.js";
+export { ScriptedHandle, ScriptedWorker, TestClock, buildWorld, workGrants, EXEC_PROFILES, PI, ROUTING_TABLE, type DispatchWorld, type WorkerScript } from "../dispatch/testing/world.js";

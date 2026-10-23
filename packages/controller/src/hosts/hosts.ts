@@ -4,6 +4,7 @@ import { onlyKnown, taskId as checkTaskId, text, type View } from "../domain/mod
 import { CommandRunner, view, type CommandResult, type RunnerOptions } from "../domain/runner.js";
 import { allows } from "../security/access.js";
 import { credentialIdOf, scopedCommandId } from "../security/credentials.js";
+import { DISPATCHER_PRINCIPAL } from "../security/task-credentials.js";
 import type { NoActor, Principal, PrincipalBody } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
@@ -199,7 +200,8 @@ export class HostService {
 
   /** One host as the controller sees it now. A host may ask about itself; the owner about any. Anything else is refused as if the host did not exist. */
   async status(asker: Principal, hostId: string): Promise<HostStatus | undefined> {
-    if (asker.kind !== "owner" && asker.id !== hostId) return undefined;
+    // The owner, the host itself and the dispatcher (card H12: it must see whether a host is fresh and revoked before it starts an attempt there) may ask.
+    if (asker.kind !== "owner" && asker.id !== hostId && !(asker.kind === "service" && asker.id === DISPATCHER_PRINCIPAL && asker.taskScope === undefined)) return undefined;
     // Only an enrolled host has a status: a name that was never enrolled (or belongs to an agent) reads as absent, not as revoked.
     const principal = await this.#runner.get("principal", hostId);
     if ((principal?.body as unknown as PrincipalBody | undefined)?.kind !== "host") return undefined;

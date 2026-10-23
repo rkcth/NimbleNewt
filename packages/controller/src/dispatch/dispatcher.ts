@@ -1,0 +1,852 @@
+import { randomUUID } from "node:crypto";
+import type { AssignmentService } from "../domain/assignments.js";
+import type { BlockerService } from "../domain/blockers.js";
+import type { EffectBridge } from "../domain/effects.js";
+import { mergeChanges } from "../domain/changes.js";
+import type { EffectService } from "../domain/effects.js";
+import { DomainError, isDomainError } from "../domain/errors.js";
+import { derivedId } from "../domain/ids.js";
+import { onlyKnown, type TaskBody, type View } from "../domain/model.js";
+import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
+import type { ProjectService } from "../domain/service.js";
+import type { AdmissionService } from "../admission/index.js";
+import type { BudgetService } from "../budgets/index.js";
+import type { DecisionGuard } from "../decisions/index.js";
+import type { EnvironmentService } from "../environments/index.js";
+import type { GenerationService } from "../generation/index.js";
+import type { HarnessCatalog } from "../harness/index.js";
+import type { HostService } from "../hosts/index.js";
+import type { PauseGuard } from "../lifecycle/index.js";
+import type { McpService } from "../mcp/index.js";
+import type { AttendanceService } from "../meetings/index.js";
+import type { NotificationService } from "../notifications/index.js";
+import type { ContractService } from "../planning/index.js";
+import type { PolicyService } from "../policy/index.js";
+import { ActionCatalog } from "../policy/catalog.js";
+import type { ReviewService } from "../review/index.js";
+import { selectRoute, type RoutingService } from "../routing/index.js";
+import { allows } from "../security/access.js";
+import type { Principal } from "../security/principals.js";
+import type { TaskCredentialService } from "../security/task-credentials.js";
+import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
+import { DISPATCHER_ACTOR, DISPATCH_KIND, DISPATCH_LIMITS, type DispatchBody, type DispatchRevisions, type Frozen } from "./model.js";
+import { ToolPath, type Loaded } from "./tools.js";
+import type { RecipeSummary, ToolGateway, WorkerTurnResult, TurnUsage, WorkOrder, WorkerHandle, WorkerHost } from "./ports.js";
+
+/** The record of live dispatches: the attempts that have a claim and have not finished. Ticks read it instead of scanning every dispatch ever made. */
+const LIVE: AggregateRef = { kind: "dispatch-live", id: "live" };
+const LIVE_MAX = 600;
+const ATTEMPT = /^att-[a-z2-7]{20}$/;
+const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
+
+/** What a route resolver says: the route and harness for a task, or why there is none. The resolver is the owner's configuration read at the moment of dispatch (R03). */
+export type RouteChoice =
+  | {
+    readonly route: string; readonly harness?: string; readonly role: string;
+    readonly request: { readonly contextTokens: number; readonly needs: readonly string[]; readonly data: "local-only" | "cloud-allowed"; readonly paidAuthorized: boolean };
+    readonly routing?: number; readonly profiles?: number;
+  }
+  | { readonly none: true; readonly reasons: readonly string[] };
+export type RouteResolver = (command: { readonly commandId: string; readonly taskId: string }) => Promise<RouteChoice>;
+
+export interface DispatcherLoop { readonly name: string; run(by: Principal): Promise<unknown> }
+
+export interface DispatcherDeps {
+  /** The dispatcher's own service principal (`service:dispatcher`, authenticated). It is the only principal that issues task credentials for admitted attempts. */
+  readonly principal: Principal;
+  readonly assignments: Pick<AssignmentService, "getAssignment" | "getAttempt" | "finishAttempt" | "admitAttempt" | "guardFor" | "epoch">;
+  readonly projects: Pick<ProjectService, "getTask">;
+  readonly credentials: Pick<TaskCredentialService, "issueForAttempt" | "principalOf" | "endForAttempt">;
+  readonly admission: Pick<AdmissionService, "request" | "release" | "where" | "reprioritize" | "snapshot">;
+  readonly hosts: Pick<HostService, "status">;
+  /** The worker hosts, local or remote, in the order they are tried. They all implement the same contract. */
+  readonly workers: readonly WorkerHost[];
+  readonly contracts: Pick<ContractService, "priorityOf" | "recoveryOf">;
+  readonly harnesses: HarnessCatalog;
+  readonly policy: Pick<PolicyService, "evaluate">;
+  readonly effects: Pick<EffectService, "intend" | "run" | "get">;
+  readonly blockers: Pick<BlockerService, "openBlocker">;
+  readonly route: RouteResolver;
+  /** The routing table, to judge the chosen route again at each call. Without it the route is not judged again. */
+  readonly routing?: Pick<RoutingService, "get">;
+  readonly pauses: PauseGuard;
+  readonly decisions?: DecisionGuard;
+  /** `GenerationService.guardFor` is handed to every effect that is started (it adds the generation hold to the pause and decision guards). */
+  readonly generation?: Pick<GenerationService, "guardFor">;
+  readonly reviews?: Pick<ReviewService, "request" | "admit" | "get">;
+  readonly budgets?: Pick<BudgetService, "accounting" | "charge">;
+  readonly mcp?: Pick<McpService, "authorizeCall" | "recordOutcome">;
+  readonly environments?: Pick<EnvironmentService, "pin">;
+  readonly meetings?: Pick<AttendanceService, "admission" | "revalidation">;
+  readonly notifications?: Pick<NotificationService, "emitFromController">;
+  /** Called when a checkpoint is taken for an attempt (the composer connects C04's `ContinuationService.capture` here). */
+  readonly checkpoints?: (info: { attemptId: string; taskId: string; agentId: string; reason: string; checkpoint: JsonObject }) => Promise<void>;
+  /** The loops the dispatcher's tick runs after its own work: the services whose callers were said to be "the controller's loop". */
+  readonly loops?: readonly DispatcherLoop[];
+}
+
+export interface AttemptDispatcherOptions extends RunnerOptions {
+  /** Names this dispatcher in the lease. */
+  readonly holder?: string;
+  /** A worker that does not beat within this time is taken as lost. Default one minute. */
+  readonly leaseMs?: number;
+  /** How long an attempt may run (shortened by the contract's `maxMinutes`). Default four hours. */
+  readonly attemptMs?: number;
+  /** Attempts the dispatcher itself admits after a lost one (contract `maxAttempts` wins). Default 3 in all. */
+  readonly maxAttempts?: number;
+  /** Assignments looked at per tick. Default 100. */
+  readonly scanPage?: number;
+  /** How long the dispatcher expects an attempt to run when the contract says nothing, for the meeting check (M04). Default 30 minutes. */
+  readonly expectedMinutes?: number;
+  readonly catalog?: ActionCatalog;
+  /** The bridge for each effect kind, so an effect that was started before a restart is reconciled without the worker. */
+  readonly bridges?: Readonly<Record<string, EffectBridge>>;
+}
+
+export type DispatchCheck = "generation" | "pause" | "decision" | "revalidation" | "meeting" | "harness" | "route" | "budget" | "grant" | "host" | "place" | "expired";
+
+export interface TickReport {
+  readonly at: string;
+  readonly started: readonly string[];
+  /** Attempts whose request waits for a place. */
+  readonly waiting: readonly string[];
+  readonly skipped: readonly { readonly taskId: string; readonly attemptId: string; readonly check: DispatchCheck; readonly reason: string }[];
+  /** Attempts that cannot be started for a reason waiting does not fix: a blocker names who can change it. */
+  readonly blocked: readonly { readonly taskId: string; readonly attemptId: string; readonly check: DispatchCheck; readonly blockerId: string }[];
+  readonly lost: readonly string[];
+  readonly readmitted: readonly string[];
+  readonly reprioritized: number;
+  readonly approvals: readonly { readonly attemptId: string; readonly operationId: string; readonly verdict: "approved" | "denied" | "expired" }[];
+  readonly loops: readonly { readonly name: string; readonly ok: boolean; readonly error?: string }[];
+  readonly scanned: number;
+  /** True when the scan of assignments reached its end in this tick (so it saw every assignment since it began). */
+  readonly complete: boolean;
+}
+
+export type RecipeChange =
+  | { readonly kind: "grants" }
+  | { readonly kind: "narrow"; readonly recipe: RecipeSummary }
+  | { readonly kind: "widen"; readonly recipe: RecipeSummary; readonly tell: string };
+
+interface Live { readonly handle: WorkerHandle; readonly host: WorkerHost; readonly turn: Promise<void> }
+
+/**
+ * The attempt dispatcher (card H12). It takes the attempts the inbox admitted, asks the checks in a fixed order, asks admission (H03) for a place on a fresh host, issues the task credential as the
+ * dispatcher's own service principal (the owner is not asked), starts the worker through the dispatch contract and supervises it with a lease the worker's heartbeats extend. Every tool call the
+ * worker makes goes through a `ToolGateway` bound to the attempt: the gateway decides, records the call as a durable operation, runs effects through the S05 ledger, and parks a call that needs an
+ * approval without holding up anything else.
+ *
+ * Nothing sleeps and nothing runs by itself: `tick()` is the one step the controller's loop calls, from the injected clock. The order of the checks before a start is: the generation is current
+ * (a stale one never dispatches), the pause gates (L01), the owner's decisions and gates (C08), the meeting decisions that need revalidation and a coming meeting (M04), the route and harness
+ * with the recovery gate (R03, F08), the budget, the grants the task needs, the host, and last the place (H03). A check that fails for a lasting reason opens a blocker that names who can change it;
+ * one that fails for a passing reason only skips the attempt for this tick.
+ */
+export class DispatcherService {
+  readonly #runner: CommandRunner;
+  readonly #deps: DispatcherDeps;
+  readonly #options: Required<Pick<AttemptDispatcherOptions, "leaseMs" | "attemptMs" | "maxAttempts" | "scanPage" | "expectedMinutes">> & AttemptDispatcherOptions;
+  readonly #holder: string;
+  readonly #live = new Map<string, Live>();
+  readonly #path: ToolPath;
+  /** Names this dispatcher in the commands of its updates: two dispatchers that read one revision must not share a command (the second would be answered with the first's result). */
+  readonly #instance = randomUUID().slice(0, 8);
+  readonly #ending = new Set<Promise<unknown>>();
+  #cursor: string | undefined;
+  #ticking: Promise<TickReport> | undefined;
+  #scanStartedAt = 0;
+
+  private constructor(runner: CommandRunner, deps: DispatcherDeps, options: AttemptDispatcherOptions) {
+    this.#runner = runner;
+    this.#deps = deps;
+    this.#options = { leaseMs: DISPATCH_LIMITS.leaseMs, attemptMs: DISPATCH_LIMITS.attemptMs, maxAttempts: DISPATCH_LIMITS.maxAttempts, scanPage: DISPATCH_LIMITS.scanPage, expectedMinutes: 30, ...options };
+    this.#holder = options.holder ?? "dispatcher";
+    this.#path = new ToolPath(runner, deps, {
+      catalog: options.catalog ?? ActionCatalog.default,
+      ...(options.bridges === undefined ? {} : { bridges: options.bridges }),
+      update: (attemptId, mutate, extra) => this.#update(attemptId, mutate, extra),
+      load: (attemptId) => this.#load(attemptId),
+      handleOf: (attemptId) => this.#live.get(attemptId)?.handle,
+    });
+  }
+
+  static withEpoch(storage: ConstructorParameters<typeof CommandRunner>[0], epoch: number, deps: DispatcherDeps, options: AttemptDispatcherOptions = {}): DispatcherService {
+    if (deps.principal.kind !== "service" || deps.principal.taskScope !== undefined) throw new DomainError("invalid_command", "principal: the dispatcher acts as its service principal", { field: "principal" });
+    if (deps.assignments.epoch !== epoch) throw new DomainError("invalid_command", "epoch: must be the epoch the assignment service writes under", { field: "epoch" });
+    return new DispatcherService(new CommandRunner(storage, epoch, options), deps, options);
+  }
+
+  // ---- the tick ----------------------------------------------------------------------------------------------------------------
+
+  /**
+   * One step of the dispatcher, from the injected clock. It: ends the attempts whose lease or time ran out; gives waiting requests the priority their task has now; starts what has got its place;
+   * claims the next page of assignments' active attempts; looks at the calls waiting for an approval; and runs the loops. It starts workers and returns: `idle()` waits for the turns it started.
+   */
+  async tick(): Promise<TickReport> {
+    // A second call while a tick runs is the same tick: it waits for it and gets its report.
+    if (this.#ticking !== undefined) return this.#ticking;
+    const running = this.#tick();
+    this.#ticking = running;
+    try { return await running; } finally { this.#ticking = undefined; }
+  }
+
+  async #tick(): Promise<TickReport> {
+    const at = this.#runner.now();
+    const started: string[] = [], waiting: string[] = [], lost: string[] = [], readmitted: string[] = [];
+    const skipped: { taskId: string; attemptId: string; check: DispatchCheck; reason: string }[] = [];
+    const blocked: { taskId: string; attemptId: string; check: DispatchCheck; blockerId: string }[] = [];
+    const approvals: { attemptId: string; operationId: string; verdict: "approved" | "denied" | "expired" }[] = [];
+    const live = await this.#liveIds();
+    // 1. Leases and time. A worker that stopped beating, or an attempt past its expiry, is over; its calls are settled through the ledger first.
+    for (const id of live) {
+      const d = await this.#load(id);
+      if (d === undefined || (d.body.state !== "running" && d.body.state !== "parked")) continue;
+      const expired = d.body.expiresAt <= at;
+      if (expired || (d.body.state === "running" && d.body.lease !== undefined && d.body.lease.until <= at)) {
+        const result = await this.#end(id, "abandoned", expired ? "the attempt ran past its expiry" : "the worker stopped beating; its lease ran out", { readmit: !expired });
+        lost.push(id);
+        if (result.readmitted !== undefined) readmitted.push(result.readmitted);
+      }
+    }
+    // 2. The priority the contract has now, for every request that still waits (no stored contract version is rewritten).
+    const reprioritized = await this.#reprioritize();
+    // 3. Waiting claims: get a request, or start when the place has come.
+    for (const id of await this.#liveIds()) {
+      const d = await this.#load(id);
+      if (d === undefined || d.body.state !== "waiting") continue;
+      const outcome = await this.#advance(d);
+      if (outcome.kind === "started") started.push(id);
+      else if (outcome.kind === "waiting") waiting.push(id);
+      else if (outcome.kind === "skipped") skipped.push({ taskId: d.body.taskId, attemptId: id, check: outcome.check, reason: outcome.reason });
+      else if (outcome.kind === "blocked") blocked.push({ taskId: d.body.taskId, attemptId: id, check: outcome.check, blockerId: outcome.blockerId });
+    }
+    // 4. New attempts: a page of assignments from where the last tick stopped.
+    const scan = await this.#scan();
+    for (const found of scan.found) {
+      if (found.outcome.kind === "claimed") {
+        const d = await this.#load(found.attemptId);
+        if (d === undefined) continue;
+        const next = await this.#advance(d);
+        if (next.kind === "started") started.push(found.attemptId);
+        else if (next.kind === "waiting") waiting.push(found.attemptId);
+        else if (next.kind === "skipped") skipped.push({ taskId: found.taskId, attemptId: found.attemptId, check: next.check, reason: next.reason });
+        else if (next.kind === "blocked") blocked.push({ taskId: found.taskId, attemptId: found.attemptId, check: next.check, blockerId: next.blockerId });
+      } else if (found.outcome.kind === "skipped") skipped.push({ taskId: found.taskId, attemptId: found.attemptId, check: found.outcome.check, reason: found.outcome.reason });
+      else if (found.outcome.kind === "blocked") blocked.push({ taskId: found.taskId, attemptId: found.attemptId, check: found.outcome.check, blockerId: found.outcome.blockerId });
+    }
+    // 5. Calls waiting for an approval: say how each was decided to the worker, and close those that were denied or ran out.
+    for (const id of await this.#liveIds()) {
+      const before = await this.#load(id);
+      const parked = before?.body.state === "parked";
+      const verdicts = await this.#path.sweepParked(id, { includeTold: parked });
+      approvals.push(...verdicts);
+      // An attempt that gave its place back while its calls waited goes on once for each decision that comes: it asks for a place again and resumes from its checkpoint. A decision already resumed for does not resume it again.
+      if (parked && before !== undefined) {
+        const fresh = verdicts.filter((v) => !(before.body.resumedFor ?? []).includes(v.operationId));
+        if (fresh.length > 0) {
+          const note = fresh.map((v) => `call ${v.operationId} was ${v.verdict}`).join("; ");
+          await this.#update(id, (b) => ({ ...b, state: "waiting", resumeNote: note.slice(0, 500), resumedFor: [...new Set([...(b.resumedFor ?? []), ...fresh.map((v) => v.operationId)])].slice(-DISPATCH_LIMITS.parked * 4) }));
+        }
+      }
+    }
+    // 6. The loops of the services that said "the controller's loop must call it". A loop that fails is reported and does not stop the others.
+    const loops: { name: string; ok: boolean; error?: string }[] = [];
+    for (const loop of this.#deps.loops ?? []) {
+      try { await loop.run(this.#deps.principal); loops.push({ name: loop.name, ok: true }); } catch (error) {
+        if (isDomainError(error, "stale_epoch")) throw error;
+        loops.push({ name: loop.name, ok: false, error: error instanceof Error ? error.message.slice(0, 200) : "failed" });
+      }
+    }
+    return { at, started, waiting, skipped, blocked, lost, readmitted, reprioritized, approvals, loops, scanned: scan.scanned, complete: scan.complete };
+  }
+
+  /** Resolves when every turn this dispatcher started has ended. */
+  async idle(): Promise<void> {
+    while (this.#live.size > 0 || this.#ending.size > 0) await Promise.allSettled([...[...this.#live.values()].map((l) => l.turn), ...this.#ending]);
+  }
+
+  // ---- the gateway and the worker's heartbeat -------------------------------------------------------------------------------------
+
+  /** The gateway one attempt's worker calls. Nothing exposes this to an agent or the state API: the worker host holds it. */
+  gateway(attemptId: string): ToolGateway {
+    if (typeof attemptId !== "string" || !ATTEMPT.test(attemptId)) invalid("attemptId", "is not an attempt ID");
+    return {
+      attemptId,
+      call: (request, executor) => this.#path.call(attemptId, request, executor),
+      begin: (request) => this.#path.begin(attemptId, request),
+      report: (operationId, outcome) => this.#path.report(attemptId, operationId, outcome),
+      usage: (usage) => this.#usage(attemptId, usage),
+      heartbeat: () => this.heartbeat(attemptId),
+      acknowledgeDecisions: () => this.acknowledgeDecisions(attemptId),
+    };
+  }
+
+  /** The worker is alive: extends its lease. Refused (`fenced`) once the attempt is no longer the task's current one, so a stale worker learns it has lost. */
+  async heartbeat(attemptId: string): Promise<{ until: string }> {
+    const d = await this.#running(attemptId);
+    await this.#assertCurrent(d.body);
+    const now = this.#runner.now();
+    const until = new Date(Date.parse(now) + this.#options.leaseMs).toISOString();
+    await this.#update(attemptId, (b) => ({ ...b, lease: { holder: this.#holder, until }, heartbeats: b.heartbeats + 1, lastHeartbeatAt: now }));
+    return { until };
+  }
+
+  /** The owner's decisions changed and the worker has put the new context in front of the agent: calls are allowed again under the new version. */
+  async acknowledgeDecisions(attemptId: string): Promise<void> {
+    const d = await this.#running(attemptId);
+    const version = await this.#decisionVersion(d.body.projectId);
+    await this.#update(attemptId, (b) => ({ ...b, revisions: { ...b.revisions, decisions: version } }));
+  }
+
+  // ---- control: freeze, settle, restart the sandbox, stop ------------------------------------------------------------------------
+
+  /** New calls are refused until `release`. Calls already running are not touched (`settle` waits for them). */
+  async freeze(by: Principal, attemptId: string, reason: string): Promise<void> {
+    const d = await this.#controlled(by, attemptId);
+    if (typeof reason !== "string" || reason.length < 1 || reason.length > 300) invalid("reason", "must be 1 to 300 characters");
+    const frozen: Frozen = { reason, at: this.#runner.now() };
+    await this.#update(d.body.attemptId, (b) => ({ ...b, frozen: b.frozen ?? frozen }));
+  }
+
+  /** Lifts a freeze. */
+  async release(by: Principal, attemptId: string): Promise<void> {
+    const d = await this.#controlled(by, attemptId);
+    await this.#update(d.body.attemptId, (b) => { const { frozen: _f, ...rest } = b; void _f; return rest; });
+  }
+
+  /**
+   * Lets the calls in flight settle: waits for each (a local call can be told to stop with `cancel`, and then ends `cancelled`; a call on the ledger is never cut: it settles as `confirmed`, `failed` or
+   * `uncertain` and the ledger says which). A call that no running executor owns any more (after a restart) is settled from the ledger. When it returns nothing is in flight.
+   */
+  async settle(by: Principal, attemptId: string, options: { cancel?: boolean } = {}): Promise<{ settled: number }> {
+    const d = await this.#controlled(by, attemptId);
+    return { settled: await this.#path.settle(d.body.attemptId, options.cancel === true) };
+  }
+
+  /**
+   * Makes the agent quiet before someone integrates its changes, refreshes its checkout or quarantines its work: new calls are refused, calls in flight settle, and a checkpoint is taken. Call
+   * `release` when the other step is done. The checkpoint is handed to the checkpoint hook (C04) and returned.
+   */
+  async quiesce(by: Principal, attemptId: string, reason: string): Promise<{ checkpoint?: JsonObject }> {
+    await this.freeze(by, attemptId, reason);
+    await this.settle(by, attemptId, { cancel: true });
+    const checkpoint = await this.#checkpoint(attemptId, reason);
+    return checkpoint === undefined ? {} : { checkpoint };
+  }
+
+  /**
+   * A change of the agent's recipe on a running attempt (decision G01, 2026-10-21). A change of the controller's own grants needs nothing: the next call is judged on the grants as they are then and
+   * nothing restarts. A narrowing of the sandbox freezes new calls, lets the ones in flight settle, takes a checkpoint and starts the sandbox again with the narrower recipe before the agent's next
+   * action; a widening restarts the sandbox from a checkpoint with the wider recipe and tells the agent. The conversation context survives both (the checkpoint is restored). A failure leaves the
+   * attempt frozen, never running on the old recipe by mistake.
+   */
+  async changeRecipe(by: Principal, attemptId: string, change: RecipeChange): Promise<{ restarted: boolean; recipeRevision?: string }> {
+    const d = await this.#controlled(by, attemptId);
+    if (change.kind === "grants") return { restarted: false };
+    const live = this.#live.get(attemptId) ?? invalid("attemptId", "has no running worker on this dispatcher");
+    if (change.recipe === null || typeof change.recipe !== "object" || typeof change.recipe.revision !== "string" || change.recipe.revision.length < 1) invalid("recipe", "must name its revision");
+    await this.freeze(by, attemptId, change.kind === "narrow" ? "narrowing the sandbox" : "widening the sandbox");
+    await this.settle(by, attemptId, { cancel: true });
+    const checkpoint = await this.#checkpoint(attemptId, `recipe ${change.kind}`);
+    await live.handle.restart(change.recipe, checkpoint ?? {});
+    if (change.kind === "widen") await live.handle.tell?.(change.tell);
+    await this.#update(d.body.attemptId, (b) => { const { frozen: _f, ...rest } = b; void _f; return { ...rest, recipeRevision: change.recipe.revision }; });
+    return { restarted: true, recipeRevision: change.recipe.revision };
+  }
+
+  /**
+   * Stops an attempt. An ordinary stop freezes, lets the calls settle, checkpoints and then ends the worker; an emergency stop (`emergency: true`) ends the worker at once, with no settle and no
+   * checkpoint, and the calls in flight are recorded from the ledger as they stand (cancelled, or uncertain when an effect had started). The attempt ends `abandoned` and the task is left as it is.
+   */
+  async stop(by: Principal, attemptId: string, options: { emergency?: boolean; reason: string }): Promise<void> {
+    const d = await this.#controlled(by, attemptId);
+    if (typeof options.reason !== "string" || options.reason.length < 1 || options.reason.length > 300) invalid("reason", "must be 1 to 300 characters");
+    if (options.emergency !== true) {
+      await this.freeze(by, attemptId, options.reason);
+      await this.settle(by, attemptId, { cancel: true });
+      await this.#checkpoint(attemptId, options.reason);
+    }
+    await this.#end(d.body.attemptId, "abandoned", options.reason, { readmit: false });
+  }
+
+  // ---- reads --------------------------------------------------------------------------------------------------------------------
+
+  async get(by: Principal, attemptId: string): Promise<View<DispatchBody> | undefined> {
+    const d = typeof attemptId === "string" && ATTEMPT.test(attemptId) ? await this.#load(attemptId) : undefined;
+    if (d === undefined) return undefined;
+    return this.#mayRead(by, d.body) ? view<DispatchBody>(d.aggregate) : undefined;
+  }
+
+  /** The operations of an attempt, in the order they began. */
+  async operations(by: Principal, attemptId: string) {
+    const d = typeof attemptId === "string" && ATTEMPT.test(attemptId) ? await this.#load(attemptId) : undefined;
+    return d === undefined || !this.#mayRead(by, d.body) ? undefined : this.#path.list(attemptId);
+  }
+
+  /** Settles every call that a restart left in flight, from the ledger (the dispatcher runs this itself when it ends a lost attempt). */
+  async recover(by: Principal, attemptId: string): Promise<{ settled: number }> {
+    const d = await this.#controlled(by, attemptId);
+    return { settled: await this.#path.settle(d.body.attemptId, false) };
+  }
+
+  // ---- internals: loading and writing -----------------------------------------------------------------------------------------
+
+  async #load(attemptId: string) {
+    const aggregate = await this.#runner.get(DISPATCH_KIND, derivedId("dpa", attemptId));
+    return aggregate === undefined ? undefined : { aggregate, body: aggregate.body as unknown as DispatchBody, revision: aggregate.revision };
+  }
+
+  async #running(attemptId: string) {
+    const d = typeof attemptId === "string" && ATTEMPT.test(attemptId) ? await this.#load(attemptId) : undefined;
+    if (d === undefined || d.body.state !== "running") throw new DomainError("fenced", `attempt ${String(attemptId)} is not running under this dispatcher`, { field: "attemptId" });
+    return d;
+  }
+
+  async #controlled(by: Principal, attemptId: string) {
+    const d = typeof attemptId === "string" && ATTEMPT.test(attemptId) ? await this.#load(attemptId) : undefined;
+    if (d === undefined || d.body.state === "finished") throw new DomainError("not_found", `attempt ${String(attemptId)} is not a live dispatch`);
+    const staff = (by.kind === "owner" || by.kind === "host" || by.kind === "service") && by.taskScope === undefined;
+    if (!staff && !allows(by, "assignment.manage", d.body.projectId, { resource: { kind: "task", id: d.body.taskId }, now: this.#runner.now() })) throw new DomainError("forbidden", `${by.id} may not control that attempt`);
+    return d;
+  }
+
+  #mayRead(by: Principal, body: DispatchBody): boolean {
+    return by.kind === "owner" || by.kind === "host" || by.kind === "service" || allows(by, "assignment.read", body.projectId, { resource: { kind: "task", id: body.taskId }, now: this.#runner.now() });
+  }
+
+  /**
+   * Rewrites the dispatch record of an attempt from what is there now (a lost race reads again), together with any extra changes. `mutate` must be idempotent: a repeat after a crash between the
+   * commit and the caller's next step runs it on the result of the first.
+   */
+  async #update(attemptId: string, mutate: (body: DispatchBody) => DispatchBody, extra?: (body: DispatchBody) => Promise<readonly Change[]>): Promise<DispatchBody> {
+    for (let attempt = 1; ; attempt++) {
+      const d = await this.#load(attemptId);
+      if (d === undefined) throw new DomainError("not_found", `attempt ${attemptId} has no dispatch record`);
+      // The extra changes are worked out first: a caller that finds it lost a race (its record already exists) tells `mutate` so by a flag the extra function sets.
+      const more = extra === undefined ? [] : await extra(d.body);
+      const next = mutate(d.body);
+      const ref: AggregateRef = { kind: DISPATCH_KIND, id: d.aggregate.id };
+      try {
+        await this.#runner.command("dispatch.update", { commandId: `dpa-up:${attemptId}:${d.revision}:${this.#instance}`, actor: DISPATCHER_ACTOR }, async () => ({
+          payload: { attemptId, revision: d.revision },
+          build: async () => ({ ref, creates: false, changes: mergeChanges([{ type: "update", ref, expectedRevision: d.revision, body: next as unknown as JsonObject }, ...more]), detail: { attemptId, state: next.state } }),
+        }));
+        return next;
+      } catch (error) {
+        if (isDomainError(error, "stale_revision") && attempt < 25) continue;
+        throw error;
+      }
+    }
+  }
+
+  async #liveIds(): Promise<string[]> {
+    const found = await this.#runner.get(LIVE.kind, LIVE.id);
+    return found === undefined ? [] : [...(found.body as unknown as { ids: string[] }).ids];
+  }
+
+  /** Adds or removes an attempt from the live list in the same commit as the record that makes it so. */
+  async #liveChange(attemptId: string, add: boolean): Promise<Change[]> {
+    const found = await this.#runner.get(LIVE.kind, LIVE.id);
+    const ids = found === undefined ? [] : (found.body as unknown as { ids: string[] }).ids;
+    if (add && ids.length >= LIVE_MAX && !ids.includes(attemptId)) throw new DomainError("unavailable", `the dispatcher already holds ${LIVE_MAX} live attempts; none is added until some finish`);
+    const next = add ? [...new Set([...ids, attemptId])] : ids.filter((i) => i !== attemptId);
+    const body = { ids: next } as unknown as JsonObject;
+    return found === undefined ? [{ type: "create", ref: LIVE, body }] : [{ type: "update", ref: LIVE, expectedRevision: found.revision, body }];
+  }
+
+  async #assertCurrent(d: DispatchBody): Promise<void> {
+    const assignment = await this.#deps.assignments.getAssignment(d.taskId);
+    if (assignment === undefined || assignment.state !== "assigned" || assignment.generation !== d.generation || assignment.activeAttemptId !== d.attemptId) {
+      throw new DomainError("fenced", `attempt ${d.attemptId} is not the active attempt of its task at the current generation; it may not run`, { field: "attemptId" });
+    }
+  }
+
+  // ---- internals: finding and claiming attempts -------------------------------------------------------------------------------
+
+  /** The next page of assignments; for each active attempt without a dispatch, runs the checks and claims it. */
+  async #scan(): Promise<{ scanned: number; complete: boolean; found: { taskId: string; attemptId: string; outcome: ClaimOutcome }[] }> {
+    const page = await this.#runner.list("assignment", { ...(this.#cursor === undefined ? {} : { afterId: this.#cursor }), limit: this.#options.scanPage });
+    const found: { taskId: string; attemptId: string; outcome: ClaimOutcome }[] = [];
+    for (const a of page) {
+      const body = a.body as unknown as { taskId: string; state: string; activeAttemptId?: string; generation: number; owner?: { kind: string; id: string } };
+      if (body.state !== "assigned" || body.activeAttemptId === undefined || body.owner?.kind !== "agent") continue;
+      if ((await this.#load(body.activeAttemptId)) !== undefined) continue;
+      found.push({ taskId: body.taskId, attemptId: body.activeAttemptId, outcome: await this.#claim(body.taskId, body.activeAttemptId) });
+    }
+    const complete = page.length < this.#options.scanPage;
+    this.#cursor = complete ? undefined : page.at(-1)?.id;
+    return { scanned: page.length, complete, found };
+  }
+
+  /** Runs the checks that come before a claim, in order; claims the attempt when they pass. */
+  async #claim(taskId: string, attemptId: string): Promise<ClaimOutcome> {
+    const task = await this.#deps.projects.getTask(taskId);
+    const assignment = await this.#deps.assignments.getAssignment(taskId);
+    const attempt = await this.#deps.assignments.getAttempt(attemptId);
+    if (task === undefined || assignment === undefined || attempt === undefined) return { kind: "skipped", check: "generation", reason: "the task, its assignment or the attempt is missing" };
+    const pre = await this.#checks(task, assignment.generation === attempt.generation && assignment.state === "assigned" && assignment.activeAttemptId === attemptId && attempt.state === "active", attemptId, `${attempt.owner.kind === "agent" ? "agent:" : ""}${attempt.owner.id}`);
+    if (pre.kind !== "ok") return pre;
+    const now = this.#runner.now();
+    const contract = await this.#contractOf(taskId);
+    const minutes = contract.maxMinutes === undefined ? this.#options.attemptMs : Math.min(this.#options.attemptMs, contract.maxMinutes * 60_000);
+    const body: DispatchBody = {
+      attemptId, taskId, projectId: task.projectId, agentId: pre.agentId, generation: attempt.generation, state: "waiting",
+      ...(pre.harness === undefined ? {} : { harness: pre.harness }), route: pre.route.route, role: pre.route.role, request: pre.route.request,
+      revisions: await this.#revisions(task.projectId, taskId, contract.version, pre.route),
+      hostId: pre.host.hostId, claimedAt: now, expiresAt: new Date(Date.parse(now) + minutes).toISOString(), heartbeats: 0, inFlight: [], parked: [], calls: 0,
+    };
+    const ref: AggregateRef = { kind: DISPATCH_KIND, id: derivedId("dpa", attemptId) };
+    try {
+      await this.#runner.command("dispatch.claim", { commandId: `dpa-claim:${attemptId}`, actor: DISPATCHER_ACTOR }, async () => ({
+        payload: { attemptId, taskId },
+        build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }, ...await this.#liveChange(attemptId, true)], detail: { attemptId, taskId, ...(pre.harness === undefined ? {} : { harness: pre.harness }), route: pre.route.route, host: pre.host.hostId } }),
+      }));
+    } catch (error) {
+      // Another tick (or a restart racing this one) claimed it first: that claim stands.
+      if (!isDomainError(error, "command_conflict") && !isDomainError(error, "stale_revision")) throw error;
+    }
+    return { kind: "claimed" };
+  }
+
+  /**
+   * The checks before a claim, in their fixed order. `current` says the attempt is the task's active one at the current generation. Returns what the claim needs, or why the attempt is skipped or blocked.
+   */
+  async #checks(task: View<TaskBody>, current: boolean, attemptId: string, agentId: string): Promise<ClaimOutcome | { kind: "ok"; agentId: string; harness: string | undefined; route: Extract<RouteChoice, { route: string }>; host: WorkerHost & { hostId: string } }> {
+    const taskId = task.id;
+    const skip = (check: DispatchCheck, reason: string): ClaimOutcome => ({ kind: "skipped", check, reason });
+    const block = async (check: DispatchCheck, type: "grant_needed" | "dispatch_blocked", reason: string, resolver = "owner"): Promise<ClaimOutcome> => {
+      const summary = `Attempt ${attemptId} was not started: ${reason}`.slice(0, 900);
+      const opened = await this.#deps.blockers.openBlocker({ commandId: `dpa-blk:${type}:${taskId}:${check}:${derivedId("dpa", summary).slice(4, 16)}`, actor: DISPATCHER_ACTOR, type, subject: { kind: "task", id: taskId }, summary, resolver });
+      await this.#deps.notifications?.emitFromController({ commandId: `dpa-ntf:${opened.id}`, kind: "blocker", ref: { kind: "blocker", id: opened.id }, projectId: task.projectId }).catch(() => undefined);
+      return { kind: "blocked", check, blockerId: opened.id };
+    };
+    // 1. Generation: a stale attempt never dispatches.
+    if (!current) return skip("generation", "the attempt is not the task's active attempt at the current generation");
+    if (task.state === "done" || task.state === "cancelled" || task.state === "blocked" || task.state === "proposed") return skip("generation", `the task is ${task.state}`);
+    // 2. Pause gates.
+    const paused = await this.#deps.pauses.guard(taskId);
+    if (paused.blockedBy.length > 0) return skip("pause", `paused by ${paused.blockedBy.map((s) => `${s.kind} ${s.id}`).join(", ")}`);
+    // 3. The owner's decisions and gates.
+    if (this.#deps.decisions !== undefined) {
+      const g = await this.#deps.decisions.guard(taskId, "start");
+      if (g.blockedBy.length > 0) return skip("decision", g.blockedBy.join("; "));
+    }
+    // 4. Meeting decisions that need the agent's acknowledgement, and a meeting about to start.
+    if (this.#deps.meetings !== undefined) {
+      const need = await this.#deps.meetings.revalidation(this.#deps.principal, taskId);
+      if (need?.required === true) return skip("revalidation", "a meeting's decisions must be acknowledged by the agent before it continues");
+      const advice = await this.#deps.meetings.admission(this.#deps.principal, { agent: agentId, expectedMinutes: (await this.#contractOf(taskId)).maxMinutes ?? this.#options.expectedMinutes });
+      if (advice.decision === "defer") return skip("meeting", "a meeting the agent attends starts before this work would end");
+    }
+    // 5. Route and harness, and the recovery gate: every admission names its harness.
+    // The decision is recorded per command ID, so the ID carries the revisions it reads: a change of the owner's route configuration or of the task's contract is a new decision, an unchanged one is the recorded one.
+    const key = [(await this.#runner.get("routing-table", "routing"))?.revision ?? 0, (await this.#runner.get("difficulty-profiles", "profiles"))?.revision ?? 0, (await this.#runner.get("task-contract", taskId))?.revision ?? 0].join(".");
+    const chosen = await this.#deps.route({ commandId: `dpa-route:${attemptId}:${key}`, taskId });
+    if ("none" in chosen) return block("route", "dispatch_blocked", `no model route can be used: ${chosen.reasons.join("; ")}`.slice(0, 800));
+    const recovery = await this.#deps.contracts.recoveryOf(taskId);
+    const gap = this.#deps.harnesses.checkAttempt(recovery, chosen.harness);
+    if (gap !== undefined) return block("harness", "dispatch_blocked", gap);
+    // 6. Budget, from accounting.
+    if (this.#deps.budgets !== undefined) {
+      const report = await this.#deps.budgets.accounting(this.#deps.principal, taskId);
+      if (report !== undefined && (exhausted(report.limit.costMicros, report.spent.costMicros + report.uncertain.costMicros) || exhausted(report.limit.computeMs, report.spent.computeMs + report.uncertain.computeMs))) {
+        return block("budget", "dispatch_blocked", "the task's budget is used up; raise it or change the task");
+      }
+    }
+    // 7. Grants: the task's instructions and the standing policy determine them, or the owner is asked.
+    const contract = await this.#contractOf(taskId);
+    const missing = await this.#missingGrants(agentId, task.projectId, taskId, contract.tools);
+    if (missing.length > 0) return block("grant", "grant_needed", `the task needs ${missing.join(", ")} and no one has given ${missing.length === 1 ? "it" : "them"} to ${agentId}`);
+    // 8. The host: an enrolled, unrevoked, recently heard-from host that supports the harness.
+    const hostPick = await this.#pickHost(chosen.harness);
+    if (hostPick.kind !== "ok") return hostPick.blocked ? block("host", "dispatch_blocked", hostPick.reason) : skip("host", hostPick.reason);
+    return { kind: "ok", agentId, harness: chosen.harness, route: chosen, host: hostPick.host };
+  }
+
+  async #missingGrants(agentId: string, projectId: string, taskId: string, tools: readonly string[]): Promise<string[]> {
+    if (tools.length === 0) return [];
+    const stored = (await this.#runner.get("principal", agentId))?.body as unknown as { grants: readonly { action: string; project: string; resource?: { kind: string; id: string }; expiresAt?: string }[]; kind: string; state: string } | undefined;
+    if (stored === undefined || stored.state !== "active") return tools.slice();
+    const held = await this.#agentGrants(agentId);
+    return tools.filter((t) => !held(t, projectId, taskId));
+  }
+
+  /** Whether an action is covered by what the agent holds now: its enrolment grants and its grant records (the same snapshot the credential would carry). */
+  async #agentGrants(agentId: string): Promise<(action: string, projectId: string, taskId: string) => boolean> {
+    const stored = (await this.#runner.get("principal", agentId))?.body as unknown as { name: string; grants: readonly { action: string; project: string; resource?: { kind: string; id: string }; expiresAt?: string }[] };
+    const { effectiveOf } = await import("../security/grants.js");
+    const now = this.#runner.now();
+    const principal = await effectiveOf(this.#runner, { id: agentId, kind: "agent", name: stored.name, grants: stored.grants as never }, now);
+    return (action, projectId, taskId) => allows(principal, action, projectId, { resource: { kind: "task", id: taskId }, now });
+  }
+
+  async #pickHost(harness: string | undefined): Promise<{ kind: "ok"; host: WorkerHost & { hostId: string } } | { kind: "none"; reason: string; blocked: boolean }> {
+    const reasons: string[] = [];
+    let revoked = 0;
+    for (const worker of this.#deps.workers) {
+      const status = await this.#deps.hosts.status(this.#deps.principal, worker.hostId);
+      if (status === undefined) { reasons.push(`${worker.hostId} is not an enrolled host`); continue; }
+      if (status.identity !== "active") { revoked++; reasons.push(`${worker.hostId} is revoked`); continue; }
+      if (status.freshness !== "fresh") { reasons.push(`${worker.hostId} has not been heard from recently (${status.freshness})`); continue; }
+      if (harness !== undefined && status.capabilities !== undefined && !status.capabilities.harnesses.some((h) => h.name === harness)) { reasons.push(`${worker.hostId} does not have the ${harness} harness`); continue; }
+      return { kind: "ok", host: worker };
+    }
+    return { kind: "none", reason: reasons.length === 0 ? "no worker host is configured" : reasons.join("; "), blocked: this.#deps.workers.length === 0 || revoked === this.#deps.workers.length };
+  }
+
+  async #revisions(projectId: string, taskId: string, contract: number, route: Extract<RouteChoice, { route: string }>): Promise<DispatchRevisions> {
+    void taskId;
+    const installation = (await this.#runner.get("approval-policy", "installation"))?.revision ?? 0;
+    const project = (await this.#runner.get("approval-policy", projectId))?.revision;
+    return {
+      ...(route.routing === undefined ? {} : { routing: route.routing }), ...(route.profiles === undefined ? {} : { profiles: route.profiles }),
+      policy: { installation, ...(project === undefined ? {} : { project }) }, decisions: await this.#decisionVersion(projectId), contract,
+    };
+  }
+
+  async #decisionVersion(projectId: string): Promise<number> {
+    return ((await this.#runner.get("decision-context", projectId))?.body as unknown as { version?: number } | undefined)?.version ?? 0;
+  }
+
+  async #contractOf(taskId: string): Promise<{ version: number; maxMinutes?: number; maxAttempts?: number; tools: readonly string[] }> {
+    const c = (await this.#runner.get("task-contract", taskId))?.body as unknown as { version: number; budget?: { maxMinutes?: number; maxAttempts?: number }; permissions?: readonly string[] } | undefined;
+    return {
+      version: c?.version ?? 0, ...(c?.budget?.maxMinutes === undefined ? {} : { maxMinutes: c.budget.maxMinutes }), ...(c?.budget?.maxAttempts === undefined ? {} : { maxAttempts: c.budget.maxAttempts }),
+      // Only a tool named in full (no wildcard, no class) is a grant the task is said to need.
+      tools: (c?.permissions ?? []).filter((p) => p.startsWith("tool.") && !p.endsWith("*")),
+    };
+  }
+
+  // ---- internals: places, starts and ends ------------------------------------------------------------------------------------------
+
+  /** Takes a claimed attempt as far as it can go: asks for a place, and starts the worker when it has one. */
+  async #advance(d: Loaded): Promise<AdvanceOutcome> {
+    const b = d.body;
+    const task = await this.#deps.projects.getTask(b.taskId);
+    const assignment = await this.#deps.assignments.getAssignment(b.taskId);
+    const attempt = await this.#deps.assignments.getAttempt(b.attemptId);
+    if (task === undefined || assignment === undefined || attempt === undefined) return { kind: "skipped", check: "generation", reason: "the task, its assignment or the attempt is missing" };
+    const current = assignment.generation === b.generation && assignment.state === "assigned" && assignment.activeAttemptId === b.attemptId && attempt.state === "active";
+    // The attempt was superseded, released or finished elsewhere while it waited: the claim is closed, its place given back.
+    if (!current) { await this.#end(b.attemptId, "abandoned", "the attempt is no longer the task's active attempt at the current generation", { readmit: false }); return { kind: "skipped", check: "generation", reason: "the attempt was superseded while it waited" }; }
+    if (b.expiresAt <= this.#runner.now()) { await this.#end(b.attemptId, "abandoned", "the attempt expired before it was started", { readmit: false }); return { kind: "skipped", check: "expired", reason: "the attempt expired before it started" }; }
+    const pre = await this.#checks(task, true, b.attemptId, b.agentId);
+    if (pre.kind === "skipped" || pre.kind === "blocked") {
+      // A passing reason gives the place back (nothing waits on a place for work that may not start); a lasting one is already a blocker.
+      if (b.requestId !== undefined) await this.#giveBack(d);
+      return pre;
+    }
+    if (pre.kind !== "ok") return { kind: "waiting" };
+    // The place. The request ID derives from the dispatch and the number of requests so far, so a repeat after a crash finds the same request.
+    const requestId = await this.#request(d, pre.host);
+    const where = await this.#deps.admission.where(requestId);
+    if (where.state !== "running") return where.state === "waiting" ? { kind: "waiting" } : { kind: "skipped", check: "place", reason: where.state === "withdrawn" ? `the request for a place was withdrawn: ${where.reason}` : "the request for a place is gone" };
+    return this.#start(d, pre.host, requestId);
+  }
+
+  async #request(d: Loaded, host: WorkerHost): Promise<string> {
+    if (d.body.requestId !== undefined) {
+      const where = await this.#deps.admission.where(d.body.requestId);
+      if (where.state === "running" || where.state === "waiting") return d.body.requestId;
+    }
+    const n = d.body.requests ?? 0;
+    const priority = await this.#deps.contracts.priorityOf(d.body.taskId);
+    const asked = await this.#deps.admission.request({ commandId: `dpa-req:${d.body.attemptId}:${n}`, actor: DISPATCHER_ACTOR, class: "productive", priority, host: host.hostId, cpus: host.resources.cpus, memoryMb: host.resources.memoryMb });
+    await this.#update(d.body.attemptId, (b) => ({ ...b, requestId: asked.id, requests: Math.max(b.requests ?? 0, n + 1), hostId: host.hostId }));
+    return asked.id;
+  }
+
+  async #giveBack(d: Loaded): Promise<void> {
+    const id = d.body.requestId;
+    if (id === undefined) return;
+    await this.#deps.admission.release({ commandId: `dpa-rel:${d.body.attemptId}:${d.body.requests ?? 0}`, actor: DISPATCHER_ACTOR, requestId: id, reason: "the attempt cannot start now" }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
+    await this.#update(d.body.attemptId, (b) => { const { requestId: _r, ...rest } = b; void _r; return rest; });
+  }
+
+  async #start(d: Loaded, host: WorkerHost, requestId: string): Promise<AdvanceOutcome> {
+    const b = d.body;
+    // The place, the host and the generation were judged just before (`#advance`, which runs every check again for a claim that waits); here the claim on the attempt is made. The record says "running"
+    // before the worker exists, and only one caller can make it: it must still be waiting, with the place this caller holds. If this process dies now, the lease ends and the attempt is taken as lost.
+    const now = this.#runner.now();
+    const until = new Date(Date.parse(now) + this.#options.leaseMs).toISOString();
+    try {
+      await this.#update(b.attemptId, (x) => {
+        if (x.state !== "waiting" || x.requestId !== requestId) throw new DomainError("invalid_command", `attempt ${b.attemptId} is ${x.state} and was started by another caller`, { field: "attemptId" });
+        const { resumeNote: _n, resumeFrom: _f, ...rest } = x; void _n; void _f;
+        return { ...rest, state: "running", hostId: host.hostId, startedAt: x.startedAt ?? now, lease: { holder: this.#holder, until } };
+      });
+    } catch (error) {
+      if (isDomainError(error, "invalid_command")) return { kind: "skipped", check: "place", reason: "another caller started the attempt" };
+      throw error;
+    }
+    await this.#assertCurrent(b);
+    const credential = await this.#deps.credentials.issueForAttempt(this.#deps.principal, { commandId: `dpa-cred:${b.attemptId}`, attemptId: b.attemptId, expiresAt: b.expiresAt });
+    const credentialId = credential.token.slice(0, credential.token.lastIndexOf("."));
+    const environment = await this.#pin(b);
+    await this.#update(b.attemptId, (x) => ({ ...x, credentialId, revisions: { ...x.revisions, ...(environment === undefined ? {} : { environment }) } }));
+    const recipe: RecipeSummary = { revision: `r-${b.attemptId.slice(4, 16)}`, reach: [] };
+    const order: WorkOrder = {
+      attemptId: b.attemptId, taskId: b.taskId, projectId: b.projectId, agentId: b.agentId, generation: b.generation, ...(b.harness === undefined ? {} : { harness: b.harness }), route: b.route, credential: credential.token, recipe,
+      content: await this.#contentOf(b.taskId), requestId: `cmd:adm:${b.attemptId}`, expiresAt: b.expiresAt,
+      ...(b.resumeFrom === undefined ? {} : { resumeFrom: b.resumeFrom }), ...(b.resumeNote === undefined ? {} : { resumeNote: b.resumeNote }),
+    };
+    let handle: WorkerHandle;
+    try { handle = await host.start(order); } catch (error) {
+      await this.#end(b.attemptId, "failed", `the worker did not start: ${error instanceof Error ? error.message.slice(0, 200) : "failed"}`, { readmit: false });
+      return { kind: "skipped", check: "host", reason: "the worker did not start" };
+    }
+    await this.#update(b.attemptId, (x) => ({ ...x, workerVersion: handle.workerVersion, recipeRevision: recipe.revision }));
+    const turn = this.#run(b.attemptId, handle);
+    this.#live.set(b.attemptId, { handle, host, turn });
+    return { kind: "started" };
+  }
+
+  async #contentOf(taskId: string): Promise<string> {
+    const task = await this.#deps.projects.getTask(taskId);
+    return task === undefined ? "" : `${task.title}${task.description === "" ? "" : `\n\n${task.description}`}`;
+  }
+
+  async #pin(b: DispatchBody): Promise<number | undefined> {
+    if (this.#deps.environments === undefined) return undefined;
+    const agent = await this.#deps.credentials.principalOf(this.#deps.principal, b.attemptId);
+    try { return (await this.#deps.environments.pin(agent, { commandId: `dpa-env:${b.attemptId}`, attemptId: b.attemptId, agentId: b.agentId, kind: "attempt" })).revision; } catch (error) {
+      // An agent with no environment revision runs without one; the record says so by having none.
+      if (isDomainError(error, "invalid_command") && /no active environment/.test(error.message)) return undefined;
+      throw error;
+    }
+  }
+
+  /** Runs the turn and records how it ended. The turn's promise never rejects: a broken worker ends the attempt as failed. */
+  #run(attemptId: string, handle: WorkerHandle): Promise<void> {
+    const gateway = this.gateway(attemptId);
+    const done = (async () => {
+      let result: WorkerTurnResult;
+      try { result = await handle.run(gateway); } catch (error) { result = { status: "failed", error: error instanceof Error ? error.message.slice(0, 200) : "the worker failed" }; }
+      const d = await this.#load(attemptId);
+      if (d === undefined || d.body.state !== "running") return;
+      try {
+        if (result.usage !== undefined) await this.#usage(attemptId, result.usage).catch(() => undefined);
+        // The turn ended with calls still waiting for an approval: the attempt gives its place back instead of holding it while nobody works.
+        if (result.status === "completed" && d.body.parked.length > 0) {
+          // A call that was decided, the attempt resumed for it, and that the agent did not make again is closed; the attempt yields again only for calls still undecided.
+          await this.#path.closeUnmade(attemptId, d.body.resumedFor ?? []);
+          if ((await this.#load(attemptId))!.body.parked.length > 0) { await this.#yield(attemptId, result.checkpoint); return; }
+        }
+        await this.#end(attemptId, result.status === "completed" ? "succeeded" : result.status === "cancelled" ? "abandoned" : "failed", result.status === "completed" ? "the turn completed" : (result.error ?? `the turn ${result.status}`), { readmit: false });
+      } catch (error) {
+        // The attempt could not be recorded as ended (the epoch was lost, storage was unreachable): the lease will end it; nothing is thrown into the void.
+        if (isDomainError(error, "stale_epoch")) return;
+      }
+    })();
+    return done.finally(() => { this.#live.delete(attemptId); });
+  }
+
+  /** Gives the attempt's place back while its calls wait for an approval; the checkpoint of the turn is kept so the attempt can go on in a new run. */
+  async #yield(attemptId: string, checkpoint: JsonObject | undefined): Promise<void> {
+    const d = (await this.#load(attemptId))!;
+    const b = d.body;
+    await this.#live.get(attemptId)?.handle.stop().catch(() => undefined);
+    this.#path.forget(attemptId, b.parked);
+    if (b.requestId !== undefined) await this.#deps.admission.release({ commandId: `dpa-yield:${attemptId}:${b.requests ?? 0}`, actor: DISPATCHER_ACTOR, requestId: b.requestId, reason: "every call of the attempt waits for an approval" }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
+    await this.#update(attemptId, (x) => {
+      const { requestId: _r, lease: _l, ...rest } = x; void _r; void _l;
+      return { ...rest, state: "parked", ...(checkpoint === undefined ? {} : { resumeFrom: checkpoint }) };
+    });
+  }
+
+  /**
+   * Ends an attempt, whatever the reason: the worker is stopped, the calls still in flight are settled from the ledger, the attempt is finished in the assignment (the task itself is not touched),
+   * the place is given back, the credential ends and the dispatch is closed. A lost attempt (not an expired or stopped one) may be admitted again by the dispatcher, within the attempts allowed.
+   */
+  async #end(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean }): Promise<{ readmitted?: string }> {
+    // `idle()` waits for every end in progress, not only for the turns: an attempt leaves the live list part-way through its end, and the blocker for a failure is opened after that.
+    const ending = this.#endInner(attemptId, outcome, summary, options);
+    this.#ending.add(ending);
+    try { return await ending; } finally { this.#ending.delete(ending); }
+  }
+
+  async #endInner(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean }): Promise<{ readmitted?: string }> {
+    const d = await this.#load(attemptId);
+    if (d === undefined || d.body.state === "finished") return {};
+    const live = this.#live.get(attemptId);
+    if (live !== undefined) await live.handle.stop().catch(() => undefined);
+    await this.#path.settle(attemptId, true).catch(() => undefined);
+    await this.#path.cancelParked(attemptId).catch(() => undefined);
+    const b = (await this.#load(attemptId))!.body;
+    const assignment = await this.#deps.assignments.getAssignment(b.taskId);
+    // The attempt is finished in the assignment only if it is still the active one; a superseded attempt was ended by whoever transferred the task.
+    if (assignment !== undefined && assignment.state === "assigned" && assignment.generation === b.generation && assignment.activeAttemptId === attemptId) {
+      await this.#deps.assignments.finishAttempt({ commandId: `dpa-fin:${attemptId}`, actor: DISPATCHER_ACTOR, taskId: b.taskId, expectedRevision: assignment.revision, fence: { generation: b.generation, attemptId }, outcome, summary: summary.slice(0, 500) }).catch((error: unknown) => { if (!isDomainError(error, "fenced") && !isDomainError(error, "stale_revision") && !isDomainError(error, "invalid_command")) throw error; });
+    }
+    if (b.requestId !== undefined) await this.#deps.admission.release({ commandId: `dpa-end-rel:${attemptId}`, actor: DISPATCHER_ACTOR, requestId: b.requestId, reason: summary.slice(0, 280) }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
+    await this.#deps.credentials.endForAttempt(this.#deps.principal, { commandId: `dpa-end-cred:${attemptId}`, attemptId, reason: summary.slice(0, 280) }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
+    await this.#update(attemptId, (x) => ({ ...x, state: "finished", inFlight: [], parked: [], outcome: { status: outcome, summary: summary.slice(0, 500), at: this.#runner.now() } }), () => this.#liveChange(attemptId, false));
+    this.#live.delete(attemptId);
+    if (outcome === "failed") {
+      const opened = await this.#deps.blockers.openBlocker({ commandId: `dpa-blk:failed:${attemptId}`, actor: DISPATCHER_ACTOR, type: "dispatch_blocked", subject: { kind: "task", id: b.taskId }, summary: `Attempt ${attemptId} failed (${summary.slice(0, 300)}); the task is as it was and no further attempt starts by itself.`, resolver: "owner" });
+      await this.#deps.notifications?.emitFromController({ commandId: `dpa-ntf:${opened.id}`, kind: "blocker", ref: { kind: "blocker", id: opened.id }, projectId: b.projectId }).catch(() => undefined);
+    }
+    return options.readmit ? this.#readmit(b) : {};
+  }
+
+  /** After a lost attempt the dispatcher admits the next one itself, up to the attempts the contract (or the dispatcher's own limit) allows; beyond that a blocker names the owner. */
+  async #readmit(b: DispatchBody): Promise<{ readmitted?: string }> {
+    const assignment = await this.#deps.assignments.getAssignment(b.taskId);
+    if (assignment === undefined || assignment.state !== "assigned" || assignment.generation !== b.generation || assignment.activeAttemptId !== undefined || assignment.owner === undefined) return {};
+    const contract = await this.#contractOf(b.taskId);
+    const allowed = contract.maxAttempts ?? this.#options.maxAttempts;
+    if (assignment.attempts >= allowed) {
+      const opened = await this.#deps.blockers.openBlocker({ commandId: `dpa-blk:attempts:${b.taskId}:${assignment.attempts}`, actor: DISPATCHER_ACTOR, type: "dispatch_blocked", subject: { kind: "task", id: b.taskId }, summary: `${assignment.attempts} attempts were made and the task allows ${allowed}; no further attempt starts by itself.`, resolver: "owner" });
+      await this.#deps.notifications?.emitFromController({ commandId: `dpa-ntf:${opened.id}`, kind: "blocker", ref: { kind: "blocker", id: opened.id }, projectId: b.projectId }).catch(() => undefined);
+      return {};
+    }
+    const next = await this.#deps.assignments.admitAttempt({ commandId: `dpa-readmit:${b.taskId}:${assignment.attempts + 1}`, actor: DISPATCHER_ACTOR, taskId: b.taskId, expectedRevision: assignment.revision, generation: b.generation, owner: assignment.owner, ...(b.harness === undefined ? {} : { harness: b.harness }) });
+    return { readmitted: next.id };
+  }
+
+  async #reprioritize(): Promise<number> {
+    // Only requests whose stored priority differs from the contract's now are sent, and the command names the queue it was worked out from, so a priority that goes back to an earlier value is applied again.
+    const snapshot = await this.#deps.admission.snapshot();
+    const stored = new Map(snapshot.queue.map((e) => [e.id, e.priority]));
+    const changes: { requestId: string; priority: number }[] = [];
+    for (const id of await this.#liveIds()) {
+      const d = await this.#load(id);
+      if (d === undefined || d.body.state !== "waiting" || d.body.requestId === undefined || !stored.has(d.body.requestId)) continue;
+      const priority = await this.#deps.contracts.priorityOf(d.body.taskId);
+      if (priority !== stored.get(d.body.requestId)) changes.push({ requestId: d.body.requestId, priority });
+    }
+    let changed = 0;
+    for (let i = 0; i < changes.length; i += 100) {
+      const batch = changes.slice(i, i + 100);
+      const key = `${snapshot.revision}:${i}`;
+      changed += (await this.#deps.admission.reprioritize({ commandId: `dpa-prio:${key}`, actor: DISPATCHER_ACTOR, changes: batch })).changed;
+    }
+    return changed;
+  }
+
+  async #checkpoint(attemptId: string, reason: string): Promise<JsonObject | undefined> {
+    const live = this.#live.get(attemptId);
+    const d = await this.#load(attemptId);
+    if (live === undefined || d === undefined) return undefined;
+    const checkpoint = await live.handle.checkpoint();
+    await this.#deps.checkpoints?.({ attemptId, taskId: d.body.taskId, agentId: d.body.agentId, reason, checkpoint });
+    return checkpoint;
+  }
+
+  async #usage(attemptId: string, usage: TurnUsage): Promise<void> {
+    if (this.#deps.budgets === undefined) return;
+    const d = await this.#running(attemptId);
+    if (usage === null || typeof usage !== "object") invalid("usage", "must be an object");
+    onlyKnown(usage, ["costMicros", "computeMs", "cache"]);
+    if (usage.costMicros === undefined && usage.computeMs === undefined) return;
+    await this.#deps.budgets.charge(this.#deps.principal, {
+      commandId: `dpa-use:${attemptId}:${d.body.heartbeats}:${d.body.calls}:${usage.costMicros ?? 0}:${usage.computeMs ?? 0}`, activity: "model-call", taskId: d.body.taskId, agentId: d.body.agentId,
+      ...(usage.costMicros === undefined ? {} : { costMicros: usage.costMicros }), ...(usage.computeMs === undefined ? {} : { computeMs: usage.computeMs }), ...(usage.cache === undefined ? {} : { cache: usage.cache }),
+    });
+  }
+}
+
+type ClaimOutcome = { kind: "claimed" } | { kind: "skipped"; check: DispatchCheck; reason: string } | { kind: "blocked"; check: DispatchCheck; blockerId: string };
+type AdvanceOutcome = { kind: "started" } | { kind: "waiting" } | { kind: "skipped"; check: DispatchCheck; reason: string } | { kind: "blocked"; check: DispatchCheck; blockerId: string };
+
+/** A limit of 0 states no limit; a limit that is set is used up when what was spent (and what may have been) reaches it. */
+const exhausted = (limit: number, used: number): boolean => limit > 0 && used >= limit;

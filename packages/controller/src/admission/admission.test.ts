@@ -88,6 +88,29 @@ for (const backend of backends) {
     void mid2;
   });
 
+  suite("reprioritizing waiting requests reorders the queue at the next decision, leaves running ones alone, and keeps arrival order among equals", async ({ ask, admission, kinds }) => {
+    const runners = [await ask({ host: "host:h1" }), await ask({ host: "host:h1" }), await ask({ host: "host:h2" }), await ask({ host: "host:h2" })];
+    const a = await ask({ host: "host:h1", priority: 5 });
+    const b = await ask({ host: "host:h1", priority: 5 });
+    const c = await ask({ host: "host:h1", priority: 5 });
+    const positions = async (): Promise<(number | undefined)[]> => Promise.all([a, b, c].map(async (r) => { const w = await admission.where(r.id); return w.state === "waiting" ? w.position : undefined; }));
+    assert.deepEqual(await positions(), [1, 2, 3]);
+    assert.equal((await kinds()).waiting.length, 3);
+    const cmd = cid("rp");
+    const first = await admission.reprioritize({ commandId: cmd, actor: "controller", changes: [{ requestId: c.id, priority: 9 }, { requestId: runners[0]!.id, priority: 0 }, { requestId: "req-aaaaaaaaaaaaaaaaaaaa", priority: 3 }] });
+    assert.deepEqual(first, { changed: 1, unchanged: 1, missing: 1 });
+    assert.deepEqual(await positions(), [2, 3, 1], "the raised request is served first; the others keep arrival order");
+    assert.equal((await admission.snapshot()).running.find((e) => e.id === runners[0]!.id)!.priority, 5, "a running request is not touched");
+    // Repeating the command changes nothing; the same priorities again are no change.
+    await admission.reprioritize({ commandId: cmd, actor: "controller", changes: [{ requestId: c.id, priority: 9 }, { requestId: runners[0]!.id, priority: 0 }, { requestId: "req-aaaaaaaaaaaaaaaaaaaa", priority: 3 }] });
+    assert.deepEqual(await admission.reprioritize({ commandId: cid("rp"), actor: "controller", changes: [{ requestId: c.id, priority: 9 }] }), { changed: 0, unchanged: 1, missing: 0 });
+    await release(admission, runners[0]!.id);
+    assert.equal((await admission.where(c.id)).state, "running", "the freed place went to the raised request");
+    await refuses("invalid_command", () => admission.reprioritize({ commandId: cid("rp"), actor: "controller", changes: [{ requestId: a.id, priority: 10 }] }));
+    await refuses("invalid_command", () => admission.reprioritize({ commandId: cid("rp"), actor: "controller", changes: [{ requestId: a.id, priority: 1 }, { requestId: a.id, priority: 2 }] }));
+    await refuses("invalid_command", () => admission.reprioritize({ commandId: cid("rp"), actor: "controller", changes: [] }));
+  });
+
   suite("a steady stream of higher-priority work cannot keep a low-priority request waiting for ever", async ({ ask, admission, kinds }) => {
     await admission.setLimits({ commandId: cid("l"), actor: "owner:rob", limits: { ...DEFAULT_LIMITS, productive: 1, perHost: 1, patience: 3 } });
     const current = await ask({ host: "host:h1" });

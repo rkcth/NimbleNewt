@@ -120,6 +120,8 @@ const HINTS: Readonly<Record<BlockerType, string>> = {
   runtime_hold: "review the unfinished work the runtime found and recover it",
   circular_wait: "break the ring by changing one dependency or answering one of the inquiries",
   context_overflow: "change the model route, the task or the budget",
+  grant_needed: "give the grant the task needs, or change the task so it does not need it",
+  dispatch_blocked: "change the route, the harness, the budget or the task, then the dispatcher starts it",
 };
 
 /** The first words of the route: what kind of obstacle it is. */

@@ -34,6 +34,11 @@ export class ActionCatalog {
   /** The catalogue with more tools classified (a name already known keeps its class). */
   static with(extra: Readonly<Record<string, ActionClass>>): ActionCatalog { return new ActionCatalog({ ...extra }); }
 
+  /** The tools this catalogue puts in a class (the execution tools are classed by where they run, so none is listed). */
+  toolsOf(cls: string): readonly string[] {
+    return [...new Set([...Object.entries(DEFAULT_TOOL_CLASSES), ...Object.entries(this.#extra)].filter(([, c]) => c === cls).map(([name]) => name))].sort();
+  }
+
   /** The class of a tool call. A program run is an edit when it runs in the agent's own checkout and a mutation anywhere else. */
   classify(tool: string, targetKind?: string): ActionClass | "unknown" {
     if (EXECUTION_TOOLS.has(tool)) return targetKind === "workspace" ? "workspace-edit" : "mutate";

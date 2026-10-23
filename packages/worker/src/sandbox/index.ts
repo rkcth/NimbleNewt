@@ -1,4 +1,5 @@
 export { SandboxError, type SandboxErrorCode } from "./errors.js";
+export { attemptSandbox, type AttemptSandboxPlan } from "./attempt.js";
 export { GUEST, normalizeRecipe, protectedPathsFor, type NormalizedRecipe, type ReadOnlyMount, type SandboxMode, type SandboxRecipe } from "./recipe.js";
 export type { BackendHealth, GuestView, SandboxBackend, SpawnPlan } from "./backend.js";
 export { seatbeltBackend, profileFor, type SeatbeltOptions } from "./seatbelt.js";

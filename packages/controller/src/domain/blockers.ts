@@ -14,10 +14,12 @@ import { CommandRunner, view, type CommandMeta, type CommandResult, type RunnerO
  * - `runtime_hold`: the conversation runtime restarted holding unfinished work that is not the attempt's own; a person reviews and recovers it (card S09).
  * - `circular_wait`: agents wait for each other in a ring (through task dependencies or open inquiries), so none of them can proceed on its own (card S10).
  * - `unexplained_block`: a task is blocked and nothing says why or what happens next (card S08).
+ * - `grant_needed`: the task needs a grant that neither its instructions nor the standing policy give, so the dispatcher did not start it; the owner decides whether to give it (card H12).
+ * - `dispatch_blocked`: the dispatcher cannot start the attempt for a reason that waiting will not fix (no eligible route, a harness that cannot recover the task, an exhausted budget); a person changes the route, the task or the budget (card H12).
  * - `context_overflow`: the context kept running out (a first call that does not fit, a summary that could not be made, repeated overflow); a person changes the route, the task or the budget (card C07b).
  */
-export type BlockerType = "manual_hold" | "delivery_exhausted" | "effect_uncertain" | "wait_overdue" | "scan_failure" | "unexplained_block" | "runtime_hold" | "circular_wait" | "context_overflow";
-export const BLOCKER_TYPES: readonly BlockerType[] = ["manual_hold", "delivery_exhausted", "effect_uncertain", "wait_overdue", "scan_failure", "unexplained_block", "runtime_hold", "circular_wait", "context_overflow"];
+export type BlockerType = "manual_hold" | "delivery_exhausted" | "effect_uncertain" | "wait_overdue" | "scan_failure" | "unexplained_block" | "runtime_hold" | "circular_wait" | "context_overflow" | "grant_needed" | "dispatch_blocked";
+export const BLOCKER_TYPES: readonly BlockerType[] = ["manual_hold", "delivery_exhausted", "effect_uncertain", "wait_overdue", "scan_failure", "unexplained_block", "runtime_hold", "circular_wait", "context_overflow", "grant_needed", "dispatch_blocked"];
 
 /**
  * What kind of obstacle a blocker is (card U05), so a status answer can say what stands in the way and the route out:
@@ -30,7 +32,7 @@ export const BLOCKER_TYPES: readonly BlockerType[] = ["manual_hold", "delivery_e
 export type BlockerBasis = "technical" | "enforced_permission" | "policy_conflict" | "owner_hold" | "preference";
 export const BLOCKER_BASES: readonly BlockerBasis[] = ["technical", "enforced_permission", "policy_conflict", "owner_hold", "preference"];
 /** The basis a blocker has when its opener did not state one. */
-export const defaultBasis = (type: BlockerType): BlockerBasis => (type === "manual_hold" ? "owner_hold" : "technical");
+export const defaultBasis = (type: BlockerType): BlockerBasis => (type === "manual_hold" ? "owner_hold" : type === "grant_needed" ? "enforced_permission" : "technical");
 
 export interface BlockerBody {
   readonly type: BlockerType;

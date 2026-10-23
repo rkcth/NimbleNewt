@@ -62,6 +62,12 @@ function outsideTask(principal: Principal, project: string | undefined, options:
   return options.resource !== undefined && options.resource.kind === "task" && options.resource.id !== scope.taskId;
 }
 
+/** A task credential issued under a contract limit takes only the tool actions that limit covers (card H12). Actions that are not tools are not limited here. */
+function outsideLimit(principal: Principal, action: string): boolean {
+  const limit = principal.taskScope?.limit;
+  return limit !== undefined && action.startsWith("tool.") && !limit.some((l) => covers(l, action));
+}
+
 /** False for a task credential asked about another project; true for every other principal. For rules decided by who a record belongs to, which `allows` does not see. */
 export const inTaskScope = (principal: Principal, projectId: string): boolean => principal.taskScope === undefined || principal.taskScope.projectId === projectId;
 
@@ -76,7 +82,7 @@ function restricted(principal: Principal, action: string, project: string | unde
  */
 export function allows(principal: Principal, action: string, project: string | undefined, options: CheckOptions = {}): boolean {
   if (principal.kind === "owner") return true;
-  if (outsideTask(principal, project, options)) return false;
+  if (outsideTask(principal, project, options) || outsideLimit(principal, action)) return false;
   // A principal that did not come from authentication (or `GrantService.effective`) has not had its restrictions loaded: it is refused rather than trusted.
   if (principal.asOf === undefined || restricted(principal, action, project, options)) return false;
   const now = options.now ?? new Date().toISOString();
@@ -87,7 +93,7 @@ export function allows(principal: Principal, action: string, project: string | u
 /** Whether a grant names this exact action (not through `*` or a prefix) in the project: used where a broad grant must not be enough, such as reading another agent's private scratch. */
 export function allowsExactly(principal: Principal, action: string, project: string | undefined, options: CheckOptions = {}): boolean {
   if (principal.kind === "owner") return true;
-  if (outsideTask(principal, project, options)) return false;
+  if (outsideTask(principal, project, options) || outsideLimit(principal, action)) return false;
   if (principal.asOf === undefined || restricted(principal, action, project, options)) return false;
   const now = options.now ?? new Date().toISOString();
   return principal.grants.some((g) => g.action === action && projectMatches(g.project, project)

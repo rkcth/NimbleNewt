@@ -20,6 +20,7 @@ export interface ContractFields {
   /** 0 to 9, higher is served first; the scale admission uses. */
   readonly priority: number;
   readonly difficulty?: Difficulty;
+  /** `maxCost` is in the same micro-cost unit as the budget accounting's `costMicros` (the figure the approval policy gets as the spend so far), so the estimate left is `maxCost` less what accounting says was spent (card H12). */
   readonly budget: { readonly maxAttempts?: number; readonly maxMinutes?: number; readonly maxCost?: number };
   /** P (production: the requested deliverable and its necessary checks) or PC (improvement of how the team works). */
   readonly workClass: WorkClass;

@@ -40,7 +40,16 @@ export interface IncomingMessage {
   readonly payload: JsonObject;
 }
 
-export interface AdmitMessage extends CommandMeta { readonly messageId: string }
+export interface AdmitMessage extends CommandMeta {
+  readonly messageId: string;
+  /** The harness the attempt will run in (card F08, H12). Absent: the inbox's own default (`InboxOptions.harness`). With the harness gate configured an attempt that names none is refused unless the task needs no recovery. */
+  readonly harness?: string;
+}
+
+export interface InboxOptions extends RunnerOptions {
+  /** The harness every admission names unless the call names another (card H12: every admission names its harness). */
+  readonly harness?: string;
+}
 export interface SettleMessage extends CommandMeta {
   readonly messageId: string;
   readonly expectedRevision: number;
@@ -72,15 +81,17 @@ export const inboxMessageId = (source: string, deliveryId: string): string => de
 export class InboxService {
   readonly #runner: CommandRunner;
   readonly #assignments: AssignmentService;
+  readonly #harness: string | undefined;
 
-  private constructor(runner: CommandRunner, assignments: AssignmentService) {
+  private constructor(runner: CommandRunner, assignments: AssignmentService, harness: string | undefined) {
     this.#runner = runner;
     this.#assignments = assignments;
+    this.#harness = harness;
   }
 
-  static withEpoch(storage: ControllerStorage, epoch: number, assignments: AssignmentService, options: RunnerOptions = {}): InboxService {
+  static withEpoch(storage: ControllerStorage, epoch: number, assignments: AssignmentService, options: InboxOptions = {}): InboxService {
     if (assignments.epoch !== epoch) throw new DomainError("invalid_command", "epoch: must be the epoch the assignment service writes under", { field: "epoch" });
-    return new InboxService(new CommandRunner(storage, epoch, options), assignments);
+    return new InboxService(new CommandRunner(storage, epoch, options), assignments, options.harness);
   }
 
   /** Durably receives a message. Resolves only after the record is committed (or found to be committed already). */
@@ -131,11 +142,12 @@ export class InboxService {
    */
   async admitAssignment(command: AdmitMessage): Promise<Admission> {
     if (command === null || typeof command !== "object") throw new DomainError("invalid_command", "a command is an object");
-    onlyKnown(command, ["commandId", "actor", "messageId"]);
+    onlyKnown(command, ["commandId", "actor", "messageId", "harness"]);
     const messageId = typeof command.messageId === "string" && MESSAGE_ID.test(command.messageId) ? command.messageId : invalid("messageId", "is not an inbox message ID");
     text(command.actor, "actor", { min: 1, max: 120 });
     const attemptCommand = `adm:${messageId}`;
     const myAttempt = derivedId("att", attemptCommand);
+    const harness = command.harness ?? this.#harness;
     for (let tries = 0; tries < 5; tries++) {
       const message = await this.#message(messageId);
       if (message.state !== "received") return this.#recorded(message);
@@ -161,10 +173,12 @@ export class InboxService {
         else if (current.activeAttemptId !== undefined) decision = { outcome: "already_active", attemptId: current.activeAttemptId, ...(guard === undefined ? {} : { guard }) };
         else {
           try {
-            const admitted = await this.#assignments.admitAttempt({ commandId: attemptCommand, actor: INBOX_ACTOR, taskId: event.taskId as string, expectedRevision: found.revision, generation: current.generation, owner });
+            const admitted = await this.#assignments.admitAttempt({ commandId: attemptCommand, actor: INBOX_ACTOR, taskId: event.taskId as string, expectedRevision: found.revision, generation: current.generation, owner, ...(harness === undefined ? {} : { harness }) });
             decision = { outcome: "admitted", attemptId: admitted.id };
           } catch (error) {
             // Lost a race for the writer slot, or the assignment or task moved since it was read: look again at the new state (the task's state was checked above, so a refusal here is a race).
+            // A refused harness is lasting (waiting does not change it) and says why; it is not a race.
+            if (isDomainError(error, "invalid_command") && error.field === "harness") throw error;
             if (isDomainError(error, "stale_revision") || isDomainError(error, "invalid_command") || isDomainError(error, "fenced")) continue;
             throw error;
           }

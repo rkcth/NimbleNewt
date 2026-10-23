@@ -5,4 +5,4 @@ export { CREDENTIAL_PATTERNS, findCredentialShapes, type CredentialPattern } fro
 export { REDACTED, redact, redactText } from "./redact.js";
 export { SecureApi, type SecureDependencies } from "./secured.js";
 export { GrantService, GRANT_LIMITS, checkTerms, heldRecords, within, type DeriveInput, type GrantInput, type GrantRecordBody, type GrantSource, type GrantTerms, type ResourceRef, type RestrictInput, type RestrictionBody } from "./grants.js";
-export { TaskCredentialService, type IssuedTaskCredential, type TaskCredentialBody } from "./task-credentials.js";
+export { DISPATCHER_PRINCIPAL, TaskCredentialService, type IssuedTaskCredential, type TaskCredentialBody } from "./task-credentials.js";

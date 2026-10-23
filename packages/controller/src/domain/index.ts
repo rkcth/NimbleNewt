@@ -15,7 +15,7 @@ export {
 } from "./assignment-model.js";
 export {
   INBOX_LIMITS, InboxService, inboxMessageId,
-  type AdmissionOutcome, type AdmissionResult, type Admission, type AdmitMessage, type IncomingMessage, type InboxMessageBody, type InboxState, type SettleMessage,
+  type AdmissionOutcome, type AdmissionResult, type Admission, type AdmitMessage, type InboxOptions, type IncomingMessage, type InboxMessageBody, type InboxState, type SettleMessage,
 } from "./inbox.js";
 export {
   EFFECT_LIMITS, EffectRejected, EffectService,

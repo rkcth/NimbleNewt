@@ -185,6 +185,46 @@ export class AdmissionService {
     return { withdrawn };
   }
 
+  /**
+   * Gives waiting requests the priority their task has now (card H12: the dispatcher reads the contract's priority at each admission request, and a change of priority reorders the queue at the next
+   * decision). It changes only the stored priority of requests that are still waiting; a request that is running, or gone, is left as it is and reported. Arrival order is kept, so equal priorities
+   * stay first come, first served, and waiting requests that now fit are admitted in the same step. Nothing about the contract is written.
+   */
+  async reprioritize(command: CommandMeta & { changes: readonly { requestId: string; priority: number }[] }): Promise<{ changed: number; unchanged: number; missing: number }> {
+    let report = { changed: 0, unchanged: 0, missing: 0 };
+    await this.#retrying(() => this.#runner.command("admission.reprioritize", command, async () => {
+      onlyKnown(command, ["commandId", "actor", "changes"]);
+      if (!Array.isArray(command.changes) || command.changes.length < 1 || command.changes.length > 100) invalid("changes", "must list 1 to 100 requests");
+      const seen = new Set<string>();
+      const changes = command.changes.map((c, i) => {
+        if (c === null || typeof c !== "object") return invalid(`changes[${i}]`, "must be an object with requestId and priority");
+        onlyKnown(c, ["requestId", "priority"]);
+        const requestId = typeof c.requestId === "string" && REQUEST_ID.test(c.requestId) ? c.requestId : invalid(`changes[${i}].requestId`, "is not a request ID");
+        if (seen.has(requestId)) invalid(`changes[${i}].requestId`, "is listed twice");
+        seen.add(requestId);
+        if (!Number.isSafeInteger(c.priority) || c.priority < 0 || c.priority > 9) invalid(`changes[${i}].priority`, "must be a whole number from 0 to 9");
+        return { requestId, priority: c.priority };
+      });
+      return {
+        payload: { changes: changes as unknown as JsonObject[] },
+        build: async () => {
+          const loaded = await this.#load();
+          const state = await this.#prepare(loaded.state);
+          const wanted = new Map(changes.map((c) => [c.requestId, c.priority]));
+          let changed = 0, unchanged = 0, missing = 0;
+          for (const c of changes) {
+            const waiting = state.queue.find((e) => e.id === c.requestId);
+            if (waiting === undefined) { if (state.running.some((e) => e.id === c.requestId)) unchanged++; else missing++; } else if (waiting.priority === c.priority) unchanged++; else changed++;
+          }
+          report = { changed, unchanged, missing };
+          const next: AdmissionState = { ...state, queue: state.queue.map((e) => (wanted.has(e.id) ? { ...e, priority: wanted.get(e.id)! } : e)) };
+          return this.#built(loaded.revision, promote(next).state, { changed, unchanged, missing });
+        },
+      };
+    }));
+    return report;
+  }
+
   /** Where a request is: running, waiting (with its position in its lane's order), or neither. */
   async where(requestId: string): Promise<Where> {
     const { state } = await this.#load();
