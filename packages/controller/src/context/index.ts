@@ -4,3 +4,4 @@ export { RETRIEVAL_LIMITS, RetrievalService, type Assembled, type Hit, type Reso
 export { InspectionService, type InspectionBody, type InspectionPolicyBody } from "./inspection.js";
 export { PublicationService, pathIdOf, type PublicationPathBody } from "./publication.js";
 export * from "./budget.js";
+export { NOTE_CATEGORIES, NOTE_LIMITS, WorkingNoteService, type NoteCategory, type NoteDeletionBody, type NotePromotionBody, type NoteVersionBody, type NoteVisibility, type ReviseNote, type WorkingNoteBody, type WriteNote } from "./notes.js";

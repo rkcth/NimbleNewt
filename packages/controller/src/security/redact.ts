@@ -2,6 +2,8 @@
  * Keeps secrets out of anything that is logged, audited, returned in an error or shown (card A01). Two rules together: values stored under a name that
  * says "secret" are replaced whole, and anything shaped like a NimbleNewt token or a common bearer or API key is replaced wherever it appears in text.
  */
+import { CREDENTIAL_PATTERNS } from "./credential-patterns.js";
+
 export const REDACTED = "[redacted]";
 
 /** A field is sensitive by its last word (`apiKey`, `client_secret`, `accessToken`, `password`); a plural such as `inputTokens` is a count, not a secret. */
@@ -13,24 +15,9 @@ function sensitiveName(name: string): boolean {
   const last = words[words.length - 1];
   return last !== undefined && last !== "key" && SENSITIVE_LAST_WORD.has(last);
 }
-// <principal id>.<43-character base64url secret>, bearer tokens, and common provider key shapes.
-const SHAPES: readonly RegExp[] = [
-  /\b(?:owner|agent|host|client|service):[a-z0-9][a-z0-9-]{0,39}\.[A-Za-z0-9_-]{43}\b/g,
-  /\bBearer\s+[A-Za-z0-9._~+/=-]{16,}/gi,
-  /\bsk-[A-Za-z0-9_-]{16,}\b/g,
-  /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g,
-  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
-  /\bAKIA[0-9A-Z]{16}\b/g,
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
-  /\b[a-z][a-z0-9+.-]{0,30}:\/\/[^\s:/@]+:[^\s@/]+@/gi,
-  /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
-  /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
-  /\b(?:password|passwd|secret|api[-_]?key|token)\s*[=:]\s*\S{4,}/gi,
-];
-
 export function redactText(text: string): string {
   let out = text;
-  for (const shape of SHAPES) out = out.replace(shape, (m) => (/^[a-z][a-z0-9+.-]{0,30}:\/\//i.test(m) ? m.replace(/:[^:@/]*@$/, `:${REDACTED}@`) : REDACTED));
+  for (const { pattern: shape } of CREDENTIAL_PATTERNS) out = out.replace(shape, (m) => (/^[a-z][a-z0-9+.-]{0,30}:\/\//i.test(m) ? m.replace(/:[^:@/]*@$/, `:${REDACTED}@`) : REDACTED));
   return out;
 }
 

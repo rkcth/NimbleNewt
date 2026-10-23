@@ -15,7 +15,7 @@ export const ACTIONS = [
   "artifact.publish", "artifact.read",
   "effect.perform",
   "wait.manage", "blocker.manage",
-  "desk.write", "desk.read", "desk.scratch.read",
+  "desk.write", "desk.read", "desk.scratch.read", "notes.chair.read",
   "history.append", "history.read",
   "review.request", "review.decide", "review.policy.write",
   "config.read", "config.write", "routing.write", "recovery.read",
