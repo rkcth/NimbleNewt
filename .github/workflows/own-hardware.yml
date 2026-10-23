@@ -3,7 +3,7 @@ name: Own hardware
 # Runs on the owner's own machines (self-hosted runners), started by hand from the Actions tab and only from main.
 # It never runs on a push or a pull request: this repository is public, and a runner on a personal machine must not execute code
 # from anyone else's branch or fork. Today it only checks that each runner works and records what the machine is (the probe);
-# the sandbox and containment checks (cards A03, A04, G05) are added as further jobs here once those cards exist.
+# the sandbox and containment checks (cards A03, A04, G05) are added as further jobs here once those cards exist (`sandbox-windows` is the first: card A03b).
 # This file's guards do not protect a runner from OTHER workflow files: see docs/nimblenewt/own-hardware-runners.md.
 # Runner labels: `nimblenewt-mac`, `nimblenewt-windows`, `nimblenewt-linux` (see docs/nimblenewt/own-hardware-runners.md).
 on:
@@ -45,5 +45,40 @@ jobs:
         with:
           name: own-hardware-${{ matrix.label }}
           path: ${{ runner.temp }}/qa-output
+          if-no-files-found: warn
+          retention-days: 90
+
+  # Card A03b: the real Windows Sandbox tests (packages/worker/src/sandbox/windows-real.test.ts). Same guards as the probe; only the Windows runner, and only when it is
+  # started by hand from main. The artifact holds only a summary (pass/fail, counts, OS build, mode names); detailed output stays on the machine. The tests start real sandboxes and change per-job ACLs under a temporary folder, and remove them afterwards. They never enable auto-login
+  # (the auto-login and lock test runs only if the owner sets NIMBLENEWT_REAL_WINDOWS_AUTOLOGON on the runner's own environment, which this file does not do).
+  sandbox-windows:
+    name: Windows Sandbox (real)
+    if: github.repository == 'rkcth/NimbleNewt' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, nimblenewt-windows]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: npm ci
+      - run: npm run build
+      - name: Run the real Windows Sandbox tests
+        shell: bash
+        env:
+          NIMBLENEWT_REAL_WINDOWS_SANDBOX: "1"
+          # The checkout is writable by the runner's account, so the strict supervisor-ACL rule cannot pass here; the test records whether it would.
+          NIMBLENEWT_WSB_SUPERVISOR_ACL: report-only
+          # Only summary.json (pass/fail, counts, OS build, mode names) is uploaded: the repository is public. Everything detailed stays in the local folder on the machine.
+          NIMBLENEWT_WSB_OUT: ${{ runner.temp }}/sandbox-windows
+          NIMBLENEWT_WSB_LOCAL: ${{ runner.temp }}/sandbox-windows-local
+        run: |
+          set -o pipefail
+          mkdir -p "$NIMBLENEWT_WSB_OUT" "$NIMBLENEWT_WSB_LOCAL"
+          node --import ./scripts/offline-guard.mjs --test --test-timeout=1500000 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination="$NIMBLENEWT_WSB_LOCAL/junit.xml" packages/worker/dist/sandbox/windows-real.test.js > "$NIMBLENEWT_WSB_LOCAL/output.txt" 2>&1 || { echo "the real Windows Sandbox tests failed; the detail is on the machine in $NIMBLENEWT_WSB_LOCAL"; exit 1; }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: sandbox-windows
+          path: ${{ runner.temp }}/sandbox-windows
           if-no-files-found: warn
           retention-days: 90

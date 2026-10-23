@@ -54,3 +54,8 @@ Written during the long coding session of 2026-10-22. By the guiding principle t
 ## R03 (difficulty profiles and escalation)
 - **"Parent" is whoever delegated the task** (with `task.difficulty.write`), not the H11 supervisor; only the owner can reassign the parent. The per-task ceiling chosen by the parent is accepted; delegation chains are not limited by the parent's own ceiling yet. A task with no difficulty uses the mapping key `unrated` (no entry means no dispatch choice).
 - **"Failing" means admitted attempts since the last escalation that changed difficulty;** a blocker can be used for one escalation only; defaults: retry budget 2 and total budget 5 per round; a parent's decision on a stopped request or a redelegation starts a new round.
+
+## A03b (Windows Sandbox launcher)
+- **The uploaded `sandbox-windows` artifact carries only a summary** (pass/fail per test, counts, OS build, Node version, mode names), because the repository is public; detailed findings stay on the Windows machine in a local folder.
+- **The first qualifying run checks the supervisor-folder ACLs in report-only mode;** the strict check must run before release (G05). One sandbox at a time: a second job is refused as busy, not queued. The real run uses the owner's own account as the share account, so it cannot prove that the narrow per-job grants are what make access work.
+- **Auto-login and lock mode exists only with an authority string and the exact acknowledgement sentence from the owner;** the host interface has no operation that writes the registry, creates an account or stores a credential.

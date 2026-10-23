@@ -14,6 +14,8 @@ export interface BackendHealth {
   readonly version?: string;
   /** When unhealthy: why, in words the owner can act on. */
   readonly reason?: string;
+  /** Facts the owner should see with the capacity, healthy or not (for example that a backend only works while someone is signed in). */
+  readonly notes?: readonly string[];
 }
 
 /** The paths the agent sees for the things in its recipe. On Linux they are fixed names inside the sandbox; where the OS has no private view of the filesystem (macOS) they are the host paths. */
@@ -35,11 +37,16 @@ export interface SandboxBackend {
   readonly name: string;
   /** Proves, by really starting a confined probe, that this backend confines on this host right now. */
   health(): Promise<BackendHealth>;
-  plan(recipe: NormalizedRecipe, command: readonly string[]): SpawnPlan;
+  /** `runId` is the launch's own id (the launcher plans twice for one launch and passes the same id both times), for a mechanism that keeps per-launch state. */
+  plan(recipe: NormalizedRecipe, command: readonly string[], runId?: string): SpawnPlan;
   /** Where the agent finds what the recipe gives it. */
   guestView(recipe: NormalizedRecipe): GuestView;
   /** Every process the launched one started, found now, each with its start time (for a mechanism that has no private process list). Optional. */
   descendants?(pid: number): Promise<readonly { readonly pid: number; readonly started: string }[]>;
   /** The start time of each of these processes that is still running, in one look. A process id can be reused, so a process is ended only if its start time still matches the one seen. Needed with `descendants`. */
   startTimes?(pids: readonly number[]): Promise<ReadonlyMap<number, string>>;
+  /** Backend facts written into every launch record (the Windows backend: its mode and that it depends on the signed-in session). Plain strings, never secrets. Optional. */
+  auditDetails?(): Readonly<Record<string, string>>;
+  /** Called once a run has ended, however it ended (also after a kill): ends what the mechanism itself may have left, such as a sandbox VM. It is given the plan the run started with. Optional. */
+  release?(plan: SpawnPlan): Promise<void>;
 }

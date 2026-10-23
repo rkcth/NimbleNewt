@@ -23,6 +23,8 @@ export interface LaunchRecord {
   readonly unprotectedSubpaths: readonly string[];
   /** How each limit asked for was handled (card A08b): enforced fully, partly or not at all, and by what. A limit is never absent from this list without being absent from the request. */
   readonly limits: readonly LimitEnforcement[];
+  /** What the backend says about itself (card A03b: the Windows backend's mode and its dependence on the signed-in session). Absent for backends with nothing to add. */
+  readonly backendDetails?: Readonly<Record<string, string>>;
 }
 
 export interface Capacity {
@@ -31,6 +33,8 @@ export interface Capacity {
   readonly version?: string;
   /** When not available: why. */
   readonly reason?: string;
+  /** Facts to show with the capacity, such as "session-dependent". */
+  readonly notes?: readonly string[];
   readonly checkedAt: string;
 }
 
@@ -76,6 +80,8 @@ export interface RunResult {
   /** True when stdout or stderr was cut at the limit. */
   readonly truncated: boolean;
   readonly durationMs: number;
+  /** Set when the backend could not clean up after the run (for the Windows backend: a sandbox, an access-list change or a job folder left behind). The owner must act on it. */
+  readonly releaseProblem?: string;
 }
 
 export interface SandboxRun {
@@ -89,7 +95,9 @@ export interface SandboxRun {
   readonly result: Promise<RunResult>;
 }
 
-const SUPERVISOR_ROOT = fileURLToPath(new URL("../../", import.meta.url)).replace(/\/$/, "");
+/** Drops one trailing path separator, either kind (Windows paths end in a backslash). */
+export const stripTrailingSeparator = (path: string): string => path.replace(/[\\/]$/, "");
+const SUPERVISOR_ROOT = stripTrailingSeparator(fileURLToPath(new URL("../../", import.meta.url)));
 const EXIT_DRAIN_MS = 2000;
 const MAX_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
@@ -147,8 +155,8 @@ export class SandboxLauncher {
     try {
       const health = await this.#backend.health();
       this.#capacity = health.healthy
-        ? { available: true, backend: health.backend, ...(health.version === undefined ? {} : { version: health.version }), checkedAt }
-        : { available: false, backend: health.backend, ...(health.version === undefined ? {} : { version: health.version }), reason: health.reason ?? "the health check failed", checkedAt };
+        ? { available: true, backend: health.backend, ...(health.version === undefined ? {} : { version: health.version }), ...(health.notes === undefined ? {} : { notes: health.notes }), checkedAt }
+        : { available: false, backend: health.backend, ...(health.version === undefined ? {} : { version: health.version }), reason: health.reason ?? "the health check failed", ...(health.notes === undefined ? {} : { notes: health.notes }), checkedAt };
     } catch (error) {
       this.#capacity = { available: false, backend: this.#backend.name, reason: `the health check failed: ${(error as Error).message}`, checkedAt };
     }
@@ -167,6 +175,7 @@ export class SandboxLauncher {
     const limits = request.limits === undefined ? {} : checkLimits(request.limits);
     checkHeadroom(limits, this.#config.headroom ?? DEFAULT_HEADROOM);
 
+    const runId = randomUUID();
     let makePlan: () => SpawnPlan;
     let backendName: string;
     let authority: string | undefined;
@@ -179,10 +188,9 @@ export class SandboxLauncher {
       if (this.#backend === undefined || !this.#capacity.available) throw new SandboxError("unavailable", `no confined launch is possible: ${this.#capacity.reason ?? "no capacity"}`);
       backendName = this.#backend.name;
       const backend = this.#backend;
-      makePlan = () => backend.plan(recipe, command);
+      makePlan = () => backend.plan(recipe, command, runId);
     }
 
-    const runId = randomUUID();
     const caps = this.#limitCaps ?? { platform: this.#config.platform ?? process.platform, cgroupScope: false, escapeDollar: false, prlimit: false, taskset: false, passEnv: {} };
     const limited = limitedPlan(makePlan(), limits, caps);
     if (request.requireEnforced === true) {
@@ -193,6 +201,7 @@ export class SandboxLauncher {
       limits: limited.report,
       at: this.#clock(), runId, mode: recipe.mode, backend: backendName, recipeRevision: recipe.revision,
       commandDigest: sha256(canonical(command)), ...(authority === undefined ? {} : { authority }), unprotectedSubpaths: recipe.unprotectedSubpaths,
+      ...(recipe.mode === "sandboxed" && this.#backend?.auditDetails !== undefined ? { backendDetails: this.#backend.auditDetails() } : {}),
     };
     try { await this.#config.audit(record); } catch (error) { throw new SandboxError("audit_failed", `the launch could not be recorded, so it did not happen: ${(error as Error).message}`, { cause: error }); }
     // Planned only now, after the record is written, so the checks the plan repeats run as close to the start as possible.
@@ -255,12 +264,13 @@ export class SandboxLauncher {
         // Nothing the run started is left running after it; the result is given once that is done.
         // A process that outlived the run may still hold the output pipes; closing our ends lets the launcher's own process exit instead of waiting on it for ever.
         child.stdout.destroy(); child.stderr.destroy();
-        void sweep().catch(() => undefined).then(() => resolve({ exitCode, signal, timedOut, killed, stdout: Buffer.concat(chunks.out).toString("utf8"), stderr: Buffer.concat(chunks.err).toString("utf8"), truncated, durationMs: Date.now() - started }));
+        let releaseProblem: string | undefined;
+        void sweep().catch(() => undefined).then(async () => { try { await backend?.release?.(plan); } catch (error) { releaseProblem = (error as Error).message; } }).then(() => resolve({ exitCode, signal, timedOut, killed, stdout: Buffer.concat(chunks.out).toString("utf8"), stderr: Buffer.concat(chunks.err).toString("utf8"), truncated, durationMs: Date.now() - started, ...(releaseProblem === undefined ? {} : { releaseProblem }) }));
       };
       child.once("close", finish);
       // A trusted-host child that started its own session can outlive its parent and keep the output pipes open; after a short drain the result is given anyway.
       child.once("exit", (code, signal) => { setTimeout(() => finish(code, signal), EXIT_DRAIN_MS).unref(); });
-      child.once("error", (error) => { ended = true; clearTimeout(timer); if (poller !== undefined) clearInterval(poller); resolve({ exitCode: null, signal: null, timedOut, killed, stdout: "", stderr: `could not start: ${error.message}`, truncated: false, durationMs: Date.now() - started }); });
+      child.once("error", (error) => { void Promise.resolve(backend?.release?.(plan)).catch(() => undefined); ended = true; clearTimeout(timer); if (poller !== undefined) clearInterval(poller); resolve({ exitCode: null, signal: null, timedOut, killed, stdout: "", stderr: `could not start: ${error.message}`, truncated: false, durationMs: Date.now() - started }); });
     });
     const guest: GuestView = backend?.guestView(recipe) ?? { workdir: recipe.workdir, home: recipe.home, scratch: recipe.scratch, tmp: recipe.scratch, inputs: recipe.readOnly.map((m) => ({ host: m.host, guest: m.host })) };
     const run: SandboxRun = { runId, mode: recipe.mode, recipeRevision: recipe.revision, guest, kill: () => { killed = true; killTree(); }, result };
