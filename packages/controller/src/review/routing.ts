@@ -107,6 +107,12 @@ export function mergeContext(old: StoredContext | undefined, update: StoredConte
 
 export type RouteState = "assigned" | "waiting" | "escalated";
 
+/**
+ * What a sweep last saw of the assigned reviewer (card H05b). `held`: paused, suspended or stopped; the review keeps its place and its deadline. `host-lost`: the host the reviewer runs on has a revoked identity, a fact
+ * that does not depend on a clock. `host-silent`: the host has gone quiet, which is also what a network partition or a slow reviewer looks like, so it is only noted. Absent: nothing to report (a slow reviewer on a live host is this).
+ */
+export type ReviewerStatus = "held" | "host-lost" | "host-silent";
+
 export interface RouteEvent { readonly at: string; readonly event: string; readonly detail: string }
 
 /** Where one review stands in routing: who is on it, why others are not, and the figures kept about it. */
@@ -126,6 +132,7 @@ export interface ReviewRouteBody {
   readonly events: readonly RouteEvent[];
   readonly requestedAt: string;
   readonly assignedAt?: string;
+  readonly reviewerStatus?: ReviewerStatus;
   readonly decidedAt?: string;
   readonly queueMs?: number;
   readonly latencyMs?: number;

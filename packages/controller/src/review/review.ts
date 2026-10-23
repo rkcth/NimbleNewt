@@ -2,6 +2,8 @@ import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import { onlyKnown, projectId as checkProjectId, revision as checkRevision, taskId as checkTaskId, text, type TaskBody, type View } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
+import type { Availability } from "../conversations/conversations.js";
+import { DEFAULT_HOST_STALE_AFTER_MS, hostFreshness, type HostBody } from "../hosts/hosts.js";
 import { allows, inTaskScope, toolAction } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import { effectiveOf } from "../security/grants.js";
@@ -9,7 +11,7 @@ import type { NoActor, Principal, PrincipalBody } from "../security/principals.j
 import { redactText } from "../security/redact.js";
 import { canonicalJson, sha256 } from "../storage/json.js";
 import type { Aggregate, AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
-import { addEvent, checkContext, checkPolicy, DEFAULT_POLICY, mergeContext, minutesLater, missingEssentials, ROUTING_LIMITS, type ReviewContext, type ReviewPolicyBody, type ReviewRouteBody, type StoredContext } from "./routing.js";
+import { addEvent, checkContext, checkPolicy, DEFAULT_POLICY, mergeContext, minutesLater, missingEssentials, ROUTING_LIMITS, type ReviewContext, type ReviewPolicyBody, type ReviewRouteBody, type ReviewerStatus, type StoredContext } from "./routing.js";
 import type { WaitEdge } from "../planning/wait-graph.js";
 
 /**
@@ -83,6 +85,21 @@ export interface Decide extends NoActor {
   readonly expiresAt?: string;
 }
 
+export interface ReviewOptions extends RunnerOptions {
+  /**
+   * Whether an agent is held (paused, suspended or stopped, card L01; `PauseService.availability` is this function). A held reviewer is skipped when a reviewer is chosen, is never in the wake list and does not
+   * decide while held; a review already assigned to it keeps its place until its deadline. Default: every agent is available.
+   */
+  readonly availability?: (principalId: string) => Promise<Availability>;
+  /** The host principal (`host:...`) a reviewer's worker runs on, if known (nothing records this link before card H03, so it is supplied). Without it a reviewer's host is never judged. */
+  readonly reviewerHost?: (principalId: string) => Promise<string | undefined>;
+  /** How long a host counts as fresh (default: the one constant `HostService` uses). */
+  readonly hostStaleAfterMs?: number;
+}
+
+/** Why a reviewer cannot be woken or chosen now, for the wake list. */
+export type Unavailable = Availability | "host-lost";
+
 export type AdmitResult = { readonly admitted: true; readonly requestId: string; readonly replayed: boolean };
 
 export const REVIEW_LIMITS = { args: 8 * 1024, script: 16 * 1024, note: 1000, reason: 1000, name: 80, targetId: 200, defaultMinutes: 30, maxHours: 24 } as const;
@@ -125,13 +142,20 @@ function checkOperation(value: unknown, field = "operation"): Operation {
  */
 export class ReviewService {
   readonly #runner: CommandRunner;
+  readonly #availability: (principalId: string) => Promise<Availability>;
+  readonly #reviewerHost: ((principalId: string) => Promise<string | undefined>) | undefined;
+  readonly #hostStaleAfterMs: number;
 
-  private constructor(runner: CommandRunner) {
+  private constructor(runner: CommandRunner, options: ReviewOptions) {
     this.#runner = runner;
+    this.#availability = options.availability ?? (async () => "available");
+    this.#reviewerHost = options.reviewerHost;
+    this.#hostStaleAfterMs = options.hostStaleAfterMs ?? DEFAULT_HOST_STALE_AFTER_MS;
+    if (!Number.isSafeInteger(this.#hostStaleAfterMs) || this.#hostStaleAfterMs < 1000) throw new DomainError("invalid_command", "hostStaleAfterMs: must be a whole number of at least 1000", { field: "hostStaleAfterMs" });
   }
 
-  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions = {}): ReviewService {
-    return new ReviewService(new CommandRunner(storage, epoch, options));
+  static withEpoch(storage: ControllerStorage, epoch: number, options: ReviewOptions = {}): ReviewService {
+    return new ReviewService(new CommandRunner(storage, epoch, options), options);
   }
 
   /**
@@ -226,6 +250,9 @@ export class ReviewService {
         // A tool the owner has reserved since the request was made is the owner's to review: the gate is read now, not when the request was routed.
         const reservedNow = (await this.#policy(body.binding.projectId)).body.mandatoryHuman.includes(body.operation.name);
         if (!isOwner && reservedNow) throw new DomainError("forbidden", `${reviewer.id} may not decide that review: ${body.operation.name} is now reserved for the owner`);
+        // A held reviewer does not decide: it is not woken to review, and the review keeps its place (and its deadline) until the reviewer is resumed or the review moves on.
+        const held = isOwner ? undefined : await this.#held(reviewer.id);
+        if (held !== undefined) throw new DomainError("invalid_command", `${reviewer.id} is ${held} and does not decide while held; the review waits for it, or moves on at its deadline`, { field: "reviewer" });
         if (current.revision !== expected) throw new DomainError("stale_revision", `review ${id} is at revision ${current.revision}, not ${expected}`, { currentRevision: current.revision });
         if (body.state !== "pending" && body.state !== "owner-decision") throw new DomainError("invalid_command", `review ${id} is ${body.state}; only a pending review can be decided${body.state === "needs-context" ? " (the requester has to supply the context asked for)" : ""}`, { field: "requestId" });
         if (isOwner && verdict === "requires-owner-decision") throw new DomainError("invalid_command", "the owner is the one who decides; give allow or deny", { field: "verdict" });
@@ -463,7 +490,7 @@ export class ReviewService {
           const policy = await this.#policy(body.binding.projectId);
           const tried = [...new Set([...route.tried, who])];
           const chosen = await this.#choose(body.binding.projectId, policy.body, route.requester, contributors, tried);
-          const { assigned: _gone, assignedVia: _via, assignedAt: _at, ...kept } = nextRoute;
+          const { assigned: _gone, assignedVia: _via, assignedAt: _at, reviewerStatus: _status, ...kept } = nextRoute;
           nextRoute = chosen.assigned === undefined
             ? { ...kept, tried, state: "waiting", deadline: minutesLater(now, policy.body.deadlineMinutes), events: addEvent(nextRoute.events, now, "waiting", `${who} became a contributor and no one else is eligible`) }
             : { ...kept, tried, state: "assigned", assigned: chosen.assigned, assignedVia: chosen.via!, assignedAt: now, deadline: minutesLater(now, policy.body.deadlineMinutes), events: addEvent(nextRoute.events, now, "reassigned", `${who} became a contributor; now ${chosen.assigned}`) };
@@ -506,14 +533,14 @@ export class ReviewService {
         done = await this.#sweepPlan(projectId);
         if (done.changes.length === 0) throw new DomainError("stale_revision", `the reviews of ${projectId} moved meanwhile; ask again`);
         const first = done.changes.find((c) => c.type === "update")!;
-        return { ref: first.ref, creates: false, changes: done.changes, detail: { projectId, moved: done.reassigned.length + done.escalated.length + done.assigned.length } };
+        return { ref: first.ref, creates: false, changes: done.changes, detail: { projectId, moved: done.reassigned.length + done.escalated.length + done.assigned.length, noted: done.noted.length } };
       },
     }));
     return { reassigned: done.reassigned, escalated: done.escalated, assigned: done.assigned, more: done.more };
   }
 
-  async #sweepPlan(projectId: string): Promise<{ changes: Change[]; reassigned: string[]; escalated: string[]; assigned: string[]; more: boolean }> {
-    const out = { changes: [] as Change[], reassigned: [] as string[], escalated: [] as string[], assigned: [] as string[], more: false };
+  async #sweepPlan(projectId: string): Promise<{ changes: Change[]; reassigned: string[]; escalated: string[]; assigned: string[]; noted: string[]; more: boolean }> {
+    const out = { changes: [] as Change[], reassigned: [] as string[], escalated: [] as string[], assigned: [] as string[], noted: [] as string[], more: false };
     const policy = await this.#policy(projectId);
     const now = this.#runner.now();
     let handled = 0;
@@ -526,29 +553,44 @@ export class ReviewService {
       const late = route.deadline <= now;
       if (policy.body.mandatoryHuman.includes(body.operation.name)) {
         // Reserved for the owner since it was routed: it goes to the owner now, not at the deadline.
-        if (handled >= 50) { out.more = true; break; }
+        if (handled >= 49) { out.more = true; break; }
         handled += 1;
         out.escalated.push(routeAggregate.id);
-        const { assigned: _g, assignedVia: _w, assignedAt: _x, ...rest } = route;
+        const { assigned: _g, assignedVia: _w, assignedAt: _x, reviewerStatus: _y, ...rest } = route;
         out.changes.push({ type: "update", ref: { kind: "review-route", id: routeAggregate.id }, expectedRevision: routeAggregate.revision, body: { ...rest, state: "escalated", mandatoryHuman: true, events: addEvent(route.events, now, "owner-only", `${body.operation.name} is now reserved for the owner`) } as unknown as JsonObject });
         out.changes.push({ type: "update", ref: { kind: "review", id: review.id }, expectedRevision: review.revision, body: { ...body, state: "owner-decision" } as unknown as JsonObject });
         continue;
       }
-      if (route.state === "assigned" && !late) continue;
-      if (handled >= 50) { out.more = true; break; }
+      // What the assigned reviewer is doing: held, on a lost host, on a quiet one, or simply slow (nothing to report).
+      const status = route.state === "assigned" && route.assigned !== undefined ? await this.#standing(route.assigned) : undefined;
+      // A lost host (a revoked identity, a fact) moves the review at once; a held reviewer keeps it until the deadline, and a quiet host or a slow reviewer likewise.
+      const early = status === "host-lost";
+      const noted = (): void => {
+        if (status === route.reviewerStatus) return;
+        if (handled >= 49) { out.more = true; return; }
+        handled += 1;
+        const { reviewerStatus: _old, ...rest } = route;
+        const text = status === "held" ? `${route.assigned} is held; the review keeps its place until ${route.deadline}` : status === "host-lost" ? `the host of ${route.assigned} is lost (identity revoked) and no one else is eligible yet` : status === "host-silent" ? `the host of ${route.assigned} has gone quiet; that cannot tell a lost host from a partition or a slow reviewer, so the deadline stands` : `${route.assigned} is no longer held`;
+        out.changes.push({ type: "update", ref: { kind: "review-route", id: routeAggregate.id }, expectedRevision: routeAggregate.revision, body: { ...rest, ...(status === undefined ? {} : { reviewerStatus: status }), events: addEvent(route.events, now, status === undefined ? "resumed" : status, text) } as unknown as JsonObject });
+        out.changes.push({ type: "check", ref: { kind: "review", id: review.id }, expectedRevision: review.revision });
+        out.noted.push(routeAggregate.id);
+      };
+      if (route.state === "assigned" && !late && !early) { noted(); continue; }
+      if (handled >= 49) { out.more = true; break; }
       let nextRoute: ReviewRouteBody;
       let nextBody = body;
       const tried = route.state === "assigned" && route.assigned !== undefined ? [...new Set([...route.tried, route.assigned])] : route.tried;
       const chosen = await this.#choose(projectId, policy.body, route.requester, route.contributors, tried);
-      const { assigned: _a, assignedVia: _v, assignedAt: _t, ...kept } = route;
+      const { assigned: _a, assignedVia: _v, assignedAt: _t, reviewerStatus: _s, ...kept } = route;
       if (chosen.assigned !== undefined) {
-        nextRoute = { ...kept, tried, state: "assigned", assigned: chosen.assigned, assignedVia: chosen.via!, assignedAt: now, deadline: minutesLater(now, policy.body.deadlineMinutes), events: addEvent(route.events, now, route.state === "assigned" ? "reassigned" : "assigned", `${chosen.assigned} (${chosen.via})${route.state === "assigned" ? `; ${route.assigned} did not decide in time` : ""}`) };
+        const why = route.state !== "assigned" ? "" : early && !late ? `; the host of ${route.assigned} is lost` : status === "held" ? `; ${route.assigned} was held and did not decide by the deadline` : `; ${route.assigned} did not decide in time`;
+        nextRoute = { ...kept, tried, state: "assigned", assigned: chosen.assigned, assignedVia: chosen.via!, assignedAt: now, deadline: minutesLater(now, policy.body.deadlineMinutes), events: addEvent(route.events, now, route.state === "assigned" ? "reassigned" : "assigned", `${chosen.assigned} (${chosen.via})${why}`) };
         (route.state === "assigned" ? out.reassigned : out.assigned).push(routeAggregate.id);
       } else if (late) {
         nextRoute = { ...kept, tried, state: "escalated", deadline: minutesLater(now, policy.body.deadlineMinutes), events: addEvent(route.events, now, "escalated", "no eligible reviewer decided in time; the owner decides") };
         nextBody = { ...body, state: "owner-decision" };
         out.escalated.push(routeAggregate.id);
-      } else continue;
+      } else { noted(); continue; }
       handled += 1;
       out.changes.push({ type: "update", ref: { kind: "review-route", id: routeAggregate.id }, expectedRevision: routeAggregate.revision, body: nextRoute as unknown as JsonObject });
       out.changes.push(nextBody !== body
@@ -626,6 +668,28 @@ export class ReviewService {
     return edges;
   }
 
+  /**
+   * Which reviewers a dispatcher may wake to review (needs `review.policy.write` in the project). A pending review assigned to a reviewer that is available is in `wake`; one whose reviewer is held (paused,
+   * suspended or stopped) or whose host is lost is in `held` with the reason, and nobody is woken for it: the review keeps its place until the reviewer is resumed or the review moves on at its deadline.
+   * At most 200 entries are returned in all; `more` says if there are others.
+   */
+  async wakeList(by: Principal, projectId: string): Promise<{ wake: { requestId: string; reviewer: string }[]; held: { requestId: string; reviewer: string; why: Unavailable }[]; more: boolean }> {
+    const id = checkProjectId(projectId);
+    const fresh = await this.#fresh(by.id, by.taskScope);
+    if (fresh === undefined || !allows(fresh, "review.policy.write", id)) throw new DomainError("forbidden", `${by.id} may not list the reviews to wake in ${id}`);
+    const out = { wake: [] as { requestId: string; reviewer: string }[], held: [] as { requestId: string; reviewer: string; why: Unavailable }[], more: false };
+    for (const routeAggregate of await this.#routesOf(id)) {
+      const route = routeAggregate.body as unknown as ReviewRouteBody;
+      if (route.state !== "assigned" || route.assigned === undefined || route.verdict !== undefined || route.withdrawn === true) continue;
+      if (((await this.#runner.get("review", routeAggregate.id))?.body as unknown as ReviewBody | undefined)?.state !== "pending") continue;
+      if (out.wake.length + out.held.length >= 200) { out.more = true; break; }
+      const why = await this.#unavailable(route.assigned);
+      if (why === undefined) out.wake.push({ requestId: routeAggregate.id, reviewer: route.assigned });
+      else out.held.push({ requestId: routeAggregate.id, reviewer: route.assigned, why });
+    }
+    return out;
+  }
+
   // ---- internals -------------------------------------------------------------------------------------------------------------
 
   /** The project's policy, or the defaults at revision 0. */
@@ -687,6 +751,9 @@ export class ReviewService {
         const fresh = await this.#fresh(id);
         if (fresh === undefined || fresh.kind !== "agent") { excluded.push({ id, reason: "is not an active agent" }); continue; }
         if (!allows(fresh, "review.decide", projectId)) { excluded.push({ id, reason: "holds no review right here" }); continue; }
+        // A held reviewer is never chosen (and so never woken), and neither is one whose host is lost.
+        const unavailable = await this.#unavailable(id);
+        if (unavailable !== undefined) { excluded.push({ id, reason: unavailable === "host-lost" ? "its host is lost" : `is ${unavailable}` }); continue; }
         ok.push(id);
       }
       return ok.sort((a, b) => (load.get(a) ?? 0) - (load.get(b) ?? 0) || (a < b ? -1 : 1));
@@ -702,6 +769,36 @@ export class ReviewService {
       if (first !== undefined) return { assigned: first, via: "fallback", excluded };
     }
     return { excluded };
+  }
+
+  /** `paused`, `suspended` or `stopped` when the reviewer is held (card L01), else `undefined`. */
+  async #held(id: string): Promise<Exclude<Availability, "available"> | undefined> {
+    const a = await this.#availability(id);
+    return a === "available" ? undefined : a;
+  }
+
+  /** The state of the host a reviewer runs on, as far as it can be told. Only a revoked host identity is `lost`: an independent fact. A host that stopped heartbeating is `silent`, which a partition or a slow worker looks like too. */
+  async #hostOf(id: string): Promise<"reachable" | "silent" | "lost" | "unknown"> {
+    const hostId = await this.#reviewerHost?.(id);
+    if (hostId === undefined) return "unknown";
+    const principal = (await this.#runner.get("principal", hostId))?.body as unknown as PrincipalBody | undefined;
+    if (principal === undefined || principal.kind !== "host") return "unknown";
+    if (principal.state !== "active") return "lost";
+    const record = (await this.#runner.get("host-record", hostId))?.body as unknown as HostBody | undefined;
+    const fresh = hostFreshness(record?.lastSeenAt, this.#runner.now(), this.#hostStaleAfterMs);
+    return fresh === "fresh" ? "reachable" : fresh === "stale" ? "silent" : "unknown";
+  }
+
+  /** What a sweep reports about an assigned reviewer; held takes precedence over the host. */
+  async #standing(id: string): Promise<ReviewerStatus | undefined> {
+    if ((await this.#held(id)) !== undefined) return "held";
+    const host = await this.#hostOf(id);
+    return host === "lost" ? "host-lost" : host === "silent" ? "host-silent" : undefined;
+  }
+
+  /** Why the reviewer cannot be chosen or woken now. */
+  async #unavailable(id: string): Promise<Unavailable | undefined> {
+    return (await this.#held(id)) ?? ((await this.#hostOf(id)) === "lost" ? "host-lost" : undefined);
   }
 
   async #allAgents(): Promise<string[]> {

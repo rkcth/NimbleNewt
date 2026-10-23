@@ -84,3 +84,7 @@ Written during the long coding session of 2026-10-22. By the guiding principle t
 - **Failback defaults** (an AI session's choice, to confirm): automatic after 3 good probes over at least 120 s with a 900 s hold-down, plus one half-open trial after the 300 s outage cooldown; manual mode never restores by probes. A drain has no default duration; the owner gives `drainSeconds` and an expired drain becomes a cutover by itself (applied lazily or by `tick`).
 - **A routing list needs two distinct endpoints, and two distinct accounts** unless every entry is a local engine or the owner acknowledges the weak list. The setting `routing.fallbackProfile.*` (profile-to-profile fallback) stays and is superseded by lists in a later configuration card.
 - **Nothing in production aborts the real request on a cutover yet:** the dispatcher must bind the cancel listener (runtime abort and L05 `interrupt`); `CutoverService` and `FallbackService` are not constructed by `api/start.ts`.
+
+## H05b (reviewer pause and hold)
+- **A pause of one task of a reviewer does not hold the reviewer** (L01's rule); an agent, team or installation pause does. A held reviewer's review waits for the original deadline (it is not extended on resume) and then moves on under the project policy, never by approval; the hold takes precedence over a revoked host. An option to move a long-held review on at once is a possible later owner setting.
+- **Nothing applies these rules in production until the composer wires `pauses.availability` and a reviewer-to-host lookup** (H03 and H12).
