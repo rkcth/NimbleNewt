@@ -2,6 +2,21 @@
 
 This register distinguishes settled direction from proposals, unanswered choices, and implementation evidence. A document marked historical cannot override a later user decision. Accepted requirements describe what NimbleNewt must do; they do not claim it has been built or qualified. A proposed implementation outline is registered as an inactive Paperclip backlog; the consolidated implementation baseline is published; execution authorization remains separate.
 
+## Guiding principle: the owner gives direction, management decides
+
+Owner statement, 2026-10-22: the goal is not to have the user micromanage. It is like a CEO popping in: the CEO tells the VP what is wanted, and the VP and the lower management tiers make the decisions based on what the CEO said. They bother the CEO only when it cannot be determined. If the owner had to grant credentials, that would waste their valuable time.
+
+How this governs the design, and where defaults come from:
+
+- **The owner's time is the scarce resource.** A default that makes the owner perform a routine step (issue a credential, approve the same kind of action again and again, pick a value the system can work out) is the wrong default.
+- **Decisions flow down.** The supervisor and the tiers below it decide details from the owner's instructions, the standing policy, the approvals already given and the owner's wording, and they explain what they chose in plain words.
+- **The owner is asked only when something cannot be determined**, and then in one place (the Needs-you view, U11b), with what is known, what is unclear and what each answer would do.
+- **Reserved decisions stay with the owner.** Existing owner-reserved decisions (mandatory human gates, launching changes to the system itself, spending beyond limits and the like) are not delegated by this principle; it removes routine asks, not the reserved ones.
+- **The strict profile is the exception**, not the model. It is for an owner who needs to approve things personally, for example in a large organization where they are accountable for every decision. In strict, routine steps that this principle would remove stay with the owner on purpose; the principle describes the derived and autonomous profiles; a new installation still starts strict and is offered derived (A07, A07c) (owner statement, 2026-10-22).
+- **Every choice remains the owner's to change**, by chatting with the supervisor, and a recorded default can be overridden at any time.
+
+When a default has to be chosen without asking, choose the one that follows this principle. When a card seems to need an owner step, check first whether the instructions and the policy already determine the answer. The values in [provisional defaults](implementation-plan/provisional-defaults.md) were reviewed against this principle with the owner on 2026-10-22.
+
 ## Accepted direction
 
 | Area | Decision | Main reference |

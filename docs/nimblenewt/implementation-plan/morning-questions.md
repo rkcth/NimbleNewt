@@ -2,8 +2,8 @@
 
 Written by the implementing AI session while the owner slept. Nothing below blocked the work; each has a default that was used.
 
-1. **Provisional defaults.** [provisional-defaults.md](provisional-defaults.md) lists every choice made without asking. Please review it; anything you change is a small edit.
-2. **Sign-offs.** G01 (scope and prerequisites) and G02 (Pi adapter first milestone) are `awaiting-signoff`.
+1. ~~**Provisional defaults.**~~ Reviewed with the owner and decided on 2026-10-22 ([provisional-defaults.md](provisional-defaults.md)).
+2. ~~**Sign-offs.**~~ G01 and G02 signed off by the owner on 2026-10-22 (G02's real-hardware QA stays under D04).
 3. **Paperclip import.** Verification needs access (the company ID or a configured profile). Status in [paperclip-sync-status.md](paperclip-sync-status.md).
 4. **N00 gate** (the implementation gate parent issue) and **token rotation** (the GitHub token used for CI checks and pushes is long-lived).
 5. **Windows hardware** for A03b (Windows Sandbox launcher) and G05 (isolation proof per OS); neither can be finished without a real machine.

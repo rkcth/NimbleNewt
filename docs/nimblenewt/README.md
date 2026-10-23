@@ -234,7 +234,7 @@ Before producing a contribution, inspect its actual diff for unrelated changes, 
 
 ## Activity history and replay
 
-The user wants to inspect an agent's conversation history and replay how its work unfolded: what it was asked, what information it received, what it said, which tools it called, and what happened next. Provide a chronological replay of recorded activity with linked decision explanations and evidence. This is an observable audit trail, not access to hidden model reasoning or a claim to reconstruct its internal thoughts.
+The user wants to inspect an agent's conversation history and replay how its work unfolded: what it was asked, what information it received, what it said, which tools it called, and what happened next. Provide a chronological replay of recorded activity with linked decision explanations and evidence. This is an observable audit trail, not a claim to reconstruct internal thoughts: thinking that the provider returned is shown collapsed and labelled as model output (not as a decision explanation), only while it is stored, and the owner can expand it (owner decision 2026-10-22).
 
 Capture user and agent messages, delivered instructions, retrieved source references, model and harness selections, tool inputs and results, approval decisions, relevant artifact versions and diffs, context compression events, task branches, meeting decisions, and lifecycle or ownership changes. Preserve the actual context references and versions used at each step, including which summary was supplied, so replay does not substitute today's records for what was available then. Store sensitive payloads under appropriate access controls and show redactions or missing data explicitly.
 

@@ -1,6 +1,6 @@
 # G01: accepted scope and experiment prerequisites
 
-Status: **recorded; reviewed by a separate AI session (not a human review).** This consolidates decisions the owner has already made and states what is still open. It adds no new decisions: where the owner has not decided something, it says so and does not fill the gap. N00 (the implementation scope and budget gate) is **not** opened or closed by this record.
+Status: **recorded; reviewed by a separate AI session (not a human review); signed off by the owner on 2026-10-22 as it stands, with item 4 below covered by the provisional-defaults review the same day.** This consolidates decisions the owner has already made and states what is still open. It adds no new decisions: where the owner has not decided something, it says so and does not fill the gap. N00 (the implementation scope and budget gate) is **not** opened or closed by this record.
 
 Sources: [design-proposal.md](design-proposal.md) section 3 (D1-D7), [design-decisions.md](../design-decisions.md), [approval.md](approval.md), [windows-unattended-findings.md](windows-unattended-findings.md).
 
@@ -74,8 +74,8 @@ Given by the owner in conversation with the implementing AI session; recorded he
 1. ~~N00 formal scope and budget~~ Scope-only record decided 2026-10-20 (no money cap yet; paid model use needs the owner's go-ahead); the N00 gate is still the owner's to open.
 2. ~~Supported PostgreSQL versions~~ Decided 2026-10-20 (17 and above; verification in F04g). Embedded/ephemeral servers in CI are in use.
 3. ~~Minimum OS versions and architectures~~ Decided 2026-10-20 as what CI covers; exact OS release floors decided as the CI runner releases (macOS floor confirmed by the owner 2026-10-21), with refuse-unless-overridden behaviour (F04h); real-hardware qualification moved to the last plan item (D04).
-4. Production and improvement budgets (provisional, configurable storage defaults decided 2026-10-20) and the proposed defaults in the design register that the owner has not set (P/PC allocation, meeting cadence, voting rules, lifecycle limits, update windows).
-5. Acceptance of the G02 milestone and its default decisions (aborted-input framing, update behaviour, branch and task limits, the interrupted-work hold).
+4. ~~Production and improvement budgets~~ Reviewed with the owner on 2026-10-22 together with the provisional defaults (see [provisional-defaults.md](provisional-defaults.md)); budgets stay provisional and configurable, and the N00 gate remains the owner's to open. (Previously: provisional, configurable storage defaults decided 2026-10-20) and the proposed defaults in the design register that the owner has not set (P/PC allocation, meeting cadence, voting rules, lifecycle limits, update windows).
+5. ~~Acceptance of the G02 milestone and its default decisions~~ Accepted by the owner on 2026-10-22.
 
 ## Approval load, 2026-10-21 (owner requirement)
 

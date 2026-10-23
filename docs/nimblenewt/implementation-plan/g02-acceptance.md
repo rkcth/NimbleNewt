@@ -1,6 +1,6 @@
 # G02: Pi adapter first-milestone acceptance record
 
-Status: **implemented and passing in CI; awaiting independent QA on real macOS and Windows machines and the owner's sign-off.** This record is the evidence for card G02 ("Accept the Pi adapter first milestone"). It does not accept dependent features: see [unsupported capabilities](#unsupported-capabilities).
+Status: **implemented and passing in CI; owner signed off 2026-10-22; independent QA on real macOS and Windows machines is carried out under card D04.** This record is the evidence for card G02 ("Accept the Pi adapter first milestone"). It does not accept dependent features: see [unsupported capabilities](#unsupported-capabilities).
 
 ## What was tested, and on what
 
@@ -96,6 +96,6 @@ Decided 2026-10-20: the real-hardware runs are not done now. The hand-started ho
 - [ ] macOS (real hardware): ______  (commit, Node, date)
 - [ ] Windows (real hardware): ______
 - [ ] Linux (any distribution beyond the CI runner): ______
-- [ ] Owner accepts the G02 milestone and the decisions above.
+- [x] Owner accepts the G02 milestone and the decisions above (owner sign-off, 2026-10-22).
 
-Until these are checked, dependent features may build on the adapter for development, but none may be marked accepted on the strength of this record.
+The owner signed off the milestone on 2026-10-22. The three real-hardware boxes above stay unticked by the owner's 2026-10-20 decision and are carried out under card D04, the last plan item; until then, dependent features may build on the adapter, and none may claim real-hardware evidence from this record.

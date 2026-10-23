@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **63 of 171 tasks implemented**, 2 awaiting sign-off.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **65 of 174 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -103,7 +103,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 1
 
-- [~] **G01** Record accepted scope and experiment prerequisites — recorded; open owner decisions (N00 budget, PostgreSQL versions, minimum OS versions) listed in the record
+- [x] **G01** Record accepted scope and experiment prerequisites — recorded; open owner decisions (N00 budget, PostgreSQL versions, minimum OS versions) listed in the record
 
 ### Phase 2
 
@@ -125,7 +125,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 6
 
-- [~] **G02** Accept the Pi adapter first milestone _(needs F05, F06, F03)_ — implemented and passing CI; awaiting independent macOS/Windows QA and owner sign-off
+- [x] **G02** Accept the Pi adapter first milestone _(needs F05, F06, F03)_ — implemented and passing CI; owner signed off 2026-10-22; real macOS/Windows QA is carried out under D04
 
 ### Phase 7
 
@@ -165,6 +165,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 14
 
+- [ ] **F04i** Refuse unsupported filesystems unless explicitly overridden _(needs F04h)_
 - [x] **F08** Declare harness capabilities and enforce per-task recovery requirements _(needs F06, S02)_
 - [x] **S04** Implement durable inbox and duplicate handling _(needs S03, S02)_
 
@@ -206,6 +207,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [x] **A04** Implement protected filesystem and Git bridge _(needs A03, S05)_
 - [x] **A05** Implement exact-operation review admission _(needs A02, S05, F07)_
 - [x] **C02** Implement bounded source-backed retrieval _(needs C01)_
+- [ ] **F04j** Check required tools and libraries instead of distribution names _(needs F04i, A03)_
 - [x] **H03** Implement priority admission and reserved control capacity _(needs S08, H01)_
 - [x] **R01** Implement model routing and capability policy _(needs F05, A02, F02)_
 - [x] **S10** Implement task contracts and the task dependency graph _(needs S01, S08, A02)_
@@ -299,8 +301,9 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 31
 
+- [ ] **A07d** Offer a choice of standing-grant lengths with a system-chosen default _(needs A07b, A07c, C09)_
 - [ ] **L02** Implement Suspend and graceful Stop _(needs L01, T07)_
-- [ ] **U09** Implement read-only activity timeline and replay views _(needs C09, U05, A10)_
+- [ ] **U09** Implement read-only activity timeline and replay views _(needs C09, U05, A10, C06b)_
 
 ### Phase 32
 
@@ -316,7 +319,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **F04e** Implement chat-controlled controller database transfer _(needs F04, K01, F06)_
 - [ ] **H09** Implement reconnect reconciliation and primary epochs _(needs H08, L04, S05)_
 - [ ] **K01b** Implement encrypted backups with passcode and recovery-file unlock _(needs K01, F09)_
-- [ ] **K06** Implement retention, quotas, archive, export and deletion _(needs K01, S06, C02)_
+- [ ] **K06** Implement retention, quotas, archive, export and deletion _(needs K01, S06, C02, C06b)_
 - [ ] **L06** Implement team and system shutdown, reboot and resume policy _(needs L02, L03, H08, U06, H11)_
 - [ ] **P04** Implement ongoing responsibility checks, incidents and coverage _(needs P01, S08, H13, V01, L03)_
 - [ ] **T02** Implement review/promotion/deprecation and retention _(needs T01, A05, L04)_
@@ -333,7 +336,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **U08** Implement settings and administration views _(needs U07, U10, A07, F09, H11, R03, T03, A07b, A07c)_
 - [ ] **U11b** Implement notification levels, the Needs you view and escalation to Urgent _(needs U11, A07b, H05, M03, H12, K01, H01, H09, A08)_
 - [ ] **X09** Implement external release-test job protocol _(needs H07, H09, F03, S06)_
-- [ ] **Y02** QA checkpoint 2: isolation, stop and recovery _(needs G05, G06, A06, L04, H09, A03b, A08b)_
+- [ ] **Y02** QA checkpoint 2: isolation, stop and recovery _(needs G05, G06, A06, L04, H09, A03b, A08b, F04i, F04j)_
 
 ### Phase 35
 
@@ -363,7 +366,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **Q03** Implement documentation impact and release evidence links _(needs Q02, C02)_
 - [ ] **Q04** Implement defect tracking, review cycles and overrides _(needs Q02, C08)_
 - [ ] **X01** Run integrated crash and handoff campaign _(needs S09, V02, H02, Q02, K03, G04, H12, T07, K06, L06)_
-- [ ] **Y03** QA checkpoint 3: first complete chat-driven workflow _(needs U07, M02, P02, P03, Q02, K03)_
+- [ ] **Y03** QA checkpoint 3: first complete chat-driven workflow _(needs U07, M02, P02, P03, Q02, K03, A07d)_
 
 ### Phase 39
 
@@ -424,7 +427,6 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 ### Phase 51
 
 - [ ] **D05** Close the plan: every optional item built or deferred by the owner _(needs D04, K06b, K01d, P02b)_
-_Note: F01 started before its prerequisite planning records G01 and G07 were formally closed; G01 is still not fully closed._
 
 ## More detail
 
