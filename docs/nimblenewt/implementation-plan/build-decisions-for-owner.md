@@ -43,3 +43,6 @@ Written during the long coding session of 2026-10-22. By the guiding principle t
 - **Owner approval creates new money along the whole ancestor path;** requests never expire yet; a limit can be lowered only by `reclaim` from a child.
 - **A child's overrun passes up to its ancestors;** overrun counts only spent plus handed-on beyond the limit, never amounts that are only held.
 - **Requests for more budget are found with `pending(by)`;** U11 or the dispatcher must call it (no notification outbox here).
+
+## T05 (MCP durable conversation adapter)
+- **Agents converse under their own credential;** task credentials (`tcr-`) are not accepted by this door (same limit as U02b), and the owner's credential is accepted. No session ID is issued; a later transport card may not add one that carries state.
