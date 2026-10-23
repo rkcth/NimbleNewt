@@ -26,6 +26,7 @@ export const ACTIONS = [
   "budget.manage", "budget.read",
   "resource.read", "resource.write", "resource.scope.write", "project.plan.write", "project.participants.write",
   "responsibility.read", "responsibility.write", "responsibility.assign",
+  "meeting.manage", "meeting.agenda", "meeting.read",
 ] as const;
 export type Action = (typeof ACTIONS)[number];
 
