@@ -2,6 +2,7 @@ import { DomainError } from "../domain/errors.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import type { ProjectService } from "../domain/service.js";
 import type { AgentService } from "../agents/index.js";
+import type { WatchService } from "../events/handling.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
 import type { RetrievalService } from "../context/index.js";
@@ -19,6 +20,8 @@ export interface Context {
   readonly graph: WaitGraphService;
   readonly projects: ProjectService;
   readonly assignments: AssignmentService;
+  /** Absent when the controller runs without event handling. */
+  readonly watches?: WatchService;
 }
 
 export type Args = Record<string, unknown>;
@@ -60,9 +63,10 @@ function limitOf(args: Args): number {
   if (v === undefined) return PAGE.default;
   return typeof v === "number" && Number.isSafeInteger(v) && v >= 1 && v <= PAGE.max ? v : invalid("args.limit", `must be a whole number from 1 to ${PAGE.max}`);
 }
+const watches = (c: Context): WatchService => c.watches ?? ((): never => { throw new DomainError("unavailable", "event handling is not configured"); })();
 const need = (commandId: string | undefined): string => commandId ?? invalid("commandId", "is required for a command");
 const asJson = (value: unknown): JsonObject => JSON.parse(JSON.stringify(value)) as JsonObject;
-const page = (result: { items: unknown[]; next?: string }): JsonObject => asJson({ items: result.items, ...(result.next === undefined ? {} : { next: result.next }) });
+const page = (result: { items: unknown[]; next?: string; scanLimited?: boolean }): JsonObject => asJson({ items: result.items, ...(result.next === undefined ? {} : { next: result.next }), ...(result.scanLimited === true ? { scanLimited: true } : {}) });
 const found = (what: string, value: unknown): JsonObject => (value === undefined ? ((): never => { throw new DomainError("not_found", `no such ${what}`); })() : asJson({ item: value }));
 const written = (r: { id: string; revision?: number; replayed: boolean }): JsonObject => asJson({ id: r.id, ...(r.revision === undefined ? {} : { revision: r.revision }), replayed: r.replayed });
 /** Everything in `args` except the named keys, for passing on to a service that checks its own fields. */
@@ -118,6 +122,12 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, ["taskId"]); return found("activity", await c.secure.getActivity(str(a, "taskId"))); } },
   { name: "search", kind: "query", summary: "Word search over the desk records and histories the caller may read.", args: { projectId: "the project to search", query: "words to look for", "limit?": "1 to 50, default 20", "cursor?": "the `next` of the previous page" }, result: "`{ hits, next?, scanLimited }`: each hit links to its original.",
     run: async (c, a) => { only(a, ["projectId", "query", "limit", "cursor"]); return asJson(await c.retrieval.search(c.principal, { projectId: str(a, "projectId"), query: str(a, "query"), ...(a["limit"] === undefined ? {} : { limit: a["limit"] as number }), ...(optStr(a, "cursor") === undefined ? {} : { cursor: optStr(a, "cursor")! }) })); } },
+  { name: "events.failures", kind: "query", summary: "Event handling attempts that failed (a delivery that could not be made, one the agent reported failed, one whose lease ended without a report, or one given up on), in record ID order (IDs are derived, so this is not chronological; sort by `createdAt`). The owner sees all; anyone else sees only the handlings of projects whose histories they may read (`projectId` narrows the list and grants nothing).", args: { "projectId?": "narrow to this project (what the caller may read is filtered either way)", "taskId?": "only this task", "limit?": `1 to ${PAGE.max}, default ${PAGE.default}`, "after?": "the `next` of the previous page" }, result: "`{ items, next?, scanLimited? }`: each handling with its state, attempts, failure, owner and the events it carried. `scanLimited: true` means the scan stopped before the end of the records: continue with `after` (as `next`).",
+    run: async (c, a) => { only(a, ["projectId", "taskId", "limit", "after"]); return page(await watches(c).failures(c.principal, { limit: limitOf(a), ...(optStr(a, "projectId") === undefined ? {} : { projectId: optStr(a, "projectId")! }), ...(optStr(a, "taskId") === undefined ? {} : { taskId: optStr(a, "taskId")! }), ...(optStr(a, "after") === undefined ? {} : { afterId: optStr(a, "after")! }) })); } },
+  { name: "events.handling", kind: "query", summary: "One event handling attempt: its events, why it was made, what became of it, the inbox item, and the text that came with the events (untrusted data).", args: { handlingId: "the handling's ID" }, result: "`{ item: { handling, data, inbox? } }`.",
+    run: async (c, a) => { only(a, ["handlingId"]); return found("handling", await watches(c).inspect(c.principal, str(a, "handlingId"))); } },
+  { name: "events.loops", kind: "query", summary: "Self-triggering event loops that are held (their events are not scheduled until the owner releases them).", args: { "limit?": `1 to ${PAGE.max}, default ${PAGE.default}`, "after?": "the `next` of the previous page" }, result: "`{ items, next?, scanLimited? }` (see `events.failures` for `scanLimited`).",
+    run: async (c, a) => { only(a, ["limit", "after"]); return page(await watches(c).loops(c.principal, { limit: limitOf(a), ...(optStr(a, "after") === undefined ? {} : { afterId: optStr(a, "after")! }) })); } },
   { name: "inquiry.pending", kind: "query", summary: "Open inquiries waiting for the caller to answer.", args: { "limit?": `1 to ${PAGE.max}, default ${PAGE.default}`, "after?": "the `next` of the previous page" }, result: "`{ items, next? }`.",
     run: async (c, a) => { only(a, ["limit", "after"]); return page(await c.inquiries.pendingFor(c.principal, { limit: limitOf(a), ...(optStr(a, "after") === undefined ? {} : { afterId: optStr(a, "after")! }) })); } },
 

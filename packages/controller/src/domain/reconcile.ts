@@ -5,7 +5,7 @@ import { DomainError, isDomainError } from "./errors.js";
 import { sha256 } from "../storage/json.js";
 import { derivedId } from "./ids.js";
 import type { EffectBody, EffectBridge, EffectService } from "./effects.js";
-import type { InboxMessageBody, InboxService } from "./inbox.js";
+import { EVENTS_INBOX_SOURCE, type InboxMessageBody, type InboxService } from "./inbox.js";
 import { CommandRunner, mapStorageError, type RunnerOptions } from "./runner.js";
 import type { ProjectService } from "./service.js";
 import type { WaitBody, WaitService } from "./waits.js";
@@ -253,6 +253,8 @@ export class Reconciler {
     for (const aggregate of page) {
       const message = aggregate.body as unknown as InboxMessageBody;
       if (message.state !== "received") continue;
+      // Event items are consumed by the wake consumer (H13), which only schedules the agent to look; admission here would mark them ignored.
+      if (message.source === EVENTS_INBOX_SOURCE) continue;
       const taskId = (message.payload as { taskId?: unknown }).taskId;
       if (typeof taskId === "string" && (await this.#deps.blockers.openFor("manual_hold", { kind: "task", id: taskId })) !== undefined) { report.inboxHeld += 1; continue; }
       if ((await this.#deps.blockers.openFor("manual_hold", { kind: "inbox-message", id: aggregate.id })) !== undefined) { report.inboxHeld += 1; continue; }

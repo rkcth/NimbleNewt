@@ -4,6 +4,7 @@ import type { AssignmentService } from "../domain/assignments.js";
 import type { ProjectService } from "../domain/service.js";
 import type { RetrievalService } from "../context/index.js";
 import type { AgentService } from "../agents/index.js";
+import type { WatchService } from "../events/handling.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
 import { SecureApi } from "../security/secured.js";
@@ -43,6 +44,8 @@ export interface StateApiDeps {
   readonly agents: AgentService;
   readonly contracts: ContractService;
   readonly graph: WaitGraphService;
+  /** When present, event handling attempts can be listed and inspected (card H13). */
+  readonly watches?: WatchService;
   /** When present, a task credential (`tcr-…`) is accepted too and acts for its one task (card A10b). */
   readonly taskCredentials?: TaskCredentialService;
   /** Called with errors that are not part of the contract (so they are not shown to the client). */
@@ -82,6 +85,7 @@ export class StateApi {
       const context: Context = {
         principal, secure: new SecureApi(principal, { projects: this.#deps.projects, assignments: this.#deps.assignments }),
         retrieval: this.#deps.retrieval, inquiries: this.#deps.inquiries, agents: this.#deps.agents, contracts: this.#deps.contracts, graph: this.#deps.graph, projects: this.#deps.projects, assignments: this.#deps.assignments,
+        ...(this.#deps.watches === undefined ? {} : { watches: this.#deps.watches }),
       };
       const result = await operation.run(context, args, request.commandId);
       if (operation.kind === "query") return { v: API_VERSION, op: request.op, ok: true, result };

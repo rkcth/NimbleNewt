@@ -157,6 +157,8 @@ export class CommandRunner {
         if (now === undefined) throw new DomainError("not_found", `${built.ref.kind} ${built.ref.id} does not exist`, { cause: error });
         return refusedUnlessApplied(new DomainError("stale_revision", `${built.ref.kind} ${built.ref.id} changed meanwhile and is now at revision ${now.revision}`, { currentRevision: now.revision, cause: error }));
       }
+      // The same command committed at the same moment (a duplicate sent together with the original): answer with what the first one recorded.
+      if (isStorageError(error, "idempotency_conflict")) return refusedUnlessApplied(mapStorageError(error));
       throw mapStorageError(error);
     }
     return { id: built.ref.id, revision: revisionOf(result, built.ref), replayed: result.replayed };

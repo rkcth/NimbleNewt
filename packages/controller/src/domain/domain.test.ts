@@ -3,7 +3,7 @@ import { after, test } from "node:test";
 import { FaultInjectingStorage } from "../storage/faults.js";
 import { MemoryStorage } from "../storage/memory.js";
 import type { ControllerStorage } from "../storage/types.js";
-import { DomainError, TRANSITIONS, derivedId, isDomainError, type DomainErrorCode, type TaskState } from "./index.js";
+import { AssignmentService, DomainError, InboxService, TRANSITIONS, derivedId, isDomainError, type DomainErrorCode, type TaskState } from "./index.js";
 import { ProjectService } from "./service.js";
 import { backends, stopServer, type World } from "./testing/backends.js";
 
@@ -133,6 +133,26 @@ for (const backend of backends) {
     // A genuinely different command with the same ID is still a conflict on that path.
     hidden = true;
     await refuses("command_conflict", () => second.updateProject({ ...command, name: "C" }));
+  });
+
+  suite("a duplicate whose own commit meets the original's operation is answered with the recorded result", async (svc, world) => {
+    // An inbox receipt records the time it was made, so a duplicate built a moment later differs in content from the original: its commit is refused as a reused operation ID, not as a stale revision.
+    const assign = AssignmentService.withEpoch(world.storage, svc.epoch, svc, fast);
+    const first = await InboxService.withEpoch(world.storage, svc.epoch, assign, fast).receive({ source: "s", deliveryId: "d-1", payload: { a: 1 } });
+    let hidden = 1;
+    const blind = new Proxy(world.storage, {
+      get(target, name, receiver) {
+        const value = Reflect.get(target, name, receiver) as unknown;
+        if (name !== "getOperation" || typeof value !== "function") return typeof value === "function" ? value.bind(target) : value;
+        return async (id: string) => { if (hidden > 0) { hidden--; return undefined; } return (value as (id: string) => Promise<unknown>).call(target, id); };
+      },
+    }) as ControllerStorage;
+    const later = InboxService.withEpoch(blind, svc.epoch, AssignmentService.withEpoch(blind, svc.epoch, svc, fast), { ...fast, clock: () => "2026-10-20T10:00:05.000Z" });
+    assert.deepEqual(await later.receive({ source: "s", deliveryId: "d-1", payload: { a: 1 } }), { ...first, replayed: true });
+    assert.equal(hidden, 0, "the first look found nothing; the answer came after the commit was refused");
+    assert.equal(await audits(world), 1, "applied once");
+    hidden = 1;
+    await refuses("payload_changed", () => later.receive({ source: "s", deliveryId: "d-1", payload: { a: 2 } }));
   });
 
   suite("services of one controller can share the epoch it acquired, and a deposed controller's services all stop", async (svc, world) => {

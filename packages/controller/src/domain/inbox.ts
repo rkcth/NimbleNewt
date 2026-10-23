@@ -52,6 +52,8 @@ export interface Admission { readonly messageId: string; readonly outcome: Admis
 /** The actor of the commands an admission issues. They derive from the message, not from the caller, so two callers admitting one message issue identical commands and the second is answered by the first. */
 const INBOX_ACTOR = "inbox";
 export const INBOX_LIMITS = { source: 80, deliveryId: 200, payloadBytes: 64 * 1024, detail: 1000 } as const;
+/** The source of the items the event watchers put in the inbox (card H13). They are not assignment messages: the reconciler leaves them alone and the wake consumer takes them. */
+export const EVENTS_INBOX_SOURCE = "events";
 const MESSAGE_ID = /^inb-[a-z2-7]{20}$/;
 export const inboxMessageId = (source: string, deliveryId: string): string => derivedId("inb", `${source}\0${deliveryId}`);
 

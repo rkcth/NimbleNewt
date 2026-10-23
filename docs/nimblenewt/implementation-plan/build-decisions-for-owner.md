@@ -63,3 +63,7 @@ Written during the long coding session of 2026-10-22. By the guiding principle t
 ## L05 (generation interruption and late results)
 - **The per-task hold lives in this card's own `generation-gate` until L01 adopts it** (L01 must reconcile it with the existing `manual_hold` blocker). Both interrupt modes set a hold and a release by someone with `assignment.manage` is required before a new generation: a pause is explicit.
 - **Only effects admitted and started through the generation service are gated;** H12 and any dispatcher must wire `guardFor(taskId)` into every effect run for a task (the slice pipeline starts effects ungated today). One agent cannot supersede another agent's running generation unless it is the owner, holds `assignment.manage`, or presents a valid fence.
+
+## H13 (event source adapters and watchers)
+- **Event wake-ups only wake an existing active attempt** (starting an attempt belongs to H12); a handling has a 900 s lease (extendable up to 4 times and 24 h in total) after which it fails visibly as `lease`; at most 2 open handlings per owner; per-run source cap 200 (max 1000); only the owner or a service sets up watches; only the owner releases a held loop.
+- **A race in the shared command runner was fixed:** a concurrent duplicate of the same command now gets the recorded result instead of `command_conflict` (a different command with the same ID is still a conflict).

@@ -193,6 +193,40 @@ Arguments:
 
 Result: `{ hits, next?, scanLimited }`: each hit links to its original.
 
+#### `events.failures`
+
+Event handling attempts that failed (a delivery that could not be made, one the agent reported failed, one whose lease ended without a report, or one given up on), in record ID order (IDs are derived, so this is not chronological; sort by `createdAt`). The owner sees all; anyone else sees only the handlings of projects whose histories they may read (`projectId` narrows the list and grants nothing).
+
+Arguments:
+
+- `projectId` (optional): narrow to this project (what the caller may read is filtered either way)
+- `taskId` (optional): only this task
+- `limit` (optional): 1 to 100, default 20
+- `after` (optional): the `next` of the previous page
+
+Result: `{ items, next?, scanLimited? }`: each handling with its state, attempts, failure, owner and the events it carried. `scanLimited: true` means the scan stopped before the end of the records: continue with `after` (as `next`).
+
+#### `events.handling`
+
+One event handling attempt: its events, why it was made, what became of it, the inbox item, and the text that came with the events (untrusted data).
+
+Arguments:
+
+- `handlingId`: the handling's ID
+
+Result: `{ item: { handling, data, inbox? } }`.
+
+#### `events.loops`
+
+Self-triggering event loops that are held (their events are not scheduled until the owner releases them).
+
+Arguments:
+
+- `limit` (optional): 1 to 100, default 20
+- `after` (optional): the `next` of the previous page
+
+Result: `{ items, next?, scanLimited? }` (see `events.failures` for `scanLimited`).
+
 #### `inquiry.pending`
 
 Open inquiries waiting for the caller to answer.
