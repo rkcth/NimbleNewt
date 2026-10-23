@@ -19,7 +19,7 @@ export {
 } from "./inbox.js";
 export {
   EFFECT_LIMITS, EffectRejected, EffectService,
-  type EffectBody, type EffectBridge, type EffectOutcome, type EffectRequest, type EffectServiceOptions, type IntendEffect, type Reconciliation, type ResolveEffect,
+  type EffectBody, type EffectBridge, type EffectOutcome, type EffectRequest, type EffectServiceOptions, type IntendEffect, type Reconciliation, type ResolveEffect, type RunOptions as EffectRunOptions,
 } from "./effects.js";
 export {
   BLOCKER_LIMITS, BLOCKER_TYPES, BlockerService, subjectRef,

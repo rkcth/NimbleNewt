@@ -87,6 +87,12 @@ const EFFECT_ID = /^eff-[a-z2-7]{20}$/;
 const KIND = /^[a-z][a-z0-9-]{0,39}$/;
 const EFFECTS_ACTOR = "effects";
 
+/** Options of one `run`. */
+export interface RunOptions {
+  /** Called before an effect that has not started is claimed. Throws to refuse; returns guard changes that commit with the claim (a lost race on one repeats the check). */
+  readonly beforeStart?: () => Promise<readonly Change[]>;
+}
+
 export interface EffectServiceOptions extends RunnerOptions {
   /** How long an executor holds an effect before another may take it over. Default five minutes; must exceed the bridge's worst case. */
   readonly leaseMs?: number;
@@ -170,18 +176,18 @@ export class EffectService {
    * `pending` when the target is idempotent and the outcome is not known yet (call again). Throws `effect_uncertain` for an uncertain
    * effect and `effect_busy` while another executor holds it.
    */
-  async run(effectId: string, bridge: EffectBridge): Promise<EffectOutcome> {
+  async run(effectId: string, bridge: EffectBridge, options: RunOptions = {}): Promise<EffectOutcome> {
     if (typeof effectId !== "string" || !EFFECT_ID.test(effectId)) invalid("effectId", "is not an effect ID");
     if (this.#running.has(effectId)) throw new DomainError("effect_busy", `effect ${effectId} is already being run by this executor`, { field: "effectId" });
     this.#running.add(effectId);
     try {
-      return await this.#runLoop(effectId, bridge);
+      return await this.#runLoop(effectId, bridge, options);
     } finally {
       this.#running.delete(effectId);
     }
   }
 
-  async #runLoop(effectId: string, bridge: EffectBridge): Promise<EffectOutcome> {
+  async #runLoop(effectId: string, bridge: EffectBridge, options: RunOptions): Promise<EffectOutcome> {
     for (let tries = 0; tries < 5; tries++) {
       const { aggregate, record } = await this.#load(effectId);
       if (record.status === "confirmed" || record.status === "failed") return { effectId, status: record.status, ...(record.evidence === undefined ? {} : { evidence: record.evidence }) };
@@ -203,6 +209,9 @@ export class EffectService {
         }
       }
       if (fenceLost && !body.started) return this.#settle(effectId, aggregate, "failed", { reason: "superseded before it started", fence: body.fence as unknown as JsonObject });
+      // A caller's own gate on starting (card L05: a pause or an interruption blocks effects that have not started). It may refuse by throwing; the checks it returns commit with the claim, so
+      // a change it saw cannot slip in between. It is not consulted for an effect that already started: that one is only ever reconciled.
+      if (!body.started && options.beforeStart !== undefined) guardChanges = [...guardChanges, ...(await options.beforeStart())];
 
       // Claim (revision-guarded, with the fence as a guard so the claim is atomic with ownership).
       try {
