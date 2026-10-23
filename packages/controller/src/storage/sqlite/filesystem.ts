@@ -44,7 +44,7 @@ export function networkFilesystemProblem(path: string, platform: NodeJS.Platform
   return undefined;
 }
 
-export function assertLocalFilesystem(path: string): void {
-  const problem = networkFilesystemProblem(path);
+export function assertLocalFilesystem(path: string, find: (path: string) => string | undefined = networkFilesystemProblem): void {
+  const problem = find(path);
   if (problem !== undefined) throw new StorageError("unavailable", `refusing to put a SQLite controller database on a network file system: ${problem}. Use local storage, or the PostgreSQL backend.`);
 }

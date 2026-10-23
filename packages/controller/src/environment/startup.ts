@@ -10,8 +10,20 @@ export async function recordOverride(storage: ControllerStorage, epoch: number, 
   if (!check.overridden) return false;
   await commitOperation(storage, {
     operationId: `environment:${epoch}`, epoch, actor: "startup", correlationId: `environment:${epoch}`, at,
-    changes: [], audit: [{ type: "environment.override", detail: { problems: check.problems as unknown as JsonObject[] } }],
+    changes: [], audit: [{ type: "environment.override", detail: { problems: check.problems as unknown as JsonObject[], ...(check.host === undefined ? {} : { host: check.host }) } }],
     outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [],
   }, { attempts: 5 });
   return true;
+}
+
+/**
+ * Writes the host line (operating system, architecture, distribution if there is one) as an `environment.host` audit record, once per primary epoch, on every start (card F04j: the
+ * distribution is recorded in the audit log, for information only). Nothing is printed for it and nothing reads it back to decide anything.
+ */
+export async function recordHost(storage: ControllerStorage, epoch: number, host: string, at: string = new Date().toISOString()): Promise<void> {
+  await commitOperation(storage, {
+    operationId: `environment-host:${epoch}`, epoch, actor: "startup", correlationId: `environment-host:${epoch}`, at,
+    changes: [], audit: [{ type: "environment.host", detail: { host } }],
+    outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [],
+  }, { attempts: 5 });
 }

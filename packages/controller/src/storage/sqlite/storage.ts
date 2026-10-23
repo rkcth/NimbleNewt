@@ -19,6 +19,10 @@ export interface SqliteOptions {
   readonly path: string;
   /** How long a write waits for another connection's write lock before failing as `retryable`. Default 5000, at most 60000. */
   readonly busyTimeoutMs?: number;
+  /** Accept a database on a network file system (the F04h/F04i override, which start-up has already audited). Default: refused. */
+  readonly allowNetworkFilesystem?: boolean;
+  /** For tests: how a network location is recognised, instead of looking at this machine. */
+  readonly networkCheck?: (path: string) => string | undefined;
   /**
    * For the crash qualification only: called immediately before and after every numbered statement of a write transaction
    * (`BEGIN IMMEDIATE` is statement 1, `COMMIT` the last), so a test can kill the process at an exact atomic boundary.
@@ -86,9 +90,11 @@ export class SqliteStorage implements ControllerStorage {
     }
     const busyTimeoutMs = options.busyTimeoutMs ?? 5000;
     if (!Number.isSafeInteger(busyTimeoutMs) || busyTimeoutMs < 0 || busyTimeoutMs > 60_000) throw new StorageError("invalid_input", "busyTimeoutMs: must be a whole number from 0 to 60000", { path: "busyTimeoutMs" });
-    assertLocalFilesystem(path); // as given: a UNC path must be recognised before it is resolved against this machine
     const absolute = resolve(path);
-    assertLocalFilesystem(absolute);
+    if (options.allowNetworkFilesystem !== true) {
+      assertLocalFilesystem(path, options.networkCheck); // as given: a UNC path must be recognised before it is resolved against this machine
+      assertLocalFilesystem(absolute, options.networkCheck);
+    }
     mkdirSync(dirname(absolute), { recursive: true });
     let db: DatabaseSync | undefined;
     try {

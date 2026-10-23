@@ -17,10 +17,18 @@ export function detectEnvironment(extra: { postgresVersion?: string } = {}): Env
 }
 
 export interface Problem {
-  readonly item: "operating system" | "Node.js" | "PostgreSQL";
+  /** What is wrong: "operating system", "Node.js", "PostgreSQL", "filesystem (data directory)", "git", ... */
+  readonly item: string;
   readonly found: string;
   readonly supported: string;
-  readonly howToTest: string;
+  /** How to run the project's own verification in this environment (F04h, F04i). Absent for a missing prerequisite, which has `howToFix` instead. */
+  readonly howToTest?: string;
+  /** How to install or enable what is missing (F04j). */
+  readonly howToFix?: string;
+  /** False for a missing hard prerequisite: no switch overrides it, because the feature cannot run without it. Absent or true: the override covers it. */
+  readonly overridable?: boolean;
+  /** What the override means for this problem, when it is more than "start anyway". */
+  readonly overrideMeans?: string;
 }
 
 const parts = (version: string): number[] => version.split(".").map((p) => Number.parseInt(p, 10)).map((n) => (Number.isFinite(n) ? n : 0));
@@ -60,20 +68,35 @@ export function checkEnvironment(facts: EnvironmentFacts): Problem[] {
   return problems;
 }
 
-/** The refusal an operator reads: what was found, what is supported, how to test their environment, and the exact override. */
-export function refusalMessage(problems: readonly Problem[]): string {
+const isHard = (p: Problem): boolean => p.overridable === false;
+/** One line about one problem, as printed in a refusal and in the override notice. */
+export function problemLine(p: Problem): string {
+  return `  - ${p.item}: found ${p.found}; ${isHard(p) ? "required" : "supported"}: ${p.supported}.${p.howToFix === undefined ? "" : ` To fix: ${p.howToFix}.`}${isHard(p) ? " This cannot be overridden, because the feature cannot run without it." : ""}`;
+}
+
+/**
+ * The refusal an operator reads: what was found, what is supported, how to test their environment (or how to install what is missing), and the exact override, which every
+ * problem that can be overridden is covered by. A problem that cannot be overridden says so on its own line. `host` is the one line that records the distribution, for information only.
+ */
+export function refusalMessage(problems: readonly Problem[], host?: string, switchGiven = false): string {
+  const hard = problems.filter(isHard), soft = problems.filter((p) => !isHard(p));
+  const headline = soft.length === 0 ? "something it needs is missing or unusable." : hard.length === 0 ? "this environment is not one it has been tested on." : "this environment is not one it has been tested on, and something it needs is missing or unusable.";
+  const tests = [...new Set(soft.flatMap((p) => (p.howToTest === undefined ? [] : [p.howToTest])))];
   return [
-    "NimbleNewt will not start: this environment is not one it has been tested on.",
-    ...problems.map((p) => `  - ${p.item}: found ${p.found}; supported: ${p.supported}.`),
-    "To find out whether it works in your environment, " + [...new Set(problems.map((p) => p.howToTest))].join(", and ") + ".",
-    `If you have verified it and want to start anyway, pass ${OVERRIDE_FLAG} (or set ${OVERRIDE_ENV}=1). The override is recorded in the audit log and printed at every start.`,
+    `NimbleNewt will not start: ${headline}`,
+    ...problems.map(problemLine),
+    ...(tests.length === 0 ? [] : ["To find out whether it works in your environment, " + tests.join(", and ") + "."]),
+    ...(switchGiven && hard.length > 0 ? [`${OVERRIDE_FLAG} (or ${OVERRIDE_ENV}) was given, but it does not cover the items marked "cannot be overridden": fix those and start again.`] : []),
+    ...(soft.length === 0 ? [] : [`If you have verified it and want to start anyway, pass ${OVERRIDE_FLAG} (or set ${OVERRIDE_ENV}=1)${hard.length === 0 ? "" : ` to override the problems that can be overridden (the ones marked "cannot be overridden" must be fixed first)`}. The override is recorded in the audit log and printed at every start.`]),
+    ...soft.flatMap((p) => (p.overrideMeans === undefined ? [] : [`Overriding ${p.item} means: ${p.overrideMeans}.`])),
+    ...(host === undefined ? [] : [host]),
   ].join("\n");
 }
 
 export class UnsupportedEnvironmentError extends Error {
   readonly problems: readonly Problem[];
-  constructor(problems: readonly Problem[]) {
-    super(refusalMessage(problems));
+  constructor(problems: readonly Problem[], host?: string, switchGiven = false) {
+    super(refusalMessage(problems, host, switchGiven));
     this.name = "UnsupportedEnvironmentError";
     this.problems = problems;
   }
@@ -90,6 +113,8 @@ export interface StartupCheck {
   readonly overridden: boolean;
   /** What to print at start: nothing when supported, a loud notice when overridden. */
   readonly output: readonly string[];
+  /** The distribution line, recorded in the audit record of an override and in the notice; nothing depends on it. */
+  readonly host?: string;
 }
 
 /**
@@ -98,16 +123,23 @@ export interface StartupCheck {
  * `recordOverride` writes the audit record. The override changes nothing else about how the controller behaves.
  */
 export function startupCheck(facts: EnvironmentFacts, options: { allowUnsupported: boolean }): StartupCheck {
-  const problems = checkEnvironment(facts);
+  return decideStartup(checkEnvironment(facts), options);
+}
+
+/**
+ * The one decision over every problem found (operating system, Node.js, file systems, prerequisites; the PostgreSQL server joins later through `overriddenCheck`). A problem that cannot be
+ * overridden is a refusal whatever the switch says; the rest are refused unless the switch was given.
+ */
+export function decideStartup(problems: readonly Problem[], options: { allowUnsupported: boolean; host?: string }): StartupCheck {
   if (problems.length === 0) return { problems, overridden: false, output: [] };
-  if (!options.allowUnsupported) throw new UnsupportedEnvironmentError(problems);
-  return overriddenCheck(problems);
+  if (problems.some(isHard) || !options.allowUnsupported) throw new UnsupportedEnvironmentError(problems, options.host, options.allowUnsupported);
+  return overriddenCheck(problems, options.host);
 }
 
 /** The result of starting with the override for these problems: the loud notice, and the problems to audit. */
-export function overriddenCheck(problems: readonly Problem[]): StartupCheck {
+export function overriddenCheck(problems: readonly Problem[], host?: string): StartupCheck {
   return {
-    problems, overridden: true,
-    output: [`WARNING: starting in an unsupported environment because the override was given (${OVERRIDE_FLAG} or ${OVERRIDE_ENV}):`, ...problems.map((p) => `  - ${p.item}: found ${p.found}; supported: ${p.supported}.`), "Behaviour is otherwise unchanged. This is recorded in the audit log."],
+    problems, overridden: true, ...(host === undefined ? {} : { host }),
+    output: [`WARNING: starting in an unsupported environment because the override was given (${OVERRIDE_FLAG} or ${OVERRIDE_ENV}):`, ...problems.map(problemLine), ...problems.flatMap((p) => (p.overrideMeans === undefined ? [] : [`Overriding ${p.item} means: ${p.overrideMeans}.`])), ...(host === undefined ? [] : [host]), "Behaviour is otherwise unchanged. This is recorded in the audit log."],
   };
 }
