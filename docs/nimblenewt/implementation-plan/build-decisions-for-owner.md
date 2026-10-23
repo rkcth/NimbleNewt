@@ -24,3 +24,11 @@ Written during the long coding session of 2026-10-22. By the guiding principle t
 - **Sandbox and limits tools are required at start only when the start options name those features.**
 - **A network or unsupported filesystem under a workspace root is refused too**, not only under the data directory.
 - **The git floor is 2.38.1**, derived from the `protocol.file.allow` flag the workspace bridge sets.
+
+## C05 (context branches)
+- **Only the branch owner and the installation owner can view or command a branch.** A branch's return destination and a delegated child must be a task of the same project. `resume` ends a branch (no discard operation). Other writers are not blocked while a branch is suspended; restore reports what they wrote.
+
+## V01 (stall detection)
+- **Provisional thresholds** (minutes request/silence, repeat counts for actions and errors): trivial 2/5, 4, 3; easy 5/10, 5, 4; medium 10/20, 6, 5; hard 20/40, 8, 6; expert 45/90, 10, 8. A dismissal silences a concern for 6 hours. All are settings.
+- **A task's own owner never decides its own concern**, even with `assignment.manage`; concerns go to the agent's active supervisor, else the owner.
+- **A stale timestamp never permits a takeover**; a takeover may be proposed only when the worker is silent and its host is revoked or stale.

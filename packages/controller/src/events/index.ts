@@ -1,1 +1,1 @@
-export { EVENT_LIMITS, EventService, type EventBody, type Gap, type HeadBody, type Pulled, type SubscriptionBody } from "./events.js";
+export { EVENT_LIMITS, EventService, noticeThroughNotifications, type EventBody, type ExpiryNotice, type Gap, type HeadBody, type IdleStatus, type NotifyExpiry, type Pulled, type SubscriptionBody } from "./events.js";

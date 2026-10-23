@@ -41,11 +41,25 @@ export interface SubscriptionBody {
   /** The last sequence number the subscriber has acknowledged. */
   readonly cursor: number;
   readonly lastWakeAt?: string;
-  readonly state: "active" | "cancelled";
+  readonly state: "active" | "cancelled" | "expired";
   /** True when the controller relies on this subscriber (owner, host, service): only such subscribers slow producers. Everyone else is bounded by reconciliation instead. */
   readonly critical: boolean;
   readonly createdAt: string;
+  /** The last acknowledgement, heartbeat, resume or the subscription itself (card H06b): idle time is counted from here. Absent on records made before idle expiry (createdAt is used). */
+  readonly lastActiveAt?: string;
+  /** The idle time this subscriber asked for; it can only shorten the owner's setting, never lengthen it. */
+  readonly idleSeconds?: number;
+  readonly expiredAt?: string;
+  /** The cursor at the moment of expiry: the subscriber resumes from here. */
+  readonly expiredCursor?: number;
+  /** True while the Notice for an expiry that left events unhandled has not been delivered yet; a sweep retries it. */
+  readonly noticePending?: boolean;
 }
+/** What an idle expiry hands to the notification path (U11 `emitFromController`; U11b's Needs-you view is not in code yet). */
+export interface ExpiryNotice { readonly subscriptionId: string; readonly subscriber: string; readonly stream: string; readonly cursor: number; readonly expiredAt: string; readonly pending: number; readonly idleSeconds: number; readonly projectId?: string }
+export type NotifyExpiry = (notice: ExpiryNotice) => Promise<void>;
+export interface IdleStatus { readonly state: SubscriptionBody["state"]; readonly cursor: number; readonly lastActiveAt: string; readonly idleSeconds: number; readonly expiredAt?: string; readonly expiredCursor?: number }
+interface SettingsBody { readonly idleSeconds: number }
 export interface Pulled {
   readonly events: readonly { seq: number; kind: string; ref: { kind: string; id: string }; key: string; at: string; collapsed: number }[];
   /** True when the subscriber should act on these now. False when its scope is on manual hold or its cooldown has not passed: the events wait. */
@@ -65,7 +79,7 @@ export type PublishResult = { accepted: true; seq: number; suppressed: boolean; 
 /** Carries a publish that was answered without being applied out of the command's build. */
 class Rejected extends Error { constructor(readonly result: PublishResult) { super("rejected"); } }
 
-export const EVENT_LIMITS = { queue: 1000, chain: 20, batch: 200, kinds: 20, cooldown: 3600, gaps: 50, scan: 2000 } as const;
+export const EVENT_LIMITS = { queue: 1000, chain: 20, batch: 200, kinds: 20, cooldown: 3600, gaps: 50, scan: 2000, idleDefault: 900, idleMin: 10, idleMax: 604_800, sweep: 100 } as const;
 const STREAM = /^(?:project|task):[a-z]+-[a-z2-7]{20}$/;
 const KIND = /^[a-z][a-z0-9._-]{0,59}$/;
 const KEY = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/;
@@ -73,6 +87,13 @@ const SUB = /^sub-[a-z2-7]{20}$/;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const kindOf = (stream: string): string => `ev-${stream.replace(":", "-")}`;
 const watcherKind = (stream: string): string => `wtc-${stream.replace(":", "-")}`;
+const listedKind = (stream: string): string => `sbl-${stream.replace(":", "-")}`;
+const SETTINGS: AggregateRef = { kind: "events-settings", id: "idle" };
+/** Carries a sweep's decision not to expire (the subscription is no longer idle) out of the command's build. */
+class NotIdle extends Error { constructor() { super("not idle"); } }
+const idleOf = (sub: SubscriptionBody, ceiling: number): number => Math.min(sub.idleSeconds ?? ceiling, ceiling);
+const lastActive = (sub: SubscriptionBody): string => sub.lastActiveAt ?? sub.createdAt;
+const isIdle = (sub: SubscriptionBody, ceiling: number, now: string): boolean => Date.parse(now) >= Date.parse(lastActive(sub)) + idleOf(sub, ceiling) * 1000;
 const pad = (n: number): string => String(n).padStart(10, "0");
 const sig = (kind: string, ref: { kind: string; id: string }): string => `${kind}|${ref.kind}:${ref.id}`;
 
@@ -82,16 +103,21 @@ const sig = (kind: string, ref: { kind: string; id: string }): string => `${kind
  * complete (events missing from the sequence, a source's own numbering that skipped, repeated or came out of order, a cursor older than retention) and then the subscriber must reconcile from the
  * source of truth: nothing is guessed. An event never lifts a manual hold (it waits, with `wake: false`), each subscription has a cooldown, the causation chain of every event is recorded and an
  * event that a loop would produce again is suppressed, and a producer is told to slow down when a subscriber's queue is full.
+ *
+ * Idle expiry (card H06b): a subscription with no acknowledgement, heartbeat or resume for its idle time (the owner's setting is the ceiling; a subscriber may ask for less) is expired by `expireIdle`
+ * (the scheduler's call) or by a producer that meets a full queue. An expired subscription no longer holds producers back, keeps its cursor on record, shows in the audit trail as `events.expire`, and
+ * is reported through `notify` when events were waiting for it. Its subscriber `resume`s from the cursor; the owner can cancel at any time.
  */
 export class EventService {
   readonly #runner: CommandRunner;
   readonly #held: (stream: string) => Promise<boolean>;
+  readonly #notify: NotifyExpiry | undefined;
 
-  private constructor(runner: CommandRunner, held: (stream: string) => Promise<boolean>) { this.#runner = runner; this.#held = held; }
+  private constructor(runner: CommandRunner, held: (stream: string) => Promise<boolean>, notify: NotifyExpiry | undefined) { this.#runner = runner; this.#held = held; this.#notify = notify; }
 
-  /** `held` says whether a stream's scope is on manual hold (the pause service supplies it). */
-  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions & { held?: (stream: string) => Promise<boolean> } = {}): EventService {
-    return new EventService(new CommandRunner(storage, epoch, options), options.held ?? (async () => false));
+  /** `held` says whether a stream's scope is on manual hold (the pause service supplies it); `notify` reports an idle expiry that left events unhandled (see `noticeThroughNotifications`). */
+  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions & { held?: (stream: string) => Promise<boolean>; notify?: NotifyExpiry } = {}): EventService {
+    return new EventService(new CommandRunner(storage, epoch, options), options.held ?? (async () => false), options.notify);
   }
 
   /** Publishes an event. Returns its sequence number, or says it was suppressed (a loop), was a repeat from its source, or that the producer must wait (a subscriber's queue is full). */
@@ -105,6 +131,7 @@ export class EventService {
     const ref = this.#ref(command.ref);
     const key = command.key === undefined ? sig(kind, ref) : typeof command.key === "string" && KEY.test(command.key) ? command.key : invalid("key", "is not an acceptable key");
     const source = command.source === undefined ? undefined : (typeof command.source.id === "string" && KEY.test(command.source.id) && Number.isSafeInteger(command.source.seq) && command.source.seq >= 1 ? command.source : invalid("source", "needs an id and a sequence number from 1"));
+    let idleSeen: string[] = [];
     for (let attempt = 1; ; attempt++) {
       try {
         const headRef: AggregateRef = { kind: "events-head", id: derivedId("sub", stream) };
@@ -116,7 +143,9 @@ export class EventService {
           build: async () => {
             const found = await this.#runner.get(headRef.kind, headRef.id);
             const head = (found?.body as unknown as HeadBody | undefined) ?? { stream, next: 1, floor: 1, sources: {}, gaps: [] };
-            const behind = await this.#backlog(stream, head);
+            // A watcher that has been idle past its time does not hold anyone back; it is expired for the record after this command.
+            const { worst: behind, idle } = await this.#backlog(stream, head, await this.#ceiling(), this.#runner.now());
+            idleSeen = idle;
             if (behind >= EVENT_LIMITS.queue) throw new Rejected({ accepted: false, retryAfterSeconds: 5, reason: `a subscriber of ${stream} is ${behind} events behind` });
             let chain: string[] = []; let suppressed = false; let causedBySeq: number | undefined;
             if (command.causedBy !== undefined) {
@@ -145,18 +174,19 @@ export class EventService {
         }));
         // A repeat of the same command is the same event: its number is the recorded one (the suppressed flag of a repeat is read back from the record).
         const seq = Number(published.id);
+        await this.#reap(idleSeen);
         const suppressed = published.replayed ? ((await this.#runner.get(eventKind, pad(seq)))?.body as unknown as EventBody | undefined)?.suppressed === true : outcome.suppressed;
         return { accepted: true, seq, suppressed, duplicate: false, ...(outcome.gap === undefined ? {} : { gap: outcome.gap }) };
       } catch (error) {
-        if (error instanceof Rejected) return error.result;
+        if (error instanceof Rejected) { await this.#reap(idleSeen); return error.result; }
         if (!(error instanceof DomainError) || error.code !== "stale_revision" || error.currentRevision !== undefined || attempt >= 8) throw error;
       }
     }
   }
 
   /** Subscribes to a stream from now on (or from the start). The subscriber must be able to read the stream's project. */
-  async subscribe(by: Principal, command: NoActor & { stream: string; kinds?: readonly string[]; cooldownSeconds?: number; batch?: number; fromStart?: boolean }): Promise<{ id: string }> {
-    onlyKnown(command, ["commandId", "stream", "kinds", "cooldownSeconds", "batch", "fromStart"]);
+  async subscribe(by: Principal, command: NoActor & { stream: string; kinds?: readonly string[]; cooldownSeconds?: number; batch?: number; fromStart?: boolean; idleSeconds?: number }): Promise<{ id: string }> {
+    onlyKnown(command, ["commandId", "stream", "kinds", "cooldownSeconds", "batch", "fromStart", "idleSeconds"]);
     const stream = this.#stream(command.stream);
     if (!(by.kind === "owner" || by.kind === "host" || by.kind === "service" || allows(by, "history.read", this.#projectOf(stream)))) throw new DomainError("forbidden", `${by.id} may not subscribe to ${stream}`);
     const kinds = command.kinds ?? [];
@@ -165,13 +195,15 @@ export class EventService {
     if (!Number.isSafeInteger(cooldown) || cooldown < 0 || cooldown > EVENT_LIMITS.cooldown) invalid("cooldownSeconds", `must be 0 to ${EVENT_LIMITS.cooldown}`);
     const batch = command.batch ?? 50;
     if (!Number.isSafeInteger(batch) || batch < 1 || batch > EVENT_LIMITS.batch) invalid("batch", `must be 1 to ${EVENT_LIMITS.batch}`);
+    const idle = command.idleSeconds;
+    if (idle !== undefined && (!Number.isSafeInteger(idle) || idle < EVENT_LIMITS.idleMin || idle > EVENT_LIMITS.idleMax)) invalid("idleSeconds", `must be ${EVENT_LIMITS.idleMin} to ${EVENT_LIMITS.idleMax}`);
     const id = derivedId("sub", scopedCommandId(by.id, command.commandId));
     const head = (await this.#runner.get("events-head", derivedId("sub", stream)))?.body as unknown as HeadBody | undefined;
-    const body: SubscriptionBody = { subscriber: by.id, stream, kinds: [...new Set(kinds as string[])].sort(), cooldownSeconds: cooldown, batch, cursor: command.fromStart === true ? (head?.floor ?? 1) - 1 : (head?.next ?? 1) - 1, state: "active", critical: by.kind !== "agent" && by.kind !== "client", createdAt: this.#runner.now() };
+    const body: SubscriptionBody = { subscriber: by.id, stream, kinds: [...new Set(kinds as string[])].sort(), cooldownSeconds: cooldown, batch, cursor: command.fromStart === true ? (head?.floor ?? 1) - 1 : (head?.next ?? 1) - 1, state: "active", critical: by.kind !== "agent" && by.kind !== "client", createdAt: this.#runner.now(), lastActiveAt: this.#runner.now(), ...(idle === undefined ? {} : { idleSeconds: idle }) };
     const ref: AggregateRef = { kind: "subscription", id };
     await this.#runner.command("events.subscribe", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
-      payload: { stream, kinds: body.kinds as unknown as string[], cooldown, batch, fromStart: command.fromStart === true },
-      build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }, ...(body.critical ? [{ type: "create" as const, ref: { kind: watcherKind(stream), id }, body: { subscription: id } as JsonObject }] : [])], detail: { stream } }),
+      payload: { stream, kinds: body.kinds as unknown as string[], cooldown, batch, fromStart: command.fromStart === true, idle: idle ?? null },
+      build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }, { type: "create", ref: { kind: listedKind(stream), id }, body: { subscription: id } as JsonObject }, ...(body.critical ? [{ type: "create" as const, ref: { kind: watcherKind(stream), id }, body: { subscription: id } as JsonObject }] : [])], detail: { stream } }),
     }));
     return { id };
   }
@@ -223,7 +255,7 @@ export class EventService {
         const current = await this.#runner.get(ref.kind, ref.id);
         const body = current!.body as unknown as SubscriptionBody;
         const cursor = Math.max(body.cursor, command.through);
-        const next: SubscriptionBody = { ...body, cursor, ...(command.woke === true ? { lastWakeAt: this.#runner.now() } : {}) };
+        const next: SubscriptionBody = { ...body, cursor, lastActiveAt: this.#runner.now(), ...(command.woke === true ? { lastWakeAt: this.#runner.now() } : {}) };
         return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current!.revision, body: next as unknown as JsonObject }], detail: { cursor } };
       },
     }));
@@ -293,22 +325,184 @@ export class EventService {
   async #mine(by: Principal, subscriptionId: string): Promise<{ sub: SubscriptionBody; id: string }> {
     const id = typeof subscriptionId === "string" && SUB.test(subscriptionId) ? subscriptionId : invalid("subscriptionId", "is not a subscription ID");
     const sub = (await this.#runner.get("subscription", id))?.body as unknown as SubscriptionBody | undefined;
-    if (sub === undefined || sub.subscriber !== by.id || sub.state !== "active") throw new DomainError("forbidden", `${by.id} has no such subscription`);
+    if (sub === undefined || sub.subscriber !== by.id) throw new DomainError("forbidden", `${by.id} has no such subscription`);
+    if (sub.state === "expired") throw new DomainError("invalid_transition", `the subscription expired after being idle; it holds the cursor at ${sub.expiredCursor ?? sub.cursor}: resume it`);
+    if (sub.state !== "active") throw new DomainError("forbidden", `${by.id} has no such subscription`);
     return { sub, id };
   }
 
-  /** The backlog of the slowest critical subscriber of the stream (those the controller relies on). Others never slow a producer. */
-  async #backlog(stream: string, head: HeadBody): Promise<number> {
-    let worst = 0;
+  /** The backlog of the slowest critical subscriber of the stream (those the controller relies on). Others never slow a producer. A watcher idle past its time is not counted and is named in `idle`. */
+  async #backlog(stream: string, head: HeadBody, ceiling: number, now: string): Promise<{ worst: number; idle: string[] }> {
+    let worst = 0; const idle: string[] = [];
     for (let after: string | undefined; ;) {
       const page = await this.#runner.list(watcherKind(stream), { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
       for (const w of page) {
         after = w.id;
         const s = (await this.#runner.get("subscription", w.id))?.body as unknown as SubscriptionBody | undefined;
-        if (s !== undefined && s.state === "active") worst = Math.max(worst, head.next - 1 - Math.max(s.cursor, head.floor - 1));
+        if (s === undefined || s.state !== "active") continue;
+        if (isIdle(s, ceiling, now)) { idle.push(w.id); continue; }
+        worst = Math.max(worst, head.next - 1 - Math.max(s.cursor, head.floor - 1));
       }
-      if (page.length < 200) return worst;
+      if (page.length < 200) return { worst, idle };
     }
+  }
+
+  /** The owner's idle ceiling: the setting, or the default. */
+  async #ceiling(): Promise<number> { return ((await this.#runner.get(SETTINGS.kind, SETTINGS.id))?.body as unknown as SettingsBody | undefined)?.idleSeconds ?? EVENT_LIMITS.idleDefault; }
+
+  /** Expires the named subscriptions for the record; one that is active again or raced with an acknowledgement is left alone. A failure here never fails the publish that found them (the next sweep does it). */
+  async #reap(ids: readonly string[]): Promise<void> {
+    for (const id of ids.slice(0, EVENT_LIMITS.sweep)) { try { await this.#expire(id); } catch { /* the sweep will find it again */ } }
+  }
+
+  // ---- idle expiry (card H06b) ----------------------------------------------------------------------------------------------
+
+  /** The owner sets how long a subscription may be idle before the system expires it (the default is 15 minutes). A subscriber may ask for a shorter time, never a longer one. Counts from the next check. */
+  async configureIdle(owner: Principal, command: NoActor & { idleSeconds: number }): Promise<void> {
+    if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} may not set the idle time`);
+    onlyKnown(command, ["commandId", "idleSeconds"]);
+    if (!Number.isSafeInteger(command.idleSeconds) || command.idleSeconds < EVENT_LIMITS.idleMin || command.idleSeconds > EVENT_LIMITS.idleMax) invalid("idleSeconds", `must be ${EVENT_LIMITS.idleMin} to ${EVENT_LIMITS.idleMax}`);
+    await this.#runner.command("events.idle-configure", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
+      payload: { idleSeconds: command.idleSeconds },
+      build: async () => {
+        const current = await this.#runner.get(SETTINGS.kind, SETTINGS.id);
+        const body = { idleSeconds: command.idleSeconds } as unknown as JsonObject;
+        return { ref: SETTINGS, creates: current === undefined, changes: [current === undefined ? { type: "create", ref: SETTINGS, body } : { type: "update", ref: SETTINGS, expectedRevision: current.revision, body }], detail: { idleSeconds: command.idleSeconds } };
+      },
+    }));
+  }
+
+  /** The subscriber says it is alive and working (a long batch in hand), so the idle time starts again. Acknowledging does the same. */
+  async heartbeat(by: Principal, command: NoActor & { subscriptionId: string }): Promise<void> {
+    onlyKnown(command, ["commandId", "subscriptionId"]);
+    const { id } = await this.#mine(by, command.subscriptionId);
+    const ref: AggregateRef = { kind: "subscription", id };
+    await this.#runner.command("events.heartbeat", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
+      payload: { subscriptionId: id },
+      build: async () => {
+        const current = await this.#runner.get(ref.kind, ref.id);
+        const sub = current!.body as unknown as SubscriptionBody;
+        if (sub.state !== "active") throw new DomainError("invalid_transition", "the subscription is not active");
+        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current!.revision, body: { ...sub, lastActiveAt: this.#runner.now() } as unknown as JsonObject }], detail: { subscriber: sub.subscriber } };
+      },
+    }));
+  }
+
+  /** Where a subscription stands, for its subscriber or the owner: whether it expired, and the cursor to resume from. */
+  async status(by: Principal, subscriptionId: string): Promise<IdleStatus> {
+    const id = typeof subscriptionId === "string" && SUB.test(subscriptionId) ? subscriptionId : invalid("subscriptionId", "is not a subscription ID");
+    const sub = (await this.#runner.get("subscription", id))?.body as unknown as SubscriptionBody | undefined;
+    if (sub === undefined || !(by.kind === "owner" || sub.subscriber === by.id)) throw new DomainError("forbidden", `${by.id} has no such subscription`);
+    return { state: sub.state, cursor: sub.cursor, lastActiveAt: lastActive(sub), idleSeconds: idleOf(sub, await this.#ceiling()), ...(sub.expiredAt === undefined ? {} : { expiredAt: sub.expiredAt }), ...(sub.expiredCursor === undefined ? {} : { expiredCursor: sub.expiredCursor }) };
+  }
+
+  /**
+   * Takes an expired subscription back (its subscriber only; a cancelled one stays cancelled). The cursor is where it was, so every event after the last acknowledged one is still served; if the
+   * cursor has meanwhile passed retention or the queue bound, the next `pull` says `reconcile` exactly as for any slow subscriber.
+   */
+  async resume(by: Principal, command: NoActor & { subscriptionId: string }): Promise<{ cursor: number }> {
+    onlyKnown(command, ["commandId", "subscriptionId"]);
+    const id = typeof command.subscriptionId === "string" && SUB.test(command.subscriptionId) ? command.subscriptionId : invalid("subscriptionId", "is not a subscription ID");
+    const ref: AggregateRef = { kind: "subscription", id };
+    await this.#runner.command("events.resume", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
+      payload: { subscriptionId: id },
+      build: async () => {
+        const current = await this.#runner.get(ref.kind, ref.id);
+        const sub = current?.body as unknown as SubscriptionBody | undefined;
+        if (current === undefined || sub === undefined || sub.subscriber !== by.id || sub.state === "cancelled") throw new DomainError("forbidden", `${by.id} has no such subscription`);
+        if (sub.state !== "expired") throw new DomainError("invalid_transition", "the subscription has not expired");
+        const { expiredAt: _a, expiredCursor: _c, noticePending: _n, ...rest } = sub;
+        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: { ...rest, state: "active", lastActiveAt: this.#runner.now() } as unknown as JsonObject }], detail: { subscriber: sub.subscriber, cursor: sub.cursor, expiredAt: sub.expiredAt ?? null } };
+      },
+    }));
+    return { cursor: ((await this.#runner.get(ref.kind, ref.id))!.body as unknown as SubscriptionBody).cursor };
+  }
+
+  /**
+   * The scheduler's call (the owner or a service): expires every subscription that has been idle for its time and delivers the Notices still owed. At most `EVENT_LIMITS.sweep` expiries per call, so call
+   * again while `more` is true. Streams that have never had an event are not looked at (nothing can be held back there).
+   */
+  async expireIdle(by: Principal): Promise<{ expired: string[]; noticed: number; noticeFailed: number; more: boolean }> {
+    if (!(by.kind === "owner" || by.kind === "service")) throw new DomainError("forbidden", `${by.id} may not expire subscriptions`);
+    const ceiling = await this.#ceiling(); const now = this.#runner.now();
+    const expired: string[] = []; let noticed = 0; let noticeFailed = 0; let more = false;
+    // A Notice that cannot be delivered never stops the sweep: the flag stays on the subscription and the next sweep tries again.
+    const owe = async (id: string, known?: ExpiryNotice): Promise<void> => { try { if (await this.#noticeOwed(id, known)) noticed++; } catch { noticeFailed++; } };
+    for (let afterHead: string | undefined; !more;) {
+      const heads = await this.#runner.list("events-head", { ...(afterHead === undefined ? {} : { afterId: afterHead }), limit: 200 });
+      for (const h of heads) {
+        if (more) break;
+        afterHead = h.id;
+        const stream = (h.body as unknown as HeadBody).stream;
+        for (let after: string | undefined; !more;) {
+          const page = await this.#runner.list(listedKind(stream), { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+          for (const entry of page) {
+            if (expired.length >= EVENT_LIMITS.sweep) { more = true; break; }
+            after = entry.id;
+            const sub = (await this.#runner.get("subscription", entry.id))?.body as unknown as SubscriptionBody | undefined;
+            if (sub === undefined || sub.state === "cancelled") continue;
+            if (sub.state === "active" && isIdle(sub, ceiling, now)) {
+              const done = await this.#expire(entry.id);
+              if (done !== undefined) { expired.push(entry.id); await owe(entry.id, done); }
+            } else if (sub.state === "expired" && sub.noticePending === true) await owe(entry.id);
+          }
+          if (page.length < 200) break;
+        }
+      }
+      if (heads.length < 200) break;
+    }
+    return { expired, noticed, noticeFailed, more };
+  }
+
+  /** Expires one subscription if it is (still) idle; says what to tell the owner when this call did it. Never calls the notifier: a slow channel must not slow a producer. */
+  async #expire(id: string): Promise<ExpiryNotice | undefined> {
+    const ref: AggregateRef = { kind: "subscription", id };
+    const first = (await this.#runner.get(ref.kind, ref.id))?.body as unknown as SubscriptionBody | undefined;
+    if (first === undefined || first.state !== "active") return undefined;
+    let notice: ExpiryNotice | undefined;
+    try {
+      // The command ID names the activity it expires after: a new acknowledgement makes a new ID, so an earlier expiry's record is never mistaken for this one.
+      await this.#runner.command("events.expire", { commandId: `expire-${id}-${lastActive(first)}`, actor: "events" }, async () => ({
+        payload: { subscriptionId: id },
+        build: async () => {
+          const current = await this.#runner.get(ref.kind, ref.id);
+          const sub = current?.body as unknown as SubscriptionBody | undefined;
+          const now = this.#runner.now(); const ceiling = await this.#ceiling();
+          if (current === undefined || sub === undefined || sub.state !== "active" || !isIdle(sub, ceiling, now)) throw new NotIdle();
+          const head = (await this.#runner.get("events-head", derivedId("sub", sub.stream)))?.body as unknown as HeadBody | undefined;
+          const pending = head === undefined ? 0 : Math.max(0, head.next - 1 - Math.max(sub.cursor, head.floor - 1));
+          const idleSeconds = idleOf(sub, ceiling);
+          const body: SubscriptionBody = { ...sub, state: "expired", expiredAt: now, expiredCursor: sub.cursor, ...(pending > 0 || sub.critical ? { noticePending: true } : {}) };
+          notice = { subscriptionId: id, subscriber: sub.subscriber, stream: sub.stream, cursor: sub.cursor, expiredAt: now, pending, idleSeconds, ...(sub.stream.startsWith("project:") ? { projectId: sub.stream.slice("project:".length) } : {}) };
+          return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: body as unknown as JsonObject }], detail: { subscriber: sub.subscriber, stream: sub.stream, cursor: sub.cursor, lastActiveAt: lastActive(sub), idleSeconds, critical: sub.critical, pending, noticed: pending > 0 || sub.critical }, contention: async () => new DomainError("stale_revision", "the subscription was acknowledged at the same moment") };
+        },
+      }));
+    } catch (error) {
+      if (error instanceof NotIdle) return undefined;
+      if (error instanceof DomainError && error.code === "stale_revision") return undefined;
+      throw error;
+    }
+    return notice;
+  }
+
+  /** Delivers the Notice an expiry owes, then clears the flag. A failed delivery leaves the flag for the next sweep. */
+  async #noticeOwed(id: string, known?: ExpiryNotice): Promise<boolean> {
+    const ref: AggregateRef = { kind: "subscription", id };
+    const current = await this.#runner.get(ref.kind, ref.id);
+    const sub = current?.body as unknown as SubscriptionBody | undefined;
+    if (current === undefined || sub === undefined || sub.state !== "expired" || sub.noticePending !== true) return false;
+    if (this.#notify === undefined) return false;
+    const head = (await this.#runner.get("events-head", derivedId("sub", sub.stream)))?.body as unknown as HeadBody | undefined;
+    const pending = known?.pending ?? (head === undefined ? 0 : Math.max(0, head.next - 1 - Math.max(sub.cursor, head.floor - 1)));
+    await this.#notify(known ?? { subscriptionId: id, subscriber: sub.subscriber, stream: sub.stream, cursor: sub.expiredCursor ?? sub.cursor, expiredAt: sub.expiredAt!, pending, idleSeconds: idleOf(sub, await this.#ceiling()), ...(sub.stream.startsWith("project:") ? { projectId: sub.stream.slice("project:".length) } : {}) });
+    const { noticePending: _n, ...rest } = sub;
+    try {
+      await this.#runner.command("events.noticed", { commandId: `noticed-${id}-${sub.expiredAt}`, actor: "events" }, async () => ({
+        payload: { subscriptionId: id },
+        build: async () => ({ ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: rest as unknown as JsonObject }], detail: { subscriber: sub.subscriber } }),
+      }));
+    } catch (error) { if (!(error instanceof DomainError && error.code === "stale_revision")) throw error; }
+    return true;
   }
 
   /** Ends a subscription (its subscriber or the owner). Its events are no longer kept for it. */
@@ -328,3 +522,8 @@ export class EventService {
   }
 }
 void checkRevision;
+
+/** Wires idle-expiry notices to the owner notifications (U11): a `maintenance` item pointing at the subscription, with the cursor and the number of events left unhandled. U11b's Needs-you view is not in code yet; the notice reaches the owner's inbox and digest like any maintenance report. */
+export const noticeThroughNotifications = (notifications: { emitFromController(command: { commandId: string; kind: "maintenance"; ref: { kind: string; id: string }; detail?: string; projectId?: string }): Promise<unknown> }): NotifyExpiry => async (n) => {
+  await notifications.emitFromController({ commandId: `events-expired-${n.subscriptionId}-${n.expiredAt}`, kind: "maintenance", ref: { kind: "subscription", id: n.subscriptionId }, detail: `${n.subscriber} stopped acknowledging events on ${n.stream} for ${n.idleSeconds}s; it was expired at event ${n.cursor} with ${n.pending} unhandled`, ...(n.projectId === undefined ? {} : { projectId: n.projectId }) });
+};
