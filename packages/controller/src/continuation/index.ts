@@ -1,1 +1,1 @@
-export { CONTINUATION_LIMITS, ContinuationService, type ContinuationBody, type ContinuationInput, type ResumeBody } from "./continuation.js";
+export { CONTINUATION_LIMITS, ContinuationService, RESTORE_METHODS, type ContinuationBody, type ContinuationInput, type ResumeBody, type RestoreMethod } from "./continuation.js";

@@ -52,7 +52,11 @@ export interface ContinuationBody extends Omit<ContinuationInput, "durable"> {
   readonly capturedAt: string;
 }
 interface HeadBody { readonly identity: string; readonly next: number; readonly latestComplete: number; readonly latestCompleteId?: string; readonly projectId: string }
-export interface ResumeBody { readonly taskId: string; readonly continuationId: string; readonly identity: string; readonly model: { readonly provider: string; readonly id: string }; readonly previousModel?: { readonly provider: string; readonly id: string }; readonly modelChanged: boolean; readonly after: "restart" | "model-change" | "continue"; readonly by: string; readonly at: string }
+export interface ResumeBody { readonly taskId: string; readonly continuationId: string; readonly identity: string; readonly model: { readonly provider: string; readonly id: string }; readonly previousModel?: { readonly provider: string; readonly id: string }; readonly modelChanged: boolean; readonly after: "restart" | "model-change" | "continue"; /** How the context came back, as the host found it: never inferred by this service. Absent when the host did not say. */ readonly restoredBy?: RestoreMethod; readonly by: string; readonly at: string }
+
+/** `native-restore`: the harness continued the same stored history (its checkpoint verified). `reconstruction`: the context was rebuilt from recorded material, so it is not the original. `restart`: nothing of the conversation came back; the work begins again. */
+export type RestoreMethod = "native-restore" | "reconstruction" | "restart";
+export const RESTORE_METHODS: readonly RestoreMethod[] = ["native-restore", "reconstruction", "restart"];
 
 export const CONTINUATION_LIMITS = { items: 200, text: 2000, ranges: 200, tools: 50 } as const;
 const IDENTITY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
@@ -138,19 +142,20 @@ export class ContinuationService {
   }
 
   /** Continues a task from a complete continuation (the latest by default) in the same conversation identity, after a restart or with a different model. */
-  async resume(by: Principal, command: NoActor & { taskId: string; continuationId?: string; model: { provider: string; id: string }; previousModel?: { provider: string; id: string }; after: "restart" | "model-change" | "continue" }): Promise<{ identity: string; continuation: ContinuationBody & { id: string }; modelChanged: boolean; replayed: boolean }> {
-    onlyKnown(command, ["commandId", "taskId", "continuationId", "model", "previousModel", "after"]);
+  async resume(by: Principal, command: NoActor & { taskId: string; continuationId?: string; model: { provider: string; id: string }; previousModel?: { provider: string; id: string }; after: "restart" | "model-change" | "continue"; restoredBy?: RestoreMethod }): Promise<{ identity: string; continuation: ContinuationBody & { id: string }; modelChanged: boolean; restoredBy?: RestoreMethod; replayed: boolean }> {
+    onlyKnown(command, ["commandId", "taskId", "continuationId", "model", "previousModel", "after", "restoredBy"]);
     const taskId = checkTaskId(command.taskId);
     const task = (await this.#runner.get("task", taskId))?.body as unknown as TaskBody | undefined;
     if (task === undefined || !(by.kind === "owner" || by.kind === "host" || by.kind === "service" || allows(by, "attempt.work", task.projectId, { resource: { kind: "task", id: taskId } }))) throw new DomainError("forbidden", `${by.id} may not resume that task`);
     if (!["restart", "model-change", "continue"].includes(command.after)) invalid("after", "must be restart, model-change or continue");
+    if (command.restoredBy !== undefined && !RESTORE_METHODS.includes(command.restoredBy)) invalid("restoredBy", "must be native-restore, reconstruction or restart");
     const model = this.#model(command.model, "model");
     const previous = command.previousModel === undefined ? undefined : this.#model(command.previousModel, "previousModel");
     const rid = derivedId("cnr", scopedCommandId(by.id, command.commandId));
     const ref: AggregateRef = { kind: "continuation-resume", id: rid };
     let chosen: (ContinuationBody & { id: string }) | undefined;
     const r = await this.#runner.command("continuation.resume", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
-      payload: { taskId, continuationId: command.continuationId ?? null, model: model as unknown as JsonObject, previousModel: (previous ?? null) as unknown as JsonObject, after: command.after },
+      payload: { taskId, continuationId: command.continuationId ?? null, model: model as unknown as JsonObject, previousModel: (previous ?? null) as unknown as JsonObject, after: command.after, restoredBy: command.restoredBy ?? null },
       build: async () => {
         const head = (await this.#runner.get("continuation-head", taskId))?.body as unknown as HeadBody | undefined;
         if (head === undefined) throw new DomainError("not_found", "no continuation was captured for that task");
@@ -166,7 +171,7 @@ export class ContinuationService {
         if (c.status !== "complete") throw new DomainError("invalid_transition", `that continuation is incomplete (${c.problem ?? "unverified"}) and cannot be resumed`);
         chosen = c;
         const modelChanged = previous !== undefined && (previous.provider !== model.provider || previous.id !== model.id);
-        const body: ResumeBody = { taskId, continuationId: c.id, identity: head.identity, model, ...(previous === undefined ? {} : { previousModel: previous }), modelChanged, after: command.after, by: by.id, at: this.#runner.now() };
+        const body: ResumeBody = { taskId, continuationId: c.id, identity: head.identity, model, ...(previous === undefined ? {} : { previousModel: previous }), modelChanged, after: command.after, ...(command.restoredBy === undefined ? {} : { restoredBy: command.restoredBy }), by: by.id, at: this.#runner.now() };
         return { ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { taskId, continuationId: c.id, modelChanged } };
       },
     }));
@@ -175,7 +180,7 @@ export class ContinuationService {
       const a = (await this.#runner.get("continuation", done.continuationId))!;
       chosen = { ...(a.body as unknown as ContinuationBody), id: a.id };
     }
-    return { identity: done.identity, continuation: chosen, modelChanged: done.modelChanged, replayed: r.replayed };
+    return { identity: done.identity, continuation: chosen, modelChanged: done.modelChanged, ...(done.restoredBy === undefined ? {} : { restoredBy: done.restoredBy }), replayed: r.replayed };
   }
 
   /** The recovery service reads the scratch records a continuation points to, only through the inspection service, which leaves a record the agent can see for each. */

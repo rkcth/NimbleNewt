@@ -100,6 +100,14 @@ for (const backend of backends) {
       const first = await svc.resume(host, { commandId: rid, taskId: ta, model: { provider: "local", id: "m1" }, after: "continue" });
       assert.equal((await svc.resume(host, { commandId: rid, taskId: ta, model: { provider: "local", id: "m1" }, after: "continue" })).replayed, true);
       void first;
+      // The resume record labels how the context came back; the label is the host's word, is part of the command's identity, and is never made up.
+      assert.equal(restart.restoredBy, undefined, "an unlabelled resume carries no label");
+      const lid = cid("r3");
+      const labelled = await svc.resume(host, { commandId: lid, taskId: ta, model: { provider: "local", id: "m1" }, after: "restart", restoredBy: "native-restore" });
+      assert.deepEqual([labelled.restoredBy, (await svc.resume(host, { commandId: lid, taskId: ta, model: { provider: "local", id: "m1" }, after: "restart", restoredBy: "native-restore" })).replayed], ["native-restore", true]);
+      await assert.rejects(() => svc.resume(host, { commandId: lid, taskId: ta, model: { provider: "local", id: "m1" }, after: "restart", restoredBy: "reconstruction" }), DomainError);
+      for (const label of ["reconstruction", "restart"] as const) assert.equal((await svc.resume(host, { commandId: cid("r4"), taskId: ta, model: { provider: "local", id: "m1" }, after: "restart", restoredBy: label })).restoredBy, label);
+      await refuses("invalid_command", () => svc.resume(host, { commandId: cid("r5"), taskId: ta, model: { provider: "local", id: "m1" }, after: "restart", restoredBy: "exact" as never }), (e) => assert.equal(e.field, "restoredBy"));
       await refuses("forbidden", () => svc.resume(stranger, { commandId: cid("r"), taskId: ta, model: { provider: "local", id: "m1" }, after: "restart" }));
       await refuses("not_found", () => svc.resume(host, { commandId: cid("r"), taskId: tb, model: { provider: "local", id: "m1" }, after: "restart" }));
 

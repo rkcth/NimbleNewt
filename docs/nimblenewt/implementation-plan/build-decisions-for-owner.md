@@ -67,3 +67,7 @@ Written during the long coding session of 2026-10-22. By the guiding principle t
 ## H13 (event source adapters and watchers)
 - **Event wake-ups only wake an existing active attempt** (starting an attempt belongs to H12); a handling has a 900 s lease (extendable up to 4 times and 24 h in total) after which it fails visibly as `lease`; at most 2 open handlings per owner; per-run source cap 200 (max 1000); only the owner or a service sets up watches; only the owner releases a held loop.
 - **A race in the shared command runner was fixed:** a concurrent duplicate of the same command now gets the recorded result instead of `command_conflict` (a different command with the same ID is still a conflict).
+
+## G09 (retained-context inquiry and mid-generation interruption proof)
+- **`restoredBy` on a resume stays optional;** the label (native restore, reconstruction or restart) is the host's word until H12 owns resume. `useModel` is an explicit adapter method with no audit event yet (the controller starting to change providers must audit it, a limit for H12/R04).
+- **The proof shows the production C05, L05, H04 and C04 services working with the real Pi adapter,** but no production code yet carries a branch resume result into the adapter conversation (the test joins them), and the partial-tool-call relay to L05 is a stand-in.

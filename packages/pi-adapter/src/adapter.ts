@@ -710,6 +710,17 @@ export class AdapterConversation implements ConversationPort {
     }
   }
 
+  /**
+   * Moves this conversation to another model, for example another provider, from its next request on (card G09: continuity across a provider change). Nothing in the history changes and nothing is
+   * summarised: the next request carries the same context, answered by the new model. The model must be known to the `Models` the adapter was opened with, or requests end `unanswered` with reason
+   * `no_model`. Applies to this conversation only; its branches and tasks keep the model they were created with, so move each one that should change. Refused while interrupted work is held.
+   */
+  async useModel(model: { readonly provider: string; readonly modelId: string }): Promise<void> {
+    await this.shared.hold.assertRunnable();
+    await this.assertActive();
+    await this.conversation.configure({ model }, context);
+  }
+
   /** Compact the conversation's model-visible context now. Older entries stay in storage and results stay readable. */
   async compact(instructions?: string): Promise<void> {
     await this.shared.hold.assertRunnable();
