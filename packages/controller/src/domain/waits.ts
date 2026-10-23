@@ -4,6 +4,7 @@ import { isStorageError } from "../storage/errors.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject, OperationInput, OutboxEntry, TimerClaim } from "../storage/types.js";
 import type { AssignmentService } from "./assignments.js";
 import { fence as checkFence, type Fence } from "./assignment-model.js";
+import { mergeChanges } from "./changes.js";
 import { DomainError } from "./errors.js";
 import { taskEventEntry } from "./events.js";
 import { derivedId } from "./ids.js";
@@ -167,7 +168,7 @@ export class WaitService {
   }
 
   /** The named resolver answers an open wait: the task is released and the deadline cancelled. */
-  answerWait(command: AnswerWait): Promise<CommandResult> {
+  answerWait(command: AnswerWait, options: { beforeCommit?: () => Promise<readonly Change[]> } = {}): Promise<CommandResult> {
     return this.#runner.command("wait.answer", command, async (meta) => {
       onlyKnown(command, ["commandId", "actor", "waitId", "expectedRevision", "resolverId", "answer"]);
       const waitId = this.#waitId(command.waitId);
@@ -185,7 +186,9 @@ export class WaitService {
           const taskBody = task?.body as unknown as TaskBody | undefined;
           if (task === undefined || taskBody === undefined || taskBody.state !== "blocked") throw new DomainError("wait_closed", `task ${wait.taskId} is ${taskBody?.state ?? "missing"}, not waiting; the answer was not applied`, { field: "waitId" });
           const next: WaitBody = { ...wait, state: "answered", answer, answeredBy: meta.actor, closedAt: this.#runner.now(), outcome: "resumed" };
-          return this.#close(waitId, current.revision, next, wait.taskId, task.revision, taskBody, "ready", { answeredBy: meta.actor });
+          const closed = await this.#close(waitId, current.revision, next, wait.taskId, task.revision, taskBody, "ready", { answeredBy: meta.actor });
+          // A caller's own guard (for example a pause check) is read now and commits with the answer; it may refuse by throwing.
+          return options.beforeCommit === undefined ? closed : { ...closed, changes: mergeChanges(closed.changes, await options.beforeCommit()) };
         },
       };
     });

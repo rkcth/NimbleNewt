@@ -31,3 +31,4 @@ export * from "./chat/index.js";
 export * from "./status/index.js";
 export * from "./meetings/index.js";
 export * from "./standups/index.js";
+export * from "./messaging/index.js";
