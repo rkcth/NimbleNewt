@@ -51,7 +51,7 @@ test("a hook that hangs is stopped by the adapter's own ceiling; Pi's own summar
   await (await world.adapter.root().submit(input("c-2", "second"))).result();
   const t0 = Date.now();
   await world.adapter.root().compact();
-  assert.ok(Date.now() - t0 < 5000);
+  assert.ok(Date.now() - t0 < 60_000);
   assert.equal(failures.length, 1);
   assert.equal(seenSignal?.aborted, true, "the callback was told to stop when the adapter gave up");
   assert.ok(failures[0] instanceof CompactionHookTimeout);

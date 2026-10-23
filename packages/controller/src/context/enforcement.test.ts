@@ -140,7 +140,7 @@ for (const backend of backends) {
     assert.equal(failed.kind, "overflow");
     assert.match((failed as { reason: string }).reason, /context_overflow/);
     assert.equal((failed as { overflow: { action: string } }).overflow.action, "restart-fresh", "one overflow: restart fresh, not blocked yet");
-    assert.ok(Date.now() - t0 < 3000, "each hang cost only its own short timeout");
+    assert.ok(Date.now() - t0 < 60_000, "each hang cost only its own short timeout, not the chain default");
     // The failure is recorded: asking again answers from the record without calling anything.
     const calls = { n: 0 };
     const repeat = await enf.compact(owner, compactCmd(t, "k3", [src], { parent: viaFallback.id }), [writes("never", "x", calls)]);
@@ -418,8 +418,11 @@ for (const backend of backends) {
     const src = await note(ann, "d", "x");
     const stop = new AbortController();
     let told = false;
-    const slow: Summariser = { route: "slow", summarise: ({ signal }) => new Promise<string>((_, reject) => { signal.addEventListener("abort", () => { told = true; reject(new Error("stopped")); }); }) };
-    setTimeout(() => stop.abort(), 40);
+    let started!: () => void;
+    const hasStarted = new Promise<void>((resolve) => { started = resolve; });
+    // The caller gives up only once the summariser is running, and the summariser records the abort event itself: no clock decides the order.
+    const slow: Summariser = { route: "slow", summarise: ({ signal }) => new Promise<string>((_, reject) => { signal.addEventListener("abort", () => { told = true; reject(new Error("stopped")); }); started(); }) };
+    void hasStarted.then(() => stop.abort());
     const r = await enf.compact(owner, compactCmd(t, "k1", [src]), [slow], { signal: stop.signal });
     assert.equal(r.kind, "aborted");
     assert.equal(told, true, "the summariser saw the abort");

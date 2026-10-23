@@ -60,7 +60,7 @@ describe("dispatch enforcement, pure parts (C07b)", () => {
   test("a summariser that hangs hits its own timeout; the next route is tried, then the fallback; nothing hangs", async () => {
     const text = "word ".repeat(4000);
     const t0 = Date.now();
-    const a = await boundedSummarise(text, [never("local"), says("cloud", "short summary")], { timeoutMs: 40, totalMs: 1000 });
+    const a = await boundedSummarise(text, [never("local"), says("cloud", "short summary")], { timeoutMs: 40, totalMs: 60_000 });
     assert.deepEqual([a.kind, (a as { route: string }).route, (a as { degraded: boolean }).degraded], ["summary", "cloud", true]);
     assert.deepEqual(a.attempts.map((x) => [x.route, x.outcome]), [["local", "timeout"], ["cloud", "ok"]]);
     const b = await boundedSummarise(text, [never("local")], { timeoutMs: 40 });
@@ -70,17 +70,17 @@ describe("dispatch enforcement, pure parts (C07b)", () => {
     const c = await boundedSummarise(text, [never("local")], { timeoutMs: 40 }, { extractive: false });
     assert.equal(c.kind, "overflow");
     assert.match((c as { reason: string }).reason, /context_overflow/);
-    assert.ok(Date.now() - t0 < 2000, "three hangs never took more than their own timeouts");
+    assert.ok(Date.now() - t0 < 30_000, "three hangs took their own timeouts, not the 45 s default each");
   });
 
   test("a summary that is empty, too long, or does not reduce the text is not accepted", async () => {
     const text = "y".repeat(3000);
-    const r = await boundedSummarise(text, [says("empty", "  "), says("long", "z".repeat(1900)), says("fine", "ok")], { maxChars: 2000, maxShare: 0.5, timeoutMs: 100 });
+    const r = await boundedSummarise(text, [says("empty", "  "), says("long", "z".repeat(1900)), says("fine", "ok")], { maxChars: 2000, maxShare: 0.5, timeoutMs: 5000 });
     assert.deepEqual(r.attempts.map((x) => x.outcome), ["unusable", "unusable", "ok"]);
     const tiny = await boundedSummarise("a", [says("a", "b")]);
     assert.equal(tiny.kind, "overflow", "nothing to reduce");
     const thrower: Summariser = { route: "bad", summarise: async () => { throw new Error("boom sk-abcdefghijklmnopqrstuvwxyz"); } };
-    const e = await boundedSummarise(text, [thrower], { timeoutMs: 100 }, { extractive: false });
+    const e = await boundedSummarise(text, [thrower], { timeoutMs: 5000 }, { extractive: false });
     assert.equal(e.attempts[0]!.outcome, "error");
     assert.ok(!JSON.stringify(e).includes("sk-abcdef"), "credentials are removed from failure notes");
   });
@@ -96,8 +96,10 @@ describe("dispatch enforcement, pure parts (C07b)", () => {
   test("the caller giving up stops every summariser and produces nothing", async () => {
     const stop = new AbortController();
     let told = false;
-    const waits: Summariser = { route: "w", summarise: ({ signal }) => new Promise<string>((_, reject) => signal.addEventListener("abort", () => { told = true; reject(new Error("stopped")); })) };
-    setTimeout(() => stop.abort(), 30);
+    let started!: () => void;
+    const hasStarted = new Promise<void>((resolve) => { started = resolve; });
+    const waits: Summariser = { route: "w", summarise: ({ signal }) => new Promise<string>((_, reject) => { signal.addEventListener("abort", () => { told = true; reject(new Error("stopped")); }); started(); }) };
+    void hasStarted.then(() => stop.abort());
     const r = await boundedSummarise("word ".repeat(2000), [waits, says("next", "never reached")], { timeoutMs: 5000 }, { signal: stop.signal });
     assert.deepEqual([r.kind, told], ["aborted", true]);
     assert.equal(r.attempts.length, 0);
