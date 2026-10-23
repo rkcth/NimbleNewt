@@ -110,8 +110,8 @@ const plain = (value: unknown, field: string, max: number): string => {
   if (redactText(out) !== out) invalid(field, "looks like a credential or key; those are not recorded");
   return out;
 };
-const keyOf = (s: SourceRef): string => (s.kind === "desk-record" ? `d:${s.id}` : `h:${s.scopeId}:${s.seq}`);
-const normal = (s: SourceRef): SourceRef => (s.kind === "desk-record" ? { kind: "desk-record", id: s.id } : { kind: "history-entry", scopeId: s.scopeId, seq: s.seq });
+const keyOf = (s: SourceRef): string => (s.kind === "desk-record" ? `d:${s.id}` : s.kind === "owner-decision" ? `o:${s.id}` : `h:${s.scopeId}:${s.seq}`);
+const normal = (s: SourceRef): SourceRef => (s.kind === "desk-record" ? { kind: "desk-record", id: s.id } : s.kind === "owner-decision" ? { kind: "owner-decision", id: s.id } : { kind: "history-entry", scopeId: s.scopeId, seq: s.seq });
 
 /**
  * Retained context branches (card C05). A branch is the controller's record of a side line of work begun from a task: an inquiry about its status, an assessment, a detour.

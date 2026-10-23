@@ -12,6 +12,7 @@ import { allows, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
+import type { DecisionGuard } from "../decisions/records.js";
 import { canonicalJson, sha256 } from "../storage/json.js";
 import type { Aggregate, AggregateRef, Change, EffectEntry, JsonObject } from "../storage/types.js";
 
@@ -92,7 +93,7 @@ export interface RecordChunk extends NoActor {
   readonly toolCall?: { readonly id: string; readonly name?: string; readonly argumentsDelta?: string; readonly done?: boolean };
 }
 
-export type RefusalReason = "held" | "paused" | "interrupted" | "stale" | "streaming" | "incomplete" | "admitted";
+export type RefusalReason = "held" | "paused" | "decision" | "interrupted" | "stale" | "streaming" | "incomplete" | "admitted";
 /** A refusal that says why in a form a program can act on (the command itself was well formed). */
 export class GenerationRefused extends DomainError {
   constructor(readonly reason: RefusalReason, message: string) {
@@ -122,7 +123,7 @@ const clean = (body: object): JsonObject => Object.fromEntries(Object.entries(bo
 
 export interface GenerationServiceOptions extends RunnerOptions {
   /** Test seam: runs between reading the gate for an effect start and committing the claim, to stage a pause landing in that window. */
-  readonly testHooks?: { readonly afterGuardRead?: () => Promise<void>; /** Between reading the pause gates and committing, in `begin` and `admitEffect`. */ readonly afterPauseRead?: () => Promise<void> };
+  readonly testHooks?: { readonly afterGuardRead?: () => Promise<void>; /** Between reading the pause gates and committing, in `begin` and `admitEffect`. */ readonly afterPauseRead?: () => Promise<void>; /** Between reading the owner's decisions (card C08) and committing, in `begin`, `admitEffect` and `execute`. */ readonly afterDecisionRead?: () => Promise<void> };
 }
 
 /**
@@ -145,17 +146,19 @@ export class GenerationService {
   readonly #assignments: AssignmentService | undefined;
   readonly #effects: EffectService | undefined;
   readonly #pauses: PauseGuard | undefined;
+  readonly #decisions: DecisionGuard | undefined;
   readonly #hooks: GenerationServiceOptions["testHooks"];
 
-  private constructor(runner: CommandRunner, deps: { assignments?: AssignmentService; effects?: EffectService; pauses?: PauseGuard }, options: GenerationServiceOptions) {
+  private constructor(runner: CommandRunner, deps: { assignments?: AssignmentService; effects?: EffectService; pauses?: PauseGuard; decisions?: DecisionGuard }, options: GenerationServiceOptions) {
     this.#runner = runner;
     this.#assignments = deps.assignments;
     this.#effects = deps.effects;
     this.#pauses = deps.pauses;
+    this.#decisions = deps.decisions;
     this.#hooks = options.testHooks;
   }
 
-  static withEpoch(storage: ConstructorParameters<typeof CommandRunner>[0], epoch: number, deps: { assignments?: AssignmentService; effects?: EffectService; pauses?: PauseGuard } = {}, options: GenerationServiceOptions = {}): GenerationService {
+  static withEpoch(storage: ConstructorParameters<typeof CommandRunner>[0], epoch: number, deps: { assignments?: AssignmentService; effects?: EffectService; pauses?: PauseGuard; decisions?: DecisionGuard } = {}, options: GenerationServiceOptions = {}): GenerationService {
     return new GenerationService(new CommandRunner(storage, epoch, options), deps, options);
   }
 
@@ -177,7 +180,7 @@ export class GenerationService {
           const gate = await this.#gate(taskId, task.projectId);
           if (gate.body.hold !== undefined) throw new GenerationRefused("held", `task ${taskId} is held (${gate.body.hold.mode}: ${gate.body.hold.reason}); no generation begins until it is released`);
           if (bound !== gate.body.contextRevision) throw new GenerationRefused("stale", `context revision ${bound} is not the current one (${gate.body.contextRevision})`);
-          const paused = await this.#pauseChanges(taskId);
+          const paused = [...(await this.#pauseChanges(taskId)), ...(await this.#decisionChanges(taskId, "start"))];
           const guard = fence === undefined ? undefined : await this.#assignments!.guardFor(fence).check(taskId);
           const at = this.#runner.now();
           const changes: Change[] = [];
@@ -439,7 +442,7 @@ export class GenerationService {
           if (call === undefined) invalid("toolCallId", "is not a tool call of this generation");
           const refusal = this.#blocked(gate.body, run);
           if (refusal !== undefined) throw refusal;
-          const paused = await this.#pauseChanges(run.taskId);
+          const paused = [...(await this.#pauseChanges(run.taskId)), ...(await this.#decisionChanges(run.taskId, "effect"))];
           if (call!.state === "admitted") throw new GenerationRefused("admitted", `tool call ${call!.id} is already admitted`);
           if (call!.state === "withdrawn") throw new GenerationRefused("interrupted", `tool call ${call!.id} was withdrawn`);
           if (call!.state !== "complete" && call!.state !== "held") throw new GenerationRefused("incomplete", `tool call ${call!.id} is ${call!.state}: only a complete call becomes an effect`);
@@ -473,7 +476,7 @@ export class GenerationService {
       const gate = await this.#runner.get("generation-gate", gateIdOf(id));
       const hold = (gate?.body as unknown as GateBody | undefined)?.hold;
       if (hold !== undefined) throw new GenerationRefused("held", `task ${id} is held (${hold.mode}: ${hold.reason}); no new effect starts until it is released`);
-      const paused = await this.#pauseChanges(id);
+      const paused = [...(await this.#pauseChanges(id)), ...(await this.#decisionChanges(id, "effect"))];
       return gate === undefined ? paused : mergeChanges([{ type: "check", ref: { kind: "generation-gate", id: gateIdOf(id) }, expectedRevision: gate.revision }, ...paused]);
     };
   }
@@ -501,7 +504,7 @@ export class GenerationService {
         const current = await this.#load(found.id);
         const refusal = this.#blocked(gate.body, current.body);
         if (refusal !== undefined) throw refusal;
-        const paused = await this.#pauseChanges(run.taskId);
+        const paused = [...(await this.#pauseChanges(run.taskId)), ...(await this.#decisionChanges(run.taskId, "effect"))];
         await this.#hooks?.afterGuardRead?.();
         return mergeChanges([{ type: "check", ref: gate.ref, expectedRevision: gate.revision }, { type: "check", ref: { kind: "generation-run", id: found.id }, expectedRevision: current.revision }, ...paused]);
       },
@@ -573,6 +576,15 @@ export class GenerationService {
     const g = await this.#pauses.guard(taskId);
     await this.#hooks?.afterPauseRead?.();
     if (g.blockedBy.length > 0) throw new GenerationRefused("paused", `task ${taskId} is paused (${g.blockedBy.map((s) => `${s.kind} ${s.id}`).join(", ")}); no new work starts until it is resumed`);
+    return g.changes;
+  }
+
+  /** Refuses (reason `decision`) while an owner gate or a decision the task's work relied on stands in the way (card C08); otherwise the revision checks to commit with the caller's change. */
+  async #decisionChanges(taskId: string, purpose: "start" | "effect"): Promise<readonly Change[]> {
+    if (this.#decisions === undefined) return [];
+    const g = await this.#decisions.guard(taskId, purpose);
+    await this.#hooks?.afterDecisionRead?.();
+    if (g.blockedBy.length > 0) throw new GenerationRefused("decision", `task ${taskId} may not continue: ${g.blockedBy.join("; ")}`);
     return g.changes;
   }
 

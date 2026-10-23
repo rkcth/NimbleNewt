@@ -23,7 +23,7 @@ const window = (value: unknown): number => (Number.isSafeInteger(value) ? (value
 const cleanReason = (value: unknown, field: string): string => redactText(text(value, field, { min: 1, max: 2000, multiline: true })).slice(0, ENFORCEMENT_LIMITS.reason);
 const sameSource = (a: SourceRef, b: SourceRef): boolean => JSON.stringify(a) === JSON.stringify(b);
 const handoffId = (taskId: string, attemptId: string, source: string): string => derivedId("hof", `${taskId}\0${attemptId}\0${source}`);
-const label = (s: SourceRef): string => (s.kind === "desk-record" ? s.id : `${s.scopeId}#${s.seq}`);
+const label = (s: SourceRef): string => (s.kind === "desk-record" || s.kind === "owner-decision" ? s.id : `${s.scopeId}#${s.seq}`);
 
 export interface AdmissionBody {
   readonly type: "first-call" | "route-change";

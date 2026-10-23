@@ -8,11 +8,12 @@ import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import { sha256 } from "../storage/json.js";
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
+import { canReadDecision, decisionText, type OwnerDecisionBody } from "../decisions/records.js";
 import type { DeskService } from "./desks.js";
 import type { HistoryService } from "./histories.js";
 
-/** A link to the original: one desk record, or one entry of a history. Following it is checked against the reader's rights every time. */
-export type SourceRef = { readonly kind: "desk-record"; readonly id: string } | { readonly kind: "history-entry"; readonly scopeId: string; readonly seq: number };
+/** A link to the original: one desk record, one entry of a history, or one owner decision (card C08; its text is the owner's wording, marked non-authoritative once superseded). Following it is checked against the reader's rights every time. */
+export type SourceRef = { readonly kind: "desk-record"; readonly id: string } | { readonly kind: "history-entry"; readonly scopeId: string; readonly seq: number } | { readonly kind: "owner-decision"; readonly id: string };
 
 export interface Hit {
   readonly source: SourceRef;
@@ -82,6 +83,10 @@ function checkSource(value: unknown, field: string): SourceRef {
     for (const key of Object.keys(e)) if (key !== "kind" && key !== "id") invalid(`${field}.${key}`, "is not a field of a desk-record link");
     return { kind: "desk-record", id: typeof e["id"] === "string" && RECORD_ID.test(e["id"]) ? e["id"] : invalid(`${field}.id`, "is not a desk record ID") };
   }
+  if (e["kind"] === "owner-decision") {
+    for (const key of Object.keys(e)) if (key !== "kind" && key !== "id") invalid(`${field}.${key}`, "is not a field of an owner-decision link");
+    return { kind: "owner-decision", id: typeof e["id"] === "string" && /^dec-[a-z2-7]{20}$/.test(e["id"]) ? e["id"] : invalid(`${field}.id`, "is not an owner decision ID") };
+  }
   if (e["kind"] === "history-entry") {
     for (const key of Object.keys(e)) if (key !== "kind" && key !== "scopeId" && key !== "seq") invalid(`${field}.${key}`, "is not a field of a history-entry link");
     const seq = e["seq"];
@@ -91,10 +96,10 @@ function checkSource(value: unknown, field: string): SourceRef {
       seq: typeof seq === "number" && Number.isSafeInteger(seq) && seq >= 1 ? seq : invalid(`${field}.seq`, "must be a whole number of at least 1"),
     };
   }
-  return invalid(`${field}.kind`, "must be desk-record or history-entry");
+  return invalid(`${field}.kind`, "must be desk-record, history-entry or owner-decision");
 }
 const sameSource = (a: SourceRef, b: SourceRef): boolean => JSON.stringify(a) === JSON.stringify(b);
-const keyOf = (s: SourceRef): string => (s.kind === "desk-record" ? `d:${s.id}` : `h:${s.scopeId}:${String(s.seq).padStart(9, "0")}`);
+const keyOf = (s: SourceRef): string => (s.kind === "desk-record" ? `d:${s.id}` : s.kind === "owner-decision" ? `o:${s.id}` : `h:${s.scopeId}:${String(s.seq).padStart(9, "0")}`);
 
 function terms(query: unknown): string[] {
   const q = text(query, "query", { min: 1, max: RETRIEVAL_LIMITS.query });
@@ -218,6 +223,12 @@ export class RetrievalService {
         const record = await this.#desks.read(principal, ref.id);
         // The digest covers what a reader relies on: the text, the title and whether the record is still the current one (a record that has been superseded is no longer as it was).
         return { text: record.body, digest: sha256(JSON.stringify([record.status, record.title, record.body])), projectId: record.projectId };
+      }
+      if (ref.kind === "owner-decision") {
+        const found = await this.#runner.get("decision", ref.id);
+        const d = found?.body as unknown as OwnerDecisionBody | undefined;
+        // The digest covers what a reader relies on: the wording and reading, and whether the decision is still authoritative.
+        return d === undefined || !canReadDecision(principal, d) ? undefined : { text: decisionText(d, ref.id), digest: sha256(JSON.stringify([d.state, d.statement, d.wording, d.supersededBy ?? null])), projectId: d.projectId };
       }
       const scope = await this.#histories.getScope(principal, ref.scopeId);
       if (scope === undefined) return undefined;

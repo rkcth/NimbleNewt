@@ -13,6 +13,7 @@ import { canonicalJson, sha256 } from "../storage/json.js";
 import type { Aggregate, AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import { addEvent, checkContext, checkPolicy, DEFAULT_POLICY, mergeContext, minutesLater, missingEssentials, ROUTING_LIMITS, type ReviewContext, type ReviewPolicyBody, type ReviewRouteBody, type ReviewerStatus, type StoredContext } from "./routing.js";
 import type { WaitEdge } from "../planning/wait-graph.js";
+import type { DecisionGuard } from "../decisions/records.js";
 
 /**
  * `pending`: waiting for a verdict. `needs-context`: the reviewer asked for more and the requester has to supply it. `owner-decision`: only the owner may decide. `approved`: allowed, once, until it
@@ -95,6 +96,11 @@ export interface ReviewOptions extends RunnerOptions {
   readonly reviewerHost?: (principalId: string) => Promise<string | undefined>;
   /** How long a host counts as fresh (default: the one constant `HostService` uses). */
   readonly hostStaleAfterMs?: number;
+  /**
+   * The owner's decisions (card C08). An allow, and the admission of an approval, are refused while the task relies on a decision that is no longer authoritative or an owner gate forbids effects: the team's earlier
+   * agreement cannot carry obsolete work through review. Without it nothing is checked.
+   */
+  readonly decisions?: DecisionGuard;
 }
 
 /** Why a reviewer cannot be woken or chosen now, for the wake list. */
@@ -145,11 +151,13 @@ export class ReviewService {
   readonly #availability: (principalId: string) => Promise<Availability>;
   readonly #reviewerHost: ((principalId: string) => Promise<string | undefined>) | undefined;
   readonly #hostStaleAfterMs: number;
+  readonly #decisions: DecisionGuard | undefined;
 
   private constructor(runner: CommandRunner, options: ReviewOptions) {
     this.#runner = runner;
     this.#availability = options.availability ?? (async () => "available");
     this.#reviewerHost = options.reviewerHost;
+    this.#decisions = options.decisions;
     this.#hostStaleAfterMs = options.hostStaleAfterMs ?? DEFAULT_HOST_STALE_AFTER_MS;
     if (!Number.isSafeInteger(this.#hostStaleAfterMs) || this.#hostStaleAfterMs < 1000) throw new DomainError("invalid_command", "hostStaleAfterMs: must be a whole number of at least 1000", { field: "hostStaleAfterMs" });
   }
@@ -261,6 +269,7 @@ export class ReviewService {
         const routeRef: AggregateRef = { kind: "review-route", id };
         let next: ReviewBody;
         let nextRoute: ReviewRouteBody;
+        const owned = verdict === "allow" ? await this.#decisionChanges(body.binding.taskId, "an approval") : [];
         if (verdict === "allow") {
           const missing = missingEssentials(body.context);
           if (missing.length > 0) throw new DomainError("invalid_command", `essential context is missing (${missing.join(", ")}); an allow needs it. Ask for it with request-context`, { field: "context" });
@@ -290,6 +299,7 @@ export class ReviewService {
             { type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject },
             { type: "update", ref: routeRef, expectedRevision: routeAggregate.revision, body: nextRoute as unknown as JsonObject },
             ...(policyNow.revision === 0 ? [] : [{ type: "check" as const, ref: { kind: "review-policy", id: body.binding.projectId }, expectedRevision: policyNow.revision }]),
+            ...owned,
           ],
           detail: { verdict, requester: body.binding.requester, argsDigest: body.binding.argsDigest },
         };
@@ -362,7 +372,8 @@ export class ReviewService {
         const next: ReviewBody = { ...body, state: "used", usedAt: now, usedByCommand: command.commandId };
         const change: Change = { type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject };
         const policyGuard: Change[] = policy.revision === 0 ? [] : [{ type: "check", ref: { kind: "review-policy", id: body.binding.projectId }, expectedRevision: policy.revision }];
-        return { ref, creates: false, changes: [change, ...policyGuard], detail: { name: operation.name, argsDigest: actual.argsDigest }, contention: async () => new DomainError("review_invalid", `review ${id} was used or changed at the same moment`, { field: "requestId" }) };
+        const owned = await this.#decisionChanges(body.binding.taskId, "this approval");
+        return { ref, creates: false, changes: [change, ...policyGuard, ...owned], detail: { name: operation.name, argsDigest: actual.argsDigest }, contention: async () => new DomainError("review_invalid", `review ${id} was used or changed at the same moment`, { field: "requestId" }) };
       },
     }));
     return { admitted: true, requestId: r.id, replayed: r.replayed };
@@ -691,6 +702,14 @@ export class ReviewService {
   }
 
   // ---- internals -------------------------------------------------------------------------------------------------------------
+
+  /** The revision checks of the owner's decisions to commit with an approval; refuses (`review_invalid`) when the task's work no longer rests on the owner's current decisions. */
+  async #decisionChanges(taskId: string, what: string): Promise<readonly Change[]> {
+    if (this.#decisions === undefined) return [];
+    const g = await this.#decisions.guard(taskId, "effect");
+    if (g.blockedBy.length > 0) throw new DomainError("review_invalid", `${what} cannot stand: ${g.blockedBy.join("; ")}`, { field: "requestId" });
+    return g.changes;
+  }
 
   /** The project's policy, or the defaults at revision 0. */
   async #policy(projectId: string): Promise<{ body: ReviewPolicyBody; revision: number }> {
