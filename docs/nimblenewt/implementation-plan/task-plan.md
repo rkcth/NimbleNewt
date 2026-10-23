@@ -33,11 +33,11 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06, C06b |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
 | N05 / AII-255 | L05, L01, L02, L03, L04, L06, H08 |
-| N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A08, A08b, A09, A10, A10b |
+| N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A08, A08b, A08c, A09, A10, A10b |
 | N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C08, C09 |
 | N08 / AII-258 | R01, R02, R03, R04, R05 |
 | N09 / AII-259 | U03, U04, U05, U06, U07, U09, U08, U10, U11, U11b |
-| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H07, H09, H10, H11, H12, H13 |
+| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H07, H09, H10, H11, H12, H13 |
 | N11 / AII-261 | V01, V02 |
 | N12 / AII-262 | M00, M01, M02, M03, M04, M05, M05b, M06 |
 | N13 / AII-263 | T01, T02, T03, T06, T07, T08, T09 |
@@ -558,6 +558,14 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** CPU, memory, disk and process-count limit fixtures enforced with headroom reserved for the controller; each launch records which limits were enforced and by what, and a limit the host cannot enforce is reported, never silently skipped; (split from A08 on 2026-10-22: A08 holds the environment manifests, revisions, pins, rollback, integrity checks and limit validation).
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
+### A08c — Enforce per-agent resource limits on macOS and Windows (after the first release)
+
+- **Parent:** N06 / AII-256.
+- **Blockers:** A08b, A03b.
+- **Deliverable:** A macOS mechanism and a Windows Job Object that carry the CPU, memory, process-count and disk limits of A08b into the sandbox on those systems (owner decision 2026-10-22: the first release accepts that no per-agent limit is enforced there, and every launch records that; this card closes the gap afterwards).
+- **Acceptance and verification:** Limit fixtures run on real macOS and Windows hardware (the own-hardware runners, or an equivalent real machine the owner provides) with headroom reserved for the controller; a runaway agent is stopped at its limit and the others keep running; the launch record says which limits were applied on that system and which were not; a platform without a mechanism still records that no limit was applied instead of claiming one.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
 ### A09 — Implement reviewed environment changes and maintenance requests
 
 - **Parent:** N06 / AII-256.
@@ -804,6 +812,14 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Blockers:** S07, C03.
 - **Deliverable:** Scoped subscription cursors, dedup and batching.
 - **Acceptance and verification:** Missing/duplicate/out-of-order events and retention expiry trigger reconciliation; incoming event never lifts manual hold; per-subscription cooldowns; the causation chain is recorded and self-triggered loops suppressed; producers are slowed when queues are full.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### H06b — Expire idle event subscriptions
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H06.
+- **Deliverable:** Idle expiry for event subscriptions (owner decision 2026-10-22: the system drops an abandoned subscription itself, so the owner is not asked to cancel it): a subscription with no acknowledgement or activity for an owner-settable time is expired, its producers stop being held back, and the drop is recorded with its cursor so the subscriber can resume from the last acknowledged event.
+- **Acceptance and verification:** A host that crashes while subscribed no longer holds producers back beyond the idle time; the expiry time is a setting with a default and the owner can still cancel a subscription at any time; an expired subscription resumes from its cursor without losing or repeating events, or, if its cursor has passed retention, reconciles as H06 does; every expiry is recorded and appears in the activity record and, if work was affected, as a Notice (U11b); a live but slow subscriber is not expired while it acknowledges within the time; tested with a crashed host, a slow host and a restart.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### H07 — Implement idle host polling and capability placement
@@ -1543,9 +1559,9 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** D04, K06b, K01d, P02b.
-- **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (K06b, K01d, P02b) is either built or recorded as deferred by the owner, and the plan is marked complete.
-- **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so K06b, K01d and P02b may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
+- **Blockers:** D04, K06b, K01d, P02b, A08c.
+- **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
+- **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### Y01 — QA checkpoint 1: durable core
@@ -1561,7 +1577,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### Y02 — QA checkpoint 2: isolation, stop and recovery
 
 - **Parent:** N18 / AII-268.
-- **Blockers:** G05, G06, A06, L04, H09, A03b, A08b, F04i, F04j.
+- **Blockers:** G05, G06, A06, L04, H09, A03b, A08b, F04i, F04j, H06b.
 - **Deliverable:** Cross-platform QA of the sandbox and protected filesystem, human pre-commit gate, pause, stop, release and checked resume, and remote reconnect with primary epochs, before the cards that run agent work on them (P02, P03) are built.
 - **Acceptance and verification:** Scenario set run on Linux, macOS and Windows with real sandbox launchers: escape and path-trick attempts refused, pause and stop settle with no unfinished tool action, resume invalidates stale evidence, a worker lost mid-task is fenced and reconciled with no duplicate protected effect, Windows implementation qualified on real Windows; evidence recorded per platform. Each checkpoint has two parts: an automated part (an integration scenario set run by the QA workflow on Linux, macOS and Windows with crash and restart kills, extended from scripts/qa.mjs) that must pass, and a real-hardware run on the owner's Mac, Windows and Linux machines that the owner runs and signs off. Failures are raised as typed blockers and fixed before the layers above are built; the owner may waive the real-hardware part for a checkpoint explicitly, and the waiver is recorded. Not a substitute for the final D04.; the checkpoint reports owner decisions per day, counted from the audit log (commands whose actor is the owner, per day), and any stall that reached unrelated work.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

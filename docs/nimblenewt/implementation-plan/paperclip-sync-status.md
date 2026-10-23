@@ -33,3 +33,5 @@ October 21, 2026: the plan grew from 113 to 151 cards after a requirement-by-req
 2026-10-22: card A07c (strict-to-derived profile suggestion) was added to the plan. The owner reported that another Claude copy imported the 38 cards added on October 21; that import has **not been verified by this session** (no Paperclip access configured here). A07c and the later split cards (H05b, U02b, A10b, A07b) should be compared against the board when access is available.
 
 2026-10-22 (end of session): A07c, U11, F09, A03 and A07b/A10b/A07 were completed and A03b (Windows Sandbox launcher) was split from A03. The plan now has 157 cards. A03b is not in Paperclip, and the earlier import of the 38 audit cards was not verified by this session (no Paperclip access configured here).
+
+2026-10-22: the owner stated that another Claude instance updates the Paperclip board periodically from the plan. The implementing session of this repository does not verify or update the board and holds no access to it; the board may lag the plan (176 cards on 2026-10-22). Before any activation, whoever maintains the board should re-run the comparison with `task-plan.json` as described above.

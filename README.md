@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **65 of 174 tasks implemented**.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **65 of 176 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -240,6 +240,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [x] **A10** Implement private-record inspection and cross-project information boundaries _(needs C02, A02, H11)_
 - [ ] **C05** Implement retained context branches and selective updates _(needs C04, H04)_
 - [x] **C07** Implement context budgets, the startup builder and stall-proof helpers _(needs C04, R01)_
+- [ ] **H06b** Expire idle event subscriptions _(needs H06)_
 - [x] **R02** Implement fallback and cumulative budget accounting _(needs R01, S05, C04)_
 - [x] **U02b** Implement the conversation transport and remote exposure _(needs U02)_
 - [x] **U10** Implement layered configuration, effective values and change history _(needs F02, R01, U01, H11)_
@@ -263,6 +264,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 27
 
+- [ ] **A08c** Enforce per-agent resource limits on macOS and Windows (after the first release) _(needs A08b, A03b)_
 - [ ] **C06b** Make Pi agent prompts cache-stable across context switches _(needs C06, F05, F06)_
 - [ ] **C08** Implement owner decision records and correction propagation _(needs C03, C07, U03, H06)_
 - [ ] **G09** Prove retained-context inquiry and mid-generation interruption _(needs C05, L05)_
@@ -336,7 +338,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **U08** Implement settings and administration views _(needs U07, U10, A07, F09, H11, R03, T03, A07b, A07c)_
 - [ ] **U11b** Implement notification levels, the Needs you view and escalation to Urgent _(needs U11, A07b, H05, M03, H12, K01, H01, H09, A08)_
 - [ ] **X09** Implement external release-test job protocol _(needs H07, H09, F03, S06)_
-- [ ] **Y02** QA checkpoint 2: isolation, stop and recovery _(needs G05, G06, A06, L04, H09, A03b, A08b, F04i, F04j)_
+- [ ] **Y02** QA checkpoint 2: isolation, stop and recovery _(needs G05, G06, A06, L04, H09, A03b, A08b, F04i, F04j, H06b)_
 
 ### Phase 35
 
@@ -426,7 +428,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 51
 
-- [ ] **D05** Close the plan: every optional item built or deferred by the owner _(needs D04, K06b, K01d, P02b)_
+- [ ] **D05** Close the plan: every optional item built or deferred by the owner _(needs D04, K06b, K01d, P02b, A08c)_
 
 ## More detail
 

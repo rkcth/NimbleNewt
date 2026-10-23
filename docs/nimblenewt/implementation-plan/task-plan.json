@@ -1428,6 +1428,24 @@
       }
     },
     {
+      "id": "A08c",
+      "parent": "N06",
+      "existing_issue": "AII-256",
+      "title": "Enforce per-agent resource limits on macOS and Windows (after the first release)",
+      "depends_on": [
+        "A08b",
+        "A03b"
+      ],
+      "deliverable": "A macOS mechanism and a Windows Job Object that carry the CPU, memory, process-count and disk limits of A08b into the sandbox on those systems (owner decision 2026-10-22: the first release accepts that no per-agent limit is enforced there, and every launch records that; this card closes the gap afterwards)",
+      "acceptance_and_verification": "Limit fixtures run on real macOS and Windows hardware (the own-hardware runners, or an equivalent real machine the owner provides) with headroom reserved for the controller; a runaway agent is stopped at its limit and the others keep running; the launch record says which limits were applied on that system and which were not; a platform without a mechanism still records that no limit was applied instead of claiming one",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "A09",
       "parent": "N06",
       "existing_issue": "AII-256",
@@ -2086,6 +2104,23 @@
         "note": "Event subscriptions with gap recovery: numbered per-stream events, cursors with batching and key collapsing, reconcile on missing, skipped or expired events, no wake through a manual hold or cooldown, causation chains with loop suppression, backpressure from subscribers the controller relies on. Limits stated: no idle expiry of abandoned critical watchers. Reviewed and approved by an AI review session (Claude Opus); full six-cell CI green.",
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
       }
+    },
+    {
+      "id": "H06b",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Expire idle event subscriptions",
+      "depends_on": [
+        "H06"
+      ],
+      "deliverable": "Idle expiry for event subscriptions (owner decision 2026-10-22: the system drops an abandoned subscription itself, so the owner is not asked to cancel it): a subscription with no acknowledgement or activity for an owner-settable time is expired, its producers stop being held back, and the drop is recorded with its cursor so the subscriber can resume from the last acknowledged event",
+      "acceptance_and_verification": "A host that crashes while subscribed no longer holds producers back beyond the idle time; the expiry time is a setting with a default and the owner can still cancel a subscription at any time; an expired subscription resumes from its cursor without losing or repeating events, or, if its cursor has passed retention, reconciles as H06 does; every expiry is recorded and appears in the activity record and, if work was affected, as a Notice (U11b); a live but slow subscriber is not expired while it acknowledges within the time; tested with a crashed host, a slow host and a restart",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
       "id": "H07",
@@ -4006,10 +4041,11 @@
         "D04",
         "K06b",
         "K01d",
-        "P02b"
+        "P02b",
+        "A08c"
       ],
-      "deliverable": "Final bookkeeping after real-world QA: each optional, after-the-first-release card (K06b, K01d, P02b) is either built or recorded as deferred by the owner, and the plan is marked complete",
-      "acceptance_and_verification": "D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so K06b, K01d and P02b may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards",
+      "deliverable": "Final bookkeeping after real-world QA: each optional, after-the-first-release card (K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete",
+      "acceptance_and_verification": "D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -4064,7 +4100,8 @@
         "A03b",
         "A08b",
         "F04i",
-        "F04j"
+        "F04j",
+        "H06b"
       ],
       "deliverable": "Cross-platform QA of the sandbox and protected filesystem, human pre-commit gate, pause, stop, release and checked resume, and remote reconnect with primary epochs, before the cards that run agent work on them (P02, P03) are built",
       "acceptance_and_verification": "Scenario set run on Linux, macOS and Windows with real sandbox launchers: escape and path-trick attempts refused, pause and stop settle with no unfinished tool action, resume invalidates stale evidence, a worker lost mid-task is fenced and reconciled with no duplicate protected effect, Windows implementation qualified on real Windows; evidence recorded per platform. Each checkpoint has two parts: an automated part (an integration scenario set run by the QA workflow on Linux, macOS and Windows with crash and restart kills, extended from scripts/qa.mjs) that must pass, and a real-hardware run on the owner's Mac, Windows and Linux machines that the owner runs and signs off. Failures are raised as typed blockers and fixed before the layers above are built; the owner may waive the real-hardware part for a checkpoint explicitly, and the waiver is recorded. Not a substitute for the final D04.; the checkpoint reports owner decisions per day, counted from the audit log (commands whose actor is the owner, per day), and any stall that reached unrelated work",
