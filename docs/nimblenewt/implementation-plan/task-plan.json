@@ -3236,6 +3236,25 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "T06b",
+      "parent": "N13",
+      "existing_issue": "AII-263",
+      "title": "Wire the protected bridge into the composed worker across a process boundary",
+      "depends_on": [
+        "T06",
+        "H12b",
+        "H12c"
+      ],
+      "deliverable": "The worker runtime factory starts every worker with the bridge extension over a bound transport to the tool execution service across a process boundary, backs the script runner with the sandbox launcher and its limits, and opens request-boundary declarations",
+      "acceptance_and_verification": "The worker process holds only its task credential and loads no controller module, and a tampered extension in the real worker process cannot reach controller services; a tool registered during a turn appears only at the next request boundary of a real Pi turn (declarations opened and closed per request, with the descriptions in the volatile context); the replay-safe answer is passed to the dispatcher; scripts run through the A03 launcher with arguments and model text as data on stdin, an empty environment, the manifest limits enforced (A08b) and output capped by the launcher; a script over its output or time limit fails and is recorded; an agent's own namespace grant exists from enrolment",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "T07",
       "parent": "N13",
       "existing_issue": "AII-263",
@@ -4152,6 +4171,7 @@
         "D01",
         "D02",
         "F04h",
+        "T06b",
         "H12a",
         "H12b",
         "H12c",

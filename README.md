@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **65 of 184 tasks implemented**.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **65 of 185 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -306,6 +306,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **H12a** Carry the dispatch contract to remote workers _(needs H12, H02)_
 - [ ] **M05b** Prove meeting desk reads are read-only and recorded per file _(needs M05, C01b)_
 - [ ] **M06** Implement meeting procedure, roster, quorum and ballots _(needs M02, A02, C08, T06, M00)_
+- [ ] **T06b** Wire the protected bridge into the composed worker across a process boundary _(needs T06, H12b, H12c)_
 - [ ] **T07** Implement durable job records and job control _(needs T06, S05)_
 - [ ] **T09** Implement command namespaces and alias dispatch _(needs T06, H11, U03)_
 
@@ -428,7 +429,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 49
 
-- [ ] **D03** Approve release readiness and publication decision _(needs X08, D01, D02, F04h, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h)_
+- [ ] **D03** Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h)_
 
 ### Phase 50
 

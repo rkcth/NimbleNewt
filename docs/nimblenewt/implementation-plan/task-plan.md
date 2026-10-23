@@ -40,7 +40,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H07, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H13 |
 | N11 / AII-261 | V01, V02 |
 | N12 / AII-262 | M00, M01, M02, M03, M04, M05, M05b, M06 |
-| N13 / AII-263 | T01, T02, T03, T06, T07, T08, T09 |
+| N13 / AII-263 | T01, T02, T03, T06, T06b, T07, T08, T09 |
 | N14 / AII-264 | P01, P02, P02b, P03, P04, P05, P06, P07 |
 | N15 / AII-265 | Q01, Q02, Q03, Q04 |
 | N16 / AII-266 | B01 |
@@ -1252,6 +1252,14 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** A script tool is created, registered and used in one conversation without a worker reload; new declarations appear at the next model-request boundary and never in a request already in flight; descriptions are fetched on demand, not loaded into every prompt; an active call finishes on its version while the next call uses the new one; a revoked version is refused at invocation despite a stale tool list; excessive permissions denied; model-supplied text is never concatenated into a shell command; the extension holds only the worker's scoped credential and no admin methods, and a tampered in-process extension cannot exceed the worker's grants or call services directly; personal extensions cannot disable or shadow the bridge; the replay-safe or idempotent flag comes only from the controller-approved manifest; restart recovery verified.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
+### T06b — Wire the protected bridge into the composed worker across a process boundary
+
+- **Parent:** N13 / AII-263.
+- **Blockers:** T06, H12b, H12c.
+- **Deliverable:** The worker runtime factory starts every worker with the bridge extension over a bound transport to the tool execution service across a process boundary, backs the script runner with the sandbox launcher and its limits, and opens request-boundary declarations.
+- **Acceptance and verification:** The worker process holds only its task credential and loads no controller module, and a tampered extension in the real worker process cannot reach controller services; a tool registered during a turn appears only at the next request boundary of a real Pi turn (declarations opened and closed per request, with the descriptions in the volatile context); the replay-safe answer is passed to the dispatcher; scripts run through the A03 launcher with arguments and model text as data on stdin, an empty environment, the manifest limits enforced (A08b) and output capped by the launcher; a script over its output or time limit fails and is recorded; an agent's own namespace grant exists from enrolment.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
 ### T07 — Implement durable job records and job control
 
 - **Parent:** N13 / AII-263.
@@ -1607,7 +1615,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D03 — Approve release readiness and publication decision
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** X08, D01, D02, F04h, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h.
+- **Blockers:** X08, D01, D02, F04h, T06b, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h.
 - **Deliverable:** Exact release manifest, known limitations and owner signoff.
 - **Acceptance and verification:** All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
