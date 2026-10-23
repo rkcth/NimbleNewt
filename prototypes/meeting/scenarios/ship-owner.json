@@ -1,0 +1,67 @@
+{
+  "title": "Ship on Friday with a known bug (the owner interrupts and questions)",
+  "motion": "The team ships the v2 payments API this Friday as planned, with the known duplicate-charge bug unfixed, and fixes it in the following release.",
+  "context": "Background (fictional, for this exercise): v2 of the payments API is due to ship this Friday. Testing found a bug: when a client retries a charge request after a network timeout, about 1 in 2000 charges is applied twice. The fix is understood but needs about two weeks including a safe migration. Shipping on time satisfies a signed launch commitment to the largest customer; each week of delay costs the company a contractual penalty. Nothing here is real-world knowledge: rely only on your own background and notes, and use your own judgment.",
+  "agents": [
+    {
+      "id": "a1",
+      "name": "Dana",
+      "role": "backend engineer who wrote the charge code",
+      "persona": "You wrote the retry path where the bug lives and know it best.",
+      "desk": [
+        "The duplicate only happens when the client retries after a timeout and the first request had actually succeeded.",
+        "Our existing refund tool reverses a duplicate in about 5 minutes of manual work per case; no customer data is exposed.",
+        "At the expected volume of 40,000 charges a week, 1 in 2000 means about 20 duplicates a week."
+      ]
+    },
+    {
+      "id": "a2",
+      "name": "Ravi",
+      "role": "engineer on call for customer-facing incidents",
+      "persona": "You carry the pager and talk to affected customers when something goes wrong.",
+      "desk": [
+        "The last billing incident, a single double charge, produced 14 support tickets and two customers asking to cancel.",
+        "Customers see a double charge as a trust problem even when refunded within the hour.",
+        "I have no data on whether the largest customer would accept a short delay."
+      ]
+    },
+    {
+      "id": "a3",
+      "name": "Mei",
+      "role": "engineer who leads the launch work",
+      "persona": "You coordinate the launch with the largest customer's team.",
+      "desk": [
+        "The launch commitment is in the contract; the penalty is 20 thousand dollars per week of delay.",
+        "The largest customer's own go-live is Monday and it will use the new API from day one.",
+        "I have not asked the customer whether a two-week delay is acceptable."
+      ]
+    }
+  ],
+  "owner": {
+    "afterRound1": {
+      "message": "Owner here. Before round 2: I am worried about the customer more than the penalty. Please keep that in mind.",
+      "questions": [
+        {
+          "to": "a2",
+          "text": "Ravi, how many customers could a double charge realistically reach in the first month, and what would you tell them?"
+        }
+      ],
+      "command": "Thanks, that is all for now; carry on."
+    },
+    "duringVote": {
+      "afterBallots": 2,
+      "message": "Owner here, pausing the vote. I will ask a couple of things before anyone finalizes.",
+      "questions": [
+        {
+          "to": "a1",
+          "text": "Dana, could the retry path be made safe with a small interim guard, such as an idempotency key, in under two days? Be honest if you do not know."
+        },
+        {
+          "to": "a3",
+          "text": "Mei, what exactly would you need from the customer to move Friday?"
+        }
+      ],
+      "command": "Done with questions. Carry on with the vote."
+    }
+  }
+}

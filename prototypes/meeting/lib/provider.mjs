@@ -81,7 +81,11 @@ function fakeProvider(cfg) {
       if (task === "ballot") text = `VOTE: ${stance === "for" ? "yes" : stance === "against" ? "no" : "abstain"}\nREASON: ${words(12)}`;
       else if (task === "objection") text = `OBJECT: ${n % 11 === 0 ? "yes" : "no"}\nREASON: ${words(8)}`;
       else if (task === "chair-ruling") text = `RULING: proceed\nREASON: ${words(6)}`;
+      else if (task === "casting") text = `CASTING: no\nREASON: ${words(6)}`;
+      else if (task === "correction") text = `CORRECTION: ${n % 2 ? "none" : "That note was an early draft, not my view. " + words(4)}\nCONTRADICTS: ${n % 4 === 0 ? "yes" : "no"}`;
+      else if (task === "chair-desk-read") { const m = /FILE (\S+) \(desk of [^)]*\):\n([^\n]{20,60})/.exec(user); const who = /absent\)/.test(user); text = JSON.stringify({ excerpts: m ? [{ member: hint?.absent ?? "a3", file: m[1], quote: m[2].slice(0, 30), bears_on: "relevant" }] : [] }); }
       else if (task === "chair-questions") text = JSON.stringify({ questions: [{ to: hint?.agents?.[0] ?? "a1", topic: "experience with the tool", experience_sought: "how long and with what result" }] });
+      else if (task === "statement" && /ASK: none/.test(user) && n % 3 === 0) text = `STANCE: ${stance}\nSTATEMENT: ${words(20)}\nTLDR: short\nASK: a2: how long did that take`;
       else text = `STANCE: ${stance}\nSTATEMENT: ${words(Math.min(40, Math.floor(maxTokens / 6)))}\nTLDR: ${stance} because ${words(5)}`;
       const input = Math.ceil(all.length / 4);
       return { text, finish: "stop", usage: { input, cached: 0, output: Math.ceil(text.length / 4) }, ms: 1 };

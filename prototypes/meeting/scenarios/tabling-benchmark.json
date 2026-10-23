@@ -1,0 +1,40 @@
+{
+  "title": "Switch the nightly jobs to a new scheduler (a decisive measurement is still pending)",
+  "motion": "The team moves all nightly jobs to the new Quill scheduler this week.",
+  "context": "Background (fictional, for this exercise): the team runs 40 nightly jobs on an old scheduler. Quill is a newer scheduler. Moving is only worth it if it does not make the nightly window longer; the nightly window has about 15 minutes of slack. Nothing here is real-world product knowledge: rely only on your own background and notes, and use your own judgment.",
+  "agents": [
+    {
+      "id": "a1",
+      "name": "Noor",
+      "role": "infrastructure engineer who evaluates Quill",
+      "persona": "You have been evaluating Quill and know what has and has not been measured.",
+      "desk": [
+        "I have run Quill on 5 of the 40 jobs; they behaved the same as on the old scheduler.",
+        "I have NOT yet benchmarked the heavy jobs (the 6 database exports); the benchmark is scheduled for Thursday and would take about two hours.",
+        "Quill documentation says its start-up overhead per job is small, but it gives no figure for jobs with large outputs."
+      ]
+    },
+    {
+      "id": "a2",
+      "name": "Axel",
+      "role": "engineer who owns the database exports",
+      "persona": "You own the six heavy nightly database exports.",
+      "desk": [
+        "The six exports take 40 of the nightly window's minutes together and are the only jobs close to the slack limit.",
+        "If Quill added more than 15 minutes in total, the exports would overrun into the morning reports.",
+        "I cannot say whether Quill slows large exports; nobody has measured it."
+      ]
+    },
+    {
+      "id": "a3",
+      "name": "Wen",
+      "role": "engineer on call for the morning reports",
+      "persona": "You are paged when the nightly window overruns.",
+      "desk": [
+        "Two overruns last quarter each cost a morning of delayed reports.",
+        "The old scheduler is stable and has no known problems.",
+        "Rolling back to the old scheduler takes about a day."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+{"name": "m00-full", "firstRound": "blind", "rounds": 2, "transcriptMode": "full", "promptOrder": "shared-first", "chairQuestions": 2, "deskCheck": true, "tokenLimit": 220, "objectionCheck": true, "maxObjectionReruns": 2, "parallel": 3, "allowTabling": true, "directQuestions": true, "deskRead": true}

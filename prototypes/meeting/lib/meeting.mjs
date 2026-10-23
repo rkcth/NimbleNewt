@@ -15,13 +15,16 @@ const PREAMBLE = [
 export async function runMeeting({ scenario, variant, provider, providers = {}, ledger, outDir, headroom = 0, log = () => {} }) {
   mkdirSync(outDir, { recursive: true });
   const callsPath = join(outDir, "calls.jsonl");
-  const agents = scenario.agents;
-  const byId = new Map(agents.map((a) => [a.id, a]));
+  const roster = scenario.agents;
+  const absentIds = new Set(scenario.absent ?? []); // decided by the controller (here: the scenario), never by the chair
+  const agents = roster.filter((a) => !absentIds.has(a.id)); // the present members
+  const byId = new Map(roster.map((a) => [a.id, a]));
+  const clock = { startedMs: Date.now(), pausedMs: 0 };
+  const promptLog = []; // every delivery, for the held-answer leak check
   const tokenLimit = variant.tokenLimit ?? 220;
   let motion = { text: scenario.motion, version: 1 };
   const transcript = []; // visible to later speakers under the baton rule
-  const ballots = []; // the ballot record: never delivered to another participant while the vote is open
-  const stats = { objections: [], chairQuestions: [], rejectedChairQuestions: [] };
+  const stats = { objections: [], chairQuestions: [], rejectedChairQuestions: [], skippedAbsent: [], inquiries: [], ownerReports: [] };
 
   const common = () => `${PREAMBLE}\n\nMOTION (version ${motion.version}): ${motion.text}\n\n${scenario.context ?? ""}`.trim();
   const personaOf = (a) => `You are ${a.name}, ${a.role}. ${a.persona}${variant.richPersonas && a.temperament ? ` Your temperament: ${a.temperament}. Your habits: ${a.habits}.` : ""}`;
@@ -50,9 +53,10 @@ export async function runMeeting({ scenario, variant, provider, providers = {}, 
     ledger.assertRoom(0.002);
     // A roster may mix models: each member answers through its own provider, the chair through the chair's.
     const p = agent?.id === "chair" ? (providers.chair ?? provider) : (providers.byAgent?.[agent?.id] ?? provider);
+    promptLog.push({ phase, agent: agent?.id, text: `${system}\n${user}` });
     const r = await p.chat({ system, user, maxTokens: maxTokens + headroom, hint: { ...hint, task } });
     const row = ledger.record({ phase, agent: agent?.id, task, model: p.name, usage: r.usage, ms: r.ms, finish: r.finish });
-    appendFileSync(callsPath, JSON.stringify(row) + "\n");
+    appendFileSync(callsPath, JSON.stringify({ ...row, text: r.text }) + "\n");
     log(`${phase} ${agent?.id ?? "chair"} in=${r.usage.input} cached=${r.usage.cached} out=${r.usage.output} $${ledger.spent.toFixed(4)}`);
     return r;
   }
@@ -60,10 +64,11 @@ export async function runMeeting({ scenario, variant, provider, providers = {}, 
   const pick = (re, text) => re.exec(text)?.[1]?.trim();
   function parseStatement(text) {
     const stance = (pick(/STANCE:\s*(for|against|undecided)/i, text) ?? "unknown").toLowerCase();
-    const body = pick(/STATEMENT:\s*([\s\S]*?)(?:\nTLDR:|$)/i, text) ?? text.trim();
-    const tldr = pick(/TLDR:\s*([\s\S]*)$/i, text) ?? (variant.tldrStyle === "facts" ? "none" : body.split(/\s+/).slice(0, 25).join(" "));
+    const body = pick(/STATEMENT:\s*([\s\S]*?)(?:\nTLDR:|\nASK:|$)/i, text) ?? text.trim();
+    const ask = pick(/^ASK:\s*(.*)$/im, text);
+    const tldr = pick(/TLDR:\s*([\s\S]*?)(?:\nASK:|$)/i, text) ?? (variant.tldrStyle === "facts" ? "none" : body.split(/\s+/).slice(0, 25).join(" "));
     const clean = tldr.replace(/\s+/g, " ").trim();
-    return { stance, text: body, tldr: /^none\.?$/i.test(clean) ? undefined : clean };
+    return { stance, text: body, tldr: /^none\.?$/i.test(clean) ? undefined : clean, ask: ask && !/^none/i.test(ask) ? ask : undefined };
   }
   const push = (who, kind, text, extra = {}) => {
     const e = { seq: transcript.length + 1, who, kind, text, ...extra };
@@ -73,9 +78,12 @@ export async function runMeeting({ scenario, variant, provider, providers = {}, 
 
   const summarizeAbove = variant.summarizeAbove ?? 70;
   const summaryWords = variant.summaryWords ?? 60;
-  const FORMAT = variant.tldrStyle === "facts"
+  const ASKLINE = variant.directQuestions ? `\nASK: none | <member id>: <one short factual question to one present member, only if you really need an answer from them>${variant.askNudge ? " (asking is encouraged whenever a fact that could change your view is missing from what you have heard and is likely known to a specific present member; use the other members' ids)" : ""}` : "";
+  const FORMAT0 = variant.tldrStyle === "facts"
     ? `Use exactly this format:\nSTANCE: for|against|undecided\nSTATEMENT: <your statement>\nTLDR: <if your statement is brief, write none; otherwise summarize your thoughts into one brief paragraph, remembering to include important points or details that you want the group to know>`
     : `Use exactly this format:\nSTANCE: for|against|undecided\nSTATEMENT: <your statement>\nTLDR: <one sentence, at most 25 words>`;
+  const FORMAT = FORMAT0 + ASKLINE;
+  const FORMAT_NOASK = FORMAT0;
   const deskText = (a) => (variant.deskCheck && a.desk?.length ? `Notes you looked up on your own desk:\n${a.desk.map((d) => `- ${d}`).join("\n")}\n\n` : "");
 
   async function turn(agent, phase, instruction, { blind = false, desk = false } = {}) {
@@ -108,9 +116,62 @@ export async function runMeeting({ scenario, variant, provider, providers = {}, 
   }
 
   push("Chair", "motion", `Motion (version ${motion.version}): ${motion.text}`, { label: "opening" });
+  for (const id of absentIds) {
+    stats.skippedAbsent.push(id);
+    push("Chair", "absent", `${byId.get(id).name} is absent and is skipped in the comment rounds and the vote (recorded).`, { label: "absent member" });
+  }
+
+  // Owner inquiry period (owner decision 2026-10-22), played by a scripted owner. The meeting clock is paused while it runs.
+  // During a held vote, the answers voters give the owner are kept out of everyone else's deliveries until the vote closes.
+  const answeredDuringVote = []; // for the leak check, whether or not the answer was held
+  const held = []; // answers given to the owner while a vote is open: { agent, text }
+  const ownerPrivate = new Map(); // agent id -> the agent's own exchange with the owner (it held the floor for it)
+  const castBallots = new Map(); // agent id -> its current ballot
+  const ballotHistory = [];
+  const revisionCounts = {};
+  let voteOpen = false;
+  const ballotPrompt = (a, extra = "") => prompt(a, `${extra}Cast your ballot on the motion as it now stands. Reply exactly:\nVOTE: yes|no|abstain\nREASON: <one sentence>`, { extra: ownerPrivate.has(a.id) ? `Your own earlier exchange with the owner:\n${ownerPrivate.get(a.id)}\n\n` : "" });
+  async function inquiry(spec, name) {
+    const t0 = Date.now();
+    const rec = { name, voteOpen, castBefore: [...castBallots.keys()], questions: [], revisions: [], heldAnswers: [] };
+    stats.inquiries.push(rec);
+    log(`-- owner inquiry "${name}" opens: meeting clock paused${voteOpen ? ", vote held" : ""}`);
+    if (spec.message) push("Owner", "owner-message", spec.message, { label: "owner message" });
+    for (const q of spec.questions ?? []) {
+      const a = byId.get(q.to);
+      if (!a || absentIds.has(q.to)) { rec.questions.push({ to: q.to, skipped: "not present" }); continue; }
+      push("Owner", "owner-question", `To ${a.name}: ${q.text}`, { label: "owner question" });
+      const own = castBallots.get(a.id);
+      const r = await turn(a, "owner-answer", `The owner asks you directly: "${q.text}". Answer the owner in at most ${words(tokenLimit / 2)} words, from your own background and notes only. ${FORMAT_NOASK}${own ? `\n(Your recorded ballot is ${own.vote}: ${own.reason}.)` : ""}`, { desk: true });
+      rec.questions.push({ to: a.id, question: q.text, answer: r.text });
+      ownerPrivate.set(a.id, `${ownerPrivate.get(a.id) ? `${ownerPrivate.get(a.id)}\n` : ""}Owner: ${q.text}\nYou: ${r.text}`);
+      if (voteOpen) answeredDuringVote.push({ agent: a, text: r.text });
+      if (voteOpen && process.env.M00_MUTATE_LEAK !== "1") { held.push({ agent: a, text: r.text }); rec.heldAnswers.push(a.id); log(`   (answer from ${a.name} held until the vote closes; the owner reads it now)`); }
+      else push(a.name, "answer", r.text, { label: "answer to owner", agent: a.id });
+    }
+    push("Owner", "owner-command", spec.command ?? "That is all my questions; carry on.", { label: "owner command: end inquiry" });
+    clock.pausedMs += Date.now() - t0;
+    log(`-- inquiry "${name}" ended by the owner command`);
+    if (voteOpen) await revisionTurns(rec);
+  }
+  async function revisionTurns(rec) {
+    // Each voter who cast before the message gets exactly one revision turn: keep or revise, with a reason.
+    for (const id of rec.castBefore) {
+      const a = byId.get(id);
+      const old = castBallots.get(id);
+      revisionCounts[id] = (revisionCounts[id] ?? 0) + 1;
+      const { system, user } = prompt(a, `You have the floor for one revision turn because of the owner's message and questions above. Your recorded ballot is ${old.vote}: ${old.reason}. Keep it or revise it. Reply exactly:\nVOTE: yes|no|abstain\nCHANGED: yes|no\nREASON: <one sentence>`, { extra: ownerPrivate.has(id) ? `Your own earlier exchange with the owner:\n${ownerPrivate.get(id)}\n\n` : "" });
+      const r = await call({ phase: "ballot-revision", agent: a, task: "ballot", system, user, maxTokens: 100, hint: { lean: a.lean } });
+      const vote = (pick(/VOTE:\s*(yes|no|abstain)/i, r.text) ?? old.vote).toLowerCase();
+      const reason = pick(/REASON:\s*([\s\S]*)$/i, r.text) ?? "";
+      ballotHistory.push({ agent: id, name: a.name, vote, reason, trigger: `owner inquiry "${rec.name}"`, revisionOf: old.vote });
+      castBallots.set(id, { agent: id, name: a.name, vote, reason });
+      rec.revisions.push({ agent: id, from: old.vote, to: vote });
+    }
+  }
 
   // Round 1: open (sequential, each hears the earlier speakers) or blind (independent, in parallel).
-  const r1 = `Give your position on the motion in at most ${words(tokenLimit)} words. ${FORMAT}`;
+  const r1 = `Give your position on the motion in at most ${words(tokenLimit)} words. ${FORMAT_NOASK}`;
   if (variant.firstRound === "blind") {
     const results = await parallel(agents, variant.parallel ?? 4, (a) => turn(a, "round1-blind", r1, { blind: true, desk: variant.deskFromStart === true }));
     for (const r of results) await updateNotes(push(r.agent.name, "statement", r.text, { tldr: r.tldr, stance: r.stance, label: "round 1 (blind)", agent: r.agent.id }));
@@ -120,6 +181,8 @@ export async function runMeeting({ scenario, variant, provider, providers = {}, 
       await updateNotes(push(a.name, "statement", r.text, { tldr: r.tldr, stance: r.stance, label: "round 1", agent: a.id }));
     }
   }
+
+  if (scenario.owner?.afterRound1) await inquiry(scenario.owner.afterRound1, "after round 1");
 
   // The chair reads the full statements (never only summaries) and keeps private notes for its follow-up questions.
   if (variant.chairNotes === true) {
@@ -134,7 +197,7 @@ export async function runMeeting({ scenario, variant, provider, providers = {}, 
   const maxQ = variant.chairQuestions ?? 0;
   if (maxQ > 0) {
     const chair = { id: "chair", name: "Chair", role: "the meeting chair", persona: "You run the meeting and keep it brief. You ask only factual questions that help the group decide." };
-    const ids = agents.map((a) => a.id);
+    const ids = roster.map((a) => a.id);
     const { system, user } = prompt(chair, `${chairNotes ? `Your private notes:\n${chairNotes}\n\n` : ""}Ask up to ${maxQ} factual questions of named members to inform the group, for example asking those who have used a tool what they found. Each question needs: "to" (one of: ${ids.join(", ")}), "topic" (a factual topic) and "experience_sought". Never ask how anyone will vote or whether they support the motion. Reply with JSON only: {"questions":[{"to":"...","topic":"...","experience_sought":"..."}]}`, variant.chairNotes ? { transcriptText: variant.chairNotes === "rolling" ? "(You have your notes; the full statements are available if needed.)" : view("full") } : undefined);
     const r = await call({ phase: "chair-questions", agent: chair, task: "chair-questions", system, user, maxTokens: 300, hint: { agents: ids } });
     let qs = [];
@@ -142,13 +205,70 @@ export async function runMeeting({ scenario, variant, provider, providers = {}, 
     for (const q of qs.slice(0, maxQ)) {
       const bad = !byId.has(q.to) || !q.topic || !q.experience_sought || /\b(vote|support|oppose|in favou?r|for or against)\b/i.test(`${q.topic} ${q.experience_sought}`);
       if (bad) { stats.rejectedChairQuestions.push(q); continue; }
+      if (absentIds.has(q.to)) { stats.skippedAbsent.push(`chair question to ${q.to}`); push("Chair", "chair-question", `Question to ${byId.get(q.to).name} skipped: absent (recorded).`, { label: "skipped" }); continue; }
       stats.chairQuestions.push(q);
       push("Chair", "chair-question", `To ${byId.get(q.to).name}: ${q.topic} (${q.experience_sought})`, { label: "fact-finding question" });
       const a = byId.get(q.to);
-      const ans = await turn(a, "chair-answer", `The chair asked you: "${q.topic}" — ${q.experience_sought}. Answer in at most ${words(tokenLimit / 2)} words, from your own experience and your notes only. ${FORMAT}`, { desk: true });
+      const ans = await turn(a, "chair-answer", `The chair asked you: "${q.topic}" — ${q.experience_sought}. Answer in at most ${words(tokenLimit / 2)} words, from your own experience and your notes only. ${FORMAT_NOASK}`, { desk: true });
       await updateNotes(push(a.name, "answer", ans.text, { tldr: ans.tldr, stance: ans.stance, label: "answer to chair", agent: a.id }));
     }
   }
+
+  // Chair desk read (owner decision 2026-10-22): only an absent roster member, read-only, redacted, one inspection record per
+  // file, excerpts with verbatim quotes, marked unverified; reading a present member's desk is refused. The returning member
+  // sees what was read and may add a correction.
+  const inspections = [];
+  stats.deskRead = { refused: [], excerpts: [], rejectedExcerpts: [], corrections: [] };
+  const redact = (t) => t.replace(/\b(sk|pk|ghp|xox[bp])[-_][A-Za-z0-9_-]{8,}/g, "[redacted]").replace(/((?:password|passwd|secret|token|api[_ -]?key)\s*[:=]\s*)\S+/gi, "$1[redacted]");
+  function meetingRead(memberId, why) {
+    const m = byId.get(memberId);
+    if (!m || !absentIds.has(memberId)) { stats.deskRead.refused.push({ memberId, why, reason: m ? "member is present (controller state)" : "not on the roster" }); return undefined; }
+    const files = (m.deskFiles ?? []).map((f) => ({ path: f.path, text: redact(f.text) }));
+    for (const f of files) inspections.push({ member: memberId, path: f.path, revision: 1, by: "meeting-chair", meeting: scenario.title, writes: 0 });
+    return files;
+  }
+  async function chairDeskRead() {
+    if (!variant.deskRead || absentIds.size === 0) return;
+    stats.deskRead.refused = []; // the scripted adversarial attempt below is recorded here
+    const probe = agents[0]?.id; // a scripted attempt to read a present member's desk, which must be refused
+    if (probe) meetingRead(probe, "scripted adversarial attempt");
+    const files = [];
+    for (const id of absentIds) for (const f of meetingRead(id, "chair read") ?? []) files.push({ member: id, ...f });
+    if (files.length === 0) return;
+    const listing = files.map((f) => `FILE ${f.path} (desk of ${byId.get(f.member).name}, absent):\n${f.text}`).join("\n\n");
+    const { system, user } = prompt(chairPersona, `Some members are absent. Under the meeting rules you may read an absent member's desk, read-only, to inform the group. The files you have read are below. Choose at most 3 short excerpts that bear on the motion. Each needs a verbatim quote copied exactly from the file. Facts and evidence only; never anything about how to vote.\n\n${listing}\n\nReply with JSON only: {"excerpts":[{"member":"<id>","file":"<path>","quote":"<verbatim>","bears_on":"<one sentence>"}]}`);
+    const r = await call({ phase: "chair-desk-read", agent: chairPersona, task: "chair-desk-read", system, user, maxTokens: 450, hint: {} });
+    let ex = [];
+    try { ex = JSON.parse(/\{[\s\S]*\}/.exec(r.text)?.[0] ?? "{}").excerpts ?? []; } catch { ex = []; }
+    const norm = (t) => t.toLowerCase().replace(/[^a-z0-9% ]+/g, " ").replace(/\s+/g, " ").trim();
+    for (const e of ex.slice(0, 3)) {
+      const memberId = [...byId.values()].find((m) => m.id === e.member || m.name.toLowerCase() === String(e.member).toLowerCase())?.id; // the chair may give the name instead of the id
+      const f = files.find((x) => x.member === memberId && x.path === e.file);
+      e.member = memberId ?? e.member;
+      if (!f) { stats.deskRead.rejectedExcerpts.push({ ...e, why: "no such read file" }); continue; }
+      if (!e.quote || norm(e.quote).length < 8 || !norm(f.text).includes(norm(e.quote))) { stats.deskRead.rejectedExcerpts.push({ ...e, why: "quote not verbatim" }); continue; }
+      stats.deskRead.excerpts.push(e);
+      push("Chair", "desk-read", `[From ${byId.get(e.member).name}'s desk, read-only by the chair, file ${f.path}, UNVERIFIED by ${byId.get(e.member).name}] "${e.quote}" (${e.bears_on})`, { label: "desk read (unverified)" });
+    }
+    stats.deskRead.inspections = inspections;
+  }
+  async function returningMember() {
+    if (!variant.deskRead || stats.deskRead.excerpts.length === 0) return;
+    for (const id of absentIds) {
+      const a = byId.get(id);
+      const mine = stats.deskRead.excerpts.filter((e) => e.member === id);
+      if (!mine.length) continue;
+      const { system, user } = prompt(a, `You were absent. While you were away the chair read your desk, read-only, and told the meeting this (marked unverified):\n${mine.map((e) => `- file ${e.file}: "${e.quote}" (${e.bears_on})`).join("\n")}\n\nIf the meeting was given a wrong or misleading picture of your view, add a short correction. Reply exactly:\nCORRECTION: none | <at most 40 words>\nCONTRADICTS: yes|no (does your correction contradict what the chair relayed?)`);
+      const r = await call({ phase: "member-correction", agent: a, task: "correction", system, user, maxTokens: 120, hint: {} });
+      const corr = pick(/CORRECTION:\s*([\s\S]*?)(?:\nCONTRADICTS:|$)/i, r.text) ?? "none";
+      const contradicts = /CONTRADICTS:\s*yes/i.test(r.text);
+      if (/^none/i.test(corr)) { stats.deskRead.corrections.push({ member: id, correction: null }); continue; }
+      stats.deskRead.corrections.push({ member: id, correction: corr, contradicts, whileVoteOpen: voteOpen });
+      push(a.name, "correction", corr, { label: "correction by the returning member", agent: a.id });
+      if (contradicts && voteOpen) stats.ownerReports.push(`${a.name}'s correction contradicts what the chair relayed while the vote is open`);
+    }
+  }
+  await chairDeskRead();
 
   // Chair reminders: the chair holds the full statements and knows what the summaries left out. It may restate up to a
   // few important omitted points, each with a verbatim quote that must really occur in that speaker's full statement.
@@ -197,6 +317,25 @@ export async function runMeeting({ scenario, variant, provider, providers = {}, 
     for (const a of agents) {
       const r = await turn(a, "round2", r2, { desk: true });
       await updateNotes(push(a.name, "statement", r.text, { tldr: r.tldr, stance: r.stance, label: "round 2", agent: a.id }));
+      // Direct question during the speaker's turn: the addressed member gets the floor for a short answer (depth one: the answer may
+      // not open a further question), then the floor returns to the asker. At most one per member per round.
+      const scripted = (scenario.scriptedAsks ?? []).find((x) => x.from === a.id); // a scripted ask exercises the floor mechanics when no model volunteers a question
+      if (scripted && !r.ask) r.ask = `${scripted.to}: ${scripted.text}`;
+      const dq = variant.directQuestions && r.ask ? /^\s*(?:\|\s*)?(\w+)\s*:\s*([\s\S]+)$/.exec(r.ask) : null;
+      if (dq) {
+        const target = byId.get(dq[1]);
+        stats.directQuestions ??= [];
+        if (!target || target.id === a.id) { stats.directQuestions.push({ from: a.id, to: dq[1], refused: "unknown or self" }); }
+        else if (absentIds.has(target.id)) { stats.directQuestions.push({ from: a.id, to: target.id, skipped: "absent" }); push("Chair", "direct-question", `${a.name}'s question to ${target.name} skipped: absent (recorded).`, { label: "skipped" }); }
+        else {
+          push(a.name, "direct-question", `To ${target.name}: ${dq[2]}`, { label: "direct question" });
+          const ans = await turn(target, "direct-answer", `${a.name} asked you directly: "${dq[2]}". Answer in at most ${words(tokenLimit / 2)} words, from your own background and notes. Do not ask anything back. ${FORMAT_NOASK}`, { desk: true });
+          push(target.name, "answer", ans.text, { tldr: ans.tldr, stance: ans.stance, label: "answer to direct question", agent: target.id });
+          const cont = await turn(a, "direct-continue", `You asked ${target.name} and the answer is above. If it changes anything for you, say so in at most ${words(tokenLimit / 2)} words; otherwise say briefly that it does not. ${FORMAT_NOASK}`, { desk: true });
+          push(a.name, "statement", cont.text, { tldr: cont.tldr, stance: cont.stance, label: "round 2 (after answer)", agent: a.id });
+          stats.directQuestions.push({ from: a.id, to: target.id, question: dq[2] });
+        }
+      }
     }
   }
 
@@ -250,20 +389,55 @@ export async function runMeeting({ scenario, variant, provider, providers = {}, 
 
   // Ballots: asked individually; nobody sees another ballot; revealed together below. A tabled motion has none.
   if (!stats.tabled) await chairReminderStep("before-ballots");
-  const viewForBallots = view();
-  for (const a of stats.tabled ? [] : agents) {
-    const { system, user } = prompt(a, `Cast your ballot on the motion as it now stands. Reply exactly:\nVOTE: yes|no|abstain\nREASON: <one sentence>`, { transcriptText: viewForBallots });
+  if (!stats.tabled && !scenario.returnDuringVote) await returningMember(); // before the vote opens, unless the scenario has the member return during the vote
+  const finals = () => [...castBallots.values()]; // each member's last recorded ballot counts
+  const ownerDuring = scenario.owner?.duringVote;
+  const order = stats.tabled ? [] : agents;
+  if (order.length) voteOpen = true;
+  for (let i = 0; i < order.length; i++) {
+    const a = order[i];
+    const { system, user } = ballotPrompt(a);
     const r = await call({ phase: "ballot", agent: a, task: "ballot", system, user, maxTokens: 100, hint: { lean: a.lean } });
     const vote = (pick(/VOTE:\s*(yes|no|abstain)/i, r.text) ?? "abstain").toLowerCase();
-    ballots.push({ agent: a.id, name: a.name, vote, reason: pick(/REASON:\s*([\s\S]*)$/i, r.text) ?? "" });
+    const b = { agent: a.id, name: a.name, vote, reason: pick(/REASON:\s*([\s\S]*)$/i, r.text) ?? "" };
+    castBallots.set(a.id, b);
+    ballotHistory.push({ ...b, trigger: "original ballot" });
+    if (ownerDuring && i + 1 === ownerDuring.afterBallots) await inquiry(ownerDuring, "during the vote");
+    if (variant.deskRead && scenario.returnDuringVote && i + 1 === 1) { await returningMember(); }
   }
+  voteOpen = false;
+  // The vote has closed: held answers are released into the transcript for everyone.
+  for (const h of held) push(h.agent.name, "answer", h.text, { label: "answer to owner (released at close)", agent: h.agent.id });
+  const norm2 = (t) => t.toLowerCase().replace(/\s+/g, " ").trim();
+  stats.inquiryChecks = {
+    heldAnswers: held.length,
+    leaks: answeredDuringVote.flatMap((h) => promptLog.filter((p) => p.agent !== h.agent.id && p.agent !== undefined && ["ballot", "ballot-revision", "owner-answer", "objection-check"].includes(p.phase) && norm2(p.text).includes(norm2(h.text).slice(0, 50))).map((p) => ({ answerBy: h.agent.id, seenBy: p.agent, phase: p.phase }))),
+    revisionsPerVoter: revisionCounts,
+    voterRevisionTurnsOk: stats.inquiries.filter((i) => i.voteOpen).every((i) => i.revisions.length === i.castBefore.length && i.castBefore.every((id) => i.revisions.filter((rv) => rv.agent === id).length === 1)),
+    clockMs: { total: Date.now() - clock.startedMs, paused: clock.pausedMs, meeting: Date.now() - clock.startedMs - clock.pausedMs },
+  };
+  const ballots = finals();
   const yes = ballots.filter((b) => b.vote === "yes").length;
   const no = ballots.filter((b) => b.vote === "no").length;
+  // Tie: the chair is not on the roster here, so it casts a single casting vote only on a tie, recorded as such; no answer means the tie fails.
+  if (!stats.tabled && yes !== no && variant.tieProbe) {
+    // Drill: real models rarely split, so the casting-vote call is also exercised on a hypothetical 1-1 tie. Not part of the result.
+    const { system, user } = prompt(chairPersona, `DRILL, not a real tie: suppose the ballots were tied 1-1. You are not on the roster. Under the rules the chair casts a single casting vote on a tie, with no double vote. Reply exactly:\nCASTING: yes|no\nREASON: <one sentence>`, { transcriptText: view() });
+    const r = await call({ phase: "casting-probe", agent: chairPersona, task: "casting", system, user, maxTokens: 100, hint: {} });
+    stats.castingProbe = { vote: pick(/CASTING:\s*(yes|no)/i, r.text)?.toLowerCase() ?? "no answer", reason: pick(/REASON:\s*([\s\S]*)$/i, r.text) ?? "" };
+  }
+  let casting;
+  if (!stats.tabled && yes === no && ballots.length > 0) {
+    const { system, user } = prompt(chairPersona, `The ballots are tied ${yes}-${no}${ballots.length - yes - no ? ` with ${ballots.length - yes - no} abstention(s)` : ""}. You are not on the roster. Under the rules the chair casts a single casting vote on a tie, with no double vote. Reply exactly:\nCASTING: yes|no\nREASON: <one sentence>`, { transcriptText: view() });
+    const r = await call({ phase: "casting-vote", agent: chairPersona, task: "casting", system, user, maxTokens: 100, hint: {} });
+    const v = pick(/CASTING:\s*(yes|no)/i, r.text)?.toLowerCase();
+    casting = { vote: v ?? "no answer", reason: pick(/REASON:\s*([\s\S]*)$/i, r.text) ?? "" };
+  }
   if (stats.chairDecision) {
     const d = stats.chairDecision;
     stats.chairDecision = { ...d, actualYes: yes, passed: yes > no, matchesOutcome: (d.decide === "yes") === (yes > no), predictionError: Number.isFinite(d.predictYes) ? d.predictYes - yes : null };
   }
-  const result = stats.tabled ? { outcome: "tabled", research: stats.tabled.research } : { yes, no, abstain: ballots.length - yes - no, quorum: ballots.length > agents.length / 2, outcome: yes > no ? "passed" : yes === no ? "tied (the plan now has the chair break it; not simulated here)" : "failed" };
+  const result = stats.tabled ? { outcome: "tabled", research: stats.tabled.research } : { yes, no, abstain: ballots.length - yes - no, quorum: ballots.length > agents.length / 2, outcome: casting ? (casting.vote === "yes" ? "passed (casting vote)" : casting.vote === "no" ? "failed (casting vote)" : "failed (tie, no casting vote)") : yes > no ? "passed" : "failed", ...(casting ? { castingVote: casting } : {}) };
 
   // Metrics
   const r1s = transcript.filter((e) => e.label?.startsWith("round 1") && e.stance);
@@ -285,16 +459,16 @@ export async function runMeeting({ scenario, variant, provider, providers = {}, 
       round1StanceAgreementWithPrevious: pairs ? agree / pairs : null,
       membersWhoChangedStanceInRound2: changed,
       cacheHitRatio: ledger.calls.reduce((s, c) => s + c.usage.cached, 0) / Math.max(1, ledger.calls.reduce((s, c) => s + c.usage.input, 0)),
-      calls: ledger.calls.length, estimatedCostUsd: ledger.spent, byPhase,
+      calls: ledger.calls.length, estimatedCostUsd: ledger.calls.reduce((s, c) => s + c.costUsd, 0), byPhase,
     },
   };
   if (variant.chairNotes === "rolling") writeFileSync(join(outDir, "chair-notes.md"), `# Chair's private notes (rolling)\n\n${chairNotes}\n`);
   writeFileSync(join(outDir, "summary.json"), JSON.stringify(summary, null, 2));
-  writeFileSync(join(outDir, "ballots.json"), JSON.stringify({ ballots, result }, null, 2));
+  writeFileSync(join(outDir, "ballots.json"), JSON.stringify({ ballots, ballotHistory, result }, null, 2));
   writeFileSync(join(outDir, "transcript.md"), [
     `# ${scenario.title}`, `Variant: ${JSON.stringify(variant)}`, `Model: ${provider.name}`, "",
     ...transcript.map((e) => `**#${e.seq} ${e.who}** ${e.label ? `_(${e.label})_` : ""}${e.stance ? ` [${e.stance}]` : ""}\n${e.text}\n${e.tldr ? `> tl;dr (what later speakers saw in summary mode): ${e.tldr}\n` : ""}`),
-    "## Ballots (revealed together at the close)", ...ballots.map((b) => `- ${b.name}: **${b.vote}** — ${b.reason}`), "", `Result: ${JSON.stringify(result)}`,
+    "## Ballots (revealed together at the close)", ...ballotHistory.map((b) => `- ${b.name}: **${b.vote}** — ${b.reason} _(${b.trigger}${b.revisionOf ? `; was ${b.revisionOf}` : ""})_`), "", `Result: ${JSON.stringify(result)}`,
   ].join("\n"));
   return summary;
 }
