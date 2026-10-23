@@ -494,7 +494,10 @@ export class DecisionService implements DecisionGuard {
   async #cannotClear(by: Principal, taskId: string, projectId: string, l: LinkBody): Promise<string | undefined> {
     if (by.kind === "owner") return undefined;
     if (l.subject.kind === "review") {
-      const review = body<{ binding: { requester: string; projectId: string } }>(await this.#runner.get("review", l.subject.id));
+      const review = body<{ binding: { requester: string; projectId: string }; state: string; decidedBy?: string }>(await this.#runner.get("review", l.subject.id));
+      const route = body<{ mandatoryHuman: boolean; state: string }>(await this.#runner.get("review-route", l.subject.id));
+      // A review in owner mode (or one the owner decided) is only ever decided again by the owner (card H12h).
+      if (review === undefined || route === undefined || review.state === "owner-decision" || route.mandatoryHuman || route.state === "escalated" || (review.decidedBy ?? "").startsWith("owner:")) return `${by.id} may not revalidate that review: it is the owner's to decide again`;
       return review === undefined || review.binding.requester === by.id || !allows(by, "review.decide", review.binding.projectId) || !inTaskScope(by, projectId)
         ? `${by.id} may not revalidate that review: the agent whose work was reviewed cannot re-approve it; a reviewer (or the owner) decides again` : undefined;
     }

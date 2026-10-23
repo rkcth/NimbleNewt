@@ -503,6 +503,21 @@ for (const backend of backends) {
     assert.equal(await blocked(), 0);
   });
 
+  suite("an agent reviewer cannot clear the stale link of a review in owner mode; the owner can (card H12h)", async (r) => {
+    const old = await r.recorded({});
+    const review = await r.reviews.request(r.ann, { commandId: cid("rq"), taskId: r.t1, operation: op(), note: "check", context, ownerOnly: true });
+    assert.equal((await r.reviews.get(r.w.owner, review.id))!.state, "owner-decision");
+    await r.reviews.decide(r.w.owner, { commandId: cid("dc"), requestId: review.id, expectedRevision: 1, verdict: "allow", reason: "the owner agrees" });
+    await link(r, r.t1, { kind: "review", id: review.id }, [old.id]);
+    const fix = await r.recorded({ statement: "Use MySQL", wording: "use MySQL, not PostgreSQL", basedOn: 1 });
+    assert.equal((await r.decisions.guard(r.t1, "effect")).blockedBy.length, 1);
+    await refuses("forbidden", () => r.decisions.revalidate(r.rev, { commandId: cid("rv"), taskId: r.t1, decisions: [fix.id], note: "x", subjects: [{ kind: "review", id: review.id }] }), (e) => assert.match(e.message, /owner's to decide again/));
+    await refuses("forbidden", () => r.decisions.revalidate(r.rev, { commandId: cid("rv"), taskId: r.t1, decisions: [fix.id], note: "x" }), (e) => assert.match(e.message, /owner's to decide again/));
+    assert.equal((await r.decisions.guard(r.t1, "effect")).blockedBy.length, 1, "still blocked");
+    await r.decisions.revalidate(r.w.owner, { commandId: cid("rv"), taskId: r.t1, decisions: [fix.id], note: "the owner re-reads it" });
+    assert.equal((await r.decisions.guard(r.t1, "effect")).blockedBy.length, 0);
+  });
+
   suite("work attaches only to the decision that governs its task: a project-level decision a task-level one overrides is refused, also when revalidating", async (r) => {
     const wide = await r.recorded({});
     const exception = await r.recorded({ taskId: r.t1, statement: "Task one uses SQLite", wording: "task one uses SQLite instead", basedOn: 1 });

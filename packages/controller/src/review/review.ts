@@ -15,6 +15,11 @@ import { addEvent, checkContext, checkPolicy, DEFAULT_POLICY, mergeContext, minu
 import type { WaitEdge } from "../planning/wait-graph.js";
 import type { DecisionGuard } from "../decisions/records.js";
 
+/** A review is in owner mode once it is reserved for the owner, escalated or sent to the owner; it never goes back to an agent reviewer (card H12h). */
+function ownerMode(body: ReviewBody, route: ReviewRouteBody): boolean {
+  return body.state === "owner-decision" || route.mandatoryHuman || route.state === "escalated";
+}
+
 /**
  * `pending`: waiting for a verdict. `needs-context`: the reviewer asked for more and the requester has to supply it. `owner-decision`: only the owner may decide. `approved`: allowed, once, until it
  * expires. `used`, `denied` and `withdrawn` are final.
@@ -73,6 +78,8 @@ export interface RequestReview extends NoActor {
   readonly operation: Operation;
   readonly note?: string;
   readonly context?: ReviewContext;
+  /** Only the owner may review this request (the dispatcher sets it for an exact-operation call). It can only make a review stricter, so the requester may set it; it never loosens the project's policy. */
+  readonly ownerOnly?: boolean;
 }
 
 export interface Decide extends NoActor {
@@ -173,7 +180,9 @@ export class ReviewService {
    * only the owner may review.
    */
   async request(requester: Principal, command: RequestReview): Promise<{ id: string; replayed: boolean; cleared: boolean }> {
-    onlyKnown(command, ["commandId", "taskId", "operation", "note", "context"]);
+    onlyKnown(command, ["commandId", "taskId", "operation", "note", "context", "ownerOnly"]);
+    if (command.ownerOnly !== undefined && typeof command.ownerOnly !== "boolean") invalid("ownerOnly", "must be true or false");
+    const ownerOnly = command.ownerOnly === true;
     const taskId = checkTaskId(command.taskId);
     const operation = checkOperation(command.operation);
     const note = command.note === undefined ? undefined : text(command.note, "note", { min: 1, max: REVIEW_LIMITS.note, multiline: true });
@@ -189,11 +198,11 @@ export class ReviewService {
     const scoped = scopedCommandId(requester.id, command.commandId);
     const id = derivedId("rev", scoped);
     const r = await this.#runner.command("review.request", { commandId: scoped, actor: requester.id }, async () => ({
-      payload: { taskId, operation: operation as unknown as JsonObject, ...(note === undefined ? {} : { note }), binding: binding as unknown as JsonObject, context: context as unknown as JsonObject },
+      payload: { taskId, operation: operation as unknown as JsonObject, ...(note === undefined ? {} : { note }), binding: binding as unknown as JsonObject, context: context as unknown as JsonObject, ...(ownerOnly ? { ownerOnly } : {}) },
       build: async () => {
         const now = this.#runner.now();
         const policy = await this.#policy(projectId);
-        const mandatory = policy.body.mandatoryHuman.includes(operation.name);
+        const mandatory = ownerOnly || policy.body.mandatoryHuman.includes(operation.name);
         const guard: Change[] = policy.revision === 0 ? [] : [{ type: "check", ref: { kind: "review-policy", id: projectId }, expectedRevision: policy.revision }];
         const earlier = await this.#coveringApproval(projectId, binding, mandatory, now);
         if (earlier !== undefined) {
@@ -212,7 +221,7 @@ export class ReviewService {
         const state: ReviewRouteBody["state"] = mandatory ? "escalated" : chosen.assigned !== undefined ? "assigned" : "waiting";
         const route: ReviewRouteBody = {
           projectId, taskId, requester: requester.id, state, ...(chosen.assigned === undefined ? {} : { assigned: chosen.assigned, assignedVia: chosen.via!, assignedAt: now }), tried: [], contributors, deadline, mandatoryHuman: mandatory,
-          events: addEvent([], now, mandatory ? "owner-only" : state === "assigned" ? "assigned" : "waiting", mandatory ? `${operation.name} is reserved for the owner by the project's policy` : state === "assigned" ? `${chosen.assigned} (${chosen.via})` : `no eligible reviewer: ${chosen.excluded.map((e) => `${e.id} ${e.reason}`).join("; ").slice(0, 200) || "none designated or holding the review right"}`),
+          events: addEvent([], now, mandatory ? "owner-only" : state === "assigned" ? "assigned" : "waiting", mandatory ? ownerOnly ? `${operation.name} was requested as owner-only` : `${operation.name} is reserved for the owner by the project's policy` : state === "assigned" ? `${chosen.assigned} (${chosen.via})` : `no eligible reviewer: ${chosen.excluded.map((e) => `${e.id} ${e.reason}`).join("; ").slice(0, 200) || "none designated or holding the review right"}`),
           requestedAt: now,
         };
         const ref: AggregateRef = { kind: "review", id };
@@ -254,7 +263,8 @@ export class ReviewService {
         if (current === undefined || body === undefined || route === undefined || routeAggregate === undefined || fresh === undefined || !allows(fresh, "review.decide", body.binding.projectId) || reviewer.id === body.binding.requester || route.contributors.includes(reviewer.id)) {
           throw new DomainError("forbidden", `${reviewer.id} may not decide that review`);
         }
-        if (!isOwner && (body.state === "owner-decision" || route.assigned !== reviewer.id)) throw new DomainError("forbidden", `${reviewer.id} may not decide that review: ${body.state === "owner-decision" ? "only the owner can" : "it is not assigned to them"}`);
+        // A review in owner mode (reserved for the owner, escalated or sent to the owner) stays the owner's whatever state it is in later and whoever it was once assigned to (card H12h).
+        if (!isOwner && (ownerMode(body, route) || route.assigned !== reviewer.id)) throw new DomainError("forbidden", `${reviewer.id} may not decide that review: ${ownerMode(body, route) ? "only the owner can" : "it is not assigned to them"}`);
         // A tool the owner has reserved since the request was made is the owner's to review: the gate is read now, not when the request was routed.
         const reservedNow = (await this.#policy(body.binding.projectId)).body.mandatoryHuman.includes(body.operation.name);
         if (!isOwner && reservedNow) throw new DomainError("forbidden", `${reviewer.id} may not decide that review: ${body.operation.name} is now reserved for the owner`);
@@ -397,6 +407,11 @@ export class ReviewService {
     const fresh = await this.#fresh(principal.id, principal.taskScope);
     const mayReview = fresh !== undefined && allows(fresh, "review.decide", body.binding.projectId);
     if (principal.kind !== "owner" && principal.id !== body.binding.requester && principal.id !== body.decidedBy && !mayReview) return undefined;
+    // A review in owner mode is not shown to an agent reviewer: it is not sent to one (card H12h). The requester and whoever decided it still see it.
+    if (principal.kind !== "owner" && principal.id !== body.binding.requester && principal.id !== body.decidedBy) {
+      const route = (await this.#runner.get("review-route", requestId))?.body as unknown as ReviewRouteBody | undefined;
+      if (route === undefined || ownerMode(body, route) || (await this.#policy(body.binding.projectId)).body.mandatoryHuman.includes(body.operation.name)) return undefined;
+    }
     return view<ReviewBody>(found);
   }
 
@@ -457,8 +472,11 @@ export class ReviewService {
           const now = this.#runner.now();
           const route = routeAggregate.body as unknown as ReviewRouteBody;
           const { contextRequest: _asked, ...rest } = body;
-          const next: ReviewBody = { ...rest, context: mergeContext(body.context, context), state: "pending" };
-          const nextRoute: ReviewRouteBody = { ...route, deadline: minutesLater(now, (await this.#policy(body.binding.projectId)).body.deadlineMinutes), events: addEvent(route.events, now, "context", `${principal.id} supplied context`) };
+          const policyNow = await this.#policy(body.binding.projectId);
+          // The answer goes back to the owner when the review is in owner mode (or the tool has been reserved since), never to an agent.
+          const reserved = policyNow.body.mandatoryHuman.includes(body.operation.name);
+          const next: ReviewBody = { ...rest, context: mergeContext(body.context, context), state: reserved || ownerMode(body, route) ? "owner-decision" : "pending" };
+          const nextRoute: ReviewRouteBody = { ...route, deadline: minutesLater(now, policyNow.body.deadlineMinutes), events: addEvent(route.events, now, "context", `${principal.id} supplied context`) };
           return {
             ref: { kind: "review", id }, creates: false,
             changes: [
@@ -497,7 +515,7 @@ export class ReviewService {
         let nextRoute: ReviewRouteBody = { ...route, contributors, events: addEvent(route.events, now, "contributor", who) };
         let next = body;
         const open = body.state === "pending" || body.state === "needs-context";
-        if (open && route.assigned === who) {
+        if (open && route.assigned === who && !ownerMode(body, route)) {
           const policy = await this.#policy(body.binding.projectId);
           const tried = [...new Set([...route.tried, who])];
           const chosen = await this.#choose(body.binding.projectId, policy.body, route.requester, contributors, tried);
@@ -669,11 +687,13 @@ export class ReviewService {
    */
   async waitEdges(projectId: string, tasks: ReadonlyMap<string, { readonly state: string; readonly owner?: string }>): Promise<WaitEdge[]> {
     const edges: WaitEdge[] = [];
-    for (const routeAggregate of await this.#routesOf(checkProjectId(projectId))) {
+    const reserved = (await this.#policy(checkProjectId(projectId))).body.mandatoryHuman;
+    for (const routeAggregate of await this.#routesOf(projectId)) {
       const route = routeAggregate.body as unknown as ReviewRouteBody;
       if (route.state !== "assigned" || route.assigned === undefined || route.verdict !== undefined || route.withdrawn === true) continue;
       const review = await this.#runner.get("review", routeAggregate.id);
-      if ((review?.body as unknown as ReviewBody | undefined)?.state !== "pending") continue;
+      const pending = review?.body as unknown as ReviewBody | undefined;
+      if (pending?.state !== "pending" || ownerMode(pending, route) || reserved.includes(pending.operation.name)) continue;
       for (const [id, t] of tasks) if (t.owner === route.assigned && t.state !== "done" && t.state !== "cancelled" && id !== route.taskId) edges.push({ fromTask: route.taskId, toTask: id, via: "review", detail: `review ${routeAggregate.id}: ${route.requester} waits for ${route.assigned}` });
     }
     return edges;
@@ -688,11 +708,15 @@ export class ReviewService {
     const id = checkProjectId(projectId);
     const fresh = await this.#fresh(by.id, by.taskScope);
     if (fresh === undefined || !allows(fresh, "review.policy.write", id)) throw new DomainError("forbidden", `${by.id} may not list the reviews to wake in ${id}`);
+    const reserved = (await this.#policy(id)).body.mandatoryHuman;
     const out = { wake: [] as { requestId: string; reviewer: string }[], held: [] as { requestId: string; reviewer: string; why: Unavailable }[], more: false };
     for (const routeAggregate of await this.#routesOf(id)) {
       const route = routeAggregate.body as unknown as ReviewRouteBody;
       if (route.state !== "assigned" || route.assigned === undefined || route.verdict !== undefined || route.withdrawn === true) continue;
-      if (((await this.#runner.get("review", routeAggregate.id))?.body as unknown as ReviewBody | undefined)?.state !== "pending") continue;
+      const pending = (await this.#runner.get("review", routeAggregate.id))?.body as unknown as ReviewBody | undefined;
+      if (pending?.state !== "pending") continue;
+      // No one is woken for a review in owner mode, nor for one whose tool has been reserved for the owner since it was routed (card H12h).
+      if (ownerMode(pending, route) || reserved.includes(pending.operation.name)) continue;
       if (out.wake.length + out.held.length >= 200) { out.more = true; break; }
       const why = await this.#unavailable(route.assigned);
       if (why === undefined) out.wake.push({ requestId: routeAggregate.id, reviewer: route.assigned });

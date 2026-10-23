@@ -318,12 +318,15 @@ export class ToolPath {
       review = await this.#deps.reviews.request(agent, {
         commandId: `rev:${ready.opId}`, taskId: d.taskId, operation: this.#operation(ready),
         note: `${c.tool.name} ${c.tool.version}: ${verdict.decision.reasons[0] ?? verdict.decision.via}`.slice(0, 900),
+        ...(verdict.ownerOnly ? { ownerOnly: true } : {}),
         context: { toolVersion: `${c.tool.name}@${c.tool.version}`.slice(0, 100), authoritySource: `the task assignment (attempt ${d.attemptId})`, expectedEffects: [clip(c.summary, 200)] },
       });
     } catch (error) {
       if (error instanceof DomainError && (error.code === "invalid_command" || error.code === "forbidden")) return this.#refuse(ready, `the approval could not be asked for: ${error.message}`, []);
       throw error;
     }
+    // A review waiting for the owner goes to the owner's attention queue (best effort: the review is the record, a failed notice is not an error).
+    if (verdict.ownerOnly && !review.cleared) await this.#deps.notifications?.emitFromController({ commandId: `dpa-rvn:${review.id}`, kind: "review-request", ref: { kind: "review", id: review.id } }).catch(() => undefined);
     const body = this.#body(ready, "awaiting-approval", { decision: verdict.decision, reviewId: review.id, ...(verdict.ownerOnly ? { ownerOnly: true } : {}) });
     if (!await this.#write(ready, body, (b) => (b.parked.includes(ready.opId) ? b : { ...b, calls: b.calls + 1, parked: [...b.parked, ready.opId] }), [])) return this.#existing(ready);
     // An approval that already covers this exact operation (A05 clears a repeat against it) is used at once.

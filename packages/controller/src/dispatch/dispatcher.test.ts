@@ -706,6 +706,9 @@ for (const backend of backends) {
     await c.run();
     assert.deepEqual(r.map((x) => x.state), ["confirmed", "awaiting-approval", "confirmed"]);
     assert.match((r[1] as { reason: string }).reason, /beyond the task contract's permission ceiling/);
+    const beyond = (r[1] as { reviewId: string }).reviewId;
+    assert.equal((await c.reviews.get(c.owner, beyond))!.state, "owner-decision", "beyond the ceiling the review is created in owner mode");
+    assert.equal((await c.reviews.getRoute(c.owner, beyond))!.assigned, undefined);
   });
 
   suite("a call the policy sends to the owner is not cleared by an agent reviewer's approval", async (c) => {
@@ -729,12 +732,16 @@ for (const backend of backends) {
     assert.equal(parked.state, "awaiting-approval");
     const review = (await c.reviews.get(c.owner, (parked as { reviewId: string }).reviewId))!;
     const revP = await c.principals.authenticate((await c.principals.issueCredential(c.owner, "agent:rev")).token);
-    await c.reviews.decide(revP, { commandId: "dec", requestId: review.id, expectedRevision: review.revision, verdict: "allow", reason: "looks fine" });
+    // The review is in owner mode from the start: the agent reviewer neither sees it, is woken for it, nor can decide it (card H12h); only the owner's allow lets the call run.
+    assert.deepEqual([review.state, (await c.reviews.getRoute(c.owner, review.id))!.mandatoryHuman], ["owner-decision", true]);
+    assert.equal(await c.reviews.get(revP, review.id), undefined);
+    assert.deepEqual((await c.reviews.wakeList(c.owner, c.project)).wake, []);
+    await assert.rejects(() => c.reviews.decide(revP, { commandId: "dec", requestId: review.id, expectedRevision: review.revision, verdict: "allow", reason: "looks fine" }), (e: unknown) => e instanceof DomainError && e.code === "forbidden");
+    await c.reviews.decide(c.owner, { commandId: "dec-o", requestId: review.id, expectedRevision: review.revision, verdict: "allow", reason: "the owner agrees" });
     go.resolve();
     const after = await second.promise;
-    assert.equal(after.state, "refused");
-    assert.match((after as { reason: string }).reason, /only the owner's approval counts/);
-    assert.equal(log.applied, 0);
+    assert.equal(after.state, "confirmed");
+    assert.equal(log.applied, 1);
     await c.dispatcher.idle();
   });
 
@@ -968,6 +975,8 @@ for (const backend of backends) {
     await c.policy.set(c.owner, { scope: "installation", commandId: "pol", profile: "derived" });
     await c.contracts.setContract(c.owner, { commandId: "ct", taskId, expectedVersion: 0, permissions: ["tool.install-package", "tool.edit-file"] });
     const r: Record<string, ToolResult> = {};
+    const emitted: string[] = [];
+    c.dispatcher = c.restart({ notifications: { emitFromController: async (cmd: { kind: string; ref: { kind: string; id: string } }) => { emitted.push(`${cmd.kind} ${cmd.ref.id}`); return { itemId: "i", coalesced: false, immediate: false }; } } as never });
     const bridge = { idempotent: true, execute: async () => ({}) };
     c.worker.script = async ({ gateway }) => {
       r["edit"] = await gateway.call({ callId: "e", tool: { name: "edit-file", version: "1" }, args: {} }, local());
@@ -979,6 +988,11 @@ for (const backend of backends) {
     assert.equal(r["install"]!.state, "awaiting-approval");
     const op = (await c.ops(c.worker.starts[0]!.attemptId)).find((o) => o.callId === "i")!;
     assert.deepEqual([op.decision?.via, op.ownerOnly], ["exact-operation", true]);
+    const owned = (await c.reviews.get(c.owner, op.reviewId!))!;
+    assert.equal(owned.state, "owner-decision", "created in owner mode, never assigned to an agent");
+    const owned2 = (await c.reviews.getRoute(c.owner, op.reviewId!))!;
+    assert.deepEqual([owned2.mandatoryHuman, owned2.state, owned2.assigned], [true, "escalated", undefined]);
+    assert.deepEqual(emitted, [`review-request ${op.reviewId}`], "and the owner's attention queue is told");
   });
 
   test(`${backend.name}: guards that create the same record must agree`, async () => {
