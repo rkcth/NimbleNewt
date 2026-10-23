@@ -1,0 +1,515 @@
+import { DomainError } from "../domain/errors.js";
+import type { ActivityBody, AssignmentBody, AttemptBody, Owner } from "../domain/assignment-model.js";
+import type { AssignmentService } from "../domain/assignments.js";
+import { onlyKnown, taskId as checkTaskId, text, type TaskBody, type View } from "../domain/model.js";
+import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
+import type { WaitService } from "../domain/waits.js";
+import type { AgentBody } from "../agents/agents.js";
+import { DEFAULT_HOST_STALE_AFTER_MS, hostFreshness, type HostBody } from "../hosts/hosts.js";
+import { DEFAULT_CONTRACT, DIFFICULTIES, type ContractBody, type Difficulty } from "../planning/contracts.js";
+import { allows, allowsExactly } from "../security/access.js";
+import { scopedCommandId } from "../security/credentials.js";
+import type { NoActor, Principal, PrincipalBody } from "../security/principals.js";
+import { redactText } from "../security/redact.js";
+import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
+import {
+  DEFAULT_THRESHOLDS, JOB_STATUSES, STALL_LIMITS, assessStall,
+  type Assessment, type EvidenceBody, type HostEvidence, type JobStatus, type StallKind, type StallThresholds, type WindowEntry,
+} from "./assess.js";
+
+/** A suspected stall is `suspected` until someone decides: `confirmed` (a failure someone accepted), `dismissed` (judged fine, for a while), or `cleared` (the signals recovered on their own). */
+export type ConcernState = "suspected" | "confirmed" | "dismissed" | "cleared";
+const STATES: readonly ConcernState[] = ["suspected", "confirmed", "dismissed", "cleared"];
+
+/** Who should look at a concern: the agent's responsible supervisor (card H11), or the installation owner when there is none. */
+export interface Route {
+  readonly to: { readonly kind: "agent" | "owner"; readonly id: string };
+  readonly via: "supervisor" | "owner";
+  readonly reason: string;
+}
+
+export interface ConcernBody {
+  readonly taskId: string;
+  readonly projectId: string;
+  readonly generation: number;
+  readonly kind: StallKind;
+  readonly state: ConcernState;
+  readonly detail: string;
+  readonly difficulty: Difficulty;
+  readonly route: Route;
+  readonly firstSeenAt: string;
+  readonly lastChangedAt: string;
+  /** How many times it came back after being cleared or after a dismissal ran out. */
+  readonly reopened: number;
+  readonly decidedBy?: string;
+  readonly decidedAt?: string;
+  readonly decision?: string;
+  readonly dismissedUntil?: string;
+  readonly clearedBecause?: string;
+}
+
+export type StallEvent =
+  | { readonly type: "request_started"; readonly requestId: string }
+  | { readonly type: "request_finished"; readonly requestId: string; readonly outcome: "ok" | "error" }
+  | { readonly type: "step"; readonly label: string; readonly actionKey?: string }
+  | { readonly type: "error"; readonly errorClass: string; readonly actionKey?: string }
+  | { readonly type: "job"; readonly status: JobStatus }
+  | { readonly type: "spend"; readonly minutes?: number; readonly cost?: number }
+  | { readonly type: "evidence"; readonly item: string };
+
+export interface StallOptions extends RunnerOptions {
+  /** Per difficulty, over the provisional defaults. A task with no stated difficulty is assessed as `medium`. */
+  readonly thresholds?: Partial<Record<Difficulty, Partial<StallThresholds>>>;
+  /** How long a host counts as fresh (default: the one constant `HostService` uses). */
+  readonly hostStaleAfterMs?: number;
+  /** How long a dismissal silences a concern before a signal that is still bad reopens it. Provisional default 6 hours. */
+  readonly dismissForMs?: number;
+}
+
+export interface ScanReport { readonly checked: number; readonly opened: number; readonly reopened: number; readonly cleared: number; readonly contended: number; readonly next?: string }
+
+const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
+const safe = (value: unknown, field: string, max: number): string => {
+  const out = text(value, field, { min: 1, max });
+  if (redactText(out) !== out) return invalid(field, "looks like a credential or key; those are not recorded");
+  return out;
+};
+const amount = (value: unknown, field: string): number | undefined => (value === undefined ? undefined : typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1e12 ? value : invalid(field, "must be a number from 0"));
+const pad = (n: number): string => String(n).padStart(10, "0");
+const concernId = (taskId: string, generation: number, kind: StallKind): string => `stl-${taskId.slice(5)}-${pad(generation)}-${kind.replace("_", "-")}`;
+const prefixOf = (taskId: string): string => `stl-${taskId.slice(5)}-`;
+
+/** Whether the identity that reported is the task's owner (an agent owner `ann` reports as `agent:ann`). */
+const isOwner = (owner: Owner | undefined, principalId: string): boolean => owner !== undefined && (owner.id === principalId || `${owner.kind}:${owner.id}` === principalId);
+
+/** Field by field: stored records come back with their keys in another order. */
+const sameRoute = (a: Route, b: Route): boolean => a.via === b.via && a.reason === b.reason && a.to.kind === b.to.kind && a.to.id === b.to.id;
+
+function thresholdsFor(options: StallOptions): Record<Difficulty, StallThresholds> {
+  const out = {} as Record<Difficulty, StallThresholds>;
+  for (const level of DIFFICULTIES) {
+    const merged = { ...DEFAULT_THRESHOLDS[level], ...(options.thresholds?.[level] ?? {}) };
+    for (const key of ["requestMs", "silenceMs"] as const) if (!Number.isSafeInteger(merged[key]) || merged[key] < 1000) throw new DomainError("invalid_command", `thresholds.${level}.${key}: must be a whole number of at least 1000`, { field: "thresholds" });
+    for (const key of ["repeatedActions", "repeatedErrors"] as const) if (!Number.isSafeInteger(merged[key]) || merged[key] < 2 || merged[key] > STALL_LIMITS.maxRepeat) throw new DomainError("invalid_command", `thresholds.${level}.${key}: must be a whole number from 2 to ${STALL_LIMITS.maxRepeat}`, { field: "thresholds" });
+    out[level] = merged;
+  }
+  return out;
+}
+
+function checkEvent(value: unknown): StallEvent {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return invalid("event", "must be an object with a type");
+  const e = value as Record<string, unknown>;
+  const only = (known: readonly string[]): void => { for (const key of Object.keys(e)) if (!known.includes(key)) invalid(`event.${key}`, "is not a field of this event"); };
+  const key = (field: string): string | undefined => (e[field] === undefined ? undefined : safe(e[field], `event.${field}`, STALL_LIMITS.key));
+  switch (e["type"]) {
+    case "request_started": only(["type", "requestId"]); return { type: "request_started", requestId: safe(e["requestId"], "event.requestId", STALL_LIMITS.requestId) };
+    case "request_finished": {
+      only(["type", "requestId", "outcome"]);
+      if (e["outcome"] !== "ok" && e["outcome"] !== "error") invalid("event.outcome", "must be ok or error");
+      return { type: "request_finished", requestId: safe(e["requestId"], "event.requestId", STALL_LIMITS.requestId), outcome: e["outcome"] as "ok" | "error" };
+    }
+    case "step": { only(["type", "label", "actionKey"]); const k = key("actionKey"); return { type: "step", label: safe(e["label"], "event.label", STALL_LIMITS.label), ...(k === undefined ? {} : { actionKey: k }) }; }
+    case "error": { only(["type", "errorClass", "actionKey"]); const k = key("actionKey"); return { type: "error", errorClass: safe(e["errorClass"], "event.errorClass", STALL_LIMITS.key), ...(k === undefined ? {} : { actionKey: k }) }; }
+    case "job": {
+      only(["type", "status"]);
+      if (!(JOB_STATUSES as readonly unknown[]).includes(e["status"])) invalid("event.status", `must be one of ${JOB_STATUSES.join(", ")}`);
+      return { type: "job", status: e["status"] as JobStatus };
+    }
+    case "spend": {
+      only(["type", "minutes", "cost"]);
+      const minutes = amount(e["minutes"], "event.minutes"); const cost = amount(e["cost"], "event.cost");
+      if (minutes === undefined && cost === undefined) invalid("event", "spend must give minutes, cost or both");
+      return { type: "spend", ...(minutes === undefined ? {} : { minutes }), ...(cost === undefined ? {} : { cost }) };
+    }
+    case "evidence": only(["type", "item"]); return { type: "evidence", item: safe(e["item"], "event.item", STALL_LIMITS.label) };
+    default: return invalid("event.type", "must be request_started, request_finished, step, error, job, spend or evidence");
+  }
+}
+
+/** The evidence after one event, at controller time `at`. Throws for an event that contradicts the record (a finish with no open request, spend that goes down). */
+function applyEvent(before: EvidenceBody, event: StallEvent, by: string, at: string): EvidenceBody {
+  let next: EvidenceBody = { ...before, reportedBy: by, lastReportAt: at, reports: before.reports + 1 };
+  // Only these count as progress: a repeated job ping or a spend report proves a process is alive, not that it is getting anywhere.
+  const progress = (): void => { next = { ...next, lastProgressAt: at }; };
+  const count = (k: string): Readonly<Record<string, number>> => {
+    const counts = { ...before.counts };
+    if (counts[k] === undefined && Object.keys(counts).length >= STALL_LIMITS.countKeys) {
+      let least: string | undefined;
+      for (const key of Object.keys(counts)) if (least === undefined || counts[key]! < counts[least]!) least = key;
+      if (least !== undefined) delete counts[least];
+    }
+    counts[k] = (counts[k] ?? 0) + 1;
+    return counts;
+  };
+  const push = (entry: WindowEntry): readonly WindowEntry[] => [...before.window, entry].slice(-STALL_LIMITS.window);
+  switch (event.type) {
+    case "request_started":
+      // Repeating the start of the open request does not make it younger.
+      if (before.request?.id !== event.requestId) { next = { ...next, request: { id: event.requestId, startedAt: at } }; progress(); }
+      break;
+    case "request_finished": {
+      if (before.request === undefined || before.request.id !== event.requestId) return invalid("event.requestId", "is not the open request");
+      const { request: _r, ...rest } = next;
+      next = { ...rest, lastRequestMs: Math.max(0, Date.parse(at) - Date.parse(before.request.startedAt)) };
+      progress();
+      break;
+    }
+    case "step": next = { ...next, steps: before.steps + 1, lastStep: { label: event.label, at }, counts: count(`s:${event.actionKey ?? event.label}`), window: push({ t: "s", key: event.actionKey ?? event.label, at, ev: before.evidenceTotal }) }; progress(); break;
+    case "error": next = { ...next, lastError: { errorClass: event.errorClass, at }, counts: count(`e:${event.actionKey === undefined ? event.errorClass : `${event.errorClass}:${event.actionKey}`}`), window: push({ t: "e", key: event.actionKey === undefined ? event.errorClass : `${event.errorClass}:${event.actionKey}`, at, ev: before.evidenceTotal }) }; progress(); break;
+    case "job":
+      next = { ...next, job: { status: event.status, at: before.job?.status === event.status ? before.job.at : at } };
+      if (before.job?.status !== event.status) progress();
+      break;
+    case "spend": {
+      const was = before.spend ?? {};
+      if ((event.minutes !== undefined && was.minutes !== undefined && event.minutes < was.minutes) || (event.cost !== undefined && was.cost !== undefined && event.cost < was.cost)) return invalid("event", "spend is cumulative and cannot go down");
+      next = { ...next, spend: { ...(event.minutes ?? was.minutes) === undefined ? {} : { minutes: event.minutes ?? was.minutes! }, ...(event.cost ?? was.cost) === undefined ? {} : { cost: event.cost ?? was.cost! } } };
+      break;
+    }
+    case "evidence":
+      if (!before.evidence.includes(event.item)) { next = { ...next, evidence: [...before.evidence, event.item].slice(-STALL_LIMITS.evidence), evidenceTotal: before.evidenceTotal + 1, counts: {} }; progress(); }
+      break;
+  }
+  return next;
+}
+
+/**
+ * Health and progress stall detection (card V01). Workers (through their host, or the owning agent itself) report bounded progress evidence: request start and finish (the
+ * controller measures the duration with its own clock), steps, errors, job status, cumulative spend and acceptance evidence produced. `assess` and `scan` turn that, with the
+ * task's difficulty, budget, open waits and the host's freshness, into deterministic concerns (loop, repeated errors, silence, stuck request, budget). A concern is only ever
+ * *suspected* until the agent's responsible supervisor (or the owner) confirms or dismisses it, and suspected and confirmed ones are kept and listed apart.
+ *
+ * **Nothing here acts.** No assignment, task or attempt is changed, and the assessment says `takeover.permitted: false` always: a stale timestamp is evidence about a connection, and
+ * reassigning is the owner's explicit command (S02). All times are the controller's own clock (injected, like its neighbours); there are no timers: `scan` is called periodically.
+ */
+export class StallService {
+  readonly #runner: CommandRunner;
+  readonly #assignments: AssignmentService;
+  readonly #waits: WaitService;
+  readonly #thresholds: Record<Difficulty, StallThresholds>;
+  readonly #hostStaleAfterMs: number;
+  readonly #dismissForMs: number;
+
+  private constructor(runner: CommandRunner, assignments: AssignmentService, waits: WaitService, options: StallOptions) {
+    this.#runner = runner;
+    this.#assignments = assignments;
+    this.#waits = waits;
+    this.#thresholds = thresholdsFor(options);
+    this.#hostStaleAfterMs = options.hostStaleAfterMs ?? DEFAULT_HOST_STALE_AFTER_MS;
+    this.#dismissForMs = options.dismissForMs ?? 6 * 3_600_000;
+    if (!Number.isSafeInteger(this.#hostStaleAfterMs) || this.#hostStaleAfterMs < 1000) throw new DomainError("invalid_command", "hostStaleAfterMs: must be a whole number of at least 1000", { field: "hostStaleAfterMs" });
+    if (!Number.isSafeInteger(this.#dismissForMs) || this.#dismissForMs < 1000) throw new DomainError("invalid_command", "dismissForMs: must be a whole number of at least 1000", { field: "dismissForMs" });
+  }
+
+  static withEpoch(storage: ControllerStorage, epoch: number, assignments: AssignmentService, waits: WaitService, options: StallOptions = {}): StallService {
+    return new StallService(new CommandRunner(storage, epoch, options), assignments, waits, options);
+  }
+
+  // ---- evidence ---------------------------------------------------------------------------------------------------------------
+
+  /**
+   * A worker reports one event about a task under the generation it believes is current. The owner, a host with `attempt.work` in the task's project, or the owning agent itself
+   * (another agent is refused) may report; a task the caller cannot work on reads like a missing one. A generation that is not the assignment's current one is refused (`fenced`), so
+   * a superseded worker's reports never count as the owner's liveness. The reporter sends no times: durations and timestamps are the controller's.
+   */
+  async report(by: Principal, command: NoActor & { taskId: string; generation: number; event: StallEvent }): Promise<{ id: string; revision: number; replayed: boolean }> {
+    onlyKnown(command, ["commandId", "taskId", "generation", "event"]);
+    const taskId = checkTaskId(command.taskId);
+    const task = (await this.#runner.get("task", taskId))?.body as unknown as TaskBody | undefined;
+    const assignment = (await this.#assignments.getAssignment(taskId));
+    const mayReport = task !== undefined && (by.kind === "owner" || ((by.kind === "host" || by.kind === "agent") && allows(by, "attempt.work", task.projectId, { resource: { kind: "task", id: taskId } })));
+    if (task === undefined || !mayReport) throw new DomainError("forbidden", `${by.id} may not report on that task`);
+    // An agent reports only for itself: it must be the assignment's owner.
+    if (by.kind === "agent" && !isOwner(assignment?.owner, by.id)) throw new DomainError("forbidden", `${by.id} may not report on that task`);
+    if (!Number.isSafeInteger(command.generation) || command.generation < 1) invalid("generation", "must be a whole number of at least 1");
+    const event = checkEvent(command.event);
+    if (assignment === undefined || assignment.state !== "assigned") throw new DomainError("fenced", "the task is not assigned, so there is no one to report for");
+    if (assignment.generation !== command.generation) throw new DomainError("fenced", `generation ${command.generation} is not the current one (${assignment.generation}); read the assignment`);
+    const ref: AggregateRef = { kind: "stall-evidence", id: taskId };
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.#runner.command("stall.report", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
+          payload: { taskId, generation: command.generation, event: event as unknown as JsonObject },
+          build: async () => {
+            const current = await this.#runner.get(ref.kind, ref.id);
+            const stored = current?.body as unknown as EvidenceBody | undefined;
+            const at = this.#runner.now();
+            // A late report of an earlier generation must not overwrite the newer generation's evidence (the check before the command can be overtaken).
+            if (stored !== undefined && stored.generation > command.generation) throw new DomainError("fenced", `generation ${command.generation} is no longer current; read the assignment`);
+            // A new generation starts its evidence again: what the previous owner did says nothing about this one.
+            const base: EvidenceBody = stored !== undefined && stored.generation === command.generation
+              ? stored
+              : { taskId, projectId: task.projectId, generation: command.generation, since: at, reportedBy: by.id, lastReportAt: at, lastProgressAt: at, reports: 0, steps: 0, window: [], counts: {}, evidence: [], evidenceTotal: 0 };
+            const next = applyEvent(base, event, by.id, at);
+            const change: Change = current === undefined
+              ? { type: "create", ref, body: next as unknown as JsonObject }
+              : { type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject };
+            return { ref, creates: current === undefined, changes: [change], detail: { taskId, generation: command.generation, event: event.type } };
+          },
+        }));
+      } catch (error) {
+        if (!(error instanceof DomainError) || (error.code !== "stale_revision" && error.code !== "command_conflict") || attempt >= 6) throw error;
+      }
+    }
+  }
+
+  /** The bounded evidence recorded for a task, for those who may read its concerns. */
+  async evidence(by: Principal, taskId: string): Promise<View<EvidenceBody> | undefined> {
+    const id = checkTaskId(taskId);
+    const found = await this.#runner.get("stall-evidence", id);
+    if (found === undefined) return undefined;
+    const body = found.body as unknown as EvidenceBody;
+    return (await this.#mayRead(by, body.projectId, id)) ? view<EvidenceBody>(found) : undefined;
+  }
+
+  // ---- assessment -------------------------------------------------------------------------------------------------------------
+
+  /** The assessment of a task now, with its signals and who a concern would be routed to. Nothing is written. A task the caller may not read reads like a missing one. */
+  async assess(by: Principal, taskId: string): Promise<(Assessment & { taskId: string; generation?: number; difficulty: Difficulty; route?: Route }) | undefined> {
+    const id = checkTaskId(taskId);
+    const task = (await this.#runner.get("task", id))?.body as unknown as TaskBody | undefined;
+    if (task === undefined || !(await this.#mayRead(by, task.projectId, id))) return undefined;
+    const facts = await this.#facts(id, task);
+    return { ...facts.assessment, taskId: id, difficulty: facts.difficulty, ...(facts.generation === undefined ? {} : { generation: facts.generation }), ...(facts.route === undefined ? {} : { route: facts.route }) };
+  }
+
+  /**
+   * One pass over assignments (a page of `limit`, from `afterId`): suspected concerns are opened, refreshed or cleared to match the signals, a dismissed concern whose time has run
+   * out and is still true is reopened, and concerns of a task that is no longer running, or of an earlier generation, are cleared. Confirmed concerns are never changed here. For the
+   * owner or a service holding `recovery.read` everywhere. A pass changes only concern records; it repeats safely (each change is its own command, keyed by concern and revision).
+   */
+  async scan(by: Principal, page: { afterId?: string; limit?: number } = {}): Promise<ScanReport> {
+    if (!(by.kind === "owner" || (by.kind === "service" && allowsExactly(by, "recovery.read", "*")))) throw new DomainError("forbidden", `${by.id} may not run stall detection`);
+    const limit = page.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > STALL_LIMITS.scan) invalid("limit", `must be a whole number from 1 to ${STALL_LIMITS.scan}`);
+    const records = await this.#runner.list("assignment", { ...(page.afterId === undefined ? {} : { afterId: page.afterId }), limit });
+    const counts = { checked: 0, opened: 0, reopened: 0, cleared: 0, contended: 0 };
+    for (const record of records) {
+      const taskId = (record.body as unknown as AssignmentBody).taskId;
+      const task = (await this.#runner.get("task", taskId))?.body as unknown as TaskBody | undefined;
+      if (task === undefined) continue;
+      counts.checked++;
+      const facts = await this.#facts(taskId, task);
+      const wanted = new Map(facts.assessment.concerns.map((c) => [c.kind, c] as const));
+      const existing = await this.#concernsOf(taskId);
+      const now = Date.parse(this.#runner.now());
+      for (const [kind, concern] of wanted) {
+        if (facts.generation === undefined || facts.route === undefined) continue;
+        const id = concernId(taskId, facts.generation, kind);
+        const found = existing.find((c) => c.id === id);
+        try {
+          if (found === undefined) { await this.#write(by, id, undefined, { taskId, projectId: task.projectId, generation: facts.generation, kind, state: "suspected", detail: concern.detail, difficulty: facts.difficulty, route: facts.route, firstSeenAt: this.#runner.now(), lastChangedAt: this.#runner.now(), reopened: 0 }); counts.opened++; continue; }
+          const body = found;
+          if (body.state === "confirmed") continue;
+          if (body.state === "dismissed" && (body.dismissedUntil === undefined || Date.parse(body.dismissedUntil) > now)) continue;
+          if (body.state === "suspected") {
+            // Only a change of route rewrites a suspected concern: the stored detail does not vary with time, so a supervisor's revision stays good across scans.
+            if (sameRoute(body.route, facts.route)) continue;
+            await this.#write(by, id, found.revision, { ...body, route: facts.route, lastChangedAt: this.#runner.now() });
+            continue;
+          }
+          // Cleared, or a dismissal that has run out: it came back.
+          const { dismissedUntil: _d, clearedBecause: _c, decidedBy: _b, decidedAt: _a, decision: _n, ...rest } = body;
+          await this.#write(by, id, found.revision, { ...rest, state: "suspected", detail: concern.detail, difficulty: facts.difficulty, route: facts.route, lastChangedAt: this.#runner.now(), reopened: body.reopened + 1 });
+          counts.reopened++;
+        } catch (error) { if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict")) counts.contended++; else throw error; }
+      }
+      // A confirmed concern is archived (state cleared, with the reason) once its task is done or cancelled or its generation has moved on; a dismissed one is left to run out.
+      for (const found of existing) {
+        if (found.state !== "confirmed") continue;
+        const ended = task.state === "done" || task.state === "cancelled";
+        const moved = facts.generation !== undefined && found.generation !== facts.generation;
+        if (!ended && !moved) continue;
+        try {
+          await this.#write(by, found.id, found.revision, { ...found, state: "cleared", clearedBecause: ended ? `archived: the task is ${task.state}` : "archived: the task has a new owner", lastChangedAt: this.#runner.now() });
+          counts.cleared++;
+        } catch (error) { if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict")) counts.contended++; else throw error; }
+      }
+      // Suspected concerns the signals no longer support (or that belong to another generation, or a task that is not running) are cleared.
+      for (const found of existing) {
+        const body = found;
+        if (body.state !== "suspected") continue;
+        const stillTrue = body.generation === facts.generation && wanted.has(body.kind);
+        if (stillTrue) continue;
+        const status = facts.assessment.status;
+        const because = body.generation !== facts.generation ? "the task has a new owner or is no longer assigned" : status === "waiting" ? "the task is waiting on purpose" : status === "not_running" ? "the task is not running" : "the signals recovered";
+        try {
+          await this.#write(by, found.id, found.revision, { ...body, state: "cleared", clearedBecause: because, lastChangedAt: this.#runner.now() });
+          counts.cleared++;
+        } catch (error) { if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict")) counts.contended++; else throw error; }
+      }
+    }
+    const last = records.at(-1);
+    return { ...counts, ...(records.length === limit && last !== undefined ? { next: last.id } : {}) };
+  }
+
+  // ---- decisions and reads ----------------------------------------------------------------------------------------------------
+
+  /**
+   * The agent's responsible supervisor, the installation owner, or a holder of `assignment.manage` in the project confirms the suspicion as a failure or dismisses it (for
+   * `dismissForMs`; a signal that is still bad after that reopens it). The task's own owner may not decide on its own concern. Neither changes the task or its assignment.
+   */
+  async decide(by: Principal, command: NoActor & { concernId: string; expectedRevision: number; decision: "confirm" | "dismiss"; reason: string }): Promise<{ id: string; revision: number; replayed: boolean }> {
+    onlyKnown(command, ["commandId", "concernId", "expectedRevision", "decision", "reason"]);
+    const found = await this.#concern(command.concernId);
+    if (found === undefined || !(await this.#mayRead(by, found.projectId, found.taskId))) throw new DomainError("not_found", "no such concern");
+    if (command.decision !== "confirm" && command.decision !== "dismiss") invalid("decision", "must be confirm or dismiss");
+    const reason = safe(command.reason, "reason", 500);
+    if (!Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 1) invalid("expectedRevision", "must be a whole number of at least 1");
+    const assignment = await this.#assignments.getAssignment(found.taskId);
+    const supervisor = found.route.via === "supervisor" && `agent:${found.route.to.id}` === by.id;
+    const manager = by.kind === "owner" || allows(by, "assignment.manage", found.projectId);
+    if (!(by.kind === "owner" || (!isOwner(assignment?.owner, by.id) && (supervisor || manager)))) throw new DomainError("forbidden", `${by.id} may not decide on that concern`);
+    const ref: AggregateRef = { kind: "stall-concern", id: found.id };
+    // The revision and state are checked inside the command, so a repeat of one that already applied is answered with its recorded result, not refused as stale.
+    return this.#runner.command(`stall.${command.decision}`, { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
+      payload: { concernId: found.id, expectedRevision: command.expectedRevision, decision: command.decision, reason },
+      build: async () => {
+        const current = await this.#runner.get(ref.kind, ref.id);
+        if (current === undefined) throw new DomainError("not_found", "no such concern");
+        if (current.revision !== command.expectedRevision) throw new DomainError("stale_revision", `the concern is at revision ${current.revision}`, { currentRevision: current.revision });
+        const body = current.body as unknown as ConcernBody;
+        if (body.state !== "suspected") throw new DomainError("invalid_transition", `the concern is ${body.state}; only a suspected one can be decided`);
+        const at = this.#runner.now();
+        const next: ConcernBody = command.decision === "confirm"
+          ? { ...body, state: "confirmed", decidedBy: by.id, decidedAt: at, decision: reason, lastChangedAt: at }
+          : { ...body, state: "dismissed", decidedBy: by.id, decidedAt: at, decision: reason, dismissedUntil: new Date(Date.parse(at) + this.#dismissForMs).toISOString(), lastChangedAt: at };
+        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject }], detail: { taskId: body.taskId, kind: body.kind, state: next.state, generation: body.generation } };
+      },
+    }));
+  }
+
+  async get(by: Principal, id: string): Promise<View<ConcernBody> | undefined> {
+    const found = await this.#concern(id);
+    return found === undefined || !(await this.#mayRead(by, found.projectId, found.taskId)) ? undefined : (found as unknown as View<ConcernBody>);
+  }
+
+  /** Concerns of one state (default `suspected`), a page at a time, only those the caller may read. */
+  async list(by: Principal, query: { state?: ConcernState; taskId?: string; afterId?: string; limit?: number } = {}): Promise<{ items: View<ConcernBody>[]; next?: string }> {
+    const state = query.state ?? "suspected";
+    if (!STATES.includes(state)) invalid("state", `must be one of ${STATES.join(", ")}`);
+    const limit = query.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) invalid("limit", "must be a whole number from 1 to 1000");
+    const items: View<ConcernBody>[] = [];
+    let after = query.afterId;
+    const prefix = query.taskId === undefined ? undefined : prefixOf(checkTaskId(query.taskId));
+    if (after === undefined && prefix !== undefined) after = prefix;
+    for (let pages = 0; pages < 50; pages++) {
+      const rows = await this.#runner.list("stall-concern", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const row of rows) {
+        after = row.id;
+        if (prefix !== undefined && !row.id.startsWith(prefix)) return { items };
+        const body = row.body as unknown as ConcernBody;
+        if (body.state !== state || !(await this.#mayRead(by, body.projectId, body.taskId))) continue;
+        items.push(view<ConcernBody>(row));
+        if (items.length === limit) return { items, next: row.id };
+      }
+      if (rows.length < 200) return { items };
+    }
+    return { items, ...(after === undefined ? {} : { next: after }) };
+  }
+
+  /** Suspected stalls and confirmed failures, side by side but never mixed: two lists, each bounded. */
+  async overview(by: Principal, limit = 100): Promise<{ suspected: View<ConcernBody>[]; confirmed: View<ConcernBody>[] }> {
+    return { suspected: (await this.list(by, { state: "suspected", limit })).items, confirmed: (await this.list(by, { state: "confirmed", limit })).items };
+  }
+
+  // ---- internals --------------------------------------------------------------------------------------------------------------
+
+  async #concern(id: string): Promise<(ConcernBody & { id: string; revision: number }) | undefined> {
+    if (typeof id !== "string" || !/^stl-[a-z2-7]{20}-\d{10}-[a-z-]{4,20}$/.test(id)) return undefined;
+    const found = await this.#runner.get("stall-concern", id);
+    return found === undefined ? undefined : { ...(found.body as unknown as ConcernBody), id: found.id, revision: found.revision };
+  }
+
+  /** Every concern of a task, in order (all generations). */
+  async #concernsOf(taskId: string): Promise<(ConcernBody & { id: string; revision: number })[]> {
+    const prefix = prefixOf(taskId);
+    const out: (ConcernBody & { id: string; revision: number })[] = [];
+    let after = prefix;
+    for (;;) {
+      const rows = await this.#runner.list("stall-concern", { afterId: after, limit: 200 });
+      for (const row of rows) {
+        if (!row.id.startsWith(prefix)) return out;
+        out.push({ ...(row.body as unknown as ConcernBody), id: row.id, revision: row.revision });
+        after = row.id;
+      }
+      if (rows.length < 200) return out;
+    }
+  }
+
+  async #write(by: Principal, id: string, expected: number | undefined, body: ConcernBody): Promise<{ id: string; revision: number; replayed: boolean }> {
+    const ref: AggregateRef = { kind: "stall-concern", id };
+    // The records we read carry their id and revision; the stored body does not.
+    const { id: _i, revision: _r, ...stored } = body as ConcernBody & { id?: string; revision?: number };
+    body = stored;
+    const change: Change = expected === undefined ? { type: "create", ref, body: body as unknown as JsonObject } : { type: "update", ref, expectedRevision: expected, body: body as unknown as JsonObject };
+    // Keyed by concern and the revision it was read at, so a pass repeated after a crash is the same command and a later state is a different one.
+    return this.#runner.command("stall.concern", { commandId: `stall:${id}:${expected ?? 0}:${body.state}`, actor: by.id }, async () => ({
+      payload: { id, state: body.state, kind: body.kind, detail: body.detail },
+      build: async () => ({ ref, creates: expected === undefined, changes: [change], detail: { taskId: body.taskId, kind: body.kind, state: body.state, generation: body.generation } }),
+    }));
+  }
+
+  /** Owner, the agent a concern is about, the supervisor it is routed to, and holders of `assignment.read` or `assignment.manage` in the project. */
+  async #mayRead(by: Principal, projectId: string, taskId: string): Promise<boolean> {
+    const scope = { resource: { kind: "task", id: taskId } } as const;
+    if (by.kind === "owner" || allows(by, "assignment.read", projectId, scope) || allows(by, "assignment.manage", projectId, scope)) return true;
+    const assignment = await this.#assignments.getAssignment(taskId);
+    if (isOwner(assignment?.owner, by.id)) return true;
+    const route = await this.#route(assignment?.owner);
+    return route.via === "supervisor" && `agent:${route.to.id}` === by.id;
+  }
+
+  /** The agent's supervisor when it has an active one (card H11); otherwise the installation owner, with the reason. */
+  async #route(owner: Owner | undefined): Promise<Route> {
+    const toOwner = (reason: string): Route => ({ to: { kind: "owner", id: "owner" }, via: "owner", reason });
+    if (owner === undefined) return toOwner("the task has no owner");
+    if (owner.kind !== "agent") return toOwner(`the owner (${owner.kind}) is not an agent`);
+    const id = owner.id.startsWith("agent:") ? owner.id.slice(6) : owner.id;
+    const agent = (await this.#runner.get("agent", id))?.body as unknown as AgentBody | undefined;
+    if (agent === undefined) return toOwner("the owning agent has no agent record (enrolled by hand), so it has no supervisor");
+    if (agent.supervisorId === undefined) return toOwner("the owning agent has no supervisor");
+    const supervisor = (await this.#runner.get("agent", agent.supervisorId))?.body as unknown as AgentBody | undefined;
+    if (supervisor === undefined || supervisor.state !== "active") return toOwner("the owning agent's supervisor is not an active agent");
+    return { to: { kind: "agent", id: agent.supervisorId }, via: "supervisor", reason: `${supervisor.friendlyName} supervises the owning agent` };
+  }
+
+  async #host(reporter: string): Promise<HostEvidence | undefined> {
+    if (!reporter.startsWith("host:")) return undefined;
+    const pbody = (await this.#runner.get("principal", reporter))?.body as unknown as PrincipalBody | undefined;
+    if (pbody === undefined || pbody.kind !== "host") return undefined;
+    const record = (await this.#runner.get("host-record", reporter))?.body as unknown as HostBody | undefined;
+    const identity = pbody.state === "active" ? "active" as const : "revoked" as const;
+    return { hostId: reporter, identity, freshness: hostFreshness(record?.lastSeenAt, this.#runner.now(), this.#hostStaleAfterMs) };
+  }
+
+  async #facts(taskId: string, task: TaskBody): Promise<{ assessment: Assessment; difficulty: Difficulty; generation?: number; route?: Route }> {
+    const assignment = await this.#assignments.getAssignment(taskId);
+    const contract = (await this.#runner.get("task-contract", taskId))?.body as unknown as ContractBody | undefined;
+    const difficulty = contract?.difficulty ?? "medium";
+    const wait = await this.#waits.openFor(taskId);
+    const assigned = assignment !== undefined && assignment.state === "assigned" && assignment.owner !== undefined;
+    const attempt = assigned && assignment.activeAttemptId !== undefined ? await this.#assignments.getAttempt(assignment.activeAttemptId) as View<AttemptBody> | undefined : undefined;
+    const running = assigned && attempt !== undefined && attempt.state === "active" && task.state === "in_progress";
+    const waiting = assigned && wait !== undefined;
+    const stored = (await this.#runner.get("stall-evidence", taskId))?.body as unknown as EvidenceBody | undefined;
+    const evidence = stored !== undefined && assigned && stored.generation === assignment.generation ? stored : undefined;
+    // Observed activity (card H01) counts as the owner's only when it is the owner, or the one who has been reporting, and under the current generation.
+    let activityAt: number | undefined;
+    if (assigned) {
+      const activity = (await this.#assignments.getActivity(taskId)) as View<ActivityBody> | undefined;
+      if (activity !== undefined && activity.current && activity.generation === assignment.generation && (isOwner(assignment.owner, activity.observedBy) || activity.observedBy === evidence?.reportedBy)) activityAt = Date.parse(activity.observedAt);
+    }
+    const host = evidence === undefined ? undefined : await this.#host(evidence.reportedBy);
+    const fields = { ...DEFAULT_CONTRACT, ...(contract ?? {}) };
+    const assessment = assessStall({
+      now: Date.parse(this.#runner.now()), running, waiting, difficulty, thresholds: this.#thresholds[difficulty],
+      attemptStart: attempt === undefined ? 0 : Date.parse(attempt.createdAt), ...(activityAt === undefined ? {} : { activityAt }),
+      ...(evidence === undefined ? {} : { evidence }), budget: { ...(fields.budget.maxMinutes === undefined ? {} : { maxMinutes: fields.budget.maxMinutes }), ...(fields.budget.maxCost === undefined ? {} : { maxCost: fields.budget.maxCost }) },
+      requiredEvidence: fields.requiredEvidence.length, ...(host === undefined ? {} : { host }),
+    });
+    const route = assigned ? await this.#route(assignment.owner) : undefined;
+    return { assessment, difficulty, ...(assigned ? { generation: assignment.generation } : {}), ...(route === undefined ? {} : { route }) };
+  }
+}

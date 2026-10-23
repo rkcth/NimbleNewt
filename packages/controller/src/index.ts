@@ -18,3 +18,4 @@ export * from "./policy/index.js";
 export * from "./routing/index.js";
 export * from "./security/index.js";
 export * from "./context/index.js";
+export * from "./health/index.js";

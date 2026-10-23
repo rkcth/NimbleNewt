@@ -32,3 +32,8 @@ Written during the long coding session of 2026-10-22. By the guiding principle t
 - **Provisional thresholds** (minutes request/silence, repeat counts for actions and errors): trivial 2/5, 4, 3; easy 5/10, 5, 4; medium 10/20, 6, 5; hard 20/40, 8, 6; expert 45/90, 10, 8. A dismissal silences a concern for 6 hours. All are settings.
 - **A task's own owner never decides its own concern**, even with `assignment.manage`; concerns go to the agent's active supervisor, else the owner.
 - **A stale timestamp never permits a takeover**; a takeover may be proposed only when the worker is silent and its host is revoked or stale.
+
+## V01 (stall detection), after review
+- **Confirmed concerns are archived** (state cleared, reason archived) when the task is done or cancelled or its generation changes; a scan may reopen one if a done task is reopened under the same generation.
+- **A takeover may be proposed only on silence plus a revoked host identity**; a stale host heartbeat is never enough (a partition makes host and worker quiet together). Only the owner or a service with an exact `recovery.read` grant may run a scan.
+- **Only progress counts as liveness** (a step, an error, new evidence, a request start or finish, a change of job status); a repeated `job: running` or a spend report does not. A wrapper that alternates job status still counts as progress.

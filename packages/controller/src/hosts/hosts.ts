@@ -52,6 +52,14 @@ export interface HostOptions extends RunnerOptions {
   readonly staleAfterMs?: number;
 }
 
+/** Provisional default: three heartbeats at 30 s. Shared with stall detection (card V01) so both read freshness the same way. */
+export const DEFAULT_HOST_STALE_AFTER_MS = 90_000;
+/** Freshness of a host from its last heartbeat time (controller clock) at `now`. */
+export function hostFreshness(lastSeenAt: string | undefined, now: string, staleAfterMs: number): Freshness {
+  if (lastSeenAt === undefined) return "unknown";
+  return Math.max(0, Date.parse(now) - Date.parse(lastSeenAt)) <= staleAfterMs ? "fresh" : "stale";
+}
+
 export const HOST_LIMITS = { word: 40, harnesses: 20, isolation: 10, tools: 50, workspaces: 20, workspaceName: 120, detail: 500 } as const;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 
@@ -110,7 +118,7 @@ export class HostService {
   }
 
   static withEpoch(storage: ControllerStorage, epoch: number, assignments: AssignmentService, options: HostOptions = {}): HostService {
-    const stale = options.staleAfterMs ?? 90_000;
+    const stale = options.staleAfterMs ?? DEFAULT_HOST_STALE_AFTER_MS;
     if (!Number.isSafeInteger(stale) || stale < 1000) throw new DomainError("invalid_command", "staleAfterMs: must be a whole number of at least 1000", { field: "staleAfterMs" });
     return new HostService(new CommandRunner(storage, epoch, options), assignments, stale);
   }
@@ -218,7 +226,7 @@ export class HostService {
     const identity = pbody?.state === "active" ? "active" : "revoked";
     if (body === undefined) return { hostId, identity, freshness: "unknown" };
     const age = body.lastSeenAt === undefined ? undefined : Math.max(0, Date.parse(now) - Date.parse(body.lastSeenAt));
-    const freshness: Freshness = age === undefined ? "unknown" : age <= this.#staleAfterMs ? "fresh" : "stale";
+    const freshness = hostFreshness(body.lastSeenAt, now, this.#staleAfterMs);
     return { hostId, identity, freshness, ...(body.lastSeenAt === undefined ? {} : { lastSeenAt: body.lastSeenAt }), ...(age === undefined ? {} : { ageMs: age }), capabilities: body.capabilities };
   }
 
