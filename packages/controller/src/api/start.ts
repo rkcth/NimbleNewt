@@ -147,7 +147,8 @@ export async function startController(options: StartOptions): Promise<Controller
     const agents = AgentService.withEpoch(storage, epoch);
     const reviews = ReviewService.withEpoch(storage, epoch);
     const graph = WaitGraphService.withEpoch(storage, epoch, contracts, BlockerService.withEpoch(storage, epoch), { extraEdges: (projectId, tasks) => reviews.waitEdges(projectId, tasks) });
-    const routing = RoutingService.withEpoch(storage, epoch);
+    // The routing table is refused unless the coordinator, the safety supervisor and every other role in it have a valid fallback list (card R04).
+    const routing = RoutingService.withEpoch(storage, epoch, {}, {});
     const configuration = ConfigurationService.withEpoch(storage, epoch, { routing });
     const conversations = ConversationService.withEpoch(storage, epoch, options.availability === undefined ? {} : { availability: options.availability });
     const api = new StateApi({ principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });

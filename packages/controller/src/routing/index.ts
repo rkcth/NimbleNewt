@@ -1,4 +1,6 @@
 export { ROUTING_LIMITS, checkRequest, checkTable, selectRoute, type Candidate, type Exclusion, type Location, type ProviderEntry, type RouteEntry, type RouteRequest, type RoutingTable, type Selection } from "./policy.js";
 export { RoutingService, type RoutingBody, type Target } from "./service.js";
-export { FALLBACK_LIMITS, FallbackService, classifyProviderFailure, type Attempt, type BudgetBody, type CallBody, type EffectState, type FailureClass, type SpendBody, type Step, type Usage } from "./fallback.js";
+export { FALLBACK_LIMITS, FallbackService, classifyProviderFailure, type Attempt, type BudgetBody, type CallBody, type Charge, type InFlight, type LateReport, type ListPosition, type RouteGate, type EffectState, type FailureClass, type SpendBody, type Step, type Usage } from "./fallback.js";
 export { DIFFICULTY_LIMITS, DifficultyService, checkProfiles, type DecisionBody, type DelegationBody as DifficultyDelegationBody, type EscalationBody, type EscalationState, type ExecProfile, type MappedLevel, type ProfilesBody } from "./difficulty.js";
+export { CUTOVER_LIMITS, CutoverService, DEFAULT_FAILBACK, type ControlEntry, type ControlsBody, type FailbackPolicy, type HealthBody, type ControlLevel, type ControlMode, type HealthScope, type CutoverReport } from "./cutover.js";
+export { EMPTY_TOPOLOGY, MODEL_USING_ROLES, TOPOLOGY_LIMITS, canonical, checkLists, checkTopology, targetOf, type ListProblem, type ListRules, type RouteTarget, type Topology } from "./lists.js";

@@ -6,6 +6,7 @@ import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
+import { EMPTY_TOPOLOGY, TOPOLOGY_REF, assertLists, checkTopology, type ListRules, type Topology } from "./lists.js";
 import { ROUTING_LIMITS, checkRequest, checkTable, selectRoute, type Exclusion, type RouteRequest, type RoutingTable, type Selection } from "./policy.js";
 
 const ROUTING: AggregateRef = { kind: "routing-table", id: "routing" };
@@ -38,13 +39,16 @@ function reasonOf(value: unknown): string {
  */
 export class RoutingService {
   readonly #runner: CommandRunner;
+  readonly #rules: ListRules | undefined;
 
-  private constructor(runner: CommandRunner) {
+  private constructor(runner: CommandRunner, rules: ListRules | undefined) {
     this.#runner = runner;
+    this.#rules = rules;
   }
 
-  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions = {}): RoutingService {
-    return new RoutingService(new CommandRunner(storage, epoch, options));
+  /** With `rules` (card R04), a table is refused unless every model-using role has a valid fallback list (see `checkLists`). Without them the table is judged as before. */
+  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions = {}, rules?: ListRules): RoutingService {
+    return new RoutingService(new CommandRunner(storage, epoch, options), rules);
   }
 
   /** Replaces providers, routes, profiles and roles in one validated step. Exclusions are untouched. Nothing is applied unless the whole proposal is valid. */
@@ -59,6 +63,10 @@ export class RoutingService {
         payload: { table: table as unknown as JsonObject, expectedRevision: expected },
         build: async () => {
           const current = await this.#runner.get(ROUTING.kind, ROUTING.id);
+          const stored = (await this.#runner.get(TOPOLOGY_REF.kind, TOPOLOGY_REF.id))?.body as unknown as Topology | undefined;
+          // The route topology (aliases, endpoints, accounts) must keep describing routes that exist.
+          const topology = stored === undefined ? EMPTY_TOPOLOGY : checkTopology({ targets: stored.targets, aliases: stored.aliases, services: stored.services }, table);
+          assertLists(table, topology, this.#rules);
           if ((current === undefined ? 0 : current.revision) !== expected) throw new DomainError("stale_revision", `routing is at revision ${current?.revision ?? 0}, not ${expected}`, { currentRevision: current?.revision ?? 0 });
           const keep = current === undefined ? [] : (current.body as unknown as RoutingBody).exclusions;
           // An exclusion must keep pointing at something: a table that drops or renames an excluded provider or route would quietly stop it applying.
