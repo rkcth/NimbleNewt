@@ -4,6 +4,8 @@
     "storage/postgres/qualification.test.js",
     "storage/postgres/migration.test.js",
     "storage/sqlite/worker-qualification.test.js",
-    "storage/workload.test.js"
+    "storage/workload.test.js",
+    "g04-kill-sqlite.test.js",
+    "g04-kill-postgres.test.js"
   ]
 }

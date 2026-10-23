@@ -11,12 +11,18 @@ on:
         description: Consecutive `npm test` runs per machine (1 to 20)
         default: "5"
         required: true
+      job:
+        description: Which job to run
+        type: choice
+        options: [qa, g04, both]
+        default: qa
 
 permissions:
   contents: read
 
 jobs:
   qa:
+    if: ${{ inputs.job != 'g04' }}
     name: QA ${{ matrix.os }} / node ${{ matrix.node }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
@@ -62,5 +68,58 @@ jobs:
         with:
           name: qa-evidence-${{ matrix.os }}-node${{ matrix.node }}
           path: ${{ runner.temp }}/qa-output
+          if-no-files-found: warn
+          retention-days: 90
+
+  # Card G04: the exhaustive durable-engine integration sweep (every boundary, every fault point, every connection cut) with real process kills, on each
+  # hosted operating system. The default suite (ci.yml) runs a sampled subset; this is where the full numbers of docs/.../g04-evidence.md come from on
+  # macOS and Windows, and where the heavy files (worker-thread real kills, the worker-process tests, skipped by default) run. Start it with job = g04 or both.
+  # Evidence for the owner, not an acceptance.
+  g04-exhaustive:
+    if: ${{ inputs.job != 'qa' }}
+    name: G04 exhaustive ${{ matrix.os }} / node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: ["22.19.0"]
+    env:
+      NIMBLENEWT_G04_EXHAUSTIVE: "1"
+      NIMBLENEWT_G04_HEAVY: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: nn check
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci
+        working-directory: nn check
+      - run: npx tsc --build
+        working-directory: nn check
+      - name: Run every G04 test file exhaustively
+        working-directory: nn check
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/g04-output"
+          status=0
+          for f in packages/integration/dist/g04-*.test.js; do
+            name=$(basename "$f" .test.js)
+            echo "::group::$name"
+            node --import ./scripts/offline-guard.mjs --test --test-timeout=3000000 "$f" 2>&1 | tee "$RUNNER_TEMP/g04-output/$name.log" || true
+            grep -q "^# fail 0" "$RUNNER_TEMP/g04-output/$name.log" && ! grep -q "^# cancelled [1-9]" "$RUNNER_TEMP/g04-output/$name.log" || { echo "FAILED: $name" | tee -a "$RUNNER_TEMP/g04-output/summary.txt"; status=1; }
+            echo "::endgroup::"
+          done
+          grep -h "# g04 " "$RUNNER_TEMP"/g04-output/*.log > "$RUNNER_TEMP/g04-output/counts.txt" || true
+          { echo "## G04 exhaustive ${{ runner.os }}"; echo '```'; cat "$RUNNER_TEMP/g04-output/counts.txt" "$RUNNER_TEMP/g04-output/summary.txt" 2>/dev/null; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $status
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: g04-exhaustive-${{ matrix.os }}-node${{ matrix.node }}
+          path: ${{ runner.temp }}/g04-output
           if-no-files-found: warn
           retention-days: 90

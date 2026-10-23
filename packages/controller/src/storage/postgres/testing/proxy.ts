@@ -53,6 +53,9 @@ export class FaultProxy {
 
   #relay(client: net.Socket, target: { host: string; port: number }): void {
     const upstream = net.connect(target.port, target.host);
+    // A relay of small request/answer messages is slowed to ~25 ms a statement by Nagle's algorithm and delayed ACKs; the integration proof (G04) sends hundreds of statements through it.
+    client.setNoDelay(true);
+    upstream.setNoDelay(true);
     this.#sockets.add(client).add(upstream);
     let buffer = Buffer.alloc(0);
     let startupDone = false;
