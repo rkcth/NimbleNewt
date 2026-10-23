@@ -34,6 +34,10 @@ interface Node {
 interface Reservation { readonly id: string; readonly taskId: string; readonly agentId?: string; readonly amounts: Amounts; readonly purpose: string; readonly activity: Activity; readonly by: string; readonly at: string; state: "open" | "uncertain"; uncertainReason?: string }
 interface TreeBody { readonly rootTaskId: string; readonly projectId: string; readonly currency: string; nodes: Record<string, Node>; reservations: Record<string, Reservation> }
 
+/** What the endpoint's cache did for one call, as read from its response (cached_tokens, cache_n and prompt_n, cache_read_input_tokens). For Claude, `writtenTokens` is a subset of `computedTokens` (computed, then written to the cache), not an addition. */
+export interface CacheUsage { readonly backend: string; readonly route: string; readonly cachedTokens: number; readonly computedTokens: number; readonly writtenTokens: number }
+export interface CacheTotals { readonly cachedTokens: number; readonly computedTokens: number; readonly writtenTokens: number; readonly calls: number }
+
 export type Activity = "model-call" | "background-job" | "meeting" | "supervision" | "review";
 export interface UsageEntry {
   readonly taskId?: string;
@@ -49,6 +53,8 @@ export interface UsageEntry {
   readonly reservationId?: string;
   readonly reservedCostMicros?: number;
   readonly reservedComputeMs?: number;
+  /** Cache figures of the call (card C06), when the response carried them. Tokens, not money: they are never added to the cost or compute figures. */
+  readonly cache?: CacheUsage;
   readonly by: string;
   readonly at: string;
 }
@@ -83,6 +89,9 @@ export interface UsageSummary {
   readonly byAgent: Record<string, Amounts>;
   readonly byTask: Record<string, Amounts>;
   readonly byProject: Record<string, Amounts>;
+  /** Cache figures of the entries that reported them: all together and by backend. Entries without cache figures are not counted (unknown is not zero). */
+  readonly cache: CacheTotals;
+  readonly cacheByBackend: Record<string, CacheTotals>;
   readonly entries: number;
   /** True when more entries matched than the scan limit; the figures are then a lower bound. */
   readonly truncated: boolean;
@@ -107,6 +116,16 @@ const REQUEST = "budget-request";
 const PRINCIPAL = /^(?:owner|agent|host):[a-z0-9][a-z0-9-]{0,39}$/;
 const ACTIVITIES: readonly Activity[] = ["model-call", "background-job", "meeting", "supervision", "review"];
 const CURRENCY = /^[A-Z]{3,8}$/;
+const BACKEND_NAME = /^[a-z][a-z0-9-]{0,39}$/;
+const cacheUsage = (value: unknown): CacheUsage | undefined => {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return invalid("cache", "must be an object");
+  const v = value as Record<string, unknown>;
+  for (const k of Object.keys(v)) if (!["backend", "route", "cachedTokens", "computedTokens", "writtenTokens"].includes(k)) invalid(`cache.${k}`, "is not a field here");
+  if (typeof v["backend"] !== "string" || !BACKEND_NAME.test(v["backend"])) invalid("cache.backend", "must be a backend kind such as llama-cpp");
+  if (typeof v["route"] !== "string" || !/^[A-Za-z][A-Za-z0-9._-]{0,63}\/[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/.test(v["route"])) invalid("cache.route", "must be provider/model");
+  return { backend: v["backend"] as string, route: v["route"] as string, cachedTokens: whole(v["cachedTokens"], "cache.cachedTokens"), computedTokens: whole(v["computedTokens"], "cache.computedTokens"), writtenTokens: whole(v["writtenTokens"], "cache.writtenTokens") };
+};
 const zero = (): Mutable<Amounts> => ({ costMicros: 0, computeMs: 0 });
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const whole = (v: unknown, field: string): number => (Number.isSafeInteger(v) && (v as number) >= 0 && (v as number) <= BUDGET_LIMITS.max ? (v as number) : invalid(field, "must be a whole number from 0"));
@@ -332,15 +351,16 @@ export class BudgetService {
    * Reconciles a reservation to actual use (open or uncertain): the hold is released, the actual amounts become spending of the task and one ledger entry is written. Use above the reservation is
    * recorded as overrun. Settling nothing (0 and 0) is how a call that provably never happened gives its hold back.
    */
-  async settle(by: Principal, command: NoActor & { reservationId: string; costMicros?: number; computeMs?: number }): Promise<void> {
+  async settle(by: Principal, command: NoActor & { reservationId: string; costMicros?: number; computeMs?: number; cache?: CacheUsage }): Promise<void> {
     this.#dispatcher(by);
-    onlyKnown(command, ["commandId", "reservationId", "costMicros", "computeMs"]);
+    onlyKnown(command, ["commandId", "reservationId", "costMicros", "computeMs", "cache"]);
     const id = this.#resId(command.reservationId);
     const actual = amounts(command, false);
+    const cache = cacheUsage(command.cache);
     const treeId = await this.#reservationTree(id);
     const treeRef: AggregateRef = { kind: TREE, id: treeId };
     await this.#retrying(() => this.#runner.command("budget.settle", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
-      payload: { id, actual: actual as unknown as JsonObject },
+      payload: { id, actual: actual as unknown as JsonObject, cache: (cache ?? null) as unknown as JsonObject },
       build: async () => {
         const found = await this.#tree(treeId);
         const tree = clone(found.body);
@@ -350,7 +370,7 @@ export class BudgetService {
         // Overrun is the increase in how far the node's commitments are above its limit across this step, so a use above the reservation counts once however many other holds are open.
         this.#step(tree, node.taskId, () => { subFrom(res.state === "open" ? node.reserved : node.uncertain, res.amounts); addTo(node.spent, actual); });
         delete tree.reservations[id];
-        const entry: UsageEntry = { taskId: res.taskId, projectId: tree.projectId, ...(res.agentId === undefined ? {} : { agentId: res.agentId }), activity: res.activity ?? "model-call", category: "work", ...actual, currency: tree.currency, reservationId: id, reservedCostMicros: res.amounts.costMicros, reservedComputeMs: res.amounts.computeMs, by: by.id, at: this.#runner.now() };
+        const entry: UsageEntry = { taskId: res.taskId, projectId: tree.projectId, ...(res.agentId === undefined ? {} : { agentId: res.agentId }), activity: res.activity ?? "model-call", category: "work", ...actual, currency: tree.currency, reservationId: id, reservedCostMicros: res.amounts.costMicros, reservedComputeMs: res.amounts.computeMs, ...(cache === undefined ? {} : { cache }), by: by.id, at: this.#runner.now() };
         const ref: AggregateRef = { kind: ENTRY, id };
         return { ref: treeRef, creates: false, changes: [{ type: "update", ref: treeRef, expectedRevision: found.revision, body: tree as unknown as JsonObject }, { type: "create", ref, body: entry as unknown as JsonObject }], detail: { reservationId: id, taskId: res.taskId, ...actual } };
       },
@@ -383,9 +403,10 @@ export class BudgetService {
    * Records use that was not reserved (a background job, a meeting, supervision, a review, or a call made without a reservation). Name the work it served with `taskId`, or give the `rule`
    * under which it is shared overhead; exactly one of the two. Work charged to a task that has a budget counts as its spending (and as overrun where it exceeds what was free).
    */
-  async charge(by: Principal, command: NoActor & { activity: Activity; taskId?: string; sharedOverheadRule?: string; projectId?: string; agentId?: string; costMicros?: number; computeMs?: number }): Promise<{ id: string; replayed: boolean }> {
+  async charge(by: Principal, command: NoActor & { activity: Activity; taskId?: string; sharedOverheadRule?: string; projectId?: string; agentId?: string; costMicros?: number; computeMs?: number; cache?: CacheUsage }): Promise<{ id: string; replayed: boolean }> {
     this.#dispatcher(by);
-    onlyKnown(command, ["commandId", "activity", "taskId", "sharedOverheadRule", "projectId", "agentId", "costMicros", "computeMs"]);
+    onlyKnown(command, ["commandId", "activity", "taskId", "sharedOverheadRule", "projectId", "agentId", "costMicros", "computeMs", "cache"]);
+    const cache = cacheUsage(command.cache);
     if (!ACTIVITIES.includes(command.activity)) invalid("activity", `must be one of ${ACTIVITIES.join(", ")}`);
     if ((command.taskId === undefined) === (command.sharedOverheadRule === undefined)) invalid("taskId", "name the work this served (taskId) or the rule it is shared overhead under (sharedOverheadRule), not both and not neither");
     const used = amounts(command, false);
@@ -399,7 +420,7 @@ export class BudgetService {
     const entryRef: AggregateRef = { kind: ENTRY, id };
     let guarded = false;
     const result = await this.#retrying(() => this.#runner.command("budget.charge", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
-      payload: { activity: command.activity, taskId: taskId ?? null, rule: rule ?? null, projectId: projectId ?? null, agentId: agentId ?? null, used: used as unknown as JsonObject },
+      payload: { activity: command.activity, taskId: taskId ?? null, rule: rule ?? null, projectId: projectId ?? null, agentId: agentId ?? null, used: used as unknown as JsonObject, cache: (cache ?? null) as unknown as JsonObject },
       build: async () => {
         const changes: Change[] = [];
         let currency: string | undefined;
@@ -413,7 +434,7 @@ export class BudgetService {
           currency = tree.currency;
           changes.push({ type: "update", ref: { kind: TREE, id: link.treeId }, expectedRevision: found.revision, body: tree as unknown as JsonObject });
         }
-        const entry: UsageEntry = { ...(taskId === undefined ? {} : { taskId }), ...(projectId === undefined ? {} : { projectId }), ...(agentId === undefined ? {} : { agentId }), activity: command.activity, category: taskId === undefined ? "shared-overhead" : "work", ...(rule === undefined ? {} : { rule }), ...used, ...(currency === undefined ? {} : { currency }), by: by.id, at: this.#runner.now() };
+        const entry: UsageEntry = { ...(taskId === undefined ? {} : { taskId }), ...(projectId === undefined ? {} : { projectId }), ...(agentId === undefined ? {} : { agentId }), activity: command.activity, category: taskId === undefined ? "shared-overhead" : "work", ...(rule === undefined ? {} : { rule }), ...used, ...(currency === undefined ? {} : { currency }), ...(cache === undefined ? {} : { cache }), by: by.id, at: this.#runner.now() };
         changes.push({ type: "create", ref: entryRef, body: entry as unknown as JsonObject });
         return { ref: entryRef, creates: true, changes, detail: { activity: command.activity, taskId: taskId ?? null, category: entry.category }, contention: async () => (!guarded ? new DomainError("command_conflict", "this command ID was used by something else") : new DomainError("stale_revision", "the budget changed meanwhile")) };
       },
@@ -571,6 +592,8 @@ export class BudgetService {
     const byCategory = group(), byActivity = group(), byAgent = group(), byTask = group(), byProject = group();
     const bump = (m: Record<string, Mutable<Amounts>>, key: string, e: UsageEntry): void => { const t = (m[key] ??= zero()); t.costMicros += e.costMicros; t.computeMs += e.computeMs; };
     const rules = new Set<string>();
+    const cache = { cachedTokens: 0, computedTokens: 0, writtenTokens: 0, calls: 0 };
+    const cacheByBackend: Record<string, typeof cache> = {};
     let entries = 0, scanned = 0, truncated = false;
     for (let after: string | undefined; !truncated;) {
       const page = await this.#runner.list(ENTRY, { ...(after === undefined ? {} : { afterId: after }), limit: BUDGET_LIMITS.page });
@@ -583,10 +606,14 @@ export class BudgetService {
         totals.costMicros += e.costMicros; totals.computeMs += e.computeMs;
         bump(byCategory, e.category, e); bump(byActivity, e.activity, e); bump(byAgent, e.agentId ?? "unattributed", e); bump(byTask, e.taskId ?? "none", e); bump(byProject, e.projectId ?? "none", e);
         if (e.rule !== undefined) rules.add(e.rule);
+        if (e.cache !== undefined) {
+          const b = (cacheByBackend[e.cache.backend] ??= { cachedTokens: 0, computedTokens: 0, writtenTokens: 0, calls: 0 });
+          for (const t of [cache, b]) { t.cachedTokens += e.cache.cachedTokens; t.computedTokens += e.cache.computedTokens; t.writtenTokens += e.cache.writtenTokens; t.calls++; }
+        }
       }
       if (page.length < BUDGET_LIMITS.page) break;
     }
-    return { totals, byCategory, byActivity, byAgent, byTask, byProject, entries, truncated, overheadRules: [...rules].sort() };
+    return { totals, byCategory, byActivity, byAgent, byTask, byProject, cache, cacheByBackend, entries, truncated, overheadRules: [...rules].sort() };
   }
 
   // ---- internals ------------------------------------------------------------------------------------------------------------

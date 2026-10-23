@@ -408,4 +408,32 @@ for (const backend of backends) {
     await again.settle(c.host, { commandId: cid("s"), reservationId: r.id, costMicros: 30 });
     assert.deepEqual([(await rep(c, c.root)).spent.costMicros, (await rep(c, c.root)).uncertain.costMicros], [30, 0]);
   });
+
+  suite("cache figures of a call (C06) reach the ledger through settle and charge, are summed by backend, and a call without them counts as unknown, not zero", async (c) => {
+    await open(c, 100, 0);
+    const hit = (cachedTokens: number, backend = "claude", route = "anthropic/claude-opus-5-5") => ({ backend, route, cachedTokens, computedTokens: 10, writtenTokens: 5 });
+    const r1 = await c.reserve(c.root, 20);
+    const sc = cid("s");
+    await c.svc.settle(c.host, { commandId: sc, reservationId: r1.id, costMicros: 10, cache: hit(900) });
+    await c.svc.settle(c.host, { commandId: sc, reservationId: r1.id, costMicros: 10, cache: hit(900) }); // a repeat is the recorded answer
+    const r2 = await c.reserve(c.root, 20);
+    await c.svc.settle(c.host, { commandId: cid("s"), reservationId: r2.id, costMicros: 10 }); // no cache figures
+    const cc = cid("c");
+    await c.svc.charge(c.host, { commandId: cc, activity: "meeting", taskId: c.root, costMicros: 1, cache: hit(50, "radiance", "local/qwen3.8") });
+    await c.svc.charge(c.host, { commandId: cc, activity: "meeting", taskId: c.root, costMicros: 1, cache: hit(50, "radiance", "local/qwen3.8") });
+    const u = await c.svc.usage(c.owner, { taskId: c.root });
+    assert.equal(u.entries, 3);
+    assert.deepEqual(u.cache, { cachedTokens: 950, computedTokens: 20, writtenTokens: 10, calls: 2 });
+    assert.deepEqual(u.cacheByBackend, { claude: { cachedTokens: 900, computedTokens: 10, writtenTokens: 5, calls: 1 }, radiance: { cachedTokens: 50, computedTokens: 10, writtenTokens: 5, calls: 1 } });
+    assert.deepEqual(u.totals, { costMicros: 21, computeMs: 0 }, "tokens never mix into money");
+    // The same command with different cache figures is a conflict, and bad figures are refused.
+    const r3 = await c.reserve(c.root, 5);
+    const sc3 = cid("s");
+    await c.svc.settle(c.host, { commandId: sc3, reservationId: r3.id, costMicros: 1, cache: hit(7) });
+    await refuses("command_conflict", () => c.svc.settle(c.host, { commandId: sc3, reservationId: r3.id, costMicros: 1, cache: hit(8) }));
+    const r4 = await c.reserve(c.root, 5);
+    for (const bad of [{ ...hit(1), cachedTokens: -1 }, { ...hit(1), route: "no slash" }, { ...hit(1), backend: "Bad Name" }, { ...hit(1), extra: 1 }, "x"]) {
+      await refuses("invalid_command", () => c.svc.settle(c.host, { commandId: cid("s"), reservationId: r4.id, costMicros: 1, cache: bad as never }));
+    }
+  });
 }
