@@ -26,6 +26,8 @@ $user = ''; $domain = ''; $flags = $null
 $q = Query $sid 5; if ($q) { $user = [Runtime.InteropServices.Marshal]::PtrToStringUni($q.p); [NNWts]::WTSFreeMemory($q.p) }
 $q = Query $sid 7; if ($q) { $domain = [Runtime.InteropServices.Marshal]::PtrToStringUni($q.p); [NNWts]::WTSFreeMemory($q.p) }
 $q = Query $sid 25; if ($q) { $flags = [Runtime.InteropServices.Marshal]::ReadInt32($q.p, 16); [NNWts]::WTSFreeMemory($q.p) }
+# Another session's user name can be refused to an ordinary account; the console user is also known to WMI without special rights.
+if (-not $user) { try { $cu = (Get-CimInstance -ClassName Win32_ComputerSystem).UserName; if ($cu) { $parts = $cu -split '\\\\', 2; if ($parts.Count -eq 2) { $domain = $parts[0]; $user = $parts[1] } else { $user = $cu } } } catch { } }
 @{ sessionId = [int]$sid; user = $user; domain = $domain; flags = $flags } | ConvertTo-Json -Compress
 `;
 const AUTOLOGON_SCRIPT = `

@@ -71,10 +71,12 @@ jobs:
           # Only summary.json (pass/fail, counts, OS build, mode names) is uploaded: the repository is public. Everything detailed stays in the local folder on the machine.
           NIMBLENEWT_WSB_OUT: ${{ runner.temp }}/sandbox-windows
           NIMBLENEWT_WSB_LOCAL: ${{ runner.temp }}/sandbox-windows-local
+          # A failing test also writes a redacted detail here (names, home directories and SIDs replaced; output cut to 2 KiB); it is uploaded separately with a short retention.
+          NIMBLENEWT_WSB_DETAIL: ${{ runner.temp }}/sandbox-windows-detail
         run: |
           set -o pipefail
-          mkdir -p "$NIMBLENEWT_WSB_OUT" "$NIMBLENEWT_WSB_LOCAL"
-          node --import ./scripts/offline-guard.mjs --test --test-timeout=1500000 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination="$NIMBLENEWT_WSB_LOCAL/junit.xml" packages/worker/dist/sandbox/windows-real.test.js > "$NIMBLENEWT_WSB_LOCAL/output.txt" 2>&1 || { echo "the real Windows Sandbox tests failed; the detail is on the machine in $NIMBLENEWT_WSB_LOCAL"; exit 1; }
+          mkdir -p "$NIMBLENEWT_WSB_OUT" "$NIMBLENEWT_WSB_LOCAL" "$NIMBLENEWT_WSB_DETAIL"
+          node --import ./scripts/offline-guard.mjs --test --test-timeout=1500000 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination="$NIMBLENEWT_WSB_LOCAL/junit.xml" packages/worker/dist/sandbox/windows-real.test.js > "$NIMBLENEWT_WSB_LOCAL/output.txt" 2>&1 || { echo "the real Windows Sandbox tests failed; see the redacted detail artifact"; exit 1; }
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
@@ -82,3 +84,10 @@ jobs:
           path: ${{ runner.temp }}/sandbox-windows
           if-no-files-found: warn
           retention-days: 90
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: sandbox-windows-detail
+          path: ${{ runner.temp }}/sandbox-windows-detail
+          if-no-files-found: ignore
+          retention-days: 7

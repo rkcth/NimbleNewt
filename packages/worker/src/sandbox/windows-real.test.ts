@@ -2,11 +2,15 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { release as osRelease, tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFile } from "node:child_process";
+import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, describe, test } from "node:test";
 import { SandboxLauncher, type LaunchRecord } from "./launcher.js";
 import { AUTOLOGON_ACKNOWLEDGEMENT, windowsSandboxBackend, type WindowsSandboxOptions } from "./windows.js";
 import { windowsRealHost } from "./windows-real.js";
+import type { WindowsHost } from "./windows-host.js";
+import { scrub, scrubDeep, type RedactionNames } from "./windows-redact.js";
 import { verifyClient, type WindowsSettings } from "./windows-plan.js";
 
 // Real Windows Sandbox tests (card A03b). They need a Windows machine with the Windows Sandbox feature, an owner signed in at the console, and NIMBLENEWT_REAL_WINDOWS_SANDBOX=1.
@@ -30,26 +34,66 @@ const note = (name: string, value: unknown): void => { findings[name] = value; t
 const results: Record<string, "pass" | "fail"> = {};
 const testNames: string[] = [];
 const modes = new Set<string>(["owner-session"]);
+/** Which sub-fact of the facts test held (names and booleans only). */
+const factsSummary: Record<string, boolean> = {};
+
+// A failing test also leaves a REDACTED detail (NIMBLENEWT_WSB_DETAIL, uploaded as its own artifact with a short retention): the error message, the failing step, and the last host calls
+// with their output cut to 2 KiB each, with account, domain, machine and home names and SIDs replaced by placeholders (windows-redact.ts). Auto-login and lock-task results are never copied.
+const detailDir = process.env["NIMBLENEWT_WSB_DETAIL"] ?? join(tmpdir(), "nn-wsb-detail");
+const redactNames: { users: string[]; hosts: string[] } = { users: [], hosts: [] };
+const calls: { step: string; ok: boolean; detail?: string }[] = [];
+const details: Record<string, unknown> = {};
+const clean = (text: string): string => scrub(text, redactNames as RedactionNames);
+function recording(inner: WindowsHost): WindowsHost {
+  const wrapped = { ...inner } as unknown as Record<string, unknown>;
+  const quiet = new Set(["autologon", "lockTask"]);
+  for (const m of ["findPackage", "signature", "session", "autologon", "lockTask", "writableBy"] as const) {
+    wrapped[m] = async (...args: unknown[]) => {
+      try { const v = await (inner[m] as (...a: unknown[]) => Promise<unknown>)(...args); calls.push({ step: m, ok: true }); return v; }
+      catch (error) { calls.push({ step: m, ok: false, detail: quiet.has(m) ? "failed" : (error as Error).message }); throw error; }
+    };
+  }
+  wrapped["run"] = async (file: string, args: readonly string[], options: { cwd?: string; timeoutMs: number }) => {
+    const r = await inner.run(file, args, options);
+    calls.push({ step: `run ${basename(file)} ${args.slice(0, 2).map((a) => (a.length > 40 ? "<long>" : a)).join(" ")}`, ok: r.code === 0, detail: `exit ${String(r.code)}${r.timedOut ? " (timed out)" : ""}\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}` });
+    return r;
+  };
+  return wrapped as unknown as WindowsHost;
+}
+function recordFailure(name: string, error: unknown, since: number): void {
+  const mine = calls.slice(since);
+  const failing = [...mine].reverse().find((c) => !c.ok);
+  details[name] = { error: clean(error instanceof Error ? error.message : String(error)), failingStep: failing === undefined ? "(an assertion, no host call failed)" : clean(failing.step), calls: mine.slice(-12).map((c) => ({ step: clean(c.step), ok: c.ok, ...(c.detail === undefined ? {} : { detail: clean(c.detail) }) })) };
+  try { mkdirSync(detailDir, { recursive: true }); writeFileSync(join(detailDir, "detail.json"), JSON.stringify(scrubDeep({ os: osRelease(), tests: details }, redactNames as RedactionNames), null, 2)); } catch { /* best effort */ }
+}
 function check(name: string, optionsOrFn: { skip?: string | false } | (() => Promise<void>), maybeFn?: () => Promise<void>): void {
   const options = typeof optionsOrFn === "function" ? {} : optionsOrFn;
   const fn = typeof optionsOrFn === "function" ? optionsOrFn : maybeFn!;
   testNames.push(name);
-  test(name, options, async () => { try { await fn(); results[name] = "pass"; } catch (error) { results[name] = "fail"; throw error; } });
+  test(name, options, async () => {
+    const since = calls.length;
+    try { await fn(); results[name] = "pass"; } catch (error) { results[name] = "fail"; recordFailure(name, error, since); throw error; }
+  });
 }
 const writeSummary = (): void => {
   const tests = Object.fromEntries(testNames.map((n) => [n, results[n] ?? "not run or skipped"]));
   const values = Object.values(tests);
   try {
     mkdirSync(outDir, { recursive: true });
-    writeFileSync(join(outDir, "summary.json"), JSON.stringify({ os: osRelease(), node: process.version, modes: [...modes], counts: { pass: values.filter((v) => v === "pass").length, fail: values.filter((v) => v === "fail").length, other: values.filter((v) => v !== "pass" && v !== "fail").length }, tests }, null, 2));
+    writeFileSync(join(outDir, "summary.json"), JSON.stringify(scrubDeep({ os: osRelease(), node: process.version, modes: [...modes], counts: { pass: values.filter((v) => v === "pass").length, fail: values.filter((v) => v === "fail").length, other: values.filter((v) => v !== "pass" && v !== "fail").length }, facts: factsSummary, tests }, redactNames as RedactionNames), null, 2));
   } catch { /* best effort */ }
 };
 
 const user = `${process.env["USERDOMAIN"] ?? ""}\\${process.env["USERNAME"] ?? ""}`;
-const owner = process.env["NIMBLENEWT_WSB_OWNER"] ?? user;
-const shareIdentity = process.env["NIMBLENEWT_WSB_SHARE_IDENTITY"] ?? user;
+// The owner and the share account default to the account signed in at the console (found in `before`): that is the account whose token the Sandbox service uses, and the one the
+// research had to grant explicitly. The runner's own account (this process) is only the fallback when nobody is found.
+let owner = process.env["NIMBLENEWT_WSB_OWNER"] ?? user;
+let shareIdentity = process.env["NIMBLENEWT_WSB_SHARE_IDENTITY"] ?? user;
+// Whatever the probes find, the environment's own names are always among the names to hide.
+for (const v of [process.env["USERNAME"], process.env["USERDOMAIN"], process.env["COMPUTERNAME"]]) if (v !== undefined && v !== "") (v === process.env["USERNAME"] ? redactNames.users : redactNames.hosts).push(v);
+redactNames.users.push(user, owner);
 const runnerScript = fileURLToPath(new URL("./windows-runner.js", import.meta.url));
-const host = windowsRealHost();
+const host = recording(windowsRealHost());
 
 describe("Windows Sandbox on a real Windows machine", { skip }, () => {
   let base = "";
@@ -76,23 +120,49 @@ describe("Windows Sandbox on a real Windows machine", { skip }, () => {
     return r.stdout;
   };
 
-  before(() => {
+  before(async () => {
+    try {
+    const found = await host.session().then((s) => s.consoleUser, () => undefined);
+    if (found !== undefined) { redactNames.users.push(found); if (process.env["NIMBLENEWT_WSB_OWNER"] === undefined) owner = found; if (process.env["NIMBLENEWT_WSB_SHARE_IDENTITY"] === undefined) shareIdentity = found; }
+    redactNames.users.push(owner, shareIdentity);
+    // The console user's full name (the account's FullName) is used only to hide it; it is never written anywhere.
+    const full = await new Promise<string>((resolve) => execFile(`${process.env["SystemRoot"] ?? "C:\\Windows"}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`, ["-NoProfile", "-NonInteractive", "-Command", "(Get-CimInstance Win32_UserAccount -Filter \"Name='$($env:NN_U -replace \"'\",\"''\")'\").FullName"], { env: { ...process.env, NN_U: (found ?? owner).split("\\").pop()! }, timeout: 30_000, windowsHide: true }, (_e, out) => resolve(String(out ?? "").trim())));
+    if (full !== "") redactNames.users.push(full);
     base = realpathSync(mkdtempSync(join(process.env["ProgramData"] ?? tmpdir(), "nn-wsb-real-")));
     note("machine", { platform: process.platform, release: process.version, owner, shareIdentity, user, base });
+      } catch (error) { results["before hook"] = "fail"; recordFailure("before hook", error, 0); throw error; }
   });
   after(() => { rmSync(base, { recursive: true, force: true }); writeSummary(); });
 
   check("facts: the package, the signature, the working directory, the session, the auto-login flags (booleans only) and the supervisor ACLs", async () => {
     const settings: WindowsSettings = { controlDir: join(base, "control"), shareIdentity, owner, minVersion: "0.8.107.0", packageName: "MicrosoftWindows.WindowsSandbox", publisherId: "8wekyb3d8bbwe", mode: "owner-session", lockTask: "NimbleNewt-LockOnLogon" };
-    const pkg = await host.findPackage().catch((e: Error) => `error: ${e.message}`);
+    const sub = factsSummary;
+    const attempt = async <T>(name: string, fn: () => Promise<T>): Promise<T | undefined> => { try { const v = await fn(); sub[name] = true; return v; } catch { sub[name] = false; return undefined; } };
+    const pkg = await attempt("package found", async () => { const p = await host.findPackage(); if (p === undefined) throw new Error("no package"); return p; });
+    if (pkg !== undefined) {
+      sub["publisher is Microsoft"] = pkg.publisherId === "8wekyb3d8bbwe";
+      sub["version at least the qualified one"] = /^\d+(\.\d+){1,3}$/.test(pkg.version);
+      sub["package folder under WindowsApps"] = pkg.installLocation.toLowerCase().includes("\\windowsapps\\");
+      sub["wsb.exe visible to this account"] = host.exists(`${pkg.installLocation}\\wsb.exe`);
+      sub["WindowsSandboxServer.exe visible to this account"] = host.exists(`${pkg.installLocation}\\WindowsSandboxServer.exe`);
+      const sig = await attempt("wsb.exe signature readable", () => host.signature(`${pkg.installLocation}\\wsb.exe`));
+      sub["wsb.exe signature valid"] = sig?.valid === true;
+    }
     const client = await verifyClient(host, settings);
-    const session = await host.session().catch((e: Error) => `error: ${e.message}`);
-    const auto = await host.autologon().catch((e: Error) => `error: ${e.message}`);
-    const task = await host.lockTask("NimbleNewt-LockOnLogon").catch((e: Error) => `error: ${e.message}`);
-    const writable = await host.writableBy(join(runnerScript, "..")).catch((e: Error) => `error: ${e.message}`);
-    note("facts", { pkg, client, session, auto, task, supervisorWritableBy: writable });
+    sub["client verified as a whole"] = client.ok;
+    const session = await attempt("session readable", () => host.session());
+    sub["console user present"] = session?.consoleUser !== undefined;
+    sub["owner was explicitly configured"] = process.env["NIMBLENEWT_WSB_OWNER"] !== undefined;
+    sub["console user is the configured owner"] = session?.consoleUser !== undefined && session.consoleUser.toLowerCase() === owner.toLowerCase();
+    sub["lock state known"] = session?.locked !== undefined;
+    await attempt("auto-login flags readable", () => host.autologon());
+    await attempt("lock task readable", () => host.lockTask("NimbleNewt-LockOnLogon"));
+    await attempt("supervisor folder ACL readable", () => host.writableBy(join(runnerScript, "..")));
+    await attempt("control folder ACL readable", async () => { mkdirSync(join(base, "control"), { recursive: true }); return host.writableBy(join(base, "control")); });
+    note("facts", { sub, clientOk: client.ok });
     assert.ok(client.ok, client.ok ? "" : client.reason);
-    assert.equal(typeof session === "object" && session.consoleUser !== undefined, true, "an owner must be signed in at the console for these tests");
+    assert.equal(sub["console user present"], true, "an owner must be signed in at the console for these tests");
+    assert.equal(sub["console user is the configured owner"], true, "the console user must be the configured owner");
   });
 
   check("health: a real probe sandbox starts, the guest cannot write read-only inputs or .git or reach the network, and everything is torn down", async () => {

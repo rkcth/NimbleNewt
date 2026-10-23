@@ -16,7 +16,7 @@ The repository is public, and a runner executes whatever a workflow tells it to,
 ## Setting up a runner (each machine)
 
 1. Install Node 22 and Git on the machine, as for a normal checkout. On Windows, Git for Windows must be installed with its `bash` on the PATH of the runner's account (the probe uses `shell: bash`).
-2. Decide on the account (see above) and the work folder, which the account owns.
+2. Decide on the account (see above) and the work folder, which the account owns. Install the runner outside the owner's own profile (a dedicated account's folder, never under the owner's home), and remember that the artifacts a job uploads are public on a public repository: the Windows Sandbox job uploads only a summary and a redacted failure detail, and anything a future job uploads must be checked the same way.
 3. In GitHub: the repository, Settings, Actions, Runners, **New self-hosted runner**. Choose the machine's operating system and architecture. GitHub shows the download commands and a `config` command that contains the one-hour token.
 4. Run the download commands in that folder. Run `config` as shown, adding the label for the machine: `--labels nimblenewt-mac` (or `nimblenewt-windows`, `nimblenewt-linux`) and, if wanted, `--ephemeral`. Accept the other defaults.
 5. Start it by hand (`./run.sh` or `run.cmd`). In Settings, Actions, Runners, it should show as **Idle**. A sandbox check that needs a signed-in desktop (Windows Sandbox did, in the earlier research) needs the runner started in an interactive session with the owner present, which is what a hand start gives; this page will say so when such a job exists.
