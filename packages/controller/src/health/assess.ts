@@ -68,6 +68,8 @@ export interface AssessInput {
   readonly running: boolean;
   /** The task has an open wait (card S08): it is waiting on purpose, and its own deadline and owner are S08's business. */
   readonly waiting: boolean;
+  /** A pause gate (card L01) applies to the task: it is not expected to make progress, so silence, loops and budget are not judged. */
+  readonly paused?: boolean;
   readonly difficulty: Difficulty;
   readonly thresholds: StallThresholds;
   /** When the active attempt began: the earliest a silence can be counted from. */
@@ -83,8 +85,8 @@ export interface AssessInput {
 export interface Concern { readonly kind: StallKind; readonly detail: string }
 
 export interface Assessment {
-  /** `healthy`: signals are recent and moving. `long_running`: a request is long but the worker is still reporting, so it is not suspect. `waiting`: an open wait explains the quiet. `suspected`: see `concerns`. `not_running`: nothing to assess. */
-  readonly status: "healthy" | "long_running" | "waiting" | "suspected" | "not_running";
+  /** `healthy`: signals are recent and moving. `long_running`: a request is long but the worker is still reporting, so it is not suspect. `waiting`: an open wait explains the quiet. `paused`: a pause gate explains it. `suspected`: see `concerns`. `not_running`: nothing to assess. */
+  readonly status: "healthy" | "long_running" | "waiting" | "paused" | "suspected" | "not_running";
   readonly concerns: readonly Concern[];
   readonly signals: {
     readonly silenceMs: number;
@@ -150,6 +152,7 @@ export function assessStall(input: AssessInput): Assessment {
     ...(input.host === undefined ? {} : { host: input.host }),
   };
   const takeover = (basis: "insufficient" | "may_be_proposed"): Assessment["takeover"] => ({ permitted: false, basis, note: TAKEOVER_NOTE });
+  if (input.paused === true) return { status: "paused", concerns: [], signals, takeover: takeover("insufficient") };
   if (!input.running) return { status: input.waiting ? "waiting" : "not_running", concerns: [], signals, takeover: takeover("insufficient") };
   if (input.waiting) return { status: "waiting", concerns: [], signals, takeover: takeover("insufficient") };
 

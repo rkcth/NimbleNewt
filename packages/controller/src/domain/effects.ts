@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { canonicalJson, sha256 } from "../storage/json.js";
 import type { AggregateRef, Change, ControllerStorage, EffectRecord, JsonObject } from "../storage/types.js";
 import type { AssignmentService } from "./assignments.js";
+import { mergeChanges } from "./changes.js";
 import { DomainError, isDomainError } from "./errors.js";
 import { derivedId } from "./ids.js";
 import { fence as checkFence, type Fence } from "./assignment-model.js";
@@ -211,7 +212,7 @@ export class EffectService {
       if (fenceLost && !body.started) return this.#settle(effectId, aggregate, "failed", { reason: "superseded before it started", fence: body.fence as unknown as JsonObject });
       // A caller's own gate on starting (card L05: a pause or an interruption blocks effects that have not started). It may refuse by throwing; the checks it returns commit with the claim, so
       // a change it saw cannot slip in between. It is not consulted for an effect that already started: that one is only ever reconciled.
-      if (!body.started && options.beforeStart !== undefined) guardChanges = [...guardChanges, ...(await options.beforeStart())];
+      if (!body.started && options.beforeStart !== undefined) guardChanges = mergeChanges(guardChanges, await options.beforeStart());
 
       // Claim (revision-guarded, with the fence as a guard so the claim is atomic with ownership).
       try {

@@ -10,6 +10,7 @@ import { CommandRunner, mapStorageError, type RunnerOptions } from "./runner.js"
 import type { ProjectService } from "./service.js";
 import type { WaitBody, WaitService } from "./waits.js";
 import type { TaskBody } from "./model.js";
+import type { PauseLookup } from "../lifecycle/pause.js";
 
 /** One destination whose messages the reconciler delivers: where they go. */
 export interface Destination {
@@ -24,6 +25,8 @@ export interface ReconcilerDependencies {
   readonly blockers: BlockerService;
   /** When given, passes also settle wait deadlines, close waits whose task was cancelled, and flag blocked tasks that nothing explains (card S08). */
   readonly waits?: WaitService;
+  /** When given, an inbox message for a task under a pause (L01) stays received: it is held like a manual hold, not admitted, and never discarded. */
+  readonly pauses?: PauseLookup;
   readonly destinations: readonly Destination[];
   /** The bridge for each effect kind. An effect of a kind with no bridge is left for a person (it is reported, never guessed at). */
   readonly bridges: Readonly<Record<string, EffectBridge>>;
@@ -257,6 +260,7 @@ export class Reconciler {
       if (message.source === EVENTS_INBOX_SOURCE) continue;
       const taskId = (message.payload as { taskId?: unknown }).taskId;
       if (typeof taskId === "string" && (await this.#deps.blockers.openFor("manual_hold", { kind: "task", id: taskId })) !== undefined) { report.inboxHeld += 1; continue; }
+      if (typeof taskId === "string" && this.#deps.pauses !== undefined && (await this.#deps.pauses.isPaused(taskId))) { report.inboxHeld += 1; continue; }
       if ((await this.#deps.blockers.openFor("manual_hold", { kind: "inbox-message", id: aggregate.id })) !== undefined) { report.inboxHeld += 1; continue; }
       if ((await this.#deps.blockers.openFor("scan_failure", { kind: "inbox-message", id: aggregate.id })) !== undefined) { report.inboxHeld += 1; continue; }
       try {

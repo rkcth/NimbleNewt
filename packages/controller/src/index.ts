@@ -22,3 +22,5 @@ export * from "./context/index.js";
 export * from "./health/index.js";
 export * from "./generation/index.js";
 export * from "./continuation/index.js";
+
+export * from "./lifecycle/index.js";

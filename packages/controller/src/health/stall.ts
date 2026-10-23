@@ -64,6 +64,8 @@ export interface StallOptions extends RunnerOptions {
   readonly hostStaleAfterMs?: number;
   /** How long a dismissal silences a concern before a signal that is still bad reopens it. Provisional default 6 hours. */
   readonly dismissForMs?: number;
+  /** Whether a pause gate (card L01) applies to the task. A paused task is assessed as `paused`: its silence is expected, and a concern already suspected is cleared. */
+  readonly isPaused?: (taskId: string) => Promise<boolean>;
 }
 
 export interface ScanReport { readonly checked: number; readonly opened: number; readonly reopened: number; readonly cleared: number; readonly contended: number; readonly next?: string }
@@ -189,6 +191,7 @@ export class StallService {
   readonly #thresholds: Record<Difficulty, StallThresholds>;
   readonly #hostStaleAfterMs: number;
   readonly #dismissForMs: number;
+  readonly #isPaused: ((taskId: string) => Promise<boolean>) | undefined;
 
   private constructor(runner: CommandRunner, assignments: AssignmentService, waits: WaitService, options: StallOptions) {
     this.#runner = runner;
@@ -197,6 +200,7 @@ export class StallService {
     this.#thresholds = thresholdsFor(options);
     this.#hostStaleAfterMs = options.hostStaleAfterMs ?? DEFAULT_HOST_STALE_AFTER_MS;
     this.#dismissForMs = options.dismissForMs ?? 6 * 3_600_000;
+    this.#isPaused = options.isPaused;
     if (!Number.isSafeInteger(this.#hostStaleAfterMs) || this.#hostStaleAfterMs < 1000) throw new DomainError("invalid_command", "hostStaleAfterMs: must be a whole number of at least 1000", { field: "hostStaleAfterMs" });
     if (!Number.isSafeInteger(this.#dismissForMs) || this.#dismissForMs < 1000) throw new DomainError("invalid_command", "dismissForMs: must be a whole number of at least 1000", { field: "dismissForMs" });
   }
@@ -332,7 +336,7 @@ export class StallService {
         const stillTrue = body.generation === facts.generation && wanted.has(body.kind);
         if (stillTrue) continue;
         const status = facts.assessment.status;
-        const because = body.generation !== facts.generation ? "the task has a new owner or is no longer assigned" : status === "waiting" ? "the task is waiting on purpose" : status === "not_running" ? "the task is not running" : "the signals recovered";
+        const because = body.generation !== facts.generation ? "the task has a new owner or is no longer assigned" : status === "waiting" ? "the task is waiting on purpose" : status === "paused" ? "the task is paused on purpose" : status === "not_running" ? "the task is not running" : "the signals recovered";
         try {
           await this.#write(by, found.id, found.revision, { ...body, state: "cleared", clearedBecause: because, lastChangedAt: this.#runner.now() });
           counts.cleared++;
@@ -493,6 +497,7 @@ export class StallService {
     const attempt = assigned && assignment.activeAttemptId !== undefined ? await this.#assignments.getAttempt(assignment.activeAttemptId) as View<AttemptBody> | undefined : undefined;
     const running = assigned && attempt !== undefined && attempt.state === "active" && task.state === "in_progress";
     const waiting = assigned && wait !== undefined;
+    const paused = assigned && this.#isPaused !== undefined && (await this.#isPaused(taskId));
     const stored = (await this.#runner.get("stall-evidence", taskId))?.body as unknown as EvidenceBody | undefined;
     const evidence = stored !== undefined && assigned && stored.generation === assignment.generation ? stored : undefined;
     // Observed activity (card H01) counts as the owner's only when it is the owner, or the one who has been reporting, and under the current generation.
@@ -504,7 +509,7 @@ export class StallService {
     const host = evidence === undefined ? undefined : await this.#host(evidence.reportedBy);
     const fields = { ...DEFAULT_CONTRACT, ...(contract ?? {}) };
     const assessment = assessStall({
-      now: Date.parse(this.#runner.now()), running, waiting, difficulty, thresholds: this.#thresholds[difficulty],
+      now: Date.parse(this.#runner.now()), running, waiting, paused, difficulty, thresholds: this.#thresholds[difficulty],
       attemptStart: attempt === undefined ? 0 : Date.parse(attempt.createdAt), ...(activityAt === undefined ? {} : { activityAt }),
       ...(evidence === undefined ? {} : { evidence }), budget: { ...(fields.budget.maxMinutes === undefined ? {} : { maxMinutes: fields.budget.maxMinutes }), ...(fields.budget.maxCost === undefined ? {} : { maxCost: fields.budget.maxCost }) },
       requiredEvidence: fields.requiredEvidence.length, ...(host === undefined ? {} : { host }),
