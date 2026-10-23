@@ -50,3 +50,7 @@ Written during the long coding session of 2026-10-22. By the guiding principle t
 ## C07b (context budgets at dispatch, bounded compaction)
 - **The extractive (no-model) summary is the default last-resort fallback;** it is marked as extractive, visible to the owner and does not count as an overflow. Defaults: 2 consecutive overflows then a blocker, at most 12 pinned owner decisions, 45 s per route and 100 s in total (under the adapter's 150 s ceiling).
 - **Only an owner, host or service may call the dispatcher-side operations;** an attempt's own hand-off arriving after the controller's is kept beside it and preferred as the head; a remembered decline after one summariser timeout is acceptable; one open `context_overflow` blocker per task.
+
+## R03 (difficulty profiles and escalation)
+- **"Parent" is whoever delegated the task** (with `task.difficulty.write`), not the H11 supervisor; only the owner can reassign the parent. The per-task ceiling chosen by the parent is accepted; delegation chains are not limited by the parent's own ceiling yet. A task with no difficulty uses the mapping key `unrated` (no entry means no dispatch choice).
+- **"Failing" means admitted attempts since the last escalation that changed difficulty;** a blocker can be used for one escalation only; defaults: retry budget 2 and total budget 5 per round; a parent's decision on a stopped request or a redelegation starts a new round.

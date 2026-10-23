@@ -187,6 +187,34 @@ export class ContractService {
     });
   }
 
+  /**
+   * The storage changes that set (or, with `null`, clear) a task's difficulty and store the new contract version, for another command that commits them together with its own
+   * records (card R03: a parent's decision, or an escalation, and the difficulty it sets are one step). No authority is checked here: the caller has decided who may. Returns
+   * `undefined` when the difficulty already has that value. `expectedVersion`, when given, must be the version now stored.
+   */
+  async difficultyChanges(actor: string, taskId: string, difficulty: Difficulty | null, expectedVersion?: number): Promise<{ changes: Change[]; version: number } | undefined> {
+    const task = (await this.#runner.get("task", taskId))?.body as unknown as TaskBody | undefined;
+    if (task === undefined) throw new DomainError("not_found", `no such task ${taskId}`);
+    const current = await this.#runner.get("task-contract", taskId);
+    const before = current?.body as unknown as ContractBody | undefined;
+    const version = before?.version ?? 0;
+    if (expectedVersion !== undefined && version !== expectedVersion) throw new DomainError("stale_revision", `the contract of ${taskId} is at version ${version}, not ${expectedVersion}`, { currentRevision: version });
+    const base = before ?? { ...DEFAULT_CONTRACT, taskId, projectId: task.projectId, version: 0, changedBy: actor };
+    if ((base.difficulty ?? null) === difficulty) return undefined;
+    const next: Record<string, unknown> = { ...base };
+    if (difficulty === null) delete next["difficulty"]; else next["difficulty"] = difficulty;
+    const body = { ...next, version: version + 1, changedBy: actor } as unknown as ContractBody;
+    const ref: AggregateRef = { kind: "task-contract", id: taskId };
+    const stored: ContractVersionBody = { ...body, changedAt: this.#runner.now() };
+    return {
+      version: body.version,
+      changes: [
+        current === undefined ? { type: "create", ref, body: body as unknown as JsonObject } : { type: "update", ref, expectedRevision: current.revision, body: body as unknown as JsonObject },
+        { type: "create", ref: { kind: "task-contract-version", id: `${taskId}.${body.version}` }, body: stored as unknown as JsonObject },
+      ],
+    };
+  }
+
   /** What the task needs from its harness to be recovered (the default for a task with no contract). */
   async recoveryOf(taskId: string): Promise<RecoveryRequirement> {
     const stored = await this.#runner.get("task-contract", taskId);
