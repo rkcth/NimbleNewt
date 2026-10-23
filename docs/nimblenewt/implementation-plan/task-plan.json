@@ -2254,6 +2254,153 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "H12a",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Carry the dispatch contract to remote workers",
+      "depends_on": [
+        "H12",
+        "H02"
+      ],
+      "deliverable": "The H12 dispatch contract (begin/report, tool gateway calls, acknowledgements) carried over the H02 authenticated remote transport",
+      "acceptance_and_verification": "A remote worker runs an attempt through the same admission, credential, tool gate and ledger path as a local one; a lost link fences the attempt and reconciles with no duplicate protected effect; a remote worker can call the gateway acknowledgement path to recover from a decision-version change; the controller never trusts a worker-supplied credential or result without the fence; tested with delayed, duplicated and dropped messages",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "H12b",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Bind the real sandbox launcher and worker process to the local runtime",
+      "depends_on": [
+        "H12",
+        "A03",
+        "A08"
+      ],
+      "deliverable": "Bind the A03 SandboxLauncher and the A08 resource-limit recipe to the H12 SandboxPort, protect the separate git directory with the attemptSandbox rules and build the real worker process that runs the Pi adapter inside the sandbox",
+      "acceptance_and_verification": "A real attempt runs in the selected sandbox with only the checkout mounted and the git directory protected; resource limits apply as A08 states; the worker process exits and is reaped on completion, pause, stop and loss; a crash leaves no running tool process; the integration test uses the real launcher on Linux and the OS-specific launchers on their CI cells",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "H12c",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Compose the dispatcher at controller start with a durable scan cursor",
+      "depends_on": [
+        "H12"
+      ],
+      "deliverable": "start() builds the dispatcher, its loops (tick, release, settleDue, sweeps) and the gateway acknowledgement path; the scan cursor becomes durable",
+      "acceptance_and_verification": "After a controller restart no admitted attempt is rescanned unsafely or lost; the loops run under an injected clock in tests and a real timer in production with graceful shutdown; a second controller instance does not run the loops (epoch); the loop errors are recorded and bounded, never silent",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "H12d",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Quiesce attempts before integration, refresh and quarantine",
+      "depends_on": [
+        "H12",
+        "A04",
+        "A06"
+      ],
+      "deliverable": "Call the H12 quiesce (freeze, settle, checkpoint) from the A04 integration, A06 release and refresh paths and from quarantine",
+      "acceptance_and_verification": "Integration, refresh or quarantine never runs while an attempt has an unsettled tool call; the attempt checkpoints and resumes after; a failed settle blocks the operation with a typed blocker; tested with a call in flight",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "H12e",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Route Pi model calls through the cache adapter",
+      "depends_on": [
+        "H12",
+        "C06b"
+      ],
+      "deliverable": "Pi's own HTTP calls go through the C06 CacheAdapter and its per-endpoint state so slot partitioning, markers and pins apply",
+      "acceptance_and_verification": "Slotted servers get real reuse for the same project and none across projects; the degraded no-reuse mode is used only when the adapter is unavailable; cache hit figures from the backend reach the budget accounting; tested against the simulated servers",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "H12f",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Wire context enforcement, pause observation and message boundaries into the runtime",
+      "depends_on": [
+        "H12",
+        "C07b",
+        "L01",
+        "U12"
+      ],
+      "deliverable": "The runtime calls C07b admit at start and resumeDecision at resume, reports L01 PauseService.observe so a paused attempt shows as paused, and delivers U12 boundary reads (interrupt, advice) to the running attempt",
+      "acceptance_and_verification": "A context over budget is compacted or refused at start; a paused attempt is reported paused only once its calls have settled; an interrupt message reaches only an eligible running attempt and never a paused one; tested with a message and a pause arriving mid-turn",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "H12g",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Use the DNS-rebinding guard in the remote MCP client",
+      "depends_on": [
+        "H12",
+        "T03"
+      ],
+      "deliverable": "The remote MCP client connects only through the H12 resolvePublic/connectPublic guard",
+      "acceptance_and_verification": "A remote MCP address that resolves to a private or changing address is refused; the connection uses the checked address; a revoked connection blocks new calls; tested with a rebinding resolver",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "H12h",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Route owner-mode reviews only to the owner",
+      "depends_on": [
+        "H12",
+        "A05"
+      ],
+      "deliverable": "The review service sends an exact-operation review that is owner-mode only to the owner and rejects an agent reviewer for it",
+      "acceptance_and_verification": "An agent reviewer cannot decide or receive an owner-mode review; the dispatcher accepts only the owner's decision for it; tested for every review route",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "H13",
       "parent": "N10",
       "existing_issue": "AII-260",
@@ -4004,7 +4151,15 @@
         "X08",
         "D01",
         "D02",
-        "F04h"
+        "F04h",
+        "H12a",
+        "H12b",
+        "H12c",
+        "H12d",
+        "H12e",
+        "H12f",
+        "H12g",
+        "H12h"
       ],
       "deliverable": "Exact release manifest, known limitations and owner signoff",
       "acceptance_and_verification": "All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded",

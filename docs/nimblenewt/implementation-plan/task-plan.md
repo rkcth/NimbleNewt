@@ -37,7 +37,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C08, C09 |
 | N08 / AII-258 | R01, R02, R03, R04, R05 |
 | N09 / AII-259 | U03, U04, U05, U06, U07, U09, U08, U10, U11, U11b |
-| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H07, H09, H10, H11, H12, H13 |
+| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H07, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H13 |
 | N11 / AII-261 | V01, V02 |
 | N12 / AII-262 | M00, M01, M02, M03, M04, M05, M05b, M06 |
 | N13 / AII-263 | T01, T02, T03, T06, T07, T08, T09 |
@@ -872,6 +872,70 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** An admitted attempt runs a real Pi turn with the scripted offline model; the attempt records harness, model route, policy, decision and environment revisions, worker version and expiry; every tool call, read-only and MCP included, gets a durable operation ID linked to project, task, agent and attempt with exact tool or server version, invocation, in-progress, confirmed, failed, cancelled or uncertain state, start and end, diagnostics and resource use, and restricted payloads are redacted in summaries; a tool call alone never marks progress; a call is refused when a gate, decision revision, budget, provider eligibility or grant changed; a stale generation cannot dispatch; a kill mid-tool resumes through the ledger with no duplicate effect; a failed attempt leaves the task outcome unchanged; H02 remote workers use the same dispatch contract; a start without an admission place, or on a stale or revoked host, is refused; the dispatcher reads ContractService.priorityOf at each admission request, and a contract priority change reorders the waiting queue at the next admission decision without rewriting stored versions (S10 acceptance clause carried here); the contract's permission list is enforced on the task's tool path; every admission names the harness and passes the F08 recovery gate, and an attempt that names none is refused unless the task's recovery requirement is none; a recipe change on a running agent follows the G01 decision of 2026-10-21: controller-side grant changes apply at the next call with no restart; for a sandbox-level narrowing the dispatcher freezes new calls, lets in-flight calls settle (cancelled or uncertain ones recorded in the S05 ledger), checkpoints (C04), then restarts the A03 sandbox with the narrower recipe before the agent's next action; a widening resumes from a checkpoint in a new sandbox and tells the agent; conversation context survives both; only an emergency stop skips settle and checkpoint; approving a task contract approves the actions inside its permission ceiling, and only an action beyond the ceiling asks again, except that a tool the policy reserves for the owner (H05 mandatoryHuman) or one that needs an exact-operation review (A05) still goes to the owner inside an approved ceiling (tested); a gated step parks that task's change and the dispatcher takes other work; with twenty asks pending, unrelated tasks still dispatch and run (tested); the dispatcher asks the approval policy through PolicyService.evaluate only, and the spend it reports so far comes from budget accounting (S05) rather than from the agent; the agent's separate git directory (from the Git bridge) is added to the sandbox's protected paths and only the checkout is mounted; the agent is frozen or settled before its changes are integrated or its checkout is refreshed or quarantined; a worker that connects to a remote MCP server (or any outside address) refuses an address that is internal after name resolution, so a public name pointing at a private address (DNS rebinding) is not reached; it takes the host facts it reports to the catalog from its own registration; a task credential is issued by the dispatcher without any owner step when the task's instructions and the policy determine the grants, and an owner question is raised only when they do not (for example the task needs a grant nobody has given), as a Needs-you item (U11b); the credential is issued with only the grants of the task's project and the task, ends with the task, and its issue is recorded; the dispatcher acts as a service principal that no agent or conversation can use, issues a credential only for an admitted attempt by the agent assigned to that task, gives grants no wider than the agent's project grants and the task contract's limit, and the issue path refuses every other non-owner caller; tasks within one project are not separated from each other by the credential (A10b).
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
+### H12a — Carry the dispatch contract to remote workers
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H12, H02.
+- **Deliverable:** The H12 dispatch contract (begin/report, tool gateway calls, acknowledgements) carried over the H02 authenticated remote transport.
+- **Acceptance and verification:** A remote worker runs an attempt through the same admission, credential, tool gate and ledger path as a local one; a lost link fences the attempt and reconciles with no duplicate protected effect; a remote worker can call the gateway acknowledgement path to recover from a decision-version change; the controller never trusts a worker-supplied credential or result without the fence; tested with delayed, duplicated and dropped messages.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### H12b — Bind the real sandbox launcher and worker process to the local runtime
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H12, A03, A08.
+- **Deliverable:** Bind the A03 SandboxLauncher and the A08 resource-limit recipe to the H12 SandboxPort, protect the separate git directory with the attemptSandbox rules and build the real worker process that runs the Pi adapter inside the sandbox.
+- **Acceptance and verification:** A real attempt runs in the selected sandbox with only the checkout mounted and the git directory protected; resource limits apply as A08 states; the worker process exits and is reaped on completion, pause, stop and loss; a crash leaves no running tool process; the integration test uses the real launcher on Linux and the OS-specific launchers on their CI cells.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### H12c — Compose the dispatcher at controller start with a durable scan cursor
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H12.
+- **Deliverable:** start() builds the dispatcher, its loops (tick, release, settleDue, sweeps) and the gateway acknowledgement path; the scan cursor becomes durable.
+- **Acceptance and verification:** After a controller restart no admitted attempt is rescanned unsafely or lost; the loops run under an injected clock in tests and a real timer in production with graceful shutdown; a second controller instance does not run the loops (epoch); the loop errors are recorded and bounded, never silent.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### H12d — Quiesce attempts before integration, refresh and quarantine
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H12, A04, A06.
+- **Deliverable:** Call the H12 quiesce (freeze, settle, checkpoint) from the A04 integration, A06 release and refresh paths and from quarantine.
+- **Acceptance and verification:** Integration, refresh or quarantine never runs while an attempt has an unsettled tool call; the attempt checkpoints and resumes after; a failed settle blocks the operation with a typed blocker; tested with a call in flight.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### H12e — Route Pi model calls through the cache adapter
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H12, C06b.
+- **Deliverable:** Pi's own HTTP calls go through the C06 CacheAdapter and its per-endpoint state so slot partitioning, markers and pins apply.
+- **Acceptance and verification:** Slotted servers get real reuse for the same project and none across projects; the degraded no-reuse mode is used only when the adapter is unavailable; cache hit figures from the backend reach the budget accounting; tested against the simulated servers.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### H12f — Wire context enforcement, pause observation and message boundaries into the runtime
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H12, C07b, L01, U12.
+- **Deliverable:** The runtime calls C07b admit at start and resumeDecision at resume, reports L01 PauseService.observe so a paused attempt shows as paused, and delivers U12 boundary reads (interrupt, advice) to the running attempt.
+- **Acceptance and verification:** A context over budget is compacted or refused at start; a paused attempt is reported paused only once its calls have settled; an interrupt message reaches only an eligible running attempt and never a paused one; tested with a message and a pause arriving mid-turn.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### H12g — Use the DNS-rebinding guard in the remote MCP client
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H12, T03.
+- **Deliverable:** The remote MCP client connects only through the H12 resolvePublic/connectPublic guard.
+- **Acceptance and verification:** A remote MCP address that resolves to a private or changing address is refused; the connection uses the checked address; a revoked connection blocks new calls; tested with a rebinding resolver.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### H12h — Route owner-mode reviews only to the owner
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H12, A05.
+- **Deliverable:** The review service sends an exact-operation review that is owner-mode only to the owner and rejects an agent reviewer for it.
+- **Acceptance and verification:** An agent reviewer cannot decide or receive an owner-mode review; the dispatcher accepts only the owner's decision for it; tested for every review route.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
 ### H13 — Implement event source adapters and watchers
 
 - **Parent:** N10 / AII-260.
@@ -1543,7 +1607,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D03 — Approve release readiness and publication decision
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** X08, D01, D02, F04h.
+- **Blockers:** X08, D01, D02, F04h, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h.
 - **Deliverable:** Exact release manifest, known limitations and owner signoff.
 - **Acceptance and verification:** All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
