@@ -16,6 +16,7 @@ export * from "./configuration/index.js";
 export * from "./transport/index.js";
 export * from "./policy/index.js";
 export * from "./routing/index.js";
+export * from "./budgets/index.js";
 export * from "./security/index.js";
 export * from "./context/index.js";
 export * from "./health/index.js";

@@ -23,6 +23,7 @@ export const ACTIONS = [
   "principal.manage", "notification.emit", "catalog.register", "catalog.revoke", "catalog.read", "environment.manage", "mcp.use", "events.publish",
   "agent.manage", "agent.read",
   "task.contract.write", "task.priority.write", "task.difficulty.write", "task.class.write", "task.dependency.write",
+  "budget.manage", "budget.read",
 ] as const;
 export type Action = (typeof ACTIONS)[number];
 

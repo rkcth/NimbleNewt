@@ -37,3 +37,9 @@ Written during the long coding session of 2026-10-22. By the guiding principle t
 - **Confirmed concerns are archived** (state cleared, reason archived) when the task is done or cancelled or its generation changes; a scan may reopen one if a done task is reopened under the same generation.
 - **A takeover may be proposed only on silence plus a revoked host identity**; a stale host heartbeat is never enough (a partition makes host and worker quiet together). Only the owner or a service with an exact `recovery.read` grant may run a scan.
 - **Only progress counts as liveness** (a step, an error, new evidence, a request start or finish, a change of job status); a repeated `job: running` or a spend report does not. A wrapper that alternates job status still counts as progress.
+
+## R05 (cost and resource attribution, delegated budgets)
+- **Allowance is an explicit act** (`open`), not derived from the S10 contract `budget.maxCost`. The intended default is a project-level allowance opened by the owner with a supervisor as holder, who delegates, so only new money and raises reach the owner. Three caps exist that nothing connects yet (S10 `maxCost`, R02's per-task cap, R05 allowances); H12 must reconcile them (reserve, call the fallback service, settle).
+- **Owner approval creates new money along the whole ancestor path;** requests never expire yet; a limit can be lowered only by `reclaim` from a child.
+- **A child's overrun passes up to its ancestors;** overrun counts only spent plus handed-on beyond the limit, never amounts that are only held.
+- **Requests for more budget are found with `pending(by)`;** U11 or the dispatcher must call it (no notification outbox here).
