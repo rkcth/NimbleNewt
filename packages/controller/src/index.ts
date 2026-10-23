@@ -5,6 +5,7 @@ export * from "./environment/index.js";
 export * from "./harness/index.js";
 export * from "./hosts/index.js";
 export * from "./inquiries/index.js";
+export * from "./branches/index.js";
 export * from "./admission/index.js";
 export * from "./agents/index.js";
 export * from "./planning/index.js";
