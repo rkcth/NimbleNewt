@@ -150,7 +150,11 @@ test("macOS Keychain: a damaged or mixed entry is refused by name and never retu
   } finally { try { execFileSync("security", ["delete-keychain", keychain]); } catch { /* gone */ } await rm(dir, { recursive: true, force: true }); }
 });
 
-test("macOS Keychain: a locked keychain is reported as locked, by name, with no value", { skip: mac }, async () => {
+// Reading a locked keychain from a desktop session makes macOS ask for its password in a dialog. A hosted CI runner has no desktop, but the owner's own Mac does
+// (the self-hosted runner), so this one case is skipped on self-hosted runners and wherever NIMBLENEWT_NO_KEYCHAIN_UI=1 is set; the locked-keychain mapping is also
+// covered by the simulated `security` tool above.
+const macNoDialog = mac !== false ? mac : (process.env["RUNNER_ENVIRONMENT"] === "self-hosted" || process.env["NIMBLENEWT_NO_KEYCHAIN_UI"] === "1" ? "would show a password dialog on a desktop session" : false);
+test("macOS Keychain: a locked keychain is reported as locked, by name, with no value", { skip: macNoDialog }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "nn-kc-"));
   const keychain = join(dir, "locked.keychain-db");
   try {
