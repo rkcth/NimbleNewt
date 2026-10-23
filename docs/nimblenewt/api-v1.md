@@ -322,6 +322,28 @@ Arguments:
 
 Result: `{ items, next? }`.
 
+#### `agenda.get`
+
+One agenda item with its state, owner, deferral and outcome link.
+
+Arguments:
+
+- `itemId`: the agenda item
+
+Result: `{ item }`; the same answer for a missing item and one you may not see.
+
+#### `agenda.list`
+
+A project's open agenda items (queued or deferred) in the order a meeting takes them: urgent first, then conflicts, questions, decisions, other topics and improvement proposals. Needs `meeting.read`.
+
+Arguments:
+
+- `projectId`: the project
+- `after` (optional): the `next` of the previous page
+- `limit` (optional): page size, at most 100
+
+Result: `{ items, next? }`.
+
 ### Commands
 
 #### `agent.create`
@@ -750,5 +772,48 @@ Arguments:
 - `taskId` (optional): the task it produced
 
 Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `agenda.capture`
+
+Saves a topic for a later stand-up or meeting, linked to the conversation it came from, and returns it as it will appear so it can be checked and corrected. The request type sets its authority: `discussion` and `recommendation` never execute anything; `delegated-decision` and `owner-instruction` can be recorded by the owner only. Needs `meeting.agenda` in the project (or the owner).
+
+Arguments:
+
+- `projectId`: the project
+- `topic`: the topic, in the requester's words
+- `question` (optional): the requester's actual question
+- `context` (optional): relevant context and constraints
+- `requestedOutcome` (optional): what the requester wants out of it
+- `urgency` (optional): `normal` (default) or `urgent`
+- `intent` (optional): `discussion` (default), `recommendation`, `delegated-decision` or `owner-instruction`
+- `participants` (optional): agent principal IDs it is for (empty: whoever attends)
+- `category` (optional): `conflict` (managers and the owner), `question`, `decision`, `topic` or `improvement`; default derived from the request type
+- `sourceTurnId` (optional): the owner's chat turn it came from (the chat sets this)
+
+Result: `{ id, revision, replayed, shown }`: `shown` is the plain lines to show the requester.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `agenda.correct`
+
+Corrects an open agenda item (the revision you read must still be current); a field given as null is cleared. Only the owner can set or change an instruction or a decision delegated to the team. Returns the item as it now reads.
+
+Arguments:
+
+- `itemId`: the agenda item
+- `expectedRevision`: the revision you read
+- `topic` (optional): new topic
+- `question` (optional): new question, or null
+- `context` (optional): new context, or null
+- `requestedOutcome` (optional): new outcome, or null
+- `urgency` (optional): `normal` or `urgent`
+- `intent` (optional): the request type
+- `participants` (optional): agent principal IDs
+- `category` (optional): the kind of point, or null
+- `timeboxMinutes` (optional): minutes to spend on it, or null
+
+Result: `{ id, revision, replayed, shown }`.
 
 Completion: finished when accepted (`completed: true`).

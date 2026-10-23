@@ -7,6 +7,8 @@ import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
 import type { ProjectPlanService, ProjectResourceService, ResponsibilityService } from "../projects/index.js";
 import type { RetrievalService } from "../context/index.js";
+import type { MeetingService } from "../meetings/index.js";
+import { shownLines } from "../standups/standups.js";
 import type { Principal } from "../security/principals.js";
 import type { SecureApi } from "../security/secured.js";
 import type { JsonObject } from "../storage/types.js";
@@ -27,6 +29,8 @@ export interface Context {
   readonly resources?: ProjectResourceService;
   readonly plans?: ProjectPlanService;
   readonly responsibilities?: ResponsibilityService;
+  /** Absent when the controller runs without meetings (cards M01 and M03). */
+  readonly meetings?: MeetingService;
 }
 
 export type Args = Record<string, unknown>;
@@ -72,6 +76,7 @@ const watches = (c: Context): WatchService => c.watches ?? ((): never => { throw
 const unavailable = (what: string): never => { throw new DomainError("unavailable", `${what} is not configured`); };
 const resources = (c: Context): ProjectResourceService => c.resources ?? unavailable("project resources");
 const plans = (c: Context): ProjectPlanService => c.plans ?? unavailable("project plans");
+const meetingsOf = (c: Context): MeetingService => c.meetings ?? unavailable("meetings");
 const duties = (c: Context): ResponsibilityService => c.responsibilities ?? unavailable("responsibilities");
 const optNum = (args: Args, key: string): number | undefined => { const v = args[key]; return v === undefined ? undefined : (typeof v === "number" ? v : invalid(`args.${key}`, "must be a number")); };
 const need = (commandId: string | undefined): string => commandId ?? invalid("commandId", "is required for a command");
@@ -195,6 +200,28 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => written(await duties(c).update(c.principal, { commandId: need(id), ...(a as object) } as never)) },
   { name: "responsibility.record", kind: "command", summary: "Adds a check, intervention, incident or note to a responsibility's history, optionally linked to the bounded task it produced.", args: { responsibilityId: "the responsibility", kind: "`check`, `intervention`, `incident` or `note`", summary: "what was found or done", "outcome?": "`ok`, `attention` or `failed`", "taskId?": "the task it produced" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
     run: async (c, a, id) => written(await duties(c).record(c.principal, { commandId: need(id), ...(a as object) } as never)) },
+  { name: "agenda.capture", kind: "command", summary: "Saves a topic for a later stand-up or meeting, linked to the conversation it came from, and returns it as it will appear so it can be checked and corrected. The request type sets its authority: `discussion` and `recommendation` never execute anything; `delegated-decision` and `owner-instruction` can be recorded by the owner only. Needs `meeting.agenda` in the project (or the owner).", args: { projectId: "the project", topic: "the topic, in the requester's words", "question?": "the requester's actual question", "context?": "relevant context and constraints", "requestedOutcome?": "what the requester wants out of it", "urgency?": "`normal` (default) or `urgent`", "intent?": "`discussion` (default), `recommendation`, `delegated-decision` or `owner-instruction`", "participants?": "agent principal IDs it is for (empty: whoever attends)", "category?": "`conflict` (managers and the owner), `question`, `decision`, `topic` or `improvement`; default derived from the request type", "sourceTurnId?": "the owner's chat turn it came from (the chat sets this)" }, result: "`{ id, revision, replayed, shown }`: `shown` is the plain lines to show the requester.", completion: { kind: "completed" },
+    run: async (c, a, id) => {
+      only(a, ["projectId", "topic", "question", "context", "requestedOutcome", "urgency", "intent", "participants", "category", "sourceTurnId"]);
+      const { sourceTurnId, ...rest } = a;
+      // Which conversation a topic came from is the owner's chat to say (the chat sets it itself); no other caller names one.
+      if (sourceTurnId !== undefined && c.principal.kind !== "owner") throw new DomainError("forbidden", "only the owner's chat links a topic to a conversation");
+      const made = await meetingsOf(c).addAgendaItem(c.principal, { commandId: need(id), ...(rest as object), ...(sourceTurnId === undefined ? {} : { source: { kind: "chat-turn", id: typeof sourceTurnId === "string" ? sourceTurnId : invalid("args.sourceTurnId", "must be text") } }) } as never);
+      const item = await meetingsOf(c).agendaItem(c.principal, made.id);
+      return asJson({ id: made.id, revision: item?.revision ?? 1, replayed: made.replayed, shown: item === undefined ? [] : shownLines(item) });
+    } },
+  { name: "agenda.correct", kind: "command", summary: "Corrects an open agenda item (the revision you read must still be current); a field given as null is cleared. Only the owner can set or change an instruction or a decision delegated to the team. Returns the item as it now reads.", args: { itemId: "the agenda item", expectedRevision: "the revision you read", "topic?": "new topic", "question?": "new question, or null", "context?": "new context, or null", "requestedOutcome?": "new outcome, or null", "urgency?": "`normal` or `urgent`", "intent?": "the request type", "participants?": "agent principal IDs", "category?": "the kind of point, or null", "timeboxMinutes?": "minutes to spend on it, or null" }, result: "`{ id, revision, replayed, shown }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => {
+      only(a, ["itemId", "expectedRevision", "topic", "question", "context", "requestedOutcome", "urgency", "intent", "participants", "category", "timeboxMinutes"]);
+      const made = await meetingsOf(c).correctAgendaItem(c.principal, { commandId: need(id), ...(a as object) } as never);
+      const itemId = str(a, "itemId");
+      const item = await meetingsOf(c).agendaItem(c.principal, itemId);
+      return asJson({ id: itemId, revision: made.revision, replayed: made.replayed, shown: item === undefined ? [] : shownLines(item) });
+    } },
+  { name: "agenda.get", kind: "query", summary: "One agenda item with its state, owner, deferral and outcome link.", args: { itemId: "the agenda item" }, result: "`{ item }`; the same answer for a missing item and one you may not see.",
+    run: async (c, a) => { only(a, ["itemId"]); return found("agenda item", await meetingsOf(c).agendaItem(c.principal, str(a, "itemId"))); } },
+  { name: "agenda.list", kind: "query", summary: "A project's open agenda items (queued or deferred) in the order a meeting takes them: urgent first, then conflicts, questions, decisions, other topics and improvement proposals. Needs `meeting.read`.", args: { projectId: "the project", "after?": "the `next` of the previous page", "limit?": "page size, at most 100" }, result: "`{ items, next? }`.",
+    run: async (c, a) => { only(a, ["projectId", "after", "limit"]); const r = await meetingsOf(c).openAgenda(c.principal, str(a, "projectId"), { limit: limitOf(a), ...(optStr(a, "after") === undefined ? {} : { afterId: optStr(a, "after") as string }) }); return r === undefined ? asJson({ items: [] }) : page(r); } },
 ];
 
 export const OPERATION_BY_NAME: ReadonlyMap<string, Operation> = new Map(OPERATIONS.map((o) => [o.name, o]));

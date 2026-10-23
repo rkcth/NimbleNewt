@@ -35,7 +35,7 @@ export interface ChatPin {
   readonly idle?: true;
 }
 
-export interface ChatStepResult { readonly op: string; readonly id: string; readonly revision?: number; readonly key?: string; readonly accepted: true; readonly completed: boolean; readonly awaits?: string }
+export interface ChatStepResult { readonly op: string; readonly id: string; readonly revision?: number; readonly key?: string; readonly shown?: readonly string[]; readonly accepted: true; readonly completed: boolean; readonly awaits?: string }
 
 export interface ChatProposalBody {
   readonly ownerId: string;
@@ -87,6 +87,8 @@ export interface Outcome {
   readonly observedAt?: string;
   readonly lines?: readonly { readonly text: string; readonly cites: readonly Cite[] }[];
   readonly moreLines?: number;
+  /** For an agenda topic that was captured or corrected (card M03): the item as it now reads, in plain lines, for the owner to check. */
+  readonly shown?: readonly string[];
 }
 
 export interface TurnBody {
@@ -364,17 +366,19 @@ export class ChatService {
       const resolved = await this.#resolve(token, intent, currentFocus, pending, profile, words, quoted);
       if (!resolved.ok) { push(askOrRefuse(i, resolved, n)); continue; }
       projectId = resolved.projectId ?? projectId;
+      // A captured topic is linked to this very turn (set here, after the interpreter's arguments were checked, so it cannot be named by anyone else).
+      const steps = resolved.steps.map((st) => (st.op === "agenda.capture" ? { ...st, args: { ...st.args, sourceTurnId: turnId } } : st));
       if (resolved.reason === undefined) {
         // An explicit order applies now, one API command per step (a first step such as setting the repository, then the order itself).
-        const last = resolved.steps.length - 1;
-        for (const [k, step] of resolved.steps.entries()) {
+        const last = steps.length - 1;
+        for (const [k, step] of steps.entries()) {
           const written = recordOf(step);
           if (written !== undefined) pending.set(written, (pending.get(written) ?? 0) + 1);
           push({ i: items.length, kind: "apply", op: step.op, args: asJson(step.args), commandId: k === last ? `${turnId}-c${i}` : `${turnId}-c${i}-${k}`, preview: describe(step.op, step.args, resolved.labels) });
         }
       } else {
         const proposalId = `prop-${hash(scopedCommandId(owner.id, `${turnId}-p${i}`))}`;
-        push({ i, kind: "propose", proposalId, steps: resolved.steps, pins: resolved.pins, preview: resolved.steps.map((st) => describe(st.op, st.args, resolved.labels)), reason: resolved.reason });
+        push({ i, kind: "propose", proposalId, steps, pins: resolved.pins, preview: steps.map((st) => describe(st.op, st.args, resolved.labels)), reason: resolved.reason });
       }
     }
     // One question holds the message: nothing that would change a record runs while something is unanswered. The held commands are kept, so the answer carries them on.
@@ -413,6 +417,8 @@ export class ChatService {
     const accepted = acceptedArgs(intent.op);
     if (spec === undefined || accepted === undefined) return refuse("not_a_chat_command", `${intent.op.slice(0, 60)} is not something that can be done by chat`);
     if (hasRefMarker(intent.args)) return refuse("invalid_command", "$ref is reserved for steps the controller builds");
+    // Which conversation a topic came from is the controller's to say, never the interpreter's.
+    if (intent.op === "agenda.capture" && intent.args["sourceTurnId"] !== undefined) return refuse("invalid_command", "sourceTurnId is set by the controller");
     for (const key of Object.keys(intent.args)) if (!accepted.includes(key) && !(key === "repositoryId" && spec.dispatch === true)) return refuse("invalid_command", `${key} is not an argument of ${intent.op}`);
     const args: Record<string, unknown> = { ...intent.args };
     const labels: Record<string, string> = {};
@@ -452,6 +458,24 @@ export class ChatService {
       if (matches.length === 0) return refuse("not_found", `no task called "${title.slice(0, 80)}" in that project`);
       if (matches.length > 1) return { ok: false, kind: "ask", question: `More than one task is called "${title.slice(0, 80)}". Which one?`, options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${m.id} (${m.state})`), field: idKey, choices: matches.slice(0, CHAT_LIMITS.options).map((m) => m.id) };
       args[idKey] = (matches[0] as { id: string }).id;
+    }
+    // An agenda item named by its words: exactly one open item of the project whose topic contains them, or the owner is asked.
+    if (intent.op === "agenda.correct") {
+      const named = args["agendaTopic"];
+      delete args["agendaTopic"];
+      if (named !== undefined && args["itemId"] !== undefined) return refuse("invalid_command", "give either itemId or agendaTopic, not both");
+      if (args["itemId"] === undefined) {
+        if (named !== undefined && typeof named !== "string") return refuse("invalid_command", "agendaTopic must be text");
+        const open = await this.#listAll(token, "agenda.list", { projectId });
+        const words = typeof named === "string" ? named.trim().toLowerCase() : "";
+        const matches = open.filter((i) => words === "" || String(i["topic"]).toLowerCase().includes(words));
+        if (matches.length === 0) return refuse("not_found", words === "" ? "there is no open agenda item in that project" : `no open agenda item about "${(named as string).slice(0, 80)}" in that project`);
+        if (matches.length > 1) return { ok: false, kind: "ask", question: "Which agenda item do you mean?", options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${String(m["id"])} (${String(m["topic"]).slice(0, 60)})`), field: "itemId", choices: matches.slice(0, CHAT_LIMITS.options).map((m) => String(m["id"])) };
+        args["itemId"] = String(matches[0]!["id"]);
+      }
+      const found = await this.#get(token, "agenda.get", { itemId: args["itemId"] });
+      if (found === undefined) return refuse("not_found", "no such agenda item");
+      labels[String(args["itemId"])] = String(found["topic"]);
     }
     // A project argument belongs only to the operations that take one (the others only used it to find the task).
     if ("projectId" in args && !acceptedForOp(intent.op).includes("projectId")) delete args["projectId"];
@@ -554,6 +578,10 @@ export class ChatService {
         const item = typeof args["taskId"] === "string" ? await this.#get(token, "assignment.get", { taskId: args["taskId"] }) : undefined;
         // A task never assigned has no assignment revision to expect (that is how a first assignment is asked for).
         return item === undefined ? { ok: true } : { ok: true, name: "expectedRevision", value: item["revision"] as number };
+      }
+      case "agenda": {
+        const item = typeof args["itemId"] === "string" ? await this.#get(token, "agenda.get", { itemId: args["itemId"] }) : undefined;
+        return item === undefined ? refuse("not_found", "no such agenda item") : { ok: true, name: "expectedRevision", value: (item["revision"] as number) + ahead(`agenda:${args["itemId"] as string}`) };
       }
       case "contract": {
         const item = typeof args["taskId"] === "string" ? await this.#get(token, "contract.get", { taskId: args["taskId"] }) : undefined;
@@ -677,7 +705,7 @@ export class ChatService {
       case "apply": {
         const response = await this.#deps.api.handle(token, { v: API_VERSION, op: item.op, commandId: item.commandId, args: item.args });
         if (!response.ok) return { i: item.i, status: "refused", op: item.op, commandId: item.commandId, code: response.error.code, message: response.error.message };
-        return { i: item.i, status: "applied", op: item.op, commandId: item.commandId, id: response.result["id"] as string, ...(typeof response.result["revision"] === "number" ? { revision: response.result["revision"] } : {}), accepted: true, completed: response.completed ?? true, ...(response.awaits === undefined ? {} : { awaits: response.awaits }) };
+        return { i: item.i, status: "applied", op: item.op, commandId: item.commandId, id: response.result["id"] as string, ...(typeof response.result["revision"] === "number" ? { revision: response.result["revision"] } : {}), ...(shownOf(response.result) === undefined ? {} : { shown: shownOf(response.result) as string[] }), accepted: true, completed: response.completed ?? true, ...(response.awaits === undefined ? {} : { awaits: response.awaits }) };
       }
       case "propose": {
         try {
@@ -740,7 +768,7 @@ export class ChatService {
       if (using === undefined) return { proposalId, applied: false, replayed: false, results, failure: { step: index, code: "unavailable", message: "the coordinator is not available to make this step" } };
       const response = await this.#deps.api.handle(using, { v: API_VERSION, op: step.op, commandId: step.commandId, args: args as Record<string, unknown> });
       if (!response.ok) return { proposalId, applied: false, replayed: false, results, failure: { step: index, code: response.error.code, message: response.error.message } };
-      results.push({ op: step.op, id: response.result["id"] as string, ...(typeof response.result["revision"] === "number" ? { revision: response.result["revision"] } : {}), ...(step.key === undefined ? {} : { key: step.key }), accepted: true, completed: response.completed ?? true, ...(response.awaits === undefined ? {} : { awaits: response.awaits }) });
+      results.push({ op: step.op, id: response.result["id"] as string, ...(typeof response.result["revision"] === "number" ? { revision: response.result["revision"] } : {}), ...(shownOf(response.result) === undefined ? {} : { shown: shownOf(response.result) as string[] }), ...(step.key === undefined ? {} : { key: step.key }), accepted: true, completed: response.completed ?? true, ...(response.awaits === undefined ? {} : { awaits: response.awaits }) });
     }
     try {
       await this.#runner.command("chat.apply", { commandId: scopedCommandId(owner.id, commandId), actor: owner.id }, async () => ({
@@ -886,8 +914,15 @@ function recordOf(step: ChatStep): string | undefined {
     case "resource.bind": return a["kind"] === "repository" ? `project:${a["projectId"] as string}` : undefined;
     case "agent.update": return `agent:${a["agentId"] as string}`;
     case "contract.set": return `contract:${a["taskId"] as string}`;
+    case "agenda.correct": return `agenda:${a["itemId"] as string}`;
     default: return undefined;
   }
+}
+
+/** The plain lines an API result asks to be shown to the owner (a captured agenda topic), if it has any. */
+function shownOf(result: JsonObject): string[] | undefined {
+  const lines = result["shown"];
+  return Array.isArray(lines) && lines.length > 0 && lines.every((l) => typeof l === "string") ? (lines as string[]).slice(0, 12).map((l) => l.slice(0, 600)) : undefined;
 }
 
 const refuse = (code: string, message: string): { ok: false; kind: "refuse"; code: string; message: string } => ({ ok: false, kind: "refuse", code, message });
@@ -947,7 +982,12 @@ export function replyOf(outcomes: readonly Outcome[]): string[] {
         if (o.moreLines !== undefined) lines.push(`${o.moreLines} more line${o.moreLines === 1 ? "" : "s"} not shown; ask for a narrower view.`);
         break;
       case "proposed": lines.push(`Proposed, nothing has happened yet (${o.message ?? ""}). Proposal ${o.proposalId ?? ""}: ${(o.preview ?? []).join("; ")}. Say to apply it, or to discard it.`); break;
-      case "applied": lines.push(o.proposalId !== undefined ? `Applied proposal ${o.proposalId}.` : `Done: ${o.op ?? ""}${o.completed === false ? `, accepted but not complete yet (${o.awaits ?? "waiting"})` : ""}.`); break;
+      case "applied":
+        lines.push(o.proposalId !== undefined ? `Applied proposal ${o.proposalId}.` : `Done: ${o.op ?? ""}${o.completed === false ? `, accepted but not complete yet (${o.awaits ?? "waiting"})` : ""}.`);
+        // A captured or corrected agenda topic is shown as it now reads, so the owner can check it.
+        for (const l of o.shown ?? []) lines.push(l);
+        for (const r of o.results ?? []) for (const l of r.shown ?? []) lines.push(l);
+        break;
     }
   }
   return lines;

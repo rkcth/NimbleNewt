@@ -8,6 +8,7 @@ import type { WatchService } from "../events/handling.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
 import type { ProjectPlanService, ProjectResourceService, ResponsibilityService } from "../projects/index.js";
+import type { MeetingService } from "../meetings/index.js";
 import { SecureApi } from "../security/secured.js";
 import type { PrincipalService } from "../security/principals.js";
 import type { TaskCredentialService } from "../security/task-credentials.js";
@@ -51,6 +52,8 @@ export interface StateApiDeps {
   readonly resources?: ProjectResourceService;
   readonly plans?: ProjectPlanService;
   readonly responsibilities?: ResponsibilityService;
+  /** When present, agenda items can be captured, corrected and listed through the API (cards M01 and M03). */
+  readonly meetings?: MeetingService;
   /** When present, a task credential (`tcr-…`) is accepted too and acts for its one task (card A10b). */
   readonly taskCredentials?: TaskCredentialService;
   /** Called with errors that are not part of the contract (so they are not shown to the client). */
@@ -94,6 +97,7 @@ export class StateApi {
         ...(this.#deps.resources === undefined ? {} : { resources: this.#deps.resources }),
         ...(this.#deps.plans === undefined ? {} : { plans: this.#deps.plans }),
         ...(this.#deps.responsibilities === undefined ? {} : { responsibilities: this.#deps.responsibilities }),
+        ...(this.#deps.meetings === undefined ? {} : { meetings: this.#deps.meetings }),
       };
       const result = await operation.run(context, args, request.commandId);
       if (operation.kind === "query") return { v: API_VERSION, op: request.op, ok: true, result };

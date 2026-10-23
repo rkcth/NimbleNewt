@@ -23,6 +23,30 @@ export type AgendaState = "queued" | "scheduled" | "discussed" | "deferred" | "r
 export type AgendaUrgency = "normal" | "urgent";
 /** What the topic asks for. An owner instruction or a decision delegated to the team carries authority, so only the owner can record one; a paraphrase by a supervisor is a discussion or a recommendation request. */
 export type AgendaIntent = "discussion" | "recommendation" | "delegated-decision" | "owner-instruction";
+/**
+ * What kind of agenda point it is, for the order a meeting takes them in (card M03): conflicts first, then questions, then decisions, then other topics, then improvement proposals. Absent on older items: it is derived
+ * (`categoryOf`). Only a manager or the owner may record a `conflict`; an agent that disagrees with another raises a question.
+ */
+export type AgendaCategory = "conflict" | "question" | "decision" | "topic" | "improvement";
+export const AGENDA_CATEGORIES: readonly AgendaCategory[] = ["conflict", "question", "decision", "topic", "improvement"];
+const CATEGORY_RANK: Readonly<Record<AgendaCategory, number>> = { conflict: 0, question: 1, decision: 2, topic: 3, improvement: 4 };
+
+/** The category an item has: the stated one, or derived from what it asks (a decision for the team or an instruction is a decision; a question text makes a question; anything else a topic). */
+export const categoryOf = (item: { readonly category?: AgendaCategory; readonly intent: AgendaIntent; readonly question?: string }): AgendaCategory =>
+  item.category ?? (item.intent === "delegated-decision" || item.intent === "owner-instruction" ? "decision" : item.question !== undefined ? "question" : "topic");
+
+/**
+ * What each request type lets the team do with the topic (card M03). `executes` is true only where the owner gave a direction: a discussion or a recommendation request is never an instruction, so findings go back and nothing is done on its strength.
+ * `votable` says whether the team may vote to overturn the substance: an explicit owner choice is a constraint on the discussion, not a proposition.
+ */
+export const authorityOf = (intent: AgendaIntent): { readonly executes: boolean; readonly votable: boolean; readonly words: string } => {
+  switch (intent) {
+    case "discussion": return { executes: false, votable: true, words: "discussion only: the team talks it over and reports back; nothing is done because of it" };
+    case "recommendation": return { executes: false, votable: true, words: "a recommendation is asked for: the team advises and the owner decides; nothing is done because of it" };
+    case "delegated-decision": return { executes: true, votable: true, words: "the owner left this decision to the team: it may be decided within the authority the team already has" };
+    case "owner-instruction": return { executes: true, votable: false, words: "an explicit instruction from the owner: the team plans how to carry it out and does not vote on whether to" };
+  }
+};
 
 export interface ScheduleBody {
   readonly projectId: string;
@@ -41,6 +65,8 @@ export interface ScheduleBody {
   readonly prepareMinutes: number;
   /** A planning figure for the meeting procedure (M05); nothing here enforces it. */
   readonly budgetTokens?: number;
+  /** A stand-up's daily window (local wall-clock hours, in the schedule's zone): the time and the length of the meeting must lie inside it, on creation and on every later change (card M03). */
+  readonly window?: { readonly from: string; readonly to: string };
   readonly state: ScheduleState;
   readonly createdBy: string;
   readonly createdAt: string;
@@ -86,6 +112,8 @@ export interface OccurrenceBody {
   readonly agendaOverflow: number;
   /** Items that could not be put back on the open agenda when this meeting was settled (the list was full); they stay queued, marked `unlisted`. */
   readonly agendaUnlisted?: number;
+  /** Items this meeting deferred whose outcome could not be queued to go back to their conversation (the queue of returns was full); their state still shows what happened. */
+  readonly returnsUnlisted?: number;
   /** The report period a catch-up covers: from the previous handled slot to this one. */
   readonly coversFrom?: string;
   /** Earlier slots that were not made into occurrences because this later one replaced them (after downtime). */
@@ -110,6 +138,15 @@ export interface AgendaBody {
   readonly requestedOutcome?: string;
   readonly urgency: AgendaUrgency;
   readonly intent: AgendaIntent;
+  /** Where it goes in the order of a meeting; absent: derived (`categoryOf`). */
+  readonly category?: AgendaCategory;
+  /** How long the meeting should spend on it (improvement proposals are timeboxed, README 531). The meeting procedure enforces it (M05); here it is recorded and shown. */
+  readonly timeboxMinutes?: number;
+  /** What the topic is about, when that is a record other than a conversation (an improvement backlog item, card M03). */
+  readonly link?: { readonly kind: "improvement"; readonly id: string };
+  /** Corrections made after it was captured (the requester or a manager fixing what the supervisor wrote), newest last, at most ten kept. */
+  readonly corrections?: readonly { readonly at: string; readonly by: string; readonly fields: readonly string[] }[];
+  readonly correctionCount?: number;
   /** Empty: whoever is on the roster. */
   readonly participants: readonly string[];
   readonly owner: string;
@@ -123,6 +160,12 @@ export interface AgendaBody {
   readonly deferral?: { readonly reason: string; readonly nextStep: string };
   /** A link to what the meeting made of it (a decision record), set by whoever resolves it. */
   readonly outcomeRef?: string;
+  /** What the meeting made of it, in words, for the conversation the topic came from (set with the state change; handed back by `outcomesToReturn`). */
+  readonly outcomeNote?: string;
+  /** The outcome could not go on the list of outcomes waiting to be returned (it was full): it waits on the overflow list or, past that, nowhere; `requeueReturns` lists it when there is room. */
+  readonly returnUnlisted?: true;
+  /** Present once the outcome was handed back to the conversation the item came from. */
+  readonly returnedAt?: string;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -151,11 +194,14 @@ export interface MeetingOptions extends RunnerOptions {
   /** The owner's time zone setting (the `meeting.timeZone` setting, see `ownerTimeZoneFrom`); used when a schedule names no zone. */
   readonly ownerTimeZone?: () => Promise<string | undefined>;
   readonly invitations?: InvitationSink;
+  /** How many outcomes may wait on the list to be returned to their conversations, and how many more on the overflow list behind it (defaults 200 and 1000; mostly for tests). Beyond both the state change is still recorded, the outcome is marked unlisted and counted. */
+  readonly returnsListed?: number;
+  readonly returnsMore?: number;
 }
 
 export const MEETING_LIMITS = {
   title: 200, reason: 1000, topic: 200, question: 2000, context: 4000, outcome: 1000, deferral: 500, ref: 200, roster: 50, participants: 50, durationMax: 480, prepareMax: 720,
-  openAgendaPerProject: 200, agendaPerMeeting: 25, openOccurrencesPerProject: 200, openOccurrences: 1000, scheduleScanDays: 400, retries: 8, page: 100, skippedListed: 10, graceMinutes: 60, tickSchedules: 50, tickMax: 200, budgetTokens: 1_000_000_000,
+  openAgendaPerProject: 200, returnsPending: 200, returnsMore: 1000, timeboxMax: 120, corrections: 10, agendaPerMeeting: 25, openOccurrencesPerProject: 200, openOccurrences: 1000, scheduleScanDays: 400, retries: 8, page: 100, skippedListed: 10, graceMinutes: 60, tickSchedules: 50, tickMax: 200, budgetTokens: 1_000_000_000,
 } as const;
 
 /** The setting that holds the owner's time zone for meetings. Pass these as `settings` to the configuration service. */
@@ -166,6 +212,7 @@ export const MEETING_SETTINGS: readonly SettingDefinition[] = [
 const SCHEDULE_ID = /^msc-[a-z2-7]{20}$/;
 const OCCURRENCE_ID = /^mto-[a-z2-7]{20}$/;
 const AGENDA_ID = /^mag-[a-z2-7]{20}$/;
+const IMPROVEMENT_ID = /^imp-[a-z2-7]{20}$/;
 const AGENT = /^agent:[a-z0-9][a-z0-9-]{0,39}$/;
 const GLOBAL_OPEN = "all";
 const agendaIndexId = (projectId: string): string => projectId;
@@ -201,6 +248,8 @@ export class MeetingService {
   readonly #availability: ((principalId: string) => Promise<Availability>) | undefined;
   readonly #ownerZone: (() => Promise<string | undefined>) | undefined;
   readonly #sink: InvitationSink | undefined;
+  readonly #capListed: number;
+  readonly #capMore: number;
 
   private constructor(runner: CommandRunner, deps: { inquiries?: InquiryService }, options: MeetingOptions) {
     this.#runner = runner;
@@ -208,6 +257,8 @@ export class MeetingService {
     this.#availability = options.availability;
     this.#ownerZone = options.ownerTimeZone;
     this.#sink = options.invitations;
+    this.#capListed = options.returnsListed ?? MEETING_LIMITS.returnsPending;
+    this.#capMore = options.returnsMore ?? MEETING_LIMITS.returnsMore;
   }
 
   static withEpoch(storage: ControllerStorage, epoch: number, deps: { inquiries?: InquiryService } = {}, options: MeetingOptions): MeetingService {
@@ -219,9 +270,9 @@ export class MeetingService {
   /** Creates a schedule. Needs `meeting.manage` in the project. Slots before the creation time are never made (a schedule made at 10:00 for 09:00 daily starts tomorrow). */
   async createSchedule(by: Principal, command: NoActor & {
     projectId: string; title: string; roster: readonly string[]; time: string; recurrence?: Recurrence; timeZone?: string; startDate?: string; endDate?: string;
-    durationMinutes?: number; prepareMinutes?: number; budgetTokens?: number;
+    durationMinutes?: number; prepareMinutes?: number; budgetTokens?: number; window?: { from: string; to: string };
   }): Promise<{ id: string; replayed: boolean }> {
-    onlyKnown(command, ["commandId", "projectId", "title", "roster", "time", "recurrence", "timeZone", "startDate", "endDate", "durationMinutes", "prepareMinutes", "budgetTokens"]);
+    onlyKnown(command, ["commandId", "projectId", "title", "roster", "time", "recurrence", "timeZone", "startDate", "endDate", "durationMinutes", "prepareMinutes", "budgetTokens", "window"]);
     const projectId = checkProjectId(command.projectId);
     await this.#requireManage(by, projectId);
     const title = plain(command.title, "title", MEETING_LIMITS.title);
@@ -237,12 +288,13 @@ export class MeetingService {
     const durationMinutes = command.durationMinutes === undefined ? 30 : whole(command.durationMinutes, "durationMinutes", 1, MEETING_LIMITS.durationMax);
     const prepareMinutes = command.prepareMinutes === undefined ? 0 : whole(command.prepareMinutes, "prepareMinutes", 0, MEETING_LIMITS.prepareMax);
     const budgetTokens = command.budgetTokens === undefined ? undefined : whole(command.budgetTokens, "budgetTokens", 1, MEETING_LIMITS.budgetTokens);
+    const window = command.window === undefined ? undefined : checkWindow(command.window, time, durationMinutes);
     const id = derivedId("msc", scopedCommandId(by.id, command.commandId));
     const result = await this.#runner.command("meeting.schedule.create", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
-      payload: clean({ projectId, title, roster, time, recurrence, timeZone, fromOwner, startDate, endDate, durationMinutes, prepareMinutes, budgetTokens }),
+      payload: clean({ projectId, title, roster, time, recurrence, timeZone, fromOwner, startDate, endDate, durationMinutes, prepareMinutes, budgetTokens, window }),
       build: async () => {
         const now = this.#runner.now();
-        const base = { projectId, title, roster, timeZone, timeZoneFromOwnerSetting: fromOwner, time, recurrence, ...(startDate === undefined ? {} : { startDate }), ...(endDate === undefined ? {} : { endDate }), durationMinutes, prepareMinutes, ...(budgetTokens === undefined ? {} : { budgetTokens }) };
+        const base = { projectId, title, roster, timeZone, timeZoneFromOwnerSetting: fromOwner, time, recurrence, ...(startDate === undefined ? {} : { startDate }), ...(endDate === undefined ? {} : { endDate }), durationMinutes, prepareMinutes, ...(budgetTokens === undefined ? {} : { budgetTokens }), ...(window === undefined ? {} : { window }) };
         const next = nextPrepare({ ...base, cursor: now });
         const body: ScheduleBody = { ...base, state: next === undefined ? "ended" : "active", createdBy: by.id, createdAt: now, cursor: now, ...(next === undefined ? {} : { nextPrepareAt: next }), occurrences: 0 };
         const ref: AggregateRef = { kind: "meeting-schedule", id };
@@ -258,9 +310,9 @@ export class MeetingService {
    */
   async updateSchedule(by: Principal, command: NoActor & {
     scheduleId: string; expectedRevision: number; state?: ScheduleState; title?: string; roster?: readonly string[]; time?: string; recurrence?: Recurrence; timeZone?: string; startDate?: string | null; endDate?: string | null;
-    durationMinutes?: number; prepareMinutes?: number;
+    durationMinutes?: number; prepareMinutes?: number; window?: { from: string; to: string };
   }): Promise<void> {
-    onlyKnown(command, ["commandId", "scheduleId", "expectedRevision", "state", "title", "roster", "time", "recurrence", "timeZone", "startDate", "endDate", "durationMinutes", "prepareMinutes"]);
+    onlyKnown(command, ["commandId", "scheduleId", "expectedRevision", "state", "title", "roster", "time", "recurrence", "timeZone", "startDate", "endDate", "durationMinutes", "prepareMinutes", "window"]);
     const id = typeof command.scheduleId === "string" && SCHEDULE_ID.test(command.scheduleId) ? command.scheduleId : invalid("scheduleId", "is not a schedule ID");
     const expected = checkRevision(command.expectedRevision);
     if (command.state !== undefined && command.state !== "active" && command.state !== "paused" && command.state !== "ended") invalid("state", "must be active, paused or ended");
@@ -277,7 +329,7 @@ export class MeetingService {
     const durationMinutes = command.durationMinutes === undefined ? undefined : whole(command.durationMinutes, "durationMinutes", 1, MEETING_LIMITS.durationMax);
     const prepareMinutes = command.prepareMinutes === undefined ? undefined : whole(command.prepareMinutes, "prepareMinutes", 0, MEETING_LIMITS.prepareMax);
     await this.#runner.command("meeting.schedule.update", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
-      payload: clean({ scheduleId: id, expectedRevision: expected, state: command.state, title, roster, time, recurrence, timeZone, startDate, endDate, durationMinutes, prepareMinutes }),
+      payload: clean({ scheduleId: id, expectedRevision: expected, state: command.state, title, roster, time, recurrence, timeZone, startDate, endDate, durationMinutes, prepareMinutes, window: command.window }),
       build: async () => {
         const now = this.#runner.now();
         const cur = await this.#runner.get("meeting-schedule", id);
@@ -297,10 +349,13 @@ export class MeetingService {
           ...(newStart === undefined ? {} : { startDate: newStart }), ...(newEnd === undefined ? {} : { endDate: newEnd }),
         };
         // A change of when meetings happen (or a resume) marks the moment: slots at or before it are not made, and the next tick says so.
+        // A stand-up schedule keeps its daily window: whatever the change, the time and length that result must lie inside the window that results.
+        const newWindow = command.window === undefined ? body.window : checkWindow(command.window, merged.time, merged.durationMinutes);
+        if (command.window === undefined && newWindow !== undefined) checkWindow(newWindow, merged.time, merged.durationMinutes);
         const editedAt = moved ? now : body.editedAt;
         const next = state === "active" ? nextPrepare({ ...merged, ...(editedAt === undefined ? {} : { editedAt }) }) : undefined;
         const nextState: ScheduleState = state === "active" && next === undefined ? "ended" : state;
-        const out: ScheduleBody = { ...merged, state: nextState, ...(editedAt === undefined ? {} : { editedAt }), ...(next === undefined ? {} : { nextPrepareAt: next }) };
+        const out: ScheduleBody = { ...merged, ...(newWindow === undefined ? {} : { window: newWindow }), state: nextState, ...(editedAt === undefined ? {} : { editedAt }), ...(next === undefined ? {} : { nextPrepareAt: next }) };
         const ref: AggregateRef = { kind: "meeting-schedule", id };
         return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: cur.revision, body: clean(out) }], detail: { projectId: body.projectId } };
       },
@@ -625,25 +680,33 @@ export class MeetingService {
         const ids = [...index.ids];
         const changes: Change[] = [];
         let unlisted = 0;
+        const returns = await this.#returnsIndex(body.projectId);
+        const returnIds = [...returns.ids];
+        const returnMore = [...returns.more];
+        let returnsUnlisted = 0;
         for (const itemId of body.agenda) {
           const item = await this.#runner.get("agenda-item", itemId);
           const ib = item?.body as unknown as AgendaBody | undefined;
           if (item === undefined || ib === undefined || ib.state !== "scheduled" || ib.occurrenceId !== id) continue;
-          const { occurrenceId: _o, deferral: _d, ...rest } = ib;
-          void _o; void _d;
+          const { occurrenceId: _o, deferral: _d, outcomeNote: _n, returnedAt: _r, returnUnlisted: _ru, ...rest } = ib;
+          void _o; void _d; void _n; void _r; void _ru;
+          // A topic from a conversation that the meeting did not reach is told so there, with its reason and next step.
+          const placed = outcome === "held" && ib.source !== undefined ? this.#place(returnIds, returnMore, itemId) : undefined;
+          if (placed !== undefined && placed !== "listed") returnsUnlisted++;
           // The open list holds 200 at most: an item that does not fit stays queued (or deferred) but marked unlisted, and the meeting counts them.
           const fits = ids.includes(itemId) || ids.length < MEETING_LIMITS.openAgendaPerProject;
           if (!fits) unlisted++;
           const next: AgendaBody = outcome === "held"
-            ? { ...rest, state: "deferred", deferral: { reason: "the meeting did not reach it", nextStep: "it is on the next meeting's agenda" }, updatedAt: nowIso, ...(fits ? {} : { unlisted: true }) }
+            ? { ...rest, state: "deferred", deferral: { reason: "the meeting did not reach it", nextStep: "it is on the next meeting's agenda" }, updatedAt: nowIso, ...(fits ? {} : { unlisted: true }), ...(placed === undefined || placed === "listed" ? {} : { returnUnlisted: true as const }) }
             : { ...rest, state: "queued", updatedAt: nowIso, ...(ib.deferral === undefined ? {} : { deferral: ib.deferral }), ...(fits ? {} : { unlisted: true }) };
           changes.push({ type: "update", ref: { kind: "agenda-item", id: itemId }, expectedRevision: item.revision, body: clean(next) });
           if (fits && !ids.includes(itemId)) ids.push(itemId);
         }
         const ref: AggregateRef = { kind: "meeting-occurrence", id };
-        const settled: OccurrenceBody = { ...body, state: outcome, settledAt: nowIso, settledBy: by.id, ...(reason === undefined ? {} : { settleReason: reason }), ...(unlisted === 0 ? {} : { agendaUnlisted: unlisted }) };
+        const settled: OccurrenceBody = { ...body, state: outcome, settledAt: nowIso, settledBy: by.id, ...(reason === undefined ? {} : { settleReason: reason }), ...(unlisted === 0 ? {} : { agendaUnlisted: unlisted }), ...(returnsUnlisted === 0 ? {} : { returnsUnlisted }) };
         const all: Change[] = [{ type: "update", ref, expectedRevision: found.revision, body: clean(settled) }, ...this.#openChanges(open, open.ids.filter((x) => x !== id)), ...changes];
         if (ids.length !== index.ids.length) all.push(this.#agendaChange(body.projectId, index, ids));
+        if (returnIds.length !== returns.ids.length || returnMore.length !== returns.more.length) all.push(this.#returnsChange(body.projectId, returns, returnIds, returnMore));
         return { ref, creates: false, changes: all, detail: { outcome, projectId: body.projectId } };
       },
     })));
@@ -657,9 +720,9 @@ export class MeetingService {
    */
   async addAgendaItem(by: Principal, command: NoActor & {
     projectId: string; topic: string; question?: string; context?: string; requestedOutcome?: string; urgency?: AgendaUrgency; intent?: AgendaIntent; participants?: readonly string[];
-    source?: { kind: "inquiry" | "chat-turn"; id: string };
+    source?: { kind: "inquiry" | "chat-turn"; id: string }; category?: AgendaCategory; timeboxMinutes?: number; link?: { kind: "improvement"; id: string };
   }): Promise<{ id: string; replayed: boolean }> {
-    onlyKnown(command, ["commandId", "projectId", "topic", "question", "context", "requestedOutcome", "urgency", "intent", "participants", "source"]);
+    onlyKnown(command, ["commandId", "projectId", "topic", "question", "context", "requestedOutcome", "urgency", "intent", "participants", "source", "category", "timeboxMinutes", "link"]);
     const projectId = checkProjectId(command.projectId);
     if (!(allows(by, "meeting.agenda", projectId) || allows(by, "meeting.manage", projectId)) || !(await this.#projectExists(projectId))) throw new DomainError("forbidden", `${by.id} may not add agenda items in that project`);
     const topic = plain(command.topic, "topic", MEETING_LIMITS.topic);
@@ -671,15 +734,18 @@ export class MeetingService {
     if ((intent === "owner-instruction" || intent === "delegated-decision") && by.kind !== "owner") throw new DomainError("forbidden", `only the owner can record a topic as ${intent.replace("-", " ")}`);
     const participants = command.participants === undefined ? [] : this.#names(command.participants, "participants");
     const source = await this.#source(by, projectId, command.source);
+    const category = this.#category(by, projectId, command.category);
+    const timeboxMinutes = command.timeboxMinutes === undefined ? undefined : whole(command.timeboxMinutes, "timeboxMinutes", 1, MEETING_LIMITS.timeboxMax);
+    const link = await this.#link(by, projectId, command.link);
     const scoped = scopedCommandId(by.id, command.commandId);
     const id = derivedId("mag", scoped);
     const result = await this.#retrying(() => this.#runner.command("meeting.agenda.add", { commandId: scoped, actor: by.id }, async () => ({
-      payload: clean({ projectId, topic, question, context, requestedOutcome, urgency, intent, participants, source }),
+      payload: clean({ projectId, topic, question, context, requestedOutcome, urgency, intent, participants, source, category, timeboxMinutes, link }),
       build: async () => {
         const index = await this.#agendaIndex(projectId);
         if (index.ids.length >= MEETING_LIMITS.openAgendaPerProject) throw new DomainError("unavailable", `${MEETING_LIMITS.openAgendaPerProject} agenda items are already open in this project; settle some first`);
         const nowIso = this.#runner.now();
-        const body: AgendaBody = { projectId, topic, ...(question === undefined ? {} : { question }), ...(context === undefined ? {} : { context }), ...(requestedOutcome === undefined ? {} : { requestedOutcome }), urgency, intent, participants, owner: by.id, requestedBy: by.id, ...(source === undefined ? {} : { source }), state: "queued", createdAt: nowIso, updatedAt: nowIso };
+        const body: AgendaBody = { projectId, topic, ...(question === undefined ? {} : { question }), ...(context === undefined ? {} : { context }), ...(requestedOutcome === undefined ? {} : { requestedOutcome }), urgency, intent, ...(category === undefined ? {} : { category }), ...(timeboxMinutes === undefined ? {} : { timeboxMinutes }), ...(link === undefined ? {} : { link }), participants, owner: by.id, requestedBy: by.id, ...(source === undefined ? {} : { source }), state: "queued", createdAt: nowIso, updatedAt: nowIso };
         const ref: AggregateRef = { kind: "agenda-item", id };
         return { ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }, this.#agendaChange(projectId, index, [...index.ids, id])], detail: { projectId, urgency, intent } };
       },
@@ -691,8 +757,8 @@ export class MeetingService {
    * Moves an item along: `discussed`, `resolved` (with an optional link to the outcome), `deferred` (with a reason and a next step; it stays open and comes back on the next agenda) or `queued` again. The item's owner or
    * someone with `meeting.manage` does it. A resolved item is final.
    */
-  async setAgendaState(by: Principal, command: NoActor & { itemId: string; expectedRevision: number; to: "discussed" | "resolved" | "deferred" | "queued"; reason?: string; nextStep?: string; outcomeRef?: string }): Promise<void> {
-    onlyKnown(command, ["commandId", "itemId", "expectedRevision", "to", "reason", "nextStep", "outcomeRef"]);
+  async setAgendaState(by: Principal, command: NoActor & { itemId: string; expectedRevision: number; to: "discussed" | "resolved" | "deferred" | "queued"; reason?: string; nextStep?: string; outcomeRef?: string; outcomeNote?: string }): Promise<void> {
+    onlyKnown(command, ["commandId", "itemId", "expectedRevision", "to", "reason", "nextStep", "outcomeRef", "outcomeNote"]);
     const id = typeof command.itemId === "string" && AGENDA_ID.test(command.itemId) ? command.itemId : invalid("itemId", "is not an agenda item ID");
     const expected = checkRevision(command.expectedRevision);
     if (!["discussed", "resolved", "deferred", "queued"].includes(command.to as string)) invalid("to", "must be discussed, resolved, deferred or queued");
@@ -701,8 +767,9 @@ export class MeetingService {
     const nextStep = to === "deferred" ? plain(command.nextStep, "nextStep", MEETING_LIMITS.deferral) : undefined;
     if (to !== "deferred" && (command.reason !== undefined || command.nextStep !== undefined)) invalid("reason", "only a deferral carries a reason and a next step");
     const outcomeRef = command.outcomeRef === undefined ? undefined : (to === "resolved" || to === "discussed" ? plain(command.outcomeRef, "outcomeRef", MEETING_LIMITS.ref) : invalid("outcomeRef", "only a discussed or resolved item links an outcome"));
+    const outcomeNote = command.outcomeNote === undefined ? undefined : (to === "queued" ? invalid("outcomeNote", "a queued item has no outcome yet") : plain(command.outcomeNote, "outcomeNote", MEETING_LIMITS.outcome));
     await this.#retrying(() => this.#runner.command("meeting.agenda.state", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
-      payload: clean({ itemId: id, expectedRevision: expected, to, reason, nextStep, outcomeRef }),
+      payload: clean({ itemId: id, expectedRevision: expected, to, reason, nextStep, outcomeRef, outcomeNote }),
       build: async () => {
         const found = await this.#runner.get("agenda-item", id);
         const body = found?.body as unknown as AgendaBody | undefined;
@@ -715,14 +782,23 @@ export class MeetingService {
         // An item that did not fit on the full open list can be listed again (queued to queued) once there is room.
         const relist = body.state === "queued" && to === "queued" && body.unlisted === true;
         if (!relist && !legal[body.state].includes(to)) throw new DomainError("invalid_command", `agenda item ${id} is ${body.state}; it cannot become ${to}`, { field: "to" });
-        const { occurrenceId: keepOccurrence, deferral: _d, outcomeRef: _o, unlisted: _u, ...rest } = body;
-        void _d; void _o; void _u;
+        const { occurrenceId: keepOccurrence, deferral: _d, outcomeRef: _o, unlisted: _u, outcomeNote: _n, returnedAt: _r, returnUnlisted: _ru, ...rest } = body;
+        void _d; void _o; void _u; void _n; void _r; void _ru;
+        // An outcome of a topic that came from a conversation is queued to go back to it, in the same commit as the state change. A full list never blocks the change: the outcome goes on the overflow list (or is counted).
+        const returns = await this.#returnsIndex(body.projectId);
+        const returnIds = [...returns.ids];
+        const returnMore = [...returns.more];
+        const returning = body.source !== undefined && (to === "discussed" || to === "resolved" || to === "deferred");
+        const placed = returning ? this.#place(returnIds, returnMore, id) : undefined;
+        if (!returning) { const a = returnIds.indexOf(id); if (a >= 0) returnIds.splice(a, 1); const b = returnMore.indexOf(id); if (b >= 0) returnMore.splice(b, 1); }
         const nowIso = this.#runner.now();
         const stays = to === "discussed" ? keepOccurrence : undefined;
         const next: AgendaBody = {
           ...rest, state: to, updatedAt: nowIso, ...(stays === undefined ? {} : { occurrenceId: stays }),
           ...(to === "deferred" ? { deferral: { reason: reason as string, nextStep: nextStep as string } } : {}),
           ...(outcomeRef === undefined ? (body.outcomeRef === undefined || to === "queued" ? {} : { outcomeRef: body.outcomeRef }) : { outcomeRef }),
+          ...(outcomeNote === undefined ? {} : { outcomeNote }),
+          ...(placed === undefined || placed === "listed" ? {} : { returnUnlisted: true as const }),
         };
         // Open means queued or deferred: those are in the project's index; the rest are not.
         const index = await this.#agendaIndex(body.projectId);
@@ -732,9 +808,144 @@ export class MeetingService {
         const ref: AggregateRef = { kind: "agenda-item", id };
         const changes: Change[] = [{ type: "update", ref, expectedRevision: found.revision, body: clean(next) }];
         if (ids.length !== index.ids.length) changes.push(this.#agendaChange(body.projectId, index, ids));
+        if (returnIds.length !== returns.ids.length || returnMore.length !== returns.more.length) changes.push(this.#returnsChange(body.projectId, returns, returnIds, returnMore));
         return { ref, creates: false, changes, detail: { projectId: body.projectId, to } };
       },
     })));
+  }
+
+  /**
+   * Corrects a captured item (card M03): the owner sees what the supervisor wrote in chat and fixes it. The item's own requester (with `meeting.agenda`), a manager or the owner may do it while the item is still open
+   * (queued, scheduled or deferred); a discussed or resolved item is history. A field given as `null` is cleared. The request type is authority: only the owner may set an instruction or a decision delegated to the team, or
+   * change an item that already is one, so a correction by someone else can neither promote a tentative idea nor rewrite what the owner decided. The revision read must still be current; each correction is counted and its fields kept (ten at most).
+   */
+  async correctAgendaItem(by: Principal, command: NoActor & {
+    itemId: string; expectedRevision: number; topic?: string; question?: string | null; context?: string | null; requestedOutcome?: string | null; urgency?: AgendaUrgency; intent?: AgendaIntent;
+    participants?: readonly string[]; category?: AgendaCategory | null; timeboxMinutes?: number | null;
+  }): Promise<{ revision: number; replayed: boolean }> {
+    onlyKnown(command, ["commandId", "itemId", "expectedRevision", "topic", "question", "context", "requestedOutcome", "urgency", "intent", "participants", "category", "timeboxMinutes"]);
+    const id = typeof command.itemId === "string" && AGENDA_ID.test(command.itemId) ? command.itemId : invalid("itemId", "is not an agenda item ID");
+    const expected = checkRevision(command.expectedRevision);
+    const patch: Record<string, unknown> = {};
+    if (command.topic !== undefined) patch["topic"] = plain(command.topic, "topic", MEETING_LIMITS.topic);
+    if (command.question !== undefined) patch["question"] = command.question === null ? null : plain(command.question, "question", MEETING_LIMITS.question);
+    if (command.context !== undefined) patch["context"] = command.context === null ? null : plain(command.context, "context", MEETING_LIMITS.context);
+    if (command.requestedOutcome !== undefined) patch["requestedOutcome"] = command.requestedOutcome === null ? null : plain(command.requestedOutcome, "requestedOutcome", MEETING_LIMITS.outcome);
+    if (command.urgency !== undefined) patch["urgency"] = command.urgency === "normal" || command.urgency === "urgent" ? command.urgency : invalid("urgency", "must be normal or urgent");
+    if (command.intent !== undefined) patch["intent"] = (["discussion", "recommendation", "delegated-decision", "owner-instruction"].includes(command.intent as string) ? command.intent : invalid("intent", "must be discussion, recommendation, delegated-decision or owner-instruction"));
+    if (command.participants !== undefined) patch["participants"] = this.#names(command.participants, "participants");
+    if (command.category !== undefined) patch["category"] = command.category === null ? null : (AGENDA_CATEGORIES.includes(command.category) ? command.category : invalid("category", `must be one of ${AGENDA_CATEGORIES.join(", ")}`));
+    if (command.timeboxMinutes !== undefined) patch["timeboxMinutes"] = command.timeboxMinutes === null ? null : whole(command.timeboxMinutes, "timeboxMinutes", 1, MEETING_LIMITS.timeboxMax);
+    if (Object.keys(patch).length === 0) invalid("topic", "nothing to correct: give at least one field");
+    const result = await this.#retrying(() => this.#runner.command("meeting.agenda.correct", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
+      payload: clean({ itemId: id, expectedRevision: expected, ...patch }),
+      build: async () => {
+        const found = await this.#runner.get("agenda-item", id);
+        const body = found?.body as unknown as AgendaBody | undefined;
+        const allowed = body !== undefined && inTaskScope(by, body.projectId) && (by.kind === "owner" || allows(by, "meeting.manage", body.projectId) || (by.id === body.requestedBy && allows(by, "meeting.agenda", body.projectId)));
+        if (found === undefined || body === undefined || !allowed) throw new DomainError("forbidden", `${by.id} may not change that agenda item`);
+        if (found.revision !== expected) throw new DomainError("stale_revision", `agenda item ${id} is at revision ${found.revision}, not ${expected}`, { currentRevision: found.revision });
+        if (body.state === "discussed" || body.state === "resolved") throw new DomainError("invalid_command", `agenda item ${id} is ${body.state}; it can no longer be corrected`, { field: "itemId" });
+        const authority = (i: AgendaIntent): boolean => i === "owner-instruction" || i === "delegated-decision";
+        if (by.kind !== "owner" && (authority(body.intent) || (patch["intent"] !== undefined && authority(patch["intent"] as AgendaIntent)))) throw new DomainError("forbidden", "only the owner can set or change an instruction or a decision delegated to the team");
+        if (patch["category"] === "conflict" && !(by.kind === "owner" || allows(by, "meeting.manage", body.projectId))) throw new DomainError("forbidden", `${by.id} may not record a conflict; raise it as a question`);
+        const next: Record<string, unknown> = { ...body };
+        const fields: string[] = [];
+        for (const [key, value] of Object.entries(patch)) {
+          if (value === null) delete next[key]; else next[key] = value;
+          fields.push(key);
+        }
+        const nowIso = this.#runner.now();
+        const log = [...(body.corrections ?? []), { at: nowIso, by: by.id, fields }].slice(-MEETING_LIMITS.corrections);
+        const out = { ...next, updatedAt: nowIso, corrections: log, correctionCount: (body.correctionCount ?? 0) + 1 };
+        const ref: AggregateRef = { kind: "agenda-item", id };
+        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: clean(out as object) }], detail: { projectId: body.projectId, fields } };
+      },
+    })));
+    return { revision: result.revision, replayed: result.replayed };
+  }
+
+  /**
+   * Outcomes waiting to go back to the conversation their topic came from (a chat turn or an inquiry): items that were discussed, resolved or deferred (also by a meeting that did not reach them) and not yet handed back, oldest first, paged.
+   * Owner, host or service only; the delivery itself is the caller's (`markOutcomeReturned` records it, once the conversation has the text).
+   */
+  async outcomesToReturn(by: Principal, projectId: string, page: { afterId?: string; limit?: number } = {}): Promise<{ items: View<AgendaBody>[]; next?: string }> {
+    if (!isService(by) || by.taskScope !== undefined) throw new DomainError("forbidden", `${by.id} may not collect agenda outcomes`);
+    const project = checkProjectId(projectId);
+    const limit = page.limit === undefined ? 20 : whole(page.limit, "limit", 1, MEETING_LIMITS.page);
+    const index = await this.#returnsIndex(project);
+    const start = page.afterId === undefined ? 0 : index.ids.indexOf(page.afterId) + 1;
+    if (page.afterId !== undefined && start === 0) invalid("afterId", "is not in the list");
+    const items: View<AgendaBody>[] = [];
+    let pos = start;
+    for (; pos < index.ids.length && items.length < limit; pos++) {
+      const found = await this.#runner.get("agenda-item", index.ids[pos]!);
+      if (found !== undefined) items.push(view<AgendaBody>(found));
+    }
+    return { items, ...(pos < index.ids.length ? { next: index.ids[pos - 1]! } : {}) };
+  }
+
+  /**
+   * Records that an item's outcome reached its conversation and takes it off the waiting list. Owner, host or service only. `revision` is the revision of the item that was delivered: if the item has moved on since (a newer outcome), it stays
+   * waiting and false is returned, so the newer outcome is still sent. Repeating it changes nothing.
+   */
+  async markOutcomeReturned(by: Principal, itemId: string, revision: number): Promise<boolean> {
+    if (!isService(by) || by.taskScope !== undefined) throw new DomainError("forbidden", `${by.id} may not record a returned outcome`);
+    const id = typeof itemId === "string" && AGENDA_ID.test(itemId) ? itemId : invalid("itemId", "is not an agenda item ID");
+    const delivered = checkRevision(revision);
+    return this.#retrying(async () => {
+      const found = await this.#runner.get("agenda-item", id);
+      const body = found?.body as unknown as AgendaBody | undefined;
+      if (found === undefined || body === undefined) throw new DomainError("not_found", `agenda item ${id} does not exist`);
+      if (found.revision !== delivered) return false;
+      if (!(await this.#returnsIndex(body.projectId)).ids.includes(id)) return true;
+      await this.#runner.command("meeting.agenda.returned", { commandId: `mar:${id}:${found.revision}`, actor: by.id }, async () => ({
+        payload: { itemId: id, revision: found.revision },
+        build: async () => {
+          const ref: AggregateRef = { kind: "agenda-item", id };
+          const returns = await this.#returnsIndex(body.projectId);
+          if (!returns.ids.includes(id)) throw new DomainError("stale_revision", `agenda item ${id} changed`, { currentRevision: found.revision });
+          const nowIso = this.#runner.now();
+          return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: clean({ ...body, returnedAt: nowIso }) }, this.#returnsChange(body.projectId, returns, returns.ids.filter((x) => x !== id), returns.more)], detail: { projectId: body.projectId } };
+        },
+      }));
+      return true;
+    });
+  }
+
+  /**
+   * Lists the outcomes that did not fit on the waiting list, now that there is room (oldest first). Owner, host or service only; `deliverOutcomes` calls it first. Returns how many were listed and how many still wait on the overflow list.
+   * Outcomes that fitted on neither list are not found again (they are marked `returnUnlisted` on their items and counted by the settling meeting).
+   */
+  async requeueReturns(by: Principal, projectId: string): Promise<{ listed: number; stillWaiting: number }> {
+    if (!isService(by) || by.taskScope !== undefined) throw new DomainError("forbidden", `${by.id} may not requeue agenda outcomes`);
+    const project = checkProjectId(projectId);
+    return this.#retrying(async () => {
+      const returns = await this.#returnsIndex(project);
+      const room = this.#capListed - returns.ids.length;
+      const take = returns.more.slice(0, Math.max(0, room));
+      if (take.length === 0) return { listed: 0, stillWaiting: returns.more.length };
+      const moves: { id: string; revision: number; body: AgendaBody }[] = [];
+      for (const id of take) { const f = await this.#runner.get("agenda-item", id); if (f !== undefined) moves.push({ id, revision: f.revision, body: f.body as unknown as AgendaBody }); }
+      await this.#runner.command("meeting.agenda.requeue", { commandId: `mrq:${project}:${returns.revision}`, actor: by.id }, async () => ({
+        payload: { projectId: project, revision: returns.revision },
+        build: async () => {
+          const ref: AggregateRef = { kind: "agenda-returns", id: project };
+          const changes: Change[] = [this.#returnsChange(project, returns, [...returns.ids, ...moves.map((m) => m.id)], returns.more.filter((x) => !take.includes(x)))];
+          for (const m of moves) { const { returnUnlisted: _u, ...rest } = m.body; void _u; changes.push({ type: "update", ref: { kind: "agenda-item", id: m.id }, expectedRevision: m.revision, body: clean(rest) }); }
+          return { ref, creates: false, changes, detail: { projectId: project, listed: moves.length } };
+        },
+      }));
+      return { listed: moves.length, stillWaiting: returns.more.length - take.length };
+    });
+  }
+
+  /** How many outcomes wait to be returned to their conversations (listed and on the overflow list), for the agenda. Needs `meeting.read` (or the owner); otherwise undefined. */
+  async returnsWaiting(viewer: Principal, projectId: string): Promise<number | undefined> {
+    const project = checkProjectId(projectId);
+    if (!this.#mayRead(viewer, project)) return undefined;
+    const r = await this.#returnsIndex(project);
+    return r.ids.length + r.more.length;
   }
 
   /** Open agenda items (queued or deferred) of a project, in the order a meeting takes them. Needs `meeting.read` (or the owner). Paged: `next` is where to continue. */
@@ -836,6 +1047,26 @@ export class MeetingService {
     return out;
   }
 
+  /** A stated category; a conflict is recorded by the owner or a manager only. */
+  #category(by: Principal, projectId: string, value: unknown): AgendaCategory | undefined {
+    if (value === undefined) return undefined;
+    if (typeof value !== "string" || !AGENDA_CATEGORIES.includes(value as AgendaCategory)) return invalid("category", `must be one of ${AGENDA_CATEGORIES.join(", ")}`);
+    if (value === "conflict" && !(by.kind === "owner" || allows(by, "meeting.manage", projectId))) throw new DomainError("forbidden", `${by.id} may not record a conflict; raise it as a question`);
+    return value as AgendaCategory;
+  }
+
+  /** A link to an improvement backlog item of this project; managers and the owner only (the item is what the topic is about, and the link shows nothing of it). */
+  async #link(by: Principal, projectId: string, value: unknown): Promise<{ kind: "improvement"; id: string } | undefined> {
+    if (value === undefined) return undefined;
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return invalid("link", "must be an object with kind and id");
+    onlyKnown(value, ["kind", "id"]);
+    const l = value as { kind?: unknown; id?: unknown };
+    if (l.kind !== "improvement" || typeof l.id !== "string" || !IMPROVEMENT_ID.test(l.id)) return invalid("link", "must name an improvement backlog item");
+    const found = await this.#runner.get("improvement-item", l.id);
+    if (found === undefined || (found.body as unknown as { projectId?: string }).projectId !== projectId || !(by.kind === "owner" || allows(by, "meeting.manage", projectId))) invalid("link", "must be an improvement item of this project that the requester may link");
+    return { kind: "improvement", id: l.id };
+  }
+
   async #source(by: Principal, projectId: string, value: unknown): Promise<{ kind: "inquiry" | "chat-turn"; id: string } | undefined> {
     if (value === undefined) return undefined;
     if (value === null || typeof value !== "object" || Array.isArray(value)) return invalid("source", "must be an object with kind and id");
@@ -896,13 +1127,34 @@ export class MeetingService {
     return found === undefined ? { ids: [], revision: 0 } : { ids: (found.body as unknown as IndexBody).ids, revision: found.revision };
   }
 
+  async #returnsIndex(projectId: string): Promise<{ ids: readonly string[]; more: readonly string[]; revision: number }> {
+    const found = await this.#runner.get("agenda-returns", projectId);
+    const body = found?.body as unknown as { ids?: string[]; more?: string[] } | undefined;
+    return found === undefined ? { ids: [], more: [], revision: 0 } : { ids: body?.ids ?? [], more: body?.more ?? [], revision: found.revision };
+  }
+
+  #returnsChange(projectId: string, index: { revision: number }, ids: readonly string[], more: readonly string[]): Change {
+    const ref: AggregateRef = { kind: "agenda-returns", id: projectId };
+    const body = { ids: [...ids], more: [...more] } as unknown as JsonObject;
+    return index.revision === 0 ? { type: "create", ref, body } : { type: "update", ref, expectedRevision: index.revision, body };
+  }
+
+  /** Puts an outcome on the list of those waiting to be returned, or on the overflow list behind it, or (both full) nowhere; says which. Never refuses: a state change must not wait for a delivery loop. */
+  #place(ids: string[], more: string[], id: string): "listed" | "more" | "beyond" {
+    if (ids.includes(id)) return "listed";
+    if (more.includes(id)) return "more";
+    if (ids.length < this.#capListed) { ids.push(id); return "listed"; }
+    if (more.length < this.#capMore) { more.push(id); return "more"; }
+    return "beyond";
+  }
+
   #agendaChange(projectId: string, index: { revision: number }, ids: readonly string[]): Change {
     const ref: AggregateRef = { kind: "agenda-index", id: agendaIndexId(projectId) };
     return index.revision === 0 ? { type: "create", ref, body: { ids: [...ids] } as unknown as JsonObject } : { type: "update", ref, expectedRevision: index.revision, body: { ids: [...ids] } as unknown as JsonObject };
   }
 
   /**
-   * The open items a meeting with this roster takes: urgent first, then oldest (ties keep the order they were queued in), those that name no participants or name one on the roster, at most `agendaPerMeeting`. Returns the changes that attach them
+   * The open items a meeting with this roster takes: urgent first, then conflicts, questions, decisions, other topics and improvement proposals (`agendaOrder`), then oldest (ties keep the order they were queued in), those that name no participants or name one on the roster, at most `agendaPerMeeting`. Returns the changes that attach them
    * (state scheduled, the occurrence) and take them out of the open list; what does not fit stays open and is counted.
    */
   async #takeAgenda(projectId: string, roster: readonly string[], occurrenceId: string, options: { urgentOnly?: boolean; room?: number; indexIds?: readonly string[]; indexRevision?: number } = {}): Promise<{ ids: string[]; changes: Change[]; overflow: number }> {
@@ -916,7 +1168,7 @@ export class MeetingService {
       if (body.participants.length > 0 && !body.participants.some((p) => roster.includes(p))) continue;
       candidates.push({ id, revision: found.revision, body });
     }
-    candidates.sort((a, b) => (a.body.urgency === b.body.urgency ? 0 : a.body.urgency === "urgent" ? -1 : 1) || (a.body.createdAt < b.body.createdAt ? -1 : a.body.createdAt > b.body.createdAt ? 1 : 0));
+    candidates.sort((a, b) => agendaOrder(a.body, b.body));
     const room = options.room ?? MEETING_LIMITS.agendaPerMeeting;
     const taken = candidates.slice(0, room);
     if (taken.length === 0) return { ids: [], changes: [], overflow: candidates.length };
@@ -939,8 +1191,24 @@ export class MeetingService {
   }
 }
 
+/** The order of an agenda: urgent first, then conflicts, questions, decisions, other topics and improvement proposals, and within each the oldest first. */
+const agendaOrder = (a: { urgency: AgendaUrgency; createdAt: string } & Pick<AgendaBody, "category" | "intent" | "question">, b: { urgency: AgendaUrgency; createdAt: string } & Pick<AgendaBody, "category" | "intent" | "question">): number =>
+  (a.urgency === b.urgency ? 0 : a.urgency === "urgent" ? -1 : 1) || CATEGORY_RANK[categoryOf(a)] - CATEGORY_RANK[categoryOf(b)] || (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0);
+
 function sortItems(items: View<AgendaBody>[]): View<AgendaBody>[] {
-  return [...items].sort((a, b) => (a.urgency === b.urgency ? 0 : a.urgency === "urgent" ? -1 : 1) || (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
+  return [...items].sort(agendaOrder);
+}
+
+/** A stand-up window: two wall-clock times, the first before the second; the meeting (start and start plus length) must lie inside it. */
+function checkWindow(value: unknown, time: string, duration: number): { from: string; to: string } {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return invalid("window", "must be an object with from and to");
+  onlyKnown(value, Object.keys({ from: 0, to: 0 }));
+  const w = value as { from?: unknown; to?: unknown };
+  if (!isLocalTime(w.from) || !isLocalTime(w.to)) return invalid("window", "from and to must be wall-clock times such as 08:00");
+  const minutes = (t: string): number => Number(t.slice(0, 2)) * 60 + Number(t.slice(3));
+  if (minutes(w.from) >= minutes(w.to)) return invalid("window", "to must be after from (a window does not cross midnight)");
+  if (minutes(time) < minutes(w.from) || minutes(time) + duration > minutes(w.to)) return invalid("time", `the stand-up (${time} for ${duration} minutes) must lie inside the daily window ${w.from} to ${w.to}`);
+  return { from: w.from, to: w.to };
 }
 
 function checkRecurrence(value: unknown): Recurrence {
