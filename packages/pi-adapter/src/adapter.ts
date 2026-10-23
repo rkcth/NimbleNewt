@@ -15,6 +15,7 @@ import {
   AlreadyReadmittedError, BranchDiscardedError, CheckpointRejectedError, ConversationBusyError, InvalidBranchPointError, InvalidToolError, NoBranchPointError, NotRetainedError,
   IncompatibleStorageError, InterruptedWorkError, InvalidReadmissionError, InvalidRecoveryError, NotHeldError, RequestIdConflictError, TooManyBranchesError, UnknownCommandError,
 } from "./errors.js";
+import { applyContextPolicy, type AdapterContextPolicy } from "./context-policy.js";
 import { fingerprintOf, fingerprintsMatch, mapReason } from "./results.js";
 import { CONTRACTS_VERSION } from "@nimblenewt/contracts";
 import { PINNED_PI_DURABLE_VERSION, assertSupportedRuntime, type RuntimeInfo } from "./runtime.js";
@@ -39,6 +40,8 @@ export interface AdapterTool<T extends TSchema = TSchema> {
    * interrupted call is not re-run and the model is told it was interrupted.
    */
   readonly replay?: "safe";
+  /** Which end of a result over the output limit is kept (default the start; command output wants the end). Only with `contextPolicy` limits. */
+  readonly outputRetain?: "head" | "tail";
   execute(args: Static<T>, context: AdapterToolContext): Promise<string>;
 }
 
@@ -49,6 +52,8 @@ export interface PiAdapterOptions {
   readonly tools?: readonly AdapterTool[];
   /** Pi Durable harness settings, for example compaction thresholds. */
   readonly settings?: NonNullable<Parameters<typeof Harness.open>[1]["settings"]>;
+  /** Explicit stream timeout and retries, per-tool output limits and the controller's summariser hook (card C07b). */
+  readonly contextPolicy?: AdapterContextPolicy;
   /**
    * Most branches (side conversations) of each kind, inquiries and restored checkpoints counted separately, a conversation
    * may have open at once; discarded branches do not count. Default 8. Branches are cheap but each is a full conversation the controller must eventually review or discard.
@@ -857,13 +862,17 @@ export class PiAdapter implements RuntimePort {
       seen.add(tool.name);
     }
     const registry = createRegistry();
+    const policy = applyContextPolicy(options.contextPolicy, options.settings);
+    const limited = policy.toolLimits.maxBytes !== undefined || policy.toolLimits.maxLines !== undefined;
     registry.install(defineExtension({
       name: "nimblenewt",
+      ...(policy.hooks.length === 0 ? {} : { hooks: policy.hooks }),
       tools: tools.map((tool) => defineTool({
         name: tool.name,
         description: tool.description,
         parameters: tool.parameters,
         ...(tool.replay === undefined ? {} : { replay: tool.replay }),
+        ...(limited ? { outputLimits: { ...policy.toolLimits, retain: tool.outputRetain ?? "head" } } : {}),
         // Pi Durable 1.3.0 reads the model-visible result from `output`; the legacy `content` field is ignored.
         execute: async (args: never, api, toolContext) => ({
           output: [{ type: "text" as const, text: await tool.execute(args as Static<typeof tool.parameters>, { signal: toolContext.abortSignal, callId: api.callId }) }],
@@ -875,7 +884,7 @@ export class PiAdapter implements RuntimePort {
       {
         models: options.models,
         registry,
-        ...(options.settings === undefined ? {} : { settings: options.settings }),
+        ...(policy.settings === undefined ? {} : { settings: policy.settings }),
         ...(options.onReport === undefined ? {} : { onReport: options.onReport }),
       },
       context,

@@ -14,9 +14,10 @@ import { CommandRunner, view, type CommandMeta, type CommandResult, type RunnerO
  * - `runtime_hold`: the conversation runtime restarted holding unfinished work that is not the attempt's own; a person reviews and recovers it (card S09).
  * - `circular_wait`: agents wait for each other in a ring (through task dependencies or open inquiries), so none of them can proceed on its own (card S10).
  * - `unexplained_block`: a task is blocked and nothing says why or what happens next (card S08).
+ * - `context_overflow`: the context kept running out (a first call that does not fit, a summary that could not be made, repeated overflow); a person changes the route, the task or the budget (card C07b).
  */
-export type BlockerType = "manual_hold" | "delivery_exhausted" | "effect_uncertain" | "wait_overdue" | "scan_failure" | "unexplained_block" | "runtime_hold" | "circular_wait";
-export const BLOCKER_TYPES: readonly BlockerType[] = ["manual_hold", "delivery_exhausted", "effect_uncertain", "wait_overdue", "scan_failure", "unexplained_block", "runtime_hold", "circular_wait"];
+export type BlockerType = "manual_hold" | "delivery_exhausted" | "effect_uncertain" | "wait_overdue" | "scan_failure" | "unexplained_block" | "runtime_hold" | "circular_wait" | "context_overflow";
+export const BLOCKER_TYPES: readonly BlockerType[] = ["manual_hold", "delivery_exhausted", "effect_uncertain", "wait_overdue", "scan_failure", "unexplained_block", "runtime_hold", "circular_wait", "context_overflow"];
 
 export interface BlockerBody {
   readonly type: BlockerType;

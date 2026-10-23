@@ -7,3 +7,4 @@ export { canonicalJson, digestHistory } from "./checkpoints.js";
 export { PI_DECLARATION, SUPPORTED_CAPABILITIES, UNSUPPORTED_CAPABILITIES, type Capability, type UnsupportedCapability } from "./capabilities.js";
 export { CHECKPOINT_FORMAT, HISTORY_FORMAT, SUPPORTED_HISTORY_FORMATS, upgradeCheckpoint, type CheckpointUpgrade } from "./checkpoints.js";
 export { STORAGE_MARKER_FORMAT, STORAGE_MIGRATIONS, scanStorage } from "./storage-compat.js";
+export { CompactionHookTimeout, applyContextPolicy, type AdapterContextPolicy, type CompactionDecision, type CompactionRequest } from "./context-policy.js";

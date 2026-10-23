@@ -5,3 +5,5 @@ export { InspectionService, type InspectionBody, type InspectionPolicyBody } fro
 export { PublicationService, pathIdOf, type PublicationPathBody } from "./publication.js";
 export * from "./budget.js";
 export { NOTE_CATEGORIES, NOTE_LIMITS, WorkingNoteService, type NoteCategory, type NoteDeletionBody, type NotePromotionBody, type NoteVersionBody, type NoteVisibility, type ReviseNote, type WorkingNoteBody, type WriteNote } from "./notes.js";
+export * from "./dispatch.js";
+export { ENFORCEMENT_LIMITS, ContextEnforcementService, type AdmissionBody, type CompactionBody, type CompactionOutcome, type EnforcementOptions, type HandoffBody, type OverflowAction, type OverflowBody } from "./enforcement.js";

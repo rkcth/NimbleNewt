@@ -46,3 +46,7 @@ Written during the long coding session of 2026-10-22. By the guiding principle t
 
 ## T05 (MCP durable conversation adapter)
 - **Agents converse under their own credential;** task credentials (`tcr-`) are not accepted by this door (same limit as U02b), and the owner's credential is accepted. No session ID is issued; a later transport card may not add one that carries state.
+
+## C07b (context budgets at dispatch, bounded compaction)
+- **The extractive (no-model) summary is the default last-resort fallback;** it is marked as extractive, visible to the owner and does not count as an overflow. Defaults: 2 consecutive overflows then a blocker, at most 12 pinned owner decisions, 45 s per route and 100 s in total (under the adapter's 150 s ceiling).
+- **Only an owner, host or service may call the dispatcher-side operations;** an attempt's own hand-off arriving after the controller's is kept beside it and preferred as the head; a remembered decline after one summariser timeout is acceptable; one open `context_overflow` blocker per task.
