@@ -84,6 +84,27 @@ export interface BackgroundResultBody {
   readonly answeredWaitId?: string;
 }
 
+/**
+ * A bounded permission for one meeting task of an agent that is itself paused (agent, team or installation gate): the owner invited the agent by hand, so the agent may attend this one meeting while all its other work stays paused
+ * (kind `pause-exemption`, one per task, ID derived from the task). It exists only for the meeting task named, only while `active` and before `expiresAt` (a lease; time from the injected clock), and only while that task is assigned to the agent.
+ * It lifts no gate and the task's own gate still applies. Written by the meeting attendance service (M04); nothing else reads it.
+ */
+export interface PauseExemptionBody {
+  readonly taskId: string;
+  /** The agent ID (`agt-...`) the meeting task is assigned to. */
+  readonly agentId: string;
+  readonly occurrenceId: string;
+  readonly grantedBy: string;
+  readonly grantedAt: string;
+  readonly expiresAt: string;
+  readonly state: "active" | "ended";
+  readonly endedAt?: string;
+  /** The agent, team and installation-free pause gates the permission covers: the ones that held the agent when the owner's invitation was granted, each with the request that paused it. A gate paused again or newly, and any installation pause, still blocks the meeting task. */
+  readonly covers: readonly { readonly kind: "agent" | "team"; readonly id: string; readonly requestId: string }[];
+}
+export const PAUSE_EXEMPTION_KIND = "pause-exemption";
+export const exemptionIdOf = (taskId: string): string => `pxm-${checkTaskId(taskId).slice(5)}`;
+
 export type ReplaceTrigger = "idle_replacement" | "urgent_deadline" | "elapsed_time";
 const REPLACE_TRIGGERS: readonly ReplaceTrigger[] = ["idle_replacement", "urgent_deadline", "elapsed_time"];
 
@@ -387,6 +408,17 @@ export class PauseService implements PauseGuard, PauseLookup {
     };
   }
 
+  /** The pause gates (agent, then its teams, then the installation) that hold an agent now, with who paused each and when, for the attendance service's decision about a direct invitation. */
+  async agentHolds(agentId: string): Promise<readonly { scope: PauseScope; requestId: string; pausedAt: string }[]> {
+    if (typeof agentId !== "string" || !AGENT_ID.test(agentId)) invalid("agentId", "is not an agent ID");
+    const out: { scope: PauseScope; requestId: string; pausedAt: string }[] = [];
+    for (const scope of await this.#chain({ kind: "agent", id: agentId })) {
+      const gate = ((await this.#runner.get("pause-gate", gateIdOf(scope)))?.body as unknown as PauseGateBody | undefined);
+      if (gate !== undefined && gate.intent === "pause" && gate.requestId !== undefined) out.push({ scope, requestId: gate.requestId, pausedAt: gate.pausedAt ?? "" });
+    }
+    return out;
+  }
+
   async isPaused(taskId: string): Promise<boolean> {
     const id = checkTaskId(taskId);
     for (const scope of await this.#applicable(id)) if (await this.#paused(scope)) return true;
@@ -473,6 +505,19 @@ export class PauseService implements PauseGuard, PauseLookup {
     if (scope.kind === "installation") return [scope];
     if (scope.kind === "task") {
       const asg = (await read("assignment", assignmentIdOf(scope.id))) as unknown as AssignmentBody | undefined;
+      // A meeting task the owner allowed to attend while its agent is paused is governed by its own gate only (the record is locked with the chain, so ending the permission races safely).
+      const exemption = (await read(PAUSE_EXEMPTION_KIND, exemptionIdOf(scope.id))) as unknown as PauseExemptionBody | undefined;
+      if (exemption !== undefined && exemption.state === "active" && Date.parse(this.#runner.now()) < Date.parse(exemption.expiresAt) && asg?.state === "assigned" && asg.owner?.kind === "agent" && asg.owner.id === exemption.agentId) {
+        const rest: PauseScope[] = [scope];
+        for (const s of await this.#chain({ kind: "agent", id: exemption.agentId }, locks)) {
+          const found = s.kind === "installation" ? undefined : await this.#runner.get("pause-gate", gateIdOf(s));
+          const gate = found?.body as unknown as PauseGateBody | undefined;
+          const covered = gate !== undefined && gate.intent === "pause" && exemption.covers.some((c) => c.kind === s.kind && c.id === s.id && c.requestId === gate.requestId);
+          // A gate left out is locked here (a pause landing meanwhile fails the caller's commit); a gate kept is locked by the caller with the rest of the chain.
+          if (covered) locks?.push({ type: "check", ref: { kind: "pause-gate", id: found!.id }, expectedRevision: found!.revision }); else rest.push(s);
+        }
+        return rest;
+      }
       return [scope, ...(asg?.state === "assigned" && asg.owner?.kind === "agent" ? await this.#chain({ kind: "agent", id: asg.owner.id }, locks) : [installation])];
     }
     const parent = scope.kind === "agent"

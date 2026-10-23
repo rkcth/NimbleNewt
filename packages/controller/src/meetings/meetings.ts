@@ -89,6 +89,8 @@ export interface ParticipantRecord {
   readonly invitedAt?: string;
   /** Only the owner's direct invitation sets this: a paused agent may attend this meeting only, its other work stays paused. */
   readonly invitedBy?: string;
+  /** When the owner's direct invitation was made (each invitation sets it again): a pause placed after it is not covered by it. */
+  readonly ownerInvitedAt?: string;
 }
 
 export interface OccurrenceBody {
@@ -598,7 +600,7 @@ export class MeetingService {
         const availability = await this.#reach(agent);
         if (availability === "suspended" || availability === "stopped") throw new DomainError("invalid_command", `${agent} is ${availability}; an invitation does not wake it`, { field: "agent" });
         const status: ParticipantStatus = availability === "paused" ? "owner-invited" : "eligible";
-        const participants = body.participants.map((p) => (p.id === agent ? { ...p, status, availability, ...(availability === "paused" ? { invitedBy: by.id } : {}) } : p));
+        const participants = body.participants.map((p) => (p.id === agent ? { ...p, status, availability, ...(availability === "paused" ? { invitedBy: by.id, ownerInvitedAt: this.#runner.now() } : {}) } : p));
         const ref: AggregateRef = { kind: "meeting-occurrence", id };
         return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: clean({ ...body, participants }) }], detail: { agent, projectId: body.projectId } };
       },
