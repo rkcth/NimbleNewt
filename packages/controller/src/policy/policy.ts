@@ -53,6 +53,22 @@ export interface EffectivePolicy {
   readonly restrictions?: readonly { action: string; project: string; reason?: string }[];
 }
 
+/** What an agent is told about the rules that bind it (card U04). */
+export interface AgentPolicyContext {
+  readonly profile: Profile;
+  readonly allCommandGate: boolean;
+  readonly environment: Environment;
+  /** How each class of action is decided in this project's environment right now: run, agent review, or ask the owner. */
+  readonly decidedBy: Readonly<Record<Mode, readonly string[]>>;
+  /** Tools only the owner may review. */
+  readonly reservedForOwner: readonly string[];
+  /** The approval grants the principal holds in this project, with what they are limited to. */
+  readonly approvals: readonly { id: string; action: string; environments?: readonly string[]; expiresAt?: string }[];
+  readonly revisions: { readonly installation: number; readonly project?: number };
+  /** The latest changes to the policy, whoever made them (the screen, the API or a conversation), newest last. */
+  readonly recentChanges: readonly { scope: string; revision: number; at: string; by: string; summary: string }[];
+}
+
 export interface PolicyChange { readonly cell: string; readonly from: Mode; readonly to: Mode }
 export interface PolicyPreview {
   readonly changes: readonly PolicyChange[];
@@ -274,6 +290,40 @@ export class PolicyService {
   async evaluateRequest(input: { principalId: string; projectId: string }): Promise<Decision & { executed: false }> {
     const decision = await this.evaluate({ principalId: input.principalId, projectId: input.projectId, tool: "conversation-action-request" });
     return { ...decision, mode: decision.mode === "allow" ? "agent-review" : decision.mode, executed: false };
+  }
+
+  /**
+   * The policy as it binds `principal` in a project, read from the records at the moment of the call: nothing is cached, so a change made through the API, the screen or a conversation is in the
+   * next context an agent is given. Any active principal that holds a grant on the project (or the owner) may ask about itself and no one else (the principal is the authenticated one, never named by the caller).
+   */
+  async contextFor(principal: Principal, projectId: string): Promise<AgentPolicyContext | undefined> {
+    const project = checkProjectId(projectId);
+    const self = principal.kind === "owner" ? principal : await this.#principal(principal.id);
+    if (self === undefined) return undefined;
+    // A project that does not exist, or one the principal holds no grant on, reads alike: nothing. (The owner is the exception: it may ask about any project that exists.)
+    if ((await this.#runner.get("project", project)) === undefined) return undefined;
+    if (self.kind !== "owner") {
+      if (principal.taskScope !== undefined && principal.taskScope.projectId !== project) return undefined;
+      const eff = await this.#grants.effective(self, this.#runner.now());
+      if (!eff.grants.some((g) => g.project === project || g.project === "*")) return undefined;
+    }
+    const inst = await this.#installationRecord();
+    const proj = await this.#runner.get("approval-policy", project);
+    const projBody = proj?.body as unknown as PolicyBody | undefined;
+    const reserved = await this.#reserved(project);
+    const view_ = this.#view(inst.body, projBody, reserved);
+    const environment = projBody?.environment ?? "development";
+    const tier = tierOf(environment);
+    const decidedBy: Record<Mode, string[]> = { allow: [], "agent-review": [], owner: [] };
+    for (const key of CELL_KEYS) if (key.endsWith(`.${tier}`)) decidedBy[view_.cells[key]].push(key.slice(0, key.lastIndexOf(".")));
+    const held = (await this.#grants.held(self.id, this.#runner.now())).filter(({ body }) => (body.project === "*" || body.project === project) && body.action.startsWith("approve."));
+    const recent = (scope: string, body: PolicyBody | undefined) => (body?.history ?? []).slice(-5).map((h) => ({ scope, ...h }));
+    return {
+      profile: view_.profile, allCommandGate: view_.allCommandGate, environment, decidedBy, reservedForOwner: [...reserved],
+      approvals: held.map(({ id, body }) => ({ id, action: body.action, ...(body.terms?.environments === undefined ? {} : { environments: body.terms.environments }), ...(body.expiresAt === undefined ? {} : { expiresAt: body.expiresAt }) })),
+      revisions: { installation: inst.revision, ...(proj === undefined ? {} : { project: proj.revision }) },
+      recentChanges: [...recent("installation", inst.body), ...recent(project, projBody)].sort((a, b) => a.at.localeCompare(b.at)),
+    };
   }
 
   // ---- internals -----------------------------------------------------------------------------------------------------------

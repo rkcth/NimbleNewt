@@ -9,6 +9,7 @@ import type { Principal, PrincipalService } from "../security/principals.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { Cite, StatusRequest } from "../status/index.js";
 import { CHAT_OPS, TITLE_KEYS, acceptedArgs, describe, foreignValue, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { lengthInWords, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
 
 // ---- records -------------------------------------------------------------------------------------------------------------------
@@ -58,8 +59,9 @@ type PlanItem =
   | { readonly i: number; readonly kind: "apply"; readonly op: string; readonly args: JsonObject; readonly commandId: string; readonly preview: string }
   | { readonly i: number; readonly kind: "propose"; readonly proposalId: string; readonly steps: readonly ChatStep[]; readonly pins: readonly ChatPin[]; readonly preview: readonly string[]; readonly reason: string }
   | { readonly i: number; readonly kind: "focus"; readonly projectId: string; readonly preview: string }
-  | { readonly i: number; readonly kind: "apply_proposal" | "discard_proposal"; readonly proposalId: string }
+  | { readonly i: number; readonly kind: "apply_proposal" | "discard_proposal"; readonly proposalId: string; readonly lengthDays?: number }
   | { readonly i: number; readonly kind: "status"; readonly request: JsonObject }
+  | { readonly i: number; readonly kind: "policy"; readonly editId: string; readonly draft: EditDraft; readonly preview: readonly string[] }
   | { readonly i: number; readonly kind: "asked"; readonly question: string; readonly options: readonly string[]; /** For a question the service asked: which command (by position) and which argument the answer fills, and the answers that are allowed. */ readonly intentIndex?: number; readonly field?: string; readonly choices?: readonly string[] }
   | { readonly i: number; readonly kind: "held"; readonly preview: string }
   | { readonly i: number; readonly kind: "refused"; readonly code: string; readonly message: string }
@@ -76,6 +78,11 @@ export interface Outcome {
   readonly completed?: boolean;
   readonly awaits?: string;
   readonly proposalId?: string;
+  /** A policy edit (card U04): its record, what it means, and what was left unapplied. */
+  readonly editId?: string;
+  readonly explanation?: readonly string[];
+  readonly unapplied?: readonly string[];
+  readonly takesEffect?: string;
   readonly preview?: readonly string[];
   readonly question?: string;
   readonly options?: readonly string[];
@@ -137,6 +144,8 @@ export interface ChatDeps {
   readonly policy?: { effective(by: Principal, projectId?: string): Promise<{ readonly profile: string } | undefined> };
   /** Status and blocker explanations (card U05). Absent: a status question is answered as unavailable; nothing else changes. */
   readonly status?: { ask(by: Principal, request: StatusRequest): Promise<{ readonly observedAt: string; readonly lines: readonly { readonly text: string; readonly cites: readonly Cite[] }[] } | undefined> };
+  /** Conversational policy editing (card U04). Absent: a policy instruction is answered with a refusal. */
+  readonly policyEdits?: PolicyEditService;
 }
 
 const MESSAGE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -205,7 +214,7 @@ export class ChatService {
       if (split.text.length === 0) invalid("text", "has no words of the owner's own outside quoted material");
       const context = await this.#context(owner.id);
       const focus = await this.#focus(tok, context.focusProjectId);
-      const interpreted = await this.#interpret({ text: split.text, quoted: safeQuoted, focus, proposals: await this.#openProposals(owner.id), ...(context.awaiting === undefined ? {} : { awaiting: context.awaiting }) });
+      const interpreted = await this.#interpret({ text: split.text, quoted: safeQuoted, focus, now: this.#runner.now(), proposals: [...(await this.#openProposals(owner.id)), ...(await this.#openEdits(owner))].slice(0, 10), ...(context.awaiting === undefined ? {} : { awaiting: context.awaiting }) });
       if ("unavailable" in interpreted) return { turnId, replayed: false, outcomes: [], reply: ["The assistant that reads free-form messages is unavailable right now. Nothing was done; the commands of the API and the proposals you already have work as usual."] };
       const planned = interpreted.intents === undefined
         ? { items: [{ i: 0, kind: "refused", code: "interpreter_invalid", message: interpreted.problem } as PlanItem], projectId: context.focusProjectId, held: undefined, resumes: undefined }
@@ -345,7 +354,14 @@ export class ChatService {
         continue;
       }
       if (intent.kind === "apply_proposal" || intent.kind === "discard_proposal") {
-        push({ i, kind: intent.kind, proposalId: intent.proposalId });
+        push({ i, kind: intent.kind, proposalId: intent.proposalId, ...(intent.kind === "apply_proposal" && intent.lengthDays !== undefined && lengthInWords(intent.lengthDays, words) ? { lengthDays: intent.lengthDays } : {}) });
+        continue;
+      }
+      if (intent.kind === "policy_edit") {
+        if (this.#deps.policyEdits === undefined) { push({ i, kind: "refused", code: "unavailable", message: "Policy editing by chat is not set up here." }); continue; }
+        const prepared = await this.#deps.policyEdits.prepare(owner, { change: intent.change, conditions: intent.conditions ?? [], evidence: intent.evidence, wording: words, ...(currentFocus.projectId === undefined ? {} : { focusProjectId: currentFocus.projectId }), quoted, forwarded: false });
+        if (!prepared.ok) { push(prepared.kind === "ask" ? { i, kind: "asked", question: prepared.question, options: prepared.options } : { i, kind: "refused", code: prepared.code, message: prepared.message }); continue; }
+        push({ i, kind: "policy", editId: this.#deps.policyEdits.idFor(owner.id, `${turnId}-e${i}`), draft: prepared.draft, preview: prepared.draft.summary });
         continue;
       }
       if (intent.kind === "status") {
@@ -383,7 +399,7 @@ export class ChatService {
     }
     // One question holds the message: nothing that would change a record runs while something is unanswered. The held commands are kept, so the answer carries them on.
     if (items.some((it) => it.kind === "asked")) {
-      const held = items.map((it): PlanItem => it.kind === "apply" ? { i: it.i, kind: "held", preview: it.preview } : it.kind === "propose" ? { i: it.i, kind: "held", preview: it.preview[0] ?? "" } : it.kind === "focus" || it.kind === "apply_proposal" || it.kind === "discard_proposal" ? { i: it.i, kind: "held", preview: it.kind === "focus" ? it.preview : it.kind } : it);
+      const held = items.map((it): PlanItem => it.kind === "apply" ? { i: it.i, kind: "held", preview: it.preview } : it.kind === "propose" ? { i: it.i, kind: "held", preview: it.preview[0] ?? "" } : it.kind === "focus" || it.kind === "apply_proposal" || it.kind === "discard_proposal" || it.kind === "policy" ? { i: it.i, kind: "held", preview: it.kind === "focus" ? it.preview : it.kind === "policy" ? it.preview[0] ?? "policy change" : it.kind } : it);
       // What was refused stays refused: it is kept as a no-op, so an answer cannot let it through. A model's own question cannot be answered by the owner's choice, so it is not resumable.
       const refusedWork = new Set(items.flatMap((it, k) => (it.kind === "refused" ? [workOf[k] as number] : [])));
       const resumable = !work.some((w) => w.intent.kind === "clarify") && early.length === 0;
@@ -651,7 +667,7 @@ export class ChatService {
 
   async #execute(owner: Principal, token: string, turnId: string, turn: TurnBody): Promise<TurnBody> {
     const outcomes: Outcome[] = [];
-    for (const item of turn.plan) outcomes.push(await this.#do(owner, token, turnId, item));
+    for (const item of turn.plan) outcomes.push(await this.#do(owner, token, turnId, item, turn.text));
     const done: TurnBody = { ...turn, status: "done", outcomes, completedAt: this.#runner.now() };
     try {
       await this.#finishTurn(owner, turnId, done);
@@ -683,7 +699,7 @@ export class ChatService {
     return done;
   }
 
-  async #do(owner: Principal, token: string, turnId: string, item: PlanItem): Promise<Outcome> {
+  async #do(owner: Principal, token: string, turnId: string, item: PlanItem, words: string): Promise<Outcome> {
     switch (item.kind) {
       case "asked": return { i: item.i, status: "asked", question: item.question, options: item.options };
       case "held": return { i: item.i, status: "held", message: `Not done yet: ${item.preview}. It waits for the answer to the question.` };
@@ -713,13 +729,46 @@ export class ChatService {
           return { i: item.i, status: "proposed", proposalId: saved.id, preview: item.preview, message: item.reason };
         } catch (error) { return refusal(item.i, error); }
       }
+      case "policy": {
+        const edits = this.#deps.policyEdits;
+        if (edits === undefined) return { i: item.i, status: "refused", code: "unavailable", message: "Policy editing by chat is not set up here." };
+        try {
+          const saved = await edits.create(owner, { commandId: `${turnId}-e${item.i}`, turnId, wording: words, draft: item.draft });
+          const unapplied = item.draft.unapplied.map((u) => u.text);
+          const shared = { i: item.i, editId: saved.id, preview: item.draft.summary, explanation: item.draft.explanation, ...(unapplied.length === 0 ? {} : { unapplied }) };
+          if (item.draft.status === "refused") return { ...shared, status: "refused", code: item.draft.refusal?.code ?? "refused", message: item.draft.refusal?.message ?? item.draft.reason ?? "not done" };
+          if (item.draft.status === "noop") return { ...shared, status: "ignored", message: item.draft.reason ?? "it is already so" };
+          if (item.draft.direct) {
+            const done = await edits.apply(owner, { commandId: `${turnId}-ea${item.i}`, editId: saved.id, fromTurn: turnId });
+            if (done.status !== "applied") return { ...shared, status: "refused", code: done.failure?.code ?? "refused", message: done.failure?.message ?? "not applied" };
+            return { ...shared, status: "applied", accepted: true, completed: true, ...(done.takesEffect === undefined ? {} : { takesEffect: done.takesEffect }) };
+          }
+          return { ...shared, status: "proposed", proposalId: saved.id, message: item.draft.reason ?? "it is shown first" };
+        } catch (error) { return refusal(item.i, error); }
+      }
       case "apply_proposal": {
+        if (item.proposalId.startsWith("pedit-")) {
+          const edits = this.#deps.policyEdits;
+          if (edits === undefined) return { i: item.i, status: "refused", code: "unavailable", message: "Policy editing by chat is not set up here." };
+          try {
+            const done = await edits.apply(owner, { commandId: `${turnId}-a${item.i}`, editId: item.proposalId, fromTurn: turnId, ...(item.lengthDays === undefined ? {} : { lengthDays: item.lengthDays }) });
+            const found = await edits.get(owner, item.proposalId);
+            const shared = { i: item.i, editId: item.proposalId, preview: found === undefined ? [] : found.forwardedBy === undefined ? found.summary : [`(passed on by ${found.forwardedBy}) ${found.summary[0] ?? ""}`, ...found.summary.slice(1)], explanation: found?.explanation ?? [] };
+            if (done.status !== "applied") return { ...shared, status: "refused", code: done.failure?.code ?? "refused", message: done.failure?.message ?? "not applied" };
+            return { ...shared, status: "applied", accepted: true, completed: true, ...(done.takesEffect === undefined ? {} : { takesEffect: done.takesEffect }) };
+          } catch (error) { return refusal(item.i, error); }
+        }
         try {
           const result = await this.#apply(owner, token, item.proposalId, `${turnId}-a${item.i}`, turnId);
           return result.applied ? { i: item.i, status: "applied", proposalId: item.proposalId, results: result.results, accepted: true, completed: result.results.every((r) => r.completed) } : { i: item.i, status: "refused", proposalId: item.proposalId, code: result.failure?.code ?? "invalid_command", message: result.failure?.message ?? "not applied", results: result.results };
         } catch (error) { return refusal(item.i, error); }
       }
       case "discard_proposal": {
+        if (item.proposalId.startsWith("pedit-")) {
+          if (this.#deps.policyEdits === undefined) return { i: item.i, status: "refused", code: "unavailable", message: "Policy editing by chat is not set up here." };
+          try { await this.#deps.policyEdits.discard(owner, { commandId: `${turnId}-d${item.i}`, editId: item.proposalId, fromTurn: turnId }); } catch (error) { return refusal(item.i, error); }
+          return { i: item.i, status: "discarded", proposalId: item.proposalId };
+        }
         try { await this.#discard(owner, item.proposalId, `${turnId}-d${item.i}`, turnId); } catch (error) { return refusal(item.i, error); }
         return { i: item.i, status: "discarded", proposalId: item.proposalId };
       }
@@ -831,7 +880,7 @@ export class ChatService {
       payload: { turnId },
       build: async () => {
         const ref: AggregateRef = { kind: "chat-turn", id: turnId };
-        return { ref, creates: true, changes: [{ type: "create", ref, body: asJson(body) }], detail: { messageId: body.messageId, commands: body.plan.flatMap((p) => (p.kind === "apply" ? [p.commandId] : p.kind === "propose" ? [p.proposalId] : [])) } };
+        return { ref, creates: true, changes: [{ type: "create", ref, body: asJson(body) }], detail: { messageId: body.messageId, commands: body.plan.flatMap((p) => (p.kind === "apply" ? [p.commandId] : p.kind === "propose" ? [p.proposalId] : p.kind === "policy" ? [p.editId] : [])) } };
       },
     }));
   }
@@ -888,6 +937,10 @@ export class ChatService {
       if (chunk.length < 200) break;
     }
     return out;
+  }
+
+  async #openEdits(owner: Principal): Promise<{ id: string; summary: string[] }[]> {
+    try { return (await this.#deps.policyEdits?.open(owner))?.map((e) => ({ id: e.id, summary: e.summary })) ?? []; } catch { return []; }
   }
 
   async #openCount(ownerId: string): Promise<number> {
@@ -969,11 +1022,13 @@ const redactForModel = (text: string): string => {
 export function replyOf(outcomes: readonly Outcome[]): string[] {
   const lines: string[] = [];
   for (const o of outcomes) {
+    // A policy edit says what it means in plain words, what stays as it is, and what was not applied.
+    const edit = o.editId === undefined ? "" : [...(o.preview ?? []), ...(o.explanation ?? []), ...(o.unapplied ?? []).map((u) => `Not applied: "${u}".`)].join(" ");
     switch (o.status) {
       case "asked": lines.push(`${o.question ?? ""}${o.options !== undefined && o.options.length > 0 ? ` (${o.options.join("; ")})` : ""}`); break;
       case "held": lines.push(o.message ?? "Held."); break;
-      case "ignored": lines.push(`No change: ${o.message ?? ""}`); break;
-      case "refused": lines.push(`Not done (${o.code ?? "refused"}): ${o.message ?? ""}`); break;
+      case "ignored": lines.push(`No change: ${o.message ?? ""}${edit === "" ? "" : ` ${edit}`}`); break;
+      case "refused": lines.push(`Not done (${o.code ?? "refused"}): ${o.message ?? ""}${edit === "" ? "" : ` ${edit}`}`); break;
       case "focused": lines.push(`Now focused on project ${o.projectId ?? ""}.`); break;
       case "discarded": lines.push(`Proposal ${o.proposalId ?? ""} discarded.`); break;
       case "answered":
@@ -981,9 +1036,9 @@ export function replyOf(outcomes: readonly Outcome[]): string[] {
         for (const l of o.lines ?? []) lines.push(`${l.text} [${l.cites.map((c) => `${c.kind} ${c.id}`).join(", ")}]`);
         if (o.moreLines !== undefined) lines.push(`${o.moreLines} more line${o.moreLines === 1 ? "" : "s"} not shown; ask for a narrower view.`);
         break;
-      case "proposed": lines.push(`Proposed, nothing has happened yet (${o.message ?? ""}). Proposal ${o.proposalId ?? ""}: ${(o.preview ?? []).join("; ")}. Say to apply it, or to discard it.`); break;
+      case "proposed": lines.push(o.editId !== undefined ? `Proposed, nothing has changed yet (${o.message ?? ""}). ${edit} Edit ${o.editId}: say to apply it, or to discard it.` : `Proposed, nothing has happened yet (${o.message ?? ""}). Proposal ${o.proposalId ?? ""}: ${(o.preview ?? []).join("; ")}. Say to apply it, or to discard it.`); break;
       case "applied":
-        lines.push(o.proposalId !== undefined ? `Applied proposal ${o.proposalId}.` : `Done: ${o.op ?? ""}${o.completed === false ? `, accepted but not complete yet (${o.awaits ?? "waiting"})` : ""}.`);
+        lines.push(o.editId !== undefined ? `Done. ${edit}${o.takesEffect === undefined ? "" : ` It takes effect ${o.takesEffect}.`} Recorded as ${o.editId}.` : o.proposalId !== undefined ? `Applied proposal ${o.proposalId}.` : `Done: ${o.op ?? ""}${o.completed === false ? `, accepted but not complete yet (${o.awaits ?? "waiting"})` : ""}.`);
         // A captured or corrected agenda topic is shown as it now reads, so the owner can check it.
         for (const l of o.shown ?? []) lines.push(l);
         for (const r of o.results ?? []) for (const l of r.shown ?? []) lines.push(l);
@@ -992,4 +1047,3 @@ export function replyOf(outcomes: readonly Outcome[]): string[] {
   }
   return lines;
 }
-

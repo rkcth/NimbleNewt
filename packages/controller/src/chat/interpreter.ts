@@ -1,5 +1,6 @@
 import { DomainError } from "../domain/errors.js";
 import { redactText } from "../security/redact.js";
+import { checkConditions, checkPolicyChange, type PolicyEditChange } from "./policy-intent.js";
 
 /**
  * What the interpreter is shown (card U03). `text` is the owner's own words and the only source of authority; `quoted` is text the owner pasted or forwarded (an email, a log, another agent's
@@ -9,6 +10,8 @@ export interface InterpreterInput {
   readonly text: string;
   readonly quoted: readonly string[];
   readonly focus: { readonly projectId?: string; readonly projectName?: string };
+  /** The controller's clock, so that "until Friday" can be turned into a date. */
+  readonly now?: string;
   /** The owner's open proposals, so that "yes, do that" can name one. */
   readonly proposals: readonly { readonly id: string; readonly summary: readonly string[] }[];
   /** A question the owner has not answered yet, whose held commands wait for it: an answer to it is an `answer` intent. */
@@ -24,7 +27,10 @@ export type Intent =
   | { readonly kind: "command"; readonly op: string; readonly args: Readonly<Record<string, unknown>>; readonly evidence: string; readonly basis: "owner" | "quoted"; readonly draft?: boolean }
   | { readonly kind: "clarify"; readonly question: string; readonly options?: readonly string[] }
   | { readonly kind: "switch_focus"; readonly projectName?: string; readonly projectId?: string; readonly evidence: string; readonly basis: "owner" | "quoted" }
-  | { readonly kind: "apply_proposal"; readonly proposalId: string; readonly evidence: string; readonly basis: "owner" | "quoted" }
+  /** A change to the approval policy, the review policy, an approval grant or a configuration value (card U04). `conditions` are the wishes the owner added that `change` cannot say; the service reports them as not applied. */
+  | { readonly kind: "policy_edit"; readonly change: PolicyEditChange; readonly conditions?: readonly string[]; readonly evidence: string; readonly basis: "owner" | "quoted" }
+  /** `lengthDays` picks one of the lengths a proposed standing grant offered (card U04). */
+  | { readonly kind: "apply_proposal"; readonly proposalId: string; readonly lengthDays?: number; readonly evidence: string; readonly basis: "owner" | "quoted" }
   | { readonly kind: "discard_proposal"; readonly proposalId: string; readonly evidence: string; readonly basis: "owner" | "quoted" }
   /** A question about status (card U05): which view to read (`request.kind`, as `StatusService.ask` takes it). It reads records and changes nothing; the details are checked there, not trusted from the model. */
   | { readonly kind: "status"; readonly request: Readonly<Record<string, unknown>>; readonly evidence: string; readonly basis: "owner" | "quoted" }
@@ -69,9 +75,15 @@ export function checkIntents(raw: unknown): Intent[] {
         if ((entry["projectName"] === undefined) === (entry["projectId"] === undefined)) return invalid(f, "needs exactly one of projectName and projectId");
         return { kind: "switch_focus", ...(entry["projectName"] === undefined ? { projectId: str(entry["projectId"], `${f}.projectId`, 60) } : { projectName: str(entry["projectName"], `${f}.projectName`, 200) }), evidence: str(entry["evidence"], `${f}.evidence`, CHAT_LIMITS.evidence), basis: basisOf(entry["basis"], `${f}.basis`) };
       }
+      case "policy_edit": {
+        known(entry, ["kind", "change", "conditions", "evidence", "basis"], f);
+        const conditions = checkConditions(entry["conditions"], `${f}.conditions`);
+        return { kind: "policy_edit", change: checkPolicyChange(entry["change"], `${f}.change`), ...(conditions.length === 0 ? {} : { conditions }), evidence: str(entry["evidence"], `${f}.evidence`, CHAT_LIMITS.evidence), basis: basisOf(entry["basis"], `${f}.basis`) };
+      }
       case "apply_proposal": case "discard_proposal": {
-        known(entry, ["kind", "proposalId", "evidence", "basis"], f);
-        return { kind: entry["kind"], proposalId: str(entry["proposalId"], `${f}.proposalId`, 80), evidence: str(entry["evidence"], `${f}.evidence`, CHAT_LIMITS.evidence), basis: basisOf(entry["basis"], `${f}.basis`) };
+        known(entry, entry["kind"] === "apply_proposal" ? ["kind", "proposalId", "lengthDays", "evidence", "basis"] : ["kind", "proposalId", "evidence", "basis"], f);
+        if (entry["lengthDays"] !== undefined && !(typeof entry["lengthDays"] === "number" && Number.isSafeInteger(entry["lengthDays"]) && entry["lengthDays"] >= 1)) invalid(`${f}.lengthDays`, "must be a whole number of days");
+        return { kind: entry["kind"], proposalId: str(entry["proposalId"], `${f}.proposalId`, 80), ...(entry["lengthDays"] === undefined ? {} : { lengthDays: entry["lengthDays"] as number }), evidence: str(entry["evidence"], `${f}.evidence`, CHAT_LIMITS.evidence), basis: basisOf(entry["basis"], `${f}.basis`) };
       }
       case "answer": {
         known(entry, ["kind", "turnId", "choice", "evidence", "basis"], f);
