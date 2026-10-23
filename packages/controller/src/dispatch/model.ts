@@ -45,6 +45,8 @@ export interface DispatchBody {
   readonly request: { readonly contextTokens: number; readonly needs: readonly string[]; readonly data: "local-only" | "cloud-allowed"; readonly paidAuthorized: boolean };
   readonly revisions: DispatchRevisions;
   readonly hostId: string;
+  /** The attempt may start only on this host (card H02: it was relocated there, or parked on the host that owns its native store). Cleared when it starts. */
+  readonly pinnedHost?: string;
   /** The H03 request that holds the attempt's place (absent while the attempt holds none, and before the first request), and how many requests were made for it. */
   readonly requestId?: string;
   readonly requests?: number;

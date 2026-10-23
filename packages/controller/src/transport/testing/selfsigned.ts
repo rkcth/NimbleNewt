@@ -19,11 +19,12 @@ const bits = (b: Buffer): Buffer => tlv(0x03, Buffer.concat([Buffer.from([0]), b
 const utc = (d: Date): Buffer => tlv(0x17, Buffer.from(d.toISOString().replace(/[-:T]/g, "").slice(2, 14) + "Z"));
 
 /** A self-signed certificate for `localhost` and 127.0.0.1 (PEM), with its private key (PEM). Valid for a day. */
-export function selfSigned(now = new Date()): { cert: string; key: string } {
+export function selfSigned(now = new Date(), names: { dns?: string; ip?: boolean } = {}): { cert: string; key: string } {
   const { publicKey, privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
-  const name = seq(set(seq(oid("2.5.4.3"), utf8("localhost"))));
+  const dns = names.dns ?? "localhost";
+  const name = seq(set(seq(oid("2.5.4.3"), utf8(dns))));
   const ecdsaSha256 = seq(oid("1.2.840.10045.4.3.2"));
-  const san = seq(oid("2.5.29.17"), octets(seq(tlv(0x82, Buffer.from("localhost")), tlv(0x87, Buffer.from([127, 0, 0, 1])))));
+  const san = seq(oid("2.5.29.17"), octets(seq(tlv(0x82, Buffer.from(dns)), ...(names.ip === false ? [] : [tlv(0x87, Buffer.from([127, 0, 0, 1]))]))));
   const basic = seq(oid("2.5.29.19"), bool(true), octets(seq(bool(true))));
   const tbs = seq(
     tlv(0xa0, int(2)), int(1), ecdsaSha256, name,

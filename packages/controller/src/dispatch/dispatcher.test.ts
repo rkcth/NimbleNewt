@@ -4,7 +4,7 @@ import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { operationKind, type ToolOperationBody } from "./model.js";
 import type { ToolResult } from "./ports.js";
-import { buildWorld, workGrants, type DispatchWorld, type WorkerScript } from "./testing/world.js";
+import { ScriptedWorker, buildWorld, workGrants, type DispatchWorld, type WorkerScript } from "./testing/world.js";
 
 after(stopServer);
 
@@ -273,7 +273,8 @@ for (const backend of backends) {
     for (let i = 0; i < 20; i++) agents.push(await c.agent(`a${i}`, workGrants(c.project, ["git-push"])));
     const free = await c.agent("free", workGrants(c.project, ["read-file"]));
     const tasks: string[] = [];
-    for (const a of agents) tasks.push((await c.task(`gated ${a.aid}`, a)).taskId);
+    const gatedAttempts: string[] = [];
+    for (const a of agents) { const t = await c.task(`gated ${a.aid}`, a); tasks.push(t.taskId); gatedAttempts.push(t.attemptId!); }
     const freeTask = await c.task("free", free);
     // Twenty places would not exist (four productive attempts at a time): the gated attempts give theirs back when their turn ends with every call waiting.
     c.worker.script = async ({ order, gateway }) => {
@@ -289,6 +290,9 @@ for (const backend of backends) {
     assert.deepEqual(finished, ["free"], "the unrelated task ran although twenty asks are pending");
     assert.equal((await c.assignments.getAttempt(freeTask.attemptId!))!.state, "succeeded");
     assert.equal((await c.admission.snapshot()).running.length, 0, "no place is held by an attempt that only waits for an approval");
+    // A parked attempt goes on where it was (card H02: the host owns the native store of its conversation).
+    const parkedDispatch = (await c.dispatcher.get(c.owner, gatedAttempts[0]!))!;
+    assert.deepEqual([parkedDispatch.state, parkedDispatch.pinnedHost], ["parked", "host:w1"]);
     // The owner approves one; its attempt resumes from the checkpoint in a new run, is told, and calls again.
     const op = [...calls.entries()][0]!;
     const review = (await c.reviews.get(c.owner, (op[1] as { reviewId: string }).reviewId))!;
@@ -1110,5 +1114,116 @@ for (const backend of backends) {
     await next.tick(); await next.idle();
     assert.equal(c.worker.starts.length, 2, "the attempt went on after the restart");
     assert.match(c.worker.starts[1]!.resumeNote ?? "", /approved/);
+  });
+
+  /** A second worker host, enrolled, announced, fresh and with capacity, in the dispatcher's list after the first. */
+  async function secondWorker(c: Ctx, options: Parameters<Ctx["restart"]>[1] = {}): Promise<{ w2: ScriptedWorker; d: Ctx["dispatcher"]; host: Awaited<ReturnType<Ctx["principals"]["authenticate"]>> }> {
+    await c.principals.enroll(c.owner, { commandId: "e-w2", kind: "host", name: "w2", grants: [] });
+    const p = await c.principals.authenticate((await c.principals.issueCredential(c.owner, "host:w2")).token);
+    await c.hosts.announce(p, { commandId: "an-w2", capabilities: { os: "linux", arch: "x64", harnesses: [{ name: "pi", version: "1.3.0" }], isolation: [], tools: [], workspaces: [] } });
+    await c.hosts.heartbeat(p, { commandId: "hb-w2", sequence: 1 });
+    await c.admission.setCapacity({ commandId: "cap-w2", actor: c.owner.id, host: "host:w2", capacity: { cpus: 8, memoryMb: 16_384 } });
+    const w2 = new ScriptedWorker("host:w2", async () => ({ status: "completed", text: "w2" }));
+    return { w2, host: p, d: c.restart({ workers: [c.worker, w2] }, options) };
+  }
+
+  suite("an attempt moves to another worker host: the calls in flight settle, the place is given back, it waits pinned to the new host and restarts there from the checkpoint; the first worker's late result changes nothing", async (c) => {
+    const { w2, d, host } = await secondWorker(c);
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const { attemptId } = await c.task("t", ann);
+    const hold = deferred<void>();
+    const started = deferred<void>();
+    c.worker.script = async ({ gateway }) => {
+      await gateway.call(read("c1"), local());
+      started.resolve();
+      await hold.promise;
+      return { status: "completed", text: "late result of the first worker" };
+    };
+    assert.deepEqual((await d.tick()).started, [attemptId]);
+    await started.promise;
+    // Only the owner and the dispatcher move an attempt.
+    const ann1 = await c.credentials.principalOf(c.dispatcherPrincipal, attemptId!);
+    await refuses("forbidden", () => d.relocate(ann1, attemptId!, { hostId: "host:w2", note: "x" }));
+    await refuses("forbidden", () => d.relocate(host, attemptId!, { hostId: "host:w2", note: "x" }));
+    await refuses("invalid_command", () => d.relocate(c.owner, attemptId!, { hostId: "w2", note: "x" }));
+    await d.relocate(c.owner, attemptId!, { hostId: "host:w2", checkpoint: { turn: 3 }, note: "moved for the test" });
+    const moved = (await d.get(c.owner, attemptId!))!;
+    assert.deepEqual([moved.state, moved.pinnedHost, moved.requestId, moved.lease, moved.resumeFrom, moved.resumeNote], ["waiting", "host:w2", undefined, undefined, { turn: 3 }, "moved for the test"]);
+    assert.equal(c.worker.handles[0]!.stopped, 1, "the first worker was ended");
+    assert.equal((await c.admission.snapshot()).running.length, 0);
+    // The first worker's result arrives late: it is not the attempt's turn any more.
+    hold.resolve();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal((await d.get(c.owner, attemptId!))!.state, "waiting");
+    // Repeating the move is harmless. The next tick starts the attempt on the new host and nowhere else.
+    await d.relocate(c.owner, attemptId!, { hostId: "host:w2", note: "moved for the test" });
+    const report = await d.tick();
+    await d.idle();
+    assert.deepEqual(report.started, [attemptId]);
+    assert.equal(w2.starts.length, 1);
+    assert.deepEqual([w2.starts[0]!.resumeFrom, w2.starts[0]!.resumeNote], [{ turn: 3 }, "moved for the test"]);
+    assert.equal(c.worker.starts.length, 1);
+    const end = (await d.get(c.owner, attemptId!))!;
+    assert.deepEqual([end.state, end.hostId, end.pinnedHost, end.outcome!.status], ["finished", "host:w2", undefined, "succeeded"]);
+    await refuses("not_found", () => d.relocate(c.owner, attemptId!, { hostId: "host:w1", note: "too late" }));
+  });
+
+  suite("an attempt pinned to a host waits for that host and never falls back to another one", async (c) => {
+    const { d } = await secondWorker(c);
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const { attemptId } = await c.task("t", ann);
+    const hold = deferred<void>();
+    c.worker.script = async () => { await hold.promise; return { status: "completed" }; };
+    await d.tick();
+    await d.relocate(c.owner, attemptId!, { hostId: "host:w2", note: "to w2" });
+    // w2 stops being heard from: the attempt waits, w1 (which is fresh and has the harness) is not used.
+    c.clock.advance(100_000);
+    await c.heartbeatHost();
+    const report = await d.tick();
+    assert.deepEqual(report.started, []);
+    assert.match(report.skipped.find((x) => x.attemptId === attemptId)!.reason, /host:w2 has not been heard from recently/);
+    assert.equal(c.worker.starts.length, 1);
+    // A host this dispatcher does not run is no host at all for it.
+    await d.relocate(c.owner, attemptId!, { hostId: "host:elsewhere", note: "nowhere" });
+    const report2 = await d.tick();
+    assert.match(report2.skipped.find((x) => x.attemptId === attemptId)!.reason, /host:elsewhere is not a worker host of this dispatcher/);
+    hold.resolve();
+    await d.idle();
+  });
+
+  suite("an attempt pinned to a host that stays unavailable is reported to the owner after the allowed number of ticks, and not before", async (c) => {
+    const { d } = await secondWorker(c, { pinnedStaleTicks: 3 });
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const { attemptId } = await c.task("t", ann);
+    const hold = deferred<void>();
+    c.worker.script = async () => { await hold.promise; return { status: "completed" }; };
+    await d.tick();
+    await d.relocate(c.owner, attemptId!, { hostId: "host:w2", note: "to w2" });
+    c.clock.advance(100_000);
+    await c.heartbeatHost();
+    const first = await d.tick();
+    const second = await d.tick();
+    assert.deepEqual([first.blocked.length, second.blocked.length], [0, 0]);
+    const third = await d.tick();
+    assert.equal(third.blocked.length, 1);
+    assert.equal(third.blocked[0]!.attemptId, attemptId);
+    const blocker = (await c.storage.listAggregates("blocker", { limit: 20 })).map((b) => b.body as unknown as { summary: string }).find((b) => /may run only on host:w2/.test(b.summary));
+    assert.ok(blocker, "a blocker names the owner and says what to do");
+    hold.resolve();
+    await d.idle();
+  });
+
+  suite("moving an attempt to the host it already runs on, or is pinned to, does nothing", async (c) => {
+    const { d } = await secondWorker(c);
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const { attemptId } = await c.task("t", ann);
+    const hold = deferred<void>();
+    c.worker.script = async () => { await hold.promise; return { status: "completed" }; };
+    await d.tick();
+    await d.relocate(c.owner, attemptId!, { hostId: "host:w1", note: "already here" });
+    assert.equal((await d.get(c.owner, attemptId!))!.state, "running");
+    assert.equal(c.worker.handles[0]!.stopped, 0);
+    hold.resolve();
+    await d.idle();
   });
 }

@@ -27,7 +27,7 @@ import type { ReviewService } from "../review/index.js";
 import { selectRoute, type RoutingService } from "../routing/index.js";
 import { allows } from "../security/access.js";
 import type { Principal } from "../security/principals.js";
-import type { TaskCredentialService } from "../security/task-credentials.js";
+import { DISPATCHER_PRINCIPAL, type TaskCredentialService } from "../security/task-credentials.js";
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
 import { DISPATCHER_ACTOR, DISPATCH_KIND, DISPATCH_LIMITS, type DispatchBody, type DispatchRevisions, type Frozen } from "./model.js";
 import { ToolPath, type Loaded } from "./tools.js";
@@ -83,6 +83,11 @@ export interface DispatcherDeps {
   readonly notifications?: Pick<NotificationService, "emitFromController">;
   /** Called when a checkpoint is taken for an attempt (the composer connects C04's `ContinuationService.capture` here). */
   readonly checkpoints?: (info: { attemptId: string; taskId: string; agentId: string; reason: string; checkpoint: JsonObject }) => Promise<void>;
+  /**
+   * Where the agent's native store is, and whether another attempt holds it (card H02: the store has one exclusive owner host). With it the dispatcher starts the agent's attempts on that host only, and an
+   * attempt whose store is busy waits for the attempt that holds it; without it only the placement itself refuses.
+   */
+  readonly storeOwner?: (agentId: string, attemptId: string) => Promise<{ readonly hostId: string; readonly busy: boolean } | undefined>;
   /** The loops the dispatcher's tick runs after its own work: the services whose callers were said to be "the controller's loop". */
   readonly loops?: readonly DispatcherLoop[];
 }
@@ -96,6 +101,8 @@ export interface AttemptDispatcherOptions extends RunnerOptions {
   readonly attemptMs?: number;
   /** Attempts the dispatcher itself admits after a lost one (contract `maxAttempts` wins). Default 3 in all. */
   readonly maxAttempts?: number;
+  /** After this many ticks in a row in which an attempt pinned to a host could not start because that host was unavailable, a blocker names the owner (who can move it). Default 5. */
+  readonly pinnedStaleTicks?: number;
   /** Assignments looked at per tick. Default 100. */
   readonly scanPage?: number;
   /** How long the dispatcher expects an attempt to run when the contract says nothing, for the meeting check (M04). Default 30 minutes. */
@@ -155,6 +162,8 @@ export class DispatcherService {
   /** Names this dispatcher in the commands of its updates: two dispatchers that read one revision must not share a command (the second would be answered with the first's result). */
   readonly #instance = randomUUID().slice(0, 8);
   readonly #ending = new Set<Promise<unknown>>();
+  /** Consecutive ticks an attempt pinned to a host has waited for it (in memory: a restart starts the count again). */
+  readonly #pinnedWaits = new Map<string, number>();
   #ticking: Promise<TickReport> | undefined;
   #scanStartedAt = 0;
   #cursorSavedAt: number | undefined;
@@ -416,6 +425,35 @@ export class DispatcherService {
     await this.#end(d.body.attemptId, "abandoned", options.reason, { readmit: false });
   }
 
+  /**
+   * Moves an attempt to another worker host (card H02). Only the owner or the dispatcher may. The calls in flight are settled, the place on the old host is given back, and the attempt goes back to
+   * waiting pinned to the new host with the checkpoint to continue from: the normal tick then asks admission for a place on that host and starts the worker there, or leaves it waiting (it never
+   * falls back to another host). The old worker is ended after the record has changed, so whatever it still returns changes nothing. Repeating the move to the same host is a no-op.
+   * This is the owner's override: it checks no policy of its own. The policy (platform, paths, credentials, data location), the integrity checks and the fence on the old host's messages are the remote service's (`RemoteWorkerService.relocate`), which calls this last.
+   */
+  async relocate(by: Principal, attemptId: string, move: { readonly hostId: string; readonly checkpoint?: JsonObject; readonly note: string }): Promise<void> {
+    if (!((by.kind === "owner" || (by.kind === "service" && by.id === DISPATCHER_PRINCIPAL)) && by.taskScope === undefined)) throw new DomainError("forbidden", `${by.id} may not move an attempt to another host`);
+    const d = await this.#controlled(by, attemptId);
+    if (typeof move.hostId !== "string" || !/^host:[a-z0-9][a-z0-9-]{0,39}$/.test(move.hostId)) invalid("hostId", "must be a host principal ID");
+    if (typeof move.note !== "string" || move.note.length > 500) invalid("note", "must be at most 500 characters");
+    const b = d.body;
+    // Already there: waiting for the host it was pinned to, or running on it.
+    if ((b.pinnedHost === move.hostId && b.state !== "running") || (b.state === "running" && b.hostId === move.hostId && b.pinnedHost === undefined)) return;
+    if (b.state !== "running" && b.state !== "waiting" && b.state !== "parked") throw new DomainError("invalid_transition", `attempt ${attemptId} is ${b.state} and cannot be moved`);
+    await this.#path.settle(attemptId, true);
+    const fresh = (await this.#load(attemptId))!.body;
+    if (fresh.requestId !== undefined) await this.#deps.admission.release({ commandId: `dpa-move:${attemptId}:${fresh.requests ?? 0}`, actor: DISPATCHER_ACTOR, requestId: fresh.requestId, reason: `the attempt moves to ${move.hostId}` }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
+    const old = this.#live.get(attemptId);
+    await this.#update(attemptId, (x) => {
+      const { requestId: _r, lease: _l, frozen: _f, ...rest } = x; void _r; void _l; void _f;
+      return { ...rest, state: x.state === "parked" ? "parked" : "waiting", pinnedHost: move.hostId, ...(move.checkpoint === undefined ? {} : { resumeFrom: move.checkpoint }), resumeNote: move.note };
+    });
+    if (old !== undefined) {
+      this.#live.delete(attemptId);
+      await old.handle.stop().catch(() => undefined);
+    }
+  }
+
   // ---- reads --------------------------------------------------------------------------------------------------------------------
 
   async get(by: Principal, attemptId: string): Promise<View<DispatchBody> | undefined> {
@@ -630,8 +668,26 @@ export class DispatcherService {
     const missing = await this.#missingGrants(agentId, task.projectId, taskId, contract.tools);
     if (missing.length > 0) return block("grant", "grant_needed", `the task needs ${missing.join(", ")} and no one has given ${missing.length === 1 ? "it" : "them"} to ${agentId}`);
     // 8. The host: an enrolled, unrevoked, recently heard-from host that supports the harness.
-    const hostPick = await this.#pickHost(chosen.harness);
-    if (hostPick.kind !== "ok") return hostPick.blocked ? block("host", "dispatch_blocked", hostPick.reason) : skip("host", hostPick.reason);
+    let pinned = (await this.#load(attemptId))?.body.pinnedHost;
+    if (this.#deps.storeOwner !== undefined) {
+      const store = await this.#deps.storeOwner(agentId, attemptId);
+      if (store !== undefined) {
+        // The native store has one owner host: the agent's attempts run there and one at a time. A busy store is a wait, not a failure.
+        if (store.busy) return skip("host", `the native store of ${agentId} is held by another attempt; this one waits for it`);
+        pinned ??= store.hostId;
+      }
+    }
+    const hostPick = await this.#pickHost(chosen.harness, pinned);
+    if (hostPick.kind !== "ok") {
+      if (hostPick.blocked) return block("host", "dispatch_blocked", hostPick.reason);
+      if (pinned === undefined) return skip("host", hostPick.reason);
+      // An attempt that may run only on one host waits for it; if the host stays unavailable the owner is told, since only the owner can move the attempt.
+      const waited = (this.#pinnedWaits.get(attemptId) ?? 0) + 1;
+      this.#pinnedWaits.set(attemptId, waited);
+      if (waited >= (this.#options.pinnedStaleTicks ?? 5)) return block("host", "dispatch_blocked", `${hostPick.reason}; the attempt may run only on ${pinned} and has waited ${waited} ticks: move it to another host or bring ${pinned} back`);
+      return skip("host", hostPick.reason);
+    }
+    this.#pinnedWaits.delete(attemptId);
     return { kind: "ok", agentId, harness: chosen.harness, route: chosen, host: hostPick.host };
   }
 
@@ -652,10 +708,13 @@ export class DispatcherService {
     return (action, projectId, taskId) => allows(principal, action, projectId, { resource: { kind: "task", id: taskId }, now });
   }
 
-  async #pickHost(harness: string | undefined): Promise<{ kind: "ok"; host: WorkerHost & { hostId: string } } | { kind: "none"; reason: string; blocked: boolean }> {
+  async #pickHost(harness: string | undefined, pinned?: string): Promise<{ kind: "ok"; host: WorkerHost & { hostId: string } } | { kind: "none"; reason: string; blocked: boolean }> {
     const reasons: string[] = [];
     let revoked = 0;
-    for (const worker of this.#deps.workers) {
+    // An attempt pinned to a host (it was relocated there, or it parked on it and the host owns its store) goes nowhere else: it waits for that host, and the owner can move it.
+    const candidates = pinned === undefined ? this.#deps.workers : this.#deps.workers.filter((w) => w.hostId === pinned);
+    if (pinned !== undefined && candidates.length === 0) return { kind: "none", reason: `${pinned} is not a worker host of this dispatcher, and the attempt may run only there`, blocked: false };
+    for (const worker of candidates) {
       const status = await this.#deps.hosts.status(this.#deps.principal, worker.hostId);
       if (status === undefined) { reasons.push(`${worker.hostId} is not an enrolled host`); continue; }
       if (status.identity !== "active") { revoked++; reasons.push(`${worker.hostId} is revoked`); continue; }
@@ -663,7 +722,7 @@ export class DispatcherService {
       if (harness !== undefined && status.capabilities !== undefined && !status.capabilities.harnesses.some((h) => h.name === harness)) { reasons.push(`${worker.hostId} does not have the ${harness} harness`); continue; }
       return { kind: "ok", host: worker };
     }
-    return { kind: "none", reason: reasons.length === 0 ? "no worker host is configured" : reasons.join("; "), blocked: this.#deps.workers.length === 0 || revoked === this.#deps.workers.length };
+    return { kind: "none", reason: reasons.length === 0 ? "no worker host is configured" : reasons.join("; "), blocked: candidates.length === 0 || revoked === candidates.length };
   }
 
   async #revisions(projectId: string, taskId: string, contract: number, route: Extract<RouteChoice, { route: string }>): Promise<DispatchRevisions> {
@@ -744,7 +803,7 @@ export class DispatcherService {
     try {
       await this.#update(b.attemptId, (x) => {
         if (x.state !== "waiting" || x.requestId !== requestId) throw new DomainError("invalid_command", `attempt ${b.attemptId} is ${x.state} and was started by another caller`, { field: "attemptId" });
-        const { resumeNote: _n, resumeFrom: _f, ...rest } = x; void _n; void _f;
+        const { resumeNote: _n, resumeFrom: _f, pinnedHost: _p, ...rest } = x; void _n; void _f; void _p;
         return { ...rest, state: "running", hostId: host.hostId, startedAt: x.startedAt ?? now, lease: { holder: this.#holder, until } };
       });
     } catch (error) {
@@ -794,6 +853,8 @@ export class DispatcherService {
     const done = (async () => {
       let result: WorkerTurnResult;
       try { result = await handle.run(gateway); } catch (error) { result = { status: "failed", error: error instanceof Error ? error.message.slice(0, 200) : "the worker failed" }; }
+      // A turn that was ended by a relocation (or any other change of its worker) is not the attempt's turn any more: whatever it returns changes nothing.
+      if (this.#live.get(attemptId)?.handle !== handle) return;
       const d = await this.#load(attemptId);
       if (d === undefined || d.body.state !== "running") return;
       try {
@@ -810,7 +871,8 @@ export class DispatcherService {
         if (isDomainError(error, "stale_epoch")) return;
       }
     })();
-    return done.finally(() => { this.#live.delete(attemptId); });
+    const turn: Promise<void> = done.finally(() => { if (this.#live.get(attemptId)?.turn === turn) this.#live.delete(attemptId); });
+    return turn;
   }
 
   /** Gives the attempt's place back while its calls wait for an approval; the checkpoint of the turn is kept so the attempt can go on in a new run. */
@@ -822,7 +884,8 @@ export class DispatcherService {
     if (b.requestId !== undefined) await this.#deps.admission.release({ commandId: `dpa-yield:${attemptId}:${b.requests ?? 0}`, actor: DISPATCHER_ACTOR, requestId: b.requestId, reason: "every call of the attempt waits for an approval" }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
     await this.#update(attemptId, (x) => {
       const { requestId: _r, lease: _l, ...rest } = x; void _r; void _l;
-      return { ...rest, state: "parked", ...(checkpoint === undefined ? {} : { resumeFrom: checkpoint }) };
+      // The attempt goes on where it was: the native store of its conversation is owned by that host.
+      return { ...rest, state: "parked", pinnedHost: x.hostId, ...(checkpoint === undefined ? {} : { resumeFrom: checkpoint }) };
     });
   }
 
