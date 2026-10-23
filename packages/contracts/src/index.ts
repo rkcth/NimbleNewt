@@ -224,7 +224,31 @@ export type AuditEvent =
   | { readonly type: "discard_branch"; readonly at: number; readonly conversationId: number; readonly branchRequestId: RequestId; readonly report: AbortReport }
   | { readonly type: "restore_checkpoint"; readonly at: number; readonly checkpoint: Checkpoint; readonly branchRequestId: RequestId; readonly newConversationId: number }
   | { readonly type: "create_task"; readonly at: number; readonly requestId: RequestId; readonly conversationId: number }
-  | { readonly type: "recover"; readonly at: number; readonly decision: RecoveryDecision; readonly found: InterruptedWork };
+  | { readonly type: "recover"; readonly at: number; readonly decision: RecoveryDecision; readonly found: InterruptedWork }
+  /** The system sections or tool set of the prompt layout were changed on purpose (card C06b); the next request rewrites the head of the prompt and loses cached prefixes after it. Fingerprints only, never the text. */
+  | { readonly type: "prompt_layout_change"; readonly at: number; readonly reason: string; readonly from: string; readonly to: string }
+  /** A request went to a different model than the one that produced some stored thinking; only the blocks that model cannot accept were left out of the request (card C06b). The stored thinking is unchanged. */
+  | { readonly type: "thinking_dropped"; readonly at: number; /** Pi's provider session ID of the conversation (its identity towards the provider). */ readonly session: string; readonly model: string; readonly dropped: number; readonly kept: number };
+
+/**
+ * One block of model thinking or reasoning kept in a conversation (card C06b). `text` is what the provider returned in readable form (empty or a placeholder when the provider returns it encrypted or redacted).
+ * The signature or encrypted payload the provider needs on replay is deliberately not part of this: it is replayed by the runtime and never shown.
+ * Reading it is an owner-only act that the controller gates (inspection policy, redaction); a peer, another conversation or an export never receives it.
+ */
+export interface StoredThinking {
+  readonly conversationId: number;
+  readonly entryId: number;
+  readonly provider: string;
+  readonly model: string;
+  readonly text: string;
+  /** The provider returned this block redacted or encrypted: the model can be given it back, nobody can read it. */
+  readonly opaque: boolean;
+}
+
+/** What a runtime can show of a conversation's stored thinking. Kept apart from `ConversationPort` so that code handed a conversation (a peer, an export) cannot reach it. */
+export interface ThinkingReader {
+  thinking(): Promise<StoredThinking[]>;
+}
 
 /** An admitted request, as the controller sees it. */
 export interface SubmissionPort {

@@ -368,7 +368,7 @@ function claude(model: string, o: EndpointOptions): CacheProfile {
       const plan = ctx.breakpoints ?? defaultPlan(body, ctx.retention);
       if (plan.length > CLAUDE_MAX_BREAKPOINTS) throw new DomainError("invalid_command", `breakpoints: at most ${CLAUDE_MAX_BREAKPOINTS} per request`, { field: "breakpoints" });
       // Render order is tools, system, then messages by index; entries with the longer lifetime must come first, so a 1h after a 5m is lowered to 5m.
-      const rank = (p: (typeof plan)[number]): number => (p.at === "tools-end" ? -2 : p.at === "system-end" ? -1 : p.at === "last-message" ? messages.length - 1 : p.at.message);
+      const rank = (p: (typeof plan)[number]): number => (p.at === "tools-end" ? -1_000_000 : p.at === "system-end" ? -1000 : p.at === "last-message" ? messages.length - 1 : "message" in p.at ? p.at.message : -100_000 + p.at.systemBlock);
       const ordered = [...plan].sort((a, b) => rank(a) - rank(b));
       let seenShort = false;
       const placed = new Set<unknown>();
@@ -393,8 +393,8 @@ function claude(model: string, o: EndpointOptions): CacheProfile {
     slotted: false,
   };
 }
-type At = "tools-end" | "system-end" | "last-message" | { readonly message: number };
-const describe = (a: At): string => (typeof a === "string" ? a : `message ${a.message}`);
+type At = "tools-end" | "system-end" | "last-message" | { readonly message: number } | { readonly systemBlock: number };
+const describe = (a: At): string => (typeof a === "string" ? a : "message" in a ? `message ${a.message}` : `system block ${a.systemBlock}`);
 
 function defaultPlan(body: WireRequest, retention: Retention | undefined) {
   const head = retention === "long" ? "1h" as const : "5m" as const;
@@ -414,6 +414,14 @@ function markable(where: At, body: WireRequest, tools: Record<string, unknown>[]
     if (typeof body["system"] === "string") body["system"] = blocks;
     return pickLast(blocks, skipped, "system-end");
   }
+  if (typeof where === "object" && "systemBlock" in where) {
+    const blocks = blocksOf(body["system"]);
+    const target = blocks?.[where.systemBlock];
+    if (blocks === undefined || target === undefined || !Number.isSafeInteger(where.systemBlock) || where.systemBlock < 0) { skipped.push(`breakpoint ${describe(where)}: there is no such system block`); return undefined; }
+    if (typeof body["system"] === "string") body["system"] = blocks;
+    if (CANNOT_MARK.has(String(target["type"]))) { skipped.push(`breakpoint ${describe(where)}: thinking blocks cannot carry a marker`); return undefined; }
+    return target;
+  }
   const index = where === "last-message" ? messages.length - 1 : where.message;
   const m = messages[index];
   if (m === undefined || !Number.isSafeInteger(index) || index < 0) { skipped.push(`breakpoint ${describe(where)}: there is no such message`); return undefined; }
@@ -432,6 +440,7 @@ function prefixTokens(where: At, body: WireRequest, tools: Record<string, unknow
   if (where === "tools-end") return tokensOf(tools);
   const head = tokensOf(tools) + tokensOf(body["system"]);
   if (where === "system-end") return head;
+  if (typeof where === "object" && "systemBlock" in where) return tokensOf(tools) + tokensOf(Array.isArray(body["system"]) ? body["system"].slice(0, where.systemBlock + 1) : body["system"]);
   const index = where === "last-message" ? messages.length - 1 : where.message;
   return head + tokensOf(messages.slice(0, index + 1));
 }

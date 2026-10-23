@@ -8,3 +8,6 @@ export { PI_DECLARATION, SUPPORTED_CAPABILITIES, UNSUPPORTED_CAPABILITIES, type 
 export { CHECKPOINT_FORMAT, HISTORY_FORMAT, SUPPORTED_HISTORY_FORMATS, upgradeCheckpoint, type CheckpointUpgrade } from "./checkpoints.js";
 export { STORAGE_MARKER_FORMAT, STORAGE_MIGRATIONS, scanStorage } from "./storage-compat.js";
 export { CompactionHookTimeout, applyContextPolicy, type AdapterContextPolicy, type CompactionDecision, type CompactionRequest } from "./context-policy.js";
+export { LayoutHolder, UnstablePromptError, assertStableText, checkLayout, layoutFingerprint, layoutSections, sharedSystemText, sortedTools, volatileContext, type PromptLayout } from "./prompt-layout.js";
+export { PrefixTracker, shapeModels, splitSharedSystem, thinkingFor, type CacheShaping, type ModelCachePolicy, type ModelInfo, type PrefixReport, type Retention, type ThinkingDropReport } from "./cache-shaping.js";
+export { storedThinking } from "./thinking.js";

@@ -56,7 +56,8 @@ export interface CacheHit {
 
 export type WireRequest = Record<string, unknown>;
 export type Retention = "short" | "long";
-export interface Breakpoint { readonly at: "tools-end" | "system-end" | "last-message" | { readonly message: number }; readonly ttl: "5m" | "1h" }
+/** `systemBlock: n` marks the end of the n-th system block (0 is the first): a prefix several agents share (the common preamble and the project's context) followed by blocks only one agent has (card C06b). */
+export interface Breakpoint { readonly at: "tools-end" | "system-end" | "last-message" | { readonly message: number } | { readonly systemBlock: number }; readonly ttl: "5m" | "1h" }
 
 /** What the dispatcher knows about this call. Keys are opaque and derived per scope (see `deriveKey`), never project or task IDs: a cloud provider sees only the derived text. */
 export interface CacheContext {

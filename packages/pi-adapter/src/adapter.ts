@@ -1,4 +1,5 @@
 import type {
+  StoredThinking, ThinkingReader,
   AbortReport, AdapterRequest, AuditEvent, BranchInfo, BranchRequest, Checkpoint, CheckpointV1, CheckpointVerdict, ConversationPort, InterruptedWork, StorageInfo, TaskPort, TaskRequest, RecoveryDecision, RequestId, RetainedRequest, RuntimePort, SemanticResult, ToolCallOutcome, TranscriptEntry, UpdateSource,
 } from "@nimblenewt/contracts";
 import type { JsonValue } from "@earendil-works/chord";
@@ -16,6 +17,9 @@ import {
   IncompatibleStorageError, InterruptedWorkError, InvalidReadmissionError, InvalidRecoveryError, NotHeldError, RequestIdConflictError, TooManyBranchesError, UnknownCommandError,
 } from "./errors.js";
 import { applyContextPolicy, type AdapterContextPolicy } from "./context-policy.js";
+import { shapeModels, type CacheShaping } from "./cache-shaping.js";
+import { LayoutHolder, layoutFingerprint, layoutSections, sharedSystemText, sortedTools, type PromptLayout } from "./prompt-layout.js";
+import { storedThinking } from "./thinking.js";
 import { fingerprintOf, fingerprintsMatch, mapReason } from "./results.js";
 import { CONTRACTS_VERSION } from "@nimblenewt/contracts";
 import { PINNED_PI_DURABLE_VERSION, assertSupportedRuntime, type RuntimeInfo } from "./runtime.js";
@@ -40,6 +44,11 @@ export interface AdapterTool<T extends TSchema = TSchema> {
    * interrupted call is not re-run and the model is told it was interrupted.
    */
   readonly replay?: "safe";
+  /**
+   * Offered to every agent of the project. Shared tools are declared first, so agents with different extra tools still share the system prompt behind them; an agent-specific tool in front would break that sharing
+   * (providers render tools before the system text). For Claude the breakpoints sit after the whole tool list, so agents that should share a prefix there need the same tool set (restrict by policy, not by declaration).
+   */
+  readonly shared?: boolean;
   /** Which end of a result over the output limit is kept (default the start; command output wants the end). Only with `contextPolicy` limits. */
   readonly outputRetain?: "head" | "tail";
   execute(args: Static<T>, context: AdapterToolContext): Promise<string>;
@@ -97,6 +106,13 @@ export interface PiAdapterOptions {
   readonly onReport?: (error: unknown) => void;
   /** Override runtime detection; for tests of the unsupported-runtime path. */
   readonly runtime?: RuntimeInfo;
+  /**
+   * The stable-first prompt (card C06b): preamble, project context and the agent's instructions as system sections, fixed until `changePromptLayout`. Without it the agent has no system text of its own. Tools are
+   * offered sorted by name either way.
+   */
+  readonly promptLayout?: PromptLayout;
+  /** Cache key and retention per model, and observers for prefix reuse and dropped thinking (card C06b). See `shapeModels`. */
+  readonly cache?: CacheShaping;
 }
 
 export interface SubmissionHandle {
@@ -258,7 +274,7 @@ interface Shared {
 }
 
 /** One Pi conversation: the root task conversation now, inquiry branches and task contexts from F06b. */
-export class AdapterConversation implements ConversationPort {
+export class AdapterConversation implements ConversationPort, ThinkingReader {
   /** @internal Use `PiAdapter.root()` or `PiAdapter.conversation()`. */
   constructor(private readonly harness: Harness, private readonly conversation: Conversation, private readonly shared: Shared) {}
 
@@ -561,6 +577,14 @@ export class AdapterConversation implements ConversationPort {
     }));
   }
 
+  /**
+   * The thinking the model produced in this conversation, in order, as readable text (card C06b). Pi keeps the provider's thinking and reasoning items in the stored conversation and replays them to the model that made them;
+   * this is the owner's view of them. It is not part of `transcript()` (which carries words said only) and not part of `ConversationPort`: the controller gates it (owner only, inspection policy, redaction).
+   */
+  async thinking(): Promise<StoredThinking[]> {
+    return storedThinking(this.id, await this.scan(0, undefined));
+  }
+
   /** The recorded result of a request that has already settled and been read; `undefined` otherwise. Never waits. */
   async recorded(id: RequestId): Promise<SemanticResult | undefined> {
     return (await this.record(id))?.result;
@@ -861,22 +885,18 @@ export class AdapterConversation implements ConversationPort {
 
 /** Maps NimbleNewt requests onto a pinned Pi Durable harness and Pi results back to semantic results. */
 export class PiAdapter implements RuntimePort {
-  private constructor(private readonly harness: Harness, private readonly rootConversation: Conversation, private readonly shared: Shared) {}
+  private constructor(private readonly harness: Harness, private readonly rootConversation: Conversation, private readonly shared: Shared, private readonly layout: { readonly holder: LayoutHolder; readonly tools: readonly AdapterTool[] } | undefined) {}
 
   static async open(options: PiAdapterOptions): Promise<PiAdapter> {
     assertSupportedRuntime(options.runtime);
-    const tools = options.tools ?? [];
-    const seen = new Set<string>();
-    for (const tool of tools) {
-      if (tool.name.length === 0) throw new InvalidToolError("tool name must not be empty");
-      if (seen.has(tool.name)) throw new InvalidToolError(`duplicate tool name "${tool.name}"`);
-      seen.add(tool.name);
-    }
+    const tools = sortedTools(options.tools ?? []);
+    const layout = options.promptLayout === undefined ? undefined : new LayoutHolder(options.promptLayout);
     const registry = createRegistry();
     const policy = applyContextPolicy(options.contextPolicy, options.settings);
     const limited = policy.toolLimits.maxBytes !== undefined || policy.toolLimits.maxLines !== undefined;
     registry.install(defineExtension({
       name: "nimblenewt",
+      ...(layout === undefined ? {} : { sections: layoutSections(layout) }),
       ...(policy.hooks.length === 0 ? {} : { hooks: policy.hooks }),
       tools: tools.map((tool) => defineTool({
         name: tool.name,
@@ -893,7 +913,15 @@ export class PiAdapter implements RuntimePort {
     const harness = await Harness.open(
       options.storage,
       {
-        models: options.models,
+        models: shapeModels(options.models, {
+          ...(options.cache ?? {}),
+          ...(options.onReport === undefined ? {} : { onReport: options.onReport }),
+          ...(layout === undefined ? {} : { sharedSystem: () => sharedSystemText(layout.current) }),
+          onThinkingDropped: (report) => {
+            options.cache?.onThinkingDropped?.(report);
+            if (options.audit !== undefined) void Promise.resolve(options.audit({ type: "thinking_dropped", at: Date.now(), ...report })).catch((error: unknown) => options.onReport?.(error));
+          },
+        }),
         registry,
         ...(policy.settings === undefined ? {} : { settings: policy.settings }),
         ...(options.onReport === undefined ? {} : { onReport: options.onReport }),
@@ -921,7 +949,27 @@ export class PiAdapter implements RuntimePort {
       audit: options.audit,
       aborting: new Map(),
       submitting: new Map(),
-    });
+    }, layout === undefined ? undefined : { holder: layout, tools });
+  }
+
+  /**
+   * Change the prompt layout on purpose (card C06b). The next request of every conversation carries the new sections, which rewrites the head of the prompt: every cached prefix after the change is lost on every backend,
+   * so this is for a real change of role or project context, never for something that varies per turn (use `volatileContext` for that). Audited with the old and new fingerprints and the reason. Needs `promptLayout` at open.
+   */
+  async changePromptLayout(next: PromptLayout, reason: string): Promise<{ readonly from: string; readonly to: string }> {
+    if (this.layout === undefined) throw new InvalidToolError("this adapter was opened without a prompt layout");
+    if (typeof reason !== "string" || reason.trim().length === 0) throw new InvalidToolError("a prompt layout change needs a reason");
+    await this.shared.hold.assertRunnable();
+    const previous = this.layout.holder.replace(next);
+    const from = layoutFingerprint(previous, this.layout.tools);
+    const to = layoutFingerprint(this.layout.holder.current, this.layout.tools);
+    await this.shared.audit?.({ type: "prompt_layout_change", at: Date.now(), reason: reason.slice(0, 500), from, to });
+    return { from, to };
+  }
+
+  /** The fingerprint of the layout and tool declarations now in force: equal fingerprints mean the same head bytes. */
+  promptFingerprint(): string | undefined {
+    return this.layout === undefined ? undefined : layoutFingerprint(this.layout.holder.current, this.layout.tools);
   }
 
   /** The root conversation, created on first use and the same on every reopen of the same storage. */
