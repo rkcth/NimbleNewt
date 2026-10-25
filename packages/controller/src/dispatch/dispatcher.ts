@@ -380,18 +380,18 @@ export class DispatcherService {
    * Lets the calls in flight settle: waits for each (a local call can be told to stop with `cancel`, and then ends `cancelled`; a call on the ledger is never cut: it settles as `confirmed`, `failed` or
    * `uncertain` and the ledger says which). A call that no running executor owns any more (after a restart) is settled from the ledger. When it returns nothing is in flight.
    */
-  async settle(by: Principal, attemptId: string, options: { cancel?: boolean } = {}): Promise<{ settled: number }> {
+  async settle(by: Principal, attemptId: string, options: { cancel?: boolean; strictMs?: number } = {}): Promise<{ settled: number }> {
     const d = await this.#controlled(by, attemptId);
-    return { settled: await this.#path.settle(d.body.attemptId, options.cancel === true) };
+    return { settled: await this.#path.settle(d.body.attemptId, options.cancel === true, options.strictMs) };
   }
 
   /**
    * Makes the agent quiet before someone integrates its changes, refreshes its checkout or quarantines its work: new calls are refused, calls in flight settle, and a checkpoint is taken. Call
    * `release` when the other step is done. The checkpoint is handed to the checkpoint hook (C04) and returned.
    */
-  async quiesce(by: Principal, attemptId: string, reason: string): Promise<{ checkpoint?: JsonObject }> {
+  async quiesce(by: Principal, attemptId: string, reason: string, options: { strictMs?: number } = {}): Promise<{ checkpoint?: JsonObject }> {
     await this.freeze(by, attemptId, reason);
-    await this.settle(by, attemptId, { cancel: true });
+    await this.settle(by, attemptId, { cancel: true, ...(options.strictMs === undefined ? {} : { strictMs: options.strictMs }) });
     const checkpoint = await this.#checkpoint(attemptId, reason);
     return checkpoint === undefined ? {} : { checkpoint };
   }
@@ -461,6 +461,20 @@ export class DispatcherService {
   }
 
   // ---- reads --------------------------------------------------------------------------------------------------------------------
+
+  /** The attempts of a task or an agent that are live now (running, or waiting or parked with their place), for whoever must make them quiet before touching their work (card H12d). Only staff may ask. */
+  async liveAttemptsOf(by: Principal, scope: { readonly taskId?: string; readonly agentId?: string }): Promise<string[]> {
+    const staff = (by.kind === "owner" || by.kind === "host" || by.kind === "service") && by.taskScope === undefined;
+    if (!staff) throw new DomainError("forbidden", `${by.id} may not list live attempts`);
+    if (scope.taskId === undefined && scope.agentId === undefined) invalid("scope", "must name a task or an agent");
+    const out: string[] = [];
+    for (const id of await this.#liveIds()) {
+      const d = await this.#load(id);
+      if (d === undefined || d.body.state === "finished") continue;
+      if ((scope.taskId === undefined || d.body.taskId === scope.taskId) && (scope.agentId === undefined || d.body.agentId === scope.agentId)) out.push(id);
+    }
+    return out;
+  }
 
   async get(by: Principal, attemptId: string): Promise<View<DispatchBody> | undefined> {
     const d = typeof attemptId === "string" && ATTEMPT.test(attemptId) ? await this.#load(attemptId) : undefined;

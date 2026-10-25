@@ -304,6 +304,8 @@ export class ToolPath {
     const body = this.#body({ ...ready, c: { ...ready.c, tool } }, "in-progress", { decision });
     const created = await this.#write(ready, body, (b) => {
       if (b.inFlight.includes(ready.opId)) return b;
+      // A call judged before a freeze must not begin after it (card H12d).
+      if (b.frozen !== undefined) throw new DomainError("unavailable", `the attempt is frozen (${b.frozen.reason}); the call did not start`);
       if (b.inFlight.length >= DISPATCH_LIMITS.inFlight) throw new DomainError("unavailable", `${DISPATCH_LIMITS.inFlight} calls are already in flight for this attempt`);
       return { ...b, calls: b.calls + 1, inFlight: [...b.inFlight, ready.opId] };
     }, guards);
@@ -508,13 +510,19 @@ export class ToolPath {
    * Settles every call of the attempt: waits for the ones this process runs (a local call is told to stop first when `cancel` is set), then settles any left in flight from the ledger. Returns how many
    * calls it found in flight.
    */
-  async settle(attemptId: string, cancel: boolean): Promise<number> {
+  async settle(attemptId: string, cancel: boolean, strictMs?: number): Promise<number> {
     const mine = [...this.#active.entries()].filter(([, run]) => run.attemptId === attemptId);
     if (cancel) {
       for (const [, run] of mine) run.abort.abort();
       // A cooperative executor ends within a few turns of the event loop. One that ignores the signal is not waited for: its call is settled from what is known below (it cannot be allowed to hold up the end of an attempt), and whatever it returns later changes nothing.
       const all = Promise.allSettled(mine.map(([, run]) => run.done));
       for (let turn = 0; turn < SETTLE_TURNS; turn++) { if (await Promise.race([all.then(() => true), new Promise<boolean>((r) => setImmediate(() => r(false)))])) break; }
+      // Strict (card H12d): someone is about to change the files the call may still be writing. A call that has not ended in time is not taken as settled; the settle fails and nothing is recovered.
+      if (strictMs !== undefined) {
+        let timer: NodeJS.Timeout | undefined;
+        const ended = await Promise.race([Promise.allSettled(mine.map(([, run]) => run.done)).then(() => true), new Promise<boolean>((r) => { timer = setTimeout(() => r(false), strictMs); })]).finally(() => clearTimeout(timer));
+        if (!ended) throw new DomainError("unavailable", `a call of attempt ${attemptId} did not stop within ${strictMs} ms and is still running`);
+      }
     } else await Promise.allSettled(mine.map(([, run]) => run.done));
     const loaded = await this.#hooks.load(attemptId);
     if (loaded === undefined) return mine.length;

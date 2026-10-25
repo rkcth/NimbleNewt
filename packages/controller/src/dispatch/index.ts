@@ -9,3 +9,4 @@ export { CachePolicies, type AttemptCache, type CachePolicyDeps, type RouteEndpo
 export { piFetch, responseBody, type FetchFunction, type PiCall, type PiFetchOptions } from "./pi-fetch.js";
 export { ModelRelay, type AttemptRelay, type ModelEndpoint, type ModelRelayOptions, type RelayRequest, type RelayResponse } from "./relay.js";
 export { controllerGuards, type GuardBinding } from "./runtime-guards.js";
+export { QuiesceCoordinator, QuiesceRefused, type Quiet, type QuiesceDeps, type QuiesceOperation } from "./quiesce.js";
