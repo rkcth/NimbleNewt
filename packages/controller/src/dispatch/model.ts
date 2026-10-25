@@ -85,7 +85,8 @@ export interface ToolIdentity {
   readonly name: string;
   /** The exact version of the tool (its catalogue version, or the worker's own build for a built-in one). */
   readonly version: string;
-  readonly kind: "builtin" | "mcp";
+  /** `catalog`: a tool from the T01 catalogue, called through the protected bridge (T06). */
+  readonly kind: "builtin" | "mcp" | "catalog";
   /** For an MCP tool: the server, with the protocol and catalogue revision the call was pinned to (T03). */
   readonly server?: { readonly id: string; readonly protocolRevision?: string; readonly catalogRevision?: number; /** The T03 call record this operation is. */ readonly callId?: string };
 }
@@ -102,6 +103,8 @@ export interface ToolOperationBody {
   readonly invocation: { readonly argsDigest: string; readonly bytes: number; readonly summary: string; readonly restricted: boolean };
   /** Whether the call only looks (the catalogue puts its tool in the `inspect` class). Judged by the controller, never by the worker's say-so. */
   readonly readOnly: boolean;
+  /** The controller-approved manifest of the tool version says a restart may run the call again from the start (card T06). Set by the controller from the catalogue, never by the worker. */
+  readonly replaySafe?: boolean;
   readonly state: OperationState;
   readonly startedAt: string;
   readonly endedAt?: string;

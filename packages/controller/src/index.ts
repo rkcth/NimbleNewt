@@ -34,3 +34,5 @@ export * from "./standups/index.js";
 export * from "./messaging/index.js";
 export * from "./dispatch/index.js";
 export * from "./remote/index.js";
+export * from "./toolbridge/index.js";
+export { CATALOG_LIMITS, CatalogService, checkHost, checkManifest, personalNamespace, runAction, type HostFacts, type Manifest } from "./catalog/index.js";

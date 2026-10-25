@@ -4,6 +4,7 @@ import { DeskService } from "../context/index.js";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
+import { buildWorld, workGrants } from "../dispatch/testing/world.js";
 import { GrantService, PrincipalService, TaskCredentialService, allows, allowsExactly, requireAction, type Grant, type Principal } from "./index.js";
 
 after(stopServer);
@@ -150,5 +151,54 @@ for (const backend of backends) {
     // No secret in the owner's list, and the task credential never lets its holder read credentials.
     assert.ok(!JSON.stringify(await c.tc.list(c.owner)).includes("salt"));
     assert.ok(!allows(p, "principal.manage", undefined));
+  });
+}
+
+for (const backend of backends) {
+  test(`${backend.name}: agentOf gives the agent's own grants uncut, only to the dispatcher, only while the attempt's credential is active, the task open and the agent active`, async () => {
+    const store = await backend.open();
+    try {
+      const w = await buildWorld(store.storage);
+      const ann = await w.agent("ann", workGrants(w.project));
+      const { taskId, attemptId } = await w.task("t", ann);
+      const seen: Record<string, unknown> = {};
+      w.worker.script = async ({ order }) => {
+        const own = await w.credentials.agentOf(w.dispatcherPrincipal, order.attemptId);
+        seen["own"] = { id: own.id, scope: own.taskScope, asOf: own.asOf !== undefined, read: allows(own, "task.read", w.project) };
+        const owner = await w.credentials.agentOf(w.owner, order.attemptId).catch((e: unknown) => e);
+        const agent = await w.credentials.agentOf(own, order.attemptId).catch((e: unknown) => e);
+        seen["owner"] = owner; seen["agent"] = agent;
+        seen["unknown attempt"] = await w.credentials.agentOf(w.dispatcherPrincipal, "att-aaaaaaaaaaaaaaaaaaaa").catch((e: unknown) => e);
+        // The agent is disabled meanwhile: nothing is returned for it.
+        const rec = (await w.principals.get("agent:ann"))!;
+        await w.principals.disable(w.owner, { commandId: cid("dis"), principalId: "agent:ann", expectedRevision: rec.revision });
+        seen["inactive"] = await w.credentials.agentOf(w.dispatcherPrincipal, order.attemptId).catch((e: unknown) => e);
+        return { status: "completed", text: "x" };
+      };
+      await w.dispatcher.tick(); await w.dispatcher.idle();
+      assert.deepEqual(seen["own"], { id: "agent:ann", scope: undefined, asOf: true, read: true });
+      for (const k of ["owner", "agent"]) { assert.ok(seen[k] instanceof DomainError, k); assert.equal((seen[k] as DomainError).code, "forbidden", k); }
+      for (const k of ["unknown attempt", "inactive"]) assert.ok(seen[k] instanceof DomainError, k);
+      // The attempt is over and its credential ended with it.
+      await refuses("unauthenticated", () => w.credentials.agentOf(w.dispatcherPrincipal, attemptId!));
+      void taskId;
+    } finally { await store.close(); }
+  });
+
+  test(`${backend.name}: agentOf is refused once the credential has expired`, async () => {
+    const store = await backend.open();
+    try {
+      const w = await buildWorld(store.storage);
+      const ann = await w.agent("ann", workGrants(w.project));
+      await w.task("t", ann);
+      let result: unknown;
+      w.worker.script = async ({ order }) => {
+        w.clock.advance(5 * 60 * 60_000);
+        result = await w.credentials.agentOf(w.dispatcherPrincipal, order.attemptId).catch((e: unknown) => e);
+        return { status: "completed", text: "x" };
+      };
+      await w.dispatcher.tick(); await w.dispatcher.idle();
+      assert.ok(result instanceof DomainError, String(result));
+    } finally { await store.close(); }
   });
 }

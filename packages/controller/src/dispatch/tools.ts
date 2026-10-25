@@ -57,7 +57,7 @@ interface Normalized {
   readonly digest: string; readonly bytes: number; readonly summary: string;
 }
 
-interface Ready { readonly d: DispatchBody; readonly agent: Principal; readonly opId: string; readonly ref: AggregateRef; readonly c: Normalized; readonly cls: string; readonly readOnly: boolean; readonly effectId: string; readonly kind: ToolExecutor["kind"] }
+interface Ready { readonly d: DispatchBody; readonly agent: Principal; readonly opId: string; readonly ref: AggregateRef; readonly c: Normalized; readonly cls: string; readonly readOnly: boolean; /** The approved manifest says the call can be made again after a restart (T06); never the worker's word. */ readonly replaySafe?: boolean; readonly effectId: string; readonly kind: ToolExecutor["kind"] }
 type Prepared = { readonly done: true; readonly result: ToolResult } | { readonly done: false; readonly ready: Ready };
 
 /**
@@ -149,7 +149,10 @@ export class ToolPath {
     }
   }
 
-  async #fresh(ready: Ready, kind: ToolExecutor["kind"]): Promise<Prepared> {
+  async #fresh(ready0: Ready, kind: ToolExecutor["kind"]): Promise<Prepared> {
+    // Whether a restart may run the call again comes from the controller-approved manifest (T06's hook), asked once for the call and written on its record.
+    const replaySafe = !LOCAL_CLASSES.has(ready0.cls) || this.#deps.replaySafe === undefined ? false : await this.#deps.replaySafe(ready0.c.tool, ready0.agent, ready0.d.attemptId, ready0.c.callId);
+    const ready: Ready = replaySafe ? { ...ready0, replaySafe } : ready0;
     const { d, c, cls } = ready;
     // The generation: a stale one never dispatches. This throws; nothing is recorded for a worker that has lost its task.
     const fence = await this.#deps.assignments.guardFor({ generation: d.generation, attemptId: d.attemptId }).check(d.taskId);
@@ -255,7 +258,7 @@ export class ToolPath {
     const now = this.#runner.now();
     return {
       attemptId: d.attemptId, callId: c.callId, taskId: d.taskId, projectId: d.projectId, agentId: d.agentId, generation: d.generation, tool: c.tool,
-      invocation: { argsDigest: c.digest, bytes: c.bytes, summary: c.summary, restricted: c.restricted }, readOnly, state, startedAt: now, diagnostics: [],
+      invocation: { argsDigest: c.digest, bytes: c.bytes, summary: c.summary, restricted: c.restricted }, readOnly, ...(ready.replaySafe === true ? { replaySafe: true } : {}), state, startedAt: now, diagnostics: [],
       judgedAt: { policy: d.revisions.policy, decisions: d.revisions.decisions }, ...(this.#effectful(ready) ? { effectId } : {}), ...extra,
     };
   }
@@ -348,7 +351,7 @@ export class ToolPath {
   }
 
   async #again(ready: Ready, op: ToolOperationBody, kind: ToolExecutor["kind"]): Promise<Prepared> {
-    if (op.invocation.argsDigest !== ready.c.digest || op.tool.name !== ready.c.tool.name) throw new DomainError("command_conflict", `call ${ready.c.callId} of attempt ${ready.d.attemptId} was already made with a different tool or arguments`);
+    if (op.invocation.argsDigest !== ready.c.digest || op.tool.name !== ready.c.tool.name || op.tool.version !== ready.c.tool.version) throw new DomainError("command_conflict", `call ${ready.c.callId} of attempt ${ready.d.attemptId} was already made with a different tool or arguments`);
     if (TERMINAL.has(op.state)) return { done: true, result: this.#resultOf(ready.opId, op) };
     if (op.state === "awaiting-approval") return this.#approval(ready, op);
     // In progress. If this process is running it, the second asker joins it; otherwise the worker died with the call open.
@@ -359,7 +362,7 @@ export class ToolPath {
     if (op.effectId !== undefined) return kind === "effect" ? { done: false, ready } : { done: true, result: await this.#recoverOne(ready.d, ready.opId) };
     if (kind === "effect") return { done: true, result: await this.#recoverOne(ready.d, ready.opId) };
     // A local call that was open when the worker died: a read-only one is safe to run again; any other is not (it may have done its work), so it is settled as uncertain.
-    if (ready.readOnly) return { done: false, ready };
+    if (ready.readOnly || op.replaySafe === true) return { done: false, ready };
     return { done: true, result: await this.#recoverOne(ready.d, ready.opId) };
   }
 
@@ -558,6 +561,7 @@ export class ToolPath {
       }
       return this.#finalize(d, opId, "uncertain", { error: "the effect had started and the worker ended; no bridge was available to ask the target" });
     }
+    if (op.replaySafe === true) return this.#finalize(d, opId, "cancelled", { error: "the worker ended while the call was running; its approved manifest says it can be run again from the start" });
     return op.readOnly ? this.#finalize(d, opId, "cancelled", { error: "the worker ended while the call was running; it only reads and can be made again" }) : this.#finalize(d, opId, "uncertain", { error: "the worker ended while the call was running; it may have done its work" });
   }
 
@@ -638,6 +642,12 @@ export class ToolPath {
     return out.sort((a, b) => (a.startedAt < b.startedAt ? -1 : a.startedAt > b.startedAt ? 1 : 0));
   }
 
+  /** One operation by the worker's call ID (the controller's own read; the dispatcher gates who may ask). */
+  async byCallId(attemptId: string, callId: string): Promise<View<ToolOperationBody> | undefined> {
+    const found = await this.#runner.get(operationKind(attemptId), derivedId("top", `${attemptId}\0${checkCallId(callId)}`));
+    return found === undefined ? undefined : view<ToolOperationBody>(found);
+  }
+
   async #stored(attemptId: string, operationId: string): Promise<{ aggregate: { id: string }; body: ToolOperationBody } | undefined> {
     if (typeof operationId !== "string") return undefined;
     const found = await this.#runner.get(operationKind(attemptId), operationId);
@@ -655,7 +665,7 @@ export class ToolPath {
     onlyKnown(t, ["name", "version", "kind", "server"]);
     const name = checkToolName(t.name);
     if (typeof t.version !== "string" || t.version.length < 1 || t.version.length > DISPATCH_LIMITS.version) invalid("tool.version", `must be 1 to ${DISPATCH_LIMITS.version} characters`);
-    const kind = t.kind === undefined ? "builtin" : t.kind === "builtin" || t.kind === "mcp" ? t.kind : invalid("tool.kind", "must be builtin or mcp");
+    const kind = t.kind === undefined ? "builtin" : t.kind === "builtin" || t.kind === "mcp" || t.kind === "catalog" ? t.kind : invalid("tool.kind", "must be builtin, mcp or catalog");
     if (t.server !== undefined && (typeof t.server !== "string" || !/^mcs-[a-z2-7]{20}$/.test(t.server))) invalid("tool.server", "is not an MCP server ID");
     if (kind === "mcp" && t.server === undefined) invalid("tool.server", "an MCP tool names its server");
     if (request.args === null || typeof request.args !== "object" || Array.isArray(request.args)) invalid("args", "must be a JSON object");

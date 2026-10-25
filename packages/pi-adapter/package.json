@@ -18,7 +18,8 @@
     "@earendil-works/chord": "1.3.0",
     "@earendil-works/pi-ai": "1.3.0",
     "@earendil-works/pi-durable": "1.3.0",
-    "@nimblenewt/contracts": "0.0.0"
+    "@nimblenewt/contracts": "0.0.0",
+    "@nimblenewt/registry": "0.0.0"
   },
   "scripts": {
     "test": "node ../../scripts/run-package-tests.mjs"

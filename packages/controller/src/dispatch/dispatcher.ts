@@ -30,7 +30,7 @@ import { redactText } from "../security/redact.js";
 import type { Principal } from "../security/principals.js";
 import { DISPATCHER_PRINCIPAL, type TaskCredentialService } from "../security/task-credentials.js";
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
-import { DISPATCHER_ACTOR, DISPATCH_KIND, DISPATCH_LIMITS, type DispatchBody, type DispatchRevisions, type Frozen } from "./model.js";
+import { DISPATCHER_ACTOR, DISPATCH_KIND, DISPATCH_LIMITS, type DispatchBody, type DispatchRevisions, type Frozen, type ToolIdentity, type ToolOperationBody } from "./model.js";
 import { ToolPath, type Loaded } from "./tools.js";
 import type { RecipeSummary, ToolGateway, WorkerTurnResult, TurnUsage, WorkOrder, WorkerHandle, WorkerHost } from "./ports.js";
 
@@ -80,6 +80,8 @@ export interface DispatcherDeps {
   readonly reviews?: Pick<ReviewService, "request" | "admit" | "get">;
   readonly budgets?: Pick<BudgetService, "accounting" | "charge">;
   readonly mcp?: Pick<McpService, "authorizeCall" | "recordOutcome">;
+  /** Whether the approved manifest of this exact tool version says a call may be run again after a restart (T06: the catalogue answers, as the agent; the worker never says). Without it no catalogue tool is replay-safe. */
+  readonly replaySafe?: (tool: ToolIdentity, agent: Principal, attemptId: string, callId: string) => Promise<boolean>;
   readonly environments?: Pick<EnvironmentService, "pin">;
   readonly meetings?: Pick<AttendanceService, "admission" | "revalidation">;
   readonly notifications?: Pick<NotificationService, "emitFromController">;
@@ -464,6 +466,12 @@ export class DispatcherService {
     const d = typeof attemptId === "string" && ATTEMPT.test(attemptId) ? await this.#load(attemptId) : undefined;
     if (d === undefined) return undefined;
     return this.#mayRead(by, d.body) ? view<DispatchBody>(d.aggregate) : undefined;
+  }
+
+  /** One call's operation by the worker's call ID, for the tool execution service (T06) that pins a call to the version it began with. Service principals and readers of the task only. */
+  async toolOperation(by: Principal, attemptId: string, callId: string): Promise<View<ToolOperationBody> | undefined> {
+    const d = typeof attemptId === "string" && ATTEMPT.test(attemptId) ? await this.#load(attemptId) : undefined;
+    return d === undefined || !this.#mayRead(by, d.body) ? undefined : this.#path.byCallId(attemptId, callId);
   }
 
   /** The operations of an attempt, in the order they began. */

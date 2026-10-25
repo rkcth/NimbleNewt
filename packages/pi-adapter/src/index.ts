@@ -11,3 +11,4 @@ export { CompactionHookTimeout, applyContextPolicy, type AdapterContextPolicy, t
 export { LayoutHolder, UnstablePromptError, assertStableText, checkLayout, layoutFingerprint, layoutSections, sharedSystemText, sortedTools, volatileContext, type PromptLayout } from "./prompt-layout.js";
 export { PrefixTracker, shapeModels, splitSharedSystem, thinkingFor, type CacheShaping, type ModelCachePolicy, type ModelInfo, type PrefixReport, type Retention, type ThinkingDropReport } from "./cache-shaping.js";
 export { storedThinking } from "./thinking.js";
+export { BRIDGE_TOOL_NAMES, DeclarationBoard, boundTransport, bridgeToolName, composeTools, createBridge, type Bridge, type BridgeReply, type BridgeRequest, type BridgeTransport, type Declarations } from "./bridge.js";

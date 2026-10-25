@@ -81,7 +81,7 @@ export interface WorkerHost {
 export interface ToolCallRequest {
   /** The worker's own ID for the call, unique within the attempt: asking again with it is the same call. */
   readonly callId: string;
-  readonly tool: { readonly name: string; readonly version: string; readonly kind?: "builtin" | "mcp"; readonly server?: string };
+  readonly tool: { readonly name: string; readonly version: string; readonly kind?: "builtin" | "mcp" | "catalog"; readonly server?: string };
   readonly args: JsonObject;
   /** The payload must not appear in any summary (a secret-bearing tool). */
   readonly restricted?: boolean;

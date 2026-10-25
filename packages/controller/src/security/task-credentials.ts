@@ -129,6 +129,17 @@ export class TaskCredentialService {
     return this.#present(body, options.limit !== false);
   }
 
+  /**
+   * The agent as its own grants stand, not cut to the task: for the dispatcher's use on installation-wide records that a task credential cannot name (the tool catalogue, card T06). Refused
+   * under the same conditions as `principalOf` (an active credential for this attempt, an open task, an active agent), so it exists only while the attempt does; the agent gets nothing it does not hold.
+   */
+  async agentOf(service: Principal, attemptId: string): Promise<Principal> {
+    const scoped = await this.principalOf(service, attemptId, { limit: false });
+    const agent = (await this.#runner.get("principal", scoped.id))?.body as unknown as PrincipalBody | undefined;
+    if (agent === undefined || agent.kind !== "agent" || agent.state !== "active") throw refusal();
+    return effectiveOf(this.#runner, { id: scoped.id, kind: "agent", name: agent.name, grants: agent.grants }, this.#runner.now());
+  }
+
   /** Ends the credential issued for an attempt (the attempt is over). The dispatcher only; ending one that is already ended is no change. */
   async endForAttempt(service: Principal, command: NoActor & { attemptId: string; reason: string }): Promise<{ ended: boolean }> {
     await this.#requireDispatcher(service);
