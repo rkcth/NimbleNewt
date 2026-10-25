@@ -247,7 +247,7 @@ export class WorkerTransport {
         case "accept": return { status: 200, body: await svc.accept(host, session, attempt, p) };
         case "begin": return { status: 200, body: await svc.begin(host, session, attempt, p, body["request"] as never) };
         case "report": return { status: 200, body: await svc.report(host, session, attempt, p, body["operationId"] as string, body["outcome"] as never) };
-        case "usage": await svc.usage(host, session, attempt, p, body["usage"] as never); return { status: 204 };
+        case "usage": await svc.usage(host, session, attempt, p, body["usage"] as never, this.#key(req)); return { status: 204 };
         case "heartbeat": return { status: 200, body: await svc.attemptHeartbeat(host, session, attempt, p) };
         case "acknowledge": await svc.acknowledgeDecisions(host, session, attempt, p); return { status: 204 };
         case "complete": return { status: 200, body: await svc.complete(host, session, attempt, p, { commandId: this.#key(req), result: body["result"] as never }) };

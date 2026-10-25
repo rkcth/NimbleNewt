@@ -24,6 +24,12 @@ export interface ModelCachePolicy {
   readonly retention?: Retention;
   /** Applied to the provider's request body just before it is sent (C06's `profile.prepare`: `id_slot`, `cache_salt`, `prompt_cache_key`, breakpoints). Must return the body to send; it never sees the model's output. */
   readonly payload?: (payload: unknown) => unknown;
+  /**
+   * Wraps the `fetch` the provider SDK uses for this model's HTTP calls (card H12e). The controller hands the call to its per-endpoint cache state here (slot turns, holder checks, markers and pins, hit figures), which a payload
+   * edit cannot do because it happens around the call, not in it. `inner` is the fetch Pi would have used (the caller's own, or the global one); the wrapper must return a standard `Response`. It applies to the one-shot compaction
+   * call too. Absent leaves Pi's own fetch.
+   */
+  readonly fetch?: (inner: typeof globalThis.fetch) => typeof globalThis.fetch;
 }
 
 export interface PrefixReport {
@@ -157,7 +163,12 @@ export function shapeModels(models: Models, shaping: CacheShaping): Models {
     get(target, property) {
       // Compaction summaries come through here: one-shot calls that nobody continues, so they carry no cache settings of any kind. (`streamDeferred` only fetches a result already requested and is left alone.)
       if (property === "completeSimple") {
-        return (model: unknown, context: unknown, options?: object) => (target.streamSimple as (m: unknown, c: unknown, o: unknown) => { result(): Promise<unknown> }).call(target, model, context, { ...(options ?? {}), cacheRetention: "none" }).result();
+        return (model: Model<never>, context: unknown, options?: { fetch?: typeof globalThis.fetch }) => {
+          // The call still has no cache key or retention, but on a server whose cache needs state around the call (llama.cpp slots) it goes through the same wrapper as every other call, so it can neither land in another project's slot nor leave the holders unknown.
+          let wrap: ModelCachePolicy["fetch"];
+          try { wrap = shaping.policy?.({ provider: model.provider, api: model.api, id: model.id })?.fetch; } catch (error) { try { shaping.onReport?.(error); } catch { /* ignored */ } }
+          return (target.streamSimple as (m: unknown, c: unknown, o: unknown) => { result(): Promise<unknown> }).call(target, model, context, { ...(options ?? {}), cacheRetention: "none", ...(wrap === undefined ? {} : { fetch: wrap(options?.fetch ?? globalThis.fetch) }) }).result();
+        };
       }
       if (property !== "streamSimple") {
         const value = Reflect.get(target, property, target) as unknown;
@@ -195,6 +206,7 @@ export function shapeModels(models: Models, shaping: CacheShaping): Models {
           }),
           ...(decided?.key === undefined ? {} : { sessionId: decided.key }),
           ...(decided?.retention === undefined ? {} : { cacheRetention: decided.retention }),
+          ...(decided?.fetch === undefined ? {} : { fetch: decided.fetch((options as { fetch?: typeof globalThis.fetch } | undefined)?.fetch ?? globalThis.fetch) }),
         };
         return (target.streamSimple as (m: unknown, c: unknown, o: unknown) => unknown).call(target, model, context, shaped);
       };

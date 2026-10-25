@@ -124,7 +124,7 @@ for (const backend of BACKENDS) {
   test(`${backend.name}: after every context switch the agent's own history and, where the backend shares, the project's head are reused; the naive layout reuses less`, async () => {
     const ours = await run(backend, "nimblenewt");
     if (backend.slot !== undefined) {
-      // A slotted server needs C06's slot partitioning around the HTTP call, which Pi makes itself: through Pi's own calls it runs with reuse off (see piCachePolicy) until the dispatcher exists.
+      // A slotted server needs C06's slot partitioning around the HTTP call. This measurement applies only the body policy (no adapter state), so it runs with reuse off; with the dispatcher's CachePolicies the call goes through CacheAdapter and reuses (h12e-pi-cache.test.ts).
       assert.deepEqual(ours.hits.map((h) => h.cachedTokens), [0, 0, 0, 0, 0, 0]);
       assert.match(piCachePolicy(backend.profile(), { scopeKey: "x" }).degraded ?? "", /slotted server/);
       return;

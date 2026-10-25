@@ -73,6 +73,8 @@ export interface DispatchBody {
   readonly calls: number;
   /** The conversation checkpoint reference taken when the attempt ended or was reconfigured. */
   readonly recipeRevision?: string;
+  /** Set when a turn's usage figures could not be charged to accounting: why (redacted). */
+  readonly usageError?: string;
   readonly outcome?: { readonly status: "succeeded" | "failed" | "abandoned"; readonly summary: string; readonly at: string };
 }
 

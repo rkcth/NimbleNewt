@@ -73,7 +73,7 @@ test("the payload function is the profile's own preparation: vLLM gets its salt 
   assert.deepEqual(input, { messages: [{ role: "user", content: "hi" }] });
 });
 
-test("a slotted llama.cpp server is never given a slot or reuse through Pi's own calls: project B cannot read the KV project A left in slot 0", async () => {
+test("a slotted llama.cpp server whose adapter state is not available is never given a slot or reuse through Pi's own calls: project B cannot read the KV project A left in slot 0", async () => {
   const profile = profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2 } });
   const sim = new LlamaSim(2);
   const a = new CacheAdapter(profile, sim);
@@ -88,6 +88,20 @@ test("a slotted llama.cpp server is never given a slot or reuse through Pi's own
   assert.equal("id_slot" in body, false);
   const res = await sim.send({ method: "POST", path: "/v1/chat/completions", headers: {}, body: body as never });
   assert.equal(profile.read(res.body).cachedTokens, 0, "nothing of A's slot was read");
+});
+
+test("routed through the adapter (card H12e) the policy no longer turns reuse off or edits a slotted body: the adapter prepares it, with the slot", async () => {
+  const profile = profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2 } });
+  const policy = piCachePolicy(profile, ctx({ slot: 1 }), { routed: true });
+  assert.equal(policy.degraded, undefined);
+  const prompt = { messages: [{ role: "user", content: "go" }] };
+  assert.deepEqual(policy.payload(prompt), prompt);
+  // The same body, prepared by the adapter's profile with the slot, reuses; an unrouted policy never names the slot.
+  assert.equal(profile.prepare(prompt, ctx({ slot: 1 })).body["id_slot"], 1);
+  assert.equal("id_slot" in (piCachePolicy(profile, ctx({ slot: 1 })).payload(prompt) as object), false);
+  // A profile that is not slotted is unaffected by `routed`.
+  const vllm = profileFor({ kind: "vllm", model: "m" });
+  assert.deepEqual(piCachePolicy(vllm, ctx(), { routed: true }).payload(prompt), piCachePolicy(vllm, ctx()).payload(prompt));
 });
 
 test("a project that requires isolation gets no cache setting on a backend that cannot keep projects apart, in the key, the retention or the body, for every profile", () => {

@@ -6,3 +6,4 @@ export { DRIVER_LIMITS, DispatchDriver, realTimer, type DriverError, type Driver
 export { activeAgents, attendanceLoops, decisionLoops, eventLoops, messageLoops, projectIds, standupLoops } from "./loops.js";
 export { LocalWorker, catalogFacts, type AttemptRuntime, type BoundCall, type LocalWorkerOptions, type RuntimeFactory, type SandboxPort, type SandboxSession } from "./local-worker.js";
 export { CachePolicies, type AttemptCache, type CachePolicyDeps, type RouteEndpoint } from "./cache.js";
+export { piFetch, responseBody, type FetchFunction, type PiCall, type PiFetchOptions } from "./pi-fetch.js";

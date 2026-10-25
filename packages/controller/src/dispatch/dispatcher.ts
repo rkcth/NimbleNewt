@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { AssignmentService } from "../domain/assignments.js";
 import type { BlockerService } from "../domain/blockers.js";
 import type { EffectBridge } from "../domain/effects.js";
@@ -26,6 +26,7 @@ import { ActionCatalog } from "../policy/catalog.js";
 import type { ReviewService } from "../review/index.js";
 import { selectRoute, type RoutingService } from "../routing/index.js";
 import { allows } from "../security/access.js";
+import { redactText } from "../security/redact.js";
 import type { Principal } from "../security/principals.js";
 import { DISPATCHER_PRINCIPAL, type TaskCredentialService } from "../security/task-credentials.js";
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
@@ -38,6 +39,7 @@ const LIVE: AggregateRef = { kind: "dispatch-live", id: "live" };
 const LIVE_MAX = 600;
 /** Where the scan of assignments stopped (card H12c): the next tick, of this process or of one after a restart, goes on from there instead of from the beginning. */
 const CURSOR: AggregateRef = { kind: "dispatch-cursor", id: "scan" };
+const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 3)}...` : s);
 const ATTEMPT = /^att-[a-z2-7]{20}$/;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 
@@ -161,6 +163,8 @@ export class DispatcherService {
   readonly #path: ToolPath;
   /** Names this dispatcher in the commands of its updates: two dispatchers that read one revision must not share a command (the second would be answered with the first's result). */
   readonly #instance = randomUUID().slice(0, 8);
+  /** Usage reports made per attempt by this dispatcher, so two turns with identical figures are two records. */
+  readonly #usageSeq = new Map<string, number>();
   readonly #ending = new Set<Promise<unknown>>();
   /** Consecutive ticks an attempt pinned to a host has waited for it (in memory: a restart starts the count again). */
   readonly #pinnedWaits = new Map<string, number>();
@@ -331,7 +335,7 @@ export class DispatcherService {
       call: (request, executor) => this.#path.call(attemptId, request, executor),
       begin: (request) => this.#path.begin(attemptId, request),
       report: (operationId, outcome) => this.#path.report(attemptId, operationId, outcome),
-      usage: (usage) => this.#usage(attemptId, usage),
+      usage: (usage, requestKey) => this.#usage(attemptId, usage, requestKey),
       heartbeat: () => this.heartbeat(attemptId),
       acknowledgeDecisions: () => this.acknowledgeDecisions(attemptId),
     };
@@ -858,7 +862,13 @@ export class DispatcherService {
       const d = await this.#load(attemptId);
       if (d === undefined || d.body.state !== "running") return;
       try {
-        if (result.usage !== undefined) await this.#usage(attemptId, result.usage).catch(() => undefined);
+        if (result.usage !== undefined) {
+          // A turn's figures that could not be charged are not lost silently: the attempt's record says so (redacted, clipped).
+          await this.#usage(attemptId, result.usage).catch(async (error: unknown) => {
+            const why = clip(redactText(error instanceof Error ? error.message : String(error)), DISPATCH_LIMITS.diagnostic);
+            await this.#update(attemptId, (b) => ({ ...b, usageError: why })).catch(() => undefined);
+          });
+        }
         // The turn ended with calls still waiting for an approval: the attempt gives its place back instead of holding it while nobody works.
         if (result.status === "completed" && d.body.parked.length > 0) {
           // A call that was decided, the attempt resumed for it, and that the agent did not make again is closed; the attempt yields again only for calls still undecided.
@@ -917,6 +927,7 @@ export class DispatcherService {
     await this.#deps.credentials.endForAttempt(this.#deps.principal, { commandId: `dpa-end-cred:${attemptId}`, attemptId, reason: summary.slice(0, 280) }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
     await this.#update(attemptId, (x) => ({ ...x, state: "finished", inFlight: [], parked: [], outcome: { status: outcome, summary: summary.slice(0, 500), at: this.#runner.now() } }), () => this.#liveChange(attemptId, false));
     this.#live.delete(attemptId);
+    this.#usageSeq.delete(attemptId);
     if (outcome === "failed") {
       const opened = await this.#deps.blockers.openBlocker({ commandId: `dpa-blk:failed:${attemptId}`, actor: DISPATCHER_ACTOR, type: "dispatch_blocked", subject: { kind: "task", id: b.taskId }, summary: `Attempt ${attemptId} failed (${summary.slice(0, 300)}); the task is as it was and no further attempt starts by itself.`, resolver: "owner" });
       await this.#deps.notifications?.emitFromController({ commandId: `dpa-ntf:${opened.id}`, kind: "blocker", ref: { kind: "blocker", id: opened.id }, projectId: b.projectId }).catch(() => undefined);
@@ -968,14 +979,21 @@ export class DispatcherService {
     return checkpoint;
   }
 
-  async #usage(attemptId: string, usage: TurnUsage): Promise<void> {
+  async #usage(attemptId: string, usage: TurnUsage, requestKey?: string): Promise<void> {
     if (this.#deps.budgets === undefined) return;
     const d = await this.#running(attemptId);
     if (usage === null || typeof usage !== "object") invalid("usage", "must be an object");
-    onlyKnown(usage, ["costMicros", "computeMs", "cache"]);
-    if (usage.costMicros === undefined && usage.computeMs === undefined) return;
+    onlyKnown(usage, ["turnSeq", "costMicros", "computeMs", "cache"]);
+    if (usage.turnSeq !== undefined && !(Number.isSafeInteger(usage.turnSeq) && usage.turnSeq >= 0)) invalid("turnSeq", "must be a whole number from 0");
+    // Cache figures alone are a record too (a local server costs nothing but still reports what its cache did).
+    if (usage.costMicros === undefined && usage.computeMs === undefined && usage.cache === undefined) return;
+    const seq = (this.#usageSeq.get(attemptId) ?? 0) + 1;
+    this.#usageSeq.set(attemptId, seq);
+    // A worker-side turn sequence is the idempotency key when there is one: the same report sent again is the same charge, and a different report under that number is a conflict.
+    // A remote worker's request key (its Idempotency-Key) serves the same way when there is no turn sequence, so a resent request is charged once.
+    const key = usage.turnSeq === undefined && requestKey !== undefined ? `k${createHash("sha256").update(requestKey).update("\0").update(JSON.stringify(usage)).digest("hex").slice(0, 32)}` : usage.turnSeq === undefined ? `${d.body.heartbeats}:${this.#instance}:${seq}:${createHash("sha256").update(JSON.stringify(usage)).digest("hex").slice(0, 24)}` : `t${usage.turnSeq}`;
     await this.#deps.budgets.charge(this.#deps.principal, {
-      commandId: `dpa-use:${attemptId}:${d.body.heartbeats}:${d.body.calls}:${usage.costMicros ?? 0}:${usage.computeMs ?? 0}`, activity: "model-call", taskId: d.body.taskId, agentId: d.body.agentId,
+      commandId: `dpa-use:${attemptId}:${key}`, activity: "model-call", taskId: d.body.taskId, agentId: d.body.agentId,
       ...(usage.costMicros === undefined ? {} : { costMicros: usage.costMicros }), ...(usage.computeMs === undefined ? {} : { computeMs: usage.computeMs }), ...(usage.cache === undefined ? {} : { cache: usage.cache }),
     });
   }

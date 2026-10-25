@@ -91,3 +91,26 @@ export class ClaudeSim implements Transport {
   }
 }
 
+
+/**
+ * A `fetch` in front of a simulated server, for tests of Pi's own HTTP path: the request is handed to `server.send` and its answer comes back as a JSON `Response`, or, when the request asks for `stream`, as chat-completion
+ * server-sent events whose last event carries the answer's `usage` and `timings` (as llama-server and vLLM send them). `seen` lists the requests in the order they arrived.
+ */
+export function simulatedFetch(server: Transport, seen: HttpRequest[] = []): typeof globalThis.fetch {
+  return async (input, init) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url);
+    if (init?.signal?.aborted === true) throw new DOMException("aborted", "AbortError");
+    const body = (typeof init?.body === "string" ? JSON.parse(init.body) : {}) as WireRequest;
+    const request: HttpRequest = { method: (init?.method ?? "GET").toUpperCase() as "GET" | "POST", path: url.pathname + url.search, headers: Object.fromEntries(new Headers(init?.headers)), body };
+    seen.push(request);
+    const answer = await server.send(request);
+    if (body["stream"] !== true || answer.status >= 400) return new Response(JSON.stringify(answer.body), { status: answer.status, headers: { "content-type": "application/json" } });
+    const full = answer.body as { choices?: { message?: { content?: string } }[]; usage?: unknown; timings?: unknown };
+    const events = [
+      { choices: [{ index: 0, delta: { role: "assistant", content: full.choices?.[0]?.message?.content ?? "" } }] },
+      { choices: [{ index: 0, delta: {}, finish_reason: "stop" }], ...(full.usage === undefined ? {} : { usage: full.usage }), ...(full.timings === undefined ? {} : { timings: full.timings }) },
+    ];
+    const text = `${events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("")}data: [DONE]\n\n`;
+    return new Response(text, { status: 200, headers: { "content-type": "text/event-stream" } });
+  };
+}

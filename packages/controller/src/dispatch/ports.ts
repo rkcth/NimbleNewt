@@ -48,7 +48,10 @@ export interface WorkerTurnResult {
   readonly usage?: TurnUsage;
 }
 
-export interface TurnUsage { readonly costMicros?: number; readonly computeMs?: number; readonly cache?: { readonly backend: string; readonly route: string; readonly cachedTokens: number; readonly computedTokens: number; readonly writtenTokens: number } }
+export interface TurnUsage {
+  /** The worker's own sequence number of the turn this report is for. When present it is the idempotency key: a report sent again (a retry) is charged once. */
+  readonly turnSeq?: number;
+  readonly costMicros?: number; readonly computeMs?: number; readonly cache?: { readonly backend: string; readonly route: string; readonly cachedTokens: number; readonly computedTokens: number; readonly writtenTokens: number } }
 
 export interface WorkerHandle {
   /** The version of the worker software that runs the attempt (recorded on the attempt). */
@@ -113,7 +116,7 @@ export interface ToolGateway {
   begin(request: ToolCallRequest): Promise<{ readonly operationId: string; readonly run: true } | { readonly operationId: string; readonly run: false; readonly result: ToolResult }>;
   report(operationId: string, outcome: { readonly state: "confirmed" | "failed" | "cancelled" | "uncertain"; readonly text?: string; readonly error?: string; readonly cpuMs?: number; readonly memoryMb?: number }): Promise<ToolResult>;
   /** The model usage of a turn, so spending is recorded by the controller's accounting and not reported by the agent. */
-  usage(usage: TurnUsage): Promise<void>;
+  usage(usage: TurnUsage, requestKey?: string): Promise<void>;
   /** The worker is alive: extends the attempt's lease. Refused (`fenced`) once the attempt is no longer the task's current one. */
   heartbeat(): Promise<{ readonly until: string }>;
   /** The worker has put the owner's current decisions in front of the agent: calls refused for a changed decision revision are allowed again. */

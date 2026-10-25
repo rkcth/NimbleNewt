@@ -945,6 +945,69 @@ for (const backend of backends) {
     assert.deepEqual(seen, [{ spentSoFar: -1 }, { spentSoFar: 400, estimatedSpend: 3 }], "a spend figure sent by the agent is refused as an unknown field; the policy got the figure from accounting");
   });
 
+  suite("the cache figures a turn reports reach budget accounting, even from a server that costs nothing and reports no compute time (card H12e)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const { taskId } = await c.task("t", ann);
+    await c.budgets.open(c.owner, { commandId: "bo", taskId, currency: "USD", costMicros: 10_000 });
+    c.worker.script = async () => ({ status: "completed", text: "x", usage: { cache: { backend: "llama-cpp", route: "llama/local", cachedTokens: 700, computedTokens: 40, writtenTokens: 0 } } });
+    await c.run();
+    const usage = await c.budgets.usage(c.owner, { taskId });
+    assert.deepEqual(usage.cacheByBackend, { "llama-cpp": { cachedTokens: 700, computedTokens: 40, writtenTokens: 0, calls: 1 } });
+    assert.deepEqual(usage.cache, { cachedTokens: 700, computedTokens: 40, writtenTokens: 0, calls: 1 });
+  });
+
+  suite("a usage report with a route of the longest allowed length is charged, two identical reports are two records, and a report that cannot be charged is recorded on the attempt, not dropped silently", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const { taskId, attemptId } = await c.task("t", ann);
+    await c.budgets.open(c.owner, { commandId: "bo", taskId, currency: "USD", costMicros: 10_000 });
+    const route = `localp/${"m".repeat(120)}`;
+    const cache = { backend: "llama-cpp", route, cachedTokens: 10, computedTokens: 5, writtenTokens: 0 };
+    c.worker.script = async ({ gateway }) => {
+      await gateway.usage({ costMicros: 1, cache });
+      await gateway.usage({ costMicros: 1, cache });
+      return { status: "completed", text: "x", usage: { cache: { ...cache, backend: "NOT A BACKEND" } } };
+    };
+    await c.run();
+    const usage = await c.budgets.usage(c.owner, { taskId });
+    assert.deepEqual(usage.cacheByBackend, { "llama-cpp": { cachedTokens: 20, computedTokens: 10, writtenTokens: 0, calls: 2 } });
+    assert.match((await c.dispatcher.get(c.owner, attemptId!))!.usageError ?? "", /backend/);
+  });
+
+  suite("a usage report that carries the worker's turn sequence is charged once however often it is sent; a different report under the same number is refused", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const { taskId } = await c.task("t", ann);
+    await c.budgets.open(c.owner, { commandId: "bo", taskId, currency: "USD", costMicros: 10_000 });
+    const cache = { backend: "llama-cpp", route: "llama/local", cachedTokens: 10, computedTokens: 5, writtenTokens: 0 };
+    let conflict: unknown;
+    c.worker.script = async ({ gateway }) => {
+      await gateway.usage({ turnSeq: 7, costMicros: 2, cache });
+      await gateway.usage({ turnSeq: 7, costMicros: 2, cache });
+      await gateway.usage({ turnSeq: 8, costMicros: 2, cache });
+      conflict = await gateway.usage({ turnSeq: 7, costMicros: 3, cache }).catch((e: unknown) => e);
+      await gateway.usage({ turnSeq: -1, costMicros: 1 }).then(() => { conflict = undefined; }, () => undefined);
+      return { status: "completed", text: "x" };
+    };
+    await c.run();
+    const usage = await c.budgets.usage(c.owner, { taskId });
+    assert.equal(usage.cache.calls, 2);
+    assert.equal(usage.totals.costMicros, 4);
+    assert.ok(conflict instanceof DomainError && conflict.code === "command_conflict", String(conflict));
+  });
+
+  suite("a usage report resent under the same request key is charged once; the same figures under another key are a second charge", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const { taskId } = await c.task("t", ann);
+    await c.budgets.open(c.owner, { commandId: "bo", taskId, currency: "USD", costMicros: 10_000 });
+    c.worker.script = async ({ gateway }) => {
+      await gateway.usage({ costMicros: 5 }, "key-1");
+      await gateway.usage({ costMicros: 5 }, "key-1");
+      await gateway.usage({ costMicros: 5 }, "key-2");
+      return { status: "completed", text: "x" };
+    };
+    await c.run();
+    assert.equal((await c.budgets.usage(c.owner, { taskId })).totals.costMicros, 10);
+  });
+
   suite("a start whose host went stale while it waited, or whose place was withdrawn, is refused at the start", async (c) => {
     const agents = [];
     for (let i = 0; i < 3; i++) agents.push(await c.agent(`a${i}`, workGrants(c.project, [])));

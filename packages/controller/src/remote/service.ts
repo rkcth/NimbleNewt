@@ -591,9 +591,9 @@ export class RemoteWorkerService {
     return (await this.#gateway(host, sessionId, attemptId, placement)).report(operationId, outcome);
   }
 
-  async usage(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, usage: TurnUsage): Promise<void> {
+  async usage(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, usage: TurnUsage, requestKey?: string): Promise<void> {
     if (usage === null || typeof usage !== "object" || Array.isArray(usage)) invalid("usage", "must be an object");
-    await (await this.#gateway(host, sessionId, attemptId, placement)).usage(usage);
+    await (await this.#gateway(host, sessionId, attemptId, placement)).usage(usage, requestKey);
   }
 
   /** Extends the attempt's lease. A worker in a partition that cannot send this loses the attempt when the lease ends. */

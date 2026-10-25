@@ -85,14 +85,14 @@ export class EndpointState {
   }
 }
 
-/** One `EndpointState` per server, keyed by the normalised endpoint URL (scheme, host and port, path without a trailing slash; case-insensitive host). */
+/** One `EndpointState` per server, keyed by the origin of the endpoint URL (scheme, host and port; case-insensitive host). The path is not part of it: `http://h:8080` and `http://h:8080/v1` are the same server and must share its slot holders and turns. */
 export class CacheEndpoints {
   readonly #states = new Map<string, EndpointState>();
   static readonly MAX = 64;
 
   state(url: string): EndpointState {
     let key: string;
-    try { const u = new URL(url); key = `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, "")}`.toLowerCase(); } catch { throw new DomainError("invalid_command", "url: must be the endpoint's URL", { field: "url" }); }
+    try { const u = new URL(url); key = `${u.protocol}//${u.host}`.toLowerCase(); } catch { throw new DomainError("invalid_command", "url: must be the endpoint's URL", { field: "url" }); }
     let s = this.#states.get(key);
     if (s === undefined) {
       if (this.#states.size >= CacheEndpoints.MAX) throw new DomainError("invalid_command", `url: at most ${CacheEndpoints.MAX} endpoints are tracked`, { field: "url" });
@@ -213,6 +213,7 @@ export class CacheAdapter {
           const res = await this.#send(r.body, {}, r.path, r.method);
           cleared = res.status < 400;
           slotCleared = cleared;
+          if (cleared) this.#state.holder.delete(slot);
         }
         if (!cleared) ctxUsed = { ...context, reuseOff: true };
       }

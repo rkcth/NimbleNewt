@@ -252,3 +252,25 @@ test("an observer that throws is reported and the request is sent unchanged; a c
   const other = await open(rig("anthropic-messages"), { tools: [{ ...plain, shared: true }] });
   assert.notEqual(other.promptFingerprint(), before);
 });
+
+test("a policy's fetch wrapper is handed to the provider for every model call, the compaction summary included; the wrapped fetch is the caller's own when there is one (card H12e)", async () => {
+  const world = rig("openai-completions", "local", "m");
+  const inner: string[] = [];
+  const marker = (async () => new Response("{}")) as unknown as typeof globalThis.fetch;
+  const adapter = await open(world, { settings: { compaction: { keepRecentTokens: 1 } }, cache: { policy: () => ({ fetch: (real) => { inner.push(real === globalThis.fetch ? "global" : "other"); return marker; } }) } });
+  world.reply("a", "b", "summary text", "d");
+  await (await adapter.root().submit(input("f1", "first"))).result();
+  await (await adapter.root().submit(input("f2", "second"))).result();
+  assert.equal(world.seen[0]!.options?.["fetch"], marker, "the model call goes through the wrapper");
+  await adapter.root().compact();
+  const summary = world.seen.at(-1)!;
+  assert.equal(summary.options?.["cacheRetention"], "none");
+  assert.equal(summary.options?.["fetch"], marker, "so does the one-shot compaction call");
+  assert.ok(inner.length >= 3 && inner.every((x) => x === "global"));
+  // No fetch in the policy: Pi's own is left alone.
+  const plain = rig("openai-completions", "local", "m");
+  const untouched = await open(plain, { cache: { policy: () => ({ key: "nn-k" }) } });
+  plain.reply("x");
+  await (await untouched.root().submit(input("f3", "hello"))).result();
+  assert.equal("fetch" in (plain.seen[0]!.options ?? {}), false);
+});

@@ -38,7 +38,7 @@ test("the policy is chosen from the route's configured endpoint; keys are derive
   assert.throws(() => make({ secret: "short" }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
 });
 
-test("slots on a shared server are partitioned by project: a project never takes another project's slot, and reuse stays off until Pi's calls go through the slot partitioning", async () => {
+test("slots on a shared server are partitioned by project: a project never takes another project's slot, and Pi's calls go through the adapter's state (no degraded mode)", async () => {
   const policies = make();
   const first = await policies.forAttempt({ projectId: A, route: "llama/local" });
   const second = await policies.forAttempt({ projectId: B, route: "llama/local" });
@@ -47,8 +47,24 @@ test("slots on a shared server are partitioned by project: a project never takes
   assert.equal(third.slot, undefined);
   assert.match(third.refused ?? "", /another project/);
   assert.equal((await policies.forAttempt({ projectId: A, route: "llama/local" })).slot, 0, "a project keeps the slot it had");
-  assert.match(first.policy.degraded ?? "", /slotted server/);
-  assert.equal((first.policy.payload(structuredClone(body)) as Record<string, unknown>)["cache_prompt"], false);
+  assert.equal(first.routed, true);
+  assert.equal(first.policy.degraded, undefined);
+  assert.equal(typeof first.policy.fetch, "function");
+  assert.deepEqual(first.policy.payload(structuredClone(body)), body, "the body is left to the adapter, which prepares it");
+});
+
+test("without the adapter's state (none given, or the registry cannot track another endpoint) a slotted server runs with reuse off and the policy says so", async () => {
+  const none = await make({ state: undefined as never }).forAttempt({ projectId: A, route: "llama/local" });
+  assert.equal(none.routed, false);
+  assert.match(none.policy.degraded ?? "", /state is not available/);
+  assert.equal((none.policy.payload(structuredClone(body)) as Record<string, unknown>)["cache_prompt"], false);
+  assert.equal(none.slot, undefined);
+  const full = new CacheEndpoints();
+  for (let i = 0; i < CacheEndpoints.MAX; i++) full.state(`http://filler-${i}.example`);
+  const crowded = await make({ state: full }).forAttempt({ projectId: A, route: "llama/local" });
+  assert.equal(crowded.routed, false);
+  assert.match(crowded.policy.degraded ?? "", /state is not available/);
+  assert.equal((crowded.policy.payload(structuredClone(body)) as Record<string, unknown>)["cache_prompt"], false);
 });
 
 test("a pin is sent only when the project holds an active pin marker for the route", async () => {
@@ -73,4 +89,11 @@ test("a project that requires isolation gets no cache key on a backend that cann
   assert.match(isolated.policy.degraded ?? "", /isolation/);
   assert.notEqual(shared.policy.key, undefined);
   assert.notEqual((await policies.forAttempt({ projectId: A, route: "vllm/big" })).policy.key, undefined, "vLLM's salt isolates, so its cache stays on");
+});
+
+test("one server is one endpoint state whatever path its URL carries, so its slot holders and turns are shared", () => {
+  const endpoints = new CacheEndpoints();
+  assert.equal(endpoints.state("http://127.0.0.1:8080"), endpoints.state("http://127.0.0.1:8080/v1"));
+  assert.equal(endpoints.state("http://HOST:8080/"), endpoints.state("http://host:8080/v1/"));
+  assert.notEqual(endpoints.state("http://host:8080"), endpoints.state("http://host:8081"));
 });
