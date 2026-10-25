@@ -1,0 +1,144 @@
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { createModels, createProvider, type Models } from "@earendil-works/pi-ai";
+import { openNodeJsonlStorage } from "@earendil-works/pi-durable/storage/jsonl/node";
+import type { Storage } from "@earendil-works/pi-durable";
+import { ChannelError, LineDecoder, WORKER_CHANNEL_VERSION, encodeMessage, parseToChild, requestId, type ChannelStart, type FromChild, type ToChild } from "@nimblenewt/contracts";
+import { PiAdapter } from "../adapter.js";
+import { boundTransport, composeTools, createBridge, type BridgeReply } from "../bridge.js";
+import { relayFetch } from "./relay-fetch.js";
+
+/**
+ * The worker process (card H12b): the Pi conversation of one attempt, run inside the sandbox. It has no network and holds only the task credential it is started with. Its whole connection to the world is the channel on standard input and
+ * output (`@nimblenewt/contracts`, worker-channel): the bridge requests of the protected tool bridge go out with the credential and are answered by the controller's execution service; the model's calls go out as relay requests and are made by
+ * the host, which keeps the provider's credential. It loads nothing of the controller.
+ */
+
+export interface WorkerIo {
+  /** What the host writes, in any chunking. */
+  readonly input: AsyncIterable<Buffer | string>;
+  write(text: string): void;
+}
+
+export interface WorkerHooks {
+  /** The models for the attempt. Default: one provider whose model calls go through the relay (`fetch`). Tests give a scripted one. */
+  readonly models?: (start: ChannelStart, fetch: typeof globalThis.fetch) => Promise<Models> | Models;
+  readonly storage?: (directory: string) => Promise<Storage> | Storage;
+}
+
+/** The Pi API implementations the process can speak, loaded when a route names one. */
+const APIS: Readonly<Record<string, () => Promise<{ stream: unknown; streamSimple: unknown }>>> = {
+  "openai-completions": () => import("@earendil-works/pi-ai/api/openai-completions") as never,
+  "anthropic-messages": () => import("@earendil-works/pi-ai/api/anthropic-messages") as never,
+};
+
+async function relayModels(start: ChannelStart): Promise<Models> {
+  const load = Object.hasOwn(APIS, start.model.api) ? APIS[start.model.api] : undefined;
+  if (load === undefined) throw new ChannelError(`the process cannot speak ${start.model.api.slice(0, 40)}`);
+  const api = await load();
+  const baseUrl = `${start.relayBase.replace(/\/+$/, "")}/${start.model.alias}`;
+  const models = createModels();
+  models.setProvider(createProvider({
+    id: start.model.provider, baseUrl,
+    // The relay adds the real credential; this placeholder only satisfies the SDK.
+    auth: { apiKey: { name: "relay", resolve: async () => ({ auth: { apiKey: "relay" } }) } },
+    models: [{ id: start.model.modelId, name: start.model.modelId, api: start.model.api, provider: start.model.provider, baseUrl, reasoning: start.model.reasoning, input: [...start.model.input], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: start.model.contextWindow, maxTokens: start.model.maxTokens }],
+    api: api as never,
+  } as never));
+  return models;
+}
+
+/** Runs the process until the host closes it or the input ends. Resolves when everything is released. */
+export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<void> {
+  const send = (message: FromChild): void => io.write(encodeMessage(message));
+  let adapter: PiAdapter | undefined;
+  let relay: ReturnType<typeof relayFetch> | undefined;
+  let started: ChannelStart | undefined;
+  let nextBridge = 0;
+  const bridgeWaiting = new Map<number, (reply: BridgeReply) => void>();
+  const realFetch = globalThis.fetch;
+  let running: Promise<void> | undefined;
+  let closed = false;
+
+  const fault = (message: string, id?: number): void => send({ t: "fault", ...(id === undefined ? {} : { id }), message: message.slice(0, 3900) });
+
+  const begin = async (start: ChannelStart): Promise<void> => {
+    started = start;
+    relay = relayFetch(start.relayBase, send);
+    // Whatever Pi's SDK uses to reach the model goes through the relay: nothing in the process can reach anything else.
+    globalThis.fetch = relay.fetch;
+    const models = await (hooks.models ?? ((s) => relayModels(s)))(start, relay.fetch);
+    const storage = await (hooks.storage ?? ((dir) => openNodeJsonlStorage(dir, BACKGROUND_CONTEXT)))(start.storeDir);
+    const transport = boundTransport(start.credential, (token, request) => new Promise<BridgeReply>((resolve) => {
+      const id = ++nextBridge;
+      bridgeWaiting.set(id, resolve);
+      send({ t: "bridge", id, token, request: { op: request.op, callId: request.callId, ...(request.args === undefined ? {} : { args: request.args as never }) } });
+    }));
+    const cache = start.cache === undefined ? undefined : { policy: () => ({ ...(start.cache!.key === undefined ? {} : { key: start.cache!.key }), ...(start.cache!.retention === undefined ? {} : { retention: start.cache!.retention }) }) };
+    adapter = await PiAdapter.open({
+      storage, models, model: { provider: start.model.provider, modelId: start.model.modelId },
+      tools: composeTools(createBridge(transport), [], start.namespaceId), ...(cache === undefined ? {} : { cache }),
+    });
+    send({ t: "ready", v: WORKER_CHANNEL_VERSION });
+  };
+
+  const turn = async (requestIdText: string, content: string): Promise<void> => {
+    if (adapter === undefined || started === undefined) return fault("the process was not started");
+    try {
+      const handle = await adapter.root().submit({ kind: "input", requestId: requestId(requestIdText), content });
+      const result = await handle.result();
+      if (result.status === "completed") send({ t: "result", status: "completed", text: result.text });
+      else if (result.status === "unanswered" && result.reason === "aborted") send({ t: "result", status: "cancelled" });
+      else send({ t: "result", status: "failed", error: result.status === "unanswered" ? `the model did not answer (${result.reason}${"detail" in result && typeof result.detail === "string" ? `: ${result.detail}` : ""})` : `the turn ended as ${result.status}` });
+    } catch (error) {
+      send({ t: "result", status: "failed", error: String((error as Error)?.message ?? error).slice(0, 2000) });
+    }
+  };
+
+  const handle = async (message: ToChild): Promise<void> => {
+    if (relay?.accept(message) === true) return;
+    switch (message.t) {
+      case "start":
+        if (message.v !== WORKER_CHANNEL_VERSION) return fault(`the channel speaks version ${WORKER_CHANNEL_VERSION}, not ${message.v}`);
+        if (started !== undefined) return fault("the process was already started");
+        try { await begin(message.start); } catch (error) { fault(`could not start: ${String((error as Error)?.message ?? error)}`); }
+        return;
+      case "run":
+        if (running !== undefined) return send({ t: "result", status: "failed", error: "a turn was already run in this process" });
+        running = turn(message.requestId, message.content);
+        return;
+      case "checkpoint":
+        if (adapter === undefined) return fault("the process was not started", message.id);
+        try { send({ t: "checkpoint.ok", id: message.id, checkpoint: JSON.parse(JSON.stringify(await adapter.root().checkpoint())) as never }); } catch (error) { fault(`checkpoint failed: ${String((error as Error)?.message ?? error)}`, message.id); }
+        return;
+      case "tell":
+        if (adapter === undefined || started === undefined) return fault("the process was not started", message.id);
+        try { await (await adapter.root().submit({ kind: "update", requestId: requestId(`tell-${started.attemptId}-${message.id}`), content: message.text, run: false })).result(); send({ t: "tell.ok", id: message.id }); } catch (error) { fault(`tell failed: ${String((error as Error)?.message ?? error)}`, message.id); }
+        return;
+      case "bridge.reply": { const waiting = bridgeWaiting.get(message.id); bridgeWaiting.delete(message.id); waiting?.(message.reply as BridgeReply); return; }
+      case "close": closed = true; return;
+      default: return;
+    }
+  };
+
+  const decoder = new LineDecoder();
+  try {
+    for await (const chunk of io.input) {
+      for (const raw of decoder.push(chunk)) {
+        let message: ToChild;
+        try { message = parseToChild(raw); } catch (error) { fault((error as Error).message); continue; }
+        // A message is handled in its own turn of the event loop so a long call (the model's) never holds up the channel.
+        void handle(message).catch((error) => fault(String((error as Error)?.message ?? error)));
+        if (message.t === "close") closed = true;
+      }
+      if (closed) break;
+    }
+  } catch (error) {
+    if (error instanceof ChannelError) fault(error.message);
+  } finally {
+    relay?.closeAll("the channel closed");
+    for (const resolve of bridgeWaiting.values()) resolve({ ok: false, code: "unavailable", message: "the channel closed" });
+    bridgeWaiting.clear();
+    await adapter?.close().catch(() => undefined);
+    globalThis.fetch = realFetch;
+  }
+}

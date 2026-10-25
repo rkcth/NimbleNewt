@@ -10,7 +10,8 @@ export const ALLOWED = {
   "pi-adapter": ["@nimblenewt/contracts", "@nimblenewt/registry", "@earendil-works/chord", "@earendil-works/pi-ai", "@earendil-works/pi-durable"],
   controller: ["pg", "@types/pg", "embedded-postgres", "@nimblenewt/registry"],
   api: [],
-  worker: [],
+  // The worker host speaks the controller channel defined in contracts (card H12b); it depends on nothing else of the product.
+  worker: ["@nimblenewt/contracts"],
   ui: [],
   // Tests that run the controller, the Pi adapter and the worker's sandbox together (cards S09, T06b). It holds no product code and nothing depends on it, which is why
   // it alone may depend on both.

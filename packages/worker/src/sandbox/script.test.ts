@@ -133,7 +133,7 @@ describe("script runner over the sandbox launcher", () => {
   test("the launch asks for exactly the manifest's limits, time and output cap, a private recipe and the data on standard input (stand-in launcher)", async () => {
     const seen: LaunchRequest[] = [];
     const finished: RunResult = { exitCode: 0, signal: null, timedOut: false, killed: false, stdout: "{\"a\":1}", stderr: "", truncated: false, stdoutTruncated: false, durationMs: 1 };
-    const stand = { capacity: { available: true, backend: "bubblewrap", checkedAt: "" }, launch: async (r: LaunchRequest): Promise<SandboxRun> => { seen.push(r); return { runId: "r", mode: "sandboxed", recipeRevision: "x", guest: { workdir: "/work", home: "", scratch: "", tmp: "", inputs: [] }, kill: () => undefined, result: Promise.resolve(finished) }; } };
+    const stand = { capacity: { available: true, backend: "bubblewrap", checkedAt: "" }, launch: async (r: LaunchRequest): Promise<SandboxRun> => { seen.push(r); return { runId: "r", mode: "sandboxed", recipeRevision: "x", guest: { workdir: "/work", home: "", scratch: "", tmp: "", inputs: [] }, kill: () => undefined, write: async () => undefined, endInput: () => undefined, result: Promise.resolve(finished) }; } };
     const out = await scriptRunner({ launcher: stand, interpreters, base }).run(run("1", { stdin: "{\"n\":2}", limits: { cpus: 2, memoryMb: 128, seconds: 3.5 }, maxOutputBytes: 777, env: { A: "b" } }), signal());
     assert.equal(out.text, "{\"a\":1}");
     const r = seen[0]!;
@@ -150,7 +150,7 @@ describe("script runner over the sandbox launcher", () => {
 
   test("a launch that could not start says so", async () => {
     const failed: RunResult = { exitCode: null, signal: null, timedOut: false, killed: false, stdout: "", stderr: "could not start: spawn bwrap ENOENT", truncated: false, stdoutTruncated: false, durationMs: 1 };
-    const stand = { capacity: { available: true, backend: "bubblewrap", checkedAt: "" }, launch: async (): Promise<SandboxRun> => ({ runId: "r", mode: "sandboxed", recipeRevision: "x", guest: { workdir: "/work", home: "", scratch: "", tmp: "", inputs: [] }, kill: () => undefined, result: Promise.resolve(failed) }) };
+    const stand = { capacity: { available: true, backend: "bubblewrap", checkedAt: "" }, launch: async (): Promise<SandboxRun> => ({ runId: "r", mode: "sandboxed", recipeRevision: "x", guest: { workdir: "/work", home: "", scratch: "", tmp: "", inputs: [] }, kill: () => undefined, write: async () => undefined, endInput: () => undefined, result: Promise.resolve(failed) }) };
     await assert.rejects(scriptRunner({ launcher: stand, interpreters, base }).run(run("1"), signal()), /could not be started: spawn bwrap ENOENT/);
   });
 

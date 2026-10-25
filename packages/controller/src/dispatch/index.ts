@@ -7,3 +7,4 @@ export { activeAgents, attendanceLoops, decisionLoops, eventLoops, messageLoops,
 export { LocalWorker, catalogFacts, type AttemptRuntime, type BoundCall, type LocalWorkerOptions, type RuntimeFactory, type SandboxPort, type SandboxSession } from "./local-worker.js";
 export { CachePolicies, type AttemptCache, type CachePolicyDeps, type RouteEndpoint } from "./cache.js";
 export { piFetch, responseBody, type FetchFunction, type PiCall, type PiFetchOptions } from "./pi-fetch.js";
+export { ModelRelay, type AttemptRelay, type ModelEndpoint, type ModelRelayOptions, type RelayRequest, type RelayResponse } from "./relay.js";

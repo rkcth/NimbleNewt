@@ -340,3 +340,4 @@ export interface StorageInfo {
 }
 
 export * from "./harness.js";
+export * from "./worker-channel.js";

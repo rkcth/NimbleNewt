@@ -86,6 +86,42 @@ describe("sandbox launcher (bubblewrap)", () => {
     assert.equal((await ignoring.result).exitCode, 0);
   });
 
+  ifUsable("a streaming run talks with its caller: output arrives as it is written, input is written while it runs, the end of input ends it", async () => {
+    const seen: string[] = [];
+    let wake: (() => void) | undefined;
+    const got = (n: number): Promise<void> => new Promise((resolve) => { const check = (): void => { if (seen.join("").split("\n").length > n) resolve(); else wake = check; }; check(); });
+    // An echo that answers each line at once and says goodbye at the end of input: the replies must come before the input is closed.
+    const run = await launcher.launch({ recipe: recipe(), command: ["/bin/sh", "-c", "while read l; do echo \"got:$l\"; done; echo bye"], timeoutMs: 20_000, maxOutputBytes: 1000, stream: { onStdout: (c) => { seen.push(c.toString("utf8")); wake?.(); } } });
+    await run.write("one\n");
+    await got(1);
+    assert.equal(seen.join(""), "got:one\n", "the reply came while the program was still running");
+    await run.write("two\n");
+    await got(2);
+    run.endInput();
+    const result = await run.result;
+    assert.equal(result.exitCode, 0);
+    assert.equal(seen.join(""), "got:one\ngot:two\nbye\n");
+    assert.equal(result.stdout, "", "output handed on is not collected as well");
+    await assert.rejects(run.write("late\n"), /takes no input/);
+  });
+
+  ifUsable("a streaming run is bounded on standard error only, can be killed, and an ordinary run takes no input", async () => {
+    const chunks: Buffer[] = [];
+    const noisy = await launcher.launch({ recipe: recipe(), command: ["/bin/sh", "-c", "head -c 100000 /dev/zero | tr '\\0' x 1>&2; head -c 300000 /dev/zero | tr '\\0' y; echo done"], timeoutMs: 20_000, maxOutputBytes: 500, stream: { onStdout: (c) => chunks.push(c) } });
+    const result = await noisy.result;
+    assert.equal(result.stderr.length, 500);
+    assert.equal(result.truncated, true);
+    assert.ok(Buffer.concat(chunks).length >= 300_000, "standard output is not cut at the bound of standard error");
+    const waiting = await launcher.launch({ recipe: recipe(), command: ["/bin/sh", "-c", "cat; sleep 30"], timeoutMs: 20_000, maxOutputBytes: 1000, stream: { onStdout: () => undefined } });
+    setTimeout(() => waiting.kill(), 200);
+    const killed = await waiting.result;
+    assert.equal(killed.killed, true);
+    const plain = await launcher.launch({ recipe: recipe(), command: ["/bin/true"], timeoutMs: 20_000, maxOutputBytes: 1000 });
+    await assert.rejects(plain.write("x"), /takes no input/);
+    await plain.result;
+    await assert.rejects(launcher.launch({ recipe: recipe(), command: ["/bin/true"], timeoutMs: 1000, maxOutputBytes: 1000, stdin: "x", stream: { onStdout: () => undefined } }), /cannot be combined with stdin/);
+  });
+
   ifUsable("writes outside the workspace are denied: system directories, the root, and paths that exist only on the host", async () => {
     const result = await sh(`for p in /usr/x /bin/x /etc/x /x /proc/x /dev/x /inputs/x ${secretDir}/x; do ( : > "$p" ) 2>/dev/null && echo "WROTE $p"; done; echo finished`);
     assert.equal(result.stdout.trim(), "finished");

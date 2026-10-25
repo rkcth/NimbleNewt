@@ -1,0 +1,184 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import type { BridgeReplyMessage, ChannelModel, JsonValue } from "@nimblenewt/contracts";
+import { attemptSandbox, type AttemptSandboxPlan } from "../sandbox/attempt.js";
+import type { SandboxLauncher } from "../sandbox/launcher.js";
+import type { ResourceLimits } from "../sandbox/limits.js";
+import { GUEST, normalizeRecipe, type ReadOnlyMount } from "../sandbox/recipe.js";
+import { PROCESS_LIMITS, WorkerProcess, type RelayRequest, type RelayResponse } from "./process.js";
+
+/**
+ * The local worker host's two ports, bound to the real sandbox launcher and the real worker process (card H12b). The controller's `LocalWorker` takes a `SandboxPort` and a `RuntimeFactory`; the worker package depends on no other package of the
+ * product, so the shapes it needs of the controller's types are restated here and the composer's types fit them structurally (the integration tests are where that is checked).
+ *
+ * One attempt: `sandbox.open` checks the attempt's workspace against the rules of card A03 (only the checkout, the agent's home and scratch and the read-only inputs are mounted; the agent's git directory is not reachable) and reserves the sandbox;
+ * `runtimes.open` starts the worker process in it (the Pi conversation, with no network) and speaks to it over the channel. Closing the sandbox, the runtime, or losing the process ends the whole process tree.
+ */
+
+type JsonObj = { readonly [key: string]: JsonValue };
+
+/** What the host needs of the dispatcher's work order. */
+export interface HostOrder {
+  readonly attemptId: string;
+  readonly agentId: string;
+  readonly route: string;
+  readonly credential: string;
+  readonly recipe: { readonly revision: string; readonly reach: readonly string[] };
+  readonly expiresAt: string;
+  readonly resumeFrom?: JsonObj;
+}
+
+export interface HostTurnResult {
+  readonly status: "completed" | "failed" | "cancelled";
+  readonly text?: string;
+  readonly error?: string;
+  readonly checkpoint?: JsonObj;
+  readonly usage?: { readonly turnSeq?: number; readonly cache?: CacheFigures };
+}
+export interface CacheFigures { readonly backend: string; readonly route: string; readonly cachedTokens: number; readonly computedTokens: number; readonly writtenTokens: number }
+
+export interface HostRuntime {
+  run(content: string, requestId: string): Promise<HostTurnResult>;
+  checkpoint(): Promise<JsonObj>;
+  tell(text: string): Promise<void>;
+  refreshContext(): Promise<void>;
+  close(): Promise<void>;
+}
+export interface HostSandboxSession { readonly revision: string; close(): Promise<void> }
+
+/** Where the worker process's program and everything it loads live on this machine, mounted read-only into the sandbox. */
+export interface WorkerApp {
+  /** The Node installation that runs it: its directory, and the executable inside it. */
+  readonly node: { readonly root: string; readonly executable: string };
+  /** The package folders and `node_modules` the process loads, laid out as they are in the repository (`packages/<name>` and `node_modules` under one root, so the workspace links resolve). Never the controller or the worker package. */
+  readonly mounts: readonly ReadOnlyMount[];
+  /** The process's entry file, as the sandbox sees it. */
+  readonly entry: string;
+}
+
+/** The mounts and entry of a source checkout that has been built: the worker process lives in `packages/pi-adapter` and needs `contracts` and `registry` beside it. */
+export function appFromRepository(repository: string, node: { readonly root: string; readonly executable: string }): WorkerApp {
+  const mounts: ReadOnlyMount[] = [{ host: join(repository, "node_modules"), guest: "/opt/app/node_modules" }];
+  for (const name of ["pi-adapter", "contracts", "registry"]) mounts.push({ host: join(repository, "packages", name), guest: `/opt/app/packages/${name}` });
+  return { node, mounts, entry: "/opt/app/packages/pi-adapter/dist/worker/main.js" };
+}
+
+export interface AttemptWorkspace extends AttemptSandboxPlan { readonly limits?: ResourceLimits }
+
+export interface LocalHostOptions<Call> {
+  readonly launcher: Pick<SandboxLauncher, "launch">;
+  readonly app: WorkerApp;
+  /** Paths the launcher must keep out of any mount besides its own list (the controller's data and the git directories); used for the checks made before a launch. */
+  readonly protectedPaths: readonly string[];
+  /** The attempt's checkout, git directory, home and scratch (card A04's workspace). */
+  readonly workspace: (order: HostOrder) => Promise<AttemptWorkspace> | AttemptWorkspace;
+  /** The model the attempt uses, as the process addresses it. */
+  readonly model: (order: HostOrder) => Promise<ChannelModel> | ChannelModel;
+  /** The id part of the agent's own tool namespace. */
+  readonly namespaceId: (order: HostOrder) => string;
+  /** Answers one bridge request of the attempt: the controller's execution service, bound to the attempt's gateway (`call`). */
+  readonly bridge: (order: HostOrder, call: Call, token: string, request: { readonly op: string; readonly callId: string; readonly args?: { readonly [key: string]: unknown } }) => Promise<BridgeReplyMessage>;
+  /** Makes the model call of the attempt: the relay (the controller's, with the route's endpoint, the provider's credential and the cache policy). It refuses by throwing. */
+  readonly relay: (order: HostOrder, request: RelayRequest) => Promise<RelayResponse>;
+  /** The cache key and retention for the attempt's route, and the figures since the last look (reported with each turn). */
+  readonly cache?: (order: HostOrder) => Promise<{ readonly key?: string; readonly retention?: "none" | "short" | "long"; takeUsage?(): Promise<CacheFigures | undefined> }> | { readonly key?: string; readonly retention?: "none" | "short" | "long"; takeUsage?(): Promise<CacheFigures | undefined> };
+  /** What to put before the agent after the owner's decisions changed. */
+  readonly refreshText?: (order: HostOrder) => Promise<string> | string;
+  /** Whether a limit the host cannot enforce in full refuses the launch (default true, as for scripts). */
+  readonly requireEnforced?: boolean;
+  /** The address the process uses for model calls (default `http://relay.invalid`). */
+  readonly relayBase?: string;
+  readonly clock?: () => number;
+}
+
+const RELAY_BASE = "http://relay.invalid";
+const DEFAULT_REFRESH = "The owner's decisions changed. Read the decisions that apply to this task again before you act on anything you had planned.";
+const MAX_RUN_MS = 24 * 60 * 60 * 1000;
+
+interface Reserved { readonly order: HostOrder; readonly workspace: AttemptWorkspace; readonly recipe: ReturnType<typeof attemptSandbox>["recipe"]; process?: WorkerProcess; closed: boolean }
+
+export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
+  readonly sandbox: { open(recipe: HostOrder["recipe"], order: HostOrder): Promise<HostSandboxSession> };
+  readonly runtimes: { open(order: HostOrder, call: Call, from: JsonObj | undefined): Promise<HostRuntime> };
+} {
+  const reserved = new Map<string, Reserved>();
+  const clock = options.clock ?? Date.now;
+
+  const sandbox = {
+    async open(_summary: HostOrder["recipe"], order: HostOrder): Promise<HostSandboxSession> {
+      const workspace = await options.workspace(order);
+      const planned = attemptSandbox(workspace, { protectedPaths: options.protectedPaths });
+      const recipe = { ...planned.recipe, readOnly: [...(planned.recipe.readOnly ?? []), { host: options.app.node.root, guest: "/opt/node" }, ...options.app.mounts] };
+      // Checked against the host now, so a bad workspace refuses the attempt before any process starts; the launcher checks again at the launch.
+      const normalized = normalizeRecipe(recipe, planned.protectedPaths);
+      const entry: Reserved = { order, workspace, recipe, closed: false };
+      reserved.set(order.attemptId, entry);
+      return {
+        revision: normalized.revision,
+        close: async () => {
+          entry.closed = true;
+          if (reserved.get(order.attemptId) === entry) reserved.delete(order.attemptId);
+          await entry.process?.close().catch(() => undefined);
+        },
+      };
+    },
+  };
+
+  const runtimes = {
+    async open(order: HostOrder, call: Call, from: JsonObj | undefined): Promise<HostRuntime> {
+      const entry = reserved.get(order.attemptId);
+      if (entry === undefined || entry.closed) throw new Error("the attempt has no sandbox open");
+      const model = await options.model(order);
+      const cache = await options.cache?.(order);
+      const nn = from?.["nn"] as JsonObj | undefined;
+      let turnSeq = typeof nn?.["turnSeq"] === "number" ? (nn["turnSeq"] as number) : 0;
+      let lastRequest = typeof nn?.["lastRequest"] === "string" ? (nn["lastRequest"] as string) : undefined;
+      // The conversation is kept in the agent's home on this host. A checkpoint to continue from with no such store (another host, a wiped home) would silently start from nothing: refused instead.
+      if (from?.["pi"] !== undefined && !existsSync(join(entry.workspace.home, "pi"))) throw new Error("the attempt resumes from a checkpoint but this host no longer holds the conversation");
+      await entry.process?.close().catch(() => undefined);
+      const remaining = Math.min(MAX_RUN_MS, Math.max(1000, Date.parse(order.expiresAt) - clock()));
+      const process = await WorkerProcess.launch(options.launcher, {
+        recipe: entry.recipe,
+        command: [`/opt/node/${options.app.node.executable}`, options.app.entry],
+        timeoutMs: remaining,
+        // Standard error is kept (bounded) for the failure message; standard output is the channel.
+        maxOutputBytes: 64 * 1024,
+        ...(entry.workspace.limits === undefined ? {} : { limits: entry.workspace.limits }),
+        requireEnforced: options.requireEnforced ?? true,
+      }, {
+        bridge: (token, request) => options.bridge(order, call, token, request),
+        relay: (request) => options.relay(order, request),
+      });
+      entry.process = process;
+      try {
+        await process.start({
+          attemptId: order.attemptId, agentId: order.agentId, namespaceId: options.namespaceId(order), credential: order.credential,
+          storeDir: `${GUEST.home}/pi`, model, relayBase: options.relayBase ?? RELAY_BASE,
+          ...(cache === undefined || (cache.key === undefined && cache.retention === undefined) ? {} : { cache: { ...(cache.key === undefined ? {} : { key: cache.key }), ...(cache.retention === undefined ? {} : { retention: cache.retention }) } }),
+        }, PROCESS_LIMITS.readyMs);
+      } catch (error) {
+        await process.close().catch(() => undefined);
+        throw error;
+      }
+      const wrapCheckpoint = (checkpoint: JsonObj): JsonObj => ({ pi: checkpoint, nn: { turnSeq, ...(lastRequest === undefined ? {} : { lastRequest }) } });
+      return {
+        async run(content, requestId) {
+          let result;
+          try { result = await process.run(requestId, content); } catch (error) { return { status: "failed", error: String((error as Error)?.message ?? error).slice(0, 2000) }; }
+          // The same request again (a replay after a restart, answered from the store) is the same turn: it keeps its number, so its usage is charged once.
+          if (requestId !== lastRequest) { turnSeq += 1; lastRequest = requestId; }
+          const figures = await cache?.takeUsage?.().catch(() => undefined);
+          let checkpoint: JsonObj | undefined;
+          try { checkpoint = wrapCheckpoint(await process.checkpoint()); } catch { checkpoint = undefined; }
+          return { status: result.status, ...(result.text === undefined ? {} : { text: result.text }), ...(result.error === undefined ? {} : { error: result.error }), ...(checkpoint === undefined ? {} : { checkpoint }), usage: { turnSeq, ...(figures === undefined ? {} : { cache: figures }) } };
+        },
+        async checkpoint() { return wrapCheckpoint(await process.checkpoint()); },
+        tell: (text) => process.tell(text),
+        async refreshContext() { await process.tell(await options.refreshText?.(order) ?? DEFAULT_REFRESH); },
+        async close() { await process.close(); },
+      };
+    },
+  };
+
+  return { sandbox, runtimes };
+}

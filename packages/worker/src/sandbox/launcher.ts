@@ -65,6 +65,11 @@ export interface LaunchRequest {
   readonly maxOutputBytes: number;
   /** Written to the process's standard input, which is then closed: data for the program, never part of its command line. Absent: standard input is closed at once. At most 1 MiB. */
   readonly stdin?: string;
+  /**
+   * A long-lived program that talks to its caller (card H12b: the worker process): standard output is handed to `onStdout` as it arrives instead of being collected (`maxOutputBytes` then bounds only standard error), standard
+   * input stays open for `SandboxRun.write` until `endInput` or the run ends. Not combined with `stdin`.
+   */
+  readonly stream?: { readonly onStdout: (chunk: Buffer) => void };
   /** Resource limits for this run. */
   readonly limits?: ResourceLimits;
   /** Refuse the launch unless every limit asked for is enforced in full. Without it a limit the host cannot enforce is reported in the launch record and the run goes ahead. */
@@ -96,6 +101,10 @@ export interface SandboxRun {
   readonly guest: GuestView;
   /** Ends the process and everything it started. Safe to call more than once. */
   kill(): void;
+  /** Writes to the standard input of a run started with `stream`; resolves when the text has been handed to the program. Rejects for any other run, and once the program has gone. */
+  write(text: string): Promise<void>;
+  /** Closes the standard input of a run started with `stream` (the program reads end-of-file). */
+  endInput(): void;
   readonly result: Promise<RunResult>;
 }
 
@@ -176,6 +185,7 @@ export class SandboxLauncher {
     if (typeof command[0] === "string" && !command[0].startsWith("/")) throw new SandboxError("invalid_recipe", "command: the program must be an absolute path as the sandbox sees it");
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) throw new SandboxError("invalid_recipe", "timeoutMs: a whole number from 1 ms to 24 hours");
     if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 1 || maxOutputBytes > MAX_OUTPUT_BYTES) throw new SandboxError("invalid_recipe", "maxOutputBytes: a whole number from 1 to 64 MiB");
+    if (request.stream !== undefined && (request.stdin !== undefined || typeof request.stream.onStdout !== "function")) throw new SandboxError("invalid_recipe", "stream: needs onStdout and cannot be combined with stdin");
     if (request.stdin !== undefined && (typeof request.stdin !== "string" || Buffer.byteLength(request.stdin, "utf8") > MAX_STDIN_BYTES)) throw new SandboxError("invalid_recipe", "stdin: text of at most 1 MiB");
     const recipe = normalizeRecipe(request.recipe, this.#protectedPaths);
     const limits = request.limits === undefined ? {} : checkLimits(request.limits);
@@ -211,15 +221,15 @@ export class SandboxLauncher {
     };
     try { await this.#config.audit(record); } catch (error) { throw new SandboxError("audit_failed", `the launch could not be recorded, so it did not happen: ${(error as Error).message}`, { cause: error }); }
     // Planned only now, after the record is written, so the checks the plan repeats run as close to the start as possible.
-    return this.#start(runId, recipe, limitedPlan(makePlan(), limits, caps).plan, recipe.mode === "sandboxed" ? this.#backend : undefined, timeoutMs, maxOutputBytes, request.stdin);
+    return this.#start(runId, recipe, limitedPlan(makePlan(), limits, caps).plan, recipe.mode === "sandboxed" ? this.#backend : undefined, timeoutMs, maxOutputBytes, request.stdin, request.stream);
   }
 
-  #start(runId: string, recipe: NormalizedRecipe, plan: SpawnPlan, backend: SandboxBackend | undefined, timeoutMs: number, maxOutputBytes: number, stdin: string | undefined): SandboxRun {
+  #start(runId: string, recipe: NormalizedRecipe, plan: SpawnPlan, backend: SandboxBackend | undefined, timeoutMs: number, maxOutputBytes: number, stdin: string | undefined, stream: LaunchRequest["stream"]): SandboxRun {
     const started = Date.now();
     const child = spawn(plan.file, [...plan.args], { env: { ...plan.env }, ...(plan.cwd === undefined ? {} : { cwd: plan.cwd }), stdio: ["pipe", "pipe", "pipe"], detached: true, windowsHide: true });
     // The program's input is the request's `stdin` (none: it reads end-of-file at once). A program that exits without reading it closes the pipe: that is its answer, not an error of the launcher.
     child.stdin.on("error", () => undefined);
-    child.stdin.end(stdin);
+    if (stream === undefined) child.stdin.end(stdin);
     const chunks = { out: [] as Buffer[], err: [] as Buffer[] };
     const sizes = { out: 0, err: 0 };
     const cut = { out: false, err: false };
@@ -228,7 +238,8 @@ export class SandboxLauncher {
       if (data.length > room) cut[which] = true;
       if (room > 0) { chunks[which].push(data.subarray(0, room)); sizes[which] += Math.min(room, data.length); }
     };
-    child.stdout.on("data", take("out"));
+    if (stream === undefined) child.stdout.on("data", take("out"));
+    else child.stdout.on("data", (data: Buffer) => { try { stream.onStdout(data); } catch { /* the receiver's failure is its own; the run goes on until it stops it */ } });
     child.stderr.on("data", take("err"));
     let killed = false;
     let timedOut = false;
@@ -282,7 +293,9 @@ export class SandboxLauncher {
       child.once("error", (error) => { void Promise.resolve(backend?.release?.(plan)).catch(() => undefined); ended = true; clearTimeout(timer); if (poller !== undefined) clearInterval(poller); resolve({ exitCode: null, signal: null, timedOut, killed, stdout: "", stderr: `could not start: ${error.message}`, truncated: false, stdoutTruncated: false, durationMs: Date.now() - started }); });
     });
     const guest: GuestView = backend?.guestView(recipe) ?? { workdir: recipe.workdir, home: recipe.home, scratch: recipe.scratch, tmp: recipe.scratch, inputs: recipe.readOnly.map((m) => ({ host: m.host, guest: m.host })) };
-    const run: SandboxRun = { runId, mode: recipe.mode, recipeRevision: recipe.revision, guest, kill: () => { killed = true; killTree(); }, result };
+    const run: SandboxRun = { runId, mode: recipe.mode, recipeRevision: recipe.revision, guest, kill: () => { killed = true; killTree(); },
+      write: (text) => (stream === undefined || ended ? Promise.reject(new SandboxError("unavailable", "this run takes no input")) : new Promise<void>((resolve, reject) => { child.stdin.write(text, (error) => (error ? reject(error) : resolve())); })),
+      endInput: () => { if (stream !== undefined) child.stdin.end(); }, result };
     this.#live.add(run);
     void result.then(() => this.#live.delete(run));
     return run;
