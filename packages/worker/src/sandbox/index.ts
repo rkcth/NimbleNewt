@@ -10,3 +10,4 @@ export { DEFAULT_HEADROOM, LIMIT_BOUNDS, checkHeadroom, checkLimits, detectLimit
 export { windowsSandboxBackend, AUTOLOGON_ACKNOWLEDGEMENT, VM_FALLBACK_DECISION, type AutologonOptIn, type WindowsSandboxOptions } from "./windows.js";
 export type { WindowsAutologon, WindowsHost, WindowsLockTask, WindowsPackageInfo, WindowsSession } from "./windows-host.js";
 export { windowsRealHost } from "./windows-real.js";
+export { scriptRunner, type InterpreterInstall, type ScriptResult, type ScriptRun, type ScriptRunnerOptions } from "./script.js";

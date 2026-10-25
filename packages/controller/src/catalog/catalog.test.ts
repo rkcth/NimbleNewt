@@ -66,6 +66,8 @@ for (const backend of backends) {
     assert.equal((await c.cat.get(c.ann, v1.name))!.version, "1.1.0", "the latest live version is chosen");
     assert.equal((await c.cat.get(c.ann, v1.name, "1.0.0"))!.digest, v1.digest, "the old version is unchanged");
     await refuses("invalid_command", () => c.cat.register(c.ann, { commandId: cid("r"), name: "fetch", kind: "skill", version: "1.2.0", manifest: manifest({ entryPoint: undefined, interpreter: undefined }), instructionsRecordId: readme }), (e) => assert.match(e.message, /keeps its kind/));
+    // An entry point the worker's runner could never start is refused when the tool is registered, not at its first use.
+    for (const [n, entryPoint] of ["a/./b.js", "a//b.js", "bin/", "../x.js", "/abs.js"].entries()) await refuses("invalid_command", () => c.cat.register(c.ann, { commandId: cid("r"), name: `entry-${n}`, kind: "tool", version: "1.0.0", manifest: manifest({ entryPoint }), instructionsRecordId: readme, executableRecordId: code }), (e) => assert.match(e.message, /entry point/));
   });
 
   suite("only accepted original work of the registrant's own desk can be registered; another agent's content, a draft and a wrong kind of source are refused", async (c) => {

@@ -139,7 +139,7 @@ export function checkManifest(value: unknown, kind: ArtifactKind): Manifest {
   const entryPoint = m["entryPoint"];
   const interpreter = m["interpreter"] as { name?: unknown; version?: unknown } | undefined;
   if (kind === "tool") {
-    if (typeof entryPoint !== "string" || !ENTRY.test(entryPoint) || entryPoint.includes("..")) invalid("manifest.entryPoint", "a tool needs an entry point (a relative path)");
+    if (typeof entryPoint !== "string" || !ENTRY.test(entryPoint) || entryPoint.includes("..") || /(^|\/)\.(\/|$)|\/\/|\/$/.test(entryPoint)) invalid("manifest.entryPoint", "a tool needs an entry point (a relative path)");
     if (interpreter !== undefined && (typeof interpreter !== "object" || interpreter === null || typeof interpreter.name !== "string" || !PLAIN_NAME.test(interpreter.name) || typeof interpreter.version !== "string" || !/^[0-9A-Za-z.+-]{1,40}$/.test(interpreter.version))) invalid("manifest.interpreter", "needs a name and an exact version");
   } else if (entryPoint !== undefined || interpreter !== undefined) invalid("manifest.entryPoint", "a skill carries instructions only and has no entry point or interpreter");
   return {

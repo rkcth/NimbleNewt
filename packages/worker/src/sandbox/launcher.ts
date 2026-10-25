@@ -63,6 +63,8 @@ export interface LaunchRequest {
   readonly timeoutMs: number;
   /** Each of stdout and stderr is cut at this many bytes (1 to 64 MiB). */
   readonly maxOutputBytes: number;
+  /** Written to the process's standard input, which is then closed: data for the program, never part of its command line. Absent: standard input is closed at once. At most 1 MiB. */
+  readonly stdin?: string;
   /** Resource limits for this run. */
   readonly limits?: ResourceLimits;
   /** Refuse the launch unless every limit asked for is enforced in full. Without it a limit the host cannot enforce is reported in the launch record and the run goes ahead. */
@@ -79,6 +81,8 @@ export interface RunResult {
   readonly stderr: string;
   /** True when stdout or stderr was cut at the limit. */
   readonly truncated: boolean;
+  /** Which stream was cut: `truncated` is true when either was. */
+  readonly stdoutTruncated: boolean;
   readonly durationMs: number;
   /** Set when the backend could not clean up after the run (for the Windows backend: a sandbox, an access-list change or a job folder left behind). The owner must act on it. */
   readonly releaseProblem?: string;
@@ -101,6 +105,7 @@ const SUPERVISOR_ROOT = stripTrailingSeparator(fileURLToPath(new URL("../../", i
 const EXIT_DRAIN_MS = 2000;
 const MAX_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
+const MAX_STDIN_BYTES = 1024 * 1024;
 
 function defaultBackend(platform: NodeJS.Platform): SandboxBackend | undefined {
   return platform === "linux" ? bubblewrapBackend() : platform === "darwin" ? seatbeltBackend() : undefined;
@@ -171,6 +176,7 @@ export class SandboxLauncher {
     if (typeof command[0] === "string" && !command[0].startsWith("/")) throw new SandboxError("invalid_recipe", "command: the program must be an absolute path as the sandbox sees it");
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) throw new SandboxError("invalid_recipe", "timeoutMs: a whole number from 1 ms to 24 hours");
     if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 1 || maxOutputBytes > MAX_OUTPUT_BYTES) throw new SandboxError("invalid_recipe", "maxOutputBytes: a whole number from 1 to 64 MiB");
+    if (request.stdin !== undefined && (typeof request.stdin !== "string" || Buffer.byteLength(request.stdin, "utf8") > MAX_STDIN_BYTES)) throw new SandboxError("invalid_recipe", "stdin: text of at most 1 MiB");
     const recipe = normalizeRecipe(request.recipe, this.#protectedPaths);
     const limits = request.limits === undefined ? {} : checkLimits(request.limits);
     checkHeadroom(limits, this.#config.headroom ?? DEFAULT_HEADROOM);
@@ -205,18 +211,21 @@ export class SandboxLauncher {
     };
     try { await this.#config.audit(record); } catch (error) { throw new SandboxError("audit_failed", `the launch could not be recorded, so it did not happen: ${(error as Error).message}`, { cause: error }); }
     // Planned only now, after the record is written, so the checks the plan repeats run as close to the start as possible.
-    return this.#start(runId, recipe, limitedPlan(makePlan(), limits, caps).plan, recipe.mode === "sandboxed" ? this.#backend : undefined, timeoutMs, maxOutputBytes);
+    return this.#start(runId, recipe, limitedPlan(makePlan(), limits, caps).plan, recipe.mode === "sandboxed" ? this.#backend : undefined, timeoutMs, maxOutputBytes, request.stdin);
   }
 
-  #start(runId: string, recipe: NormalizedRecipe, plan: SpawnPlan, backend: SandboxBackend | undefined, timeoutMs: number, maxOutputBytes: number): SandboxRun {
+  #start(runId: string, recipe: NormalizedRecipe, plan: SpawnPlan, backend: SandboxBackend | undefined, timeoutMs: number, maxOutputBytes: number, stdin: string | undefined): SandboxRun {
     const started = Date.now();
-    const child = spawn(plan.file, [...plan.args], { env: { ...plan.env }, ...(plan.cwd === undefined ? {} : { cwd: plan.cwd }), stdio: ["ignore", "pipe", "pipe"], detached: true, windowsHide: true });
+    const child = spawn(plan.file, [...plan.args], { env: { ...plan.env }, ...(plan.cwd === undefined ? {} : { cwd: plan.cwd }), stdio: ["pipe", "pipe", "pipe"], detached: true, windowsHide: true });
+    // The program's input is the request's `stdin` (none: it reads end-of-file at once). A program that exits without reading it closes the pipe: that is its answer, not an error of the launcher.
+    child.stdin.on("error", () => undefined);
+    child.stdin.end(stdin);
     const chunks = { out: [] as Buffer[], err: [] as Buffer[] };
     const sizes = { out: 0, err: 0 };
-    let truncated = false;
+    const cut = { out: false, err: false };
     const take = (which: "out" | "err") => (data: Buffer): void => {
       const room = maxOutputBytes - sizes[which];
-      if (data.length > room) truncated = true;
+      if (data.length > room) cut[which] = true;
       if (room > 0) { chunks[which].push(data.subarray(0, room)); sizes[which] += Math.min(room, data.length); }
     };
     child.stdout.on("data", take("out"));
@@ -263,14 +272,14 @@ export class SandboxLauncher {
         if (poller !== undefined) clearInterval(poller);
         // Nothing the run started is left running after it; the result is given once that is done.
         // A process that outlived the run may still hold the output pipes; closing our ends lets the launcher's own process exit instead of waiting on it for ever.
-        child.stdout.destroy(); child.stderr.destroy();
+        child.stdout.destroy(); child.stderr.destroy(); child.stdin.destroy();
         let releaseProblem: string | undefined;
-        void sweep().catch(() => undefined).then(async () => { try { await backend?.release?.(plan); } catch (error) { releaseProblem = (error as Error).message; } }).then(() => resolve({ exitCode, signal, timedOut, killed, stdout: Buffer.concat(chunks.out).toString("utf8"), stderr: Buffer.concat(chunks.err).toString("utf8"), truncated, durationMs: Date.now() - started, ...(releaseProblem === undefined ? {} : { releaseProblem }) }));
+        void sweep().catch(() => undefined).then(async () => { try { await backend?.release?.(plan); } catch (error) { releaseProblem = (error as Error).message; } }).then(() => resolve({ exitCode, signal, timedOut, killed, stdout: Buffer.concat(chunks.out).toString("utf8"), stderr: Buffer.concat(chunks.err).toString("utf8"), truncated: cut.out || cut.err, stdoutTruncated: cut.out, durationMs: Date.now() - started, ...(releaseProblem === undefined ? {} : { releaseProblem }) }));
       };
       child.once("close", finish);
       // A trusted-host child that started its own session can outlive its parent and keep the output pipes open; after a short drain the result is given anyway.
       child.once("exit", (code, signal) => { setTimeout(() => finish(code, signal), EXIT_DRAIN_MS).unref(); });
-      child.once("error", (error) => { void Promise.resolve(backend?.release?.(plan)).catch(() => undefined); ended = true; clearTimeout(timer); if (poller !== undefined) clearInterval(poller); resolve({ exitCode: null, signal: null, timedOut, killed, stdout: "", stderr: `could not start: ${error.message}`, truncated: false, durationMs: Date.now() - started }); });
+      child.once("error", (error) => { void Promise.resolve(backend?.release?.(plan)).catch(() => undefined); ended = true; clearTimeout(timer); if (poller !== undefined) clearInterval(poller); resolve({ exitCode: null, signal: null, timedOut, killed, stdout: "", stderr: `could not start: ${error.message}`, truncated: false, stdoutTruncated: false, durationMs: Date.now() - started }); });
     });
     const guest: GuestView = backend?.guestView(recipe) ?? { workdir: recipe.workdir, home: recipe.home, scratch: recipe.scratch, tmp: recipe.scratch, inputs: recipe.readOnly.map((m) => ({ host: m.host, guest: m.host })) };
     const run: SandboxRun = { runId, mode: recipe.mode, recipeRevision: recipe.revision, guest, kill: () => { killed = true; killTree(); }, result };

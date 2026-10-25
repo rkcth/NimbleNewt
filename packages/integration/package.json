@@ -20,7 +20,8 @@
     "@earendil-works/pi-durable": "1.3.0",
     "@nimblenewt/contracts": "0.0.0",
     "@nimblenewt/controller": "0.0.0",
-    "@nimblenewt/pi-adapter": "0.0.0"
+    "@nimblenewt/pi-adapter": "0.0.0",
+    "@nimblenewt/worker": "0.0.0"
   },
   "scripts": {
     "test": "node ../../scripts/run-package-tests.mjs --timeout=300000"

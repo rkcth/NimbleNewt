@@ -74,6 +74,18 @@ describe("sandbox launcher (bubblewrap)", () => {
     assert.equal(readFileSync(join(r.scratch, "s.txt"), "utf8"), "s\n");
   });
 
+  ifUsable("standard input carries the request's data and is then closed; without it the program reads end-of-file at once", async () => {
+    const started = await launcher.launch({ recipe: recipe(), command: ["/bin/sh", "-c", "cat; echo; echo end"], timeoutMs: 20_000, maxOutputBytes: 1_000_000, stdin: "line one\n\"; echo INJECTED #\n" });
+    const withInput = await started.result;
+    assert.equal(withInput.stdout, "line one\n\"; echo INJECTED #\n\nend\n", "the text is data: nothing in it ran");
+    const without = await run(["/bin/sh", "-c", "cat; echo end"]);
+    assert.equal(without.stdout, "end\n");
+    await assert.rejects(launcher.launch({ recipe: recipe(), command: ["/bin/true"], timeoutMs: 1000, maxOutputBytes: 1000, stdin: "x".repeat(1024 * 1024 + 1) }), /stdin: text of at most 1 MiB/);
+    // A program that never reads its input does not hang or fail the launcher.
+    const ignoring = await launcher.launch({ recipe: recipe(), command: ["/bin/true"], timeoutMs: 20_000, maxOutputBytes: 1000, stdin: "y".repeat(500_000) });
+    assert.equal((await ignoring.result).exitCode, 0);
+  });
+
   ifUsable("writes outside the workspace are denied: system directories, the root, and paths that exist only on the host", async () => {
     const result = await sh(`for p in /usr/x /bin/x /etc/x /x /proc/x /dev/x /inputs/x ${secretDir}/x; do ( : > "$p" ) 2>/dev/null && echo "WROTE $p"; done; echo finished`);
     assert.equal(result.stdout.trim(), "finished");
