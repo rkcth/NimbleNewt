@@ -1,6 +1,6 @@
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
-import { dirname, isAbsolute, join, normalize, sep } from "node:path";
+import { dirname, isAbsolute, join, posix } from "node:path";
 import { SandboxError } from "./errors.js";
 import type { SandboxLauncher } from "./launcher.js";
 
@@ -63,10 +63,11 @@ async function removeTree(directory: string, onLeftover: ScriptRunnerOptions["on
   try { mend(directory); await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); } catch (error) { onLeftover?.(directory, (error as Error).message); }
 }
 
-/** The entry point must stay inside the script's own directory: relative, normalised, no "..". */
+/** The entry point must stay inside the script's own directory: relative, normalised, no "..", written with "/". */
 function entryPoint(argv: readonly string[]): string {
   const entry = argv.length === 1 ? argv[0] : undefined;
-  if (typeof entry !== "string" || entry.length === 0 || entry.includes("\0") || isAbsolute(entry) || normalize(entry) !== entry || entry === "." || entry.endsWith(sep) || entry.split(sep).includes("..") || entry.startsWith("-")) {
+  // The manifest writes the entry point with "/" on every system (the same bytes mean the same file everywhere); a backslash or a drive letter is not a path of the manifest.
+  if (typeof entry !== "string" || entry.length === 0 || entry.includes("\0") || entry.includes("\\") || /^[A-Za-z]:/.test(entry) || posix.isAbsolute(entry) || isAbsolute(entry) || posix.normalize(entry) !== entry || entry === "." || entry.endsWith("/") || entry.split("/").includes("..") || entry.startsWith("-")) {
     throw new SandboxError("invalid_recipe", "argv: must be one entry point, a relative path inside the script's directory");
   }
   return entry;

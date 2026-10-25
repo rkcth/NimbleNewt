@@ -158,7 +158,7 @@ describe("script runner over the sandbox launcher", () => {
     const refusing = { capacity: { available: true, backend: "bubblewrap", checkedAt: "" }, launch: async (): Promise<SandboxRun> => { throw new SandboxError("unavailable", "these limits cannot be fully enforced on this host: memoryMb (no cgroup)"); } };
     await assert.rejects(scriptRunner({ launcher: refusing, interpreters, base }).run(run("1"), signal()), /cannot be fully enforced/);
     await assert.rejects(scriptRunner({ launcher: refusing, interpreters, base }).run(run("1", { program: "ruby" }), signal()), /no ruby /);
-    for (const argv of [["../x.js"], ["/etc/passwd"], ["a/../../x"], ["-e"], [], ["a.js", "b"], [""], ["a//b.js"], ["a/"], ["a/./b"]]) {
+    for (const argv of [["../x.js"], ["/etc/passwd"], ["a/../../x"], ["-e"], [], ["a.js", "b"], [""], ["a//b.js"], ["a/"], ["a/./b"], ["a\\b.js"], ["C:x.js"]]) {
       await assert.rejects(scriptRunner({ launcher: refusing, interpreters, base }).run(run("1", { argv }), signal()), /argv: must be one entry point/, JSON.stringify(argv));
     }
     assert.deepEqual(readdirSync(base), [], "nothing is left behind by a refusal");
