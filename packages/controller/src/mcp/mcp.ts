@@ -200,6 +200,21 @@ export class McpService {
     return { id };
   }
 
+  /**
+   * Where a remote server is reached, for the host that connects to it (card H12g). Asked for at each connection, never cached by the caller: a server the owner revoked gives nothing, so no new connection is made for it.
+   * Only staff (the owner, a host, a service) may ask; the credential reference is not part of the answer.
+   */
+  async remoteEndpoint(by: Principal, serverId: string): Promise<{ readonly url: string; readonly name: string }> {
+    if (!(by.kind === "owner" || by.kind === "host" || by.kind === "service") || by.taskScope !== undefined) throw new DomainError("forbidden", `${by.id} may not look up where an MCP server is reached`);
+    await this.#gate();
+    const id = clean(serverId, "serverId", SERVER_ID, "is not an MCP server ID");
+    const server = (await this.#runner.get("mcp-server", id))?.body as unknown as ServerBody | undefined;
+    if (server === undefined) throw new DomainError("not_found", "no such MCP server");
+    if (server.state !== "approved") throw new DomainError("forbidden", `MCP server ${server.name} is ${server.state}; no new connection is made`);
+    if (server.mode !== "remote" || server.remote === undefined) throw new DomainError("invalid_command", `MCP server ${server.name} is not a remote server`, { field: "serverId" });
+    return { url: server.remote.url, name: server.name };
+  }
+
   /** The owner withdraws a server: no further call is authorized. */
   async revoke(owner: Principal, command: NoActor & { serverId: string; expectedRevision: number }): Promise<void> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner`);
