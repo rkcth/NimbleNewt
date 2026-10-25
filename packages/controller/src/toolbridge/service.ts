@@ -88,6 +88,11 @@ export interface ToolExecutionDeps {
   readonly state?: Pick<StateApi, "handle">;
   /** The host's facts when the composer knows better than `catalogFacts` over the announcement and the declared capacity (the facts always come from the host, never the request). */
   readonly facts?: (hostId: string) => Promise<HostFacts | undefined>;
+  /**
+   * Whether the host runs attempts on this machine. A script of the catalogue runs through this process's launcher, so a call made from an attempt on any other host (a remote worker, card H02) is refused instead of running on the wrong machine.
+   * Required, so a composer cannot forget it: one with only this machine's workers answers `() => true`.
+   */
+  readonly isLocalHost: (hostId: string) => boolean;
 }
 
 /** The bound gateway of the attempt the request came through. */
@@ -110,6 +115,8 @@ export class ToolExecutionService {
   readonly #deps: ToolExecutionDeps;
   /** Calls this service is handing to the gateway right now (attempt and call ID), for the replay-safe hook. */
   readonly #bridgeCalls = new Set<string>();
+  /** What each call ID of an attempt was first used for (a digest of the request), so a provider ID that repeats cannot stand for a different request. Bounded per attempt and overall. */
+  readonly #calls = new Map<string, Map<string, { digest: string; inFlight: number; answered: boolean }>>();
 
   constructor(deps: ToolExecutionDeps) { this.#deps = deps; }
 
@@ -127,21 +134,30 @@ export class ToolExecutionService {
       if (!isObject(args)) return refusal("invalid_command", "args: must be a JSON object");
       if (canonicalJson(args).length > BRIDGE_LIMITS.args) return refusal("invalid_command", `args: must be at most ${BRIDGE_LIMITS.args} characters when written out`);
       const context = await this.#bind(token, gateway, request.callId);
-      // A pause stops everything the agent writes through the bridge; reading goes on.
-      if (WRITES.has(request.op as BridgeOperation)) {
-        const paused = await this.#deps.pauses.guard(context.taskId);
-        if (paused.blockedBy.length > 0) return refusal("paused", `the task is paused (${paused.blockedBy.map((s) => `${s.kind} ${s.id}`).join(", ")}); ${request.op} is refused until it is resumed`);
+      const used = this.#callIdUse(context.attemptId, request.callId, canonicalJson({ op: request.op, args }));
+      if (used !== undefined) return refusal("invalid_command", used);
+      // A request that was refused did nothing, so its call ID may be used again (for a corrected request); one that was answered keeps it.
+      let response: BridgeResponse | undefined;
+      try {
+        // A pause stops everything the agent writes through the bridge; reading goes on.
+        const paused = WRITES.has(request.op as BridgeOperation) ? await this.#deps.pauses.guard(context.taskId) : undefined;
+        if (paused !== undefined && paused.blockedBy.length > 0) response = refusal("paused", `the task is paused (${paused.blockedBy.map((s) => `${s.kind} ${s.id}`).join(", ")}); ${request.op} is refused until it is resumed`);
+        else {
+          switch (request.op as BridgeOperation) {
+            case "desk.read": response = await this.#deskRead(context, args); break;
+            case "desk.write": response = await this.#deskWrite(context, args); break;
+            case "task.get": case "task.update": case "task.transition": response = await this.#task(token, context, request.op as BridgeOperation, args); break;
+            case "message.send": response = await this.#message(context, args); break;
+            case "tool.register": response = await this.#register(context, args); break;
+            case "tool.discover": response = await this.#discover(context, args); break;
+            case "tool.describe": response = await this.#describe(context, args); break;
+            case "tool.invoke": response = await this.#invoke(context, gateway, args); break;
+          }
+        }
+      } finally {
+        this.#endCall(context.attemptId, request.callId, response?.ok === true);
       }
-      switch (request.op as BridgeOperation) {
-        case "desk.read": return await this.#deskRead(context, args);
-        case "desk.write": return await this.#deskWrite(context, args);
-        case "task.get": case "task.update": case "task.transition": return await this.#task(token, context, request.op as BridgeOperation, args);
-        case "message.send": return await this.#message(context, args);
-        case "tool.register": return await this.#register(context, args);
-        case "tool.discover": return await this.#discover(context, args);
-        case "tool.describe": return await this.#describe(context, args);
-        case "tool.invoke": return await this.#invoke(context, gateway, args);
-      }
+      return response!;
     } catch (error) {
       if (isDomainError(error, "unauthenticated")) return refusal("unauthenticated", "the credential was not accepted");
       if (error instanceof DomainError) return refusal(error.code, error.message);
@@ -164,6 +180,35 @@ export class ToolExecutionService {
       return v !== undefined && v.revoked === undefined && v.kind === "tool" && v.manifest.recovery === "restart";
     } catch { return false; }
   };
+
+  /** A call ID may be sent again for the same request (asking again is the same call), never for another: that would answer, or replay, the earlier one. */
+  #callIdUse(attemptId: string, callId: string, request: string): string | undefined {
+    let seen = this.#calls.get(attemptId);
+    if (seen === undefined) {
+      seen = new Map();
+      this.#calls.set(attemptId, seen);
+      while (this.#calls.size > 256) this.#calls.delete(this.#calls.keys().next().value as string);
+    }
+    const digest = createHash("sha256").update(request).digest("hex");
+    const earlier = seen.get(callId);
+    if (earlier !== undefined) {
+      if (earlier.digest !== digest) return `callId: ${callId.slice(0, 40)} was already used in this attempt for a different request; use a new call ID`;
+      earlier.inFlight++;
+      return undefined;
+    }
+    if (seen.size >= 5000) seen.delete(seen.keys().next().value as string);
+    seen.set(callId, { digest, inFlight: 1, answered: false });
+    return undefined;
+  }
+
+  /** The request was handled: an answer keeps the ID; a refusal frees it once no other copy of the request is still being handled and none was answered. */
+  #endCall(attemptId: string, callId: string, answered: boolean): void {
+    const entry = this.#calls.get(attemptId)?.get(callId);
+    if (entry === undefined) return;
+    entry.inFlight--;
+    if (answered) entry.answered = true;
+    if (entry.inFlight <= 0 && !entry.answered) this.#calls.get(attemptId)!.delete(callId);
+  }
 
   // ---- who is asking --------------------------------------------------------------------------------------------------------
 
@@ -279,6 +324,7 @@ export class ToolExecutionService {
     const target = this.#target(args);
     const input = args["input"] ?? {};
     if (!isObject(input)) return invalid("input", "must be a JSON object");
+    if (!this.#deps.isLocalHost(c.hostId)) throw new DomainError("unavailable", "this attempt runs on a host that is not this machine; tools of the catalogue cannot be run for it yet");
     const pathName = toolPathName(target.canonical);
     // A call that already has a record keeps its version.
     const recorded = await this.#deps.dispatch.toolOperation(this.#deps.principal, c.attemptId, c.callId);

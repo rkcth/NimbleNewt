@@ -60,7 +60,7 @@ for (const backend of backends) {
         const runner: ScriptRunner = { run: async (launch, signal) => { runs.push(launch); return behave.run(launch, signal); } };
         const hostFacts = { os: "linux" as const, arch: "x64" as const, interpreters: { node: "22.19.0" }, packages: {}, cpus: 8, memoryMb: 16_384 };
         const serviceOver = (dispatcher: DispatcherService, facts?: false): ToolExecutionService =>
-          new ToolExecutionService({ principal: w.dispatcherPrincipal, credentials: w.credentials, dispatch: dispatcher, assignments: w.assignments, catalog, hosts: w.hosts, admission: w.admission, runner, pauses: w.pauses, desks, ...(facts === false ? {} : { facts: async () => hostFacts }) });
+          new ToolExecutionService({ principal: w.dispatcherPrincipal, credentials: w.credentials, dispatch: dispatcher, assignments: w.assignments, catalog, hosts: w.hosts, admission: w.admission, runner, pauses: w.pauses, desks, ...(facts === false ? {} : { facts: async () => hostFacts }), isLocalHost: () => true });
         const svc = serviceOver({ get: (...a: Parameters<DispatcherService["get"]>) => c.dispatcher.get(...a), toolOperation: (...a: Parameters<DispatcherService["toolOperation"]>) => c.dispatcher.toolOperation(...a) } as never);
         const c: Ctx = Object.assign(w, {
           desks, catalog, svc, runs, behave, serviceOver,
@@ -222,8 +222,38 @@ for (const backend of backends) {
     assert.equal(c.runs.length, 0);
   });
 
-  suite("without a grant for the tool the dispatcher's tool path refuses the call and records it; nothing runs", async (c) => {
-    // Ann may register tools but holds no standing grant for her own namespace.
+  suite("a call ID stands for one request in an attempt: asking again is the same call, a different request under it is refused, a refused one frees the ID; a tool call from a host that is not this machine is refused", async (c) => {
+    const ann = await c.agentFor("ann");
+    await c.task("t", ann);
+    const seen: unknown[] = [];
+    const svc = new ToolExecutionService({
+      principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
+      state: { handle: async (_t: unknown, raw: unknown) => { seen.push(raw); return { v: 1, op: "x", ok: true, result: { done: true } } as never; } },
+      isLocalHost: () => false,
+    });
+    const out: Record<string, BridgeResponse> = {};
+    c.worker.script = async ({ order, gateway }) => {
+      const send = (op: string, args: JsonObject, callId: string) => svc.handle(order.credential, gateway, { op, callId, args });
+      out["first"] = await send("task.update", { expectedRevision: 1, title: "A" }, "call_0");
+      out["same"] = await send("task.update", { expectedRevision: 1, title: "A" }, "call_0");
+      out["other"] = await send("task.update", { expectedRevision: 1, title: "B" }, "call_0");
+      out["bad"] = await send("task.update", { expectedRevision: 1, title: "C", taskId: "task-aaaaaaaaaaaaaaaaaaaa" }, "call_1");
+      out["fixed"] = await send("task.update", { expectedRevision: 1, title: "C" }, "call_1");
+      out["remote"] = await send("tool.invoke", { tool: "a_aaaaaaaaaaaaaaaa.x", input: {} }, "call_2");
+      return { status: "completed", text: "x" };
+    };
+    await c.tick();
+    good(out["first"]!); good(out["same"]!);
+    assert.equal(bad(out["other"]!).code, "invalid_command");
+    assert.match(bad(out["other"]!).message, /already used in this attempt for a different request/);
+    bad(out["bad"]!);
+    good(out["fixed"]!);
+    assert.equal(bad(out["remote"]!).code, "unavailable");
+    assert.match(bad(out["remote"]!).message, /not this machine/);
+  });
+
+  suite("an agent holds the grant for its own tool namespace from enrolment, so the tool path asks for approval instead of refusing the call; nothing runs before it", async (c) => {
+    // Ann is enrolled with no grant for her own namespace given: she holds it all the same.
     const ann = await c.agent("ann", [...workGrants(c.project), { action: "desk.write", project: c.project }, { action: "desk.read", project: c.project }, { action: "catalog.register", project: "*" }, { action: "catalog.read", project: "*" }]);
     const { attemptId } = await c.task("t", ann);
     let result: JsonObject | undefined;
@@ -232,11 +262,11 @@ for (const backend of backends) {
       result = good(await s.send("tool.invoke", { tool: name, input: { url: "u" } }, "no-grant"));
     });
     await c.tick();
-    assert.equal(result!["state"], "refused");
-    assert.match(result!["reason"] as string, /holds no grant/);
+    assert.equal(result!["state"], "awaiting-approval");
+    assert.doesNotMatch(String(result!["reason"] ?? ""), /holds no grant/);
     assert.equal(c.runs.length, 0);
     const ops = (await c.storage.listAggregates(`tool-op-${attemptId}`, { limit: 10 })).map((a) => a.body as unknown as { state: string });
-    assert.deepEqual(ops.map((o) => o.state), ["refused"], "the refusal is a durable operation");
+    assert.deepEqual(ops.map((o) => o.state), ["awaiting-approval"], "the parked call is a durable operation");
   });
 
   suite("an active call finishes on its version while the next call uses the newly registered one", async (c) => {
@@ -344,8 +374,7 @@ for (const backend of backends) {
     const svc = new ToolExecutionService({
       principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
       state: { handle: async (token: unknown, raw: unknown) => { seen.state.push({ token, raw }); return { v: 1, op: "x", ok: true, result: { done: true } } as never; } },
-      messages: { send: async (by: unknown, command: unknown) => { seen.messages.push({ by: (by as { id: string }).id, command }); return { id: "m", replayed: false } as never; } },
-    });
+      messages: { send: async (by: unknown, command: unknown) => { seen.messages.push({ by: (by as { id: string }).id, command }); return { id: "m", replayed: false } as never; } }, isLocalHost: () => true });
     const out: Record<string, BridgeResponse> = {};
     c.worker.script = async ({ order, gateway }) => {
       const send = (op: string, args: JsonObject, callId: string) => svc.handle(order.credential, gateway, { op, callId, args });
@@ -443,8 +472,7 @@ for (const backend of backends) {
     const svc = new ToolExecutionService({
       principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
       state: { handle: async (_t: unknown, raw: unknown) => { touched.push((raw as { op: string }).op); return { v: 1, op: "x", ok: true, result: {} } as never; } },
-      messages: { send: async () => { touched.push("message.send"); return { id: "m", replayed: false } as never; } },
-    });
+      messages: { send: async () => { touched.push("message.send"); return { id: "m", replayed: false } as never; } }, isLocalHost: () => true });
     const out: Record<string, BridgeResponse> = {};
     c.worker.script = c.session(async (s) => {
       const send = (op: string, args: JsonObject, callId: string) => svc.handle(s.token, s.gateway, { op, callId, args });

@@ -47,8 +47,7 @@ async function converse(launcher: SandboxLauncher, records: LaunchRecord[], sour
       principal: world.dispatcherPrincipal, credentials: world.credentials, dispatch: { get: (...a) => dispatcher.get(...a), toolOperation: (...a) => dispatcher.toolOperation(...a) }, assignments: world.assignments, catalog, hosts: world.hosts, admission: world.admission, pauses: world.pauses, desks,
       // The real runner over the real launcher. This host may not be able to enforce cgroup limits (a container), so they are not required here; the launch record shows how each was applied.
       runner: scriptRunner({ launcher, interpreters: (name, version) => (name === "node" && version === process.versions.node ? { root: nodeRoot, executable: "bin/node" } : undefined), base: runs, requireEnforced: false }),
-      facts: async () => ({ os: "linux", arch: "x64", interpreters: { node: process.versions.node }, packages: {}, cpus: 8, memoryMb: 16_384 }),
-    });
+      facts: async () => ({ os: "linux", arch: "x64", interpreters: { node: process.versions.node }, packages: {}, cpus: 8, memoryMb: 16_384 }), isLocalHost: () => true });
     const ann = await world.agent("ann", [...workGrants(world.project), { action: "desk.write", project: world.project }, { action: "desk.read", project: world.project }, { action: "catalog.register", project: "*" }, { action: "catalog.read", project: "*" }, { action: `tool.${personalNamespace("agent:ann").replace(/^a_/, "a-")}.*`, project: world.project }]);
     const { attemptId } = await world.task("Double a number with a tool of my own", ann);
     await world.policy.set(world.owner, { scope: "installation", commandId: "pol", profile: "autonomous" });

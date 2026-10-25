@@ -95,6 +95,9 @@ describe("the worker process runs the Pi conversation inside the sandbox", () =>
       assert.equal(result.text, "all done");
       assert.equal(result.usage?.turnSeq, 1);
       assert.equal(typeof result.checkpoint, "object");
+      // The request opens with a look at the catalogue; the tool call is the other one.
+      assert.equal(bridged.filter((b) => b.op === "tool.discover").length, 1);
+      bridged.splice(0, bridged.length, ...bridged.filter((b) => b.op !== "tool.discover"));
       assert.equal(bridged.length, 1);
       assert.equal(bridged[0]!.token, "task-credential-1");
       assert.equal(bridged[0]!.op, "desk.read");

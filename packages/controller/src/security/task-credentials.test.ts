@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { personalNamespace } from "../catalog/catalog.js";
 import { after, test } from "node:test";
 import { DeskService } from "../context/index.js";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
@@ -71,7 +72,7 @@ for (const backend of backends) {
   suite("a grant for every project is narrowed to the task's project, and a wildcard agent is still held inside it", async (c) => {
     await c.principals.enroll(c.owner, { commandId: cid("e"), kind: "agent", name: "mid", grants: [{ action: "desk.*", project: "*" }] });
     const p = await c.tc.authenticate((await c.tc.issue(c.owner, { commandId: cid("i"), taskId: c.tb, agentId: "agent:mid" })).token);
-    assert.deepEqual(p.grants.map((g) => [g.action, g.project]), [["desk.*", c.b]]);
+    assert.deepEqual(p.grants.map((g) => [g.action, g.project]), [["desk.*", c.b], [`tool.${personalNamespace("agent:mid").replace(/^a_/, "a-")}.*`, c.b]], "the grant for the agent's own tool namespace comes with enrolment");
     assert.ok(allows(p, "desk.read", c.b) && !allows(p, "desk.read", c.a));
     const wide = await c.tc.authenticate((await c.tc.issue(c.owner, { commandId: cid("i"), taskId: c.ta, agentId: "agent:wide" })).token);
     assert.ok(allows(wide, "task.update", c.a) && !allows(wide, "task.update", c.b) && !allows(wide, "principal.manage", undefined));

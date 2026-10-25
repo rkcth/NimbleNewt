@@ -36,8 +36,7 @@ test("one conversation, one worker start: a real Pi agent writes a script to its
     const service = new ToolExecutionService({
       principal: world.dispatcherPrincipal, credentials: world.credentials, dispatch: { get: (...a) => dispatcher.get(...a), toolOperation: (...a) => dispatcher.toolOperation(...a) }, assignments: world.assignments, catalog, hosts: world.hosts, admission: world.admission, pauses: world.pauses, desks,
       runner: { run: async (launch) => { launches.push(launch); return { text: JSON.stringify({ result: (JSON.parse(launch.stdin) as { n: number }).n * 2 }) }; } },
-      facts: async () => ({ os: "linux", arch: "x64", interpreters: { node: "22.19.0" }, packages: {}, cpus: 8, memoryMb: 16_384 }),
-    });
+      facts: async () => ({ os: "linux", arch: "x64", interpreters: { node: "22.19.0" }, packages: {}, cpus: 8, memoryMb: 16_384 }), isLocalHost: () => true });
     const ann = await world.agent("ann", [...workGrants(world.project), { action: "desk.write", project: world.project }, { action: "desk.read", project: world.project }, { action: "catalog.register", project: "*" }, { action: "catalog.read", project: "*" }, { action: `tool.${personalNamespace("agent:ann").replace(/^a_/, "a-")}.*`, project: world.project }]);
     const { attemptId } = await world.task("Double a number with a tool of my own", ann);
     await world.policy.set(world.owner, { scope: "installation", commandId: "pol", profile: "autonomous" });

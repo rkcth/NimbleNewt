@@ -50,7 +50,7 @@ test("the extension holds only a send function bound to the worker's credential:
   assert.throws(() => { (transport as { send: unknown }).send = () => undefined; }, TypeError);
   assert.throws(() => boundTransport("", async () => ({ ok: true, result: {} })), InvalidToolError);
   const bridge = createBridge(transport);
-  assert.deepEqual(Object.keys(bridge).sort(), ["declarations", "tools"]);
+  assert.deepEqual(Object.keys(bridge).sort(), ["declarations", "seed", "tools"]);
   await bridge.tools.find((t) => t.name === "nimblenewt__task-get")!.execute({} as never, { signal: undefined, callId: "c1" });
   assert.deepEqual(delivered, [{ token: "tcr-secret.value", request: { op: "task.get", callId: "c1", args: {} } }]);
   // The tool's own context carries only the call ID and a signal: nothing about who asks is ever sent.
@@ -144,6 +144,20 @@ test("a personal tool gets no handle to the transport or the controller: it sees
   assert.equal(controller.seen.length, 0);
 });
 
+test("an attempt resumed in a new process goes on numbering after the call IDs already in its conversation, and no provider ID equals a number the bridge gave", async () => {
+  const c = fakeController();
+  const bridge = createBridge(c.transport);
+  bridge.seed(["call_0", "call_0:2"]);
+  const tool = bridge.tools.find((t) => t.name === bridgeToolName("task.get"))!;
+  const ctx = (callId: string) => ({ callId }) as never;
+  await tool.execute({}, ctx("call_0"));
+  await tool.execute({}, ctx("call_0:2"));
+  const ids = c.seen.map((r) => r.callId);
+  assert.match(ids[0]!, /^d:[0-9a-f]{40}$/, "call_0 was used before the restart");
+  assert.notEqual(ids[1], "call_0:2", "the second use of a seeded ID is renumbered too");
+  assert.notEqual(ids[0], ids[1]);
+});
+
 test("a provider call ID the controller would refuse (a `|`, or too long) is sent as a digest of itself, always the same one; a fitting ID is sent as it is", async () => {
   const c = fakeController();
   const bridge = createBridge(c.transport);
@@ -155,7 +169,12 @@ test("a provider call ID the controller would refuse (a `|`, or too long) is sen
   await tool.execute({}, ctx("call_2"));
   const ids = c.seen.map((r) => r.callId);
   assert.match(ids[0]!, /^h:[0-9a-f]{40}$/);
-  assert.equal(ids[0], ids[1]);
+  assert.notEqual(ids[0], ids[1], "the second use of a provider ID is another request to the controller");
+  const again = fakeController();
+  const tool2 = createBridge(again.transport).tools.find((t) => t.name === bridgeToolName("task.get"))!;
+  await tool2.execute({}, ctx("call_1|fc_9"));
+  await tool2.execute({}, ctx("call_1|fc_9"));
+  assert.deepEqual(again.seen.map((r) => r.callId), [ids[0], ids[1]], "the same sequence of calls always gets the same IDs, so a restart replays them as the same calls");
   assert.match(ids[2]!, /^h:[0-9a-f]{40}$/);
   assert.equal(ids[3], "call_2");
 });

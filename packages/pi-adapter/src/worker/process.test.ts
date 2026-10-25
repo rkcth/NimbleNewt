@@ -16,11 +16,17 @@ const start: ChannelStart = {
 function host(hooks: WorkerHooks) {
   const toChild = new PassThrough();
   const seen: FromChild[] = [];
+  const discovers: string[] = [];
   const waiters: (() => void)[] = [];
   const decoder = new LineDecoder();
-  const done = runWorker({ input: toChild, write: (text) => { for (const raw of decoder.push(text)) { seen.push(parseFromChild(raw)); for (const w of waiters.splice(0)) w(); } } }, hooks);
+  const done = runWorker({ input: toChild, write: (text) => { for (const raw of decoder.push(text)) {
+    const m = parseFromChild(raw);
+    // The declarations at the start of a request are answered here and kept apart from what the tests look at.
+    if (m.t === "bridge" && m.request.op === "tool.discover") { discovers.push(m.request.callId); toChild.write(encodeMessage({ t: "bridge.reply", id: m.id, reply: { ok: true, result: { revision: "r1", tools: [{ name: "a_abc.shout", kind: "tool", version: "1.2.0" }] } } })); continue; }
+    seen.push(m); for (const w of waiters.splice(0)) w();
+  } } }, hooks);
   return {
-    seen, done,
+    seen, done, discovers,
     send: (m: ToChild): void => { toChild.write(encodeMessage(m)); },
     end: (): void => { toChild.end(); },
     async next<T extends FromChild["t"]>(t: T, from = 0): Promise<Extract<FromChild, { t: T }>> {
@@ -70,7 +76,7 @@ test("a refused bridge call is the model's tool result, not a crash; garbage on 
   const { offline, hooks } = scripted();
   offline.faux.setResponses([
     fauxAssistantMessage(fauxToolCall("nimblenewt__task-get", {}, { id: "c1" }), { stopReason: "toolUse" }),
-    (context) => fauxAssistantMessage(`saw: ${/refused \(paused\)/.test(JSON.stringify(context.messages.slice(-1))) ? "refusal" : "nothing"}`),
+    (context) => fauxAssistantMessage(`saw: ${/a_abc.shout 1.2.0/.test(JSON.stringify(context.messages)) ? "catalogue " : ""}${/refused \(paused\)/.test(JSON.stringify(context.messages.slice(-1))) ? "refusal" : "nothing"}`),
   ]);
   const h = host(hooks);
   h.send({ t: "start", v: 1, start: offlineStart });
@@ -78,7 +84,8 @@ test("a refused bridge call is the model's tool result, not a crash; garbage on 
   h.send({ t: "run", requestId: "req-1", content: "say hello" });
   const bridge = await h.next("bridge");
   h.send({ t: "bridge.reply", id: bridge.id, reply: { ok: false, code: "paused", message: "the task is paused" } });
-  assert.deepEqual(await h.next("result"), { t: "result", status: "completed", text: "saw: refusal" });
+  assert.deepEqual(await h.next("result"), { t: "result", status: "completed", text: "saw: catalogue refusal" });
+  assert.equal(h.discovers.length, 1, "one snapshot of the declarations per request");
   h.send({ t: "tell", id: 1 } as never);
   const fault = await h.next("fault");
   assert.match(fault.message, /text/);
@@ -150,5 +157,27 @@ test("a model error from the relay fails the turn with its reason, and a host th
     assert.ok(answered.size >= 1);
   } finally { clearInterval(refuse); }
   h.end();
+  await h.done;
+});
+
+test("a provider call ID that repeats is sent to the controller under a new one, so it cannot stand for the earlier request", async () => {
+  const { offline, hooks } = scripted();
+  offline.faux.setResponses([
+    fauxAssistantMessage(fauxToolCall("nimblenewt__desk-read", { recordId: "dsk-aaaaaaaaaaaaaaaaaaaa" }, { id: "call_0" }), { stopReason: "toolUse" }),
+    fauxAssistantMessage(fauxToolCall("nimblenewt__desk-read", { recordId: "dsk-bbbbbbbbbbbbbbbbbbbb" }, { id: "call_0" }), { stopReason: "toolUse" }),
+    fauxAssistantMessage("done"),
+  ]);
+  const h = host(hooks);
+  h.send({ t: "start", v: 1, start: offlineStart });
+  await h.next("ready");
+  h.send({ t: "run", requestId: "req-1", content: "read two" });
+  const first = await h.next("bridge");
+  h.send({ t: "bridge.reply", id: first.id, reply: { ok: true, result: {} } });
+  const second = await h.next("bridge", h.seen.indexOf(first) + 1);
+  assert.equal(first.request.callId, "call_0");
+  assert.match(second.request.callId, /^d:[0-9a-f]{40}$/);
+  h.send({ t: "bridge.reply", id: second.id, reply: { ok: true, result: {} } });
+  assert.equal((await h.next("result")).status, "completed");
+  h.send({ t: "close" });
   await h.done;
 });

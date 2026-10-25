@@ -4,7 +4,8 @@ import { openNodeJsonlStorage } from "@earendil-works/pi-durable/storage/jsonl/n
 import type { Storage } from "@earendil-works/pi-durable";
 import { ChannelError, LineDecoder, WORKER_CHANNEL_VERSION, encodeMessage, parseToChild, requestId, type ChannelStart, type FromChild, type ToChild } from "@nimblenewt/contracts";
 import { PiAdapter } from "../adapter.js";
-import { boundTransport, composeTools, createBridge, type BridgeReply } from "../bridge.js";
+import { boundTransport, composeTools, createBridge, type Bridge, type BridgeReply } from "../bridge.js";
+import { volatileContext } from "../prompt-layout.js";
 import { relayFetch } from "./relay-fetch.js";
 
 /**
@@ -51,6 +52,7 @@ async function relayModels(start: ChannelStart): Promise<Models> {
 export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<void> {
   const send = (message: FromChild): void => io.write(encodeMessage(message));
   let adapter: PiAdapter | undefined;
+  let bridge: Bridge | undefined;
   let relay: ReturnType<typeof relayFetch> | undefined;
   let started: ChannelStart | undefined;
   let nextBridge = 0;
@@ -74,24 +76,30 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
       send({ t: "bridge", id, token, request: { op: request.op, callId: request.callId, ...(request.args === undefined ? {} : { args: request.args as never }) } });
     }));
     const cache = start.cache === undefined ? undefined : { policy: () => ({ ...(start.cache!.key === undefined ? {} : { key: start.cache!.key }), ...(start.cache!.retention === undefined ? {} : { retention: start.cache!.retention }) }) };
+    bridge = createBridge(transport);
     adapter = await PiAdapter.open({
       storage, models, model: { provider: start.model.provider, modelId: start.model.modelId },
-      tools: composeTools(createBridge(transport), [], start.namespaceId), ...(cache === undefined ? {} : { cache }),
+      tools: composeTools(bridge, [], start.namespaceId), ...(cache === undefined ? {} : { cache }),
     });
+    // A conversation resumed from the store already used some provider call IDs; the bridge goes on numbering after them.
+    try { bridge.seed((await adapter.root().transcript()).flatMap((e) => e.toolCallIds)); } catch { /* a new conversation has none */ }
     send({ t: "ready", v: WORKER_CHANNEL_VERSION });
   };
 
   const turn = async (requestIdText: string, content: string): Promise<void> => {
     if (adapter === undefined || started === undefined) return fault("the process was not started");
     try {
-      const handle = await adapter.root().submit({ kind: "input", requestId: requestId(requestIdText), content });
+      // The request opens with a snapshot of the catalogue's declarations, which go to the model in the volatile context after the stable prompt. A tool registered while the request is in flight appears in the next request's snapshot.
+      let shown = "";
+      try { await bridge!.declarations.openRequest(requestIdText); shown = bridge!.declarations.textOf(requestIdText); } catch { /* the model works without the list; it can still ask tool-discover */ }
+      const handle = await adapter.root().submit({ kind: "input", requestId: requestId(requestIdText), content: shown === "" ? content : `${content}\n\n${volatileContext(shown)}` });
       const result = await handle.result();
       if (result.status === "completed") send({ t: "result", status: "completed", text: result.text });
       else if (result.status === "unanswered" && result.reason === "aborted") send({ t: "result", status: "cancelled" });
       else send({ t: "result", status: "failed", error: result.status === "unanswered" ? `the model did not answer (${result.reason}${"detail" in result && typeof result.detail === "string" ? `: ${result.detail}` : ""})` : `the turn ended as ${result.status}` });
     } catch (error) {
       send({ t: "result", status: "failed", error: String((error as Error)?.message ?? error).slice(0, 2000) });
-    }
+    } finally { bridge?.declarations.closeRequest(requestIdText); }
   };
 
   const handle = async (message: ToChild): Promise<void> => {

@@ -1,4 +1,5 @@
 import { DomainError } from "../domain/errors.js";
+import { personalNamespace } from "../catalog/catalog.js";
 import { derivedId } from "../domain/ids.js";
 import { onlyKnown, revision as checkRevision, text, type View } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
@@ -397,6 +398,11 @@ export async function heldRecords(runner: CommandRunner, principalId: string, no
 export async function effectiveOf(runner: CommandRunner, principal: Principal, now: string): Promise<Principal> {
   if (principal.kind === "owner") return { ...principal, asOf: now };
   const grants = [...principal.grants];
+  // An agent may always run the tools it made itself: the grant for its own tool namespace is part of what an agent is (card T06b), in every project; the tool gate still judges each call in the project of its task. It is derived here, not stored, so an owner who replaces the agent's grants cannot take it away by mistake and agents enrolled earlier have it too.
+  if (principal.kind === "agent") {
+    const own = `tool.${personalNamespace(principal.id).replace(/^a_/, "a-")}.*`;
+    if (!grants.some((g) => g.action === own && g.project === "*")) grants.push({ action: own, project: "*" });
+  }
   const restrictions: Restriction[] = [];
   const byId = new Map<string, GrantRecordBody>();
   const mine: { id: string; body: GrantRecordBody }[] = [];

@@ -119,7 +119,8 @@ for (const backend of backends) {
     const tool = await c.cat.register(c.ann, { commandId: cid("r"), name: "fetch", kind: "tool", version: "1.0.0", manifest: manifest(), instructionsRecordId: readme, executableRecordId: code });
     const run = (by: Principal, name: string, version?: string, h: HostFacts = host) => c.cat.authorizeRun(by, { commandId: cid("u"), name, ...(version === undefined ? {} : { version }), taskId: c.ta, projectId: c.a, host: h });
     await refuses("forbidden", () => run(c.ann, skill.name), (e) => assert.match(e.message, /cannot run anything/));
-    await refuses("forbidden", () => run(c.ann, tool.name), (e) => assert.match(e.message, /no grant/));
+    // An agent holds the grant for its own tool namespace from enrolment (card T06b): it needs no grant from the owner to run what it made itself.
+    assert.equal((await run(c.ann, tool.name)).ready, true);
     await c.grants.grant(c.owner, { commandId: cid("g"), grantee: c.ann.id, action: runAction(tool.name), project: c.a, source: "direct", basis: "may run fetch" });
     const ann = await c.principals.authenticate((await c.principals.issueCredential(c.owner, c.ann.id)).token);
     const ok = await run(ann, tool.name);

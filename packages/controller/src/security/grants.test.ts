@@ -101,14 +101,14 @@ for (const backend of backends) {
     const child = await grants.derive(ann, { commandId: cid("d"), parentId: parent.id, action: "task.read", project: a, basis: "reading the brief is part of the job" });
     const child2 = await grants.derive(ann, { commandId: cid("d2"), parentId: child.id, action: "task.read", project: a, basis: "same, again" });
     const view = await at(ann, T);
-    assert.deepEqual(view.grants.map((g) => g.action).sort(), ["task.*", "task.read", "task.read"]);
+    assert.deepEqual(view.grants.map((g) => g.action).filter((a) => !a.startsWith("tool.a-")).sort(), ["task.*", "task.read", "task.read"]);
     const derived = (await grants.getGrant(child.id))!;
     assert.equal(derived.expiresAt, SOON, "a derived grant ends no later than its parent");
     for (const wider of [{ action: "*", project: a }, { action: "task.read", project: b }, { action: "task.read", project: "*" }, { action: "task.read", project: a, expiresAt: LATER }, { action: "project.read", project: a }]) {
       await refuses("forbidden", () => grants.derive(ann, { commandId: cid("w"), parentId: parent.id, basis: "wider", ...wider } as never), (e) => assert.match(e.message, /cannot be wider/));
     }
     await grants.revoke(owner, { commandId: cid("r"), grantId: parent.id, expectedRevision: parent.revision, reason: "done" });
-    assert.deepEqual((await at(ann, T)).grants, [], "children, and their children, stop counting with the parent");
+    assert.deepEqual((await at(ann, T)).grants.filter((g) => !g.action.startsWith("tool.a-")), [], "children, and their children, stop counting with the parent");
     await refuses("forbidden", () => grants.derive(ann, { commandId: cid("late"), parentId: parent.id, action: "task.read", project: a, basis: "after revoke" }));
     void child2;
   });

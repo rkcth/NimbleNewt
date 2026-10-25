@@ -115,19 +115,31 @@ export interface Bridge {
   readonly tools: readonly AdapterTool[];
   /** Declarations per model request. */
   readonly declarations: DeclarationBoard;
+  /** Tells the bridge which provider call IDs the stored conversation already holds (an attempt resumed in a new process). */
+  seed(ids: readonly string[]): void;
 }
 
 /** Builds the protected extension for one worker from its transport. The result is frozen; nothing in it can be switched off. */
 export function createBridge(transport: BridgeTransport, options: { maxTools?: number } = {}): Bridge {
+  // A provider may hand out the same tool call ID twice (some local servers count from zero in every reply). The controller treats a call ID as one request, so the second use gets another one: a digest of the ID and its number, which no provider ID can
+  // equal by accident. `seed` is told the IDs already in the stored conversation when an attempt resumes in a new process, so the numbering goes on where it stopped (an interrupted bridge call is never run again by Pi, so nothing replays under an old number).
+  const used = new Map<string, number>();
+  const unique = (id: string): string => {
+    const base = safeCallId(id);
+    const n = (used.get(base) ?? 0) + 1;
+    used.set(base, n);
+    return n === 1 ? base : `d:${createHash("sha256").update(`${base}\0${n}`).digest("hex").slice(0, 40)}`;
+  };
+  const seed = (ids: readonly string[]): void => { for (const id of ids) { const base = safeCallId(id); used.set(base, (used.get(base) ?? 0) + 1); } };
   const tools = SPECS.map((spec): AdapterTool => Object.freeze({
     name: bridgeToolName(spec.op),
     description: spec.description,
     parameters: spec.parameters,
     shared: true,
     // No `replay`: whether a call may be run again after a restart is the controller's decision from the approved manifest.
-    execute: async (args: unknown, context: { readonly callId: string }) => render(await transport.send({ op: spec.op, callId: safeCallId(context.callId), args: args as Record<string, unknown> })),
+    execute: async (args: unknown, context: { readonly callId: string }) => render(await transport.send({ op: spec.op, callId: unique(context.callId), args: args as Record<string, unknown> })),
   }));
-  return Object.freeze({ tools: Object.freeze(tools), declarations: new DeclarationBoard(transport, options) });
+  return Object.freeze({ tools: Object.freeze(tools), declarations: new DeclarationBoard(transport, options), seed });
 }
 
 /**
