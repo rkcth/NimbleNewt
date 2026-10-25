@@ -305,7 +305,8 @@ export class PolicyService {
     if (self.kind !== "owner") {
       if (principal.taskScope !== undefined && principal.taskScope.projectId !== project) return undefined;
       const eff = await this.#grants.effective(self, this.#runner.now());
-      if (!eff.grants.some((g) => g.project === project || g.project === "*")) return undefined;
+      // The grant for the agent's own tool namespace (card T06b) is in every project and says nothing about this one.
+      if (!eff.grants.some((g) => (g.project === project || g.project === "*") && !g.action.startsWith("tool."))) return undefined;
     }
     const inst = await this.#installationRecord();
     const proj = await this.#runner.get("approval-policy", project);

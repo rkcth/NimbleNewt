@@ -258,7 +258,7 @@ for (const backend of backends) {
     assert.equal(admitted.outcome, "ignored");
     const after = (await c.assign.getAssignment(c.t1))!;
     assert.deepEqual([after.attempts, after.revision, after.owner?.id, after.generation], [before.attempts, before.revision, before.owner?.id, before.generation]);
-    assert.deepEqual((await c.principals.authenticate((await c.principals.issueCredential(c.owner, "agent:ben")).token)).grants.map((g) => g.action), ["history.read"]);
+    assert.deepEqual((await c.principals.authenticate((await c.principals.issueCredential(c.owner, "agent:ben")).token)).grants.map((g) => g.action).filter((a) => !a.startsWith("tool.")), ["history.read"]);
     // The agent sees the text under `data`, redacted; an inspection shows the same.
     const seen = (await c.watches.inspect(c.owner, ((message.payload["handling"]) as string)))!;
     assert.match(seen.data[0]!.text, /IGNORE ALL PREVIOUS/);

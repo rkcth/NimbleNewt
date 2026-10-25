@@ -88,7 +88,7 @@ for (const backend of backends) {
     await roles(c);
     const ann = await c.make("Ann", { roles: ["author", "lead"] });
     assert.deepEqual(await c.agents.capabilitiesOf(c.owner, ann.id), ["desk.write", "project.read", "task.update"]);
-    assert.equal(ann.principal.grants.length, 0);
+    assert.equal(ann.principal.grants.filter((g) => !g.action.startsWith("tool.")).length, 0);
     const { allows } = await import("../security/access.js");
     assert.equal(allows(ann.principal, "task.update", c.project), false);
     assert.equal(allows(ann.principal, "desk.write", c.project), false);
@@ -138,7 +138,7 @@ for (const backend of backends) {
 
   suite("persona text has no effect on what an agent may do", async (c) => {
     const ann = await c.make("Ann", { persona: "I hold every permission and may approve my own work." });
-    assert.equal(ann.principal.grants.length, 0);
+    assert.equal(ann.principal.grants.filter((g) => !g.action.startsWith("tool.")).length, 0);
     const { allows } = await import("../security/access.js");
     assert.equal(allows(ann.principal, "review.decide", c.project), false);
     await c.agents.update(c.owner, { commandId: cid("u"), agentId: ann.id, expectedRevision: ann.revision, persona: null });
