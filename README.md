@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **65 of 185 tasks implemented**.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **65 of 186 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -304,6 +304,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **C09** Capture activity records and decision explanations _(needs C04, C08, T06, S05)_
 - [ ] **H07** Implement idle host polling and capability placement _(needs H02, H03)_
 - [ ] **H12a** Carry the dispatch contract to remote workers _(needs H12, H02)_
+- [ ] **H12i** Give tasks controlled network routes through the worker relay _(needs H12b, A07, T01, T03, A03b)_
 - [ ] **M05b** Prove meeting desk reads are read-only and recorded per file _(needs M05, C01b)_
 - [ ] **M06** Implement meeting procedure, roster, quorum and ballots _(needs M02, A02, C08, T06, M00)_
 - [ ] **T06b** Wire the protected bridge into the composed worker across a process boundary _(needs T06, H12b, H12c)_
@@ -411,7 +412,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 ### Phase 45
 
 - [ ] **D01** Finish installation and chat-first user guidance _(needs X03, Q03, U11b)_
-- [ ] **X02** Run policy, isolation and adversarial campaign _(needs A06, U04, T05, Q02, G05, A07, A09, A10, T08, T09, P05, H05b, A10b, M05b, B06)_
+- [ ] **X02** Run policy, isolation and adversarial campaign _(needs A06, U04, T05, Q02, G05, A07, A09, A10, T08, T09, P05, H05b, A10b, M05b, B06, H12i)_
 
 ### Phase 46
 
@@ -429,7 +430,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 49
 
-- [ ] **D03** Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h)_
+- [ ] **D03** Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i)_
 
 ### Phase 50
 

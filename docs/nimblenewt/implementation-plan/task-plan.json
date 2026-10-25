@@ -2281,8 +2281,8 @@
         "A03",
         "A08"
       ],
-      "deliverable": "Bind the A03 SandboxLauncher and the A08 resource-limit recipe to the H12 SandboxPort, protect the separate git directory with the attemptSandbox rules and build the real worker process that runs the Pi adapter inside the sandbox",
-      "acceptance_and_verification": "A real attempt runs in the selected sandbox with only the checkout mounted and the git directory protected; resource limits apply as A08 states; the worker process exits and is reaped on completion, pause, stop and loss; a crash leaves no running tool process; the integration test uses the real launcher on Linux and the OS-specific launchers on their CI cells; the composer passes the cache policy to the Pi adapter and each turn's cache figures into the usage report, with a worker-side turn sequence unique across all placements of one attempt, and a missed pin marker is recorded as lost",
+      "deliverable": "Bind the A03 SandboxLauncher and the A08 resource-limit recipe to the H12 SandboxPort, protect the separate git directory with the attemptSandbox rules and build the real worker process that runs the Pi adapter inside the sandbox, which has no network and talks to the controller over one channel; a narrow relay, its own replaceable component, makes the worker's model calls for it: it reaches only the model endpoints the routing table allows and adds the provider credentials itself (owner decision 2026-10-25)",
+      "acceptance_and_verification": "A real attempt runs in the selected sandbox with only the checkout mounted and the git directory protected; resource limits apply as A08 states; the worker process exits and is reaped on completion, pause, stop and loss; a crash leaves no running tool process; the integration test uses the real launcher on Linux and the OS-specific launchers on their CI cells; the composer passes the cache policy to the Pi adapter and each turn's cache figures into the usage report, with a worker-side turn sequence unique across all placements of one attempt, and a missed pin marker is recorded as lost; from inside the sandbox only the allowed model endpoints can be reached, through the relay, and any other destination fails; no provider key, and nothing but the task credential, is present in the worker process, its environment, its files or its output; the relay can be replaced without changing the worker, and a model stream is relayed as it arrives, not buffered whole",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -2393,6 +2393,27 @@
       ],
       "deliverable": "The review service sends an exact-operation review that is owner-mode only to the owner and rejects an agent reviewer for it",
       "acceptance_and_verification": "An agent reviewer cannot decide or receive an owner-mode review; the dispatcher accepts only the owner's decision for it; tested for every review route",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "H12i",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Give tasks controlled network routes through the worker relay",
+      "depends_on": [
+        "H12b",
+        "A07",
+        "T01",
+        "T03",
+        "A03b"
+      ],
+      "deliverable": "A task may be granted specific network destinations (internet research through a controller-side web tool, QA against a named server or a local port) that the sandboxed worker reaches only through the relay H12b builds for model calls; there is no other route out of the sandbox (owner decision 2026-10-25). The web tool is built here as a catalogue tool (T01) classified by the approval policy (A07) and reusing T03's connection record and credential-reference pattern. Inside the sandbox the route appears as a proxy endpoint served by a forwarder over the controller channel (a new recipe field, so the recipe revision records it; the sandbox itself still has no network interface); a grant is enforced in the relay, so granting or revoking one applies at the next connection with no sandbox restart",
+      "acceptance_and_verification": "A grant names the task, the destination (host and port, or a local service) and who approved it, and is judged by the approval policy (A07) like any outside action; a connection to a destination that is not granted, or that resolves to a private or changing address unless the grant names it, is refused and recorded; every connection is logged with task, attempt, destination and bytes; a grant ends with the task; a revoked grant stops new and open connections; the relay adds no credential the grant does not state and the agent never holds a provider key; a browser or command-line client in the sandbox works against a granted destination through the proxy endpoint and fails against any other; the proxy and the grant checks behave the same on Linux, macOS and Windows (Windows proven on the A03b launcher); the web tool is refused a private or rebinding address; tested with a rebinding resolver and a hostile destination list",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -3963,7 +3984,8 @@
         "H05b",
         "A10b",
         "M05b",
-        "B06"
+        "B06",
+        "H12i"
       ],
       "deliverable": "Scope/revocation/escape/injection and review-race evidence",
       "acceptance_and_verification": "Alternate shell/tool/MCP/API paths cannot bypass grants or human gate; reviewer outage cannot authorize work; a project named NimbleNewt gains no authority over the installation or updater; no outbound telemetry, issue, PR or report leaves without explicit scoped authorization (network capture); agent B cannot reach suspended agent A's scratch through file paths, search or artifact links, repeated after restart and harness change; an agent in the NimbleNewt project cannot launch, install or activate a candidate by any path (shell, MCP, API, updater) without an owner-approved proposal for that exact revision",
@@ -4179,7 +4201,8 @@
         "H12e",
         "H12f",
         "H12g",
-        "H12h"
+        "H12h",
+        "H12i"
       ],
       "deliverable": "Exact release manifest, known limitations and owner signoff",
       "acceptance_and_verification": "All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded",

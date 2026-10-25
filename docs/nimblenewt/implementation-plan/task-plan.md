@@ -37,7 +37,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C08, C09 |
 | N08 / AII-258 | R01, R02, R03, R04, R05 |
 | N09 / AII-259 | U03, U04, U05, U06, U07, U09, U08, U10, U11, U11b |
-| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H07, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H13 |
+| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H07, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H13 |
 | N11 / AII-261 | V01, V02 |
 | N12 / AII-262 | M00, M01, M02, M03, M04, M05, M05b, M06 |
 | N13 / AII-263 | T01, T02, T03, T06, T06b, T07, T08, T09 |
@@ -884,8 +884,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 
 - **Parent:** N10 / AII-260.
 - **Blockers:** H12, A03, A08.
-- **Deliverable:** Bind the A03 SandboxLauncher and the A08 resource-limit recipe to the H12 SandboxPort, protect the separate git directory with the attemptSandbox rules and build the real worker process that runs the Pi adapter inside the sandbox.
-- **Acceptance and verification:** A real attempt runs in the selected sandbox with only the checkout mounted and the git directory protected; resource limits apply as A08 states; the worker process exits and is reaped on completion, pause, stop and loss; a crash leaves no running tool process; the integration test uses the real launcher on Linux and the OS-specific launchers on their CI cells; the composer passes the cache policy to the Pi adapter and each turn's cache figures into the usage report, with a worker-side turn sequence unique across all placements of one attempt, and a missed pin marker is recorded as lost.
+- **Deliverable:** Bind the A03 SandboxLauncher and the A08 resource-limit recipe to the H12 SandboxPort, protect the separate git directory with the attemptSandbox rules and build the real worker process that runs the Pi adapter inside the sandbox, which has no network and talks to the controller over one channel; a narrow relay, its own replaceable component, makes the worker's model calls for it: it reaches only the model endpoints the routing table allows and adds the provider credentials itself (owner decision 2026-10-25).
+- **Acceptance and verification:** A real attempt runs in the selected sandbox with only the checkout mounted and the git directory protected; resource limits apply as A08 states; the worker process exits and is reaped on completion, pause, stop and loss; a crash leaves no running tool process; the integration test uses the real launcher on Linux and the OS-specific launchers on their CI cells; the composer passes the cache policy to the Pi adapter and each turn's cache figures into the usage report, with a worker-side turn sequence unique across all placements of one attempt, and a missed pin marker is recorded as lost; from inside the sandbox only the allowed model endpoints can be reached, through the relay, and any other destination fails; no provider key, and nothing but the task credential, is present in the worker process, its environment, its files or its output; the relay can be replaced without changing the worker, and a model stream is relayed as it arrives, not buffered whole.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### H12c — Compose the dispatcher at controller start with a durable scan cursor
@@ -934,6 +934,14 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Blockers:** H12, A05.
 - **Deliverable:** The review service sends an exact-operation review that is owner-mode only to the owner and rejects an agent reviewer for it.
 - **Acceptance and verification:** An agent reviewer cannot decide or receive an owner-mode review; the dispatcher accepts only the owner's decision for it; tested for every review route.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### H12i — Give tasks controlled network routes through the worker relay
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H12b, A07, T01, T03, A03b.
+- **Deliverable:** A task may be granted specific network destinations (internet research through a controller-side web tool, QA against a named server or a local port) that the sandboxed worker reaches only through the relay H12b builds for model calls; there is no other route out of the sandbox (owner decision 2026-10-25). The web tool is built here as a catalogue tool (T01) classified by the approval policy (A07) and reusing T03's connection record and credential-reference pattern. Inside the sandbox the route appears as a proxy endpoint served by a forwarder over the controller channel (a new recipe field, so the recipe revision records it; the sandbox itself still has no network interface); a grant is enforced in the relay, so granting or revoking one applies at the next connection with no sandbox restart.
+- **Acceptance and verification:** A grant names the task, the destination (host and port, or a local service) and who approved it, and is judged by the approval policy (A07) like any outside action; a connection to a destination that is not granted, or that resolves to a private or changing address unless the grant names it, is refused and recorded; every connection is logged with task, attempt, destination and bytes; a grant ends with the task; a revoked grant stops new and open connections; the relay adds no credential the grant does not state and the agent never holds a provider key; a browser or command-line client in the sandbox works against a granted destination through the proxy endpoint and fails against any other; the proxy and the grant checks behave the same on Linux, macOS and Windows (Windows proven on the A03b launcher); the web tool is refused a private or rebinding address; tested with a rebinding resolver and a hostile destination list.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### H13 — Implement event source adapters and watchers
@@ -1543,7 +1551,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### X02 — Run policy, isolation and adversarial campaign
 
 - **Parent:** N18 / AII-268.
-- **Blockers:** A06, U04, T05, Q02, G05, A07, A09, A10, T08, T09, P05, H05b, A10b, M05b, B06.
+- **Blockers:** A06, U04, T05, Q02, G05, A07, A09, A10, T08, T09, P05, H05b, A10b, M05b, B06, H12i.
 - **Deliverable:** Scope/revocation/escape/injection and review-race evidence.
 - **Acceptance and verification:** Alternate shell/tool/MCP/API paths cannot bypass grants or human gate; reviewer outage cannot authorize work; a project named NimbleNewt gains no authority over the installation or updater; no outbound telemetry, issue, PR or report leaves without explicit scoped authorization (network capture); agent B cannot reach suspended agent A's scratch through file paths, search or artifact links, repeated after restart and harness change; an agent in the NimbleNewt project cannot launch, install or activate a candidate by any path (shell, MCP, API, updater) without an owner-approved proposal for that exact revision.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
@@ -1615,7 +1623,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D03 — Approve release readiness and publication decision
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** X08, D01, D02, F04h, T06b, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h.
+- **Blockers:** X08, D01, D02, F04h, T06b, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i.
 - **Deliverable:** Exact release manifest, known limitations and owner signoff.
 - **Acceptance and verification:** All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
