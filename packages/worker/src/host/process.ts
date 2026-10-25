@@ -28,6 +28,7 @@ export class WorkerProcess {
   readonly #decoder = new LineDecoder();
   readonly #readyWaiters: Waiter<void>[] = [];
   #isReady = false;
+  #info: { toolSchemaChars?: number; systemPromptChars?: number } = {};
   #resultWaiter: Waiter<Result> | undefined;
   readonly #asked = new Map<number, Waiter<FromChild>>();
   readonly #fetches = new Map<number, AbortController>();
@@ -95,6 +96,7 @@ export class WorkerProcess {
       case "ready":
         if (m.v !== WORKER_CHANNEL_VERSION) return this.kill(`the worker process speaks channel version ${m.v}, not ${WORKER_CHANNEL_VERSION}`);
         this.#isReady = true;
+        this.#info = { ...(m.toolSchemaChars === undefined ? {} : { toolSchemaChars: m.toolSchemaChars }), ...(m.systemPromptChars === undefined ? {} : { systemPromptChars: m.systemPromptChars }) };
         for (const w of this.#readyWaiters.splice(0)) w.resolve();
         return;
       case "result": { const w = this.#resultWaiter; this.#resultWaiter = undefined; w?.resolve(m); return; }
@@ -164,6 +166,8 @@ export class WorkerProcess {
   }
 
   get ready(): boolean { return this.#isReady; }
+  /** What the process said about itself when it was ready. */
+  get info(): { readonly toolSchemaChars?: number; readonly systemPromptChars?: number } { return this.#info; }
 
   /** Runs the turn and waits for its result. */
   async run(requestId: string, content: string): Promise<Result> {
@@ -184,7 +188,10 @@ export class WorkerProcess {
     return (await answer) as T;
   }
 
-  async checkpoint(): Promise<{ readonly [key: string]: never }> { return (await this.#ask<Extract<FromChild, { t: "checkpoint.ok" }>>((id) => ({ t: "checkpoint", id }))).checkpoint as never; }
+  async checkpoint(): Promise<{ readonly checkpoint: { readonly [key: string]: never }; readonly contextTokens?: number }> {
+    const ok = await this.#ask<Extract<FromChild, { t: "checkpoint.ok" }>>((id) => ({ t: "checkpoint", id }));
+    return { checkpoint: ok.checkpoint as never, ...(ok.contextTokens === undefined ? {} : { contextTokens: ok.contextTokens }) };
+  }
   async tell(text: string): Promise<void> { await this.#ask((id) => ({ t: "tell", id, text })); }
 
   /** Asks the process to finish, waits a moment for it to go, then ends it. Safe to repeat. */

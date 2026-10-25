@@ -1,5 +1,6 @@
 import { DomainError } from "../domain/errors.js";
 import type { HostFacts } from "../catalog/index.js";
+import type { FirstCall } from "../context/dispatch.js";
 import type { Capabilities, HostService } from "../hosts/index.js";
 import type { Principal } from "../security/principals.js";
 import type { JsonObject } from "../storage/types.js";
@@ -14,6 +15,10 @@ export interface SandboxPort {
 
 /** What the attempt's conversation runtime (the harness: the Pi adapter) does for the worker. */
 export interface AttemptRuntime {
+  /** What the first call for `content` will carry, for the admission check (C07b). A runtime that cannot tell is not checked. */
+  firstCall?(content: string): FirstCall | undefined;
+  /** Makes the conversation smaller (a summary of its older part). Used once when the first call is refused for size. */
+  compact?(): Promise<void>;
   /** Runs the turn. Every tool the model calls must be made through `call`. */
   run(content: string, requestId: string): Promise<WorkerTurnResult>;
   checkpoint(): Promise<JsonObject>;
@@ -38,6 +43,37 @@ export interface LocalWorkerOptions {
   readonly capabilities: () => Capabilities;
   /** Beats the attempt's lease while a turn runs, from a scheduler the composer injects (a timer in production, a test's own tick). Returns a function that stops it. Without it the runtime calls `gateway.heartbeat` itself. */
   readonly schedule?: (beat: () => Promise<void>) => () => void;
+  /** What the runtime asks the controller's services while it runs (card H12f). Absent: none of it happens. */
+  readonly guards?: RuntimeGuards;
+  /** Told when a guard fails (the attempt goes on; a guard never silently stops working). */
+  readonly onGuardError?: (attemptId: string, what: string, error: unknown) => void;
+}
+
+/** A message the controller has for the running agent, already judged eligible for the boundary by the message service (U12). */
+export interface DeliverableMessage { readonly id: string; readonly text: string }
+export type MessageBoundaryName = "interrupt" | "safe-boundary";
+
+/**
+ * The controller's services as the local worker sees them (card H12f), as plain functions the composer binds to the services under the right principal, so the worker holds none of them:
+ * context enforcement (C07b: the first call is admitted or refused; a stored conversation over the resume share is not resumed), pause observation (L01: a paused attempt is reported
+ * `pausing` while a call is in flight and `paused` only once its calls have settled) and the message boundaries (U12: an interrupt, and advice at a safe boundary).
+ */
+export interface RuntimeGuards {
+  readonly context?: {
+    admit(order: WorkOrder, call: FirstCall, round: number): Promise<{ readonly admit: boolean; readonly reasons: readonly string[] }>;
+    resume(order: WorkOrder, storedTokens: number): Promise<{ readonly resume: boolean; readonly reason: string }>;
+    /** The size of the conversation a checkpoint holds, in tokens, when it says. */
+    storedTokens?(from: JsonObject): number | undefined;
+  };
+  readonly pause?: {
+    isPaused(order: WorkOrder): Promise<boolean>;
+    observe(order: WorkOrder, state: "pausing" | "paused", boundary?: "finished"): Promise<void>;
+  };
+  readonly messages?: {
+    readable(order: WorkOrder, boundary: MessageBoundaryName): Promise<readonly DeliverableMessage[]>;
+    /** Confirms the messages were put before the agent. Returns the IDs the service did not mark delivered (it refused them; they stay queued). */
+    acknowledge(order: WorkOrder, boundary: MessageBoundaryName, ids: readonly string[]): Promise<readonly string[]>;
+  };
 }
 
 /**
@@ -71,12 +107,36 @@ export class LocalWorker implements WorkerHost {
   }
 
   async start(order: WorkOrder): Promise<WorkerHandle> {
-    let sandbox = await this.#options.sandbox.open(order.recipe, order);
+    const options = this.#options;
+    const guards = options.guards;
+    const report = (what: string, error: unknown): void => { try { options.onGuardError?.(order.attemptId, what, error); } catch { /* the report must not stop the attempt */ } };
+    // A stored conversation over the resume share is not continued: the attempt starts fresh, and the agent is told why (C07b).
+    let from = order.resumeFrom;
+    let note = order.resumeNote;
+    if (from !== undefined && guards?.context?.storedTokens !== undefined) {
+      try {
+        const stored = guards.context.storedTokens(from);
+        if (stored !== undefined) {
+          const decision = await guards.context.resume(order, stored);
+          if (!decision.resume) { from = undefined; note = note === undefined ? decision.reason : `${note}\n${decision.reason}`; }
+        }
+      } catch (error) {
+        // The size of the stored conversation could not be judged: it is not continued (a fresh start from the continuation record is the safe side).
+        report("resume decision", error);
+        from = undefined;
+        note = note === undefined ? "the stored conversation could not be checked against the context budget; starting fresh" : `${note}\nthe stored conversation could not be checked against the context budget; starting fresh`;
+      }
+    }
+    const content = note === undefined ? order.content : `${order.content}\n\n[${note}]`;
+    let sandbox = await options.sandbox.open(order.recipe, order);
     let gateway: ToolGateway | undefined;
     let runtime: AttemptRuntime | undefined;
+    let inFlight = 0;
     const call: BoundCall = async (request, executor) => {
       if (gateway === undefined) throw new DomainError("fenced", "the turn has not started; a tool call needs the attempt's gateway");
-      const result = await gateway.call(request, executor);
+      inFlight++;
+      let result: ToolResult;
+      try { result = await gateway.call(request, executor); } finally { inFlight--; }
       // The owner's decisions changed: the new ones are put before the agent, then calls are allowed again (this call stays refused; the agent makes it again under a new call ID).
       if (result.state === "refused" && /decision revision changed/.test(result.reason)) {
         // Acknowledged only once the agent has been given the new context; a runtime that cannot do it leaves the calls refused.
@@ -84,24 +144,92 @@ export class LocalWorker implements WorkerHost {
       }
       return result;
     };
-    try { runtime = await this.#options.runtimes.open(order, call, order.resumeFrom); } catch (error) { await sandbox.close().catch(() => undefined); throw error; }
-    const options = this.#options;
+    try { runtime = await options.runtimes.open(order, call, from); } catch (error) { await sandbox.close().catch(() => undefined); throw error; }
+
+    // The first call is admitted or refused before anything is sent (C07b). A refused one is made smaller once, if the runtime can, and asked again.
+    if (guards?.context !== undefined && runtime.firstCall !== undefined) {
+      let refusal: string | undefined;
+      try {
+        for (let round = 1; round <= 2; round++) {
+          const first = runtime.firstCall(content);
+          if (first === undefined) break;
+          const decision = await guards.context.admit(order, first, round);
+          if (decision.admit) { refusal = undefined; break; }
+          refusal = decision.reasons.join("; ") || "the first call is over the context budget";
+          if (round === 1 && runtime.compact !== undefined) await runtime.compact(); else break;
+        }
+      } catch (error) { refusal = `the context check failed: ${String((error as Error)?.message ?? error).slice(0, 300)}`; report("context admission", error); }
+      if (refusal !== undefined) {
+        await runtime.close().catch(() => undefined);
+        await sandbox.close().catch(() => undefined);
+        return {
+          workerVersion: options.version,
+          run: async () => ({ status: "failed", error: `the first call was not sent: ${refusal}` }),
+          checkpoint: async () => from ?? {},
+          restart: async () => { throw new DomainError("fenced", "the attempt was refused at start"); },
+          stop: async () => undefined,
+        };
+      }
+    }
+
+    // While the turn runs, on each beat: the pause gates are observed and messages for the agent are delivered (L01, U12). One pass at a time: a slow service must not make two passes read the same batch.
+    let reported: "pausing" | "paused" | undefined;
+    const told = new Set<string>();
+    let pass: Promise<void> = Promise.resolve();
+    const watch = (deliver: boolean): Promise<void> => {
+      pass = pass.then(() => observeAndDeliver(deliver), () => observeAndDeliver(deliver));
+      return pass;
+    };
+    const observeAndDeliver = async (deliver: boolean): Promise<void> => {
+      if (guards === undefined || runtime === undefined) return;
+      let paused = false;
+      if (guards.pause !== undefined) {
+        try {
+          paused = await guards.pause.isPaused(order);
+          if (paused) {
+            // Paused is claimed only when no call is in flight; until then the honest state is pausing.
+            const state = inFlight === 0 ? "paused" : "pausing";
+            if (state !== reported) { await guards.pause.observe(order, state, state === "paused" ? "finished" : undefined); reported = state; }
+          } else reported = undefined;
+        } catch (error) { report("pause observation", error); }
+      }
+      // Nothing is delivered to a paused attempt, or after the turn: a message told then would be marked delivered and never acted on. An interrupt reaches a running attempt at once, advice only when no call is in flight.
+      if (!deliver || paused || guards.messages === undefined || runtime.tell === undefined) return;
+      for (const boundary of (inFlight === 0 ? ["interrupt", "safe-boundary"] : ["interrupt"]) as MessageBoundaryName[]) {
+        try {
+          const items = await guards.messages.readable(order, boundary);
+          if (items.length === 0) continue;
+          // What was already told (an acknowledgement that failed or was refused) is not told again; only the acknowledgement is tried again.
+          const fresh = items.filter((m) => !told.has(m.id));
+          if (fresh.length > 0) { await runtime.tell(fresh.map((m) => m.text).join("\n\n")); for (const m of fresh) told.add(m.id); }
+          const refused = await guards.messages.acknowledge(order, boundary, items.map((m) => m.id));
+          for (const m of items) if (!refused.includes(m.id)) told.delete(m.id);
+          if (refused.length > 0) report(`message delivery (${boundary})`, new Error(`the message service did not mark ${refused.length} message(s) delivered`));
+        } catch (error) { report(`message delivery (${boundary})`, error); }
+      }
+    };
+
     return {
       workerVersion: options.version,
       run: async (g) => {
         gateway = g;
-        const stop = options.schedule?.(() => g.heartbeat().then(() => undefined, () => undefined));
+        const stop = options.schedule?.(async () => { await g.heartbeat().then(() => undefined, () => undefined); await watch(true); });
         try {
-          const content = order.resumeNote === undefined ? order.content : `${order.content}\n\n[${order.resumeNote}]`;
           return await runtime!.run(content, order.requestId);
-        } finally { stop?.(); }
+        } finally {
+          stop?.();
+          // A turn that ended while the attempt is paused is reported as paused (its calls have settled); nothing is delivered after the turn.
+          await watch(false);
+        }
       },
       checkpoint: () => runtime!.checkpoint(),
-      restart: async (recipe, from) => {
+      restart: async (recipe, resumeFrom) => {
         await runtime!.close();
         await sandbox.close();
         sandbox = await options.sandbox.open(recipe, order);
-        runtime = await options.runtimes.open({ ...order, recipe }, call, from);
+        // The conversation continues from a checkpoint just taken from the same attempt; the new process has told nothing yet.
+        reported = undefined;
+        runtime = await options.runtimes.open({ ...order, recipe }, call, resumeFrom);
       },
       tell: async (text) => { await runtime!.tell?.(text); },
       stop: async () => { await runtime!.close().catch(() => undefined); await sandbox.close().catch(() => undefined); },

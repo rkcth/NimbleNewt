@@ -37,7 +37,18 @@ export interface HostTurnResult {
 }
 export interface CacheFigures { readonly backend: string; readonly route: string; readonly cachedTokens: number; readonly computedTokens: number; readonly writtenTokens: number }
 
+/** What the first call of an attempt carries, as far as the host can tell (the controller's `FirstCall`, restated): the process says how big its tools are; the prompt is counted at three characters to a token. */
+export interface HostFirstCall { readonly systemPromptChars: number; readonly toolSchemaChars: number; readonly startupTokens: number; readonly replyReserveTokens: number }
+
+/** The size of the conversation stored in a checkpoint of this host, in tokens, when it says (the resume decision of card C07b asks for it before a runtime is opened). */
+export function storedTokensOf(from: JsonObj | undefined): number | undefined {
+  const tokens = (from?.["nn"] as JsonObj | undefined)?.["contextTokens"];
+  return typeof tokens === "number" && Number.isSafeInteger(tokens) && tokens >= 0 ? tokens : undefined;
+}
+
 export interface HostRuntime {
+  /** The first call this runtime will make for `content`. */
+  firstCall(content: string): HostFirstCall;
   run(content: string, requestId: string): Promise<HostTurnResult>;
   checkpoint(): Promise<JsonObj>;
   tell(text: string): Promise<void>;
@@ -91,6 +102,8 @@ export interface LocalHostOptions<Call> {
   readonly clock?: () => number;
 }
 
+/** Pi's own system prompt is not visible to the process; until it is measured the first call is counted with this many characters for it, so the check errs on the side of refusing. */
+const UNKNOWN_SYSTEM_PROMPT_CHARS = 8000;
 const RELAY_BASE = "http://relay.invalid";
 const DEFAULT_REFRESH = "The owner's decisions changed. Read the decisions that apply to this task again before you act on anything you had planned.";
 const MAX_RUN_MS = 24 * 60 * 60 * 1000;
@@ -160,8 +173,13 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
         await process.close().catch(() => undefined);
         throw error;
       }
-      const wrapCheckpoint = (checkpoint: JsonObj): JsonObj => ({ pi: checkpoint, nn: { turnSeq, ...(lastRequest === undefined ? {} : { lastRequest }) } });
+      let contextTokens: number | undefined = typeof nn?.["contextTokens"] === "number" ? (nn["contextTokens"] as number) : undefined;
+      const wrapCheckpoint = (taken: { readonly checkpoint: JsonObj; readonly contextTokens?: number }): JsonObj => {
+        if (taken.contextTokens !== undefined) contextTokens = taken.contextTokens;
+        return { pi: taken.checkpoint, nn: { turnSeq, ...(lastRequest === undefined ? {} : { lastRequest }), ...(contextTokens === undefined ? {} : { contextTokens }) } };
+      };
       return {
+        firstCall: (content) => ({ systemPromptChars: process.info.systemPromptChars ?? UNKNOWN_SYSTEM_PROMPT_CHARS, toolSchemaChars: process.info.toolSchemaChars ?? 0, startupTokens: Math.ceil(content.length / 3), replyReserveTokens: model.maxTokens }),
         async run(content, requestId) {
           let result;
           try { result = await process.run(requestId, content); } catch (error) { return { status: "failed", error: String((error as Error)?.message ?? error).slice(0, 2000) }; }

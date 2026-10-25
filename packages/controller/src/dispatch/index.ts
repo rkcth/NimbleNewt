@@ -4,7 +4,8 @@ export { connectPublic, resolvePublic, type NameResolver, type Pinned } from "./
 export type { RecipeSummary, ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, WorkerTurnResult, TurnUsage, WorkOrder, WorkerHandle, WorkerHost } from "./ports.js";
 export { DRIVER_LIMITS, DispatchDriver, realTimer, type DriverError, type DriverOptions, type DriverStatus, type TimerPort } from "./driver.js";
 export { activeAgents, attendanceLoops, decisionLoops, eventLoops, messageLoops, projectIds, standupLoops } from "./loops.js";
-export { LocalWorker, catalogFacts, type AttemptRuntime, type BoundCall, type LocalWorkerOptions, type RuntimeFactory, type SandboxPort, type SandboxSession } from "./local-worker.js";
+export { LocalWorker, catalogFacts, type AttemptRuntime, type DeliverableMessage, type MessageBoundaryName, type RuntimeGuards, type BoundCall, type LocalWorkerOptions, type RuntimeFactory, type SandboxPort, type SandboxSession } from "./local-worker.js";
 export { CachePolicies, type AttemptCache, type CachePolicyDeps, type RouteEndpoint } from "./cache.js";
 export { piFetch, responseBody, type FetchFunction, type PiCall, type PiFetchOptions } from "./pi-fetch.js";
 export { ModelRelay, type AttemptRelay, type ModelEndpoint, type ModelRelayOptions, type RelayRequest, type RelayResponse } from "./relay.js";
+export { controllerGuards, type GuardBinding } from "./runtime-guards.js";

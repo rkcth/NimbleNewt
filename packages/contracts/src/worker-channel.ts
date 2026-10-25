@@ -66,12 +66,14 @@ export type ToChild =
 
 /** Process to host. */
 export type FromChild =
-  | { readonly t: "ready"; readonly v: number }
+  /** `toolSchemaChars`: the size of the tools as offered to the model; `systemPromptChars` when the process knows it (card H12f: context admission). */
+  | { readonly t: "ready"; readonly v: number; readonly toolSchemaChars?: number; readonly systemPromptChars?: number }
   | { readonly t: "bridge"; readonly id: number; readonly token: string; readonly request: { readonly op: string; readonly callId: string; readonly args?: Obj } }
   | { readonly t: "fetch"; readonly id: number; readonly url: string; readonly method: string; readonly headers: HeaderList; readonly body?: string }
   | { readonly t: "fetch.abort"; readonly id: number }
   | { readonly t: "result"; readonly status: "completed" | "failed" | "cancelled"; readonly text?: string; readonly error?: string }
-  | { readonly t: "checkpoint.ok"; readonly id: number; readonly checkpoint: Obj }
+  /** `contextTokens`: an estimate of the stored conversation, for the resume decision (card H12f). */
+  | { readonly t: "checkpoint.ok"; readonly id: number; readonly checkpoint: Obj; readonly contextTokens?: number }
   | { readonly t: "tell.ok"; readonly id: number }
   /** The process could not do what it was asked (`id` names the request when there is one). */
   | { readonly t: "fault"; readonly id?: number; readonly message: string };
@@ -119,7 +121,11 @@ function reply(o: Obj): BridgeReplyMessage {
 export function parseFromChild(value: unknown): FromChild {
   if (!isObj(value)) return fail("a message is an object");
   switch (value["t"]) {
-    case "ready": return { t: "ready", v: int(value, "v") };
+    case "ready": {
+      const toolSchemaChars = value["toolSchemaChars"] === undefined ? undefined : int(value, "toolSchemaChars");
+      const systemPromptChars = value["systemPromptChars"] === undefined ? undefined : int(value, "systemPromptChars");
+      return { t: "ready", v: int(value, "v"), ...(toolSchemaChars === undefined ? {} : { toolSchemaChars }), ...(systemPromptChars === undefined ? {} : { systemPromptChars }) };
+    }
     case "bridge": {
       const r = obj(value, "request");
       const args = r["args"] === undefined ? undefined : obj(r, "args");
@@ -136,7 +142,10 @@ export function parseFromChild(value: unknown): FromChild {
       const text = optStr(value, "text", 4_000_000); const error = optStr(value, "error", 10_000);
       return { t: "result", status, ...(text === undefined ? {} : { text }), ...(error === undefined ? {} : { error }) };
     }
-    case "checkpoint.ok": return { t: "checkpoint.ok", id: int(value, "id"), checkpoint: obj(value, "checkpoint") };
+    case "checkpoint.ok": {
+      const contextTokens = value["contextTokens"] === undefined ? undefined : int(value, "contextTokens");
+      return { t: "checkpoint.ok", id: int(value, "id"), checkpoint: obj(value, "checkpoint"), ...(contextTokens === undefined ? {} : { contextTokens }) };
+    }
     case "tell.ok": return { t: "tell.ok", id: int(value, "id") };
     case "fault": return { t: "fault", ...(value["id"] === undefined ? {} : { id: int(value, "id") }), message: str(value, "message", 4000) };
     default: return fail(`unknown message ${String(value["t"]).slice(0, 40)}`);

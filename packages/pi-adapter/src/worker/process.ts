@@ -48,6 +48,12 @@ async function relayModels(start: ChannelStart): Promise<Models> {
   return models;
 }
 
+/** A rough size of the stored conversation in tokens (three characters to a token, the budget's own estimate), for the resume decision. */
+async function contextTokens(adapter: PiAdapter): Promise<number | undefined> {
+  // Not known is not zero: the host then has no size to judge and says so.
+  try { return Math.ceil((await adapter.root().transcript()).reduce((n, e) => n + e.text.length, 0) / 3); } catch { return undefined; }
+}
+
 /** Runs the process until the host closes it or the input ends. Resolves when everything is released. */
 export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<void> {
   const send = (message: FromChild): void => io.write(encodeMessage(message));
@@ -56,6 +62,7 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
   let relay: ReturnType<typeof relayFetch> | undefined;
   let started: ChannelStart | undefined;
   let nextBridge = 0;
+  let toolSchemaChars = 0;
   const bridgeWaiting = new Map<number, (reply: BridgeReply) => void>();
   const realFetch = globalThis.fetch;
   let running: Promise<void> | undefined;
@@ -77,13 +84,15 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
     }));
     const cache = start.cache === undefined ? undefined : { policy: () => ({ ...(start.cache!.key === undefined ? {} : { key: start.cache!.key }), ...(start.cache!.retention === undefined ? {} : { retention: start.cache!.retention }) }) };
     bridge = createBridge(transport);
+    const tools = composeTools(bridge, [], start.namespaceId);
+    toolSchemaChars = JSON.stringify(tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }))).length;
     adapter = await PiAdapter.open({
       storage, models, model: { provider: start.model.provider, modelId: start.model.modelId },
-      tools: composeTools(bridge, [], start.namespaceId), ...(cache === undefined ? {} : { cache }),
+      tools, ...(cache === undefined ? {} : { cache }),
     });
     // A conversation resumed from the store already used some provider call IDs; the bridge goes on numbering after them.
     try { bridge.seed((await adapter.root().transcript()).flatMap((e) => e.toolCallIds)); } catch { /* a new conversation has none */ }
-    send({ t: "ready", v: WORKER_CHANNEL_VERSION });
+    send({ t: "ready", v: WORKER_CHANNEL_VERSION, toolSchemaChars });
   };
 
   const turn = async (requestIdText: string, content: string): Promise<void> => {
@@ -116,7 +125,7 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
         return;
       case "checkpoint":
         if (adapter === undefined) return fault("the process was not started", message.id);
-        try { send({ t: "checkpoint.ok", id: message.id, checkpoint: JSON.parse(JSON.stringify(await adapter.root().checkpoint())) as never }); } catch (error) { fault(`checkpoint failed: ${String((error as Error)?.message ?? error)}`, message.id); }
+        try { const checkpoint = JSON.parse(JSON.stringify(await adapter.root().checkpoint())) as never; const tokens = await contextTokens(adapter); send({ t: "checkpoint.ok", id: message.id, checkpoint, ...(tokens === undefined ? {} : { contextTokens: tokens }) }); } catch (error) { fault(`checkpoint failed: ${String((error as Error)?.message ?? error)}`, message.id); }
         return;
       case "tell":
         if (adapter === undefined || started === undefined) return fault("the process was not started", message.id);
