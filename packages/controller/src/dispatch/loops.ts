@@ -1,5 +1,6 @@
 import type { DecisionService } from "../decisions/index.js";
 import { DomainError } from "../domain/errors.js";
+import type { Principal } from "../security/principals.js";
 import type { EventService } from "../events/index.js";
 import type { StallService } from "../health/index.js";
 import type { AttendanceService, MeetingService } from "../meetings/index.js";
@@ -112,17 +113,25 @@ export function meetingLoops(meetings: Pick<MeetingService, "tick" | "planned" |
  * L01b: the reconciler's pass (repairs, inbox admission with the pause lookup, effect recovery, wait deadlines) and stall detection. The scan needs the dedicated `recovery.stall-scan` right; a dispatcher
  * without it is told once (`missing`) and the scan is skipped, so the tick does not fail every time.
  */
-export function recoveryLoops(stall: Pick<StallService, "scan">, reconciler: { runPass(): Promise<unknown> }, missing: () => Promise<unknown>): DispatcherLoop[] {
+export function recoveryLoops(stall: Pick<StallService, "scan">, reconciler: { runPass(): Promise<unknown> }, missing: () => Promise<unknown>, renew?: () => Promise<Principal>): DispatcherLoop[] {
   let said = false;
+  // The scan continues where the last tick stopped and wraps at the end, so every assignment is reached however many there are.
+  let cursor: string | undefined;
   return [
     { name: "recovery.reconcile", run: async () => { await reconciler.runPass(); } },
-    { name: "recovery.stall-scan", run: async (by) => {
+    { name: "recovery.stall-scan", run: async (tickBy) => {
+      // The principal is read again each tick: a right the owner grants or revokes while the controller runs takes effect at the next tick.
+      const by = renew === undefined ? tickBy : await renew();
       try {
-        let afterId: string | undefined;
-        for (let round = 0; round < ROUNDS; round++) { const r = await stall.scan(by, afterId === undefined ? {} : { afterId }); if (r.next === undefined) return; afterId = r.next; }
+        for (let round = 0; round < ROUNDS; round++) {
+          const r = await stall.scan(by, cursor === undefined ? {} : { afterId: cursor });
+          cursor = r.next;
+          if (r.next === undefined) break;
+        }
+        said = false;
       } catch (error) {
         if (!(error instanceof DomainError && error.code === "forbidden")) throw error;
-        if (!said) { said = true; await missing(); }
+        if (!said) { await missing(); said = true; }
       }
     } },
   ];
