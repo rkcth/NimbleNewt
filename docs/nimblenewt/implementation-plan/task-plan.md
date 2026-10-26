@@ -645,6 +645,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### C05 — Implement retained context branches and selective updates
 
 - **Parent:** N07 / AII-257.
+- **Status:** implemented; commits `638afd5`, `8c91821`; CI runs 40375987136; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Retained context branches are composed at controller start and offered through twelve branch operations (open, get, apply, suspend, switch, restore, resume, redirect, append, history, pending, delegate); carrying a restore into the Pi conversation at dispatch remains G09 work.
 - **Blockers:** C04, H04.
 - **Deliverable:** Immutable parent context, inquiry branch and revisioned update application.
 - **Acceptance and verification:** Inquiry has permitted current context; parent unchanged after status question; selected updates applied once; suspend/switch/restore preserves exact available history; a branch records its return destination, which persists until resumed or explicitly changed and survives a newer urgent task; a delegated child task receives only selected context references, not a fork of the parent context.
