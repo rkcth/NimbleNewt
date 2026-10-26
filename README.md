@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **70 of 195 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **75 of 195 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -109,17 +109,17 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓░░░` 80% | 12 of 15 |
 | Pi runtime and inference caching | `▓▓▓▓▓▓▓▓░░░░` 72% | 8 of 11 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
-| Pause, suspend and resume | `▓░░░░░░░░░░░` 11% | 1 of 9 |
+| Pause, suspend and resume | `▓▓░░░░░░░░░░` 22% | 2 of 9 |
 | Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓░░░░` 72% | 13 of 18 |
 | Context and memory | `▓▓▓▓▓▓▓░░░░░` 60% | 6 of 10 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
 | Model routing, fallback and cost | `▓▓▓▓░░░░░░░░` 40% | 2 of 5 |
 | Owner chat and web UI | `▓▓░░░░░░░░░░` 16% | 2 of 12 |
-| Workers, dispatch and teams | `▓▓░░░░░░░░░░` 24% | 6 of 25 |
+| Workers, dispatch and teams | `▓▓▓▓░░░░░░░░` 36% | 9 of 25 |
 | Agent messaging | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
 | Health and recovery | `░░░░░░░░░░░░` 0% | 0 of 2 |
 | Meetings | `░░░░░░░░░░░░` 0% | 0 of 8 |
-| Tools and skills | `▓▓▓░░░░░░░░░` 25% | 2 of 8 |
+| Tools and skills | `▓▓▓▓░░░░░░░░` 37% | 3 of 8 |
 | Projects, repositories and workspaces | `░░░░░░░░░░░░` 0% | 0 of 8 |
 | Quality: deliverables, QA and defects | `░░░░░░░░░░░░` 0% | 0 of 4 |
 | Balancing delivery and improvement | `░░░░░░░░░░░░` 0% | 0 of 1 |
@@ -204,12 +204,12 @@ Project and task records, assignments, durable delivery, the effect ledger and a
 </details>
 
 <details>
-<summary><strong>Pause, suspend and resume</strong> — ▓░░░░░░░░░░░ 1 of 9</summary>
+<summary><strong>Pause, suspend and resume</strong> — ▓▓░░░░░░░░░░ 2 of 9</summary>
 
 Pause, suspend, stop, release and checked resume, interrupting a model mid-generation, the remote watchdog, and shutdown and reboot handling.
 
 - [x] **L05** · P26 · Implement generation interruption and late-result handling _(needs C05, F06, A02)_
-- [ ] **L01** · P27 · Implement Pause and background settlement _(needs C04, A02, S08, L05)_
+- [x] **L01** · P27 · Implement Pause and background settlement _(needs C04, A02, S08, L05)_
 - [ ] **L01b** · P29 · Run the reconciler and stall detection in the controller with the pause gates _(needs L01, H12)_
 - [ ] **L05b** · P29 · Feed the model stream into revision-bound generation _(needs L05, H12)_
 - [ ] **L02** · P31 · Implement Suspend and graceful Stop _(needs L01, T07)_
@@ -309,7 +309,7 @@ Talking to your agents: the chat interpreter, policy editing, status and blocker
 </details>
 
 <details>
-<summary><strong>Workers, dispatch and teams</strong> — ▓▓░░░░░░░░░░ 6 of 25</summary>
+<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓░░░░░░░░ 9 of 25</summary>
 
 Enrolled hosts, remote workers, priority admission, the local worker runtime and dispatcher, agents, teams and roles, reviews and wait-cycle handling.
 
@@ -322,15 +322,15 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 - [ ] **H06b** · P25 · Expire idle event subscriptions _(needs H06)_
 - [ ] **H13** · P26 · Implement event source adapters and watchers _(needs H06, H01, R02)_
 - [ ] **H05b** · P28 · Implement reviewer pause and hold behaviour _(needs H05, L01)_
-- [ ] **H12** · P28 · Implement the local worker runtime and attempt dispatcher _(needs A03, A05, R01, C07b, C06b, S05, C04, F08, H03)_
+- [x] **H12** · P28 · Implement the local worker runtime and attempt dispatcher _(needs A03, A05, R01, C07b, C06b, S05, C04, F08, H03)_
 - [ ] **H02** · P29 · Implement subordinate remote work/artifact transport _(needs H01, S06, A03, H12)_
 - [ ] **H12b** · P29 · Bind the real sandbox launcher and worker process to the local runtime _(needs H12, A03, A08)_
-- [ ] **H12c** · P29 · Compose the dispatcher at controller start with a durable scan cursor _(needs H12)_
+- [x] **H12c** · P29 · Compose the dispatcher at controller start with a durable scan cursor _(needs H12)_
 - [ ] **H12d** · P29 · Quiesce attempts before integration, refresh and quarantine _(needs H12, A04, A06)_
 - [ ] **H12e** · P29 · Route Pi model calls through the cache adapter _(needs H12, C06b)_
 - [ ] **H12f** · P29 · Wire context enforcement, pause observation and message boundaries into the runtime _(needs H12, C07b, L01, U12)_
 - [ ] **H12g** · P29 · Use the DNS-rebinding guard in the remote MCP client _(needs H12, T03)_
-- [ ] **H12h** · P29 · Route owner-mode reviews only to the owner _(needs H12, A05)_
+- [x] **H12h** · P29 · Route owner-mode reviews only to the owner _(needs H12, A05)_
 - [ ] **H07** · P30 · Implement idle host polling and capability placement _(needs H02, H03)_
 - [ ] **H12a** · P30 · Carry the dispatch contract to remote workers _(needs H12, H02)_
 - [ ] **H12i** · P30 · Give tasks controlled network routes through the worker relay _(needs H12b, A07, T01, T03, A03b)_
@@ -380,13 +380,13 @@ Scheduling, votes and decisions, stand-ups, attendance and return to work, and f
 </details>
 
 <details>
-<summary><strong>Tools and skills</strong> — ▓▓▓░░░░░░░░░ 2 of 8</summary>
+<summary><strong>Tools and skills</strong> — ▓▓▓▓░░░░░░░░ 3 of 8</summary>
 
 The immutable tool and skill catalogue, review and promotion, MCP connections, the protected agent tool bridge and background jobs.
 
 - [x] **T01** · P22 · Implement immutable tool/skill catalog and attribution _(needs F07, A03, C01)_
 - [x] **T03** · P23 · Implement approved MCP client connections _(needs T01, A01, S05, F09)_
-- [ ] **T06** · P29 · Implement the protected agent tool bridge and execution service _(needs H12, T01)_
+- [x] **T06** · P29 · Implement the protected agent tool bridge and execution service _(needs H12, T01)_
 - [ ] **T06b** · P30 · Wire the protected bridge into the composed worker across a process boundary _(needs T06, H12b, H12c)_
 - [ ] **T07** · P30 · Implement durable job records and job control _(needs T06, S05)_
 - [ ] **T09** · P30 · Implement command namespaces and alias dispatch _(needs T06, H11, U03)_
