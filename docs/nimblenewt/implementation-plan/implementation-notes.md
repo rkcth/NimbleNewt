@@ -1726,3 +1726,9 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - **L01, not ready:** `startController` builds `ConversationService` without the pause service's availability, and `Reconciler`/`StallService` are not given `pauses`. Small.
 - **U12, not ready:** the agent's question reaches no owner chat (`askOwner`, `ownerQuestions`, `answerOwner` have no caller outside `messages.ts`: needs a bridge operation and a chat route). Small to medium.
 - **Order of work that frees the most cards:** (1) wire C07b into the worker and dispatcher, (2) audit and flip C06, (3) wire L01 and audit L05, (4) H12e composer wiring, (5) U12 owner-question surface and audit M01.
+
+## L01 wiring notes (the pause gates in controller start-up)
+
+- `startController` builds one `PauseService` (`services.pauses`) and uses its `availability` for the conversation service and the review service: a paused agent (its own gate, its team chain's or the installation's) has its messages queued and is skipped as a reviewer; a message never lifts a pause. `StartOptions.availability` is now the lifecycle's other states (suspended, stopped) behind it.
+- The dispatcher composer still builds its own `PauseService` for the dispatcher, messages, meetings and stand-ups (a stateless service over the same store, so the two agree).
+- **Not wired:** nothing in `startController` builds the `Reconciler` or the `StallService` (they exist only in the slice harness and tests), so they have no `pauses` to be given; wiring them belongs with the reconciler loop's own composition. L01 stays planned.

@@ -20,6 +20,7 @@ import type { ControllerStorage } from "../storage/types.js";
 import { StateApi } from "./state-api.js";
 import { ConfigurationService } from "../configuration/index.js";
 import { ConversationService, type Availability } from "../conversations/index.js";
+import { PauseService } from "../lifecycle/index.js";
 import { ReviewService } from "../review/index.js";
 import { RoutingService } from "../routing/index.js";
 import { composeDispatch, type DispatchHandle, type DispatchStartOptions } from "./dispatch-compose.js";
@@ -84,7 +85,7 @@ export interface Controller {
   readonly prerequisites: readonly PrerequisiteReport[];
   readonly services: {
     readonly principals: PrincipalService; readonly taskCredentials: TaskCredentialService; readonly grants: GrantService; readonly projects: ProjectService; readonly assignments: AssignmentService;
-    readonly waits: WaitService; readonly desks: DeskService; readonly histories: HistoryService; readonly retrieval: RetrievalService; readonly inquiries: InquiryService; readonly agents: AgentService; readonly harnesses: HarnessCatalog; readonly contracts: ContractService; readonly graph: WaitGraphService; readonly resources: ProjectResourceService; readonly plans: ProjectPlanService; readonly responsibilities: ResponsibilityService; readonly reviews: ReviewService; readonly conversations: ConversationService; readonly configuration: ConfigurationService; readonly routing: RoutingService;
+    readonly waits: WaitService; readonly desks: DeskService; readonly histories: HistoryService; readonly retrieval: RetrievalService; readonly inquiries: InquiryService; readonly agents: AgentService; readonly harnesses: HarnessCatalog; readonly contracts: ContractService; readonly graph: WaitGraphService; readonly resources: ProjectResourceService; readonly plans: ProjectPlanService; readonly responsibilities: ResponsibilityService; readonly reviews: ReviewService; readonly conversations: ConversationService; readonly configuration: ConfigurationService; readonly routing: RoutingService; readonly pauses: PauseService;
   };
   /** The dispatcher and the driver of its loops, when `dispatch` was given and the dispatcher could be provisioned. */
   readonly dispatch?: DispatchHandle;
@@ -157,12 +158,14 @@ export async function startController(options: StartOptions): Promise<Controller
     const retrieval = RetrievalService.withEpoch(storage, epoch, desks, histories);
     const inquiries = InquiryService.withEpoch(storage, epoch, { histories, retrieval, waits, assignments });
     const agents = AgentService.withEpoch(storage, epoch);
-    const reviews = ReviewService.withEpoch(storage, epoch);
+    // Card L01: the pause gates supply the availability the conversations and the reviews consult, so a paused agent's messages are queued and a paused reviewer is skipped; whatever else the lifecycle reports (suspended, stopped) comes through `options.availability`.
+    const pauses = PauseService.withEpoch(storage, epoch, { waits }, options.availability === undefined ? {} : { otherAvailability: options.availability });
+    const reviews = ReviewService.withEpoch(storage, epoch, { availability: pauses.availability });
     const graph = WaitGraphService.withEpoch(storage, epoch, contracts, BlockerService.withEpoch(storage, epoch), { extraEdges: (projectId, tasks) => reviews.waitEdges(projectId, tasks) });
     // The routing table is refused unless the coordinator, the safety supervisor and every other role in it have a valid fallback list (card R04).
     const routing = RoutingService.withEpoch(storage, epoch, {}, {});
     const configuration = ConfigurationService.withEpoch(storage, epoch, { routing });
-    const conversations = ConversationService.withEpoch(storage, epoch, options.availability === undefined ? {} : { availability: options.availability });
+    const conversations = ConversationService.withEpoch(storage, epoch, { availability: pauses.availability });
     const resources = ProjectResourceService.withEpoch(storage, epoch);
     const plans = ProjectPlanService.withEpoch(storage, epoch);
     const responsibilities = ResponsibilityService.withEpoch(storage, epoch);
@@ -179,7 +182,7 @@ export async function startController(options: StartOptions): Promise<Controller
     }
     const transport = options.conversationTransport === undefined ? undefined : await ConversationTransport.listen({ ...options.conversationTransport, conversations, principals });
     return {
-      api, storage, epoch, check, filesystems, prerequisites, services: { principals, taskCredentials, grants, projects, assignments, waits, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing },
+      api, storage, epoch, check, filesystems, prerequisites, services: { principals, taskCredentials, grants, projects, assignments, waits, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing, pauses },
       ...(dispatch === undefined ? {} : { dispatch }), ...(dispatchProblem === undefined ? {} : { dispatchProblem }),
       ...(transport === undefined ? {} : { conversationUrl: transport.url }),
       close: async () => { await dispatch?.driver.stop(); await dispatch?.closeWorkers().catch(() => undefined); await transport?.close(); await storage.close(); },
