@@ -227,6 +227,27 @@ Arguments:
 
 Result: `{ items, next?, scanLimited? }` (see `events.failures` for `scanLimited`).
 
+#### `branch.get`
+
+A branch, the updates applied to it (resolved for the caller only) and the lengths of the frozen parent and the branch.
+
+Arguments:
+
+- `branchId`: the branch
+
+Result: `{ item: { branch, updates, counts } }`.
+
+#### `branch.pending`
+
+Branches that are waiting to be returned from.
+
+Arguments:
+
+- `limit` (optional): 1 to 100, default 20
+- `after` (optional): the `next` of the previous page
+
+Result: `{ items, next? }`.
+
 #### `owner.questions`
 
 The questions agents have put to the owner (each page in the order asked), each with the task it is about (title, state, project) and the wait its answer will resolve. Owner only.
@@ -497,6 +518,90 @@ Arguments:
 - `projectId`: the project
 
 Result: `{ cycles }`: each ring's tasks and agents, the waits that form it and its blocker.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `branch.open`
+
+Opens a retained context branch of a task (an inquiry's, or a side question's): the parent's history is frozen at this point and the branch has its own. `returnTo` is where the work goes back to (default: the task it began from).
+
+Arguments:
+
+- `taskId`: the task
+- `purpose`: what the branch is for
+- `returnTo` (optional): the return destination
+- `continuationId` (optional): a complete continuation capture the branch inherits
+- `inquiryId` (optional): the inquiry it answers
+
+Result: `{ id, scopeId, throughSeq, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `branch.apply`
+
+Applies selected updates (references to records) to a branch, once; the revision you read must still be current.
+
+Arguments:
+
+- `branchId`: the branch
+- `expectedRevision`: the revision you read
+- `updates`: a list of references
+
+Result: `{ revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `branch.suspend`
+
+Suspends an active branch (a newer task arrived): it keeps exactly the history it had and its return destination.
+
+Arguments:
+
+- `branchId`: the branch
+- `expectedRevision`: the revision you read
+- `reason`: why
+
+Result: `{}`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `branch.switch`
+
+Suspends one branch and restores another in one step; each keeps exactly the history available to it.
+
+Arguments:
+
+- `suspend`: `{ branchId, expectedRevision, reason }`
+- `restore`: `{ branchId, expectedRevision }`
+
+Result: `{}`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `branch.resume`
+
+Finishes a branch and returns to its destination, which stays until resumed or explicitly changed.
+
+Arguments:
+
+- `branchId`: the branch
+- `expectedRevision`: the revision you read
+
+Result: `{ returnedTo }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `branch.delegate`
+
+Gives a child task only the selected references of a branch (never a fork of the parent context).
+
+Arguments:
+
+- `branchId`: the branch
+- `childTaskId`: the child task
+- `refs`: a list of references
+
+Result: `{ id, replayed }`.
 
 Completion: finished when accepted (`completed: true`).
 

@@ -7,6 +7,7 @@ import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
 import type { ProjectPlanService, ProjectResourceService, ResponsibilityService } from "../projects/index.js";
 import type { RetrievalService } from "../context/index.js";
+import type { ContextBranchService } from "../branches/index.js";
 import type { MeetingService } from "../meetings/index.js";
 import type { AgentMessageService } from "../messaging/index.js";
 import { shownLines } from "../standups/standups.js";
@@ -32,6 +33,8 @@ export interface Context {
   readonly responsibilities?: ResponsibilityService;
   /** Absent when the controller runs without meetings (cards M01 and M03). */
   readonly meetings?: MeetingService;
+  /** Absent when the controller runs without context branches (card C05). */
+  readonly branches?: ContextBranchService;
   /** Absent when the controller runs without agent messages (card U12): questions to the owner. */
   readonly ownerQuestions?: Pick<AgentMessageService, "askOwner" | "ownerQuestions" | "answerOwner">;
 }
@@ -80,6 +83,7 @@ const unavailable = (what: string): never => { throw new DomainError("unavailabl
 const resources = (c: Context): ProjectResourceService => c.resources ?? unavailable("project resources");
 const plans = (c: Context): ProjectPlanService => c.plans ?? unavailable("project plans");
 const ownerQuestionsOf = (c: Context): NonNullable<Context["ownerQuestions"]> => c.ownerQuestions ?? unavailable("questions to the owner");
+const branchesOf = (c: Context): ContextBranchService => c.branches ?? unavailable("context branches");
 const meetingsOf = (c: Context): MeetingService => c.meetings ?? unavailable("meetings");
 const duties = (c: Context): ResponsibilityService => c.responsibilities ?? unavailable("responsibilities");
 const optNum = (args: Args, key: string): number | undefined => { const v = args[key]; return v === undefined ? undefined : (typeof v === "number" ? v : invalid(`args.${key}`, "must be a number")); };
@@ -147,6 +151,22 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, ["handlingId"]); return found("handling", await watches(c).inspect(c.principal, str(a, "handlingId"))); } },
   { name: "events.loops", kind: "query", summary: "Self-triggering event loops that are held (their events are not scheduled until the owner releases them).", args: { "limit?": `1 to ${PAGE.max}, default ${PAGE.default}`, "after?": "the `next` of the previous page" }, result: "`{ items, next?, scanLimited? }` (see `events.failures` for `scanLimited`).",
     run: async (c, a) => { only(a, ["limit", "after"]); return page(await watches(c).loops(c.principal, { limit: limitOf(a), ...(optStr(a, "after") === undefined ? {} : { afterId: optStr(a, "after")! }) })); } },
+  { name: "branch.open", kind: "command", summary: "Opens a retained context branch of a task (an inquiry's, or a side question's): the parent's history is frozen at this point and the branch has its own. `returnTo` is where the work goes back to (default: the task it began from).", args: { taskId: "the task", purpose: "what the branch is for", "returnTo?": "the return destination", "continuationId?": "a complete continuation capture the branch inherits", "inquiryId?": "the inquiry it answers" }, result: "`{ id, scopeId, throughSeq, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => asJson(await branchesOf(c).open(c.principal, { commandId: need(id), ...(a as object) } as never)) },
+  { name: "branch.get", kind: "query", summary: "A branch, the updates applied to it (resolved for the caller only) and the lengths of the frozen parent and the branch.", args: { branchId: "the branch" }, result: "`{ item: { branch, updates, counts } }`.",
+    run: async (c, a) => { only(a, ["branchId"]); return found("branch", await branchesOf(c).view(c.principal, str(a, "branchId"))); } },
+  { name: "branch.apply", kind: "command", summary: "Applies selected updates (references to records) to a branch, once; the revision you read must still be current.", args: { branchId: "the branch", expectedRevision: "the revision you read", updates: "a list of references" }, result: "`{ revision, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => asJson(await branchesOf(c).applyUpdates(c.principal, { commandId: need(id), ...(a as object) } as never)) },
+  { name: "branch.suspend", kind: "command", summary: "Suspends an active branch (a newer task arrived): it keeps exactly the history it had and its return destination.", args: { branchId: "the branch", expectedRevision: "the revision you read", reason: "why" }, result: "`{}`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { await branchesOf(c).suspend(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({}); } },
+  { name: "branch.switch", kind: "command", summary: "Suspends one branch and restores another in one step; each keeps exactly the history available to it.", args: { suspend: "`{ branchId, expectedRevision, reason }`", restore: "`{ branchId, expectedRevision }`" }, result: "`{}`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { await branchesOf(c).switch(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({}); } },
+  { name: "branch.resume", kind: "command", summary: "Finishes a branch and returns to its destination, which stays until resumed or explicitly changed.", args: { branchId: "the branch", expectedRevision: "the revision you read" }, result: "`{ returnedTo }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => asJson(await branchesOf(c).resume(c.principal, { commandId: need(id), ...(a as object) } as never)) },
+  { name: "branch.pending", kind: "query", summary: "Branches that are waiting to be returned from.", args: { "limit?": `1 to ${PAGE.max}, default ${PAGE.default}`, "after?": "the `next` of the previous page" }, result: "`{ items, next? }`.",
+    run: async (c, a) => { only(a, ["limit", "after"]); return page(await branchesOf(c).pendingReturns(c.principal, { limit: limitOf(a), ...(optStr(a, "after") === undefined ? {} : { afterId: optStr(a, "after")! }) })); } },
+  { name: "branch.delegate", kind: "command", summary: "Gives a child task only the selected references of a branch (never a fork of the parent context).", args: { branchId: "the branch", childTaskId: "the child task", refs: "a list of references" }, result: "`{ id, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => asJson(await branchesOf(c).delegate(c.principal, { commandId: need(id), ...(a as object) } as never)) },
   { name: "owner.ask", kind: "command", summary: "An agent asks the owner a question about a task it works on. The question appears in `owner.questions` with the task's context; if `waitId` names the typed wait the task is blocked in for the owner, the owner's answer resolves it. Asking never wakes or resumes anything.", args: { taskId: "the task the question is about", question: "the question", "waitId?": "the wait the answer resolves" }, result: "`{ id, replayed }` (`id` is the inquiry).", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["taskId", "question", "waitId"]); const asked = await ownerQuestionsOf(c).askOwner(c.principal, { commandId: need(id), taskId: str(a, "taskId"), question: str(a, "question"), ...(optStr(a, "waitId") === undefined ? {} : { waitId: optStr(a, "waitId")! }) }); return asJson({ id: asked.inquiryId, replayed: asked.replayed }); } },
   { name: "owner.questions", kind: "query", summary: "The questions agents have put to the owner (each page in the order asked), each with the task it is about (title, state, project) and the wait its answer will resolve. Owner only.", args: { "limit?": `1 to ${PAGE.max}, default ${PAGE.default}`, "after?": "the `next` of the previous page" }, result: "`{ items, next? }`.",

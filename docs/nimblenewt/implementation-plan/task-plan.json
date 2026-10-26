@@ -2777,6 +2777,44 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "U03b",
+      "parent": "N09",
+      "existing_issue": "AII-259",
+      "title": "Back the owner chat interpreter and the coordinator with a routed model",
+      "depends_on": [
+        "U03",
+        "R01",
+        "R02"
+      ],
+      "deliverable": "The chat interpreter (reads the owner's free-form message into intents) and the coordinator's model are implemented over the routed model client: routes come from the routing table (R01), failures are classified and fall back (R02), the coordinator's routes are resolved from the table instead of being plain names, and the model sees only what the scripted interpreter was shown (the owner's words, quoted text marked as quoted, the focus, the open proposals)",
+      "acceptance_and_verification": "Against a recorded or simulated model: a clear order becomes the right intents; an ambiguous one asks; quoted text, and an instruction hidden in a record or a tool result, cannot become an intent that grants authority; a model that fails or answers with invalid intents leaves the chat answering that it is unavailable and nothing done; a route that fails falls back as R02 says and a cumulative budget is respected; the same message with the same command ID is one turn",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "U03c",
+      "parent": "N09",
+      "existing_issue": "AII-259",
+      "title": "Run the coordinator as a hosted agent with its own lifecycle (optional, after the first release)",
+      "depends_on": [
+        "U03",
+        "H11",
+        "L01"
+      ],
+      "deliverable": "Optional: the coordinator becomes an agent record with a host, its own grants, fallback list and pause, stop and resume lifecycle through the same controls as other agents, instead of a controller-held credential",
+      "acceptance_and_verification": "The coordinator appears in the agent list with its lifecycle state; pausing or stopping it through the agent controls has the same effect as the coordinator state today; the controller works with it paused, stopped or failing; its grants are visible and revocable like any agent's",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "U07",
       "parent": "N09",
       "existing_issue": "AII-259",
@@ -4249,6 +4287,7 @@
         "D02",
         "F04h",
         "T06b",
+        "U03b",
         "H12a",
         "H12b",
         "H12c",
@@ -4313,13 +4352,14 @@
       "depends_on": [
         "D04",
         "D04b",
+        "U03c",
         "K06b",
         "K01d",
         "P02b",
         "A08c"
       ],
-      "deliverable": "Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete",
-      "acceptance_and_verification": "D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards",
+      "deliverable": "Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete",
+      "acceptance_and_verification": "D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",

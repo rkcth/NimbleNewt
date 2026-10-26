@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **65 of 190 tasks implemented**.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **65 of 192 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -273,6 +273,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **M01** Implement durable meeting scheduling and agendas _(needs H04, U03)_
 - [ ] **P01** Implement repository-independent projects and responsibilities _(needs U03, S01)_
 - [ ] **R04** Implement provider drain, cutover and failback policy _(needs R02, L05)_
+- [ ] **U03b** Back the owner chat interpreter and the coordinator with a routed model _(needs U03, R01, R02)_
 - [ ] **U04** Implement conversational policy editing _(needs U03, A02, A05, A07, U10)_
 - [ ] **U05** Implement chat status and blocker explanations _(needs U03, S08, H01)_
 
@@ -284,6 +285,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **M02** Implement votes, decisions and meeting summaries _(needs M01, A02, C02, C08)_
 - [ ] **M03** Implement stand-up preparation, briefs and agenda items _(needs M01, C02, U03)_
 - [ ] **M04** Implement meeting attendance and return to work _(needs M01, L01, L05, H04)_
+- [ ] **U03c** Run the coordinator as a hosted agent with its own lifecycle (optional, after the first release) _(needs U03, H11, L01)_
 - [ ] **U12** Implement agent messages, delivery classes and interruption budget _(needs U02, S08, L05, M01)_
 
 ### Phase 29
@@ -433,7 +435,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 49
 
-- [ ] **D03** Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11)_
+- [ ] **D03** Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11)_
 
 ### Phase 50
 
@@ -445,7 +447,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 52
 
-- [ ] **D05** Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, K06b, K01d, P02b, A08c)_
+- [ ] **D05** Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, U03c, K06b, K01d, P02b, A08c)_
 
 ## More detail
 

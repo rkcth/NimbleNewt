@@ -36,7 +36,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A08, A08b, A08c, A09, A10, A10b |
 | N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C08, C09 |
 | N08 / AII-258 | R01, R02, R03, R04, R05 |
-| N09 / AII-259 | U03, U04, U05, U06, U07, U09, U08, U10, U11, U11b |
+| N09 / AII-259 | U03, U04, U05, U06, U03b, U03c, U07, U09, U08, U10, U11, U11b |
 | N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H07, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13 |
 | N11 / AII-261 | V01, V02 |
 | N12 / AII-262 | M00, M01, M02, M03, M04, M05, M05b, M06 |
@@ -1082,6 +1082,22 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** Provider loss still permits authenticated recovery through chat; unavailable host boundary reported; command audit retained; Force Stop and provider or route exclusion work without a model; replies distinguish received, accepted, activated and effected.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
+### U03b — Back the owner chat interpreter and the coordinator with a routed model
+
+- **Parent:** N09 / AII-259.
+- **Blockers:** U03, R01, R02.
+- **Deliverable:** The chat interpreter (reads the owner's free-form message into intents) and the coordinator's model are implemented over the routed model client: routes come from the routing table (R01), failures are classified and fall back (R02), the coordinator's routes are resolved from the table instead of being plain names, and the model sees only what the scripted interpreter was shown (the owner's words, quoted text marked as quoted, the focus, the open proposals).
+- **Acceptance and verification:** Against a recorded or simulated model: a clear order becomes the right intents; an ambiguous one asks; quoted text, and an instruction hidden in a record or a tool result, cannot become an intent that grants authority; a model that fails or answers with invalid intents leaves the chat answering that it is unavailable and nothing done; a route that fails falls back as R02 says and a cumulative budget is respected; the same message with the same command ID is one turn.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### U03c — Run the coordinator as a hosted agent with its own lifecycle (optional, after the first release)
+
+- **Parent:** N09 / AII-259.
+- **Blockers:** U03, H11, L01.
+- **Deliverable:** Optional: the coordinator becomes an agent record with a host, its own grants, fallback list and pause, stop and resume lifecycle through the same controls as other agents, instead of a controller-held credential.
+- **Acceptance and verification:** The coordinator appears in the agent list with its lifecycle state; pausing or stopping it through the agent controls has the same effect as the coordinator state today; the controller works with it paused, stopped or failing; its grants are visible and revocable like any agent's.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
 ### U07 — Qualify responsive web chat over private networking
 
 - **Parent:** N09 / AII-259.
@@ -1647,7 +1663,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D03 — Approve release readiness and publication decision
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** X08, D01, D02, F04h, T06b, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11.
+- **Blockers:** X08, D01, D02, F04h, T06b, U03b, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11.
 - **Deliverable:** Exact release manifest, known limitations and owner signoff.
 - **Acceptance and verification:** All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
@@ -1671,9 +1687,9 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** D04, D04b, K06b, K01d, P02b, A08c.
-- **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
-- **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
+- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c.
+- **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
+- **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### Y01 — QA checkpoint 1: durable core

@@ -260,7 +260,10 @@ export class CoordinatorService {
     if (found === undefined) return { kind: "unavailable", reason: "the coordinator is not set up" };
     const body = found.body as unknown as CoordinatorBody;
     // The credential the controller holds must be the principal the owner configured; otherwise the coordinator would act with someone else's grants.
-    if ((await this.#deps.principal()).id !== body.principalId) return { kind: "unavailable", reason: "the coordinator's credential is not the configured principal" };
+    // A credential that is missing or no longer valid makes the coordinator unavailable; it is never an error for the caller.
+    const held = await this.#deps.principal().then((p) => p.id, () => undefined);
+    if (held === undefined) return { kind: "unavailable", reason: "the coordinator has no valid credential" };
+    if (held !== body.principalId) return { kind: "unavailable", reason: "the coordinator's credential is not the configured principal" };
     return body.state === "running" ? { kind: "ok", body } : { kind: "unavailable", reason: `the coordinator is ${body.state}` };
   }
 

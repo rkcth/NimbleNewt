@@ -8,6 +8,7 @@ import type { WatchService } from "../events/handling.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
 import type { ProjectPlanService, ProjectResourceService, ResponsibilityService } from "../projects/index.js";
+import type { ContextBranchService } from "../branches/index.js";
 import type { MeetingService } from "../meetings/index.js";
 import type { AgentMessageService } from "../messaging/index.js";
 import { SecureApi } from "../security/secured.js";
@@ -55,6 +56,8 @@ export interface StateApiDeps {
   readonly responsibilities?: ResponsibilityService;
   /** When present, agenda items can be captured, corrected and listed through the API (cards M01 and M03). */
   readonly meetings?: MeetingService;
+  /** When present, context branches can be opened, switched, resumed and delegated through the API (card C05). */
+  readonly branches?: ContextBranchService;
   /** When present, an agent can ask the owner a question and the owner can see and answer the questions (card U12). */
   readonly ownerQuestions?: Pick<AgentMessageService, "askOwner" | "ownerQuestions" | "answerOwner">;
   /** When present, a task credential (`tcr-…`) is accepted too and acts for its one task (card A10b). */
@@ -101,6 +104,7 @@ export class StateApi {
         ...(this.#deps.plans === undefined ? {} : { plans: this.#deps.plans }),
         ...(this.#deps.responsibilities === undefined ? {} : { responsibilities: this.#deps.responsibilities }),
         ...(this.#deps.meetings === undefined ? {} : { meetings: this.#deps.meetings }),
+        ...(this.#deps.branches === undefined ? {} : { branches: this.#deps.branches }),
         ...(this.#deps.ownerQuestions === undefined ? {} : { ownerQuestions: this.#deps.ownerQuestions }),
       };
       const result = await operation.run(context, args, request.commandId);

@@ -1,3 +1,4 @@
+import { DomainError } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { AssignmentService } from "../domain/assignments.js";
 import { WaitService } from "../domain/waits.js";
@@ -22,6 +23,8 @@ import { ConfigurationService } from "../configuration/index.js";
 import { ConversationService, type Availability } from "../conversations/index.js";
 import { AgentMessageService } from "../messaging/index.js";
 import { NotificationService } from "../notifications/index.js";
+import { ChatService, CoordinatorService, type ChatInterpreter, type CoordinatorModel } from "../chat/index.js";
+import { ContextBranchService } from "../branches/index.js";
 import { PauseService } from "../lifecycle/index.js";
 import { ReviewService } from "../review/index.js";
 import { RoutingService } from "../routing/index.js";
@@ -74,6 +77,14 @@ export interface StartOptions {
    * holds the primary epoch; a newer controller instance stops them here. See `DispatchStartOptions`.
    */
   readonly dispatch?: DispatchStartOptions;
+  /**
+   * Owner chat (card U03): the interpreter that reads the owner's messages (a model behind the routed client in production; a scripted one in tests) and, optionally, the persistent coordinator's model and credential. Absent: no chat service is built.
+   * The coordinator is controller-managed and nothing depends on it: when it is paused, stopped or its routes fail, the chat and the rest of the controller carry on.
+   */
+  readonly chat?: {
+    readonly interpreter: ChatInterpreter;
+    readonly coordinator?: { readonly model: CoordinatorModel; /** The coordinator agent's credential, held by the controller. */ readonly token: () => Promise<string | undefined> };
+  };
 }
 
 export interface Controller {
@@ -87,10 +98,13 @@ export interface Controller {
   readonly prerequisites: readonly PrerequisiteReport[];
   readonly services: {
     readonly principals: PrincipalService; readonly taskCredentials: TaskCredentialService; readonly grants: GrantService; readonly projects: ProjectService; readonly assignments: AssignmentService;
-    readonly waits: WaitService; readonly desks: DeskService; readonly histories: HistoryService; readonly retrieval: RetrievalService; readonly inquiries: InquiryService; readonly agents: AgentService; readonly harnesses: HarnessCatalog; readonly contracts: ContractService; readonly graph: WaitGraphService; readonly resources: ProjectResourceService; readonly plans: ProjectPlanService; readonly responsibilities: ResponsibilityService; readonly reviews: ReviewService; readonly conversations: ConversationService; readonly configuration: ConfigurationService; readonly routing: RoutingService; readonly pauses: PauseService;
+    readonly waits: WaitService; readonly desks: DeskService; readonly histories: HistoryService; readonly retrieval: RetrievalService; readonly inquiries: InquiryService; readonly agents: AgentService; readonly harnesses: HarnessCatalog; readonly contracts: ContractService; readonly graph: WaitGraphService; readonly resources: ProjectResourceService; readonly plans: ProjectPlanService; readonly responsibilities: ResponsibilityService; readonly reviews: ReviewService; readonly conversations: ConversationService; readonly configuration: ConfigurationService; readonly routing: RoutingService; readonly pauses: PauseService; readonly branches: ContextBranchService;
   };
   /** The dispatcher and the driver of its loops, when `dispatch` was given and the dispatcher could be provisioned. */
   readonly dispatch?: DispatchHandle;
+  /** The owner chat and the coordinator, when `chat` was given. */
+  readonly chat?: ChatService;
+  readonly coordinator?: CoordinatorService;
   /** Why the dispatcher was not built although it was asked for (for example the owner disabled `service:dispatcher`). */
   readonly dispatchProblem?: string;
   /** The conversation listener's address, when it was asked for. */
@@ -174,7 +188,21 @@ export async function startController(options: StartOptions): Promise<Controller
     // Questions to the owner (card U12): agents ask through the API, the owner sees and answers them; the owner is told through the notifications.
     const notifications = NotificationService.withEpoch(storage, epoch);
     const messages = AgentMessageService.withEpoch(storage, epoch, { availability: pauses.availability, taskPaused: (t) => pauses.isPaused(t), guard: (t) => pauses.guard(t), waits, assignments, inquiries, notifications });
-    const api = new StateApi({ ownerQuestions: messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
+    const branches = ContextBranchService.withEpoch(storage, epoch, { histories, retrieval });
+    const api = new StateApi({ branches, ownerQuestions: messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
+    let chat: ChatService | undefined;
+    let coordinator: CoordinatorService | undefined;
+    if (options.chat !== undefined) {
+      const o = options.chat;
+      chat = ChatService.withEpoch(storage, epoch, { principals, api, interpreter: o.interpreter, ...(o.coordinator === undefined ? {} : { coordinatorToken: o.coordinator.token }) });
+      if (o.coordinator !== undefined) {
+        const c = o.coordinator;
+        coordinator = CoordinatorService.withEpoch(storage, epoch, {
+          chat, retrieval, inquiries, projects, assignments, api, token: c.token, model: c.model,
+          principal: async () => { const t = await c.token(); if (t === undefined) throw new DomainError("unavailable", "the coordinator has no credential"); return principals.authenticate(t); },
+        });
+      }
+    }
     let dispatchProblem: string | undefined;
     if (options.dispatch !== undefined) {
       try {
@@ -187,7 +215,8 @@ export async function startController(options: StartOptions): Promise<Controller
     }
     const transport = options.conversationTransport === undefined ? undefined : await ConversationTransport.listen({ ...options.conversationTransport, conversations, principals });
     return {
-      api, storage, epoch, check, filesystems, prerequisites, services: { principals, taskCredentials, grants, projects, assignments, waits, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing, pauses },
+      api, storage, epoch, check, filesystems, prerequisites, services: { principals, taskCredentials, grants, projects, assignments, waits, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing, pauses, branches },
+      ...(chat === undefined ? {} : { chat }), ...(coordinator === undefined ? {} : { coordinator }),
       ...(dispatch === undefined ? {} : { dispatch }), ...(dispatchProblem === undefined ? {} : { dispatchProblem }),
       ...(transport === undefined ? {} : { conversationUrl: transport.url }),
       close: async () => { await dispatch?.driver.stop(); await dispatch?.closeWorkers().catch(() => undefined); await transport?.close(); await storage.close(); },
