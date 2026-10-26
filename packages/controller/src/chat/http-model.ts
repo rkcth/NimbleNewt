@@ -44,12 +44,16 @@ export class HttpModelCall implements ModelCall {
         method: "POST", headers, redirect: "error", signal: AbortSignal.timeout(this.#o.timeoutMs ?? 60_000),
         body: JSON.stringify({ model, temperature: 0, stream: false, max_tokens: this.#o.maxReplyTokens ?? 1500, messages: [{ role: "system", content: request.system }, { role: "user", content: request.user }] }),
       });
-    } catch (error) { return fail(undefined, error instanceof Error ? error.message : String(error)); }
-    const text = await readBounded(response);
+    } catch (error) { return fail(undefined, whyFailed(error)); }
+    let text: string;
+    try { text = await readBounded(response); } catch (error) { return fail(undefined, whyFailed(error)); }
     if (!response.ok) return fail(response.status, text.slice(0, 300));
     let content: unknown;
     try { content = (JSON.parse(text) as { choices?: { message?: { content?: unknown } }[] }).choices?.[0]?.message?.content; } catch { return fail(undefined, "the reply was not JSON"); }
-    if (typeof content !== "string" || content === "") return fail(undefined, "the reply held no text");
+    if (typeof content !== "string" || content === "") {
+      const reason = (() => { try { const e = (JSON.parse(text) as { error?: unknown }).error; return typeof e === "string" ? e : typeof e === "object" && e !== null ? String((e as { message?: unknown }).message ?? "") : ""; } catch { return ""; } })();
+      return fail(undefined, reason === "" ? "the reply held no text" : reason);
+    }
     return content;
   }
 }
@@ -63,4 +67,11 @@ async function readBounded(response: Response): Promise<string> {
     parts.push(Buffer.from(chunk));
   }
   return Buffer.concat(parts).toString("utf8");
+}
+
+/** What went wrong, with the reason Node keeps in `cause` (a refused connection, a failed name lookup, a refused redirect and a timeout all arrive as "fetch failed" or a bare abort). */
+function whyFailed(error: unknown): string {
+  const e = error as { message?: unknown; name?: unknown; cause?: { code?: unknown; message?: unknown } };
+  const cause = e?.cause === undefined ? "" : ` (${String(e.cause.code ?? e.cause.message ?? "").slice(0, 100)})`;
+  return `${String(e?.name === "TimeoutError" ? "timed out" : e?.message ?? error)}${cause}`;
 }

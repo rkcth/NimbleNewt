@@ -506,7 +506,7 @@ export class ToolPath {
     if (op.state === "confirmed") {
       const kept = op.resultSummary ?? "";
       // A replay holds only the summary the operation kept, and says so: it is not the whole answer the first return gave. The controller's own placeholder for a restricted result is not the server's text.
-      const text = op.tool.kind !== "mcp" || op.invocation.restricted ? kept : framedMcp(op.tool.server?.id ?? op.tool.name, kept, kept.length >= DISPATCH_LIMITS.resultSummary - 2 ? "only the first part of the earlier answer is kept" : undefined);
+      const text = op.tool.kind !== "mcp" || op.invocation.restricted ? kept : framedMcp(op.tool.server?.id ?? op.tool.name, kept, kept.length === DISPATCH_LIMITS.resultSummary && kept.endsWith("...") ? "only the first part of the earlier answer is kept" : undefined);
       return { state: "confirmed", operationId: opId, text };
     }
     if (op.state === "awaiting-approval") return { state: "awaiting-approval", operationId: opId, reviewId: op.reviewId ?? "", reason: "waiting for an approval" };

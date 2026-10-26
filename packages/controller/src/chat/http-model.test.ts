@@ -41,3 +41,18 @@ test("failures are thrown with their class and never carry the credential; the i
   const empty = new HttpModelCall({ endpoint: () => ({ url: "http://x/v1" }), fetch: async () => new Response("{\"choices\":[]}", { status: 200 }) });
   await assert.rejects(empty.complete("a/b", { system: "s", user: "u" }), /held no text/);
 });
+
+test("a refused connection, a body that never ends and an error inside a 200 reply are classified", async () => {
+  const seen: string[] = [];
+  const mk = (fetch: typeof globalThis.fetch) => new HttpModelCall({ endpoint: () => ({ url: "http://x/v1" }), fetch, timeoutMs: 100, onFailure: (_r, k) => seen.push(k) });
+  const refused = mk(async () => { throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } }); });
+  await assert.rejects(refused.complete("a/b", { system: "s", user: "u" }), /^Error: outage/);
+  const drip = mk(async (_url, init) => new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode("{")); init?.signal?.addEventListener("abort", () => c.error(init.signal!.reason)); } }), { status: 200 }));
+  const keepAlive = setTimeout(() => undefined, 5000); // the timeout signal's own timer does not hold the process open
+  await assert.rejects(drip.complete("a/b", { system: "s", user: "u" }), /timed out|abort/i);
+  clearTimeout(keepAlive);
+  const quota = mk(async () => new Response(JSON.stringify({ error: { message: "insufficient_quota" } }), { status: 200 }));
+  await assert.rejects(quota.complete("a/b", { system: "s", user: "u" }), /^Error: credit/);
+  assert.deepEqual(seen.slice(0, 1).concat(seen.slice(-1)), ["outage", "credit"]);
+  assert.equal(seen.length, 3, "each was reported");
+});
