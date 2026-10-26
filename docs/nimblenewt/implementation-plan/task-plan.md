@@ -32,9 +32,9 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N02 / AII-252 | F01, F02, F03, F04a, F04b, F04c, F04d, F04, F04f, F04g, F04h, F04i, F04j, F04e, F09 |
 | N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06, C06b |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
-| N05 / AII-255 | L05, L01, L02, L03, L04, L06, H08 |
+| N05 / AII-255 | L05, L05b, L01, L02, L03, L04, L06, H08 |
 | N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A08, A08b, A08c, A09, A10, A10b |
-| N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C08, C09 |
+| N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C08, C09 |
 | N08 / AII-258 | R01, R02, R03, R04, R05 |
 | N09 / AII-259 | U03, U04, U05, U06, U03b, U03c, U07, U09, U08, U10, U11, U11b |
 | N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H07, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13 |
@@ -128,7 +128,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### G09 — Prove retained-context inquiry and mid-generation interruption
 
 - **Parent:** N03 / AII-253.
-- **Blockers:** C05, L05.
+- **Blockers:** C05, L05, L05b.
 - **Deliverable:** Actual NimbleNewt component/integration tests: Typed pause/branch/resume/suspend fixture with exact context manifests.
 - **Acceptance and verification:** Inquiry sees original current context without polluting parent; unchanged and updated resumes correct; stream interruption and partial tool calls cannot admit stale actions; context survives restart without summary reconstruction; invoke production implementation, not a parallel test-only state machine; attach implementation commit and reproducible evidence; continuity is also validated across a provider change and the correction of an old owner decision; the resume record labels native restore, reconstruction or restart.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
@@ -138,7 +138,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Parent:** N03 / AII-253.
 - **Blockers:** C06.
 - **Deliverable:** Actual NimbleNewt component/integration tests: Pinned Strata (latest source)/Radiance/vLLM/llama.cpp capability matrix, plus the hosted OpenAI-compatible and Claude caches measured through their usage fields (the owner is moving the local model from Strata to Radiance on two GPUs once new hardware arrives, owner statement 2026-10-22; standalone Radiance, not the deprecated vllm-radiance fork, is the intended engine for two R9700 cards; it is added and measured when it is running, including its OpenAI-compatible endpoint, prefix caching (read from each response's cache_n and prompt_n and from /sessions, with the host tier and the hybrid model's linear-state snapshots sized so a long shared transcript is not dropped and re-prefilled), the eight-sequence concurrency limit of the Flash-Next recipe, its FP8 KV cache, its pinned host memory needs and its container settings (unconfined seccomp, device access, host networking, so run it on a trusted network with an API key), and nothing may depend on a Strata-only feature) and available-hardware measurements.
-- **Acceptance and verification:** Audit exact backend APIs: llama slot save waits for idle, vLLM keep pauses whole engine; qualify cache-preserving options and avoid development-route exposure. Separate cold/native/retained-marker runs; verify tokens reused and context fidelity; report memory, TTFT, switch latency and cache-miss fallback; unavailable backends marked unqualified; no production changes; invoke production implementation, not a parallel test-only state machine; attach implementation commit and reproducible evidence.
+- **Acceptance and verification:** Audit exact backend APIs: llama slot save waits for idle, vLLM keep pauses whole engine; qualify cache-preserving options and avoid development-route exposure. Separate cold/native/retained-marker runs; verify tokens reused and context fidelity; report memory, TTFT, switch latency and cache-miss fallback; unavailable backends marked unqualified; no production changes; invoke production implementation, not a parallel test-only state machine; attach implementation commit and reproducible evidence; the responses of each running backend are captured and kept as fixtures, and the C06 profiles are re-tested against them.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### G11 — Qualify the Pi Durable runtime upgrade path
@@ -657,7 +657,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Parent:** N03 / AII-253.
 - **Blockers:** C05.
 - **Deliverable:** Per-backend tuning profiles (owner decision 2026-10-22: NimbleNewt must work well with llama.cpp, vLLM, Radiance, the latest Strata, OpenAI and compatible services, and Claude, each with its own tuning, because switching context between agents is what makes NimbleNewt different): backend capability negotiation, opaque markers and bounded retention policy, and for each backend a profile that declares what it can do, the request settings that make its cache work and how to read its hits.
-- **Acceptance and verification:** Profiles exist for llama.cpp (slot reuse and slot save and restore), vLLM (automatic prefix caching and cache salt), Radiance (prefix cache, host tier and the hybrid model's state snapshots), Strata (inspected from its latest source, which differs from the installed version), OpenAI and compatible services (automatic prefix caching, prompt cache key and retention) and Claude (cache breakpoints, five-minute and one-hour lifetimes, model minimum lengths); an unknown backend gets a generic profile that assumes nothing; the profile is chosen from endpoint and model configuration, never guessed from a name; each profile reads its cache hits from the response (cached_tokens, cache_n and prompt_n, cache_read_input_tokens) and reports them to the usage ledger (R05); cache eviction or incompatibility falls back without context loss; quota and privacy enforced; pin, fork and decoder-resume advertised separately; each profile has tests against recorded responses; engine changes require a measured gap and a separate scoped patch.
+- **Acceptance and verification:** Profiles exist for llama.cpp (slot reuse and slot save and restore), vLLM (automatic prefix caching and cache salt), Radiance (prefix cache, host tier and the hybrid model's state snapshots), Strata (inspected from its latest source, which differs from the installed version), OpenAI and compatible services (automatic prefix caching, prompt cache key and retention) and Claude (cache breakpoints, five-minute and one-hour lifetimes, model minimum lengths); an unknown backend gets a generic profile that assumes nothing; the profile is chosen from endpoint and model configuration, never guessed from a name; each profile reads its cache hits from the response (cached_tokens, cache_n and prompt_n, cache_read_input_tokens) and reports them to the usage ledger (R05); cache eviction or incompatibility falls back without context loss; quota and privacy enforced; pin, fork and decoder-resume advertised separately; each profile has tests against simulated responses built from the backend's documentation or source (responses captured from running servers are G10's); engine changes require a measured gap and a separate scoped patch.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### C06b — Make Pi agent prompts cache-stable across context switches
@@ -683,7 +683,15 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Parent:** N07 / AII-257.
 - **Blockers:** C07, C04, R01.
 - **Deliverable:** Enforcement at dispatch of the C07 budgets (the startup limit and the working limit: startup plus likely tool output plus the reply reserve at most 60% of the window) with the first call measured against the provider's reported usage (Pi's system prompt and tool schemas included) and the reply reserve; explicit stream timeouts and retries, a short summary limit and a fallback summariser through Pi's beforeCompact hook, restart-safe; tool output limits applied to Pi's tools and to MCP tools; repeated overflow ends in a visible blocker; the hand-off written when an attempt ends without one (split from C07 on 2026-10-22).
-- **Acceptance and verification:** A summariser that hangs hits its own short timeout and either uses the fallback route or ends the attempt as context_overflow without hanging; a restart in the middle of the hook neither duplicates nor loses the summary; the first call's size includes Pi's system prompt and tool schemas and is checked against the provider's reported usage; falling back to a smaller-window route rebuilds the context view and blocks with a visible reason if essential constraints do not fit; a second compressor on the same context is refused at registration; summary lineage is recorded and earlier owner decisions stay retrievable after repeated compactions and after model fallback; any compressed view, index or embedding keeps the source project and origin and is readable only by someone who can read every source (A10); a crash after a confirmed effect and before the hand-off still yields a hand-off written from the ledger and artifacts; repeated overflow stops with a visible blocker.
+- **Acceptance and verification:** A summariser that hangs hits its own short timeout and either uses the fallback route or ends the attempt as context_overflow without hanging; a restart in the middle of the hook neither duplicates nor loses the summary; the first call's size includes Pi's system prompt and tool schemas and is checked against the provider's reported usage; a second compressor on the same context is refused at registration; summary lineage is recorded and earlier owner decisions stay retrievable after repeated compactions and after model fallback; any compressed view, index or embedding keeps the source project and origin and is readable only by someone who can read every source (A10); a crash after a confirmed effect and before the hand-off still yields a hand-off written from the ledger and artifacts; repeated overflow stops with a visible blocker.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### C07d — Rebuild the context view when a model route changes to a smaller window, and scale MCP result limits to the window
+
+- **Parent:** N07 / AII-257.
+- **Blockers:** C07b, R02, H12.
+- **Deliverable:** Split from C07b: when the route of a running task changes to a model with a smaller window (a fallback, a cutover or a re-admitted attempt), the startup context is built again for that window and that route's fixed part (system prompt and tool schemas); tool output limits and the spill of an MCP result's remainder follow the window of the attempt's route instead of one fixed bound.
+- **Acceptance and verification:** Falling back to a smaller-window route rebuilds the context view and blocks with a visible reason if essential constraints do not fit; the cut text is archived; repeating the change gives the recorded decision; an MCP result longer than the window's tool limit is cut and the rest can be read in pages, as for Pi's tools.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### C08 — Implement owner decision records and correction propagation
@@ -708,6 +716,14 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Blockers:** C05, F06, A02.
 - **Deliverable:** Finish-and-hold/cancel controls and revision-bound partial streams.
 - **Acceptance and verification:** Pause blocks new effects immediately; partial tool calls never execute; late response cannot override correction; optional decoder resume qualified separately.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### L05b — Feed the model stream into revision-bound generation
+
+- **Parent:** N05 / AII-255.
+- **Blockers:** L05, H12.
+- **Deliverable:** Split from L05: the worker reports the model stream's events (partial text, tool-call fragments, the end) to the generation service so that each generation is begun, recorded and completed against the revision it started under; a late or superseded stream is held, never applied.
+- **Acceptance and verification:** A partial tool call never runs and a late response cannot override a correction, shown with a real worker process: the owner corrects a task mid-generation, the earlier stream is held with a visible reason, and the next generation starts under the new revision.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### L01 — Implement Pause and background settlement
@@ -1665,7 +1681,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D03 — Approve release readiness and publication decision
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** X08, D01, D02, F04h, T06b, U03b, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11.
+- **Blockers:** X08, D01, D02, F04h, T06b, U03b, C07d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11.
 - **Deliverable:** Exact release manifest, known limitations and owner signoff.
 - **Acceptance and verification:** All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

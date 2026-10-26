@@ -61,7 +61,7 @@ export interface DispatchStartOptions {
     /** The model's context window for the order's route, in tokens; `undefined` when the route does not say. */
     readonly window: (order: WorkOrder) => number | undefined;
     readonly storedTokens?: (from: NonNullable<WorkOrder["resumeFrom"]>) => number | undefined;
-    readonly build: (services: { readonly guards: RuntimeGuards; /** The process's context limits for an order (card C07b): tool output cut to the window\'s share and the extractive compaction fallback; `undefined` when the route does not say its window. The host\'s `context` option takes it. */ readonly context: (order: WorkOrder) => WorkerContextLimits | undefined; readonly cache?: { forOrder(order: WorkOrder): Promise<AttemptCache> } }) => WorkerHost | Promise<WorkerHost>;
+    readonly build: (services: { readonly guards: RuntimeGuards; /** The process's context limits for an order (card C07b): tool output cut to the window\'s share and the extractive compaction fallback; `undefined` when the route does not say its window. The host\'s `context` option takes it. */ readonly context: (order: WorkOrder) => WorkerContextLimits | undefined; /** Records the input size the provider reported for the attempt\'s first model call (the relay\'s `onFirstUsage`) against the call that was admitted. Never throws. */ readonly confirmFirstCall: (order: WorkOrder, usage: { readonly inputTokens: number; readonly requestChars: number }) => Promise<void>; readonly cache?: { forOrder(order: WorkOrder): Promise<AttemptCache> } }) => WorkerHost | Promise<WorkerHost>;
     /** Shuts down what `build` made (live workers, the sandbox launcher, the relay). Called when the controller closes and when a later step of the start fails. */
     readonly close?: () => Promise<void>;
   };
@@ -180,7 +180,10 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       const budget = context.budget(window);
       return { toolOutputBytes: Math.min(Math.floor(budget.toolOutputChars), 10_000_000), compaction: { fallback: "extractive" } };
     };
-    workers.push(await i.options.local.build({ guards, context: contextFor, ...(cache === undefined ? {} : { cache }) }));
+    const confirmFirstCall = async (order: WorkOrder, usage: { readonly inputTokens: number; readonly requestChars: number }): Promise<void> => {
+      try { await guards.context?.confirm?.(order, { reportedInputTokens: usage.inputTokens, promptChars: Math.max(1, usage.requestChars) }); } catch (error) { i.onError?.(error); }
+    };
+    workers.push(await i.options.local.build({ guards, context: contextFor, confirmFirstCall, ...(cache === undefined ? {} : { cache }) }));
   }
   const dispatcher = DispatcherService.withEpoch(storage, epoch, {
     principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, hosts, workers,  contracts: i.contracts, harnesses: i.catalog, policy, effects, blockers, route,

@@ -47,6 +47,7 @@ for (const backend of backends) {
       const hold = new Promise<void>((ok) => { release = ok; });
       let window = 32768;
       let admitted = 0;
+      let opened: unknown;
       const guards = controllerGuards({
         context: enforcement, pause: w.pauses, messages, system: w.dispatcherPrincipal,
         agent: async (order) => w.credentials.authenticate(order.credential), assignee: (order) => w.credentials.agentOf(w.dispatcherPrincipal, order.attemptId),
@@ -56,7 +57,7 @@ for (const backend of backends) {
         hostId: "host:local", resources: { cpus: 1, memoryMb: 1024 }, version: "v", capabilities: () => ({ os: "linux", arch: "x64", harnesses: [{ name: "pi", version: "1.3.0" }], isolation: ["bubblewrap"], tools: [], workspaces: [] }), guards, onGuardError: (_a, what, e) => { errors.push(`${what}: ${(e as Error).message}`); },
         schedule: (b) => { beat = b; return () => undefined; },
         sandbox: { open: async (r) => ({ revision: r.revision, close: async () => undefined }) },
-        runtimes: { open: async (_o, call) => { bound = call as never; return {
+        runtimes: { open: async (_o, call) => { bound = call as never; opened = _o; return {
           firstCall: () => { admitted++; return { systemPromptChars: 3000, toolSchemaChars: 6000, startupTokens: 400, replyReserveTokens: 1000 }; },
           run: async () => { await bound!({ callId: "c1", tool: { name: "read-file", version: "1" }, args: {} }, { kind: "local", run: async () => { started(); await hold; return { text: "x" }; } }); return { status: "completed", text: "done" }; },
           checkpoint: async () => ({}), tell: async (t: string) => { told.push(t); }, close: async () => undefined,
@@ -69,6 +70,10 @@ for (const backend of backends) {
       assert.deepEqual(report.started, [attemptId]);
       assert.equal(admitted, 1, "the first call was checked");
       await inCall;
+      // The provider's count of that first call is recorded against its admission (card C07b), and calibrates the route.
+      await guards.context!.confirm!(opened as never, { reportedInputTokens: 2500, promptChars: 9000 });
+      const admissions = await storage.listAggregates("ctx-admission", { limit: 10 });
+      assert.deepEqual(admissions.map((a) => (a.body as unknown as { reported?: { inputTokens: number } }).reported?.inputTokens), [2500]);
 
       // An urgent message from the owner reaches the running attempt at once, labelled as another party's words.
       await messages.send(w.owner, { commandId: "m1", taskId, to: "agent:ann", class: "urgent-control", purpose: "safety", text: "stop writing to the shared folder" });

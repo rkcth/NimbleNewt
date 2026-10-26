@@ -202,7 +202,8 @@
       "title": "Prove retained-context inquiry and mid-generation interruption",
       "depends_on": [
         "C05",
-        "L05"
+        "L05",
+        "L05b"
       ],
       "deliverable": "Actual NimbleNewt component/integration tests: Typed pause/branch/resume/suspend fixture with exact context manifests",
       "acceptance_and_verification": "Inquiry sees original current context without polluting parent; unchanged and updated resumes correct; stream interruption and partial tool calls cannot admit stale actions; context survives restart without summary reconstruction; invoke production implementation, not a parallel test-only state machine; attach implementation commit and reproducible evidence; continuity is also validated across a provider change and the correction of an old owner decision; the resume record labels native restore, reconstruction or restart",
@@ -222,7 +223,7 @@
         "C06"
       ],
       "deliverable": "Actual NimbleNewt component/integration tests: Pinned Strata (latest source)/Radiance/vLLM/llama.cpp capability matrix, plus the hosted OpenAI-compatible and Claude caches measured through their usage fields (the owner is moving the local model from Strata to Radiance on two GPUs once new hardware arrives, owner statement 2026-10-22; standalone Radiance, not the deprecated vllm-radiance fork, is the intended engine for two R9700 cards; it is added and measured when it is running, including its OpenAI-compatible endpoint, prefix caching (read from each response's cache_n and prompt_n and from /sessions, with the host tier and the hybrid model's linear-state snapshots sized so a long shared transcript is not dropped and re-prefilled), the eight-sequence concurrency limit of the Flash-Next recipe, its FP8 KV cache, its pinned host memory needs and its container settings (unconfined seccomp, device access, host networking, so run it on a trusted network with an API key), and nothing may depend on a Strata-only feature) and available-hardware measurements",
-      "acceptance_and_verification": "Audit exact backend APIs: llama slot save waits for idle, vLLM keep pauses whole engine; qualify cache-preserving options and avoid development-route exposure. Separate cold/native/retained-marker runs; verify tokens reused and context fidelity; report memory, TTFT, switch latency and cache-miss fallback; unavailable backends marked unqualified; no production changes; invoke production implementation, not a parallel test-only state machine; attach implementation commit and reproducible evidence",
+      "acceptance_and_verification": "Audit exact backend APIs: llama slot save waits for idle, vLLM keep pauses whole engine; qualify cache-preserving options and avoid development-route exposure. Separate cold/native/retained-marker runs; verify tokens reused and context fidelity; report memory, TTFT, switch latency and cache-miss fallback; unavailable backends marked unqualified; no production changes; invoke production implementation, not a parallel test-only state machine; attach implementation commit and reproducible evidence; the responses of each running backend are captured and kept as fixtures, and the C06 profiles are re-tested against them",
       "status": "planned",
       "research_evidence": "Historical context-and-windows-results.md only; acceptance requires actual NimbleNewt code",
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -1702,7 +1703,7 @@
         "C05"
       ],
       "deliverable": "Per-backend tuning profiles (owner decision 2026-10-22: NimbleNewt must work well with llama.cpp, vLLM, Radiance, the latest Strata, OpenAI and compatible services, and Claude, each with its own tuning, because switching context between agents is what makes NimbleNewt different): backend capability negotiation, opaque markers and bounded retention policy, and for each backend a profile that declares what it can do, the request settings that make its cache work and how to read its hits",
-      "acceptance_and_verification": "Profiles exist for llama.cpp (slot reuse and slot save and restore), vLLM (automatic prefix caching and cache salt), Radiance (prefix cache, host tier and the hybrid model's state snapshots), Strata (inspected from its latest source, which differs from the installed version), OpenAI and compatible services (automatic prefix caching, prompt cache key and retention) and Claude (cache breakpoints, five-minute and one-hour lifetimes, model minimum lengths); an unknown backend gets a generic profile that assumes nothing; the profile is chosen from endpoint and model configuration, never guessed from a name; each profile reads its cache hits from the response (cached_tokens, cache_n and prompt_n, cache_read_input_tokens) and reports them to the usage ledger (R05); cache eviction or incompatibility falls back without context loss; quota and privacy enforced; pin, fork and decoder-resume advertised separately; each profile has tests against recorded responses; engine changes require a measured gap and a separate scoped patch",
+      "acceptance_and_verification": "Profiles exist for llama.cpp (slot reuse and slot save and restore), vLLM (automatic prefix caching and cache salt), Radiance (prefix cache, host tier and the hybrid model's state snapshots), Strata (inspected from its latest source, which differs from the installed version), OpenAI and compatible services (automatic prefix caching, prompt cache key and retention) and Claude (cache breakpoints, five-minute and one-hour lifetimes, model minimum lengths); an unknown backend gets a generic profile that assumes nothing; the profile is chosen from endpoint and model configuration, never guessed from a name; each profile reads its cache hits from the response (cached_tokens, cache_n and prompt_n, cache_read_input_tokens) and reports them to the usage ledger (R05); cache eviction or incompatibility falls back without context loss; quota and privacy enforced; pin, fork and decoder-resume advertised separately; each profile has tests against simulated responses built from the backend's documentation or source (responses captured from running servers are G10's); engine changes require a measured gap and a separate scoped patch",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -1769,7 +1770,26 @@
         "R01"
       ],
       "deliverable": "Enforcement at dispatch of the C07 budgets (the startup limit and the working limit: startup plus likely tool output plus the reply reserve at most 60% of the window) with the first call measured against the provider's reported usage (Pi's system prompt and tool schemas included) and the reply reserve; explicit stream timeouts and retries, a short summary limit and a fallback summariser through Pi's beforeCompact hook, restart-safe; tool output limits applied to Pi's tools and to MCP tools; repeated overflow ends in a visible blocker; the hand-off written when an attempt ends without one (split from C07 on 2026-10-22)",
-      "acceptance_and_verification": "A summariser that hangs hits its own short timeout and either uses the fallback route or ends the attempt as context_overflow without hanging; a restart in the middle of the hook neither duplicates nor loses the summary; the first call's size includes Pi's system prompt and tool schemas and is checked against the provider's reported usage; falling back to a smaller-window route rebuilds the context view and blocks with a visible reason if essential constraints do not fit; a second compressor on the same context is refused at registration; summary lineage is recorded and earlier owner decisions stay retrievable after repeated compactions and after model fallback; any compressed view, index or embedding keeps the source project and origin and is readable only by someone who can read every source (A10); a crash after a confirmed effect and before the hand-off still yields a hand-off written from the ledger and artifacts; repeated overflow stops with a visible blocker",
+      "acceptance_and_verification": "A summariser that hangs hits its own short timeout and either uses the fallback route or ends the attempt as context_overflow without hanging; a restart in the middle of the hook neither duplicates nor loses the summary; the first call's size includes Pi's system prompt and tool schemas and is checked against the provider's reported usage; a second compressor on the same context is refused at registration; summary lineage is recorded and earlier owner decisions stay retrievable after repeated compactions and after model fallback; any compressed view, index or embedding keeps the source project and origin and is readable only by someone who can read every source (A10); a crash after a confirmed effect and before the hand-off still yields a hand-off written from the ledger and artifacts; repeated overflow stops with a visible blocker",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "C07d",
+      "parent": "N07",
+      "existing_issue": "AII-257",
+      "title": "Rebuild the context view when a model route changes to a smaller window, and scale MCP result limits to the window",
+      "depends_on": [
+        "C07b",
+        "R02",
+        "H12"
+      ],
+      "deliverable": "Split from C07b: when the route of a running task changes to a model with a smaller window (a fallback, a cutover or a re-admitted attempt), the startup context is built again for that window and that route's fixed part (system prompt and tool schemas); tool output limits and the spill of an MCP result's remainder follow the window of the attempt's route instead of one fixed bound",
+      "acceptance_and_verification": "Falling back to a smaller-window route rebuilds the context view and blocks with a visible reason if essential constraints do not fit; the cut text is archived; repeating the change gives the recorded decision; an MCP result longer than the window's tool limit is cut and the rest can be read in pages, as for Pi's tools",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -1829,6 +1849,24 @@
       ],
       "deliverable": "Finish-and-hold/cancel controls and revision-bound partial streams",
       "acceptance_and_verification": "Pause blocks new effects immediately; partial tool calls never execute; late response cannot override correction; optional decoder resume qualified separately",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "L05b",
+      "parent": "N05",
+      "existing_issue": "AII-255",
+      "title": "Feed the model stream into revision-bound generation",
+      "depends_on": [
+        "L05",
+        "H12"
+      ],
+      "deliverable": "Split from L05: the worker reports the model stream's events (partial text, tool-call fragments, the end) to the generation service so that each generation is begun, recorded and completed against the revision it started under; a late or superseded stream is held, never applied",
+      "acceptance_and_verification": "A partial tool call never runs and a late response cannot override a correction, shown with a real worker process: the owner corrects a task mid-generation, the earlier stream is held with a visible reason, and the next generation starts under the new revision",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -4300,6 +4338,7 @@
         "F04h",
         "T06b",
         "U03b",
+        "C07d",
         "H12a",
         "H12b",
         "H12c",

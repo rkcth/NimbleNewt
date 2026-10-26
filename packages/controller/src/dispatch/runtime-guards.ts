@@ -12,7 +12,7 @@ import type { WorkOrder } from "./ports.js";
  * pause and messages, the dispatcher for context admission) and to the attempt's own task. Command IDs are derived from the attempt and what happened, so a repeat is the same command.
  */
 export interface GuardBinding {
-  readonly context: Pick<ContextEnforcementService, "admit" | "budget">;
+  readonly context: Pick<ContextEnforcementService, "admit" | "budget" | "confirmUsage">;
   readonly pause: Pick<PauseService, "observe" | "isPaused">;
   readonly messages: Pick<AgentMessageService, "readable" | "acknowledge">;
   /** The principal that asks the context service (the dispatcher's). */
@@ -46,13 +46,21 @@ export function controllerGuards(binding: GuardBinding): RuntimeGuards {
   const nonce = randomBytes(6).toString("hex");
   const counts = new Map<string, number>();
   const next = (key: string): number => { const n = (counts.get(key) ?? 0) + 1; counts.set(key, n); return n; };
+  // The round of each attempt's latest first-call admission, so that the provider's count is recorded against the call that was sent.
+  const rounds = new Map<string, number>();
   return {
     context: {
       async admit(order, call, round) {
         const window = binding.window(order);
         if (window === undefined) return { admit: true, reasons: [] };
+        rounds.set(order.attemptId, round);
         const decision = await context.admit(binding.system, { taskId: order.taskId, attemptId: order.attemptId, round, window, route: order.route.replace(/[^A-Za-z0-9._:-]/g, ":").slice(0, 80), call });
         return { admit: decision.admit, reasons: decision.reasons };
+      },
+      async confirm(order, usage) {
+        const round = rounds.get(order.attemptId);
+        if (round === undefined) return;
+        await context.confirmUsage(binding.system, { taskId: order.taskId, attemptId: order.attemptId, round, reportedInputTokens: usage.reportedInputTokens, promptChars: usage.promptChars });
       },
       async resume(order, storedTokens) {
         const window = binding.window(order);

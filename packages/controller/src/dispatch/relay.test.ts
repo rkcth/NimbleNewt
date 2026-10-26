@@ -84,3 +84,34 @@ test("an aborted call reaches the endpoint's fetch as an abort", async () => {
   controller.abort();
   assert.equal(seen[0]!.aborted, true);
 });
+
+test("the provider's count of the first call's input is reported once, whichever style the reply has, and the reply is passed on unchanged", async () => {
+  const stream = (chunks: string[]): Response => new Response(new ReadableStream({ start(c) { for (const s of chunks) c.enqueue(new TextEncoder().encode(s)); c.close(); } }), { status: 200, headers: { "content-type": "text/event-stream" } });
+  const cases: [string, () => Response, number | undefined][] = [
+    ["an OpenAI-style plain reply", () => new Response(JSON.stringify({ choices: [], usage: { prompt_tokens: 1234, completion_tokens: 5 } }), { status: 200, headers: { "content-type": "application/json" } }), 1234],
+    ["an OpenAI-style stream that reports at its end", () => stream(["data: {\"choices\":[]}\n\n", "x".repeat(40_000), "data: {\"usage\":{\"prompt_tokens\":777}}\n\n", "data: [DONE]\n\n"]), 777],
+    ["an Anthropic-style stream that reports at its start", () => stream(["event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":4321}}}\n\n", "y".repeat(40_000)]), 4321],
+    ["a reply with no count", () => stream(["data: a\n\n"]), undefined],
+  ];
+  for (const [name, respond, expected] of cases) {
+    const { relay } = setup({ respond });
+    const told: { inputTokens: number; requestChars: number }[] = [];
+    const attempt = relay.forAttempt({ route: "llama/local", onFirstUsage: (u) => { told.push(u); } });
+    const first = await text((await attempt.relay(req("http://relay.invalid/m0/chat/completions"))).body);
+    assert.deepEqual(told.map((t) => t.inputTokens), expected === undefined ? [] : [expected], name);
+    if (expected !== undefined) assert.ok(told[0]!.requestChars > 0);
+    const expectedBody = await text(respond().body);
+    assert.equal(first, expectedBody, `${name}: unchanged`);
+    await text((await attempt.relay(req("http://relay.invalid/m0/chat/completions"))).body);
+    assert.ok(told.length <= 1, `${name}: only the first call is reported`);
+  }
+  // A reporter that throws, and a failed call, leave the call alone.
+  const { relay } = setup({ respond: () => new Response("{\"usage\":{\"prompt_tokens\":9}}", { status: 200 }) });
+  const attempt = relay.forAttempt({ route: "llama/local", onFirstUsage: () => { throw new Error("boom"); } });
+  assert.match(await text((await attempt.relay(req("http://relay.invalid/m0/chat/completions"))).body), /prompt_tokens/);
+  const failing = setup({ respond: () => new Response("{\"usage\":{\"prompt_tokens\":9}}", { status: 500 }) });
+  const told: number[] = [];
+  const bad = failing.relay.forAttempt({ route: "llama/local", onFirstUsage: (u) => { told.push(u.inputTokens); } });
+  await text((await bad.relay(req("http://relay.invalid/m0/chat/completions"))).body);
+  assert.deepEqual(told, [], "a failed call is not a measurement");
+});

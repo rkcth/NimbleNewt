@@ -53,10 +53,16 @@ export class ModelRelay {
   }
 
   /** The relay for one attempt: it can reach its route's endpoint and nothing else. `cache` is the attempt's policy (H12e), applied around each call. */
-  forAttempt(attempt: { readonly route: string; /** The model the route names; a body that asks for another is refused. */ readonly model?: string }, cache?: Pick<PiCachePolicy, "payload" | "fetch">): AttemptRelay {
+  forAttempt(attempt: {
+    readonly route: string;
+    /** The model the route names; a body that asks for another is refused. */ readonly model?: string;
+    /** Told once, after the attempt's first model call has been answered, what the provider reported as its input size and how long the request was (card C07b: the first call is checked against the provider's own count). A failure of this function never reaches the call. */
+    readonly onFirstUsage?: (usage: { readonly inputTokens: number; readonly requestChars: number }) => void;
+  }, cache?: Pick<PiCachePolicy, "payload" | "fetch">): AttemptRelay {
     const route = attempt.route;
     const maxBody = this.#options.maxBodyBytes ?? 8 * 1024 * 1024;
     const prefix = `${this.#base}/${ALIAS}/`;
+    let firstCall = attempt.onFirstUsage !== undefined;
     const refuse = (why: string): never => { throw new Error(`the model relay refused the call: ${why}`); };
     return {
       alias: ALIAS, relayBase: this.#base,
@@ -104,10 +110,34 @@ export class ModelRelay {
           this.#options.onError?.(route, text);
           throw new Error(`the model endpoint could not be reached: ${text}`);
         }
+        const watch = firstCall && response.ok && response.body !== null;
+        if (watch) firstCall = false;
+        const requestChars = body?.length ?? 0;
         const out: [string, string][] = [];
         response.headers.forEach((value, name) => { if (KEEP.has(name.toLowerCase())) out.push([name, value]); });
-        return { status: response.status, statusText: response.statusText, headers: out, body: response.body === null ? null : (response.body as unknown as AsyncIterable<Uint8Array>) };
+        return { status: response.status, statusText: response.statusText, headers: out, body: response.body === null ? null : watch ? reporting(response.body as unknown as AsyncIterable<Uint8Array>, (tokens) => { try { attempt.onFirstUsage?.({ inputTokens: tokens, requestChars }); } catch { /* the call is not affected */ } }) : (response.body as unknown as AsyncIterable<Uint8Array>) };
       },
     };
+  }
+}
+
+const SCAN = 16 * 1024;
+/**
+ * Passes the reply on unchanged and, when it ends, tells `done` the input size the provider reported in it (OpenAI-style `prompt_tokens`, Anthropic-style `input_tokens`), read from the first and the last bytes of the reply
+ * (a plain reply is small; a stream reports at its start or its end). Nothing is told when the reply holds no count or the count is not a sensible number.
+ */
+async function* reporting(body: AsyncIterable<Uint8Array>, done: (inputTokens: number) => void): AsyncGenerator<Uint8Array> {
+  const head: Buffer[] = []; let headBytes = 0; let tail = Buffer.alloc(0);
+  try {
+    for await (const piece of body) {
+      if (headBytes < SCAN) { head.push(Buffer.from(piece.subarray(0, SCAN - headBytes))); headBytes += Math.min(piece.length, SCAN - headBytes); }
+      tail = Buffer.concat([tail, piece]).subarray(-SCAN);
+      yield piece;
+    }
+  } finally {
+    const text = `${Buffer.concat(head).toString("utf8")}\n${tail.toString("utf8")}`;
+    let best = 0;
+    for (const m of text.matchAll(/"(?:prompt_tokens|input_tokens)"\s*:\s*(\d{1,9})/g)) best = Math.max(best, Number(m[1]));
+    if (best >= 1) done(best);
   }
 }

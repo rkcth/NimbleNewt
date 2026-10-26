@@ -148,3 +148,9 @@ Defaults chosen in those cards that were shown to the owner as a list but not co
 Asked whether something like graphify should be first-class, the owner decided to measure instead: after the first release, try different real coding tasks and keep the aids that measurably help. Recorded as card D04b (optional, after the first release, feeds D05). Candidates: better ripgrep paging, an on-demand language-neutral code map and references tool built inside the sandbox, neighbour-file suggestions, a reviewer "what calls the changed exports" view. Not candidates: graphify itself, model-extracted relationships, visualisation, a startup architecture summary (breaks prompt-cache reuse), controller-side shared indexes. A second opinion (Opus) agreed with this scoping; the base must be language-neutral (Tree-sitter or ctags), with the TypeScript compiler API only as a precision layer.
 
 Follow-up (owner, 2026-10-26): nothing language-specific unless the same is done for the ten most used languages, so the TypeScript compiler API is dropped as a precision layer; the base is language-neutral (Tree-sitter or ctags). If JavaScript or TypeScript is covered, the frameworks have to be: Angular templates and decorators, Vue and Svelte single-file components, React JSX. An aid that cannot handle a language or framework says so instead of returning an empty or partial result. D04b's text carries this.
+
+## Cards split or reworded to close C07b, C06 and L05 (2026-10-26)
+
+- **C06 wording:** "recorded responses" now says "simulated from the backend's documentation or source"; the capture from running servers is part of G10. Say if you want C06 to wait for real captures instead.
+- **C07d (new, before release):** route change to a smaller window and window-scaled MCP result limits, moved out of C07b.
+- **L05b (new, before release):** feeding the model stream into revision-bound generation, moved out of L05.

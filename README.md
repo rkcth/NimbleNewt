@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **66 of 192 tasks implemented**.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **66 of 194 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -267,7 +267,6 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **A08c** Enforce per-agent resource limits on macOS and Windows (after the first release) _(needs A08b, A03b)_
 - [ ] **C06b** Make Pi agent prompts cache-stable across context switches _(needs C06, F05, F06)_
 - [ ] **C08** Implement owner decision records and correction propagation _(needs C03, C07, U03, H06)_
-- [ ] **G09** Prove retained-context inquiry and mid-generation interruption _(needs C05, L05)_
 - [ ] **G10** Benchmark native backend caching and branch markers _(needs C06)_
 - [ ] **L01** Implement Pause and background settlement _(needs C04, A02, S08, L05)_
 - [ ] **M01** Implement durable meeting scheduling and agendas _(needs H04, U03)_
@@ -279,7 +278,6 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 28
 
-- [ ] **G04** Prove supporting durable engine integration _(needs S09, F04d, F04f, F04g, G09)_
 - [ ] **H05b** Implement reviewer pause and hold behaviour _(needs H05, L01)_
 - [ ] **H12** Implement the local worker runtime and attempt dispatcher _(needs A03, A05, R01, C07b, C06b, S05, C04, F08, H03)_
 - [ ] **M02** Implement votes, decisions and meeting summaries _(needs M01, A02, C02, C08)_
@@ -290,6 +288,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 29
 
+- [ ] **C07d** Rebuild the context view when a model route changes to a smaller window, and scale MCP result limits to the window _(needs C07b, R02, H12)_
 - [ ] **H02** Implement subordinate remote work/artifact transport _(needs H01, S06, A03, H12)_
 - [ ] **H12b** Bind the real sandbox launcher and worker process to the local runtime _(needs H12, A03, A08)_
 - [ ] **H12c** Compose the dispatcher at controller start with a durable scan cursor _(needs H12)_
@@ -298,13 +297,14 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **H12f** Wire context enforcement, pause observation and message boundaries into the runtime _(needs H12, C07b, L01, U12)_
 - [ ] **H12g** Use the DNS-rebinding guard in the remote MCP client _(needs H12, T03)_
 - [ ] **H12h** Route owner-mode reviews only to the owner _(needs H12, A05)_
+- [ ] **L05b** Feed the model stream into revision-bound generation _(needs L05, H12)_
 - [ ] **M05** Implement meeting facilitation and owner control _(needs M04, M02, U03, M00, A10, C01b)_
 - [ ] **T06** Implement the protected agent tool bridge and execution service _(needs H12, T01)_
-- [ ] **X11** Split the test suite into a typical and an exhaustive tier _(needs G04)_
 
 ### Phase 30
 
 - [ ] **C09** Capture activity records and decision explanations _(needs C04, C08, T06, S05)_
+- [ ] **G09** Prove retained-context inquiry and mid-generation interruption _(needs C05, L05, L05b)_
 - [ ] **H07** Implement idle host polling and capability placement _(needs H02, H03)_
 - [ ] **H12a** Carry the dispatch contract to remote workers _(needs H12, H02)_
 - [ ] **H12i** Give tasks controlled network routes through the worker relay _(needs H12b, A07, T01, T03, A03b)_
@@ -319,6 +319,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 ### Phase 31
 
 - [ ] **A07d** Offer a choice of standing-grant lengths with a system-chosen default _(needs A07b, A07c, C09)_
+- [ ] **G04** Prove supporting durable engine integration _(needs S09, F04d, F04f, F04g, G09)_
 - [ ] **L02** Implement Suspend and graceful Stop _(needs L01, T07)_
 - [ ] **U09** Implement read-only activity timeline and replay views _(needs C09, U05, A10, C06b)_
 
@@ -330,6 +331,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **L03** Implement prepared release and reassignment _(needs L02, S02, S05)_
 - [ ] **L04** Implement checked resume and evidence invalidation _(needs C03, L02, A02)_
 - [ ] **U06** Implement deterministic recovery chat controls _(needs U01, L02, A02)_
+- [ ] **X11** Split the test suite into a typical and an exhaustive tier _(needs G04)_
 
 ### Phase 33
 
@@ -435,7 +437,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 49
 
-- [ ] **D03** Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11)_
+- [ ] **D03** Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, C07d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11)_
 
 ### Phase 50
 

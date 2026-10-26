@@ -61,6 +61,8 @@ export type MessageBoundaryName = "interrupt" | "safe-boundary";
 export interface RuntimeGuards {
   readonly context?: {
     admit(order: WorkOrder, call: FirstCall, round: number): Promise<{ readonly admit: boolean; readonly reasons: readonly string[] }>;
+    /** The first call went out and the provider reported its input size (card C07b): recorded against the admission, which calibrates the estimate for the route. */
+    confirm?(order: WorkOrder, usage: { readonly reportedInputTokens: number; readonly promptChars: number }): Promise<void>;
     resume(order: WorkOrder, storedTokens: number): Promise<{ readonly resume: boolean; readonly reason: string }>;
     /** The size of the conversation a checkpoint holds, in tokens, when it says. */
     storedTokens?(from: JsonObject): number | undefined;
