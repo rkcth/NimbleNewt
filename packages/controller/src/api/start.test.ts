@@ -230,6 +230,13 @@ test("a missing hard prerequisite refuses to start whatever the switch says; a t
     assert.deepEqual(plain.prerequisites.map((p) => p.id).sort(), ["git", "sqlite-library"]);
     await plain.close();
     await assert.rejects(startController({ ...base, argv: [OVERRIDE_FLAG], env: {}, features: ["sandbox"], probes: { ...okProbes, ...sandbox } }), /cannot be overridden/);
+    // A controller that builds a local worker host needs those tools without being told: same message, same refusal.
+    const local = { window: () => undefined, build: async () => ({ workers: [] }) } as never;
+    await assert.rejects(startController({ ...base, argv: [], env: {}, dispatch: { local, manual: true }, probes: { ...okProbes, ...sandbox } }), (e: unknown) => {
+      assert.match((e as Error).message, /cannot be overridden/);
+      assert.match((e as Error).message, /bubblewrap|sandbox-exec|bwrap/i);
+      return true;
+    });
   } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 

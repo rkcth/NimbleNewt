@@ -58,7 +58,7 @@ export interface StartOptions {
   readonly dataDirectory?: string;
   /** The roots under which workspaces (checkouts) live; each one's file system must be on the supported list too. */
   readonly workspaceRoots?: readonly string[];
-  /** The parts this controller runs on this machine besides the controller itself (card F04j): their tools are required at start. Default none: the sandbox and the limits are then checked by the launcher, which refuses to advertise capacity without them. */
+  /** The parts this controller runs on this machine besides the controller itself (card F04j): their tools are required at start. Default: the sandbox and the limits when a local worker host is built (`dispatch.local`), otherwise none; the sandbox and the limits are then checked by the launcher, which refuses to advertise capacity without them. */
   readonly features?: readonly ("sandbox" | "limits")[];
   /** For tests: how the file system under a path is found, instead of asking this machine. */
   readonly filesystem?: FilesystemDetector;
@@ -154,7 +154,9 @@ export async function startController(options: StartOptions): Promise<Controller
   const facts = options.facts ?? detectEnvironment();
   const dataDirectory = options.dataDirectory ?? (options.storage.kind === "sqlite" ? dirname(resolve(options.storage.path)) : undefined);
   const filesystems: FilesystemReport[] = await checkFilesystems([...(dataDirectory === undefined ? [] : [{ role: "data directory" as const, path: dataDirectory }]), ...(options.workspaceRoots ?? []).map((path) => ({ role: "workspace" as const, path }))], { platform: facts.platform, ...(options.filesystem === undefined ? {} : { detect: options.filesystem }) });
-  const needs: PrerequisiteNeed[] = ["start", options.storage.kind, ...(options.features ?? [])];
+  // A controller that builds a local worker host runs agents in the sandbox on this machine, so the sandbox tools and the limits mechanism are required at start with the same found / required / install / switch message as every other prerequisite (card F04j). `features` says so explicitly (a test, or a controller whose workers are all remote).
+  const features = options.features ?? (options.dispatch?.local === undefined ? [] : ["sandbox", "limits"] as const);
+  const needs: PrerequisiteNeed[] = ["start", options.storage.kind, ...features];
   const prerequisites = await checkPrerequisites({ platform: facts.platform, needs, probes: { ...realProbes({ sqlite: probeSqliteLibrary, postgres: probePostgresLibrary }), ...(options.probes ?? {}) } });
   const distribution = options.distribution === undefined ? detectDistribution() : options.distribution ?? undefined;
   const host = hostLine(distribution, facts.platform, facts.arch);
