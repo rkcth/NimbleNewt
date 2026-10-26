@@ -1715,3 +1715,14 @@ T06b is built in pieces; this is the first, the only one that needs neither H12b
 - `local.close` shuts down what `build` made (called by `close()` and on a failed start); `mcp.gate` is the lifecycle gate for remote endpoints.
 - **Test limits:** the composition test shows the guards are built and the host is built and closed; it does not call the guards on a real attempt (swapped agent/assignee bindings would not be caught here; `runtime-guards.test.ts` covers the bindings with stubs) and, with `manual`, never ticks the stub host.
 - **Not done:** an end-to-end test that starts a controller with the real sandbox launcher and worker process and runs an attempt through the composed guards (the pieces are tested together in `t06b-composed-worker`, `h12b-worker-process`, `runtime-guards` and the composition test in `start-dispatch.test.ts`, but not through `startController` with a real child); an MCP transport that connects to the checked address. H12k therefore stays planned.
+
+## Audit of the planned-card chain (2026-10-26, read-only, Opus)
+
+Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to be implemented before the cards they block. Verdicts against each card's acceptance text:
+
+- **Ready once their blockers flip:** H12 (partials: the owner question is only a `grant_needed` blocker until U11b; narrow/widen proven with fake handles only; no quarantine operation yet), H12c, H12h, T06, H02 (limits belong to H12a), C06b (reuse measured on simulators only; real results go to G10).
+- **H12e, not ready:** nothing in production builds `CachePolicies` or a `MarkerService` and `relay.forAttempt` is called without `cache`. Fix: build them in the composer, pass the policy to the relay and `takeUsage` to the host's `cache` option, add one worker-process test on the llama simulator (small to medium).
+- **C07b, not ready (blocks H12):** only `admit` and `resumeDecision` are wired. The real worker (`pi-adapter/src/worker/main.ts`) sets no `contextPolicy`/`beforeCompact`; `confirmUsage`, `changeRoute`, `ensureHandoff` and `reportOverflow` have no callers; MCP `frameResult` still uses the fixed `MCP_LIMITS` instead of `limitTool`. Medium to large.
+- **L01, not ready:** `startController` builds `ConversationService` without the pause service's availability, and `Reconciler`/`StallService` are not given `pauses`. Small.
+- **U12, not ready:** the agent's question reaches no owner chat (`askOwner`, `ownerQuestions`, `answerOwner` have no caller outside `messages.ts`: needs a bridge operation and a chat route). Small to medium.
+- **Order of work that frees the most cards:** (1) wire C07b into the worker and dispatcher, (2) audit and flip C06, (3) wire L01 and audit L05, (4) H12e composer wiring, (5) U12 owner-question surface and audit M01.
