@@ -62,7 +62,7 @@ type PlanItem =
   | { readonly i: number; readonly kind: "focus"; readonly projectId: string; readonly preview: string }
   | { readonly i: number; readonly kind: "apply_proposal" | "discard_proposal"; readonly proposalId: string; readonly lengthDays?: number }
   | { readonly i: number; readonly kind: "status"; readonly request: JsonObject }
-  | { readonly i: number; readonly kind: "coordinator"; readonly action: "answer" | "decompose" | "assign" | "configure" | "start" | "pause" | "stop"; readonly projectId?: string; readonly question?: string; readonly outcome?: string; readonly principalId?: string; readonly routes?: readonly string[] }
+  | { readonly i: number; readonly kind: "coordinator"; readonly action: "answer" | "decompose" | "assign" | "configure" | "start" | "pause" | "stop"; readonly projectId?: string; readonly question?: string; readonly outcome?: string; readonly principalId?: string; readonly routes?: readonly string[]; /** The revision of the coordinator record the order expects, read once when the message was planned, so a retry of the turn sends the same thing. */ readonly expectedRevision?: number }
   | { readonly i: number; readonly kind: "policy"; readonly editId: string; readonly draft: EditDraft; readonly preview: readonly string[] }
   | { readonly i: number; readonly kind: "asked"; readonly question: string; readonly options: readonly string[]; /** For a question the service asked: which command (by position) and which argument the answer fills, and the answers that are allowed. */ readonly intentIndex?: number; readonly field?: string; readonly choices?: readonly string[] }
   | { readonly i: number; readonly kind: "held"; readonly preview: string }
@@ -387,12 +387,19 @@ export class ChatService {
         let target: string | undefined;
         if (intent.action === "answer" || intent.action === "decompose" || intent.action === "assign") {
           const found = intent.projectId === undefined && intent.projectName === undefined ? (currentFocus.projectId === undefined ? undefined : { ok: true as const, id: currentFocus.projectId, name: currentFocus.projectName ?? "" }) : await this.#projectByIntent(token, intent.projectId, intent.projectName);
-          if (found === undefined) { push({ i, kind: "asked", question: "Which project do you mean?", options: [] }); continue; }
+          if (found === undefined) { const ask = await this.#askProject(); push(ask.ok ? { i, kind: "refused", code: "invalid_command", message: "Say which project you mean." } : askOrRefuse(i, ask, n)); continue; }
           if (!found.ok) { push(askOrRefuse(i, found, n)); continue; }
           target = found.id;
           projectId = found.id;
         }
-        push({ i, kind: "coordinator", action: intent.action, ...(target === undefined ? {} : { projectId: target }), ...(intent.question === undefined ? {} : { question: intent.question }), ...(intent.outcome === undefined ? {} : { outcome: intent.outcome }), ...(intent.principalId === undefined ? {} : { principalId: intent.principalId }), ...(intent.routes === undefined ? {} : { routes: intent.routes }) });
+        // The coordinator record's revision is read once, here, and counted for each earlier change to it in this message; a retry of the turn then sends the very same order.
+        let expectedRevision: number | undefined;
+        if (intent.action === "configure" || intent.action === "start" || intent.action === "pause" || intent.action === "stop") {
+          const current = await this.#deps.coordinator?.()?.get(owner);
+          if (current === undefined && intent.action !== "configure") { push({ i, kind: "refused", code: "not_found", message: "the coordinator is not set up yet" }); continue; }
+          if (current !== undefined) { expectedRevision = current.revision + (pending.get("coordinator") ?? 0); pending.set("coordinator", (pending.get("coordinator") ?? 0) + 1); }
+        }
+        push({ i, kind: "coordinator", action: intent.action, ...(expectedRevision === undefined ? {} : { expectedRevision }), ...(target === undefined ? {} : { projectId: target }), ...(intent.question === undefined ? {} : { question: intent.question }), ...(intent.outcome === undefined ? {} : { outcome: intent.outcome }), ...(intent.principalId === undefined ? {} : { principalId: intent.principalId }), ...(intent.routes === undefined ? {} : { routes: intent.routes }) });
         continue;
       }
       // Every text in the command must be the owner's own words (or a record, or a fixed choice): a model cannot add content the owner never said.
@@ -419,7 +426,7 @@ export class ChatService {
     }
     // One question holds the message: nothing that would change a record runs while something is unanswered. The held commands are kept, so the answer carries them on.
     if (items.some((it) => it.kind === "asked")) {
-      const held = items.map((it): PlanItem => it.kind === "apply" ? { i: it.i, kind: "held", preview: it.preview } : it.kind === "propose" ? { i: it.i, kind: "held", preview: it.preview[0] ?? "" } : it.kind === "focus" || it.kind === "apply_proposal" || it.kind === "discard_proposal" || it.kind === "policy" ? { i: it.i, kind: "held", preview: it.kind === "focus" ? it.preview : it.kind === "policy" ? it.preview[0] ?? "policy change" : it.kind } : it);
+      const held = items.map((it): PlanItem => it.kind === "apply" ? { i: it.i, kind: "held", preview: it.preview } : it.kind === "propose" ? { i: it.i, kind: "held", preview: it.preview[0] ?? "" } : it.kind === "focus" || it.kind === "apply_proposal" || it.kind === "discard_proposal" || it.kind === "policy" || it.kind === "coordinator" ? { i: it.i, kind: "held", preview: it.kind === "focus" ? it.preview : it.kind === "policy" ? it.preview[0] ?? "policy change" : it.kind === "coordinator" ? `coordinator: ${it.action}` : it.kind } : it);
       // What was refused stays refused: it is kept as a no-op, so an answer cannot let it through. A model's own question cannot be answered by the owner's choice, so it is not resumable.
       const refusedWork = new Set(items.flatMap((it, k) => (it.kind === "refused" ? [workOf[k] as number] : [])));
       const resumable = !work.some((w) => w.intent.kind === "clarify") && early.length === 0;
@@ -809,7 +816,7 @@ export class ChatService {
           if (answer.kind === "unavailable") return { i: item.i, status: "refused", code: "unavailable", message: answer.reason };
           const lines = answer.kind === "answer" ? [line(answer.text, answer.cites.map((c): Cite => ("id" in c ? { kind: c.kind, id: c.id } : { kind: c.kind, id: `${c.scopeId}#${c.seq}` })))]
             : answer.kind === "asked" ? [line(`The records do not answer that, so I asked ${answer.to} (inquiry ${answer.inquiryId}).`, [{ kind: "inquiry", id: answer.inquiryId }])] : [line(answer.note)];
-          return { i: item.i, status: "answered", observedAt: new Date().toISOString(), lines };
+          return { i: item.i, status: "answered", observedAt: this.#runner.now(), lines };
         }
         case "decompose": {
           const plan = await service.decompose(owner, { commandId, projectId: item.projectId!, outcome: item.outcome! });
@@ -820,17 +827,15 @@ export class ChatService {
           const result = await service.assign(owner, { commandId, projectId: item.projectId! });
           if (result.kind === "unavailable") return { i: item.i, status: "refused", code: "unavailable", message: result.reason };
           if (result.kind === "proposed") return { i: item.i, status: "proposed", proposalId: result.proposalId, preview: [`a plan of assignments drafted by the coordinator${result.skipped.length === 0 ? "" : ` (${result.skipped.length} left out)`}`], message: "It is a proposal: nothing is assigned until you apply it." };
-          return { i: item.i, status: "answered", observedAt: new Date().toISOString(), lines: [line(`${result.assigned.length} assigned, ${result.skipped.length} left`), ...result.assigned.map((a) => line(`${a.taskId} to ${a.owner}: ${a.reason}`, [{ kind: "task", id: a.taskId }]))] };
+          return { i: item.i, status: "answered", observedAt: this.#runner.now(), lines: [line(`${result.assigned.length} assigned, ${result.skipped.length} left`), ...result.assigned.map((a) => line(`${a.taskId} to ${a.owner}: ${a.reason}`, [{ kind: "task", id: a.taskId }]))] };
         }
         case "configure": {
-          const current = await service.get(owner);
-          const made = await service.configure(owner, { commandId, principalId: item.principalId!, routes: item.routes!, ...(current === undefined ? {} : { expectedRevision: current.revision }) });
+          const made = await service.configure(owner, { commandId, principalId: item.principalId!, routes: item.routes!, ...(item.expectedRevision === undefined ? {} : { expectedRevision: item.expectedRevision }) });
           return { i: item.i, status: "applied", op: "coordinator.configure", commandId, id: made.id, revision: made.revision };
         }
         case "start": case "pause": case "stop": {
-          const current = await service.get(owner);
-          if (current === undefined) return { i: item.i, status: "refused", code: "not_found", message: "the coordinator is not set up yet" };
-          const made = await service.setState(owner, { commandId, expectedRevision: current.revision, to: item.action === "start" ? "running" : item.action === "pause" ? "paused" : "stopped" });
+          if (item.expectedRevision === undefined) return { i: item.i, status: "refused", code: "not_found", message: "the coordinator is not set up yet" };
+          const made = await service.setState(owner, { commandId, expectedRevision: item.expectedRevision, to: item.action === "start" ? "running" : item.action === "pause" ? "paused" : "stopped" });
           return { i: item.i, status: "applied", op: "coordinator.state", commandId, id: made.id, revision: made.revision };
         }
       }

@@ -124,6 +124,13 @@ test("the owner reaches the coordinator through the chat: sets it up and starts 
     assert.equal(foreign[0]!.status, "refused");
     assert.equal(foreign[0]!.code, "unsupported_value");
 
+    // Quoted text asking for the coordinator is refused; a question left open holds the coordinator order with the rest of the message.
+    const quoted = await turn("m7b", "pause the coordinator please", [{ kind: "coordinator", action: "pause", evidence: "pause the coordinator", basis: "quoted" }]);
+    assert.equal(quoted[0]!.code, "untrusted_authority");
+    const heldOut = await turn("m7c", "pause the coordinator and tell me which", [{ kind: "clarify", question: "Which one?" }, owner("coordinator", { action: "pause" }, "pause the coordinator")]);
+    assert.deepEqual(heldOut.map((o) => o.status), ["asked", "held"], JSON.stringify(heldOut));
+    assert.equal((await c.coordinator!.get(rob))!.state, "running", "nothing ran while the question was open");
+
     // Paused again by the owner's words.
     const paused = await turn("m8", "pause the coordinator", [owner("coordinator", { action: "pause" }, "pause the coordinator")]);
     assert.equal(paused[0]!.status, "applied");
