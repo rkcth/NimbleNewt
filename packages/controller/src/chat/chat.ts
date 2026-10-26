@@ -8,6 +8,7 @@ import { scopedCommandId } from "../security/credentials.js";
 import type { Principal, PrincipalService } from "../security/principals.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { Cite, StatusRequest } from "../status/index.js";
+import type { CoordinatorService } from "./coordinator.js";
 import { CHAT_OPS, TITLE_KEYS, acceptedArgs, describe, foreignValue, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { lengthInWords, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
@@ -61,6 +62,7 @@ type PlanItem =
   | { readonly i: number; readonly kind: "focus"; readonly projectId: string; readonly preview: string }
   | { readonly i: number; readonly kind: "apply_proposal" | "discard_proposal"; readonly proposalId: string; readonly lengthDays?: number }
   | { readonly i: number; readonly kind: "status"; readonly request: JsonObject }
+  | { readonly i: number; readonly kind: "coordinator"; readonly action: "answer" | "decompose" | "assign" | "configure" | "start" | "pause" | "stop"; readonly projectId?: string; readonly question?: string; readonly outcome?: string; readonly principalId?: string; readonly routes?: readonly string[] }
   | { readonly i: number; readonly kind: "policy"; readonly editId: string; readonly draft: EditDraft; readonly preview: readonly string[] }
   | { readonly i: number; readonly kind: "asked"; readonly question: string; readonly options: readonly string[]; /** For a question the service asked: which command (by position) and which argument the answer fills, and the answers that are allowed. */ readonly intentIndex?: number; readonly field?: string; readonly choices?: readonly string[] }
   | { readonly i: number; readonly kind: "held"; readonly preview: string }
@@ -146,6 +148,8 @@ export interface ChatDeps {
   readonly status?: { ask(by: Principal, request: StatusRequest): Promise<{ readonly observedAt: string; readonly lines: readonly { readonly text: string; readonly cites: readonly Cite[] }[] } | undefined> };
   /** Conversational policy editing (card U04). Absent: a policy instruction is answered with a refusal. */
   readonly policyEdits?: PolicyEditService;
+  /** The coordinator (card U03), looked up when used, because it is built after the chat (it proposes through it). Absent, or answering undefined: what is said to the coordinator is refused as unavailable. */
+  readonly coordinator?: () => CoordinatorService | undefined;
 }
 
 const MESSAGE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -373,6 +377,22 @@ export class ChatService {
         }
         if (!isObject(request) || hasRefMarker(request)) { push({ i, kind: "refused", code: "invalid_command", message: "that question is not understood" }); continue; }
         push({ i, kind: "status", request: asJson(request) });
+        continue;
+      }
+      if (intent.kind === "coordinator") {
+        // What is said to the coordinator is the owner's own: its texts must be in the message, like any command's. The project is the one named or in focus.
+        const texts = { ...(intent.question === undefined ? {} : { question: intent.question }), ...(intent.outcome === undefined ? {} : { outcome: intent.outcome }), ...(intent.principalId === undefined ? {} : { principalId: intent.principalId }), ...(intent.routes === undefined ? {} : { routes: [...intent.routes] }) };
+        const foreign = foreignValue(texts, words);
+        if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: `${foreign} is not in your message, so it was not done. Say what it should be.` }); continue; }
+        let target: string | undefined;
+        if (intent.action === "answer" || intent.action === "decompose" || intent.action === "assign") {
+          const found = intent.projectId === undefined && intent.projectName === undefined ? (currentFocus.projectId === undefined ? undefined : { ok: true as const, id: currentFocus.projectId, name: currentFocus.projectName ?? "" }) : await this.#projectByIntent(token, intent.projectId, intent.projectName);
+          if (found === undefined) { push({ i, kind: "asked", question: "Which project do you mean?", options: [] }); continue; }
+          if (!found.ok) { push(askOrRefuse(i, found, n)); continue; }
+          target = found.id;
+          projectId = found.id;
+        }
+        push({ i, kind: "coordinator", action: intent.action, ...(target === undefined ? {} : { projectId: target }), ...(intent.question === undefined ? {} : { question: intent.question }), ...(intent.outcome === undefined ? {} : { outcome: intent.outcome }), ...(intent.principalId === undefined ? {} : { principalId: intent.principalId }), ...(intent.routes === undefined ? {} : { routes: intent.routes }) });
         continue;
       }
       // Every text in the command must be the owner's own words (or a record, or a fixed choice): a model cannot add content the owner never said.
@@ -714,6 +734,7 @@ export class ChatService {
           return { i: item.i, status: "answered", observedAt: answer.observedAt, lines: shown, ...(answer.lines.length > shown.length ? { moreLines: answer.lines.length - shown.length } : {}) };
         } catch (error) { return refusal(item.i, error); }
       }
+      case "coordinator": return this.#coordinate(owner, turnId, item);
       case "focus": {
         try { await this.setFocus(token, { commandId: `${turnId}-f${item.i}`, projectId: item.projectId }); } catch (error) { return refusal(item.i, error); }
         return { i: item.i, status: "focused", projectId: item.projectId };
@@ -773,6 +794,47 @@ export class ChatService {
         return { i: item.i, status: "discarded", proposalId: item.proposalId };
       }
     }
+  }
+
+  /** What the owner said to the coordinator (card U03), done through its own service under the owner's authority, one command ID per item so the message is applied once. */
+  async #coordinate(owner: Principal, turnId: string, item: Extract<PlanItem, { kind: "coordinator" }>): Promise<Outcome> {
+    const service = this.#deps.coordinator?.();
+    if (service === undefined) return { i: item.i, status: "refused", code: "unavailable", message: "the coordinator is not set up here" };
+    const commandId = `${turnId}-k${item.i}`;
+    const line = (text: string, cites: readonly Cite[] = []) => ({ text, cites });
+    try {
+      switch (item.action) {
+        case "answer": {
+          const answer = await service.answer(owner, { commandId, projectId: item.projectId!, question: item.question! });
+          if (answer.kind === "unavailable") return { i: item.i, status: "refused", code: "unavailable", message: answer.reason };
+          const lines = answer.kind === "answer" ? [line(answer.text, answer.cites.map((c): Cite => ("id" in c ? { kind: c.kind, id: c.id } : { kind: c.kind, id: `${c.scopeId}#${c.seq}` })))]
+            : answer.kind === "asked" ? [line(`The records do not answer that, so I asked ${answer.to} (inquiry ${answer.inquiryId}).`, [{ kind: "inquiry", id: answer.inquiryId }])] : [line(answer.note)];
+          return { i: item.i, status: "answered", observedAt: new Date().toISOString(), lines };
+        }
+        case "decompose": {
+          const plan = await service.decompose(owner, { commandId, projectId: item.projectId!, outcome: item.outcome! });
+          if ("kind" in plan) return { i: item.i, status: "refused", code: "unavailable", message: plan.reason };
+          return { i: item.i, status: "proposed", proposalId: plan.proposalId, preview: [`${plan.tasks} task${plan.tasks === 1 ? "" : "s"} drafted by the coordinator`, ...plan.notes], message: "It is a proposal: nothing exists until you apply it." };
+        }
+        case "assign": {
+          const result = await service.assign(owner, { commandId, projectId: item.projectId! });
+          if (result.kind === "unavailable") return { i: item.i, status: "refused", code: "unavailable", message: result.reason };
+          if (result.kind === "proposed") return { i: item.i, status: "proposed", proposalId: result.proposalId, preview: [`a plan of assignments drafted by the coordinator${result.skipped.length === 0 ? "" : ` (${result.skipped.length} left out)`}`], message: "It is a proposal: nothing is assigned until you apply it." };
+          return { i: item.i, status: "answered", observedAt: new Date().toISOString(), lines: [line(`${result.assigned.length} assigned, ${result.skipped.length} left`), ...result.assigned.map((a) => line(`${a.taskId} to ${a.owner}: ${a.reason}`, [{ kind: "task", id: a.taskId }]))] };
+        }
+        case "configure": {
+          const current = await service.get(owner);
+          const made = await service.configure(owner, { commandId, principalId: item.principalId!, routes: item.routes!, ...(current === undefined ? {} : { expectedRevision: current.revision }) });
+          return { i: item.i, status: "applied", op: "coordinator.configure", commandId, id: made.id, revision: made.revision };
+        }
+        case "start": case "pause": case "stop": {
+          const current = await service.get(owner);
+          if (current === undefined) return { i: item.i, status: "refused", code: "not_found", message: "the coordinator is not set up yet" };
+          const made = await service.setState(owner, { commandId, expectedRevision: current.revision, to: item.action === "start" ? "running" : item.action === "pause" ? "paused" : "stopped" });
+          return { i: item.i, status: "applied", op: "coordinator.state", commandId, id: made.id, revision: made.revision };
+        }
+      }
+    } catch (error) { return refusal(item.i, error); }
   }
 
   /** Closes the turn whose held commands another turn carried on (once; repeating it is harmless). */
