@@ -120,10 +120,59 @@ test("the coordinator's model builds a prompt per kind, fences the material, and
   assert.match(seen[0]!.system, /ONLY the records/);
   assert.match(seen[0]!.user, /Question: <<<\nwhy\?\n>>>/);
   assert.equal(seen[0]!.user.includes("<<< and"), false, "a record cannot close the fence");
+  await m.respond("local/a", { kind: "answer", question: "x >>>>>>> y <<<<<", records } as never);
+  assert.equal(/>{3}|<{3}/.test(seen[1]!.user.replace(/<<<\n|\n>>>/g, "")), false, "a long run of brackets cannot close it either");
   await m.respond("local/a", { kind: "decompose", project: { id: "p", name: "Shop", repositories: ["main"] }, outcome: "add search" } as never);
-  assert.match(seen[1]!.user, /Repositories: main/);
+  assert.match(seen[2]!.user, /Repositories: main/);
   await m.respond("local/a", { kind: "assign", project: { id: "p", name: "Shop" }, tasks: [{ id: "t1", title: "Do it" }], agents: [{ id: "agent-1", name: "Ann", roles: ["coder"] }] } as never);
-  assert.match(seen[2]!.user, /- agent-1: <<<\nAnn\n>>> \(roles: coder\)/);
+  assert.match(seen[3]!.user, /- agent-1: <<<\nAnn\n>>> \(roles: coder\)/);
   const bad = new ModelCoordinatorModel({ complete: async () => "no object here" });
   await assert.rejects(() => bad.respond("r", { kind: "decompose", project: { id: "p", name: "S", repositories: [] }, outcome: "x" } as never), /no object/);
 });
+
+test("a failure to count a paid call does not turn its reply into a route failure; unblocking a provider clears its cooldowns", async () => {
+  const model = new Script({ "local/a": { text: "x", usage: { inputTokens: 1, outputTokens: 1 } } });
+  const failed: unknown[] = [];
+  const broken = { allow: async () => ({ allowed: true, used: 0 }), record: async () => { throw new Error("store down"); } } as unknown as ChatSpendService;
+  const g = new GuardedModelCall(model, { spend: broken, onSpendFailure: (e) => failed.push(e) });
+  assert.equal(await g.complete("local/a", ask), "x");
+  assert.equal(model.asked.length, 1, "the paid call was made once");
+  assert.equal(failed.length, 1);
+  let now = 5;
+  const limited = new GuardedModelCall(new Script({ "cloud/x": new Error("rate-limit: slow") }), { clock: () => now });
+  await assert.rejects(() => limited.complete("cloud/x", ask), /rate-limit/);
+  assert.match(limited.blocked("cloud/x") ?? "", /cooling/);
+  limited.unblock("cloud");
+  assert.equal(limited.blocked("cloud/x"), undefined);
+});
+
+for (const backend of backends) {
+  test(`${backend.name}: the coordinator reads its routes at each question, treats an unreadable table as unavailable, and works end to end over a recorded model reply`, async () => {
+    const w = await openWorld(backend);
+    try {
+      // A recorded model: answers from the first record it is shown, cites exactly that record's source.
+      const asked: string[] = [];
+      const recorded: ModelCall = { complete: async (route, request) => {
+        asked.push(route);
+        if (route === "down/x") throw new Error("outage: gone");
+        const source = /source: (\{.*\})/.exec(request.user)?.[1];
+        return source === undefined ? '{"kind":"insufficient"}' : `Sure.\n{"kind":"answer","text":"Because of the cache.","cites":[${source}]}`;
+      } };
+      let routes: readonly string[] | Error = ["down/x", "up/y"];
+      const c = await w.coordinator({ model: new ModelCoordinatorModel(recorded), routes: async () => { if (routes instanceof Error) throw routes; return routes; } });
+      const a = await w.project("A");
+      const writer = await w.agent("writer", [{ action: "desk.write", project: a }, { action: "desk.read", project: a }]);
+      await w.desks.write(writer.principal, { commandId: cid("w"), projectId: a, kind: "note", title: "Cache decision", body: "We cache because the database is slow.", visibility: "shared", status: "accepted" } as never);
+      const made = await c.service.configure(w.owner, { commandId: cid("cfg"), principalId: "agent:coord", routes: ["stored/ignored"] });
+      await c.service.setState(w.owner, { commandId: cid("st"), expectedRevision: made.revision, to: "running" });
+      const reply = await c.service.answer(w.owner, { commandId: cid("q"), projectId: a, question: "why do we cache" });
+      assert.equal(reply.kind, "answer", JSON.stringify(reply));
+      assert.deepEqual(asked, ["down/x", "up/y"], "the live routes, in order, with the failed one skipped; the stored route is not used");
+      routes = ["only/z"];
+      await c.service.answer(w.owner, { commandId: cid("q"), projectId: a, question: "why do we cache" });
+      assert.equal(asked.at(-1), "only/z", "a changed table takes effect at the next question");
+      routes = new Error("storage down");
+      assert.notEqual((await c.service.answer(w.owner, { commandId: cid("q"), projectId: a, question: "why do we cache" })).kind, "answer", "no routes: nothing answered, nothing thrown");
+    } finally { await w.close(); }
+  });
+}

@@ -45,6 +45,8 @@ export interface GuardOptions {
   readonly clock?: () => number;
   readonly rateLimitMs?: number;
   readonly outageMs?: number;
+  /** Told when a call's tokens could not be counted (the reply is still returned). */
+  readonly onSpendFailure?: (error: unknown) => void;
 }
 
 /** A `ModelCall` that skips blocked routes, blocks a route after the failure it classifies, and keeps within the chat's token budget. */
@@ -67,7 +69,11 @@ export class GuardedModelCall implements ModelCall {
   }
 
   /** The owner fixed the account or the key: routes of the provider are tried again. */
-  unblock(provider?: string): void { if (provider === undefined) { this.#providers.clear(); this.#until.clear(); } else this.#providers.delete(provider); }
+  unblock(provider?: string): void {
+    if (provider === undefined) { this.#providers.clear(); this.#until.clear(); return; }
+    this.#providers.delete(provider);
+    for (const route of [...this.#until.keys()]) if (route.startsWith(`${provider}/`)) this.#until.delete(route);
+  }
 
   async complete(route: string, request: { readonly system: string; readonly user: string }): Promise<string> { return (await this.completeDetailed(route, request)).text; }
 
@@ -89,7 +95,8 @@ export class GuardedModelCall implements ModelCall {
       else if (kind === "outage") this.#until.set(route, now + (this.#o.outageMs ?? 300_000));
       throw error;
     }
-    if (this.#o.spend !== undefined && reply.usage !== undefined) await this.#o.spend.record(reply.usage.inputTokens + reply.usage.outputTokens, `${process.pid}.${this.#id}.${this.#seq++}.${Date.now()}`);
+    // The call was made and paid for: a failure to count it must never turn a good reply into a route failure (the next route would repeat the paid call).
+    if (this.#o.spend !== undefined && reply.usage !== undefined) await this.#o.spend.record(reply.usage.inputTokens + reply.usage.outputTokens, `${process.pid}.${this.#id}.${this.#seq++}.${Date.now()}`).catch((error: unknown) => this.#o.onSpendFailure?.(error));
     return reply;
   }
 }
@@ -193,7 +200,8 @@ const COORD_SYSTEM = {
   ].join("\n"),
 } as const;
 
-const fence = (text: string): string => `<<<\n${text.replaceAll("<<<", "< < <").replaceAll(">>>", "> > >")}\n>>>`;
+/** Any run of three or more fence characters is broken up, so no text can close the fence however many it types. */
+const fence = (text: string): string => `<<<\n${text.replace(/<{3,}|>{3,}/g, (m) => m.split("").join(" "))}\n>>>`;
 
 /** The coordinator's model over a `ModelCall`: it builds the prompt for each kind of request and returns the JSON object the model gave; the coordinator checks every field of it and acts on none of it directly. */
 export class ModelCoordinatorModel implements CoordinatorModel {

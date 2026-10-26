@@ -278,7 +278,8 @@ export class CoordinatorService {
 
   /** The primary route, then the fallbacks in order, at most four tries; the first usable reply wins and none is a refusal to answer, not an error. */
   async #ask(body: CoordinatorBody, request: CoordinatorRequest): Promise<unknown> {
-    const routes = this.#deps.routes === undefined ? body.routes : await this.#deps.routes();
+    // A routing table that cannot be read leaves no route to try: the coordinator is unavailable, never an error for the caller.
+    const routes = this.#deps.routes === undefined ? body.routes : await Promise.resolve(this.#deps.routes()).then((r) => r, () => [] as readonly string[]);
     for (const route of routes.slice(0, MAX_ROUTES)) {
       try { return await this.#deps.model.respond(route, request); } catch { /* try the next route */ }
     }
