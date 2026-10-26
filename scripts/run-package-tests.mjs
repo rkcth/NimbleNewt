@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { shardFiles } from "./shard.mjs";
 
 function testFiles(dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
@@ -19,9 +20,19 @@ if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1000) { console.error(`inval
 // edit-and-check loop, and it prints how many files it left out so that it is never mistaken for the full run.
 const fast = process.env.NIMBLENEWT_FAST === "1";
 const slow = fast ? JSON.parse(readFileSync(fileURLToPath(new URL("./slow-tests.json", import.meta.url)), "utf8")).files : [];
+// `--shard=i/n` runs the i-th of n slices of equal expected run time (card X11), from the measured weights in scripts/test-weights.json.
+const shardFlag = process.argv.find((a) => a.startsWith("--shard="));
 const all = existsSync("dist") ? testFiles("dist") : [];
-const files = all.filter((f) => !slow.some((name) => ("/" + f.split(sep).join("/")).endsWith("/" + name)));
+let files = all.filter((f) => !slow.some((name) => ("/" + f.split(sep).join("/")).endsWith("/" + name)));
+if (shardFlag !== undefined) {
+  const m = /^--shard=(\d+)\/(\d+)$/.exec(shardFlag);
+  if (m === null) { console.error(`invalid ${shardFlag}`); process.exit(2); }
+  const weights = JSON.parse(readFileSync(fileURLToPath(new URL("./test-weights.json", import.meta.url)), "utf8")).seconds;
+  files = shardFiles(files, weights, Number(m[1]), Number(m[2]));
+  console.log(`SHARD ${m[1]}/${m[2]}: ${files.length} of ${all.length} test files`);
+}
 if (fast && files.length !== all.length) console.log(`FAST TIER: ${all.length - files.length} slow test file(s) left out of ${all.length}; run \`npm test\` for the full suite`);
-if (files.length === 0) { console.error("no compiled test files found in dist/; did the build run?"); process.exit(1); }
+if (files.length === 0 && shardFlag === undefined) { console.error("no compiled test files found in dist/; did the build run?"); process.exit(1); }
+if (files.length === 0) { console.log("this shard has no test files in this package"); process.exit(0); }
 const guard = pathToFileURL(fileURLToPath(new URL("./offline-guard.mjs", import.meta.url))).href;
 process.exit(spawnSync(process.execPath, ["--import", guard, "--test", `--test-timeout=${timeoutMs}`, ...files], { stdio: "inherit" }).status ?? 1);

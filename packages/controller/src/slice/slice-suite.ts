@@ -71,7 +71,11 @@ export type Share = "all" | "first half" | "second half" | "a spread";
 /** Declares the tests of one backend's share of the crash enumeration. Call it at the top level of a test file. */
 export function defineSliceTests(backendName: string, share: Share): void {
   const backend = backends.find((b) => b.name === backendName);
-  if (backend === undefined) throw new Error(`no backend named ${backendName}`);
+  if (backend === undefined) {
+    // The typical tier (card X11) leaves out PostgreSQL and the worker-thread variant; the file then defines nothing. Any other missing name is a mistake.
+    if (process.env["NIMBLENEWT_TIER"] === "typical" && (backendName === "PostgreSQL" || backendName === "SQLite on a worker thread")) return;
+    throw new Error(`no backend named ${backendName}`);
+  }
   after(stopServer);
   const full = share !== "a spread";
   // The clean run (which also counts the boundaries) is done once and shared by the tests of this file.

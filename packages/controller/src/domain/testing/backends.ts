@@ -21,7 +21,7 @@ export async function stopServer(): Promise<void> {
 const sqliteDir = () => mkdtempSync(join(tmpdir(), "nn-domain-"));
 const remove = (dir: string) => rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 
-export const backends: Backend[] = [
+const all: Backend[] = [
   { name: "reference store", open: async () => { const storage = new MemoryStorage(); return { storage, close: () => storage.close() }; } },
   { name: "SQLite", open: async () => {
     const dir = sqliteDir();
@@ -40,3 +40,10 @@ export const backends: Backend[] = [
     return { storage, close: async () => { await storage.close(); await withClient(s.url(), async (c) => { await c.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); }); } };
   } },
 ];
+
+/**
+ * The typical tier (card X11, `NIMBLENEWT_TIER=typical`) runs the domain suites on the reference store and SQLite; the exhaustive tier runs all four. The typical tier also leaves out the long
+ * storage qualification runs (scripts/slow-tests.json), so PostgreSQL and the worker-thread variant are covered there only by their basic suites: a change to storage should be checked with the
+ * exhaustive tier (`npm test`, or the Exhaustive tests workflow).
+ */
+export const backends: Backend[] = process.env["NIMBLENEWT_TIER"] === "typical" ? all.filter((b) => b.name === "reference store" || b.name === "SQLite") : all;

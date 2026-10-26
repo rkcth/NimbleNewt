@@ -15,6 +15,8 @@
     "check:deps": "node scripts/check-package-boundaries.mjs",
     "test": "npm run clean && npm run build && npm run check:deps && npm run licenses:check && npm run roadmap:check && node --test \"scripts/*.test.mjs\" && npm run test --workspaces --if-present",
     "test:fast": "node scripts/test-fast.mjs",
+    "test:changed": "node scripts/test-changed.mjs",
+    "test:shard": "node scripts/test-shard.mjs",
     "licenses:write": "node scripts/license-inventory.mjs --write",
     "licenses:check": "node scripts/license-inventory.mjs --check",
     "roadmap:write": "node scripts/roadmap.mjs --write",
