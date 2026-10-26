@@ -359,7 +359,7 @@ Durable conversations between agents, delivery classes, and the MCP conversation
 Stall detection and bounded supervisor recovery.
 
 - [ ] **V01** · P25 · Implement health and progress stall detection _(needs H01, S08, C04, H11)_
-- [ ] **V01b** · P30 · Scale stall thresholds to the prompt size and the measured speed of the model _(needs V01, H12, H12e)_
+- [ ] **V01b** · P30 · Scale stall thresholds to the prompt size and the measured speed of the model _(needs V01, H12, H12b, H12e)_
 - [ ] **V02** · P33 · Implement bounded supervisor recovery _(needs V01, V01b, L03, L04, R02, H05)_
 
 </details>
