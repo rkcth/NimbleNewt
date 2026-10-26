@@ -13,7 +13,7 @@ const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
 const dir = () => mkdtempSync(join(tmpdir(), "nn-dispatch-"));
 const open = (file: string, extra: Partial<Parameters<typeof startController>[0]> = {}, out: string[] = []) =>
-  startController({ storage: { kind: "sqlite", path: file }, argv: [], env: {}, print: (l) => { out.push(l); }, facts: supported, filesystem: ext4, ...extra });
+  startController({ storage: { kind: "sqlite", path: file }, argv: [], env: {}, print: (l) => { out.push(l); }, facts: supported, filesystem: ext4, features: [], ...extra });
 const cleanup = (d: string): void => rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 
 test("no dispatcher is built and no loop runs unless the operator asks for it", async () => {
