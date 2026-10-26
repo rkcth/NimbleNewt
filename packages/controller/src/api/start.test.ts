@@ -300,3 +300,35 @@ test("SqliteStorage.open skips the network check only with allowNetworkFilesyste
     await store.close();
   } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+test("the checkouts of registered projects are checked at every start: an unsupported file system refuses, names the switch, and the override starts and audits it (card F04k)", async () => {
+  const d = dir();
+  const file = join(d, "c.sqlite");
+  const where = (p: string) => (p.includes("shared") ? { type: "nfs4", network: true, where: "/mnt/shared" } : { type: "ext4", network: false });
+  try {
+    // First start: nothing registered, nothing extra asked.
+    const first = await startController({ storage: sqliteAt(file), argv: [], env: {}, print: () => undefined, facts: supported, filesystem: async (p) => where(p) });
+    try {
+      const owner = await first.services.principals.bootstrapOwner({ name: "rob" });
+      const principal = await first.services.principals.authenticate(owner.token);
+      await first.services.projects.createProject({ commandId: "p-1", actor: principal.id, name: "Shop", repositories: [{ id: "main", location: join(d, "shared", "shop") }, { id: "web", location: "https://example.invalid/x.git" }] });
+    } finally { await first.close(); }
+    // A later start on the same data finds the checkout on a network file system.
+    const asked: string[] = [];
+    const shown = lines();
+    await assert.rejects(startController({ storage: sqliteAt(file), argv: [], env: {}, print: shown.print, facts: supported, filesystem: async (p) => { asked.push(p); return where(p); } }), (e: unknown) => {
+      assert.ok(e instanceof UnsupportedEnvironmentError);
+      assert.match(e.message, /filesystem \(workspace\): found nfs4/);
+      assert.ok(e.message.includes(OVERRIDE_FLAG));
+      assert.equal(shown.out.join("\n"), e.message);
+      return true;
+    });
+    assert.ok(asked.includes(join(d, "shared", "shop")) && !asked.some((p) => p.includes("example.invalid")), "the checkout is asked about; a remote location is not a workspace");
+    const c = await startController({ storage: sqliteAt(file), argv: [OVERRIDE_FLAG], env: {}, print: shown.print, facts: supported, filesystem: async (p) => where(p) });
+    try {
+      const records = await overrides(c);
+      assert.equal(records.length, 1);
+      assert.deepEqual((records[0]!.detail["problems"] as { item: string }[]).map((p) => p.item), ["filesystem (workspace)"]);
+    } finally { await c.close(); }
+  } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});

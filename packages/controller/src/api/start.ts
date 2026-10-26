@@ -4,7 +4,7 @@ import { ProjectService } from "../domain/service.js";
 import { AssignmentService } from "../domain/assignments.js";
 import { WaitService } from "../domain/waits.js";
 import { DeskService, HistoryService, RetrievalService } from "../context/index.js";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import {
   UnsupportedEnvironmentError, checkEnvironment, checkFilesystems, checkPrerequisites, decideStartup, detectDistribution, detectEnvironment, hostLine, overrideRequested, overriddenCheck, prerequisiteProblems, realProbes, recordHost, recordOverride,
   type EnvironmentFacts, type FilesystemDetector, type FilesystemReport, type PrerequisiteNeed, type PrerequisiteReport, type Probes, type StartupCheck,
@@ -118,6 +118,24 @@ export interface Controller {
   close(): Promise<void>;
 }
 
+/** The directories the registered projects keep their checkouts in, each once, as absolute paths, apart from the roots already checked. A location that is not a local path is not a workspace. */
+async function checkoutRoots(storage: ControllerStorage, already: ReadonlySet<string>): Promise<string[]> {
+  const seen = new Set<string>(already);
+  const found: string[] = [];
+  for (let afterId: string | undefined; ;) {
+    const page = await storage.listAggregates("project", { ...(afterId === undefined ? {} : { afterId }), limit: 200 });
+    for (const a of page) {
+      for (const repository of (a.body as unknown as { repositories?: readonly { location?: unknown }[] }).repositories ?? []) {
+        if (typeof repository.location !== "string" || !isAbsolute(repository.location)) continue;
+        const path = resolve(repository.location);
+        if (!seen.has(path)) { seen.add(path); found.push(path); }
+      }
+    }
+    if (page.length < 200) return found;
+    afterId = page[page.length - 1]!.id;
+  }
+}
+
 /**
  * The controller's start-up path (first built with card U01). In order:
  * 1. Detect the environment (operating system, Node.js), the file systems under the data directory and workspaces (F04i) and the prerequisites (git, the database library, the sandbox tools
@@ -166,6 +184,22 @@ export async function startController(options: StartOptions): Promise<Controller
   try {
     const projects = await ProjectService.open(storage, { holder: options.holder ?? "controller" });
     const epoch = projects.epoch;
+    // Card F04k: the workspaces are the checkouts of the registered projects, so their file systems are checked at every start, not only for roots the caller listed. Registered checkouts exist only once the
+    // storage is open, so the decision is made again with these problems added: refused unless the F04h override was given, and then audited with the rest.
+    const roots = await checkoutRoots(storage, new Set((options.workspaceRoots ?? []).map((r) => resolve(r))));
+    if (roots.length > 0) {
+      const extra = (await checkFilesystems(roots.map((path) => ({ role: "workspace" as const, path })), { platform: facts.platform, ...(options.filesystem === undefined ? {} : { detect: options.filesystem }) })).flatMap((f) => (f.problem === undefined ? [] : [f.problem]));
+      if (extra.length > 0) {
+        try {
+          const decided = decideStartup([...check.problems, ...extra], { allowUnsupported: override, host: check.host ?? host });
+          for (const line of check.output.length === 0 ? decided.output : decided.output.filter((l) => extra.some((p) => l.includes(`${p.item}: found`)))) print(line);
+          check = decided;
+        } catch (error) {
+          if (error instanceof UnsupportedEnvironmentError) print(error.message);
+          throw error;
+        }
+      }
+    }
     await recordHost(storage, epoch, check.host ?? host);
     await recordOverride(storage, epoch, check);
     const principals = PrincipalService.withEpoch(storage, epoch);
