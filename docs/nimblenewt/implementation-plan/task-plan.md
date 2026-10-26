@@ -38,7 +38,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N08 / AII-258 | R01, R02, R03, R04, R05 |
 | N09 / AII-259 | U03, U04, U05, U06, U03b, U03c, U07, U09, U08, U10, U11, U11b |
 | N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H07, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13 |
-| N11 / AII-261 | V01, V02 |
+| N11 / AII-261 | V01, V01b, V02 |
 | N12 / AII-262 | M00, M01, M02, M03, M04, M05, M05b, M06 |
 | N13 / AII-263 | T01, T02, T03, T06, T06b, T07, T08, T09 |
 | N14 / AII-264 | P01, P02, P02b, P03, P04, P05, P06, P07 |
@@ -748,8 +748,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 
 - **Parent:** N05 / AII-255.
 - **Blockers:** L01, H12.
-- **Deliverable:** Split from L01: the controller builds the reconciler (with the pause lookup, so an inbox message for a paused task stays received) and runs it, and runs stall detection (scan) in the dispatcher's tick with the narrowest right it needs, an owner decision recorded in the build decisions: the dispatcher principal holds no grants today and the scan requires the recovery-read right everywhere.
-- **Acceptance and verification:** A paused task is not reported as stalled and its inbox messages are held, not admitted, across a controller restart; a task that stops making progress while not paused is reported as a suspected stall in the status view; the right the scan runs under is the narrowest the owner approved, and a controller without it says so instead of failing every tick; reassigning a task goes through the pause service's retention check (a paused agent keeps its tasks), which nothing calls in production today; the reconciler waits on its delivery destinations and bridges, which are not built, rather than on a right.
+- **Deliverable:** Split from L01: the controller builds the reconciler (with the pause lookup, so an inbox message for a paused task stays received) and runs it, and runs stall detection (scan) in the dispatcher's tick under a new dedicated stall-scan right (owner decision 2026-10-26: the narrower right, not recovery-read everywhere); the dispatcher principal holds no grants today and scan accepts only the owner or a recovery-read service.
+- **Acceptance and verification:** A paused task is not reported as stalled and its inbox messages are held, not admitted, across a controller restart; a task that stops making progress while not paused is reported as a suspected stall in the status view; the stall-scan right permits only the scan (it grants no read of unpublished records, enrolment of service principals accepts it, and no other action is added), and a controller without it says so instead of failing every tick; reassigning a task goes through the pause service's retention check (a paused agent keeps its tasks), which nothing calls in production today; the reconciler waits on its delivery destinations and bridges, which are not built, rather than on a right.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### L02 — Implement Suspend and graceful Stop
@@ -1216,10 +1216,18 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** Long legitimate job differs from loop and dead worker; stale timestamps not used as sole takeover permission; signals include request duration, last step, repeated equivalent actions and errors, job status, budget and acceptance evidence; concerns route to the agent's responsible supervisor (H11); thresholds depend on difficulty; suspected stalls are shown apart from confirmed failures.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
+### V01b — Scale stall thresholds to the prompt size and the measured speed of the model
+
+- **Parent:** N11 / AII-261.
+- **Blockers:** V01, H12.
+- **Deliverable:** Split from V01 on the owner's direction (2026-10-26): V01 judges an open request against a fixed time per difficulty, so a local model that needs twenty minutes to read a 120,000-token prompt at 100 tokens a second is reported as a stuck request before it has begun. The start of a request records its prompt size (uncached tokens, from the relay's first usage report and the cache figures), the controller keeps the measured reading and writing speed per route and host from finished requests, and the allowed time of a request is the larger of the difficulty's time and a margin over the time the prompt should take at the measured speed.
+- **Acceptance and verification:** A request for a large prompt on a slow local route is not reported as stuck while the expected reading time has not passed, and is reported when it passes by the margin; a hosted route with a fast reader keeps the difficulty's time; a route with no measurement yet uses a declared speed from the route settings, else a stated cautious default that is shown in the concern text; a cached prefix shortens the expected time by the cached share; once the first output arrives the reading allowance ends and silence between outputs is judged by the ordinary thresholds; the measured speed is a smoothed value that one slow request cannot collapse or one fast request inflate; a stuck-request concern states the prompt size, the speed used and the time expected so the supervisor can tell a slow model from a dead one; the thresholds and the margin are settings.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
 ### V02 — Implement bounded supervisor recovery
 
 - **Parent:** N11 / AII-261.
-- **Blockers:** V01, L03, L04, R02, H05.
+- **Blockers:** V01, V01b, L03, L04, R02, H05.
 - **Deliverable:** Recovery action ladder and supervisor monitoring.
 - **Acceptance and verification:** Loop recovery preserves history/effects; cumulative cost/retries enforced; supervisor stall escalates; owner holds remain; switching model or context never resets cumulative retry, time or cost limits; supervisors are subject to the same detection; an intervention and queued input are persisted before a stuck request is cancelled, and a resume on a backup route or rebuilt context records what context was carried.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
@@ -1707,7 +1715,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D03 — Approve release readiness and publication decision
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** X08, D01, D02, F04h, T06b, U03b, C07d, L01b, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11.
+- **Blockers:** X08, D01, D02, F04h, T06b, U03b, C07d, L01b, V01b, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11.
 - **Deliverable:** Exact release manifest, known limitations and owner signoff.
 - **Acceptance and verification:** All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

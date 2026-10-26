@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **75 of 195 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **75 of 196 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -117,7 +117,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Owner chat and web UI | `▓▓░░░░░░░░░░` 16% | 2 of 12 |
 | Workers, dispatch and teams | `▓▓▓▓░░░░░░░░` 36% | 9 of 25 |
 | Agent messaging | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
-| Health and recovery | `░░░░░░░░░░░░` 0% | 0 of 2 |
+| Health and recovery | `░░░░░░░░░░░░` 0% | 0 of 3 |
 | Meetings | `░░░░░░░░░░░░` 0% | 0 of 8 |
 | Tools and skills | `▓▓▓▓░░░░░░░░` 37% | 3 of 8 |
 | Projects, repositories and workspaces | `░░░░░░░░░░░░` 0% | 0 of 8 |
@@ -354,12 +354,13 @@ Durable conversations between agents, delivery classes, and the MCP conversation
 </details>
 
 <details>
-<summary><strong>Health and recovery</strong> — ░░░░░░░░░░░░ 0 of 2</summary>
+<summary><strong>Health and recovery</strong> — ░░░░░░░░░░░░ 0 of 3</summary>
 
 Stall detection and bounded supervisor recovery.
 
 - [ ] **V01** · P25 · Implement health and progress stall detection _(needs H01, S08, C04, H11)_
-- [ ] **V02** · P33 · Implement bounded supervisor recovery _(needs V01, L03, L04, R02, H05)_
+- [ ] **V01b** · P29 · Scale stall thresholds to the prompt size and the measured speed of the model _(needs V01, H12)_
+- [ ] **V02** · P33 · Implement bounded supervisor recovery _(needs V01, V01b, L03, L04, R02, H05)_
 
 </details>
 
@@ -494,7 +495,7 @@ Installation, documentation, QA on real machines, the release decision and closi
 
 - [ ] **D02** · P36 · Finish developer/API/security and license guidance _(needs T05, K03, F03)_
 - [ ] **D01** · P45 · Finish installation and chat-first user guidance _(needs X03, Q03, U11b)_
-- [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, C07d, L01b, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11)_
+- [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, C07d, L01b, V01b, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11)_
 - [ ] **D04** · P50 · Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
 - [ ] **D04b** · P51 · Measure code-navigation aids on real coding tasks (optional, after the first release) _(needs D04)_
 - [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, U03c, K06b, K01d, P02b, A08c)_

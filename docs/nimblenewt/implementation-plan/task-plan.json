@@ -1968,8 +1968,8 @@
         "L01",
         "H12"
       ],
-      "deliverable": "Split from L01: the controller builds the reconciler (with the pause lookup, so an inbox message for a paused task stays received) and runs it, and runs stall detection (scan) in the dispatcher's tick with the narrowest right it needs, an owner decision recorded in the build decisions: the dispatcher principal holds no grants today and the scan requires the recovery-read right everywhere",
-      "acceptance_and_verification": "A paused task is not reported as stalled and its inbox messages are held, not admitted, across a controller restart; a task that stops making progress while not paused is reported as a suspected stall in the status view; the right the scan runs under is the narrowest the owner approved, and a controller without it says so instead of failing every tick; reassigning a task goes through the pause service's retention check (a paused agent keeps its tasks), which nothing calls in production today; the reconciler waits on its delivery destinations and bridges, which are not built, rather than on a right",
+      "deliverable": "Split from L01: the controller builds the reconciler (with the pause lookup, so an inbox message for a paused task stays received) and runs it, and runs stall detection (scan) in the dispatcher's tick under a new dedicated stall-scan right (owner decision 2026-10-26: the narrower right, not recovery-read everywhere); the dispatcher principal holds no grants today and scan accepts only the owner or a recovery-read service",
+      "acceptance_and_verification": "A paused task is not reported as stalled and its inbox messages are held, not admitted, across a controller restart; a task that stops making progress while not paused is reported as a suspected stall in the status view; the stall-scan right permits only the scan (it grants no read of unpublished records, enrolment of service principals accepts it, and no other action is added), and a controller without it says so instead of failing every tick; reassigning a task goes through the pause service's retention check (a paused agent keeps its tasks), which nothing calls in production today; the reconciler waits on its delivery destinations and bridges, which are not built, rather than on a right",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -3194,12 +3194,31 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "V01b",
+      "parent": "N11",
+      "existing_issue": "AII-261",
+      "title": "Scale stall thresholds to the prompt size and the measured speed of the model",
+      "depends_on": [
+        "V01",
+        "H12"
+      ],
+      "deliverable": "Split from V01 on the owner's direction (2026-10-26): V01 judges an open request against a fixed time per difficulty, so a local model that needs twenty minutes to read a 120,000-token prompt at 100 tokens a second is reported as a stuck request before it has begun. The start of a request records its prompt size (uncached tokens, from the relay's first usage report and the cache figures), the controller keeps the measured reading and writing speed per route and host from finished requests, and the allowed time of a request is the larger of the difficulty's time and a margin over the time the prompt should take at the measured speed",
+      "acceptance_and_verification": "A request for a large prompt on a slow local route is not reported as stuck while the expected reading time has not passed, and is reported when it passes by the margin; a hosted route with a fast reader keeps the difficulty's time; a route with no measurement yet uses a declared speed from the route settings, else a stated cautious default that is shown in the concern text; a cached prefix shortens the expected time by the cached share; once the first output arrives the reading allowance ends and silence between outputs is judged by the ordinary thresholds; the measured speed is a smoothed value that one slow request cannot collapse or one fast request inflate; a stuck-request concern states the prompt size, the speed used and the time expected so the supervisor can tell a slow model from a dead one; the thresholds and the margin are settings",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "V02",
       "parent": "N11",
       "existing_issue": "AII-261",
       "title": "Implement bounded supervisor recovery",
       "depends_on": [
         "V01",
+        "V01b",
         "L03",
         "L04",
         "R02",
@@ -4468,6 +4487,7 @@
         "U03b",
         "C07d",
         "L01b",
+        "V01b",
         "H12a",
         "H12b",
         "H12c",

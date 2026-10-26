@@ -155,6 +155,8 @@ Follow-up (owner, 2026-10-26): nothing language-specific unless the same is done
 - **C07d (new, before release):** route change to a smaller window and window-scaled MCP result limits, moved out of C07b.
 - **L05b (new, before release):** feeding the model stream into revision-bound generation, moved out of L05.
 
-## Stall detection needs a right the dispatcher does not hold (2026-10-26)
+## Stall detection needs a right the dispatcher does not hold (2026-10-26) — decided
 
-`StallService.scan` runs only as the owner or a service holding `recovery.read` on everything, and `service:dispatcher` holds no grants. Running detection every tick therefore needs either that broad right for the dispatcher or a new, narrower "run stall detection" right. I would add the narrower right (it only writes concern records). Card L01b carries the work; say if you prefer the broad right.
+**Decided by the owner (2026-10-26):** a new, narrower stall-scan right, not `recovery.read` on everything. `StallService.scan` runs only as the owner or a service holding `recovery.read` on everything, and `service:dispatcher` holds no grants; card L01b adds a dedicated right that permits only the scan (it only writes concern records) and gives it to the dispatcher.
+
+**Owner direction, same day:** stall detection must account for the model's prompt reading speed. A 120,000-token prompt read at 100 tokens a second takes 20 minutes before the model does anything, and V01 judges an open request against a fixed time per difficulty (10 minutes for a medium task), so it would report a stuck request that is only reading. For local models the actual speed counts. Card V01b scales the allowed request time to the prompt size and the measured speed of the route, shortened by the cached share, and ends the allowance at the first output.
