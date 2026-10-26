@@ -168,6 +168,7 @@ export class DispatcherService {
   /** Usage reports made per attempt by this dispatcher, so two turns with identical figures are two records. */
   readonly #usageSeq = new Map<string, number>();
   readonly #ending = new Set<Promise<unknown>>();
+  readonly #endingBy = new Map<string, Promise<{ readmitted?: string }>>();
   /** Consecutive ticks an attempt pinned to a host has waited for it (in memory: a restart starts the count again). */
   readonly #pinnedWaits = new Map<string, number>();
   #ticking: Promise<TickReport> | undefined;
@@ -927,9 +928,13 @@ export class DispatcherService {
    */
   async #end(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean }): Promise<{ readmitted?: string }> {
     // `idle()` waits for every end in progress, not only for the turns: an attempt leaves the live list part-way through its end, and the blocker for a failure is opened after that.
+    // Two paths can end the same attempt at once (the worker's result and the lease scan): the second joins the first, whose outcome stands. Its own would reuse the first's command IDs with a different summary.
+    const already = this.#endingBy.get(attemptId);
+    if (already !== undefined) return already;
     const ending = this.#endInner(attemptId, outcome, summary, options);
     this.#ending.add(ending);
-    try { return await ending; } finally { this.#ending.delete(ending); }
+    this.#endingBy.set(attemptId, ending);
+    try { return await ending; } finally { this.#ending.delete(ending); if (this.#endingBy.get(attemptId) === ending) this.#endingBy.delete(attemptId); }
   }
 
   async #endInner(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean }): Promise<{ readmitted?: string }> {
