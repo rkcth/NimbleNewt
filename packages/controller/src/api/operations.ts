@@ -8,6 +8,7 @@ import type { ContractService, WaitGraphService } from "../planning/index.js";
 import type { ProjectPlanService, ProjectResourceService, ResponsibilityService } from "../projects/index.js";
 import type { RetrievalService } from "../context/index.js";
 import type { MeetingService } from "../meetings/index.js";
+import type { AgentMessageService } from "../messaging/index.js";
 import { shownLines } from "../standups/standups.js";
 import type { Principal } from "../security/principals.js";
 import type { SecureApi } from "../security/secured.js";
@@ -31,6 +32,8 @@ export interface Context {
   readonly responsibilities?: ResponsibilityService;
   /** Absent when the controller runs without meetings (cards M01 and M03). */
   readonly meetings?: MeetingService;
+  /** Absent when the controller runs without agent messages (card U12): questions to the owner. */
+  readonly ownerQuestions?: Pick<AgentMessageService, "askOwner" | "ownerQuestions" | "answerOwner">;
 }
 
 export type Args = Record<string, unknown>;
@@ -76,6 +79,7 @@ const watches = (c: Context): WatchService => c.watches ?? ((): never => { throw
 const unavailable = (what: string): never => { throw new DomainError("unavailable", `${what} is not configured`); };
 const resources = (c: Context): ProjectResourceService => c.resources ?? unavailable("project resources");
 const plans = (c: Context): ProjectPlanService => c.plans ?? unavailable("project plans");
+const ownerQuestionsOf = (c: Context): NonNullable<Context["ownerQuestions"]> => c.ownerQuestions ?? unavailable("questions to the owner");
 const meetingsOf = (c: Context): MeetingService => c.meetings ?? unavailable("meetings");
 const duties = (c: Context): ResponsibilityService => c.responsibilities ?? unavailable("responsibilities");
 const optNum = (args: Args, key: string): number | undefined => { const v = args[key]; return v === undefined ? undefined : (typeof v === "number" ? v : invalid(`args.${key}`, "must be a number")); };
@@ -143,6 +147,12 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, ["handlingId"]); return found("handling", await watches(c).inspect(c.principal, str(a, "handlingId"))); } },
   { name: "events.loops", kind: "query", summary: "Self-triggering event loops that are held (their events are not scheduled until the owner releases them).", args: { "limit?": `1 to ${PAGE.max}, default ${PAGE.default}`, "after?": "the `next` of the previous page" }, result: "`{ items, next?, scanLimited? }` (see `events.failures` for `scanLimited`).",
     run: async (c, a) => { only(a, ["limit", "after"]); return page(await watches(c).loops(c.principal, { limit: limitOf(a), ...(optStr(a, "after") === undefined ? {} : { afterId: optStr(a, "after")! }) })); } },
+  { name: "owner.ask", kind: "command", summary: "An agent asks the owner a question about a task it works on. The question appears in `owner.questions` with the task's context; if `waitId` names the typed wait the task is blocked in for the owner, the owner's answer resolves it. Asking never wakes or resumes anything.", args: { taskId: "the task the question is about", question: "the question", "waitId?": "the wait the answer resolves" }, result: "`{ id, replayed }` (`id` is the inquiry).", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["taskId", "question", "waitId"]); const asked = await ownerQuestionsOf(c).askOwner(c.principal, { commandId: need(id), taskId: str(a, "taskId"), question: str(a, "question"), ...(optStr(a, "waitId") === undefined ? {} : { waitId: optStr(a, "waitId")! }) }); return asJson({ id: asked.inquiryId, replayed: asked.replayed }); } },
+  { name: "owner.questions", kind: "query", summary: "The questions agents have put to the owner, oldest first, each with the task it is about (title, state, project) and the wait its answer will resolve. Owner only.", args: { "limit?": `1 to ${PAGE.max}, default ${PAGE.default}`, "after?": "the `next` of the previous page" }, result: "`{ items, next? }`.",
+    run: async (c, a) => { only(a, ["limit", "after"]); return page(await ownerQuestionsOf(c).ownerQuestions(c.principal, { limit: limitOf(a), ...(optStr(a, "after") === undefined ? {} : { afterId: optStr(a, "after")! }) })); } },
+  { name: "owner.answer", kind: "command", summary: "The owner answers a question; if the task waits on it, the wait is resolved and the task is ready again. Owner only.", args: { inquiryId: "the question's ID (`id` of `owner.ask`)", answer: "the answer" }, result: "`{ id, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["inquiryId", "answer"]); return written(await ownerQuestionsOf(c).answerOwner(c.principal, { commandId: need(id), inquiryId: str(a, "inquiryId"), answer: str(a, "answer") })); } },
   { name: "inquiry.pending", kind: "query", summary: "Open inquiries waiting for the caller to answer.", args: { "limit?": `1 to ${PAGE.max}, default ${PAGE.default}`, "after?": "the `next` of the previous page" }, result: "`{ items, next? }`.",
     run: async (c, a) => { only(a, ["limit", "after"]); return page(await c.inquiries.pendingFor(c.principal, { limit: limitOf(a), ...(optStr(a, "after") === undefined ? {} : { afterId: optStr(a, "after")! }) })); } },
 

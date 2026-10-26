@@ -227,6 +227,17 @@ Arguments:
 
 Result: `{ items, next?, scanLimited? }` (see `events.failures` for `scanLimited`).
 
+#### `owner.questions`
+
+The questions agents have put to the owner, oldest first, each with the task it is about (title, state, project) and the wait its answer will resolve. Owner only.
+
+Arguments:
+
+- `limit` (optional): 1 to 100, default 20
+- `after` (optional): the `next` of the previous page
+
+Result: `{ items, next? }`.
+
 #### `inquiry.pending`
 
 Open inquiries waiting for the caller to answer.
@@ -486,6 +497,33 @@ Arguments:
 - `projectId`: the project
 
 Result: `{ cycles }`: each ring's tasks and agents, the waits that form it and its blocker.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `owner.ask`
+
+An agent asks the owner a question about a task it works on. The question appears in `owner.questions` with the task's context; if `waitId` names the typed wait the task is blocked in for the owner, the owner's answer resolves it. Asking never wakes or resumes anything.
+
+Arguments:
+
+- `taskId`: the task the question is about
+- `question`: the question
+- `waitId` (optional): the wait the answer resolves
+
+Result: `{ id, replayed }` (`id` is the inquiry).
+
+Completion: finished when accepted (`completed: true`).
+
+#### `owner.answer`
+
+The owner answers a question; if the task waits on it, the wait is resolved and the task is ready again. Owner only.
+
+Arguments:
+
+- `inquiryId`: the question's ID (`id` of `owner.ask`)
+- `answer`: the answer
+
+Result: `{ id, replayed }`.
 
 Completion: finished when accepted (`completed: true`).
 

@@ -150,19 +150,21 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     if (i.options.cache !== undefined) {
       const o = i.options.cache;
       const policies = new CachePolicies({ ...o, principal, markers: MarkerService.withEpoch(storage, epoch, ro), ...(i.onError === undefined ? {} : { onError: i.onError }) });
-      // One policy per attempt: its slot, its pin bookkeeping and its figures belong to the attempt, so the relay and the host must share it. The oldest are dropped past a bound (an attempt asks again and gets an equal one: keys and slots are derived).
-      const made = new Map<string, Promise<AttemptCache>>();
+      // One policy per attempt: its slot, its pin bookkeeping and its figures belong to the attempt, so the relay and the host must share it. An entry is kept until the attempt's own expiry (it cannot run past it) and dropped then, never earlier.
+      const made = new Map<string, { readonly cache: Promise<AttemptCache>; readonly until: number }>();
+      const now = i.options.clock === undefined ? Date.now : (): number => Date.parse(i.options.clock!());
       cache = {
         forOrder: (order) => {
+          for (const [id, entry] of made) if (entry.until < now()) made.delete(id);
           let found = made.get(order.attemptId);
           if (found === undefined) {
             const pin = o.pinMarker?.(order);
-            found = policies.forAttempt({ projectId: order.projectId, route: order.route }, pin === undefined ? {} : { pinMarker: pin });
+            const cache = policies.forAttempt({ projectId: order.projectId, route: order.route }, pin === undefined ? {} : { pinMarker: pin });
+            found = { cache, until: Date.parse(order.expiresAt) + 60_000 };
             made.set(order.attemptId, found);
-            found.catch(() => made.delete(order.attemptId));
-            if (made.size > 1000) made.delete(made.keys().next().value!);
+            cache.catch(() => made.delete(order.attemptId));
           }
-          return found;
+          return found.cache;
         },
       };
     }

@@ -20,6 +20,8 @@ import type { ControllerStorage } from "../storage/types.js";
 import { StateApi } from "./state-api.js";
 import { ConfigurationService } from "../configuration/index.js";
 import { ConversationService, type Availability } from "../conversations/index.js";
+import { AgentMessageService } from "../messaging/index.js";
+import { NotificationService } from "../notifications/index.js";
 import { PauseService } from "../lifecycle/index.js";
 import { ReviewService } from "../review/index.js";
 import { RoutingService } from "../routing/index.js";
@@ -169,7 +171,10 @@ export async function startController(options: StartOptions): Promise<Controller
     const resources = ProjectResourceService.withEpoch(storage, epoch);
     const plans = ProjectPlanService.withEpoch(storage, epoch);
     const responsibilities = ResponsibilityService.withEpoch(storage, epoch);
-    const api = new StateApi({ principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
+    // Questions to the owner (card U12): agents ask through the API, the owner sees and answers them; the owner is told through the notifications.
+    const notifications = NotificationService.withEpoch(storage, epoch);
+    const messages = AgentMessageService.withEpoch(storage, epoch, { availability: pauses.availability, taskPaused: (t) => pauses.isPaused(t), guard: (t) => pauses.guard(t), waits, assignments, inquiries, notifications });
+    const api = new StateApi({ ownerQuestions: messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
     let dispatchProblem: string | undefined;
     if (options.dispatch !== undefined) {
       try {
