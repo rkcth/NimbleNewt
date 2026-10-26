@@ -1,3 +1,4 @@
+import { StallService } from "../health/index.js";
 import { DomainError } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { AssignmentService } from "../domain/assignments.js";
@@ -101,7 +102,7 @@ export interface Controller {
   readonly prerequisites: readonly PrerequisiteReport[];
   readonly services: {
     readonly principals: PrincipalService; readonly taskCredentials: TaskCredentialService; readonly grants: GrantService; readonly projects: ProjectService; readonly assignments: AssignmentService;
-    readonly waits: WaitService; readonly desks: DeskService; readonly histories: HistoryService; readonly retrieval: RetrievalService; readonly inquiries: InquiryService; readonly agents: AgentService; readonly harnesses: HarnessCatalog; readonly contracts: ContractService; readonly graph: WaitGraphService; readonly resources: ProjectResourceService; readonly plans: ProjectPlanService; readonly responsibilities: ResponsibilityService; readonly reviews: ReviewService; readonly conversations: ConversationService; readonly configuration: ConfigurationService; readonly routing: RoutingService; readonly pauses: PauseService; readonly branches: ContextBranchService;
+    readonly waits: WaitService; readonly stall: StallService; readonly desks: DeskService; readonly histories: HistoryService; readonly retrieval: RetrievalService; readonly inquiries: InquiryService; readonly agents: AgentService; readonly harnesses: HarnessCatalog; readonly contracts: ContractService; readonly graph: WaitGraphService; readonly resources: ProjectResourceService; readonly plans: ProjectPlanService; readonly responsibilities: ResponsibilityService; readonly reviews: ReviewService; readonly conversations: ConversationService; readonly configuration: ConfigurationService; readonly routing: RoutingService; readonly pauses: PauseService; readonly branches: ContextBranchService;
   };
   /** The dispatcher and the driver of its loops, when `dispatch` was given and the dispatcher could be provisioned. */
   readonly dispatch?: DispatchHandle;
@@ -179,6 +180,8 @@ export async function startController(options: StartOptions): Promise<Controller
     const agents = AgentService.withEpoch(storage, epoch);
     // Card L01: the pause gates supply the availability the conversations and the reviews consult, so a paused agent's messages are queued and a paused reviewer is skipped; whatever else the lifecycle reports (suspended, stopped) comes through `options.availability`.
     const pauses = PauseService.withEpoch(storage, epoch, { waits }, options.availability === undefined ? {} : { otherAvailability: options.availability });
+    // Suspected stalls: a task under a pause is assessed as paused, never as stalled (card L01).
+    const stall = StallService.withEpoch(storage, epoch, assignments, waits, { isPaused: (taskId) => pauses.isPaused(taskId) });
     const reviews = ReviewService.withEpoch(storage, epoch, { availability: pauses.availability });
     const graph = WaitGraphService.withEpoch(storage, epoch, contracts, BlockerService.withEpoch(storage, epoch), { extraEdges: (projectId, tasks) => reviews.waitEdges(projectId, tasks) });
     // The routing table is refused unless the coordinator, the safety supervisor and every other role in it have a valid fallback list (card R04).
@@ -199,7 +202,7 @@ export async function startController(options: StartOptions): Promise<Controller
       const o = options.chat;
       // The approval profile (A07), status explanations (U05) and conversational policy edits (U04) are composed from the services built above.
       const policy = PolicyService.withEpoch(storage, epoch, grants);
-      const status = StatusService.withEpoch(storage, epoch, { assignments, waits, blockers: BlockerService.withEpoch(storage, epoch), contracts, pauses });
+      const status = StatusService.withEpoch(storage, epoch, { assignments, waits, blockers: BlockerService.withEpoch(storage, epoch), contracts, pauses, stall });
       const policyEdits = PolicyEditService.withEpoch(storage, epoch, { policy, reviews, grants, configuration, conversations, interpreter: o.interpreter });
       chat = ChatService.withEpoch(storage, epoch, { principals, api, interpreter: o.interpreter, policy, status, policyEdits, ...(o.coordinator === undefined ? {} : { coordinatorToken: o.coordinator.token }) });
       if (o.coordinator !== undefined) {
@@ -222,7 +225,7 @@ export async function startController(options: StartOptions): Promise<Controller
     }
     const transport = options.conversationTransport === undefined ? undefined : await ConversationTransport.listen({ ...options.conversationTransport, conversations, principals });
     return {
-      api, storage, epoch, check, filesystems, prerequisites, services: { principals, taskCredentials, grants, projects, assignments, waits, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing, pauses, branches },
+      api, storage, epoch, check, filesystems, prerequisites, services: { principals, taskCredentials, grants, projects, assignments, waits, stall, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing, pauses, branches },
       ...(chat === undefined ? {} : { chat }), ...(coordinator === undefined ? {} : { coordinator }),
       ...(dispatch === undefined ? {} : { dispatch }), ...(dispatchProblem === undefined ? {} : { dispatchProblem }),
       ...(transport === undefined ? {} : { conversationUrl: transport.url }),

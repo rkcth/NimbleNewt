@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **70 of 194 tasks implemented**.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **70 of 195 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -297,6 +297,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **H12f** Wire context enforcement, pause observation and message boundaries into the runtime _(needs H12, C07b, L01, U12)_
 - [ ] **H12g** Use the DNS-rebinding guard in the remote MCP client _(needs H12, T03)_
 - [ ] **H12h** Route owner-mode reviews only to the owner _(needs H12, A05)_
+- [ ] **L01b** Run the reconciler and stall detection in the controller with the pause gates _(needs L01, H12)_
 - [ ] **L05b** Feed the model stream into revision-bound generation _(needs L05, H12)_
 - [ ] **M05** Implement meeting facilitation and owner control _(needs M04, M02, U03, M00, A10, C01b)_
 - [ ] **T06** Implement the protected agent tool bridge and execution service _(needs H12, T01)_
@@ -437,7 +438,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 49
 
-- [ ] **D03** Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, C07d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11)_
+- [ ] **D03** Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, C07d, L01b, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11)_
 
 ### Phase 50
 

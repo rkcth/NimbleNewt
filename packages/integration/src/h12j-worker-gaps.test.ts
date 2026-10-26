@@ -132,6 +132,31 @@ describe("the worker process is reaped however the attempt ends, and never holds
     } finally { model.server.close(); r.done(); }
   });
 
+  test("a recipe change restarts the sandbox from a checkpoint with the real launcher: the first process is reaped, the second continues the stored conversation, and neither holds the provider's key", async (t) => {
+    const model = await endpoint([{ text: "first answer" }, { text: "second answer" }]);
+    const r = await rig(t, model);
+    if (r === undefined) { model.server.close(); return; }
+    try {
+      const handle = await r.worker.start(r.order);
+      assert.equal((await handle.run(r.gateway)).status, "completed");
+      const checkpoint = await handle.checkpoint();
+      assert.ok(checkpoint["pi"] !== undefined, "the conversation was checkpointed");
+      // The recipe narrows: the sandbox is closed and a new one is opened from the checkpoint.
+      await handle.restart({ revision: "r2", reach: [] } as never, checkpoint);
+      assert.equal(r.tap.runs.length, 2, "a second process was started");
+      // The directory scan of `reaped` would also see the second process, so the first is checked by its own exit.
+      const exit = await Promise.race([r.tap.runs[0]!.run.result, new Promise<undefined>((ok) => setTimeout(() => ok(undefined), 15_000))]);
+      assert.ok(exit !== undefined, "the first process ended when the sandbox was closed");
+      // The second process holds the same stored conversation and runs a turn on it.
+      assert.ok(filesUnder(join(r.dirs.home, "pi")).length > 0, "the conversation store survived the restart");
+      const again = await handle.run(r.gateway);
+      assert.equal(again.status, "completed", again.error);
+      await handle.stop();
+      await reaped(r.tap.runs[1]!, r.directory);
+      for (const run of r.tap.runs) for (const text of [run.out.join(""), run.in.join("")]) assert.equal(text.includes("sk-provider"), false, "the provider key never reaches a worker process");
+    } finally { model.server.close(); r.done(); }
+  });
+
   test("the process is reaped when the attempt completes, when it is stopped in the middle of a turn, and when it is lost", async (t) => {
     const quick = await endpoint([{ text: "done" }]);
     const first = await rig(t, quick);

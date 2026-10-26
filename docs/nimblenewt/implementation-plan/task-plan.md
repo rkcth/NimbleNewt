@@ -32,7 +32,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N02 / AII-252 | F01, F02, F03, F04a, F04b, F04c, F04d, F04, F04f, F04g, F04h, F04i, F04j, F04e, F09 |
 | N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06, C06b |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
-| N05 / AII-255 | L05, L05b, L01, L02, L03, L04, L06, H08 |
+| N05 / AII-255 | L05, L05b, L01, L01b, L02, L03, L04, L06, H08 |
 | N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A08, A08b, A08c, A09, A10, A10b |
 | N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C08, C09 |
 | N08 / AII-258 | R01, R02, R03, R04, R05 |
@@ -740,6 +740,14 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Blockers:** C04, A02, S08, L05.
 - **Deliverable:** Durable pause gates and permitted background result collection.
 - **Acceptance and verification:** Pause retains owner and blocks new foreground work across restart; background result recorded without unpausing; observed execution state (pausing, stopping, recovery-required, unreachable) is recorded apart from lifecycle intent; agent-level Pause spans all the agent's task contexts while a task-level Pause still allows a separately authorized response or meeting task; a manual Pause never gains an automatic return; queued messages and state updates reach a paused agent's inbox without resuming it; each request records actor, scope, mode, operation ID and policy revision; a paused agent keeps its tasks despite an idle replacement, an urgent deadline or elapsed time; supplies the conversation availability hook, so a paused agent's messages are queued and an incoming message never lifts a hold; applying or reloading configuration (U10) leaves a pause in place.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### L01b — Run the reconciler and stall detection in the controller with the pause gates
+
+- **Parent:** N05 / AII-255.
+- **Blockers:** L01, H12.
+- **Deliverable:** Split from L01: the controller builds the reconciler (with the pause lookup, so an inbox message for a paused task stays received) and runs it, and runs stall detection (scan) in the dispatcher's tick with the narrowest right it needs, an owner decision recorded in the build decisions: the dispatcher principal holds no grants today and the scan requires the recovery-read right everywhere.
+- **Acceptance and verification:** A paused task is not reported as stalled and its inbox messages are held, not admitted, across a controller restart; a task that stops making progress while not paused is reported as a suspected stall in the status view; the right the scan runs under is the narrowest the owner approved, and a controller without it says so instead of failing every tick.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### L02 — Implement Suspend and graceful Stop
@@ -1689,7 +1697,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D03 — Approve release readiness and publication decision
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** X08, D01, D02, F04h, T06b, U03b, C07d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11.
+- **Blockers:** X08, D01, D02, F04h, T06b, U03b, C07d, L01b, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11.
 - **Deliverable:** Exact release manifest, known limitations and owner signoff.
 - **Acceptance and verification:** All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

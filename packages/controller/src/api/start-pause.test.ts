@@ -36,5 +36,7 @@ test("the pause gates supply the availability the controller's conversations con
     await s.pauses.resume(owner, { commandId: "rs1", scope: { kind: "agent", id: b.id }, reason: "back" });
     const third = await s.conversations.start(ann, { commandId: "s3", projectId: project, subject: "third", to: [bob.id], text: "now?" });
     assert.equal(await state(third.threadId), "ready");
+    // Stall detection is built with the pause gates (its assessment of a paused task is covered in health/stall.test.ts); nothing runs its scan yet (card L01b).
+    assert.deepEqual(await s.stall.overview(owner), { suspected: [], confirmed: [] });
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
