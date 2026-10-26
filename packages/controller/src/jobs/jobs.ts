@@ -35,7 +35,7 @@ export type RestartDecision = "complete" | "cancel" | "restart" | "exception";
 const DECISIONS: readonly RestartDecision[] = ["complete", "cancel", "restart", "exception"];
 
 export interface ExitStatus { readonly code?: number; readonly signal?: string; readonly reason?: string }
-export interface JobOutput { readonly tail: string; readonly bytes: number; readonly truncated: boolean }
+export interface JobOutput { readonly tail: string; readonly bytes: number; readonly truncated: boolean; /** A private-key block was begun and not ended in the output so far: what follows is dropped up to its end. */ readonly keyOpen?: boolean }
 export interface JobHistoryEntry { readonly state: JobState; readonly at: string; readonly by: string; readonly note?: string }
 
 export interface JobBody {
@@ -79,6 +79,8 @@ export interface JobBody {
 export interface ReconciliationBody { readonly jobId: string; readonly from: JobState; readonly to: JobState; readonly evidence: string; readonly by: string; readonly at: string }
 
 export const JOB_LIMITS = { label: 200, operationId: 120, tail: 8 * 1024, chunk: 64 * 1024, refs: 20, artifacts: 50, orphans: 20, orphan: 200, reason: 500, evidence: 1000, checkpoint: 200, host: 120, history: 32, page: 100, scan: 1000 } as const;
+/** Ends a redacted piece in which a private-key block was left open. */
+const KEY_OPEN = "\u0001key-open";
 const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
 const ARTIFACT_ID = /^art-[a-z2-7]{20}$/;
 const SERVER_ID = /^mcs-[a-z2-7]{20}$/;
@@ -227,7 +229,10 @@ export class JobService {
         taskId, projectId: task.projectId, kind, label, operationId, state: "admitted", resumability, background, ...(attemptId === undefined ? {} : { attemptId }), ...(host === undefined ? {} : { host }), ...(serverId === undefined ? {} : { serverId }),
         output: { tail: "", bytes: 0, truncated: false }, logs: [], artifacts: [], orphans: [], restarts: 0, reconciliations: [], history: [{ state: "admitted", at, by: principal.id }], admittedBy: principal.id, admittedAt: at,
       };
-      return { ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }, ...guardChanges], detail: { taskId, kind, operationId, resumability, background } };
+      return { ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }, ...guardChanges],
+        // Losing the commit to the same job already existing is the replay conflict; losing it to a gate that changed means the admit is decided again.
+        contention: async () => ((await this.#runner.get("job", id)) !== undefined ? new DomainError("command_conflict", "that operation already has a job", { field: "operationId" }) : new DomainError("stale_revision", "a pause gate changed while the job was admitted")),
+        detail: { taskId, kind, operationId, resumability, background } };
     }).then((r) => ({ id, replayed: r.replayed }));
   }
 
@@ -474,17 +479,29 @@ export class JobService {
     if (typeof value !== "string") return invalid("output", "must be text");
     if (value.length > JOB_LIMITS.chunk) invalid("output", `must be at most ${JOB_LIMITS.chunk} characters at a time`);
     // NUL cannot be stored by every backend and a lone surrogate is not text; both are dropped or repaired, never refused (output is whatever the process wrote).
-    return redactText(value.replaceAll("\u0000", "").replace(LONE_SURROGATE, "\ufffd"));
+    const clean = value.replaceAll("\u0000", "").replaceAll(KEY_OPEN, "").replace(LONE_SURROGATE, "\ufffd");
+    // A private-key block that is begun and not ended is cut out by the redaction to the end of this piece; the mark tells `#append` that the next pieces are more of it.
+    const begin = clean.lastIndexOf("-----BEGIN ");
+    const open = begin >= 0 && /^-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(clean.slice(begin)) && !/-----END [A-Z ]*PRIVATE KEY-----/.test(clean.slice(begin));
+    return redactText(clean) + (open ? KEY_OPEN : "");
   }
   #append(before: JobOutput, chunk: string): JobOutput {
     // The pieces are joined and redacted again, so a secret split across two reports is still caught; the end is kept, cut on a character boundary (the limit counts characters).
     // If the stored end already had a secret cut out of it, the first characters of the next piece are the rest of that secret.
-    const rest = before.tail.endsWith(REDACTED) ? chunk.replace(/^[A-Za-z0-9._~+/=-]+/, "") : chunk;
+    let rest = chunk.endsWith(KEY_OPEN) ? chunk.slice(0, -KEY_OPEN.length) : chunk;
+    const opens = rest.length !== chunk.length;
+    let keyOpen = before.keyOpen === true;
+    if (keyOpen) {
+      const end = /-----END [A-Z ]*PRIVATE KEY-----/.exec(rest);
+      rest = end === null ? "" : rest.slice(end.index + end[0].length);
+      keyOpen = end === null;
+    } else if (before.tail.endsWith(REDACTED)) rest = rest.replace(/^\S+/, "");
+    if (opens) keyOpen = true;
     const joined = redactText(before.tail + rest);
     const cut = joined.length > JOB_LIMITS.tail;
     let tail = cut ? joined.slice(joined.length - JOB_LIMITS.tail) : joined;
     if (cut && tail.length > 0 && tail.charCodeAt(0) >= 0xdc00 && tail.charCodeAt(0) <= 0xdfff) tail = tail.slice(1);
-    return { tail, bytes: before.bytes + Buffer.byteLength(chunk), truncated: before.truncated || cut };
+    return { tail, bytes: before.bytes + Buffer.byteLength(opens ? chunk.slice(0, -KEY_OPEN.length) : chunk), truncated: before.truncated || cut, ...(keyOpen ? { keyOpen } : {}) };
   }
   /** A log or artifact a job names must exist and, if it belongs to a project, to the job's. Checked inside the command, so a repeat is answered from its record even if an artifact has gone since. */
   async #checkRefs(job: JobBody, ids: readonly string[], field: string): Promise<void> {

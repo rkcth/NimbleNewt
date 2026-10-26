@@ -309,6 +309,15 @@ for (const backend of backends) {
     assert.equal(out.includes("abcdefghijklmnopqrstuvwxyz"), false);
     assert.equal(out.includes("\u0000"), false);
     assert.ok(out.endsWith("end \ufffd"));
+    // Characters the pattern matched but the old drop class did not, and a key block that goes on over several reports.
+    const lk = await c.admit(c.t1, { kind: "tool" });
+    await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: lk, state: "dispatched" });
+    await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: lk, output: "password=abcd" });
+    await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: lk, output: "!ef%gh ok\n-----BEGIN RSA PRIVATE KEY-----\nMIIEabc" });
+    await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: lk, output: "\nSECONDLINEOFKEY\n-----END RSA PRIVATE KEY-----\nafter" });
+    const kept = (await c.read(lk)).output.tail;
+    for (const gone of ["!ef%gh", "MIIEabc", "SECONDLINEOFKEY"]) assert.equal(kept.includes(gone), false, gone);
+    assert.ok(kept.includes("after"), "output after the key block is kept");
     await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: id, output: "a".repeat(JOB_LIMITS.tail - 1) + "\u{1F600}" });
     const cut = (await c.read(id)).output.tail;
     assert.equal(cut.length <= JOB_LIMITS.tail, true);
