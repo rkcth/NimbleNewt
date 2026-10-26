@@ -170,3 +170,30 @@ test("start binds the controller's services to the local worker's guards, offers
     await assert.rejects(mcp.connector.connect(server, async () => "connected"), /paused/, "a paused controller gives out no endpoint");
   } finally { await c.close(); assert.equal(closed, 1, "closing the controller shuts the local host down"); cleanup(d); }
 });
+
+test("start gives the local host one cache policy per attempt, from the owner's endpoint configuration and a secret that stays on the controller (card H12e)", async () => {
+  const d = dir();
+  const seen: { forOrder: (order: never) => Promise<{ policy: { key?: string; payload: (p: unknown) => unknown }; routed: boolean }> }[] = [];
+  const c = await open(join(d, "c.sqlite"), {
+    harnesses: [PI],
+    dispatch: {
+      timer: new ManualTimer(), manual: true,
+      cache: { secret: "installation-secret-0123456789", endpoints: { "vllm/big": { url: "http://127.0.0.1:8000", config: { kind: "vllm", model: "big", route: "vllm/big" } } } },
+      local: { window: () => 8192, build: (services) => { seen.push(services.cache as never); return { hostId: "host:w1" } as unknown as WorkerHost; } },
+    },
+  });
+  try {
+    assert.ok(c.dispatch !== undefined, c.dispatchProblem);
+    const cache = seen[0];
+    assert.ok(cache !== undefined, "the host is given the cache");
+    const order = (attemptId: string, projectId: string, route = "vllm/big") => ({ attemptId, projectId, route }) as never;
+    const one = await cache.forOrder(order("att-1", "proj-a"));
+    assert.equal(await cache.forOrder(order("att-1", "proj-a")), one, "the same attempt is given the same policy, so the relay and the host share its figures");
+    const other = await cache.forOrder(order("att-2", "proj-b"));
+    assert.notEqual(one.policy.key, other.policy.key, "another project has another key");
+    assert.match(one.policy.key!, /^nn-/);
+    assert.equal(JSON.stringify(one.policy).includes("installation-secret"), false);
+    // A route with no configured endpoint is a generic backend: nothing is sent.
+    assert.equal((await cache.forOrder(order("att-3", "proj-a", "other/model"))).routed, false);
+  } finally { await c.close(); cleanup(d); }
+});

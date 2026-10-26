@@ -2,6 +2,8 @@ import { AdmissionService } from "../admission/index.js";
 import { BudgetService } from "../budgets/index.js";
 import { DecisionService } from "../decisions/index.js";
 import { ContextEnforcementService } from "../context/index.js";
+import { CachePolicies, type AttemptCache, type CachePolicyDeps } from "../dispatch/cache.js";
+import { MarkerService } from "../inference-cache/index.js";
 import { DispatchDriver, DispatcherService, QuiesceCoordinator, controllerGuards, type RuntimeGuards, type WorkOrder, activeAgents, attendanceLoops, decisionLoops, eventLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLoop, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
 import { DomainError } from "../domain/errors.js";
 import type { AssignmentService } from "../domain/assignments.js";
@@ -56,9 +58,17 @@ export interface DispatchStartOptions {
     /** The model's context window for the order's route, in tokens; `undefined` when the route does not say. */
     readonly window: (order: WorkOrder) => number | undefined;
     readonly storedTokens?: (from: NonNullable<WorkOrder["resumeFrom"]>) => number | undefined;
-    readonly build: (services: { readonly guards: RuntimeGuards }) => WorkerHost | Promise<WorkerHost>;
+    readonly build: (services: { readonly guards: RuntimeGuards; readonly cache?: { forOrder(order: WorkOrder): Promise<AttemptCache> } }) => WorkerHost | Promise<WorkerHost>;
     /** Shuts down what `build` made (live workers, the sandbox launcher, the relay). Called when the controller closes and when a later step of the start fails. */
     readonly close?: () => Promise<void>;
+  };
+  /**
+   * The model-call cache (card H12e): the owner's endpoint configuration by route and the installation secret the keys are derived under. Given, `local.build` receives `cache.forOrder(order)`, one `AttemptCache` per attempt
+   * (the same object for every ask), whose policy goes to the relay (`relay.forAttempt(.., attempt.policy)`) and to the host's `cache` option together with `takeUsage`.
+   */
+  readonly cache?: Pick<CachePolicyDeps, "secret" | "endpoints" | "state" | "isolationRequired"> & {
+    /** The pin marker the project holds for this attempt's route, if any (a pin is sent only while the marker is active). */
+    readonly pinMarker?: (order: WorkOrder) => string | undefined;
   };
   /** Remote MCP servers (cards T03, H12g): the name resolver the host uses. Given, the handle carries the MCP service and the connector that reaches an approved server only at a checked public address. */
   readonly mcp?: { readonly resolve: NameResolver; /** Refuses while the controller is paused or stopping (the lifecycle gate); default: never refuses. */ readonly gate?: () => Promise<void> };
@@ -136,7 +146,27 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       window: i.options.local.window,
       ...(i.options.local.storedTokens === undefined ? {} : { storedTokens: i.options.local.storedTokens }),
     });
-    workers.push(await i.options.local.build({ guards }));
+    let cache: { forOrder(order: WorkOrder): Promise<AttemptCache> } | undefined;
+    if (i.options.cache !== undefined) {
+      const o = i.options.cache;
+      const policies = new CachePolicies({ ...o, principal, markers: MarkerService.withEpoch(storage, epoch, ro), ...(i.onError === undefined ? {} : { onError: i.onError }) });
+      // One policy per attempt: its slot, its pin bookkeeping and its figures belong to the attempt, so the relay and the host must share it. The oldest are dropped past a bound (an attempt asks again and gets an equal one: keys and slots are derived).
+      const made = new Map<string, Promise<AttemptCache>>();
+      cache = {
+        forOrder: (order) => {
+          let found = made.get(order.attemptId);
+          if (found === undefined) {
+            const pin = o.pinMarker?.(order);
+            found = policies.forAttempt({ projectId: order.projectId, route: order.route }, pin === undefined ? {} : { pinMarker: pin });
+            made.set(order.attemptId, found);
+            found.catch(() => made.delete(order.attemptId));
+            if (made.size > 1000) made.delete(made.keys().next().value!);
+          }
+          return found;
+        },
+      };
+    }
+    workers.push(await i.options.local.build({ guards, ...(cache === undefined ? {} : { cache }) }));
   }
   const dispatcher = DispatcherService.withEpoch(storage, epoch, {
     principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, hosts, workers,  contracts: i.contracts, harnesses: i.catalog, policy, effects, blockers, route,
