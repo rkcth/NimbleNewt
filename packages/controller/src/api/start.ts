@@ -23,6 +23,9 @@ import { ConfigurationService } from "../configuration/index.js";
 import { ConversationService, type Availability } from "../conversations/index.js";
 import { AgentMessageService } from "../messaging/index.js";
 import { NotificationService } from "../notifications/index.js";
+import { PolicyEditService } from "../chat/index.js";
+import { PolicyService } from "../policy/index.js";
+import { StatusService } from "../status/index.js";
 import { ChatService, CoordinatorService, type ChatInterpreter, type CoordinatorModel } from "../chat/index.js";
 import { ContextBranchService } from "../branches/index.js";
 import { PauseService } from "../lifecycle/index.js";
@@ -79,7 +82,7 @@ export interface StartOptions {
   readonly dispatch?: DispatchStartOptions;
   /**
    * Owner chat (card U03): the interpreter that reads the owner's messages (a model behind the routed client in production; a scripted one in tests) and, optionally, the persistent coordinator's model and credential. Absent: no chat service is built.
-   * Not wired yet: the approval profile (A07), status explanations (U05) and conversational policy edits (U04), so every order is a proposal, a status question is answered as unavailable and a policy instruction is refused until they are composed. The coordinator is controller-managed and nothing depends on it: when it is paused, stopped or its routes fail, the chat and the rest of the controller carry on.
+   * The approval profile (A07), status explanations (U05) and conversational policy edits (U04) are composed in. The coordinator is controller-managed and nothing depends on it: when it is paused, stopped or its routes fail, the chat and the rest of the controller carry on.
    */
   readonly chat?: {
     readonly interpreter: ChatInterpreter;
@@ -194,7 +197,11 @@ export async function startController(options: StartOptions): Promise<Controller
     let coordinator: CoordinatorService | undefined;
     if (options.chat !== undefined) {
       const o = options.chat;
-      chat = ChatService.withEpoch(storage, epoch, { principals, api, interpreter: o.interpreter, ...(o.coordinator === undefined ? {} : { coordinatorToken: o.coordinator.token }) });
+      // The approval profile (A07), status explanations (U05) and conversational policy edits (U04) are composed from the services built above.
+      const policy = PolicyService.withEpoch(storage, epoch, grants);
+      const status = StatusService.withEpoch(storage, epoch, { assignments, waits, blockers: BlockerService.withEpoch(storage, epoch), contracts, pauses });
+      const policyEdits = PolicyEditService.withEpoch(storage, epoch, { policy, reviews, grants, configuration, conversations, interpreter: o.interpreter });
+      chat = ChatService.withEpoch(storage, epoch, { principals, api, interpreter: o.interpreter, policy, status, policyEdits, ...(o.coordinator === undefined ? {} : { coordinatorToken: o.coordinator.token }) });
       if (o.coordinator !== undefined) {
         const c = o.coordinator;
         coordinator = CoordinatorService.withEpoch(storage, epoch, {

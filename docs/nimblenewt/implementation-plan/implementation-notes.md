@@ -1777,3 +1777,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 
 - `meetingLoops` (`dispatch/loops.ts`) is added to the composed dispatcher's loops: `meetings.tick` (every page of schedules, up to 10 pages a tick, so a backlog after downtime is worked off over ticks) and `meetings.invite` (for each project, the invitations of every planned occurrence go to the sink; the service withholds the paused and unavailable and sends nothing for a catch-up report or a settled meeting). `DispatchStartOptions.invitations` is the sink; without it invitations are decided and recorded but nothing is sent, and nobody provides a production sink yet (the host decides how an agent is reached).
 - M01 stays planned: its blocker U03 is not implemented.
+
+## Chat composition: policy, status, policy edits
+
+- `startController` with `chat` now builds `PolicyService`, `StatusService` and `PolicyEditService` and gives them to `ChatService`, so the approval profile (A07), status explanations (U05) and conversational policy edits (U04) apply instead of every order being a proposal. The stall service is not passed to status (L01 leaves it unbuilt at start), so stall concerns are not shown there.
