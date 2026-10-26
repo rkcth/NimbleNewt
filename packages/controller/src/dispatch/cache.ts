@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
 import type { CacheUsage } from "../budgets/budgets.js";
 import { CacheEndpoints, deriveKey, ledgerCache, piCachePolicy, profileFor, type CacheContext, type EndpointConfig, type EndpointState, type MarkerService, type PiCachePolicy } from "../inference-cache/index.js";
@@ -20,7 +21,8 @@ export interface CachePolicyDeps {
   readonly state?: CacheEndpoints;
   /** The dispatcher's service principal, to resolve markers. */
   readonly principal: Principal;
-  readonly markers?: Pick<MarkerService, "resolve">;
+  /** `recordOutcome` is given by the composer so that a missed pin marks the marker lost; without it the outcomes are not recorded. */
+  readonly markers?: Pick<MarkerService, "resolve"> & Partial<Pick<MarkerService, "recordOutcome">>;
   /** Whether a project requires that its prompts share no cache with other projects. */
   readonly isolationRequired?: (projectId: string) => boolean | Promise<boolean>;
   /** Told when the bookkeeping around a model call fails after Pi already has its answer (a stream that broke after it had begun, the usage hook). Default: logged, redacted. */
@@ -74,6 +76,12 @@ export class CachePolicies {
       pinAuthorized = resolved.state === "active";
       if (resolved.state === "active") expected = resolved.expectedCachedTokens;
     }
+    // What each call found of the pinned prefix is told to the marker service: a hit counts, and a miss (the endpoint no longer holds what the marker says it does) marks the marker lost, so later calls stop expecting it (card H12j).
+    const pin = pinAuthorized && options.pinMarker !== undefined ? options.pinMarker : undefined;
+    const nonce = randomBytes(6).toString("hex");
+    let outcomes = 0;
+    let markerLost = false;
+    const report = d.onError ?? ((error: unknown): void => { console.error(`pin marker bookkeeping for ${attempt.route} failed: ${redactText(error instanceof Error ? error.message : String(error)).slice(0, 300)}`); });
     const context: CacheContext = {
       scopeKey, shareKey, ...(slot === undefined ? {} : { slot }), ...(options.retention === undefined ? {} : { retention: options.retention }),
       ...(options.pinMessages === undefined ? {} : { pinMessages: options.pinMessages }), pinAuthorized, ...(await d.isolationRequired?.(attempt.projectId) === true ? { isolationRequired: true } : {}),
@@ -87,6 +95,19 @@ export class CachePolicies {
       profile, context: () => context, ...(state === undefined ? {} : { state }), ...(expected > 0 ? { expectedCachedTokens: () => expected } : {}),
       track: (done) => { pending.add(done); void done.then(() => pending.delete(done)); },
       onCall: (call) => {
+        const outcome = call.result?.outcome;
+        if (pin !== undefined && !markerLost && d.markers?.recordOutcome !== undefined && (outcome === "hit" || outcome === "partial" || outcome === "miss")) {
+          const n = ++outcomes;
+          // After a miss the marker is lost: later calls of this attempt are not told to it again.
+          if (outcome === "miss") markerLost = true;
+          try {
+            // Not awaited by the answer: the bookkeeping is tracked, and a failure is reported without touching Pi's reply or the accounting of this call. The command ID carries a part that is new for every attempt object,
+            // so a turn run again after a restart is counted again (its calls are different calls).
+            const told: Promise<void> = Promise.resolve(d.markers.recordOutcome.call(d.markers, d.principal, { commandId: `pin-outcome:${nonce}:${n}`, projectId: attempt.projectId, markerId: pin, outcome, ...(outcome === "miss" ? { reason: "the endpoint served none of the pinned prefix" } : {}) })).then(() => undefined, report);
+            pending.add(told);
+            void told.then(() => pending.delete(told));
+          } catch (error) { report(error); }
+        }
         const figures = ledgerCache(call.hit, profile.kind, attempt.route);
         if (figures === undefined) return;
         reported = true;

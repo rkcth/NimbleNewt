@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { DomainError } from "../domain/errors.js";
 import { CacheEndpoints } from "../inference-cache/index.js";
 import type { Principal } from "../security/principals.js";
+import { LlamaSim, simulatedFetch } from "../inference-cache/simulators.js";
 import { CachePolicies } from "./cache.js";
 
 const principal = { id: "service:dispatcher", kind: "service", name: "dispatcher", grants: [] } as Principal;
@@ -96,4 +97,35 @@ test("one server is one endpoint state whatever path its URL carries, so its slo
   assert.equal(endpoints.state("http://127.0.0.1:8080"), endpoints.state("http://127.0.0.1:8080/v1"));
   assert.equal(endpoints.state("http://HOST:8080/"), endpoints.state("http://host:8080/v1/"));
   assert.notEqual(endpoints.state("http://host:8080"), endpoints.state("http://host:8081"));
+});
+
+test("what each call found of a pinned prefix is told to the marker service: a hit counts, a miss marks the marker lost (card H12j)", async () => {
+  const outcomes: string[] = [];
+  const markers = {
+    resolve: async () => ({ state: "active" as const, marker: {} as never, expectedCachedTokens: 40 }),
+    recordOutcome: async (_by: Principal, q: { markerId: string; projectId: string; outcome: string; reason?: string }) => { outcomes.push(`${q.projectId}/${q.markerId}/${q.outcome}${q.reason === undefined ? "" : "!"}`); return { replayed: false }; },
+  };
+  const policies = make({ markers });
+  const server = new LlamaSim(2);
+  const attempt = await policies.forAttempt({ projectId: A, route: "llama/local" }, { pinMarker: "cmk-live" });
+  const wrapped = attempt.policy.fetch!(simulatedFetch(server));
+  const chat = (turns: number) => ({ model: "local", stream: true, messages: [{ role: "system", content: "shared project document ".repeat(60) }, ...Array.from({ length: turns }, (_, i) => ({ role: i % 2 === 0 ? "user" : "assistant", content: `turn ${i}` }))] });
+  const send = async (turns: number) => (await wrapped("http://127.0.0.1:8080/v1/chat/completions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(chat(turns)) })).text();
+  await send(1);
+  await attempt.takeUsage();
+  assert.deepEqual(outcomes, [`${A}/cmk-live/miss!`], "the marker says 40 tokens should be held and the cold server served none");
+  // No marker, no outcome.
+  outcomes.length = 0;
+  const plain = await policies.forAttempt({ projectId: A, route: "llama/local" });
+  await (await plain.policy.fetch!(simulatedFetch(new LlamaSim(2)))("http://127.0.0.1:8080/v1/chat/completions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(chat(1)) })).text();
+  await plain.takeUsage();
+  assert.deepEqual(outcomes, []);
+  // A failing marker service does not touch Pi's answer; it is reported.
+  const errors: unknown[] = [];
+  const failing = make({ markers: { ...markers, recordOutcome: async () => { throw new Error("storage down"); } }, onError: (e) => { errors.push(e); } });
+  const attempt3 = await failing.forAttempt({ projectId: A, route: "llama/local" }, { pinMarker: "cmk-live" });
+  const text = await (await attempt3.policy.fetch!(simulatedFetch(new LlamaSim(2)))("http://127.0.0.1:8080/v1/chat/completions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(chat(1)) })).text();
+  await attempt3.takeUsage();
+  assert.match(text, /data:/);
+  assert.equal(errors.length, 1);
 });
