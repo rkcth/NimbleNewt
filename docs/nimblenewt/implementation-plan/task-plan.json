@@ -2963,7 +2963,8 @@
       "depends_on": [
         "U01",
         "U02",
-        "R02"
+        "R02",
+        "U03b"
       ],
       "deliverable": "Intent-to-command mapping and audit links; a persistent coordinator agent (controller-managed, with its own grants, fallback list and lifecycle controls) answers from records and opens inquiries only when records are insufficient; proposal records; chat commands for agent, team and task-contract records",
       "acceptance_and_verification": "Clear authorized project/task edits apply; material ambiguity asks; quoted/untrusted text cannot grant authority; a drafted project or assignment is saved as a proposal and nothing is admitted until an explicit request applies it; per-project conversation context is retained across switches and changing focus never retargets a running task; every dispatched task carries an explicit project and checkout; the controller keeps working when the coordinator is unavailable; the coordinator decomposes an outcome into tasks with dependencies and proposes or, if granted, makes assignments",
@@ -3039,7 +3040,8 @@
       "existing_issue": "AII-259",
       "title": "Back the owner chat interpreter and the coordinator with a routed model",
       "depends_on": [
-        "U03",
+        "U01",
+        "U02",
         "R01",
         "R02"
       ],

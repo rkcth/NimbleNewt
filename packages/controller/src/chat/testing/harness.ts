@@ -52,10 +52,10 @@ export async function openWorld(backend: Backend, script: ConstructorParameters<
   const policy = { effective: async () => (profile.value === undefined ? undefined : { profile: profile.value }) };
   const chatDeps = (over: Partial<ChatDeps> = {}): ChatDeps => ({ principals, api, interpreter, policy, coordinatorToken: async () => coordinatorToken, ...over });
   const chat = (over: Partial<ChatDeps> = {}) => ChatService.withEpoch(world.storage, projects.epoch, chatDeps(over), options);
-  const coordinator = async (over: { grants?: Grant[]; model?: CoordinatorModel } = {}) => {
+  const coordinator = async (over: { grants?: Grant[]; model?: CoordinatorModel; routes?: () => Promise<readonly string[]> | readonly string[] } = {}) => {
     const made = await agent("coord", over.grants ?? [{ action: "attempt.work", project: "*" }, { action: "history.*", project: "*" }, { action: "desk.read", project: "*" }]);
     coordinatorToken = made.token;
-    const service = CoordinatorService.withEpoch(world.storage, projects.epoch, { chat: chat(), retrieval, inquiries, projects, assignments, api, token: async () => coordinatorToken, model: over.model ?? model, principal: () => principals.authenticate(made.token) }, options);
+    const service = CoordinatorService.withEpoch(world.storage, projects.epoch, { chat: chat(), retrieval, inquiries, projects, assignments, api, token: async () => coordinatorToken, model: over.model ?? model, ...(over.routes === undefined ? {} : { routes: over.routes }), principal: () => principals.authenticate(made.token) }, options);
     return { service, principal: made.principal };
   };
   const project = async (name: string, repositories: { id: string; location: string }[] = [{ id: "main", location: "/tmp/x" }]) => (await projects.createProject({ commandId: cid("p"), actor: "owner:rob", name, repositories })).id;

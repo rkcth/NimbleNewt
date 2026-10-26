@@ -1,7 +1,7 @@
 import { classifyProviderFailure } from "../routing/fallback.js";
 import { redactText } from "../security/redact.js";
 import type { ModelEndpoint } from "../dispatch/relay.js";
-import type { ModelCall } from "./model-interpreter.js";
+import type { ModelCall, ModelReply } from "./model-interpreter.js";
 
 /**
  * The chat's model call over an OpenAI-compatible endpoint (card U03b): the owner's configured endpoint for a route (the same configuration the worker relay uses, with the credential read at each call), one non-streamed
@@ -26,7 +26,9 @@ export class HttpModelCall implements ModelCall {
   readonly #o: HttpModelOptions;
   constructor(options: HttpModelOptions) { this.#o = options; }
 
-  async complete(route: string, request: { readonly system: string; readonly user: string }): Promise<string> {
+  async complete(route: string, request: { readonly system: string; readonly user: string }): Promise<string> { return (await this.completeDetailed(route, request)).text; }
+
+  async completeDetailed(route: string, request: { readonly system: string; readonly user: string }): Promise<ModelReply> {
     const endpoint = this.#o.endpoint(route);
     if (endpoint === undefined) throw new Error(`route ${route.slice(0, 60)} has no endpoint`);
     const fail = (status: number | undefined, message: string): never => {
@@ -54,7 +56,10 @@ export class HttpModelCall implements ModelCall {
       const reason = (() => { try { const e = (JSON.parse(text) as { error?: unknown }).error; return typeof e === "string" ? e : typeof e === "object" && e !== null ? String((e as { message?: unknown; code?: unknown; type?: unknown }).message ?? (e as { code?: unknown }).code ?? (e as { type?: unknown }).type ?? "") : ""; } catch { return ""; } })();
       return fail(undefined, reason === "" ? "the reply held no text" : reason);
     }
-    return content;
+    const u = (() => { try { return (JSON.parse(text) as { usage?: { prompt_tokens?: unknown; completion_tokens?: unknown } }).usage; } catch { return undefined; } })();
+    const count = (v: unknown): number | undefined => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : undefined);
+    const inputTokens = count(u?.prompt_tokens), outputTokens = count(u?.completion_tokens);
+    return { text: content, ...(inputTokens === undefined || outputTokens === undefined ? {} : { usage: { inputTokens, outputTokens } }) };
   }
 }
 

@@ -7,9 +7,13 @@ import { checkIntents, type ChatInterpreter, type InterpreterInput } from "./int
  * evidence to occur in the owner's own words, and proposes or applies by the owner's profile. What it adds is the prompt, which keeps the owner's words apart from quoted material, and the routes: each is
  * tried in the order given, and an answer that is not a JSON list of valid intents counts as a failure of that route, so a model that rambles falls back like one that is down.
  */
+export interface ModelReply { readonly text: string; readonly usage?: { readonly inputTokens: number; readonly outputTokens: number } }
+
 export interface ModelCall {
   /** One completion on the named route, as text. It refuses by throwing; the routed client (R01/R02) owns the failure classes, the budget and the effects of the call. */
   complete(route: string, request: { readonly system: string; readonly user: string }): Promise<string>;
+  /** The same completion with the provider's token counts, when the endpoint reports them (the budget of the chat counts them). */
+  completeDetailed?(route: string, request: { readonly system: string; readonly user: string }): Promise<ModelReply>;
 }
 
 const SYSTEM = [
