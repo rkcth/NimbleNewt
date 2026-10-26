@@ -151,7 +151,7 @@ Follow-up (owner, 2026-10-26): nothing language-specific unless the same is done
 
 ## Cards split or reworded to close C07b, C06 and L05 (2026-10-26)
 
-- **C06 wording:** "recorded responses" now says "simulated from the backend's documentation or source"; the capture from running servers is part of G10. Say if you want C06 to wait for real captures instead.
+- **C06 wording:** "recorded responses" now says "simulated from the backend's documentation or source"; the capture from running servers is part of G10. **Decided by the owner (2026-10-26): keep as is.** C06 stays implemented on simulated responses; real captures stay with G10. The owner has no llama.cpp or vLLM server running and cannot take any machine down now (BickelsSurplus work has priority), so no captures are to be made or requested until the owner says the servers are available.
 - **C07d (new, before release):** route change to a smaller window and window-scaled MCP result limits, moved out of C07b.
 - **L05b (new, before release):** feeding the model stream into revision-bound generation, moved out of L05.
 
