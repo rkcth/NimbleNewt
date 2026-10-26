@@ -226,8 +226,8 @@ export async function startController(options: StartOptions): Promise<Controller
     const stall = StallService.withEpoch(storage, epoch, assignments, waits, { isPaused: (taskId) => pauses.isPaused(taskId) });
     // Durable job records (card T07): a permitted background job's result goes to the pause service; no MCP connection check is bound until an MCP client exists, so no MCP operation is admitted.
     const jobs = JobService.withEpoch(storage, epoch, { pauses }, { background: (principal, request) => pauses.recordFinishedJob(principal, request) });
-    // The reviewer's host is the one its live attempt runs on (known once the dispatcher is built); without one the host is not judged.
-    const reviews = ReviewService.withEpoch(storage, epoch, { availability: pauses.availability, reviewerHost: async (principalId) => dispatch?.hostOfAgent(principalId) });
+    // The reviewer's host is the one its running attempt is on, or the host a moved attempt is pinned to (known once the dispatcher is built); without one, or when the lookup fails, the host is not judged.
+    const reviews = ReviewService.withEpoch(storage, epoch, { availability: pauses.availability, reviewerHost: async (principalId) => { try { return await dispatch?.hostOfAgent(principalId); } catch { return undefined; } } });
     const graph = WaitGraphService.withEpoch(storage, epoch, contracts, BlockerService.withEpoch(storage, epoch), { extraEdges: (projectId, tasks) => reviews.waitEdges(projectId, tasks) });
     // The routing table is refused unless the coordinator, the safety supervisor and every other role in it have a valid fallback list (card R04).
     const routing = RoutingService.withEpoch(storage, epoch, {}, {});
