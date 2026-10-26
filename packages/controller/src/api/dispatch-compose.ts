@@ -1,7 +1,8 @@
 import { AdmissionService } from "../admission/index.js";
 import { BudgetService } from "../budgets/index.js";
 import { DecisionService } from "../decisions/index.js";
-import { DispatchDriver, DispatcherService, activeAgents, attendanceLoops, decisionLoops, eventLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLoop, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
+import { ContextEnforcementService } from "../context/index.js";
+import { DispatchDriver, DispatcherService, QuiesceCoordinator, controllerGuards, type RuntimeGuards, type WorkOrder, activeAgents, attendanceLoops, decisionLoops, eventLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLoop, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
 import { DomainError } from "../domain/errors.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import { BlockerService } from "../domain/blockers.js";
@@ -13,6 +14,9 @@ import { EventService } from "../events/index.js";
 import { GenerationService } from "../generation/index.js";
 import type { HarnessCatalog } from "../harness/index.js";
 import { HostService } from "../hosts/index.js";
+import { McpService, RemoteMcpConnector } from "../mcp/index.js";
+import type { NameResolver } from "../dispatch/network.js";
+import type { RetrievalService } from "../context/index.js";
 import type { AgentService } from "../agents/index.js";
 import type { HistoryService } from "../context/index.js";
 import type { InquiryService } from "../inquiries/index.js";
@@ -44,17 +48,38 @@ export interface DispatchStartOptions {
   readonly manual?: boolean;
   /** Lease, attempt time, attempts allowed and so on. */
   readonly dispatcher?: AttemptDispatcherOptions;
+  /**
+   * The local worker host (card H12k). The controller binds its services to the worker's guards (context budget, pause observation, message boundaries: `controllerGuards`) and hands them to `build`, which makes the
+   * `LocalWorker` over the operator's sandbox launcher, worker process and model relay; the result is added to `workers`. The worker package holds no controller service: only these functions.
+   */
+  readonly local?: {
+    /** The model's context window for the order's route, in tokens; `undefined` when the route does not say. */
+    readonly window: (order: WorkOrder) => number | undefined;
+    readonly storedTokens?: (from: NonNullable<WorkOrder["resumeFrom"]>) => number | undefined;
+    readonly build: (services: { readonly guards: RuntimeGuards }) => WorkerHost | Promise<WorkerHost>;
+    /** Shuts down what `build` made (live workers, the sandbox launcher, the relay). Called when the controller closes and when a later step of the start fails. */
+    readonly close?: () => Promise<void>;
+  };
+  /** Remote MCP servers (cards T03, H12g): the name resolver the host uses. Given, the handle carries the MCP service and the connector that reaches an approved server only at a checked public address. */
+  readonly mcp?: { readonly resolve: NameResolver; /** Refuses while the controller is paused or stopping (the lifecycle gate); default: never refuses. */ readonly gate?: () => Promise<void> };
 }
 
 export interface DispatchHandle {
   readonly dispatcher: DispatcherService;
   readonly driver: DispatchDriver;
+  /** Makes an agent's attempts quiet around an integration, refresh, release or quarantine of its work (card H12d). */
+  readonly quiesce: QuiesceCoordinator;
+  /** Shuts down the local worker host the operator built, if it gave a way to. */
+  readonly closeWorkers: () => Promise<void>;
+  /** The MCP service and the only way the host reaches a remote server (cards T03, H12g); present when `mcp` was given. */
+  readonly mcp?: { readonly service: McpService; readonly connector: RemoteMcpConnector };
 }
 
 export interface ComposeInput {
   readonly storage: ControllerStorage; readonly epoch: number; readonly options: DispatchStartOptions;
   readonly principals: PrincipalService; readonly grants: GrantService; readonly taskCredentials: TaskCredentialService; readonly projects: ProjectService; readonly assignments: AssignmentService; readonly waits: WaitService;
   readonly contracts: ContractService; readonly catalog: HarnessCatalog; readonly routing: RoutingService; readonly inquiries: InquiryService; readonly agents: AgentService; readonly histories: HistoryService; readonly reviews: ReviewService;
+  readonly retrieval: RetrievalService;
   readonly onError?: (error: unknown) => void;
 }
 
@@ -99,8 +124,21 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   const loops: DispatcherLoop[] = [
     ...messageLoops(messages, () => activeAgents(storage)), ...attendanceLoops(attendance), ...standupLoops(standups, meetings, projects), ...eventLoops(events), ...decisionLoops(decisions, projects),
   ];
+  // The local worker host gets its guards here, bound to the services built above (card H12k); the dispatcher then has it among its workers.
+  const workers: WorkerHost[] = [...(i.options.workers ?? [])];
+  if (i.options.local !== undefined) {
+    const context = ContextEnforcementService.withEpoch(storage, epoch, { blockers, retrieval: i.retrieval }, ro);
+    const guards = controllerGuards({
+      context, pause: pauses, messages, system: principal,
+      agent: (order) => i.taskCredentials.authenticate(order.credential),
+      assignee: (order) => i.taskCredentials.agentOf(principal, order.attemptId),
+      window: i.options.local.window,
+      ...(i.options.local.storedTokens === undefined ? {} : { storedTokens: i.options.local.storedTokens }),
+    });
+    workers.push(await i.options.local.build({ guards }));
+  }
   const dispatcher = DispatcherService.withEpoch(storage, epoch, {
-    principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, hosts, workers: i.options.workers ?? [], contracts: i.contracts, harnesses: i.catalog, policy, effects, blockers, route,
+    principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, hosts, workers,  contracts: i.contracts, harnesses: i.catalog, policy, effects, blockers, route,
     routing: i.routing, pauses, decisions, generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops,
   }, { ...ro, holder: "dispatcher", ...(i.options.dispatcher ?? {}) });
   const driver = new DispatchDriver({
@@ -111,5 +149,9 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     onDisabled: async (why) => { await tell(why); },
   });
   if (i.options.manual !== true) driver.start();
-  return { dispatcher, driver };
+  const mcpService = i.options.mcp === undefined ? undefined : McpService.withEpoch(storage, epoch, { ...ro, ...(i.options.mcp?.gate === undefined ? {} : { gate: i.options.mcp.gate }) });
+  return {
+    dispatcher, driver, closeWorkers: async () => { await i.options.local?.close?.(); }, quiesce: new QuiesceCoordinator({ dispatcher, blockers, principal }),
+    ...(mcpService === undefined || i.options.mcp === undefined ? {} : { mcp: { service: mcpService, connector: new RemoteMcpConnector({ mcp: mcpService, resolve: i.options.mcp.resolve, principal }) } }),
+  };
 }
