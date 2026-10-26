@@ -191,7 +191,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       for (const [id, entry] of relays) if (entry.until < clock()) relays.delete(id);
       let found = relays.get(order.attemptId);
       if (found === undefined) {
-        found = { relay: relay.forAttempt({ route: order.route, ...(options.model === undefined ? {} : { model: options.model }), onFirstUsage: (usage) => { void confirmFirstCall(order, usage); } }, options.cache), until: Date.parse(order.expiresAt) + 60_000 };
+        found = { relay: relay.forAttempt({ route: order.route, ...(options.model === undefined ? {} : { model: options.model }), onFirstUsage: (usage) => { void confirmFirstCall(order, usage); } }, options.cache), until: (Number.isFinite(Date.parse(order.expiresAt)) ? Date.parse(order.expiresAt) : clock() + 4 * 60 * 60_000) + 60_000 };
         relays.set(order.attemptId, found);
       }
       return found.relay;

@@ -76,7 +76,13 @@ for (const backend of backends) {
       assert.deepEqual(admissions.map((a) => (a.body as unknown as { reported?: { inputTokens: number } }).reported?.inputTokens), [2500]);
       // Once recorded the round is forgotten; and a count no prompt could have is not recorded.
       await guards.context!.confirm!(opened as never, { reportedInputTokens: 99_999_999, promptChars: 9000 });
-      assert.deepEqual((await storage.listAggregates("ctx-admission", { limit: 10 })).map((a) => (a.body as unknown as { reported?: { inputTokens: number } }).reported?.inputTokens), [2500]);
+      assert.equal((await storage.listAggregates("ctx-admission", { limit: 10 })).length, 1);
+      // An impossible count is refused by the check itself: admit a second round, which it would otherwise be recorded against.
+      assert.equal((await guards.context!.admit(opened as never, { systemPromptChars: 3000, toolSchemaChars: 6000, startupTokens: 400, replyReserveTokens: 1000 }, 2)).admit, true);
+      await guards.context!.confirm!(opened as never, { reportedInputTokens: 99_999_999, promptChars: 9000 });
+      const after = await storage.listAggregates("ctx-admission", { limit: 10 });
+      assert.equal(after.length, 2);
+      assert.deepEqual(after.map((a) => (a.body as unknown as { reported?: { inputTokens: number } }).reported?.inputTokens).filter((x) => x !== undefined), [2500], "the impossible count was not recorded");
 
       // An urgent message from the owner reaches the running attempt at once, labelled as another party's words.
       await messages.send(w.owner, { commandId: "m1", taskId, to: "agent:ann", class: "urgent-control", purpose: "safety", text: "stop writing to the shared folder" });
