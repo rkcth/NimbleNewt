@@ -80,7 +80,7 @@ export interface DispatcherDeps {
   /** `GenerationService.guardFor` is handed to every effect that is started (it adds the generation hold to the pause and decision guards). */
   readonly generation?: Pick<GenerationService, "guardFor">;
   readonly reviews?: Pick<ReviewService, "request" | "admit" | "get">;
-  readonly budgets?: Pick<BudgetService, "accounting" | "charge">;
+  readonly budgets?: Pick<BudgetService, "accounting" | "charge"> & Partial<Pick<BudgetService, "reserve" | "settle" | "markUncertain">>;
   readonly mcp?: Pick<McpService, "authorizeCall" | "recordOutcome">;
   /** Whether the approved manifest of this exact tool version says a call may be run again after a restart (T06: the catalogue answers, as the agent; the worker never says). Without it no catalogue tool is replay-safe. */
   readonly replaySafe?: (tool: ToolIdentity, agent: Principal, attemptId: string, callId: string) => Promise<boolean>;
@@ -109,6 +109,11 @@ export interface AttemptDispatcherOptions extends RunnerOptions {
   readonly holder?: string;
   /** Told of a failure in bookkeeping that must not stop an attempt from ending (the context hand-off). */
   readonly onError?: (error: unknown) => void;
+  /**
+   * What an attempt holds back from its task's allowance before it starts (card R05b), as the most it may spend: compute is the contract's `maxMinutes` (or `attemptMs`) in milliseconds, money is this figure
+   * (millionths of the tree's currency; default none, so only compute is reserved). Without `budgets.reserve` nothing is reserved. An attempt that cannot reserve waits and is tried again; it is not started.
+   */
+  readonly reserveCostMicros?: number;
   /** A worker that does not beat within this time is taken as lost. Default one minute. */
   readonly leaseMs?: number;
   /** How long an attempt may run (shortened by the contract's `maxMinutes`). Default four hours. */
@@ -235,7 +240,7 @@ export class DispatcherService {
       if (d === undefined || (d.body.state !== "running" && d.body.state !== "parked")) continue;
       const expired = d.body.expiresAt <= at;
       if (expired || (d.body.state === "running" && d.body.lease !== undefined && d.body.lease.until <= at)) {
-        const result = await this.#end(id, "abandoned", expired ? "the attempt ran past its expiry" : "the worker stopped beating; its lease ran out", { readmit: !expired });
+        const result = await this.#end(id, "abandoned", expired ? "the attempt ran past its expiry" : "the worker stopped beating; its lease ran out", { readmit: !expired, lost: !expired });
         lost.push(id);
         if (result.readmitted !== undefined) readmitted.push(result.readmitted);
       }
@@ -699,6 +704,12 @@ export class DispatcherService {
       if (report !== undefined && (exhausted(report.limit.costMicros, report.spent.costMicros + report.uncertain.costMicros) || exhausted(report.limit.computeMs, report.spent.computeMs + report.uncertain.computeMs))) {
         return block("budget", "dispatch_blocked", "the task's budget is used up; raise it or change the task");
       }
+      // An attempt that holds nothing yet needs some of a limited allowance to be free; holds that are never settled (a lost worker's uncertain one) would keep it waiting for ever without anyone being told.
+      const mine = (await this.#load(attemptId))?.body;
+      if (report !== undefined && this.#deps.budgets.reserve !== undefined && mine !== undefined && mine.reservationId === undefined && mine.reserving === undefined
+        && ((report.limit.computeMs > 0 && report.available.computeMs === 0) || (report.limit.costMicros > 0 && (this.#options.reserveCostMicros ?? 0) > 0 && report.available.costMicros === 0))) {
+        return block("budget", "dispatch_blocked", "none of the task's allowance is free: holds for other work, or for an attempt that was lost and not yet settled, use it all; settle them or raise the budget");
+      }
     }
     // 7. Grants: the task's instructions and the standing policy determine them, or the owner is asked.
     const contract = await this.#contractOf(taskId);
@@ -809,7 +820,46 @@ export class DispatcherService {
     const requestId = await this.#request(d, pre.host);
     const where = await this.#deps.admission.where(requestId);
     if (where.state !== "running") return where.state === "waiting" ? { kind: "waiting" } : { kind: "skipped", check: "place", reason: where.state === "withdrawn" ? `the request for a place was withdrawn: ${where.reason}` : "the request for a place is gone" };
+    // Card R05b: the allowance is held before the attempt starts, so two attempts of sibling tasks cannot count on the same money or compute. Nothing to reserve with: nothing is held.
+    const held = await this.#reserve(d);
+    if (held !== undefined) { await this.#giveBack(d); return held; }
     return this.#start(d, pre.host, requestId);
+  }
+
+  /** Holds the attempt's most possible spend. The amounts are decided once and written to the attempt before the budget is asked, and the reservation's command ID derives from the attempt, so a repeat after a crash (or a second dispatcher) asks for the same thing and finds the same hold. Returns why the attempt cannot start when the allowance is not there. */
+  async #reserve(d: Loaded): Promise<AdvanceOutcome | undefined> {
+    const budgets = this.#deps.budgets;
+    if (budgets?.reserve === undefined || d.body.reservationId !== undefined) return undefined;
+    let want = d.body.reserving;
+    if (want === undefined) {
+      const report = await budgets.accounting(this.#deps.principal, d.body.taskId);
+      if (report === undefined) return undefined; // the task has no budget: nothing is held
+      const contract = await this.#contractOf(d.body.taskId);
+      // Only a dimension that has a limit is held (a limit of 0 states none), and no more than is still available: the contract's time, the attempt's own expiry and the allowance agree on the smallest.
+      const ms = Math.min(this.#options.attemptMs ?? 4 * 3_600_000, contract.maxMinutes === undefined ? Number.MAX_SAFE_INTEGER : contract.maxMinutes * 60_000);
+      const wantCost = this.#options.reserveCostMicros ?? 0;
+      const cost = report.limit.costMicros > 0 && wantCost > 0 ? Math.min(wantCost, report.available.costMicros) : 0;
+      const compute = report.limit.computeMs > 0 ? Math.min(ms, report.available.computeMs) : 0;
+      if (cost === 0 && compute === 0) {
+        const limited = (report.limit.computeMs > 0 && report.available.computeMs === 0) || (report.limit.costMicros > 0 && wantCost > 0 && report.available.costMicros === 0);
+        return limited ? { kind: "skipped", check: "budget", reason: "none of the task's allowance is free to hold for the attempt" } : undefined;
+      }
+      const intended = { ...(cost > 0 ? { costMicros: cost } : {}), ...(compute > 0 ? { computeMs: compute } : {}) };
+      // Written first; if another caller wrote its own first, that one stands.
+      want = (await this.#update(d.body.attemptId, (x) => ({ ...x, reserving: x.reserving ?? intended }))).reserving!;
+    }
+    let id: string;
+    try { id = (await budgets.reserve(this.#deps.principal, { commandId: `dpa-res:${d.body.attemptId}`, taskId: d.body.taskId, agentId: d.body.agentId, purpose: `attempt ${d.body.attemptId}`, ...want })).id; } catch (error) {
+      if (isDomainError(error, "not_found")) return undefined;
+      if (isDomainError(error, "invalid_command")) {
+        // Refused inside the budget's own command, so nothing was held: the amounts are decided again at the next tick (a sibling may have taken part of the allowance meanwhile).
+        await this.#update(d.body.attemptId, (x) => { if (x.reservationId !== undefined || JSON.stringify(x.reserving) !== JSON.stringify(want)) return x; const { reserving: _r, ...rest } = x; void _r; return rest; });
+        return { kind: "skipped", check: "budget", reason: `the task's allowance cannot hold this attempt: ${errorText(error)}` };
+      }
+      throw error;
+    }
+    await this.#update(d.body.attemptId, (x) => ({ ...x, reservationId: id, used: x.used ?? { costMicros: 0, computeMs: 0 } }));
+    return undefined;
   }
 
   async #request(d: Loaded, host: WorkerHost): Promise<string> {
@@ -936,7 +986,7 @@ export class DispatcherService {
    * Ends an attempt, whatever the reason: the worker is stopped, the calls still in flight are settled from the ledger, the attempt is finished in the assignment (the task itself is not touched),
    * the place is given back, the credential ends and the dispatch is closed. A lost attempt (not an expired or stopped one) may be admitted again by the dispatcher, within the attempts allowed.
    */
-  async #end(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean }): Promise<{ readmitted?: string }> {
+  async #end(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean; lost?: boolean }): Promise<{ readmitted?: string }> {
     // `idle()` waits for every end in progress, not only for the turns: an attempt leaves the live list part-way through its end, and the blocker for a failure is opened after that.
     // Two paths can end the same attempt at once (the worker's result and the lease scan): the second joins the first, whose outcome stands. Its own would reuse the first's command IDs with a different summary.
     const already = this.#endingBy.get(attemptId);
@@ -949,7 +999,7 @@ export class DispatcherService {
     try { return await ending; } finally { this.#ending.delete(ending); if (this.#endingBy.get(attemptId) === ending) this.#endingBy.delete(attemptId); }
   }
 
-  async #endInner(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean }): Promise<{ readmitted?: string }> {
+  async #endInner(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean; lost?: boolean }): Promise<{ readmitted?: string }> {
     const d = await this.#load(attemptId);
     if (d === undefined || d.body.state === "finished") return {};
     const live = this.#live.get(attemptId);
@@ -957,6 +1007,7 @@ export class DispatcherService {
     await this.#path.settle(attemptId, true).catch(() => undefined);
     await this.#path.cancelParked(attemptId).catch(() => undefined);
     const b = (await this.#load(attemptId))!.body;
+    await this.#settleReservation(b, options.lost === true);
     const assignment = await this.#deps.assignments.getAssignment(b.taskId);
     // The attempt is finished in the assignment only if it is still the active one; a superseded attempt was ended by whoever transferred the task.
     const active = assignment !== undefined && assignment.state === "assigned" && assignment.generation === b.generation && assignment.activeAttemptId === attemptId;
@@ -976,6 +1027,19 @@ export class DispatcherService {
       await this.#deps.notifications?.emitFromController({ commandId: `dpa-ntf:${opened.id}`, kind: "blocker", ref: { kind: "blocker", id: opened.id }, projectId: b.projectId }).catch(() => undefined);
     }
     return options.readmit ? this.#readmit(b) : {};
+  }
+
+  /** Settles the attempt's hold to what it used, or holds it as uncertain when the worker was lost (its last calls are not known). Settling is by command ID derived from the attempt, so an end done again settles once. */
+  async #settleReservation(b: DispatchBody, lost: boolean): Promise<void> {
+    const budgets = this.#deps.budgets;
+    if (b.reservationId === undefined || budgets?.settle === undefined) return;
+    try {
+      if (lost && budgets.markUncertain !== undefined) await budgets.markUncertain(this.#deps.principal, { commandId: `dpa-unc:${b.attemptId}`, reservationId: b.reservationId, reason: "the worker was lost; what its last calls cost is not known" });
+      else await budgets.settle(this.#deps.principal, { commandId: `dpa-set:${b.attemptId}`, reservationId: b.reservationId, ...(b.used === undefined || b.used.costMicros === 0 ? {} : { costMicros: b.used.costMicros }), ...(b.used === undefined || b.used.computeMs === 0 ? {} : { computeMs: b.used.computeMs }) });
+    } catch (error) {
+      // Already settled or already uncertain (this end ran before): fine. Anything else is told and does not keep the attempt from ending; the hold stays visible in the task's report.
+      if (!isDomainError(error, "invalid_transition") && !isDomainError(error, "command_conflict")) this.#options.onError?.(error);
+    }
   }
 
   /** The context bookkeeping of an ended attempt (card C07b). It never keeps the attempt from ending: a failure here is reported and the end goes on. */
@@ -1057,9 +1121,23 @@ export class DispatcherService {
     // A worker-side turn sequence is the idempotency key when there is one: the same report sent again is the same charge, and a different report under that number is a conflict.
     // A remote worker's request key (its Idempotency-Key) serves the same way when there is no turn sequence, so a resent request is charged once.
     const key = usage.turnSeq === undefined && requestKey !== undefined ? `k${createHash("sha256").update(requestKey).update("\0").update(JSON.stringify(usage)).digest("hex").slice(0, 32)}` : usage.turnSeq === undefined ? `${d.body.heartbeats}:${this.#instance}:${seq}:${createHash("sha256").update(JSON.stringify(usage)).digest("hex").slice(0, 24)}` : `t${usage.turnSeq}`;
+    // While a reservation is held the amounts are added to the attempt's own tally and settled when it ends (the hold already counts against the task); the cache figures are still recorded turn by turn.
+    const reserved = d.body.reservationId !== undefined;
+    if (reserved) {
+      const digest = createHash("sha256").update(JSON.stringify(usage)).digest("hex").slice(0, 24);
+      await this.#update(attemptId, (x) => {
+        const seen = x.usedKeys?.find((k) => k.key === key);
+        if (seen !== undefined) {
+          if (seen.digest !== digest) throw new DomainError("command_conflict", `usage report ${key} was already received with different figures`, { field: "turnSeq" });
+          return x; // the same report again: counted once
+        }
+        return { ...x, usedKeys: [...(x.usedKeys ?? []).slice(-199), { key, digest }], used: { costMicros: (x.used?.costMicros ?? 0) + (usage.costMicros ?? 0), computeMs: (x.used?.computeMs ?? 0) + (usage.computeMs ?? 0) } };
+      });
+      if (usage.cache === undefined) return;
+    }
     await this.#deps.budgets.charge(this.#deps.principal, {
       commandId: `dpa-use:${attemptId}:${key}`, activity: "model-call", taskId: d.body.taskId, agentId: d.body.agentId,
-      ...(usage.costMicros === undefined ? {} : { costMicros: usage.costMicros }), ...(usage.computeMs === undefined ? {} : { computeMs: usage.computeMs }), ...(usage.cache === undefined ? {} : { cache: usage.cache }),
+      ...(reserved ? {} : { ...(usage.costMicros === undefined ? {} : { costMicros: usage.costMicros }), ...(usage.computeMs === undefined ? {} : { computeMs: usage.computeMs }) }), ...(usage.cache === undefined ? {} : { cache: usage.cache }),
     });
   }
 }
