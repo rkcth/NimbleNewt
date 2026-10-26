@@ -36,7 +36,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A08, A08b, A08c, A09, A10, A10b |
 | N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C08, C09 |
 | N08 / AII-258 | R01, R02, R03, R04, R05, R05b, R05c, R05d |
-| N09 / AII-259 | U03, U04, U05, U06, U03b, U03c, U07, U09, U08, U10, U11, U11b |
+| N09 / AII-259 | U03, U03d, U04, U05, U06, U03b, U03c, U07, U09, U08, U10, U11, U11b |
 | N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13 |
 | N11 / AII-261 | V01, V01b, V02 |
 | N12 / AII-262 | M00, M01, M02, M03, M04, M05, M05b, M06 |
@@ -873,7 +873,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Parent:** N10 / AII-260.
 - **Blockers:** H06b, U11.
 - **Deliverable:** Split from H06b (audit 2026-10-26): expiry is built and recorded in the audit trail, but the composed controller passes no notifier to the event service, so no notice is sent in production; and subscriptions created before H06b were never given an idle time.
-- **Acceptance and verification:** Expiring an idle subscription that had events waiting produces exactly one owner notice in a dispatch-compose test; the expiry appears in the activity record (U09) and as a U11b notice when those exist; subscriptions that predate idle expiry are given the default idle time at start, once.
+- **Acceptance and verification:** Expiring an idle subscription that had events waiting produces exactly one owner notice in a dispatch-compose test; the expiry appears in the activity record (U09) and as a U11b notice when those exist; subscriptions that predate idle expiry are given the default idle time at start, once; the owner can set the idle time and cancel a subscription through the state API (the service has both; no operation exposes them yet).
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### H07 — Implement idle host polling and capability placement
@@ -1137,9 +1137,17 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### U03 — Implement owner chat command interpretation
 
 - **Parent:** N09 / AII-259.
-- **Blockers:** U01, U02, R02, U03b.
+- **Blockers:** U01, U02, R02, U03b, U03d.
 - **Deliverable:** Intent-to-command mapping and audit links; a persistent coordinator agent (controller-managed, with its own grants, fallback list and lifecycle controls) answers from records and opens inquiries only when records are insufficient; proposal records; chat commands for agent, team and task-contract records.
 - **Acceptance and verification:** Clear authorized project/task edits apply; material ambiguity asks; quoted/untrusted text cannot grant authority; a drafted project or assignment is saved as a proposal and nothing is admitted until an explicit request applies it; per-project conversation context is retained across switches and changing focus never retargets a running task; every dispatched task carries an explicit project and checkout; the controller keeps working when the coordinator is unavailable; the coordinator decomposes an outcome into tasks with dependencies and proposes or, if granted, makes assignments.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### U03d — Let the owner reach the coordinator through the chat
+
+- **Parent:** N09 / AII-259.
+- **Blockers:** U01, U02, U03b.
+- **Deliverable:** Split from U03 (audit 2026-10-26): the coordinator existed only as an in-process handle and in tests; the owner's chat now carries a coordinator intent (a question answered from the records with citations, a drafted plan as a proposal, handing out open tasks, and the coordinator's own set-up and start, pause and stop), checked as the owner's own words and applied once per turn.
+- **Acceptance and verification:** Through the composed controller: a question is answered from a cited record, a plan is a proposal that exists only after the owner applies it, assignment shows the model the active agents, set-up and start in one message work, quoted text and text the owner did not say are refused, and a pending question holds the order.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### U04 — Implement conversational policy editing

@@ -2295,7 +2295,7 @@
         "U11"
       ],
       "deliverable": "Split from H06b (audit 2026-10-26): expiry is built and recorded in the audit trail, but the composed controller passes no notifier to the event service, so no notice is sent in production; and subscriptions created before H06b were never given an idle time",
-      "acceptance_and_verification": "Expiring an idle subscription that had events waiting produces exactly one owner notice in a dispatch-compose test; the expiry appears in the activity record (U09) and as a U11b notice when those exist; subscriptions that predate idle expiry are given the default idle time at start, once",
+      "acceptance_and_verification": "Expiring an idle subscription that had events waiting produces exactly one owner notice in a dispatch-compose test; the expiry appears in the activity record (U09) and as a U11b notice when those exist; subscriptions that predate idle expiry are given the default idle time at start, once; the owner can set the idle time and cancel a subscription through the state API (the service has both; no operation exposes them yet)",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -2976,10 +2976,30 @@
         "U01",
         "U02",
         "R02",
-        "U03b"
+        "U03b",
+        "U03d"
       ],
       "deliverable": "Intent-to-command mapping and audit links; a persistent coordinator agent (controller-managed, with its own grants, fallback list and lifecycle controls) answers from records and opens inquiries only when records are insufficient; proposal records; chat commands for agent, team and task-contract records",
       "acceptance_and_verification": "Clear authorized project/task edits apply; material ambiguity asks; quoted/untrusted text cannot grant authority; a drafted project or assignment is saved as a proposal and nothing is admitted until an explicit request applies it; per-project conversation context is retained across switches and changing focus never retargets a running task; every dispatched task carries an explicit project and checkout; the controller keeps working when the coordinator is unavailable; the coordinator decomposes an outcome into tasks with dependencies and proposes or, if granted, makes assignments",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "U03d",
+      "parent": "N09",
+      "existing_issue": "AII-259",
+      "title": "Let the owner reach the coordinator through the chat",
+      "depends_on": [
+        "U01",
+        "U02",
+        "U03b"
+      ],
+      "deliverable": "Split from U03 (audit 2026-10-26): the coordinator existed only as an in-process handle and in tests; the owner's chat now carries a coordinator intent (a question answered from the records with citations, a drafted plan as a proposal, handing out open tasks, and the coordinator's own set-up and start, pause and stop), checked as the owner's own words and applied once per turn",
+      "acceptance_and_verification": "Through the composed controller: a question is answered from a cited record, a plan is a proposal that exists only after the owner applies it, assignment shows the model the active agents, set-up and start in one message work, quoted text and text the owner did not say are refused, and a pending question holds the order",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",

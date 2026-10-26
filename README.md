@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **78 of 202 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **78 of 203 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -114,7 +114,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Context and memory | `▓▓▓▓▓▓▓░░░░░` 60% | 6 of 10 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
 | Model routing, fallback and cost | `▓▓▓░░░░░░░░░` 25% | 2 of 8 |
-| Owner chat and web UI | `▓▓▓░░░░░░░░░` 25% | 3 of 12 |
+| Owner chat and web UI | `▓▓░░░░░░░░░░` 23% | 3 of 13 |
 | Workers, dispatch and teams | `▓▓▓▓░░░░░░░░` 34% | 9 of 26 |
 | Agent messaging | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
 | Health and recovery | `░░░░░░░░░░░░` 0% | 0 of 3 |
@@ -259,8 +259,8 @@ Separated task, chat and meeting context, working notes, source-backed retrieval
 - [x] **C07** · P25 · Implement context budgets, the startup builder and stall-proof helpers _(needs C04, R01)_
 - [ ] **C01b** · P26 · Implement the shared working-notes tier _(needs C01, A02, A10)_
 - [x] **C07b** · P26 · Wire context budgets into dispatch and bound compaction _(needs C07, C04, R01)_
-- [ ] **C08** · P28 · Implement owner decision records and correction propagation _(needs C03, C07, U03, H06)_
 - [ ] **C07d** · P29 · Rebuild the context view when a model route changes to a smaller window, and scale MCP result limits to the window _(needs C07b, R02, H12)_
+- [ ] **C08** · P29 · Implement owner decision records and correction propagation _(needs C03, C07, U03, H06)_
 - [ ] **C09** · P30 · Capture activity records and decision explanations _(needs C04, C08, T06, S05)_
 
 </details>
@@ -288,22 +288,23 @@ Routes and capability policy, provider failure fallback, difficulty profiles, dr
 - [ ] **R04** · P27 · Implement provider drain, cutover and failback policy _(needs R02, L05)_
 - [ ] **R05c** · P27 · Budget requests reach their addressee and budgets are exposed in the API _(needs R05, U11)_
 - [ ] **R05b** · P29 · Reserve before dispatch and settle after in the dispatcher _(needs R05, H12)_
-- [ ] **R05d** · P29 · Charge meetings, supervision and background jobs to their work or a shared category _(needs R05, M01)_
+- [ ] **R05d** · P30 · Charge meetings, supervision and background jobs to their work or a shared category _(needs R05, M01)_
 
 </details>
 
 <details>
-<summary><strong>Owner chat and web UI</strong> — ▓▓▓░░░░░░░░░ 3 of 12</summary>
+<summary><strong>Owner chat and web UI</strong> — ▓▓░░░░░░░░░░ 3 of 13</summary>
 
 Talking to your agents: the chat interpreter, policy editing, status and blocker explanations, recovery chat, notifications and the responsive web interface.
 
 - [x] **U10** · P25 · Implement layered configuration, effective values and change history _(needs F02, R01, U01, H11)_
 - [x] **U03b** · P26 · Back the owner chat interpreter and the coordinator with a routed model _(needs U01, U02, R01, R02)_
 - [x] **U11** · P26 · Implement owner notifications _(needs U02, S08, U10)_
-- [ ] **U03** · P27 · Implement owner chat command interpretation _(needs U01, U02, R02, U03b)_
-- [ ] **U03c** · P28 · Run the coordinator as a hosted agent with its own lifecycle (optional, after the first release) _(needs U03, H11, L01)_
-- [ ] **U04** · P28 · Implement conversational policy editing _(needs U03, A02, A05, A07, U10)_
-- [ ] **U05** · P28 · Implement chat status and blocker explanations _(needs U03, S08, H01)_
+- [ ] **U03d** · P27 · Let the owner reach the coordinator through the chat _(needs U01, U02, U03b)_
+- [ ] **U03** · P28 · Implement owner chat command interpretation _(needs U01, U02, R02, U03b, U03d)_
+- [ ] **U03c** · P29 · Run the coordinator as a hosted agent with its own lifecycle (optional, after the first release) _(needs U03, H11, L01)_
+- [ ] **U04** · P29 · Implement conversational policy editing _(needs U03, A02, A05, A07, U10)_
+- [ ] **U05** · P29 · Implement chat status and blocker explanations _(needs U03, S08, H01)_
 - [ ] **U09** · P31 · Implement read-only activity timeline and replay views _(needs C09, U05, A10, C06b)_
 - [ ] **U06** · P32 · Implement deterministic recovery chat controls _(needs U01, L02, A02)_
 - [ ] **U07** · P33 · Qualify responsive web chat over private networking _(needs U03, U06, A01, R05)_
@@ -337,10 +338,10 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 - [x] **H12h** · P29 · Route owner-mode reviews only to the owner _(needs H12, A05)_
 - [ ] **H07** · P30 · Implement idle host polling and capability placement _(needs H02, H03)_
 - [ ] **H12a** · P30 · Carry the dispatch contract to remote workers _(needs H12, H02)_
-- [ ] **H12f** · P30 · Wire context enforcement, pause observation and message boundaries into the runtime _(needs H12, C07b, L01, U12)_
 - [ ] **H12i** · P30 · Give tasks controlled network routes through the worker relay _(needs H12b, A07, T01, T03, A03b)_
 - [ ] **H12j** · P30 · Close the H12b worker-process gaps _(needs H12b)_
-- [ ] **H12k** · P31 · Compose the local worker host in the controller _(needs H12b, H12c, H12d, H12f, H12g)_
+- [ ] **H12f** · P31 · Wire context enforcement, pause observation and message boundaries into the runtime _(needs H12, C07b, L01, U12)_
+- [ ] **H12k** · P32 · Compose the local worker host in the controller _(needs H12b, H12c, H12d, H12f, H12g)_
 - [ ] **H09** · P33 · Implement reconnect reconciliation and primary epochs _(needs H08, L04, S05)_
 - [ ] **H10** · P34 · Implement distributed agent capacity and fan-in limits _(needs H07, H09, H03, R05)_
 
@@ -354,7 +355,7 @@ Durable conversations between agents, delivery classes, and the MCP conversation
 - [x] **U02** · P24 · Implement durable conversation service (threads, messages, cursors, delivery states) _(needs U01, H04)_
 - [x] **U02b** · P25 · Implement the conversation transport and remote exposure _(needs U02)_
 - [ ] **T05** · P26 · Implement MCP durable conversation adapter _(needs U02, U02b, T04)_
-- [ ] **U12** · P29 · Implement agent messages, delivery classes and interruption budget _(needs U02, S08, L05, M01)_
+- [ ] **U12** · P30 · Implement agent messages, delivery classes and interruption budget _(needs U02, S08, L05, M01)_
 
 </details>
 
@@ -375,13 +376,13 @@ Stall detection and bounded supervisor recovery.
 Scheduling, votes and decisions, stand-ups, attendance and return to work, and facilitation.
 
 - [ ] **M00** · P2 · Prototype the meeting protocol and run meeting experiments _(needs G01)_
-- [ ] **M01** · P28 · Implement durable meeting scheduling and agendas _(needs H04, U03)_
-- [ ] **M02** · P29 · Implement votes, decisions and meeting summaries _(needs M01, A02, C02, C08)_
-- [ ] **M03** · P29 · Implement stand-up preparation, briefs and agenda items _(needs M01, C02, U03)_
-- [ ] **M04** · P29 · Implement meeting attendance and return to work _(needs M01, L01, L05, H04)_
-- [ ] **M05** · P30 · Implement meeting facilitation and owner control _(needs M04, M02, U03, M00, A10, C01b)_
-- [ ] **M06** · P30 · Implement meeting procedure, roster, quorum and ballots _(needs M02, A02, C08, T06, M00)_
-- [ ] **M05b** · P31 · Prove meeting desk reads are read-only and recorded per file _(needs M05, C01b)_
+- [ ] **M01** · P29 · Implement durable meeting scheduling and agendas _(needs H04, U03)_
+- [ ] **M02** · P30 · Implement votes, decisions and meeting summaries _(needs M01, A02, C02, C08)_
+- [ ] **M03** · P30 · Implement stand-up preparation, briefs and agenda items _(needs M01, C02, U03)_
+- [ ] **M04** · P30 · Implement meeting attendance and return to work _(needs M01, L01, L05, H04)_
+- [ ] **M05** · P31 · Implement meeting facilitation and owner control _(needs M04, M02, U03, M00, A10, C01b)_
+- [ ] **M06** · P31 · Implement meeting procedure, roster, quorum and ballots _(needs M02, A02, C08, T06, M00)_
+- [ ] **M05b** · P32 · Prove meeting desk reads are read-only and recorded per file _(needs M05, C01b)_
 
 </details>
 
@@ -407,7 +408,7 @@ The immutable tool and skill catalogue, review and promotion, MCP connections, t
 
 Repository-independent projects, isolated coding workspaces, non-code and sandbox operations, ongoing responsibilities and external contribution.
 
-- [ ] **P01** · P28 · Implement repository-independent projects and responsibilities _(needs U03, S01)_
+- [ ] **P01** · P29 · Implement repository-independent projects and responsibilities _(needs U03, S01)_
 - [ ] **P04** · P33 · Implement ongoing responsibility checks, incidents and coverage _(needs P01, S08, H13, V01, L03)_
 - [ ] **P06** · P34 · Implement project and agent retirement and archival _(needs P01, H11, L03, K06)_
 - [ ] **P02** · P35 · Implement isolated coding workspaces and integration _(needs P01, A04, L04, Y02, H12)_
