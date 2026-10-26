@@ -18,7 +18,7 @@ export const ACTIONS = [
   "desk.write", "desk.read", "desk.scratch.read", "notes.chair.read",
   "history.append", "history.read",
   "review.request", "review.decide", "review.policy.write",
-  "config.read", "config.write", "routing.write", "recovery.read",
+  "config.read", "config.write", "routing.write", "recovery.read", "recovery.stall-scan",
   "conversation.start", "conversation.send", "conversation.receive", "conversation.request-action", "conversation.urgent",
   "principal.manage", "notification.emit", "catalog.register", "catalog.revoke", "catalog.read", "environment.manage", "mcp.use", "events.publish",
   "agent.manage", "agent.read",

@@ -1,5 +1,7 @@
 import type { DecisionService } from "../decisions/index.js";
+import { DomainError } from "../domain/errors.js";
 import type { EventService } from "../events/index.js";
+import type { StallService } from "../health/index.js";
 import type { AttendanceService, MeetingService } from "../meetings/index.js";
 import type { AgentMessageService } from "../messaging/index.js";
 import type { ProjectService } from "../domain/service.js";
@@ -103,6 +105,26 @@ export function meetingLoops(meetings: Pick<MeetingService, "tick" | "planned" |
         }
       },
     },
+  ];
+}
+
+/**
+ * L01b: the reconciler's pass (repairs, inbox admission with the pause lookup, effect recovery, wait deadlines) and stall detection. The scan needs the dedicated `recovery.stall-scan` right; a dispatcher
+ * without it is told once (`missing`) and the scan is skipped, so the tick does not fail every time.
+ */
+export function recoveryLoops(stall: Pick<StallService, "scan">, reconciler: { runPass(): Promise<unknown> }, missing: () => Promise<unknown>): DispatcherLoop[] {
+  let said = false;
+  return [
+    { name: "recovery.reconcile", run: async () => { await reconciler.runPass(); } },
+    { name: "recovery.stall-scan", run: async (by) => {
+      try {
+        let afterId: string | undefined;
+        for (let round = 0; round < ROUNDS; round++) { const r = await stall.scan(by, afterId === undefined ? {} : { afterId }); if (r.next === undefined) return; afterId = r.next; }
+      } catch (error) {
+        if (!(error instanceof DomainError && error.code === "forbidden")) throw error;
+        if (!said) { said = true; await missing(); }
+      }
+    } },
   ];
 }
 
