@@ -34,6 +34,8 @@ export type Intent =
   | { readonly kind: "discard_proposal"; readonly proposalId: string; readonly evidence: string; readonly basis: "owner" | "quoted" }
   /** A question about status (card U05): which view to read (`request.kind`, as `StatusService.ask` takes it). It reads records and changes nothing; the details are checked there, not trusted from the model. */
   | { readonly kind: "status"; readonly request: Readonly<Record<string, unknown>>; readonly evidence: string; readonly basis: "owner" | "quoted" }
+  /** Something said to the coordinator (card U03): a question to answer from the records, an outcome to break into tasks, open tasks to hand out, or the coordinator's own setup and lifecycle. The text fields must be the owner's own words. */
+  | { readonly kind: "coordinator"; readonly action: "answer" | "decompose" | "assign" | "configure" | "start" | "pause" | "stop"; readonly question?: string; readonly outcome?: string; readonly principalId?: string; readonly routes?: readonly string[]; readonly projectName?: string; readonly projectId?: string; readonly evidence: string; readonly basis: "owner" | "quoted" }
   | { readonly kind: "answer"; readonly turnId: string; readonly choice: string; readonly evidence: string; readonly basis: "owner" | "quoted" }
   | { readonly kind: "none"; readonly reason: string };
 
@@ -100,6 +102,27 @@ export function checkIntents(raw: unknown): Intent[] {
           if (!(typeof v === "number" || typeof v === "boolean" || (typeof v === "string" && v.length <= 200))) return invalid(`${f}.request.${k}`, "must be a number, true or false, or text of at most 200 characters");
         }
         return { kind: "status", request: entry["request"], evidence: str(entry["evidence"], `${f}.evidence`, CHAT_LIMITS.evidence), basis: basisOf(entry["basis"], `${f}.basis`) };
+      }
+      case "coordinator": {
+        known(entry, ["kind", "action", "question", "outcome", "principalId", "routes", "projectName", "projectId", "evidence", "basis"], f);
+        const action = entry["action"];
+        if (action !== "answer" && action !== "decompose" && action !== "assign" && action !== "configure" && action !== "start" && action !== "pause" && action !== "stop") return invalid(`${f}.action`, "must be answer, decompose, assign, configure, start, pause or stop");
+        if (entry["projectName"] !== undefined && entry["projectId"] !== undefined) return invalid(f, "needs at most one of projectName and projectId");
+        const routes = entry["routes"];
+        if (routes !== undefined && (!Array.isArray(routes) || routes.length > 4)) return invalid(`${f}.routes`, "must be a list of at most 4 routes");
+        const want: readonly string[] = { answer: ["question"], decompose: ["outcome"], assign: [], configure: ["principalId", "routes"], start: [], pause: [], stop: [] }[action];
+        for (const key of ["question", "outcome", "principalId", "routes"]) if (entry[key] !== undefined && !want.includes(key)) return invalid(`${f}.${key}`, `is not used by ${action}`);
+        for (const key of want) if (entry[key] === undefined) return invalid(`${f}.${key}`, `is needed by ${action}`);
+        return {
+          kind: "coordinator", action,
+          ...(entry["question"] === undefined ? {} : { question: str(entry["question"], `${f}.question`, CHAT_LIMITS.question) }),
+          ...(entry["outcome"] === undefined ? {} : { outcome: str(entry["outcome"], `${f}.outcome`, CHAT_LIMITS.text) }),
+          ...(entry["principalId"] === undefined ? {} : { principalId: str(entry["principalId"], `${f}.principalId`, 80) }),
+          ...(routes === undefined ? {} : { routes: (routes as unknown[]).map((r, j) => str(r, `${f}.routes[${j}]`, 200)) }),
+          ...(entry["projectName"] === undefined ? {} : { projectName: str(entry["projectName"], `${f}.projectName`, 200) }),
+          ...(entry["projectId"] === undefined ? {} : { projectId: str(entry["projectId"], `${f}.projectId`, 60) }),
+          evidence: str(entry["evidence"], `${f}.evidence`, CHAT_LIMITS.evidence), basis: basisOf(entry["basis"], `${f}.basis`),
+        };
       }
       case "none": {
         known(entry, ["kind", "reason"], f);

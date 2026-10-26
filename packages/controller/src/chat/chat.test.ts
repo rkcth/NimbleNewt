@@ -606,6 +606,12 @@ for (const backend of backends) {
     await assert.rejects(say(w, chat, "x".repeat(4001)), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
     await assert.rejects(say(w, chat, "x", "bad id!"), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
     await assert.rejects(say(w, chat, "x", cid("m"), Array.from({ length: 11 }, () => "q")), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
+    // Intents for the coordinator (card U03): the action and the fields it needs are checked.
+    const co = (extra: Record<string, unknown>) => [{ kind: "coordinator", evidence: "e", basis: "owner", ...extra }];
+    assert.equal(checkIntents(co({ action: "answer", question: "why?" }))[0]!.kind, "coordinator");
+    for (const bad of [{ action: "dance" }, { action: "answer" }, { action: "answer", question: "q", outcome: "o" }, { action: "start", question: "q" }, { action: "configure", principalId: "agent:c" }, { action: "configure", principalId: "agent:c", routes: ["a", "b", "c", "d", "e"] }, { action: "assign", projectName: "A", projectId: "proj-aaaaaaaaaaaaaaaaaaaa" }]) {
+      assert.throws(() => checkIntents(co(bad)), DomainError, JSON.stringify(bad));
+    }
     assert.throws(() => checkIntents(Array.from({ length: 9 }, () => ({ kind: "none", reason: "r" }))), DomainError);
     await assert.rejects(chat.submit(w.ownerToken, { messageId: "m", text: "x", extra: 1 } as never), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
   });
