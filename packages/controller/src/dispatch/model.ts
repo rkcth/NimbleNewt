@@ -67,6 +67,9 @@ export interface DispatchBody {
   /** Operations a resume has been made for (bounded): a decision resumes the attempt once. */
   readonly resumedFor?: readonly string[];
   /** Calls started and not yet settled (at most `DISPATCH_LIMITS.inFlight`), and calls waiting for an approval (at most `DISPATCH_LIMITS.parked`). */
+  /** The budget reservation held for the attempt (card R05b), and what it has used so far; settled to the use when the attempt ends, held as uncertain when the worker was lost. */
+  readonly reservationId?: string;
+  readonly used?: { readonly costMicros: number; readonly computeMs: number };
   readonly inFlight: readonly string[];
   readonly parked: readonly string[];
   /** Calls recorded for the attempt, all states. */

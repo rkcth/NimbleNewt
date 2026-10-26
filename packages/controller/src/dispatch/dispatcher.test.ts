@@ -1298,4 +1298,60 @@ for (const backend of backends) {
     hold.resolve();
     await d.idle();
   });
+  suite("the attempt's allowance is held before it starts, settled to what it used when it ends, and the report shows it in between (card R05b)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const { taskId, attemptId } = await c.task("t", ann);
+    await c.budgets.open(c.owner, { commandId: "bo", taskId, currency: "USD", costMicros: 10_000, computeMs: 3_600_000 });
+    let during: Awaited<ReturnType<Ctx["budgets"]["report"]>>;
+    c.worker.script = async ({ gateway }) => {
+      during = await c.budgets.report(c.owner, taskId);
+      await gateway.usage({ turnSeq: 1, costMicros: 7, computeMs: 40 });
+      await gateway.usage({ turnSeq: 2, costMicros: 5, computeMs: 10 });
+      return { status: "completed", text: "x" };
+    };
+    c.dispatcher = c.restart({}, { reserveCostMicros: 1000 });
+    await c.run();
+    assert.deepEqual([during!.reservedInFlight.costMicros, during!.reservedInFlight.computeMs, during!.spent.costMicros], [1000, 3_600_000, 0], "held before the first call, nothing spent yet");
+    const after = (await c.budgets.report(c.owner, taskId))!;
+    assert.deepEqual([after.reservedInFlight, after.uncertain, after.spent], [{ costMicros: 0, computeMs: 0 }, { costMicros: 0, computeMs: 0 }, { costMicros: 12, computeMs: 50 }], "settled to the use, once");
+    assert.equal((await c.dispatcher.get(c.owner, attemptId!))!.state, "finished");
+    assert.equal((await c.budgets.usage(c.owner, { taskId })).totals.costMicros, 12);
+  });
+
+  suite("an attempt whose task has none of its allowance free is not started, and starts once the allowance is there", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const { taskId } = await c.task("t", ann);
+    await c.budgets.open(c.owner, { commandId: "bo", taskId, currency: "USD", costMicros: 1000 });
+    const other = await c.budgets.reserve(c.dispatcherPrincipal, { commandId: "other-hold", taskId, costMicros: 1000, purpose: "another attempt of the same allowance" });
+    c.worker.script = async () => ({ status: "completed", text: "x" });
+    c.dispatcher = c.restart({}, { reserveCostMicros: 1000 });
+    const first = await c.run();
+    assert.equal(c.worker.starts.length, 0, "nothing was started");
+    assert.deepEqual(first.started, []);
+    await c.budgets.release(c.dispatcherPrincipal, { commandId: "other-rel", reservationId: other.id });
+    const second = await c.run();
+    assert.equal(second.started.length, 1);
+    assert.equal((await c.budgets.report(c.owner, taskId))!.reservedInFlight.costMicros, 0);
+  });
+
+  suite("a lost worker leaves its hold as uncertain, shown in full, and a later settle reconciles it", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const { taskId, attemptId } = await c.task("t", ann);
+    await c.budgets.open(c.owner, { commandId: "bo", taskId, currency: "USD", costMicros: 10_000 });
+    const never = new Promise<never>(() => undefined);
+    c.worker.script = async ({ gateway }) => { await gateway.usage({ turnSeq: 1, costMicros: 3 }); await never; return { status: "completed", text: "x" }; };
+    c.dispatcher = c.restart({}, { reserveCostMicros: 1000 });
+    await c.dispatcher.tick();
+    c.clock.advance(6 * 60_000);
+    const second = c.restart({}, { reserveCostMicros: 1000 });
+    const report = await second.tick();
+    assert.deepEqual(report.lost, [attemptId]);
+    const r = (await c.budgets.report(c.owner, taskId))!;
+    assert.deepEqual([r.reservedInFlight.costMicros, r.uncertain.costMicros], [0, 1000], "held in full as uncertain");
+    assert.equal(r.reservations[0]!.state, "uncertain");
+    await c.budgets.settle(c.dispatcherPrincipal, { commandId: "reconcile", reservationId: r.reservations[0]!.id, costMicros: 9 });
+    const done = (await c.budgets.report(c.owner, taskId))!;
+    assert.deepEqual([done.uncertain.costMicros, done.spent.costMicros], [0, 9]);
+  });
+
 }
