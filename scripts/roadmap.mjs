@@ -23,32 +23,86 @@ export function phases(tasks) {
   return level;
 }
 
+/** The major parts of NimbleNewt: each workstream parent of the plan, in the order a reader meets them, with what the part is. */
+export const PARTS = [
+  ["N01", "Scope and early proofs", "The accepted scope and the experiments that proved the foundations (durable engine, remote stop and failover)."],
+  ["N02", "Foundation: storage, configuration and builds", "The controller's transactional storage (SQLite and PostgreSQL), versioned configuration, package boundaries, portable CI and the platform checks."],
+  ["N03", "Pi runtime and inference caching", "The pinned Pi adapter, how it is upgraded, and the per-backend cache tuning that makes switching context cheap."],
+  ["N04", "Projects, tasks and reliable work", "Project and task records, assignments, durable delivery, the effect ledger and artifacts: work that survives crashes without repeating itself."],
+  ["N05", "Pause, suspend and resume", "Pause, suspend, stop, release and checked resume, interrupting a model mid-generation, the remote watchdog, and shutdown and reboot handling."],
+  ["N06", "Security: identity, approvals and sandboxing", "Authenticated principals, revisioned grants, the sandbox launchers, the protected filesystem and Git bridge, approval policy and resource limits."],
+  ["N07", "Context and memory", "Separated task, chat and meeting context, working notes, source-backed retrieval, safe-boundary continuation, retained branches, context budgets, owner decisions and the activity record."],
+  ["N07a", "State API and MCP state", "The versioned state API that every client uses, and the controller-backed MCP state."],
+  ["N08", "Model routing, fallback and cost", "Routes and capability policy, provider failure fallback, difficulty profiles, drain and cutover, and cost attribution."],
+  ["N09", "Owner chat and web UI", "Talking to your agents: the chat interpreter, policy editing, status and blocker explanations, recovery chat, notifications and the responsive web interface."],
+  ["N10", "Workers, dispatch and teams", "Enrolled hosts, remote workers, priority admission, the local worker runtime and dispatcher, agents, teams and roles, reviews and wait-cycle handling."],
+  ["N10a", "Agent messaging", "Durable conversations between agents, delivery classes, and the MCP conversation adapter."],
+  ["N11", "Health and recovery", "Stall detection and bounded supervisor recovery."],
+  ["N12", "Meetings", "Scheduling, votes and decisions, stand-ups, attendance and return to work, and facilitation."],
+  ["N13", "Tools and skills", "The immutable tool and skill catalogue, review and promotion, MCP connections, the protected agent tool bridge and background jobs."],
+  ["N14", "Projects, repositories and workspaces", "Repository-independent projects, isolated coding workspaces, non-code and sandbox operations, ongoing responsibilities and external contribution."],
+  ["N15", "Quality: deliverables, QA and defects", "Deliverable submission and acceptance, independent QA, documentation impact and defect tracking."],
+  ["N16", "Balancing delivery and improvement", "How capacity is split between production work and work that improves NimbleNewt."],
+  ["N16a", "Learning and improvement", "Observations, versioned lessons, bounded experiments, scoped adoption and optional agent work on NimbleNewt itself."],
+  ["N17", "Backup, updates and operations", "Backup and restore, release staging, migration recovery, maintenance windows and update orchestration."],
+  ["N18", "Test campaigns and platforms", "Crash, policy, isolation and partition campaigns, QA checkpoints, Windows and macOS qualification, and the typical and exhaustive test tiers."],
+  ["N19", "Release", "Installation, documentation, QA on real machines, the release decision and closing the plan."],
+];
+
+const BAR_CELLS = 12;
+/** A text progress bar that reads the same in any renderer: filled cells for implemented cards, half cells for those awaiting sign-off. */
+export function bar(done, review, total) {
+  if (total === 0) return "░".repeat(BAR_CELLS);
+  // At least one filled cell once anything is done, so progress is never drawn as empty.
+  const full = done === 0 ? 0 : Math.max(1, Math.floor((done / total) * BAR_CELLS));
+  // Half cells only when something is awaiting sign-off, and at least one then, so a single such card is never invisible.
+  const half = review === 0 ? 0 : Math.min(BAR_CELLS - full, Math.max(1, Math.floor(((done + review) / total) * BAR_CELLS) - full));
+  return "▓".repeat(full) + "▒".repeat(half) + "░".repeat(BAR_CELLS - full - half);
+}
+const percent = (n, total) => (total === 0 ? 0 : Math.floor((n / total) * 100));
+
 export function renderRoadmap(plan) {
   const tasks = plan.tasks.filter((t) => t.id !== "N00");
   const level = phases(tasks);
   const done = tasks.filter((t) => t.status === "implemented").length;
   const review = tasks.filter((t) => t.status === "implemented-awaiting-signoff").length;
+  const known = new Set(PARTS.map(([id]) => id));
+  const stray = tasks.filter((t) => !known.has(t.parent));
+  if (stray.length > 0) throw new Error(`cards under a workstream with no name in PARTS: ${[...new Set(stray.map((t) => t.parent))].join(", ")}`);
   const out = [
     "## Roadmap",
     "",
-    `Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **${done} of ${tasks.length} tasks implemented**${review > 0 ? `, ${review} awaiting sign-off` : ""}.`,
+    `NimbleNewt is built in ${PARTS.filter(([id]) => tasks.some((t) => t.parent === id)).length} major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **${done} of ${tasks.length} tasks implemented**${review > 0 ? `, ${review} awaiting sign-off` : ""}.`,
     "",
     `> ${plan.execution_note ?? ""}`.trimEnd(),
     "",
     "This section is generated from `task-plan.json`: edit the PROGRESS table in `scripts/generate_task_plan.py`, run it, then run `npm run roadmap:write`; `npm test` fails if it is stale.",
     "",
-    "Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a human review) · `[~]` implemented, awaiting sign-off the implementer cannot give · `[ ]` not started. Task prefixes: G gates, F foundations, S durable state, A authorization, C context, L lifecycle, H workers, R routing, U user interface, V supervision, M meetings, T tools, P projects, Q quality, B improvement, K backup/recovery, X release qualification, D documentation.",
+    "Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a human review) · `[~]` implemented, awaiting sign-off the implementer cannot give · `[ ]` not started. Bars: ▓ implemented, ▒ awaiting sign-off, ░ not yet. Task prefixes: G gates and experiments, F foundation, S state, L lifecycle, C context, A security, R routing, U interface, H workers, M meetings, T tools, P projects, Q quality, B budgets and learning, K operations, V supervision, X test campaigns, Y QA checkpoints, D release.",
+    "",
+    "### Progress by part",
+    "",
+    "| Part | Progress | Done |",
+    "| --- | --- | --- |",
   ];
-  const last = Math.max(...level.values());
-  for (let phase = 1; phase <= last; phase++) {
-    const members = tasks.filter((t) => level.get(t.id) === phase).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-    if (members.length === 0) continue;
-    out.push("", `### Phase ${phase}`, "");
-    for (const t of members) {
+  const parts = PARTS.map(([id, name, about]) => ({ id, name, about, cards: tasks.filter((t) => t.parent === id) })).filter((p) => p.cards.length > 0);
+  for (const p of parts) {
+    const d = p.cards.filter((t) => t.status === "implemented").length;
+    const r = p.cards.filter((t) => t.status === "implemented-awaiting-signoff").length;
+    out.push(`| ${p.name} | \`${bar(d, r, p.cards.length)}\` ${percent(d, p.cards.length)}% | ${d} of ${p.cards.length} |`);
+  }
+  out.push("", "### The parts in detail", "");
+  for (const p of parts) {
+    const d = p.cards.filter((t) => t.status === "implemented").length;
+    const r = p.cards.filter((t) => t.status === "implemented-awaiting-signoff").length;
+    out.push(`<details>`, `<summary><strong>${p.name}</strong> — ${bar(d, r, p.cards.length)} ${d} of ${p.cards.length}</summary>`, "", p.about, "");
+    const ordered = [...p.cards].sort((a, b) => level.get(a.id) - level.get(b.id) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    for (const t of ordered) {
       const needs = t.depends_on.length > 0 ? ` _(needs ${t.depends_on.join(", ")})_` : "";
       const note = t.progress?.roadmap_note ? ` — ${t.progress.roadmap_note}` : "";
-      out.push(`- [${MARK[t.status] ?? " "}] **${t.id}** ${t.title}${needs}${note}`);
+      out.push(`- [${MARK[t.status] ?? " "}] **${t.id}** · P${level.get(t.id)} · ${t.title}${needs}${note}`);
     }
+    out.push("", "</details>", "");
   }
   const open = tasks.filter((t) => ["G01", "G07"].includes(t.id) && t.status !== "implemented").map((t) => t.id);
   if (open.length > 0) out.push(`_Note: F01 started before its prerequisite planning records G01 and G07 were formally closed; ${open.join(" and ")} ${open.length === 1 ? "is" : "are"} still not fully closed._`);
