@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **75 of 196 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **75 of 201 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -106,16 +106,16 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Part | Progress | Done |
 | --- | --- | --- |
 | Scope and early proofs | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
-| Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓░░░` 80% | 12 of 15 |
+| Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓░░░` 75% | 12 of 16 |
 | Pi runtime and inference caching | `▓▓▓▓▓▓▓▓░░░░` 72% | 8 of 11 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
 | Pause, suspend and resume | `▓▓░░░░░░░░░░` 22% | 2 of 9 |
 | Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓░░░░` 72% | 13 of 18 |
 | Context and memory | `▓▓▓▓▓▓▓░░░░░` 60% | 6 of 10 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
-| Model routing, fallback and cost | `▓▓▓▓░░░░░░░░` 40% | 2 of 5 |
+| Model routing, fallback and cost | `▓▓▓░░░░░░░░░` 25% | 2 of 8 |
 | Owner chat and web UI | `▓▓░░░░░░░░░░` 16% | 2 of 12 |
-| Workers, dispatch and teams | `▓▓▓▓░░░░░░░░` 36% | 9 of 25 |
+| Workers, dispatch and teams | `▓▓▓▓░░░░░░░░` 34% | 9 of 26 |
 | Agent messaging | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
 | Health and recovery | `░░░░░░░░░░░░` 0% | 0 of 3 |
 | Meetings | `░░░░░░░░░░░░` 0% | 0 of 8 |
@@ -143,7 +143,7 @@ The accepted scope and the experiments that proved the foundations (durable engi
 </details>
 
 <details>
-<summary><strong>Foundation: storage, configuration and builds</strong> — ▓▓▓▓▓▓▓▓▓░░░ 12 of 15</summary>
+<summary><strong>Foundation: storage, configuration and builds</strong> — ▓▓▓▓▓▓▓▓▓░░░ 12 of 16</summary>
 
 The controller's transactional storage (SQLite and PostgreSQL), versioned configuration, package boundaries, portable CI and the platform checks.
 
@@ -161,6 +161,7 @@ The controller's transactional storage (SQLite and PostgreSQL), versioned config
 - [ ] **F04i** · P14 · Refuse unsupported filesystems unless explicitly overridden _(needs F04h)_
 - [x] **F09** · P21 · Implement per-OS secret store backends _(needs F02, A01)_
 - [ ] **F04j** · P22 · Check required tools and libraries instead of distribution names _(needs F04i, A03)_
+- [ ] **F04k** · P24 · Pass workspace roots to the startup filesystem check _(needs F04i, U01)_
 - [ ] **F04e** · P33 · Implement chat-controlled controller database transfer _(needs F04, K01, F06)_
 
 </details>
@@ -276,7 +277,7 @@ The versioned state API that every client uses, and the controller-backed MCP st
 </details>
 
 <details>
-<summary><strong>Model routing, fallback and cost</strong> — ▓▓▓▓░░░░░░░░ 2 of 5</summary>
+<summary><strong>Model routing, fallback and cost</strong> — ▓▓▓░░░░░░░░░ 2 of 8</summary>
 
 Routes and capability policy, provider failure fallback, difficulty profiles, drain and cutover, and cost attribution.
 
@@ -285,6 +286,9 @@ Routes and capability policy, provider failure fallback, difficulty profiles, dr
 - [ ] **R03** · P26 · Implement difficulty profiles and escalation _(needs R02, S10, H11)_
 - [ ] **R05** · P26 · Implement cost and resource attribution and delegated budgets _(needs R02, H03, S10)_
 - [ ] **R04** · P27 · Implement provider drain, cutover and failback policy _(needs R02, L05)_
+- [ ] **R05c** · P27 · Budget requests reach their addressee and budgets are exposed in the API _(needs R05, U11)_
+- [ ] **R05d** · P28 · Charge meetings, supervision and background jobs to their work or a shared category _(needs R05, M01)_
+- [ ] **R05b** · P29 · Reserve before dispatch and settle after in the dispatcher _(needs R05, H12)_
 
 </details>
 
@@ -309,7 +313,7 @@ Talking to your agents: the chat interpreter, policy editing, status and blocker
 </details>
 
 <details>
-<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓░░░░░░░░ 9 of 25</summary>
+<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓░░░░░░░░ 9 of 26</summary>
 
 Enrolled hosts, remote workers, priority admission, the local worker runtime and dispatcher, agents, teams and roles, reviews and wait-cycle handling.
 
@@ -321,6 +325,7 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 - [x] **H11** · P24 · Implement agent, team and role records _(needs A02, C01, R01, U01)_
 - [ ] **H06b** · P25 · Expire idle event subscriptions _(needs H06)_
 - [ ] **H13** · P26 · Implement event source adapters and watchers _(needs H06, H01, R02)_
+- [ ] **H06c** · P27 · Deliver idle-expiry notices in the running controller _(needs H06b, U11)_
 - [ ] **H05b** · P28 · Implement reviewer pause and hold behaviour _(needs H05, L01)_
 - [x] **H12** · P28 · Implement the local worker runtime and attempt dispatcher _(needs A03, A05, R01, C07b, C06b, S05, C04, F08, H03)_
 - [ ] **H02** · P29 · Implement subordinate remote work/artifact transport _(needs H01, S06, A03, H12)_
@@ -495,7 +500,7 @@ Installation, documentation, QA on real machines, the release decision and closi
 
 - [ ] **D02** · P36 · Finish developer/API/security and license guidance _(needs T05, K03, F03)_
 - [ ] **D01** · P45 · Finish installation and chat-first user guidance _(needs X03, Q03, U11b)_
-- [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, C07d, L01b, V01b, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11)_
+- [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, C07d, L01b, V01b, F04k, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11)_
 - [ ] **D04** · P50 · Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
 - [ ] **D04b** · P51 · Measure code-navigation aids on real coding tasks (optional, after the first release) _(needs D04)_
 - [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, U03c, K06b, K01d, P02b, A08c)_

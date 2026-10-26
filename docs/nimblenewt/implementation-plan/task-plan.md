@@ -29,15 +29,15 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | --- | --- |
 | N00 / AII-250 | Owner-controlled implementation activation gate |
 | N01 / AII-251 | G01, G04, G07, G08 |
-| N02 / AII-252 | F01, F02, F03, F04a, F04b, F04c, F04d, F04, F04f, F04g, F04h, F04i, F04j, F04e, F09 |
+| N02 / AII-252 | F01, F02, F03, F04a, F04b, F04c, F04d, F04, F04f, F04g, F04h, F04i, F04j, F04k, F04e, F09 |
 | N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06, C06b |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
 | N05 / AII-255 | L05, L05b, L01, L01b, L02, L03, L04, L06, H08 |
 | N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A08, A08b, A08c, A09, A10, A10b |
 | N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C08, C09 |
-| N08 / AII-258 | R01, R02, R03, R04, R05 |
+| N08 / AII-258 | R01, R02, R03, R04, R05, R05b, R05c, R05d |
 | N09 / AII-259 | U03, U04, U05, U06, U03b, U03c, U07, U09, U08, U10, U11, U11b |
-| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H07, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13 |
+| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13 |
 | N11 / AII-261 | V01, V01b, V02 |
 | N12 / AII-262 | M00, M01, M02, M03, M04, M05, M05b, M06 |
 | N13 / AII-263 | T01, T02, T03, T06, T06b, T07, T08, T09 |
@@ -273,6 +273,14 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Blockers:** F04i, A03.
 - **Deliverable:** Startup check of what the controller and sandbox actually need rather than which Linux distribution runs them (owner decision 2026-10-22: there are too many distributions to list): the Node version, git, the sandbox launcher's required tools and kernel features, a systemd user session where resource limits need one, and the database client libraries, each found by probing, never by the distribution's name; the distribution is only recorded in the audit log and the startup output.
 - **Acceptance and verification:** A missing or too-old prerequisite makes the controller refuse to start (or the named feature refuse to run, where only one feature needs it) with a message that says what was found, what is required, how to install it and the exact switch that overrides it (owner decision 2026-10-22: the message always tells the owner how to override that specific error); a missing hard prerequisite (git, the sandbox tools) cannot be overridden because the feature cannot run without it, and only a too-old version can be; the Node version is checked from F04h's single list and not a second one; no behaviour depends on a distribution name or version string; tested with prerequisites present, missing, too old and overridden, on every supported operating system; the list of required prerequisites lives in one place.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### F04k — Pass workspace roots to the startup filesystem check
+
+- **Parent:** N02 / AII-252.
+- **Blockers:** F04i, U01.
+- **Deliverable:** Split from F04i (audit 2026-10-26): the check of workspace file systems exists and is tested, but the controller checks workspaces only when StartOptions.workspaceRoots is passed and no production start passes it, so an unsupported workspace file system does not stop start-up today.
+- **Acceptance and verification:** A real start with a workspace on tmpfs, exFAT or a network file system is refused with the F04h message and its override switch; the override starts the controller and is audited; the workspace roots come from the registered projects' checkouts, not from a hand-built option.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### F04e — Implement chat-controlled controller database transfer
@@ -858,6 +866,14 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** A host that crashes while subscribed no longer holds producers back beyond the idle time; the expiry time is a setting with a default and the owner can still cancel a subscription at any time; an expired subscription resumes from its cursor without losing or repeating events, or, if its cursor has passed retention, reconciles as H06 does; every expiry is recorded and appears in the activity record and, if work was affected, as a Notice (U11b); a live but slow subscriber is not expired while it acknowledges within the time; tested with a crashed host, a slow host and a restart.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
+### H06c — Deliver idle-expiry notices in the running controller
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H06b, U11.
+- **Deliverable:** Split from H06b (audit 2026-10-26): expiry is built and recorded in the audit trail, but the composed controller passes no notifier to the event service, so no notice is sent in production; and subscriptions created before H06b were never given an idle time.
+- **Acceptance and verification:** Expiring an idle subscription that had events waiting produces exactly one owner notice in a dispatch-compose test; the expiry appears in the activity record (U09) and as a U11b notice when those exist; subscriptions that predate idle expiry are given the default idle time at start, once.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
 ### H07 — Implement idle host polling and capability placement
 
 - **Parent:** N10 / AII-260.
@@ -1060,6 +1076,30 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Blockers:** R02, H03, S10.
 - **Deliverable:** Usage ledger attributing provider spend (currency) and local compute (occupied worker-slot time) to task, agent and project, atomic budget reservation across the task tree, delegated sub-budgets and a request-more-budget flow (README 604, 638; pitfalls-and-safeguards 101; production-and-capacity 19-21).
 - **Acceptance and verification:** Spend is reserved before dispatch and reconciled to actual usage; concurrent children cannot spend the same allocation; uncertain in-flight and outstanding charges are shown; currency and compute are tracked separately; background jobs, meetings and supervision are attributed to their work or an explicit shared-overhead category; a request for more budget goes to the owner or delegated authority; provider ceiling enforceability is stated honestly.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### R05b — Reserve before dispatch and settle after in the dispatcher
+
+- **Parent:** N08 / AII-258.
+- **Blockers:** R05, H12.
+- **Deliverable:** Split from R05 (audit 2026-10-26): the budget service reserves and reconciles, but the dispatcher only checks accounting before a call and charges after it, so spend is not reserved before dispatch.
+- **Acceptance and verification:** A dispatch test shows a reservation before the attempt starts, settlement to actual use when it ends, an uncertain mark when the call is lost, and the three ceilings (the task contract's maximum cost, R02's cumulative budget and R05's reservation) agreeing; two attempts of sibling tasks cannot reserve the same allocation.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### R05c — Budget requests reach their addressee and budgets are exposed in the API
+
+- **Parent:** N08 / AII-258.
+- **Blockers:** R05, U11.
+- **Deliverable:** Split from R05 (audit 2026-10-26): request-more-budget is routed and stored, but nothing tells the owner or the delegated holder and no operation lets anyone see budgets or decide a request.
+- **Acceptance and verification:** A request for more budget produces a notice for the owner or the delegated holder; budget report, usage, request, decide and pending requests are API operations with rights and tests; outstanding and uncertain charges are visible through them.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### R05d — Charge meetings, supervision and background jobs to their work or a shared category
+
+- **Parent:** N08 / AII-258.
+- **Blockers:** R05, M01.
+- **Deliverable:** Split from R05 (audit 2026-10-26): the ledger takes any charge, but the only production caller charges model calls.
+- **Acceptance and verification:** Meeting turns, supervisor activity and background jobs are charged to the task they serve or to a named shared-overhead category by their own services, tested end to end; nothing is charged twice; the measurement basis for local compute is stated.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### U01 — Implement versioned state query/write API
@@ -1715,7 +1755,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D03 — Approve release readiness and publication decision
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** X08, D01, D02, F04h, T06b, U03b, C07d, L01b, V01b, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11.
+- **Blockers:** X08, D01, D02, F04h, T06b, U03b, C07d, L01b, V01b, F04k, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11.
 - **Deliverable:** Exact release manifest, known limitations and owner signoff.
 - **Acceptance and verification:** All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

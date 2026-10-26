@@ -592,6 +592,24 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "F04k",
+      "parent": "N02",
+      "existing_issue": "AII-252",
+      "title": "Pass workspace roots to the startup filesystem check",
+      "depends_on": [
+        "F04i",
+        "U01"
+      ],
+      "deliverable": "Split from F04i (audit 2026-10-26): the check of workspace file systems exists and is tested, but the controller checks workspaces only when StartOptions.workspaceRoots is passed and no production start passes it, so an unsupported workspace file system does not stop start-up today",
+      "acceptance_and_verification": "A real start with a workspace on tmpfs, exFAT or a network file system is refused with the F04h message and its override switch; the override starts the controller and is audited; the workspace roots come from the registered projects' checkouts, not from a hand-built option",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "F04e",
       "parent": "N02",
       "existing_issue": "AII-252",
@@ -2256,6 +2274,24 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "H06c",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Deliver idle-expiry notices in the running controller",
+      "depends_on": [
+        "H06b",
+        "U11"
+      ],
+      "deliverable": "Split from H06b (audit 2026-10-26): expiry is built and recorded in the audit trail, but the composed controller passes no notifier to the event service, so no notice is sent in production; and subscriptions created before H06b were never given an idle time",
+      "acceptance_and_verification": "Expiring an idle subscription that had events waiting produces exactly one owner notice in a dispatch-compose test; the expiry appears in the activity record (U09) and as a U11b notice when those exist; subscriptions that predate idle expiry are given the default idle time at start, once",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "H07",
       "parent": "N10",
       "existing_issue": "AII-260",
@@ -2771,6 +2807,60 @@
       ],
       "deliverable": "Usage ledger attributing provider spend (currency) and local compute (occupied worker-slot time) to task, agent and project, atomic budget reservation across the task tree, delegated sub-budgets and a request-more-budget flow (README 604, 638; pitfalls-and-safeguards 101; production-and-capacity 19-21)",
       "acceptance_and_verification": "Spend is reserved before dispatch and reconciled to actual usage; concurrent children cannot spend the same allocation; uncertain in-flight and outstanding charges are shown; currency and compute are tracked separately; background jobs, meetings and supervision are attributed to their work or an explicit shared-overhead category; a request for more budget goes to the owner or delegated authority; provider ceiling enforceability is stated honestly",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "R05b",
+      "parent": "N08",
+      "existing_issue": "AII-258",
+      "title": "Reserve before dispatch and settle after in the dispatcher",
+      "depends_on": [
+        "R05",
+        "H12"
+      ],
+      "deliverable": "Split from R05 (audit 2026-10-26): the budget service reserves and reconciles, but the dispatcher only checks accounting before a call and charges after it, so spend is not reserved before dispatch",
+      "acceptance_and_verification": "A dispatch test shows a reservation before the attempt starts, settlement to actual use when it ends, an uncertain mark when the call is lost, and the three ceilings (the task contract's maximum cost, R02's cumulative budget and R05's reservation) agreeing; two attempts of sibling tasks cannot reserve the same allocation",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "R05c",
+      "parent": "N08",
+      "existing_issue": "AII-258",
+      "title": "Budget requests reach their addressee and budgets are exposed in the API",
+      "depends_on": [
+        "R05",
+        "U11"
+      ],
+      "deliverable": "Split from R05 (audit 2026-10-26): request-more-budget is routed and stored, but nothing tells the owner or the delegated holder and no operation lets anyone see budgets or decide a request",
+      "acceptance_and_verification": "A request for more budget produces a notice for the owner or the delegated holder; budget report, usage, request, decide and pending requests are API operations with rights and tests; outstanding and uncertain charges are visible through them",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "R05d",
+      "parent": "N08",
+      "existing_issue": "AII-258",
+      "title": "Charge meetings, supervision and background jobs to their work or a shared category",
+      "depends_on": [
+        "R05",
+        "M01"
+      ],
+      "deliverable": "Split from R05 (audit 2026-10-26): the ledger takes any charge, but the only production caller charges model calls",
+      "acceptance_and_verification": "Meeting turns, supervisor activity and background jobs are charged to the task they serve or to a named shared-overhead category by their own services, tested end to end; nothing is charged twice; the measurement basis for local compute is stated",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -4490,6 +4580,11 @@
         "C07d",
         "L01b",
         "V01b",
+        "F04k",
+        "H06c",
+        "R05b",
+        "R05c",
+        "R05d",
         "H12a",
         "H12b",
         "H12c",
