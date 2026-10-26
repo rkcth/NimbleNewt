@@ -62,11 +62,14 @@ export interface JobBody {
   readonly artifacts: readonly string[];
   /** Child processes the stop could not end, reported by the host. */
   readonly orphans: readonly string[];
-  readonly cancel?: { readonly operation: CancelOperation; readonly requestedBy: string; readonly requestedAt: string; readonly reason: string; readonly uncooperative?: boolean };
+  /** `force` is a Force Stop: an explicit, recorded escalation of a stop that was not obeyed (or asked for as such at once). */
+  readonly cancel?: { readonly operation: CancelOperation; readonly requestedBy: string; readonly requestedAt: string; readonly reason: string; readonly force?: boolean; readonly uncooperative?: boolean };
   readonly unknown?: { readonly reason: string; readonly since: string };
   /** A live job kept under an explicit owner after a restart, instead of being completed, cancelled or restarted. */
   readonly exception?: { readonly tracker: string; readonly reason: string; readonly at: string };
   readonly restarts: number;
+  /** The IDs of the reconciliation records that settled it (outcome-unknown). */
+  readonly reconciliations: readonly string[];
   readonly history: readonly JobHistoryEntry[];
   readonly admittedBy: string;
   readonly admittedAt: string;
@@ -76,6 +79,7 @@ export interface JobBody {
 export interface ReconciliationBody { readonly jobId: string; readonly from: JobState; readonly to: JobState; readonly evidence: string; readonly by: string; readonly at: string }
 
 export const JOB_LIMITS = { label: 200, operationId: 120, tail: 8 * 1024, chunk: 64 * 1024, refs: 20, artifacts: 50, orphans: 20, orphan: 200, reason: 500, evidence: 1000, checkpoint: 200, host: 120, history: 32, page: 100, scan: 1000 } as const;
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
 const ARTIFACT_ID = /^art-[a-z2-7]{20}$/;
 const SERVER_ID = /^mcs-[a-z2-7]{20}$/;
 const JOB_ID = /^job-[a-z2-7]{20}$/;
@@ -127,7 +131,12 @@ export interface FinishJob extends NoActor {
   readonly artifacts?: readonly string[];
   readonly orphans?: readonly string[];
 }
-export interface CancelJob extends NoActor { readonly jobId: string; readonly reason: string }
+export interface CancelJob extends NoActor {
+  readonly jobId: string;
+  readonly reason: string;
+  /** Force Stop: asked for at once, or as the escalation of a stop already requested. It is a separate, recorded step. */
+  readonly force?: boolean;
+}
 export interface ConfirmCancel extends NoActor { readonly jobId: string; readonly result: "stopped" | "uncooperative"; readonly orphans?: readonly string[] }
 export interface UnknownJob extends NoActor { readonly jobId: string; readonly reason: string }
 export interface ReconcileJob extends NoActor { readonly jobId: string; readonly to: "completed" | "failed" | "cancelled"; readonly evidence: string; readonly exit?: ExitStatus }
@@ -191,28 +200,29 @@ export class JobService {
     const host = command.host === undefined ? undefined : plain(command.host, "host", JOB_LIMITS.host);
     if (kind === "mcp") { if (typeof command.serverId !== "string" || !SERVER_ID.test(command.serverId)) invalid("serverId", "an MCP operation names its server (mcs-...)"); } else if (command.serverId !== undefined) invalid("serverId", "only an MCP operation has a server");
     const serverId = command.serverId;
-    const task = await this.#task(taskId);
-    this.#requireWrite(principal, task, taskId);
-    if (task.state === "done" || task.state === "cancelled") invalid("taskId", `task ${taskId} is ${task.state}; it takes no new job`);
-    if (this.#pauses !== undefined) {
-      const guard = await this.#pauses.guard(taskId);
-      if (guard.blockedBy.length > 0) {
-        if (!background) throw new DomainError("invalid_command", `task ${taskId} is paused; only a permitted background job is admitted`, { field: "pause" });
-        if (await this.#pauses.backgroundDenied(taskId)) throw new DomainError("invalid_command", `task ${taskId} is paused with background work denied`, { field: "pause" });
-      }
-    }
-    if (kind === "mcp") {
-      if (this.#connections === undefined) invalid("serverId", "cannot be checked: this service has no MCP connection check");
-      if (!(await this.#connections!.usable(serverId as string))) throw new DomainError("forbidden", "that MCP server is not approved or was revoked; no new operation is admitted on it");
-    }
     const id = JobService.jobIdOf(taskId, operationId);
     return this.#command("job.admit", principal, command.commandId, { taskId, kind, label, operationId, resumability, background, ...(attemptId === undefined ? {} : { attemptId }), ...(host === undefined ? {} : { host }), ...(serverId === undefined ? {} : { serverId }) }, async () => {
+      // Checked here, not before the command: a repeated command is answered from its record whatever has changed since (the task is paused or done, the server was revoked).
+      const task = await this.#task(taskId);
+      this.#requireWrite(principal, task, taskId);
+      if (task.state === "done" || task.state === "cancelled") invalid("taskId", `task ${taskId} is ${task.state}; it takes no new job`);
+      if (this.#pauses !== undefined) {
+        const guard = await this.#pauses.guard(taskId);
+        if (guard.blockedBy.length > 0) {
+          if (!background) throw new DomainError("invalid_command", `task ${taskId} is paused; only a permitted background job is admitted`, { field: "pause" });
+          if (await this.#pauses.backgroundDenied(taskId)) throw new DomainError("invalid_command", `task ${taskId} is paused with background work denied`, { field: "pause" });
+        }
+      }
+      if (kind === "mcp") {
+        if (this.#connections === undefined) invalid("serverId", "cannot be checked: this service has no MCP connection check");
+        if (!(await this.#connections!.usable(serverId as string))) throw new DomainError("forbidden", "that MCP server is not approved or was revoked; no new operation is admitted on it");
+      }
       const ref: AggregateRef = { kind: "job", id };
-      if ((await this.#runner.get(ref.kind, ref.id)) !== undefined) throw new DomainError("command_conflict", `operation ${operationId} of task ${taskId} is already admitted as ${id}`);
+      if ((await this.#runner.get(ref.kind, ref.id)) !== undefined) throw new DomainError("command_conflict", `operation ${operationId} of task ${taskId} is already admitted as ${id}`, { field: "operationId" });
       const at = this.#runner.now();
       const body: JobBody = {
         taskId, projectId: task.projectId, kind, label, operationId, state: "admitted", resumability, background, ...(attemptId === undefined ? {} : { attemptId }), ...(host === undefined ? {} : { host }), ...(serverId === undefined ? {} : { serverId }),
-        output: { tail: "", bytes: 0, truncated: false }, logs: [], artifacts: [], orphans: [], restarts: 0, history: [{ state: "admitted", at, by: principal.id }], admittedBy: principal.id, admittedAt: at,
+        output: { tail: "", bytes: 0, truncated: false }, logs: [], artifacts: [], orphans: [], restarts: 0, reconciliations: [], history: [{ state: "admitted", at, by: principal.id }], admittedBy: principal.id, admittedAt: at,
       };
       return { ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }], detail: { taskId, kind, operationId, resumability, background } };
     }).then((r) => ({ id, replayed: r.replayed }));
@@ -228,6 +238,7 @@ export class JobService {
     const artifacts = command.artifacts === undefined ? undefined : this.#refs(command.artifacts, "artifacts", JOB_LIMITS.artifacts);
     const checkpoint = command.checkpoint === undefined ? undefined : plain(command.checkpoint, "checkpoint", JOB_LIMITS.checkpoint);
     const host = command.host === undefined ? undefined : plain(command.host, "host", JOB_LIMITS.host);
+    await this.#checkRefs(jobId, [...(logs ?? []), ...(artifacts ?? [])]);
     let state: JobState = "admitted";
     const result = await this.#change("job.report", principal, command.commandId, jobId, "write", { state: command.state ?? null, output: output ?? null, logs: logs ?? null, artifacts: artifacts ?? null, checkpoint: checkpoint ?? null, host: host ?? null }, (job) => {
       if (TERMINAL.includes(job.state)) invalid("jobId", `job ${jobId} is ${job.state}; it takes no more reports`);
@@ -252,6 +263,7 @@ export class JobService {
     const logs = command.logs === undefined ? undefined : this.#refs(command.logs, "logs", JOB_LIMITS.refs);
     const artifacts = command.artifacts === undefined ? undefined : this.#refs(command.artifacts, "artifacts", JOB_LIMITS.artifacts);
     const orphans = command.orphans === undefined ? undefined : this.#orphans(command.orphans);
+    await this.#checkRefs(jobId, [...(logs ?? []), ...(artifacts ?? [])]);
     const done = await this.#change("job.finish", principal, command.commandId, jobId, "write", { outcome, exit: (exit ?? null) as unknown as JsonObject, output: output ?? null, logs: logs ?? null, artifacts: artifacts ?? null, orphans: orphans ?? null }, (job) => {
       if (job.state === "admitted") invalid("jobId", `job ${jobId} was never dispatched`);
       if (job.state === "outcome_unknown") invalid("jobId", `job ${jobId} is outcome-unknown; reconcile it with evidence instead`);
@@ -265,16 +277,23 @@ export class JobService {
 
   /** Asks for the job to be stopped, with the operation its kind calls for. A job that already ended is not asked again. */
   async requestCancel(principal: Principal, command: CancelJob): Promise<{ id: string; operation: CancelOperation; replayed: boolean }> {
-    onlyKnown(command, ["commandId", "jobId", "reason"]);
+    onlyKnown(command, ["commandId", "jobId", "reason", "force"]);
     const jobId = idOf(command.jobId, "jobId");
     const reason = plain(command.reason, "reason", JOB_LIMITS.reason);
     let operation: CancelOperation = "stop_tool";
-    const result = await this.#change("job.cancel", principal, command.commandId, jobId, "control", { reason }, (job) => {
+    if (command.force !== undefined && typeof command.force !== "boolean") invalid("force", "must be true or false");
+    const force = command.force === true;
+    const result = await this.#change("job.cancel", principal, command.commandId, jobId, "control", { reason, force }, (job) => {
+      if (job.state === "cancellation_requested" && job.cancel !== undefined && force && job.cancel.force !== true) {
+        // Force Stop: the escalation of a stop that was asked for and not obeyed, recorded as its own step.
+        operation = job.cancel.operation;
+        return { ...job, cancel: { ...job.cancel, force: true }, history: this.#history(job, { state: job.state, at: this.#runner.now(), by: principal.id, note: `force stop: ${reason}`.slice(0, 200) }) };
+      }
       if (job.state === "cancellation_requested") invalid("jobId", `job ${jobId} is already being stopped`);
       if (!NEXT[job.state].includes("cancellation_requested")) invalid("jobId", `job ${jobId} is ${job.state}; there is nothing to stop`);
       operation = cancelOperationOf(job.kind);
       const at = this.#runner.now();
-      return { ...this.#move(job, "cancellation_requested", principal.id, at, operation), cancel: { operation, requestedBy: principal.id, requestedAt: at, reason } };
+      return { ...this.#move(job, "cancellation_requested", principal.id, at, operation), cancel: { operation, requestedBy: principal.id, requestedAt: at, reason, ...(force ? { force: true } : {}) } };
     });
     return { id: jobId, operation: result.after?.cancel?.operation ?? operation, replayed: result.replayed };
   }
@@ -321,7 +340,7 @@ export class JobService {
     const done = await this.#change("job.reconcile", principal, command.commandId, jobId, "control", { to, evidence, exit: (exit ?? null) as unknown as JsonObject }, (job) => {
       if (job.state !== "outcome_unknown") invalid("jobId", `job ${jobId} is ${job.state}, not outcome-unknown`);
       const at = this.#runner.now();
-      return { ...this.#move(job, to, principal.id, at, "reconciled"), finishedAt: at, ...(exit === undefined ? {} : { exit }) };
+      return { ...this.#move(job, to, principal.id, at, "reconciled"), finishedAt: at, reconciliations: [...job.reconciliations, reconciliationId].slice(-JOB_LIMITS.history), ...(exit === undefined ? {} : { exit }) };
     }, (job, at) => [{ type: "create", ref: { kind: "job-reconciliation", id: reconciliationId }, body: clean({ jobId, from: job.state, to, evidence, by: principal.id, at } satisfies ReconciliationBody) }]);
     await this.#recordBackground(principal, jobId, command.commandId);
     return { id: jobId, reconciliationId, replayed: done.replayed };
@@ -343,6 +362,7 @@ export class JobService {
     if (decision === "complete" && exit === undefined) invalid("exit", "completing a job needs how it ended");
     const done = await this.#change("job.decide", principal, command.commandId, jobId, "control", { decision, reason, exit: (exit ?? null) as unknown as JsonObject, tracker: tracker ?? null }, (job) => {
       if (TERMINAL.includes(job.state)) invalid("jobId", `job ${jobId} is ${job.state}; there is nothing to decide`);
+      if (job.state === "outcome_unknown" && decision !== "exception") invalid("decision", "an outcome-unknown job is settled by reconcile, with evidence; it can only be kept as a tracked exception here");
       const at = this.#runner.now();
       switch (decision) {
         case "complete":
@@ -376,8 +396,10 @@ export class JobService {
   /** The jobs of one task, in ID order, a page at a time. */
   async list(viewer: Principal, taskId: string, page: { afterId?: string; limit?: number } = {}): Promise<{ jobs: View<JobBody>[]; next?: string }> {
     const id = checkTaskId(taskId);
-    const task = await this.#task(id);
-    if (!this.#mayRead(viewer, task.projectId, id)) throw new DomainError("forbidden", `${viewer.id} may not read the jobs of that task`);
+    const found = (await this.#runner.get("task", id))?.body as unknown as TaskBody | undefined;
+    if (found === undefined && viewer.kind === "owner") throw new DomainError("not_found", `task ${id} does not exist`);
+    const task = found;
+    if (task === undefined || !this.#mayRead(viewer, task.projectId, id)) throw new DomainError("forbidden", `${viewer.id} may not read the jobs of that task`);
     const limit = Math.min(Math.max(page.limit ?? JOB_LIMITS.page, 1), JOB_LIMITS.page);
     return this.#scan((job) => job.taskId === id, page.afterId, limit);
   }
@@ -405,13 +427,8 @@ export class JobService {
     const job = await this.get(viewer, jobId);
     if (job === undefined) return [];
     const out: View<ReconciliationBody>[] = [];
-    let after: string | undefined;
-    for (;;) {
-      const batch = await this.#runner.storage.listAggregates("job-reconciliation", { ...(after === undefined ? {} : { afterId: after }), limit: JOB_LIMITS.scan });
-      for (const a of batch) { const v = view<ReconciliationBody>(a); if (v.jobId === jobId) out.push(v); }
-      if (batch.length < JOB_LIMITS.scan) return out;
-      after = batch[batch.length - 1]!.id;
-    }
+    for (const id of job.reconciliations) { const found = await this.#runner.get("job-reconciliation", id); if (found !== undefined) out.push(view<ReconciliationBody>(found)); }
+    return out;
   }
 
   // ---- parts ------------------------------------------------------------------------------------------------------------------
@@ -455,13 +472,28 @@ export class JobService {
   #chunk(value: unknown): string {
     if (typeof value !== "string") return invalid("output", "must be text");
     if (value.length > JOB_LIMITS.chunk) invalid("output", `must be at most ${JOB_LIMITS.chunk} characters at a time`);
-    return redactText(value);
+    // NUL cannot be stored by every backend and a lone surrogate is not text; both are dropped or repaired, never refused (output is whatever the process wrote).
+    return redactText(value.replaceAll("\u0000", "").replace(LONE_SURROGATE, "\ufffd"));
   }
   #append(before: JobOutput, chunk: string): JobOutput {
-    const joined = before.tail + chunk;
+    // The pieces are joined and redacted again, so a secret split across two reports is still caught; the end is kept, cut on a character boundary (the limit counts characters).
+    const joined = redactText(before.tail + chunk);
     const cut = joined.length > JOB_LIMITS.tail;
-    return { tail: cut ? joined.slice(joined.length - JOB_LIMITS.tail) : joined, bytes: before.bytes + Buffer.byteLength(chunk), truncated: before.truncated || cut };
+    let tail = cut ? joined.slice(joined.length - JOB_LIMITS.tail) : joined;
+    if (cut && tail.length > 0 && tail.charCodeAt(0) >= 0xdc00 && tail.charCodeAt(0) <= 0xdfff) tail = tail.slice(1);
+    return { tail, bytes: before.bytes + Buffer.byteLength(chunk), truncated: before.truncated || cut };
   }
+  /** A log or artifact a job names must exist and, if it belongs to a project, to the job's. */
+  async #checkRefs(jobId: string, ids: readonly string[]): Promise<void> {
+    if (ids.length === 0) return;
+    const job = (await this.#runner.get("job", jobId))?.body as unknown as JobBody | undefined;
+    if (job === undefined) throw new DomainError("not_found", `job ${jobId} does not exist`);
+    for (const id of ids) {
+      const found = (await this.#runner.get("artifact", id))?.body as unknown as { projectId?: string } | undefined;
+      if (found === undefined || (found.projectId !== undefined && found.projectId !== job.projectId)) invalid("artifacts", `${id} is not an artifact of this job's project`);
+    }
+  }
+
   #refs(value: unknown, field: string, max: number): string[] {
     if (!Array.isArray(value) || value.length > max) return invalid(field, `must be a list of at most ${max} artifact IDs`);
     return value.map((v, i) => (typeof v === "string" && ARTIFACT_ID.test(v) ? v : invalid(`${field}[${i}]`, "is not an artifact ID")));
@@ -475,7 +507,8 @@ export class JobService {
   }
   #orphans(value: unknown): string[] {
     if (!Array.isArray(value) || value.length > JOB_LIMITS.orphans) return invalid("orphans", `must be a list of at most ${JOB_LIMITS.orphans} descriptions`);
-    return value.map((v, i) => plain(v, `orphans[${i}]`, JOB_LIMITS.orphan));
+    // A description of a left-over process may hold a command line with a token: it is redacted, never a reason for the stop to go unrecorded.
+    return value.map((v, i) => redactText(text(v, `orphans[${i}]`, { min: 1, max: JOB_LIMITS.orphan, multiline: true })));
   }
   #exit(value: unknown): ExitStatus {
     if (value === null || typeof value !== "object" || Array.isArray(value)) return invalid("exit", "must be an object");
@@ -525,8 +558,7 @@ export class JobService {
   async #retrying<T>(run: () => Promise<T>): Promise<T> {
     for (let attempt = 1; ; attempt++) {
       try { return await run(); } catch (error) {
-        if (!(error instanceof DomainError) || (error.code !== "stale_revision" && error.code !== "command_conflict") || error.field !== undefined || attempt >= 8) throw error;
-        if (error.code === "command_conflict" && /already admitted/.test(error.message)) throw error;
+        if (!(error instanceof DomainError) || error.code !== "stale_revision" || error.field !== undefined || attempt >= 8) throw error;
       }
     }
   }

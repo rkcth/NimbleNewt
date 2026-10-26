@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { derivedId } from "../domain/ids.js";
 import { createHash } from "node:crypto";
 import { after, test } from "node:test";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
@@ -77,8 +78,12 @@ for (const backend of backends) {
     await refuses("forbidden", () => c.mcp.launchPlan(c.ann, id));
     const remoteId = await c.remote();
     await refuses("forbidden", () => c.mcp.launchPlan(c.owner, remoteId), (e) => assert.match(e.message, /local/));
+    // A long-running operation (card T07) asks whether the server may still be used: yes while approved, no once revoked, no for one never registered.
+    assert.equal(await c.mcp.usable(id), true);
+    assert.equal(await c.mcp.usable(derivedId("mcs", "never-registered")), false);
     await c.mcp.revoke(c.owner, { commandId: cid("rv"), serverId: id, expectedRevision: 1 });
     await refuses("forbidden", () => c.mcp.launchPlan(c.owner, id));
+    assert.equal(await c.mcp.usable(id), false);
   });
 
   suite("an unapproved, unknown or revoked server is denied; a capability must be allowed, in the accepted catalog and unchanged", async (c) => {

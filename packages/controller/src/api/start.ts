@@ -185,7 +185,7 @@ export async function startController(options: StartOptions): Promise<Controller
     // Suspected stalls: a task under a pause is assessed as paused, never as stalled (card L01).
     const stall = StallService.withEpoch(storage, epoch, assignments, waits, { isPaused: (taskId) => pauses.isPaused(taskId) });
     // Durable job records (card T07): a permitted background job's result goes to the pause service; no MCP connection check is bound until an MCP client exists, so no MCP operation is admitted.
-    const jobs = JobService.withEpoch(storage, epoch, { pauses }, { background: (principal, request) => pauses.recordBackground(principal, request) });
+    const jobs = JobService.withEpoch(storage, epoch, { pauses }, { background: (principal, request) => pauses.recordFinishedJob(principal, request) });
     const reviews = ReviewService.withEpoch(storage, epoch, { availability: pauses.availability });
     const graph = WaitGraphService.withEpoch(storage, epoch, contracts, BlockerService.withEpoch(storage, epoch), { extraEdges: (projectId, tasks) => reviews.waitEdges(projectId, tasks) });
     // The routing table is refused unless the coordinator, the safety supervisor and every other role in it have a valid fallback list (card R04).

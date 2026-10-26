@@ -31,6 +31,8 @@ for (const backend of backends) {
     storage: Parameters<typeof JobService.withEpoch>[0]; epoch: number;
     admit(taskId?: string, extra?: Partial<Parameters<JobService["admit"]>[1]>): Promise<string>;
     read(id: string, as?: Principal): Promise<JobBody>;
+    /** An artifact record of the project (or of another one), as the artifact service would have made it. */
+    artifact(label: string, projectId?: string): Promise<string>;
   }
   const suite = (name: string, body: (c: Ctx) => Promise<void>, options: JobOptions = {}) =>
     test(`${backend.name}: ${name}`, async () => {
@@ -60,7 +62,7 @@ for (const backend of backends) {
         const both = await plain("both", [{ action: "job.write", project }, { action: "job.control", project }, { action: "assignment.manage", project }]);
         const pauses = PauseService.withEpoch(world.storage, epoch, {}, base as PauseOptions);
         const recorded: { taskId: string; jobRef: string; outcome: string }[] = [];
-        const opts: JobOptions = { ...base, background: async (p, request) => { recorded.push({ taskId: request.taskId, jobRef: request.jobRef, outcome: request.outcome }); return pauses.recordBackground(p, request); }, ...options };
+        const opts: JobOptions = { ...base, background: async (p, request) => { recorded.push({ taskId: request.taskId, jobRef: request.jobRef, outcome: request.outcome }); return pauses.recordFinishedJob(p, request); }, ...options };
         const jobs = JobService.withEpoch(world.storage, epoch, { pauses }, opts);
         const t1 = await task("one"), t2 = await task("two"), t3 = await task("three", other);
         let op = 0;
@@ -69,11 +71,21 @@ for (const backend of backends) {
           reopen: (o = {}) => JobService.withEpoch(world.storage, epoch, { pauses }, { ...opts, ...o }),
           admit: async (taskId = t1, extra = {}) => (await jobs.admit(worker, { commandId: cid("ad"), taskId, kind: "tool", label: "build the project", operationId: `op-${op++}`, ...extra })).id,
           read: async (id, as = owner) => (await jobs.get(as, id))!,
+          artifact: async (label, projectId = project) => {
+            const id = art(label);
+            await world.storage.applyOperation({
+              operationId: `art-${label}`, epoch, actor: "test", correlationId: `art-${label}`, at: clock(),
+              changes: [{ type: "create", ref: { kind: "artifact", id }, body: { name: label, projectId, entries: [], manifestDigest: "d", totalBytes: 0, createdBy: "test" } }],
+              audit: [{ type: "test.artifact", detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [],
+            });
+            return id;
+          },
         });
       } finally { await world.close(); }
     });
 
   suite("a job has a durable handle, goes admitted, dispatched, running, completed, and keeps bounded redacted output, logs and artifacts", async (c) => {
+    for (const label of ["log-1", "log-2", "result"]) await c.artifact(label);
     const id = await c.admit();
     assert.match(id, /^job-[a-z2-7]{20}$/);
     assert.deepEqual(await c.jobs.admit(c.worker, { commandId: "same", taskId: c.t1, kind: "tool", label: "x", operationId: "op-fixed" }).then((r) => r.replayed), false);
@@ -127,7 +139,8 @@ for (const backend of backends) {
     assert.equal((await c.read(id)).resumability, "none");
     await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: id, state: "dispatched" });
     await refuses("invalid_command", () => c.jobs.report(c.worker, { commandId: cid("rp"), jobId: id, checkpoint: "c" }), (e) => assert.equal(e.field, "checkpoint"));
-    await refuses("invalid_command", () => c.jobs.report(c.worker, { commandId: cid("rp"), jobId: id, state: "dispatched" }).then(() => c.jobs.finish(c.worker, { commandId: cid("fn"), jobId: id, outcome: "completed" })).then(() => c.jobs.report(c.worker, { commandId: cid("rp"), jobId: id, state: "running" })));
+    await c.jobs.finish(c.worker, { commandId: cid("fn"), jobId: id, outcome: "completed" });
+    await refuses("invalid_command", () => c.jobs.report(c.worker, { commandId: cid("rp"), jobId: id, state: "running" }));
   });
 
   suite("cancelling a model request, stopping a tool and stopping a remote job are separate recorded operations; an uncooperative stop is not claimed as stopped, and orphans are reported", async (c) => {
@@ -150,7 +163,8 @@ for (const backend of backends) {
     assert.equal(stopped.state, "cancelled");
     const after = await c.read(tool);
     assert.deepEqual([after.orphans, after.cancel?.operation, after.finishedAt], [["pid 4121 (node) still running"], "stop_tool", clock()]);
-    await refuses("invalid_command", () => c.jobs.confirmCancel(c.worker, { commandId: cid("cc"), jobId: model, result: "stopped" }).then(() => c.jobs.confirmCancel(c.worker, { commandId: cid("cc"), jobId: model, result: "stopped" })), (e) => assert.match(e.message, /no stop was asked for/));
+    await c.jobs.confirmCancel(c.worker, { commandId: cid("cc"), jobId: model, result: "stopped" });
+    await refuses("invalid_command", () => c.jobs.confirmCancel(c.worker, { commandId: cid("cc"), jobId: model, result: "stopped" }), (e) => assert.match(e.message, /no stop was asked for/));
     // Only a controller of the job asks for the stop; a worker records what happened but does not decide.
     await refuses("forbidden", () => c.jobs.requestCancel(c.worker, { commandId: cid("cx"), jobId: remote, reason: "mine" }));
   });
@@ -216,7 +230,8 @@ for (const backend of backends) {
     await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: bg, state: "dispatched" });
     await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: bg, state: "running", output: "indexing\n" });
     assert.equal((await c.pauses.status(c.owner, c.t1))!.paused, true);
-    const done = await c.jobs.finish(c.both, { commandId: cid("fn"), jobId: bg, outcome: "completed", exit: { code: 0 } });
+    // The worker holds only job.write: its finish is never lost for want of the pause service's own right.
+    const done = await c.jobs.finish(c.worker, { commandId: cid("fn"), jobId: bg, outcome: "completed", exit: { code: 0 } });
     assert.equal(done.state, "completed");
     assert.deepEqual(c.recorded.map((r) => [r.taskId, r.jobRef, r.outcome]), [[c.t1, bg, "succeeded"]]);
     assert.equal((await c.pauses.status(c.owner, c.t1))!.paused, true, "the result was recorded and nothing was unpaused");
@@ -224,9 +239,11 @@ for (const backend of backends) {
     const same = cid("fn2");
     const bg2 = await c.admit(c.t1, { kind: "tool", background: true });
     await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: bg2, state: "dispatched" });
-    await c.jobs.finish(c.both, { commandId: same, jobId: bg2, outcome: "failed", exit: { code: 2 } });
-    await c.jobs.finish(c.both, { commandId: same, jobId: bg2, outcome: "failed", exit: { code: 2 } });
+    await c.jobs.finish(c.worker, { commandId: same, jobId: bg2, outcome: "failed", exit: { code: 2 } });
+    const repeated = await c.jobs.finish(c.worker, { commandId: same, jobId: bg2, outcome: "failed", exit: { code: 2 } });
+    assert.equal(repeated.replayed, true);
     assert.equal((await c.read(bg2)).state, "failed");
+    assert.equal((await c.storage.listAggregates("pause-background", { limit: 100 })).length, 2, "two jobs, two records, and the repeated finish added none");
     // A pause that denies background work admits none.
     await c.pauses.pause(c.owner, { commandId: cid("pz"), scope: { kind: "task", id: c.t2 }, reason: "stop everything", background: "deny" });
     await refuses("invalid_command", () => c.admit(c.t2, { kind: "tool", background: true }), (e) => assert.match(e.message, /denied/));
@@ -276,4 +293,58 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.admit(c.t2), (e) => assert.match(e.message, /takes no new job/));
     assert.equal((await c.read(id)).state, "admitted");
   });
+  suite("review fixes: a repeated admit is answered after the task is paused; output is redacted across reports, repaired and cut on a character; an outcome-unknown job is only settled by reconcile; a Force Stop is its own step", async (c) => {
+    const first = await c.jobs.admit(c.worker, { commandId: "adm-1", taskId: c.t1, kind: "tool", label: "x", operationId: "op-replay" });
+    await c.pauses.pause(c.owner, { commandId: cid("pz"), scope: { kind: "task", id: c.t1 }, reason: "hold" });
+    const again = await c.jobs.admit(c.worker, { commandId: "adm-1", taskId: c.t1, kind: "tool", label: "x", operationId: "op-replay" });
+    assert.deepEqual([again.id, again.replayed], [first.id, true], "the repeat is answered from its record, not refused for the pause");
+    await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: { kind: "task", id: c.t1 }, reason: "go" });
+    // A secret split over two reports; NUL and a lone surrogate; a surrogate pair cut by the limit.
+    const id = first.id;
+    await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: id, state: "dispatched" });
+    await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: id, output: "Authorization: Bearer abcdefghijklmnopqrstuvwxyz" });
+    await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: id, output: "0123456789ABCD\u0000 end \ud800" });
+    const out = (await c.read(id)).output.tail;
+    assert.equal(out.includes("abcdefghijklmnopqrstuvwxyz0123456789ABCD"), false, "a secret split across two reports is still caught");
+    assert.equal(out.includes("\u0000"), false);
+    assert.ok(out.endsWith("end \ufffd"));
+    await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: id, output: "a".repeat(JOB_LIMITS.tail - 1) + "\u{1F600}" });
+    const cut = (await c.read(id)).output.tail;
+    assert.equal(cut.length <= JOB_LIMITS.tail, true);
+    assert.equal(/^[\udc00-\udfff]/.test(cut), false, "the cut never starts in the middle of a character");
+    // An outcome-unknown job is not completed by a restart decision.
+    await c.jobs.markUnknown(c.worker, { commandId: cid("uk"), jobId: id, reason: "lost" });
+    await refuses("invalid_command", () => c.jobs.decide(c.boss, { commandId: cid("dc"), jobId: id, decision: "complete", reason: "x", exit: { code: 0 } }), (e) => assert.match(e.message, /reconcile/));
+    await c.jobs.reconcile(c.boss, { commandId: cid("rc"), jobId: id, to: "failed", evidence: "the host reports it was killed" });
+    // Force Stop: asked for at once, or as the escalation of an unobeyed stop, and only once.
+    const stubborn = await c.admit(c.t2, { kind: "tool" });
+    await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: stubborn, state: "dispatched" });
+    await c.jobs.requestCancel(c.boss, { commandId: cid("cx"), jobId: stubborn, reason: "stop it" });
+    assert.equal((await c.read(stubborn)).cancel?.force, undefined);
+    await c.jobs.confirmCancel(c.worker, { commandId: cid("cc"), jobId: stubborn, result: "uncooperative" });
+    await c.jobs.requestCancel(c.boss, { commandId: cid("cx"), jobId: stubborn, reason: "it ignored the stop", force: true });
+    const forced = await c.read(stubborn);
+    assert.deepEqual([forced.cancel?.force, forced.state, forced.history.at(-1)?.note], [true, "cancellation_requested", "force stop: it ignored the stop"]);
+    await refuses("invalid_command", () => c.jobs.requestCancel(c.boss, { commandId: cid("cx"), jobId: stubborn, reason: "again", force: true }), (e) => assert.match(e.message, /already being stopped/));
+    const direct = await c.admit(c.t2, { kind: "remote", resumability: "remote_tracked" });
+    await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: direct, state: "dispatched" });
+    await c.jobs.requestCancel(c.boss, { commandId: cid("cx"), jobId: direct, reason: "now", force: true });
+    assert.equal((await c.read(direct)).cancel?.force, true);
+    // An orphan description with a token in it is redacted, not a reason for the stop to go unrecorded.
+    await c.jobs.confirmCancel(c.worker, { commandId: cid("cc"), jobId: direct, result: "stopped", orphans: ["pid 77: curl -H 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789ABCD' x"] });
+    assert.equal((await c.read(direct)).orphans[0]!.includes("abcdefghijklmnopqrstuvwxyz0123456789ABCD"), false);
+  });
+
+  suite("logs and artifacts must exist and belong to the job's project; a missing task reads as forbidden to a stranger; reconciliations are listed from the job", async (c) => {
+    const id = await c.admit();
+    await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: id, state: "dispatched" });
+    await refuses("invalid_command", () => c.jobs.report(c.worker, { commandId: cid("rp"), jobId: id, logs: [art("no-such")] }), (e) => assert.match(e.message, /not an artifact of this job's project/));
+    const foreign = await c.artifact("foreign", c.other);
+    await refuses("invalid_command", () => c.jobs.finish(c.worker, { commandId: cid("fn"), jobId: id, outcome: "completed", artifacts: [foreign] }));
+    await c.jobs.finish(c.worker, { commandId: cid("fn"), jobId: id, outcome: "completed", artifacts: [await c.artifact("mine")] });
+    await refuses("forbidden", () => c.jobs.list(c.stranger, derivedId("task", "no-such-task")));
+    await refuses("not_found", () => c.jobs.list(c.owner, derivedId("task", "no-such-task")));
+    assert.deepEqual(await c.jobs.reconciliation(c.owner, id), []);
+  });
+
 }

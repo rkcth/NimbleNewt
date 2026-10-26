@@ -311,6 +311,20 @@ export class PauseService implements PauseGuard, PauseLookup {
    * unstartable until its gates are resumed. Refused if a paused gate on the task's chain said `background: deny`. Allowed to the owner, a holder of `assignment.manage`, or the assigned agent. Answering a wait needs more: the caller must be the wait's resolver (or the owner).
    */
   async recordBackground(principal: Principal, command: BackgroundRequest): Promise<{ id: string; pausedBy: readonly PauseScope[]; answeredWaitId?: string; replayed: boolean }> {
+    return this.#recordBackground(principal, command, false);
+  }
+
+  /**
+   * The same record for a job the job service has already authorized the caller to record (the right `job.write` on that task): the caller needs no `assignment.manage` and need not be the assignee, so a worker's
+   * finish is never lost for want of a right it should not hold. It cannot answer a wait. Only the job service calls it (card T07).
+   */
+  async recordFinishedJob(principal: Principal, command: Omit<BackgroundRequest, "answerWait">): Promise<{ id: string; pausedBy: readonly PauseScope[]; replayed: boolean }> {
+    if ((command as BackgroundRequest).answerWait !== undefined) invalid("answerWait", "a finished job does not answer a wait");
+    const { answeredWaitId: _a, ...done } = await this.#recordBackground(principal, command, true);
+    return done;
+  }
+
+  async #recordBackground(principal: Principal, command: BackgroundRequest, trusted: boolean): Promise<{ id: string; pausedBy: readonly PauseScope[]; answeredWaitId?: string; replayed: boolean }> {
     onlyKnown(command, ["commandId", "taskId", "jobRef", "outcome", "summary", "answerWait"]);
     const taskId = checkTaskId(command.taskId);
     const jobRef = plain(command.jobRef, "jobRef", PAUSE_LIMITS.jobRef);
@@ -327,7 +341,7 @@ export class PauseService implements PauseGuard, PauseLookup {
       given = { waitId: w.waitId as string, expectedRevision: w.expectedRevision as number, answer: plain(w.answer, "answerWait.answer", PAUSE_LIMITS.summary) };
       if (this.#waits === undefined) invalid("answerWait", "cannot be answered: this service has no wait service");
     }
-    const task = await this.#backgroundTask(principal, taskId);
+    const task = trusted ? await this.#taskBody(taskId) : await this.#backgroundTask(principal, taskId);
     if (given !== undefined) {
       const wait = await this.#waits!.getWait(given.waitId);
       if (wait === undefined || wait.taskId !== taskId) return invalid("answerWait.waitId", "is not a wait of this task");
@@ -378,12 +392,12 @@ export class PauseService implements PauseGuard, PauseLookup {
     return { blockedBy: g.entries.filter((e) => e.body.intent === "pause").map((e) => e.scope), changes: g.changes };
   }
 
-  /** Every gate on the task's chain (absent ones as they would be created, active), with the changes that lock the chain and the gates for the caller's commit. */
   /** Whether a paused gate on the task's chain said `background: deny`: no background job is admitted for it and none records a result (card T07). */
   async backgroundDenied(taskId: string): Promise<boolean> {
     return (await this.#gates(checkTaskId(taskId))).entries.some((e) => e.body.intent === "pause" && e.body.background === "deny");
   }
 
+  /** Every gate on the task's chain (absent ones as they would be created, active), with the changes that lock the chain and the gates for the caller's commit. */
   async #gates(id: string): Promise<{ entries: { scope: PauseScope; body: PauseGateBody }[]; changes: Change[] }> {
     const task = (await this.#runner.get("task", id))?.body as unknown as TaskBody | undefined;
     const changes: Change[] = [];
@@ -542,6 +556,12 @@ export class PauseService implements PauseGuard, PauseLookup {
     const inst = await this.#runner.get("approval-policy", "installation");
     const proj = projectId === undefined ? undefined : await this.#runner.get("approval-policy", projectId);
     return { installation: inst?.revision ?? 0, ...(proj === undefined ? {} : { project: proj.revision }) };
+  }
+
+  async #taskBody(taskId: string): Promise<TaskBody> {
+    const found = (await this.#runner.get("task", taskId))?.body as unknown as TaskBody | undefined;
+    if (found === undefined) throw new DomainError("not_found", `task ${taskId} does not exist`);
+    return found;
   }
 
   async #backgroundTask(principal: Principal, taskId: string): Promise<TaskBody> {
