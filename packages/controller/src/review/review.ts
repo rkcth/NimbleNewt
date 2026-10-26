@@ -550,7 +550,9 @@ export class ReviewService {
     onlyKnown(command, ["commandId", "projectId"]);
     const projectId = checkProjectId(command.projectId);
     const fresh = await this.#fresh(by.id, by.taskScope);
-    if (fresh === undefined || !allows(fresh, "review.policy.write", projectId)) throw new DomainError("forbidden", `${by.id} may not move reviews along in ${projectId}`);
+    // The controller's own service (the dispatcher's loop) moves reviews along by rule: it never decides or approves, so it needs no project right; anyone else needs `review.policy.write`.
+    const service = fresh !== undefined && fresh.kind === "service" && fresh.taskScope === undefined;
+    if (fresh === undefined || !(service || allows(fresh, "review.policy.write", projectId))) throw new DomainError("forbidden", `${by.id} may not move reviews along in ${projectId}`);
     if ((await this.#runner.get("project", projectId)) === undefined) throw new DomainError("not_found", `project ${projectId} does not exist`);
     // Nothing to move is not a command: it changes nothing, so there is nothing to record.
     const looked = await this.#sweepPlan(projectId);

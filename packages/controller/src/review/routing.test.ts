@@ -27,7 +27,7 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, check
 for (const backend of backends) {
   interface Ctx {
     review: ReviewService; owner: Principal; a: string; task: string; graph: WaitGraphService; contracts: ContractService;
-    ann: Principal; r1: Principal; r2: Principal; r3: Principal; mallory: Principal; admin: Principal;
+    ann: Principal; r1: Principal; r2: Principal; r3: Principal; mallory: Principal; admin: Principal; service: Principal;
     agent(name: string, grants: Grant[]): Promise<Principal>;
     newTask(title: string, ownedBy?: string): Promise<string>;
     disable(name: string): Promise<void>;
@@ -68,8 +68,9 @@ for (const backend of backends) {
         const mallory = await agent("mallory", []);
         const admin = await agent("admin", [{ action: "review.policy.write", project: a }]);
         const disable = async (nm: string) => { const found = await world.storage.getAggregate({ kind: "principal", id: `agent:${nm}` }); await principals.disable(owner, { commandId: cid("dis"), principalId: `agent:${nm}`, expectedRevision: found!.revision }); };
+        const service = await principals.authenticate((await principals.provisionService("dispatcher")).token);
         const policy = (p: object, expectedRevision?: number) => review.setPolicy(admin, { commandId: cid("pol"), projectId: a, policy: p, ...(expectedRevision === undefined ? {} : { expectedRevision }) });
-        await body({ review, owner, a, task, graph, contracts, ann, r1, r2, r3, mallory, admin, agent, newTask, disable, policy });
+        await body({ review, owner, a, task, graph, contracts, ann, r1, r2, r3, mallory, admin, service, agent, newTask, disable, policy });
       } finally { await world.close(); }
     });
 
@@ -147,6 +148,17 @@ for (const backend of backends) {
     const moved = await c.review.sweep(c.admin, { commandId: cid("sw"), projectId: c.a });
     assert.deepEqual(moved.assigned, [r.id]);
     assert.deepEqual([(await route(c, r.id)).state, (await route(c, r.id)).assigned], ["assigned", "agent:r2"]);
+  });
+
+  suite("the controller's own service moves reviews along by rule with no grant, and can neither decide nor set the policy", async (c) => {
+    await c.policy({ reviewers: ["agent:r1"], fallbackReviewers: ["agent:r3"], deadlineMinutes: 10 });
+    const r = await ask(c);
+    minutes(11);
+    assert.deepEqual((await c.review.sweep(c.service, { commandId: cid("sw"), projectId: c.a })).reassigned, [r.id]);
+    assert.equal((await route(c, r.id)).assigned, "agent:r3");
+    assert.equal((await c.review.get(c.ann, r.id))!.state, "pending", "moving a review never approves it");
+    await refuses("forbidden", () => decide(c, c.service, r.id, "allow"));
+    await refuses("forbidden", () => c.review.setPolicy(c.service, { commandId: cid("pol2"), projectId: c.a, policy: { reviewers: ["agent:r2"] }, expectedRevision: 1 }));
   });
 
   suite("a reviewer who misses the deadline is replaced by another, then by an authorized fallback, then the review goes to the owner who alone may decide it", async (c) => {

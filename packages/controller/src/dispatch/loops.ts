@@ -1,5 +1,6 @@
 import type { DecisionService } from "../decisions/index.js";
 import type { EventService } from "../events/index.js";
+import type { ReviewService } from "../review/index.js";
 import type { AttendanceService, MeetingService } from "../meetings/index.js";
 import type { AgentMessageService } from "../messaging/index.js";
 import type { ProjectService } from "../domain/service.js";
@@ -104,6 +105,13 @@ export function meetingLoops(meetings: Pick<MeetingService, "tick" | "planned" |
       },
     },
   ];
+}
+
+/** H05b: reviews are moved along for each project: a waiting review takes a reviewer once one is eligible; one whose reviewer is held or missed the deadline moves on under the project policy (never by approval). */
+export function reviewLoops(reviews: Pick<ReviewService, "sweep">, projects: () => Promise<readonly string[]>): DispatcherLoop[] {
+  let n = 0;
+  const nonce = Math.random().toString(36).slice(2, 10);
+  return [{ name: "reviews.sweep", run: async (by) => { for (const projectId of await projects()) await drain(() => reviews.sweep(by, { commandId: `rvs-${nonce}-${++n}`, projectId })); } }];
 }
 
 /** H06b: subscriptions idle past their time are expired and the Notices owed are filed. */
