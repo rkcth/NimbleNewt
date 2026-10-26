@@ -1,4 +1,3 @@
-import type { ChannelContext } from "@nimblenewt/contracts";
 import { AdmissionService } from "../admission/index.js";
 import { BudgetService } from "../budgets/index.js";
 import { DecisionService } from "../decisions/index.js";
@@ -36,6 +35,9 @@ import { StandupService } from "../standups/index.js";
 import type { ControllerStorage } from "../storage/types.js";
 
 /** What the operator gives the controller to run the dispatcher (card H12c). Absent from `StartOptions`: no dispatcher is built and no loop runs. */
+/** The worker process's context limits for an order, in the shape of the channel's `ChannelContext` (the controller does not depend on the contracts package; the host's `context` option takes it structurally). */
+export interface WorkerContextLimits { readonly toolOutputBytes?: number; readonly toolOutputLines?: number; readonly compaction?: { readonly timeoutMs?: number; readonly fallback?: "extractive" } }
+
 export interface DispatchStartOptions {
   /** The worker hosts, local or remote, tried in order. None: attempts are admitted and checked but no worker starts (the loops still run). */
   readonly workers?: readonly WorkerHost[];
@@ -59,7 +61,7 @@ export interface DispatchStartOptions {
     /** The model's context window for the order's route, in tokens; `undefined` when the route does not say. */
     readonly window: (order: WorkOrder) => number | undefined;
     readonly storedTokens?: (from: NonNullable<WorkOrder["resumeFrom"]>) => number | undefined;
-    readonly build: (services: { readonly guards: RuntimeGuards; /** The process's context limits for an order (card C07b): tool output cut to the window\'s share and the extractive compaction fallback; `undefined` when the route does not say its window. The host\'s `context` option takes it. */ readonly context: (order: WorkOrder) => ChannelContext | undefined; readonly cache?: { forOrder(order: WorkOrder): Promise<AttemptCache> } }) => WorkerHost | Promise<WorkerHost>;
+    readonly build: (services: { readonly guards: RuntimeGuards; /** The process's context limits for an order (card C07b): tool output cut to the window\'s share and the extractive compaction fallback; `undefined` when the route does not say its window. The host\'s `context` option takes it. */ readonly context: (order: WorkOrder) => WorkerContextLimits | undefined; readonly cache?: { forOrder(order: WorkOrder): Promise<AttemptCache> } }) => WorkerHost | Promise<WorkerHost>;
     /** Shuts down what `build` made (live workers, the sandbox launcher, the relay). Called when the controller closes and when a later step of the start fails. */
     readonly close?: () => Promise<void>;
   };
@@ -172,7 +174,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       };
     }
     const windowOf = i.options.local.window;
-    const contextFor = (order: WorkOrder): ChannelContext | undefined => {
+    const contextFor = (order: WorkOrder): WorkerContextLimits | undefined => {
       const window = windowOf(order);
       if (window === undefined) return undefined;
       const budget = context.budget(window);
