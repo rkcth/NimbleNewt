@@ -853,7 +853,7 @@ export class DispatcherService {
       if (isDomainError(error, "not_found")) return undefined;
       if (isDomainError(error, "invalid_command")) {
         // Refused inside the budget's own command, so nothing was held: the amounts are decided again at the next tick (a sibling may have taken part of the allowance meanwhile).
-        await this.#update(d.body.attemptId, (x) => { const { reserving: _r, ...rest } = x; void _r; return rest; });
+        await this.#update(d.body.attemptId, (x) => { if (x.reservationId !== undefined || JSON.stringify(x.reserving) !== JSON.stringify(want)) return x; const { reserving: _r, ...rest } = x; void _r; return rest; });
         return { kind: "skipped", check: "budget", reason: `the task's allowance cannot hold this attempt: ${errorText(error)}` };
       }
       throw error;
