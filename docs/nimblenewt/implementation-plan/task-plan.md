@@ -37,7 +37,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C08, C09 |
 | N08 / AII-258 | R01, R02, R03, R04, R05 |
 | N09 / AII-259 | U03, U04, U05, U06, U07, U09, U08, U10, U11, U11b |
-| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H07, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H13 |
+| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H07, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13 |
 | N11 / AII-261 | V01, V02 |
 | N12 / AII-262 | M00, M01, M02, M03, M04, M05, M05b, M06 |
 | N13 / AII-263 | T01, T02, T03, T06, T06b, T07, T08, T09 |
@@ -45,7 +45,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N15 / AII-265 | Q01, Q02, Q03, Q04 |
 | N16 / AII-266 | B01 |
 | N17 / AII-267 | K01, K01b, K01c, K01d, K02, K03, K04, K05, K06, K06b, K07 |
-| N18 / AII-268 | G06, X09, X10, X01, X02, X03, X04, X05, X06, X07, X08, Y01, Y02, Y03 |
+| N18 / AII-268 | G06, X11, X09, X10, X01, X02, X03, X04, X05, X06, X07, X08, Y01, Y02, Y03 |
 | N19 / AII-269 | D01, D02, D03, D04, D05 |
 | N07a / AII-519 | U01, U13, T04 |
 | N10a / AII-520 | U02, U02b, U12, T05 |
@@ -944,6 +944,30 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** A grant names the task, the destination (host and port, or a local service) and who approved it, and is judged by the approval policy (A07) like any outside action; a connection to a destination that is not granted, or that resolves to a private or changing address unless the grant names it, is refused and recorded; every connection is logged with task, attempt, destination and bytes; a grant ends with the task; a revoked grant stops new and open connections; the relay adds no credential the grant does not state and the agent never holds a provider key; a browser or command-line client in the sandbox works against a granted destination through the proxy endpoint and fails against any other; the proxy and the grant checks behave the same on Linux, macOS and Windows (Windows proven on the A03b launcher); the web tool is refused a private or rebinding address; tested with a rebinding resolver and a hostile destination list.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
+### H12j — Close the H12b worker-process gaps
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H12b.
+- **Deliverable:** The worker process is reaped when its attempt is paused, stopped or lost; a missed pin marker is recorded as lost; no provider key can appear in the worker's files, environment or output; the launcher is exercised on all six CI cells.
+- **Acceptance and verification:** Pause, stop and loss each leave no worker process behind (tested with a real process); a pin marker that never arrived is recorded as lost, not as kept; a scan of the worker's home, scratch, environment, channel traffic and logs finds none of the provider keys the relay uses; the process tests run on Linux, macOS and Windows.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### H12k — Compose the local worker host in the controller
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H12b, H12c, H12d, H12f, H12g.
+- **Deliverable:** Controller start-up builds the local worker host with the model relay, the message and pause guards, the context checks, the quiesce coordinator and the remote MCP connector, and an MCP transport that connects to the checked address.
+- **Acceptance and verification:** An end-to-end test starts a controller, runs an attempt through the real relay, guards and bridge, quiesces it around an integration, and connects to a remote MCP server only at a checked public address (owner decision 2026-10-26).
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### X11 — Split the test suite into a typical and an exhaustive tier
+
+- **Parent:** N18 / AII-268.
+- **Blockers:** G04.
+- **Deliverable:** Every push runs a small tier on the packages that changed and the packages that depend on them; milestones and releases run the exhaustive tier.
+- **Acceptance and verification:** The typical tier (Linux, Node 22, reference store and SQLite, changed packages and their dependents) finishes in about 10 minutes; the exhaustive tier (six OS and Node cells, every backend, sharded) finishes within 30 minutes per cell; both are one command locally; the exhaustive run is the evidence for status changes and releases (owner decision 2026-10-26).
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
 ### H13 — Implement event source adapters and watchers
 
 - **Parent:** N10 / AII-260.
@@ -1623,7 +1647,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D03 — Approve release readiness and publication decision
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** X08, D01, D02, F04h, T06b, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i.
+- **Blockers:** X08, D01, D02, F04h, T06b, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11.
 - **Deliverable:** Exact release manifest, known limitations and owner signoff.
 - **Acceptance and verification:** All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

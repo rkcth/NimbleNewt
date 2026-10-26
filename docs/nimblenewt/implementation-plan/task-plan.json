@@ -2422,6 +2422,61 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "H12j",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Close the H12b worker-process gaps",
+      "depends_on": [
+        "H12b"
+      ],
+      "deliverable": "The worker process is reaped when its attempt is paused, stopped or lost; a missed pin marker is recorded as lost; no provider key can appear in the worker's files, environment or output; the launcher is exercised on all six CI cells",
+      "acceptance_and_verification": "Pause, stop and loss each leave no worker process behind (tested with a real process); a pin marker that never arrived is recorded as lost, not as kept; a scan of the worker's home, scratch, environment, channel traffic and logs finds none of the provider keys the relay uses; the process tests run on Linux, macOS and Windows",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "H12k",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Compose the local worker host in the controller",
+      "depends_on": [
+        "H12b",
+        "H12c",
+        "H12d",
+        "H12f",
+        "H12g"
+      ],
+      "deliverable": "Controller start-up builds the local worker host with the model relay, the message and pause guards, the context checks, the quiesce coordinator and the remote MCP connector, and an MCP transport that connects to the checked address",
+      "acceptance_and_verification": "An end-to-end test starts a controller, runs an attempt through the real relay, guards and bridge, quiesces it around an integration, and connects to a remote MCP server only at a checked public address (owner decision 2026-10-26)",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "X11",
+      "parent": "N18",
+      "existing_issue": "AII-268",
+      "title": "Split the test suite into a typical and an exhaustive tier",
+      "depends_on": [
+        "G04"
+      ],
+      "deliverable": "Every push runs a small tier on the packages that changed and the packages that depend on them; milestones and releases run the exhaustive tier",
+      "acceptance_and_verification": "The typical tier (Linux, Node 22, reference store and SQLite, changed packages and their dependents) finishes in about 10 minutes; the exhaustive tier (six OS and Node cells, every backend, sharded) finishes within 30 minutes per cell; both are one command locally; the exhaustive run is the evidence for status changes and releases (owner decision 2026-10-26)",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "H13",
       "parent": "N10",
       "existing_issue": "AII-260",
@@ -4202,7 +4257,10 @@
         "H12f",
         "H12g",
         "H12h",
-        "H12i"
+        "H12i",
+        "H12j",
+        "H12k",
+        "X11"
       ],
       "deliverable": "Exact release manifest, known limitations and owner signoff",
       "acceptance_and_verification": "All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded",

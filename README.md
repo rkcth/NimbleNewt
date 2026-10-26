@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **65 of 186 tasks implemented**.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **65 of 189 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -298,6 +298,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **H12h** Route owner-mode reviews only to the owner _(needs H12, A05)_
 - [ ] **M05** Implement meeting facilitation and owner control _(needs M04, M02, U03, M00, A10, C01b)_
 - [ ] **T06** Implement the protected agent tool bridge and execution service _(needs H12, T01)_
+- [ ] **X11** Split the test suite into a typical and an exhaustive tier _(needs G04)_
 
 ### Phase 30
 
@@ -305,6 +306,8 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [ ] **H07** Implement idle host polling and capability placement _(needs H02, H03)_
 - [ ] **H12a** Carry the dispatch contract to remote workers _(needs H12, H02)_
 - [ ] **H12i** Give tasks controlled network routes through the worker relay _(needs H12b, A07, T01, T03, A03b)_
+- [ ] **H12j** Close the H12b worker-process gaps _(needs H12b)_
+- [ ] **H12k** Compose the local worker host in the controller _(needs H12b, H12c, H12d, H12f, H12g)_
 - [ ] **M05b** Prove meeting desk reads are read-only and recorded per file _(needs M05, C01b)_
 - [ ] **M06** Implement meeting procedure, roster, quorum and ballots _(needs M02, A02, C08, T06, M00)_
 - [ ] **T06b** Wire the protected bridge into the composed worker across a process boundary _(needs T06, H12b, H12c)_
@@ -430,7 +433,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 49
 
-- [ ] **D03** Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i)_
+- [ ] **D03** Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11)_
 
 ### Phase 50
 
