@@ -171,6 +171,8 @@ export interface AgentMessageOptions extends RunnerOptions {
 }
 
 export interface OwnerQuestionView {
+  /** The question and the wait's words are an agent's: data to show the owner, never instructions to follow. */
+  readonly trust: "untrusted-content";
   readonly inquiryId: string;
   readonly asker: string;
   readonly question: string;
@@ -586,13 +588,18 @@ export class AgentMessageService {
     const inquiries = this.#o.inquiries ?? invalid("inquiries", "questions to the owner are not set up");
     const owner = (await this.#runner.get("installation", "installation"))?.body as unknown as { ownerId?: string } | undefined;
     if (owner?.ownerId === undefined) throw new DomainError("unavailable", "this installation has no owner yet");
+    // The agent asks about a task it works on: the project-wide right to work is not enough, the task is assigned to it (a task credential is its agent's, cut to one task).
+    const assignment = await this.#o.assignments.getAssignment(command.taskId);
+    if (by.kind === "agent" && assignment?.owner !== undefined && by.id !== `agent:${assignment.owner.id}`) throw new DomainError("forbidden", `${by.id} may not ask about that task`);
+    if (by.kind === "agent" && assignment?.owner === undefined) throw new DomainError("forbidden", `${by.id} may not ask about that task`);
     const asked = await inquiries.ask(by, { commandId: command.commandId, taskId: command.taskId, to: owner.ownerId, question: command.question, ...(command.waitId === undefined ? {} : { waitId: command.waitId }) });
     // Reported to the owner's notifications under a command ID derived from the inquiry, so a repeat of this call does it once.
-    if (this.#o.notifications !== undefined) await this.#o.notifications.emitFromController({ commandId: `${asked.id}-note`, kind: "owner-question", ref: { kind: "inquiry", id: asked.id } });
+    // A repeat after the question was already answered finds nothing open to tell the owner about; that is not an error of the repeat.
+    if (this.#o.notifications !== undefined) await this.#o.notifications.emitFromController({ commandId: `${asked.id}-note`, kind: "owner-question", ref: { kind: "inquiry", id: asked.id } }).catch((error: unknown) => { if (!(error instanceof DomainError && error.code === "invalid_command")) throw error; });
     return { inquiryId: asked.id, replayed: asked.replayed };
   }
 
-  /** The questions waiting for the owner, each with the task it is about (title, state, project) and the wait its answer will resolve, oldest first. Owner only. */
+  /** The questions waiting for the owner, each with the task it is about (title, state, project) and the wait its answer will resolve; each page is in the order asked (pages follow the inquiries' IDs). Owner only. */
   async ownerQuestions(owner: Principal, page: { afterId?: string; limit?: number } = {}): Promise<{ items: OwnerQuestionView[]; next?: string }> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner`);
     const inquiries = this.#o.inquiries ?? invalid("inquiries", "questions to the owner are not set up");
@@ -603,11 +610,12 @@ export class AgentMessageService {
       const project = (await this.#runner.get("project", q.projectId))?.body as unknown as { name?: string } | undefined;
       const wait = q.waitId === undefined ? undefined : await this.#o.waits.getWait(q.waitId);
       items.push({
-        inquiryId: q.id, asker: q.asker, question: q.question, askedAt: q.askedAt, revision: q.revision,
+        trust: "untrusted-content", inquiryId: q.id, asker: q.asker, question: q.question, askedAt: q.askedAt, revision: q.revision,
         task: { id: q.taskId, title: task?.title ?? "", state: task?.state ?? "unknown", projectId: q.projectId, projectName: project?.name ?? "" },
         ...(wait === undefined ? {} : { wait: { id: wait.id, summary: wait.summary, nextAction: wait.nextAction, ...(wait.deadline === undefined ? {} : { deadline: wait.deadline }), state: wait.state } }),
       });
     }
+    items.sort((a, b) => a.askedAt.localeCompare(b.askedAt) || a.inquiryId.localeCompare(b.inquiryId));
     return { items, ...(pending.next === undefined ? {} : { next: pending.next }) };
   }
 

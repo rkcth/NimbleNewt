@@ -229,7 +229,7 @@ Result: `{ items, next?, scanLimited? }` (see `events.failures` for `scanLimited
 
 #### `owner.questions`
 
-The questions agents have put to the owner, oldest first, each with the task it is about (title, state, project) and the wait its answer will resolve. Owner only.
+The questions agents have put to the owner (each page in the order asked), each with the task it is about (title, state, project) and the wait its answer will resolve. Owner only.
 
 Arguments:
 

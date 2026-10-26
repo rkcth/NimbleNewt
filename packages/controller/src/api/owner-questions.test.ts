@@ -26,6 +26,12 @@ test("an agent's question to the owner appears in the owner's list with its task
     for (const action of ["attempt.work", "history.append", "history.read"]) await s.grants.grant(owner, { commandId: `g-${action}`, grantee: `agent:${agent}`, action, project, source: "direct", basis: "test" }).catch(() => undefined);
     const call = (t: string, op: string, args: Record<string, unknown> = {}, commandId?: string) => c.api.handle(t, { v: API_VERSION, op, args, ...(commandId === undefined ? {} : { commandId }) });
 
+    // An agent that is not the task's assignee may not ask about it, even in the same project.
+    const idle = (await s.agents.create(owner, { commandId: "ag2", friendlyName: "Bob" })).id;
+    const idleToken = (await s.principals.issueCredential(owner, `agent:${idle}`)).token;
+    for (const action of ["attempt.work", "history.append", "history.read"]) await s.grants.grant(owner, { commandId: `g2-${action}`, grantee: `agent:${idle}`, action, project, source: "direct", basis: "test" });
+    const notMine = await call(idleToken, "owner.ask", { taskId: task, question: "Can I ask?" }, "q0");
+    assert.ok(!notMine.ok && notMine.error.code === "forbidden", JSON.stringify(notMine));
     const asked = await call(token, "owner.ask", { taskId: task, question: "Which seed supplier should I use?" }, "q1");
     assert.ok(asked.ok, JSON.stringify(asked));
     const id = (asked as unknown as { result: { id: string } }).result.id;
@@ -35,6 +41,7 @@ test("an agent's question to the owner appears in the owner's list with its task
     const shown = await call(boot.token, "owner.questions");
     assert.ok(shown.ok, JSON.stringify(shown));
     const items = (shown as unknown as { result: { items: { inquiryId: string; question: string; task: { title: string; projectName: string } }[] } }).result.items;
+    assert.equal((items[0] as { trust?: string }).trust, "untrusted-content");
     assert.deepEqual(items.map((i) => [i.inquiryId, i.question, i.task.title, i.task.projectName]), [[id, "Which seed supplier should I use?", "Order seeds", "Garden"]]);
     // Nobody else sees the owner's questions or answers them.
     const peek = await call(token, "owner.questions");
