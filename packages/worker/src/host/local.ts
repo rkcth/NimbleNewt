@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { BridgeReplyMessage, ChannelModel, JsonValue } from "@nimblenewt/contracts";
+import type { BridgeReplyMessage, ChannelContext, ChannelModel, JsonValue } from "@nimblenewt/contracts";
 import { attemptSandbox, type AttemptSandboxPlan } from "../sandbox/attempt.js";
 import type { SandboxLauncher } from "../sandbox/launcher.js";
 import type { ResourceLimits } from "../sandbox/limits.js";
@@ -93,6 +93,8 @@ export interface LocalHostOptions<Call> {
   readonly relay: (order: HostOrder, request: RelayRequest) => Promise<RelayResponse>;
   /** The cache key and retention for the attempt's route, and the figures since the last look (reported with each turn). */
   readonly cache?: (order: HostOrder) => Promise<{ readonly key?: string; readonly retention?: "none" | "short" | "long"; takeUsage?(): Promise<CacheFigures | undefined> }> | { readonly key?: string; readonly retention?: "none" | "short" | "long"; takeUsage?(): Promise<CacheFigures | undefined> };
+  /** The context limits for the process (card C07b): stream timeout and retries, tool output limits, and how a compaction is done when the model has no room. */
+  readonly context?: (order: HostOrder) => ChannelContext | undefined;
   /** What to put before the agent after the owner's decisions changed. */
   readonly refreshText?: (order: HostOrder) => Promise<string> | string;
   /** Whether a limit the host cannot enforce in full refuses the launch (default true, as for scripts). */
@@ -167,6 +169,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
         await process.start({
           attemptId: order.attemptId, agentId: order.agentId, namespaceId: options.namespaceId(order), credential: order.credential,
           storeDir: `${GUEST.home}/pi`, model, relayBase: options.relayBase ?? RELAY_BASE,
+          ...(options.context?.(order) === undefined ? {} : { context: options.context(order)! }),
           ...(cache === undefined || (cache.key === undefined && cache.retention === undefined) ? {} : { cache: { ...(cache.key === undefined ? {} : { key: cache.key }), ...(cache.retention === undefined ? {} : { retention: cache.retention }) } }),
         }, PROCESS_LIMITS.readyMs);
       } catch (error) {

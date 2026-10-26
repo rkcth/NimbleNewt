@@ -31,6 +31,21 @@ export interface ChannelModel {
 }
 
 /** What the host tells the process when it starts. The credential is the task's own, shown to the process once and never anything else of the controller's. */
+/** Context limits the host sets for the process (card C07b); each absent field leaves Pi's own default. */
+export interface ChannelContext {
+  /** The model stream's timeout, and the provider SDK's retries inside one request. */
+  readonly streamTimeoutMs?: number;
+  readonly streamMaxRetries?: number;
+  /** The most one tool result may hold before it is cut (Pi's output limits). */
+  readonly toolOutputBytes?: number;
+  readonly toolOutputLines?: number;
+  /**
+   * Compaction through Pi's `beforeCompact` hook: `timeoutMs` is the hook's own short ceiling; `extractive` makes the process write the summary itself (the start and the end of what is replaced, cut to a bound) instead of asking the model that is already
+   * out of room. Without `extractive` Pi's own summariser runs.
+   */
+  readonly compaction?: { readonly timeoutMs?: number; readonly fallback?: "extractive" };
+}
+
 export interface ChannelStart {
   readonly attemptId: string;
   readonly agentId: string;
@@ -44,6 +59,7 @@ export interface ChannelStart {
   readonly cache?: { readonly key?: string; readonly retention?: "none" | "short" | "long" };
   /** The address the process uses for model calls. Calls to anything else fail: the sandbox has no network. */
   readonly relayBase: string;
+  readonly context?: ChannelContext;
 }
 
 export type BridgeReplyMessage = { readonly ok: true; readonly result: Obj } | { readonly ok: false; readonly code: string; readonly message: string };
@@ -103,11 +119,30 @@ function parseStart(o: Obj): ChannelStart {
   const retention = c === undefined ? undefined : optStr(c, "retention", 10);
   if (retention !== undefined && retention !== "none" && retention !== "short" && retention !== "long") fail("cache.retention: none, short or long");
   const key = c === undefined ? undefined : optStr(c, "key", 200);
+  const context = o["context"] === undefined ? undefined : parseContext(obj(o, "context"));
   return {
     attemptId: str(o, "attemptId", 200), agentId: str(o, "agentId", 200), namespaceId: /^[a-z0-9]{6,32}$/.test(str(o, "namespaceId", 40)) ? (o["namespaceId"] as string) : fail("namespaceId: 6 to 32 lower-case letters or digits"), credential: str(o, "credential", 4096),
     storeDir: str(o, "storeDir", 1000), model,
     ...(c === undefined ? {} : { cache: { ...(key === undefined ? {} : { key }), ...(retention === undefined ? {} : { retention: retention as "none" | "short" | "long" }) } }),
     relayBase: str(o, "relayBase", 500),
+    ...(context === undefined ? {} : { context }),
+  };
+}
+
+const bounded = (o: Obj, k: string, min: number, max: number): number | undefined => {
+  if (o[k] === undefined) return undefined;
+  const v = int(o, k);
+  return v >= min && v <= max ? v : fail(`${k}: must be between ${min} and ${max}`);
+};
+function parseContext(o: Obj): ChannelContext {
+  const compaction = o["compaction"] === undefined ? undefined : obj(o, "compaction");
+  const timeoutMs = compaction === undefined ? undefined : bounded(compaction, "timeoutMs", 1000, 600_000);
+  const fallback = compaction === undefined ? undefined : optStr(compaction, "fallback", 20);
+  if (fallback !== undefined && fallback !== "extractive") fail("compaction.fallback: extractive");
+  const out = { streamTimeoutMs: bounded(o, "streamTimeoutMs", 1000, 3_600_000), streamMaxRetries: bounded(o, "streamMaxRetries", 0, 10), toolOutputBytes: bounded(o, "toolOutputBytes", 1000, 10_000_000), toolOutputLines: bounded(o, "toolOutputLines", 10, 100_000) };
+  return {
+    ...Object.fromEntries(Object.entries(out).filter(([, v]) => v !== undefined)),
+    ...(compaction === undefined ? {} : { compaction: { ...(timeoutMs === undefined ? {} : { timeoutMs }), ...(fallback === undefined ? {} : { fallback: "extractive" as const }) } }),
   };
 }
 

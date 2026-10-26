@@ -126,8 +126,9 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   ];
   // The local worker host gets its guards here, bound to the services built above (card H12k); the dispatcher then has it among its workers.
   const workers: WorkerHost[] = [...(i.options.workers ?? [])];
+  // Context enforcement (card C07b): the worker host's first-call checks, and the dispatcher's overflow count and hand-off when an attempt ends.
+  const context = ContextEnforcementService.withEpoch(storage, epoch, { blockers, retrieval: i.retrieval }, ro);
   if (i.options.local !== undefined) {
-    const context = ContextEnforcementService.withEpoch(storage, epoch, { blockers, retrieval: i.retrieval }, ro);
     const guards = controllerGuards({
       context, pause: pauses, messages, system: principal,
       agent: (order) => i.taskCredentials.authenticate(order.credential),
@@ -139,8 +140,8 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   }
   const dispatcher = DispatcherService.withEpoch(storage, epoch, {
     principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, hosts, workers,  contracts: i.contracts, harnesses: i.catalog, policy, effects, blockers, route,
-    routing: i.routing, pauses, decisions, generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops,
-  }, { ...ro, holder: "dispatcher", ...(i.options.dispatcher ?? {}) });
+    routing: i.routing, pauses, decisions, generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
+  }, { ...ro, holder: "dispatcher", ...(i.onError === undefined ? {} : { onError: i.onError }), ...(i.options.dispatcher ?? {}) });
   const driver = new DispatchDriver({
     dispatcher, storage, epoch, record: { storage, options: ro },
     ...(i.options.intervalMs === undefined ? {} : { intervalMs: i.options.intervalMs }), ...(i.options.timer === undefined ? {} : { timer: i.options.timer }), ...(i.options.clock === undefined ? {} : { clock: i.options.clock }),

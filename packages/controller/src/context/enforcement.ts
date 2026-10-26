@@ -488,6 +488,9 @@ export class ContextEnforcementService {
     const taskId = checkTaskId(command.taskId); const attemptId = key("attemptId", command.attemptId);
     await this.#dispatch(principal, taskId);
     const ref: AggregateRef = { kind: "ctx-overflow", id: derivedId("ctx", `${taskId}\0overflow`) };
+    // Nothing counted, nothing to start again (a command with no change reports no revision).
+    const counted = (await this.#runner.get(ref.kind, ref.id))?.body as unknown as OverflowBody | undefined;
+    if (counted === undefined || counted.count === 0) return;
     await this.#runner.command("context.overflow.reset", { commandId: `ctx-rst-${derivedId("ctx", `${taskId}\0${attemptId}\0rst`).slice(4)}`, actor: principal.id }, async () => ({
       payload: { taskId, attemptId },
       build: async () => {

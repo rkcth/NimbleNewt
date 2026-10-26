@@ -4,6 +4,7 @@ import { openNodeJsonlStorage } from "@earendil-works/pi-durable/storage/jsonl/n
 import type { Storage } from "@earendil-works/pi-durable";
 import { ChannelError, LineDecoder, WORKER_CHANNEL_VERSION, encodeMessage, parseToChild, requestId, type ChannelStart, type FromChild, type ToChild } from "@nimblenewt/contracts";
 import { PiAdapter } from "../adapter.js";
+import type { AdapterContextPolicy } from "../context-policy.js";
 import { boundTransport, composeTools, createBridge, type Bridge, type BridgeReply } from "../bridge.js";
 import { volatileContext } from "../prompt-layout.js";
 import { relayFetch } from "./relay-fetch.js";
@@ -48,6 +49,39 @@ async function relayModels(start: ChannelStart): Promise<Models> {
   return models;
 }
 
+/** The longest extract the process keeps of a conversation it must compact without asking the model. */
+const EXTRACT_CHARS = 6000;
+
+/**
+ * Pi's context settings for what the host asked (card C07b). The extractive summary is the fallback for a model that has no room left to summarise: the start of what is replaced (the task and the first decisions) and its end (where the work
+ * stands), cut to a bound, and it says plainly that it is an extract. It cannot hang, so the hook's ceiling is only a second guard.
+ */
+export function contextPolicyOf(context: ChannelStart["context"]): AdapterContextPolicy | undefined {
+  if (context === undefined) return undefined;
+  const extractive = context.compaction?.fallback === "extractive";
+  return {
+    ...(context.streamTimeoutMs === undefined ? {} : { streamTimeoutMs: context.streamTimeoutMs }),
+    ...(context.streamMaxRetries === undefined ? {} : { streamMaxRetries: context.streamMaxRetries }),
+    ...(context.toolOutputBytes === undefined ? {} : { toolOutputBytes: context.toolOutputBytes }),
+    ...(context.toolOutputLines === undefined ? {} : { toolOutputLines: context.toolOutputLines }),
+    ...(context.compaction?.timeoutMs === undefined ? {} : { beforeCompactTimeoutMs: context.compaction.timeoutMs }),
+    ...(extractive ? {
+      beforeCompact: async (request) => {
+        const text = request.text;
+        const head = Math.floor(EXTRACT_CHARS / 3);
+        // A cut never falls inside a surrogate pair (the summary is stored as text and a lone half would be refused).
+        const isLow = (at: number): boolean => { const c = text.charCodeAt(at); return c >= 0xdc00 && c <= 0xdfff; };
+        const headEnd = head > 0 && isLow(head) ? head - 1 : head;
+        let tailStart = text.length - (EXTRACT_CHARS - head);
+        if (tailStart < text.length && isLow(tailStart)) tailStart += 1;
+        const body = text.length <= EXTRACT_CHARS ? text : `${text.slice(0, headEnd)}\n[… ${tailStart - headEnd} characters left out …]\n${text.slice(tailStart)}`;
+        return { summary: `Extract of ${request.messageCount} earlier messages (the model was not asked to summarise them; read the task's decisions and hand-off again for anything that is not here):\n${body}` };
+      },
+      onHookFailure: (error: unknown) => { console.error(`compaction hook failed: ${String((error as Error)?.message ?? error).slice(0, 300)}`); },
+    } : {}),
+  };
+}
+
 /** A rough size of the stored conversation in tokens (three characters to a token, the budget's own estimate), for the resume decision. */
 async function contextTokens(adapter: PiAdapter): Promise<number | undefined> {
   // Not known is not zero: the host then has no size to judge and says so.
@@ -86,9 +120,10 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
     bridge = createBridge(transport);
     const tools = composeTools(bridge, [], start.namespaceId);
     toolSchemaChars = JSON.stringify(tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }))).length;
+    const contextPolicy = contextPolicyOf(start.context);
     adapter = await PiAdapter.open({
       storage, models, model: { provider: start.model.provider, modelId: start.model.modelId },
-      tools, ...(cache === undefined ? {} : { cache }),
+      tools, ...(cache === undefined ? {} : { cache }), ...(contextPolicy === undefined ? {} : { contextPolicy }),
     });
     // A conversation resumed from the store already used some provider call IDs; the bridge goes on numbering after them.
     try { bridge.seed((await adapter.root().transcript()).flatMap((e) => e.toolCallIds)); } catch { /* a new conversation has none */ }

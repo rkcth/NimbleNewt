@@ -3,7 +3,7 @@ import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { MemoryStorage } from "@earendil-works/pi-durable";
-import { LineDecoder, encodeMessage, parseFromChild, type ChannelStart, type FromChild, type ToChild } from "@nimblenewt/contracts";
+import { LineDecoder, encodeMessage, parseFromChild, parseToChild, type ChannelStart, type FromChild, type ToChild } from "@nimblenewt/contracts";
 import { createOfflineModels } from "../testing/offline.js";
 import { runWorker, type WorkerHooks } from "./process.js";
 
@@ -180,4 +180,28 @@ test("a provider call ID that repeats is sent to the controller under a new one,
   assert.equal((await h.next("result")).status, "completed");
   h.send({ t: "close" });
   await h.done;
+});
+
+test("the host's context limits reach Pi's policy; the extractive fallback never asks the model, is bounded, and says it is an extract; bad limits are refused on the channel", async () => {
+  const { contextPolicyOf } = await import("./process.js");
+  assert.equal(contextPolicyOf(undefined), undefined);
+  const policy = contextPolicyOf({ streamTimeoutMs: 60_000, streamMaxRetries: 1, toolOutputBytes: 20_000, toolOutputLines: 500, compaction: { timeoutMs: 5000, fallback: "extractive" } })!;
+  assert.deepEqual([policy.streamTimeoutMs, policy.streamMaxRetries, policy.toolOutputBytes, policy.toolOutputLines, policy.beforeCompactTimeoutMs], [60_000, 1, 20_000, 500, 5000]);
+  const text = `START-OF-TASK ${"x".repeat(50_000)} END-WHERE-WE-STAND`;
+  const decision = await policy.beforeCompact!({ key: "k", reason: "overflow", text, messageCount: 40, signal: new AbortController().signal });
+  const summary = (decision as { summary: string }).summary;
+  assert.ok(summary.length < 7000, `bounded (${summary.length})`);
+  assert.match(summary, /START-OF-TASK/); assert.match(summary, /END-WHERE-WE-STAND/); assert.match(summary, /Extract of 40 earlier messages/); assert.match(summary, /characters left out/);
+  // No cut falls inside a surrogate pair, wherever the bound lands.
+  for (const pad of [0, 1]) {
+    const emoji = `${"a".repeat(pad)}${"😀".repeat(5000)}`;
+    const s2 = ((await policy.beforeCompact!({ key: "k", reason: "overflow", text: emoji, messageCount: 2, signal: new AbortController().signal })) as { summary: string }).summary;
+    assert.equal(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(s2), false, "a lone surrogate half");
+  }
+  // Without the fallback Pi's own summariser runs (no hook).
+  assert.equal(contextPolicyOf({ compaction: { timeoutMs: 5000 } })!.beforeCompact, undefined);
+  // On the channel.
+  const line = (context: unknown): string => JSON.stringify({ t: "start", v: 1, start: { ...start, context } });
+  assert.deepEqual(parseToChild(JSON.parse(line({ streamTimeoutMs: 60_000, compaction: { fallback: "extractive" } }))) !== undefined, true);
+  for (const bad of [{ streamTimeoutMs: 5 }, { streamMaxRetries: 99 }, { toolOutputBytes: -1 }, { compaction: { fallback: "model" } }, { compaction: { timeoutMs: 1 } }]) assert.throws(() => parseToChild(JSON.parse(line(bad))), /./, JSON.stringify(bad));
 });

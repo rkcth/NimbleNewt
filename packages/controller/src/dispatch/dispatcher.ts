@@ -18,6 +18,8 @@ import type { HarnessCatalog } from "../harness/index.js";
 import type { HostService } from "../hosts/index.js";
 import type { PauseGuard } from "../lifecycle/index.js";
 import type { McpService } from "../mcp/index.js";
+import type { ContextEnforcementService } from "../context/index.js";
+import type { HandoffFacts } from "../context/budget.js";
 import type { AttendanceService } from "../meetings/index.js";
 import type { NotificationService } from "../notifications/index.js";
 import type { ContractService } from "../planning/index.js";
@@ -85,6 +87,12 @@ export interface DispatcherDeps {
   readonly environments?: Pick<EnvironmentService, "pin">;
   readonly meetings?: Pick<AttendanceService, "admission" | "revalidation">;
   readonly notifications?: Pick<NotificationService, "emitFromController">;
+  /**
+   * Context enforcement (card C07b) at the end of an attempt: an attempt that failed for want of context is counted (repeated overflow opens a visible blocker), and an attempt that ended without a hand-off gets
+   * one written by the controller from `handoffFacts` (default: the task's title, how the attempt ended and the last checkpoint position).
+   */
+  readonly context?: Pick<ContextEnforcementService, "ensureHandoff" | "reportOverflow" | "resetOverflow">;
+  readonly handoffFacts?: (info: { taskId: string; attemptId: string; endedBecause: string }) => Promise<Omit<HandoffFacts, "endedBecause">>;
   /** Called when a checkpoint is taken for an attempt (the composer connects C04's `ContinuationService.capture` here). */
   readonly checkpoints?: (info: { attemptId: string; taskId: string; agentId: string; reason: string; checkpoint: JsonObject }) => Promise<void>;
   /**
@@ -99,6 +107,8 @@ export interface DispatcherDeps {
 export interface AttemptDispatcherOptions extends RunnerOptions {
   /** Names this dispatcher in the lease. */
   readonly holder?: string;
+  /** Told of a failure in bookkeeping that must not stop an attempt from ending (the context hand-off). */
+  readonly onError?: (error: unknown) => void;
   /** A worker that does not beat within this time is taken as lost. Default one minute. */
   readonly leaseMs?: number;
   /** How long an attempt may run (shortened by the contract's `maxMinutes`). Default four hours. */
@@ -931,7 +941,9 @@ export class DispatcherService {
     // Two paths can end the same attempt at once (the worker's result and the lease scan): the second joins the first, whose outcome stands. Its own would reuse the first's command IDs with a different summary.
     const already = this.#endingBy.get(attemptId);
     if (already !== undefined) return already;
-    const ending = this.#endInner(attemptId, outcome, summary, options);
+    // The reason may be a worker's or a model's error text, which the records refuse if it holds control characters or half a character: an attempt must always be able to end.
+    const clean = Array.from(summary.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ").replace(/[\ud800-\udfff]/g, "?")).slice(0, 1000).join("").trim();
+    const ending = this.#endInner(attemptId, outcome, clean === "" ? `the attempt ${outcome}` : clean, options);
     this.#ending.add(ending);
     this.#endingBy.set(attemptId, ending);
     try { return await ending; } finally { this.#ending.delete(ending); if (this.#endingBy.get(attemptId) === ending) this.#endingBy.delete(attemptId); }
@@ -947,12 +959,15 @@ export class DispatcherService {
     const b = (await this.#load(attemptId))!.body;
     const assignment = await this.#deps.assignments.getAssignment(b.taskId);
     // The attempt is finished in the assignment only if it is still the active one; a superseded attempt was ended by whoever transferred the task.
-    if (assignment !== undefined && assignment.state === "assigned" && assignment.generation === b.generation && assignment.activeAttemptId === attemptId) {
+    const active = assignment !== undefined && assignment.state === "assigned" && assignment.generation === b.generation && assignment.activeAttemptId === attemptId;
+    if (assignment !== undefined && active) {
       await this.#deps.assignments.finishAttempt({ commandId: `dpa-fin:${attemptId}`, actor: DISPATCHER_ACTOR, taskId: b.taskId, expectedRevision: assignment.revision, fence: { generation: b.generation, attemptId }, outcome, summary: summary.slice(0, 500) }).catch((error: unknown) => { // command_conflict: another path ending the same attempt (the lease scan and a stop) got there first with its own summary; the assignment is finished either way.
       if (!isDomainError(error, "fenced") && !isDomainError(error, "stale_revision") && !isDomainError(error, "invalid_command") && !isDomainError(error, "command_conflict")) throw error; });
     }
     if (b.requestId !== undefined) await this.#deps.admission.release({ commandId: `dpa-end-rel:${attemptId}`, actor: DISPATCHER_ACTOR, requestId: b.requestId, reason: summary.slice(0, 280) }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
     await this.#deps.credentials.endForAttempt(this.#deps.principal, { commandId: `dpa-end-cred:${attemptId}`, attemptId, reason: summary.slice(0, 280) }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
+    // Before the attempt is marked finished, so a crash in between leaves the end to be done again (every command here is derived from the task and the attempt). A superseded attempt does not count against the task or take the hand-off head.
+    if (active) await this.#contextAtEnd(b, outcome, summary);
     await this.#update(attemptId, (x) => ({ ...x, state: "finished", inFlight: [], parked: [], outcome: { status: outcome, summary: summary.slice(0, 500), at: this.#runner.now() } }), () => this.#liveChange(attemptId, false));
     this.#live.delete(attemptId);
     this.#usageSeq.delete(attemptId);
@@ -961,6 +976,28 @@ export class DispatcherService {
       await this.#deps.notifications?.emitFromController({ commandId: `dpa-ntf:${opened.id}`, kind: "blocker", ref: { kind: "blocker", id: opened.id }, projectId: b.projectId }).catch(() => undefined);
     }
     return options.readmit ? this.#readmit(b) : {};
+  }
+
+  /** The context bookkeeping of an ended attempt (card C07b). It never keeps the attempt from ending: a failure here is reported and the end goes on. */
+  async #contextAtEnd(b: DispatchBody, outcome: "succeeded" | "failed" | "abandoned", summary: string): Promise<void> {
+    const context = this.#deps.context;
+    if (context === undefined) return;
+    // The reason comes from the worker or the model: control characters become spaces, the cut is on whole characters, and a blank one gets a plain sentence (the context service refuses text it cannot store).
+    const clip = (n: number): string => { const t = Array.from(summary.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ").replace(/[\ud800-\udfff]/g, "?")).slice(0, n).join("").trim(); return t === "" ? `the attempt ${outcome}` : t; };
+    const guarded = async (step: () => Promise<unknown>): Promise<void> => { try { await step(); } catch (error) { this.#options.onError?.(error); } };
+    // An attempt that ran within budget starts the count again; one that failed for want of context is counted. Each step stands on its own: a refusal of one must not skip the hand-off.
+    if (outcome === "succeeded") await guarded(() => context.resetOverflow(this.#deps.principal, { taskId: b.taskId, attemptId: b.attemptId }));
+    if (outcome === "failed") await guarded(() => context.reportOverflow(this.#deps.principal, { taskId: b.taskId, attemptId: b.attemptId, failure: clip(500) }));
+    const ended = clip(280);
+    await guarded(async () => {
+      const facts = async (taskId: string, attemptId: string): Promise<HandoffFacts> => {
+        const given = await this.#deps.handoffFacts?.({ taskId, attemptId, endedBecause: ended });
+        if (given !== undefined) return { ...given, endedBecause: ended };
+        const task = await this.#deps.projects.getTask(taskId);
+        return { task: task?.title ?? taskId, endedBecause: ended, effects: [], artifacts: [], lastKnownState: `the attempt ${outcome}` };
+      };
+      await context.ensureHandoff(this.#deps.principal, { taskId: b.taskId, attemptId: b.attemptId, endedBecause: ended }, facts);
+    });
   }
 
   /** After a lost attempt the dispatcher admits the next one itself, up to the attempts the contract (or the dispatcher's own limit) allows; beyond that a blocker names the owner. */
