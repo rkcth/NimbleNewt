@@ -658,6 +658,7 @@ for (const backend of backends) {
     assert.match(long, /Warning: this output contains phrases/);
     assert.match(long, /Output cut/);
     assert.ok(long.length < 21_000, "the answer is bounded");
+    assert.match(long, /\[End of MCP output\]$/);
     const ops = await c.ops(attemptId!);
     const one = ops.find((o) => o.callId === "m1")!;
     assert.deepEqual([one.tool.kind, one.tool.server?.id, one.tool.server?.protocolRevision, one.tool.server?.catalogRevision, one.tool.version], ["mcp", server, "2025-06-18", 1, "0.4.2"]);

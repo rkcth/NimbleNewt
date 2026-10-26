@@ -176,7 +176,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       const window = windowOf(order);
       if (window === undefined) return undefined;
       const budget = context.budget(window);
-      return { toolOutputBytes: budget.toolOutputChars, compaction: { fallback: "extractive" } };
+      return { toolOutputBytes: Math.min(Math.floor(budget.toolOutputChars), 10_000_000), compaction: { fallback: "extractive" } };
     };
     workers.push(await i.options.local.build({ guards, context: contextFor, ...(cache === undefined ? {} : { cache }) }));
   }

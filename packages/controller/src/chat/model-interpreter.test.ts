@@ -20,7 +20,7 @@ test("a route that fails or rambles falls back to the next; all failing makes th
   const tried: string[] = [];
   const answers: Record<string, () => Promise<string>> = {
     "a/down": async () => { throw new Error("503"); },
-    "b/rambles": async () => "I think you want to move a task.",
+    "b/rambles": async () => "I think [the] task is: [broken",
     "c/invalid": async () => JSON.stringify([{ kind: "command", op: "task.transition" }]),
     "d/ok": async () => good,
   };
@@ -30,4 +30,11 @@ test("a route that fails or rambles falls back to the next; all failing makes th
   const none = new ModelInterpreter({ complete: async () => { throw new Error("down"); } }, () => ["a/down", "b/down"]);
   await assert.rejects(none.interpret(input), /no route gave a usable answer/);
   await assert.rejects(new ModelInterpreter({ complete: async () => good }, () => []).interpret(input), /no model route/);
+});
+
+test("a reply with no list at all is read as no intents, not as a reason to ask a weaker route", async () => {
+  const tried: string[] = [];
+  const m = new ModelInterpreter({ complete: async (route) => { tried.push(route); return "I will not do that."; } }, () => ["a/strong", "b/weak"]);
+  assert.deepEqual(await m.interpret(input), [{ kind: "none", reason: "the model gave no intents" }]);
+  assert.deepEqual(tried, ["a/strong"]);
 });

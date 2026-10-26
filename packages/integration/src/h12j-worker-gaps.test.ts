@@ -119,7 +119,7 @@ describe("the worker process is reaped however the attempt ends, and never holds
   test("the context limits the controller computes for the order reach the real worker process in its start message", async (t) => {
     const model = await endpoint([{ text: "done" }]);
     const seen: number[] = [];
-    // The same function the composer hands to `local.build`: tool output limited to the window's share, extractive compaction when there is no room.
+    // A limits function of the shape the composer hands to `local.build` (its own computation is tested in start-dispatch.test.ts).
     const r = await rig(t, model, (order) => { seen.push(order.generation); return { toolOutputBytes: 6000, compaction: { fallback: "extractive" } }; });
     if (r === undefined) { model.server.close(); return; }
     try {
