@@ -318,6 +318,19 @@ for (const backend of backends) {
     const kept = (await c.read(lk)).output.tail;
     for (const gone of ["!ef%gh", "MIIEabc", "SECONDLINEOFKEY"]) assert.equal(kept.includes(gone), false, gone);
     assert.ok(kept.includes("after"), "output after the key block is kept");
+    // A header split over two reports, a certificate after a key, the private mark typed by the process itself, and a block that never ends.
+    const sp = await c.admit(c.t1, { kind: "tool" });
+    await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: sp, state: "dispatched" });
+    for (const piece of ["x -----BEGIN RSA PRIV", "ATE KEY-----\nAAAA", "\nLEAK2\n-----END RSA PRIVATE KEY-----\n", "-----BEGIN PRIVATE KEY-----\nBBBB\n-----BEGIN CERTIFICATE-----\nCCCC", "\nLEAK3 \u0001key\u0001key-open-open\n-----END PRIVATE KEY-----\nvisible"]) await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: sp, output: piece });
+    const spTail = (await c.read(sp)).output.tail;
+    for (const gone of ["AAAA", "LEAK2", "BBBB", "CCCC", "LEAK3", "\u0001"]) assert.equal(spTail.includes(gone), false, gone);
+    assert.ok(spTail.includes("visible"));
+    const endless = await c.admit(c.t1, { kind: "tool" });
+    await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: endless, state: "dispatched" });
+    await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: endless, output: "-----BEGIN PRIVATE KEY-----\n" + "k".repeat(1000) });
+    for (let i = 0; i < 17; i++) await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: endless, output: "k".repeat(1000) });
+    await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: endless, output: "\nlater output" });
+    assert.ok((await c.read(endless)).output.tail.includes("later output"), "an unended block silences the job for a bounded stretch only");
     await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: id, output: "a".repeat(JOB_LIMITS.tail - 1) + "\u{1F600}" });
     const cut = (await c.read(id)).output.tail;
     assert.equal(cut.length <= JOB_LIMITS.tail, true);
