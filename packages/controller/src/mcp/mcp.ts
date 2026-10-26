@@ -215,6 +215,12 @@ export class McpService {
     return { url: server.remote.url, name: server.name };
   }
 
+  /** Whether a server is approved and not revoked, for a caller that starts a long-running operation on it (card T07). */
+  async usable(serverId: string): Promise<boolean> {
+    const server = (await this.#runner.get("mcp-server", clean(serverId, "serverId", SERVER_ID, "is not an MCP server ID")))?.body as unknown as ServerBody | undefined;
+    return server?.state === "approved";
+  }
+
   /** The owner withdraws a server: no further call is authorized. */
   async revoke(owner: Principal, command: NoActor & { serverId: string; expectedRevision: number }): Promise<void> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner`);

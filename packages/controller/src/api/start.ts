@@ -29,6 +29,7 @@ import { PolicyService } from "../policy/index.js";
 import { StatusService } from "../status/index.js";
 import { ChatService, CoordinatorService, type ChatInterpreter, type CoordinatorModel } from "../chat/index.js";
 import { ContextBranchService } from "../branches/index.js";
+import { JobService } from "../jobs/index.js";
 import { PauseService } from "../lifecycle/index.js";
 import { ReviewService } from "../review/index.js";
 import { RoutingService } from "../routing/index.js";
@@ -103,6 +104,7 @@ export interface Controller {
   readonly services: {
     readonly principals: PrincipalService; readonly taskCredentials: TaskCredentialService; readonly grants: GrantService; readonly projects: ProjectService; readonly assignments: AssignmentService;
     readonly waits: WaitService; readonly stall: StallService; readonly desks: DeskService; readonly histories: HistoryService; readonly retrieval: RetrievalService; readonly inquiries: InquiryService; readonly agents: AgentService; readonly harnesses: HarnessCatalog; readonly contracts: ContractService; readonly graph: WaitGraphService; readonly resources: ProjectResourceService; readonly plans: ProjectPlanService; readonly responsibilities: ResponsibilityService; readonly reviews: ReviewService; readonly conversations: ConversationService; readonly configuration: ConfigurationService; readonly routing: RoutingService; readonly pauses: PauseService; readonly branches: ContextBranchService;
+    readonly jobs: JobService;
   };
   /** The dispatcher and the driver of its loops, when `dispatch` was given and the dispatcher could be provisioned. */
   readonly dispatch?: DispatchHandle;
@@ -182,6 +184,8 @@ export async function startController(options: StartOptions): Promise<Controller
     const pauses = PauseService.withEpoch(storage, epoch, { waits }, options.availability === undefined ? {} : { otherAvailability: options.availability });
     // Suspected stalls: a task under a pause is assessed as paused, never as stalled (card L01).
     const stall = StallService.withEpoch(storage, epoch, assignments, waits, { isPaused: (taskId) => pauses.isPaused(taskId) });
+    // Durable job records (card T07): a permitted background job's result goes to the pause service; no MCP connection check is bound until an MCP client exists, so no MCP operation is admitted.
+    const jobs = JobService.withEpoch(storage, epoch, { pauses }, { background: (principal, request) => pauses.recordBackground(principal, request) });
     const reviews = ReviewService.withEpoch(storage, epoch, { availability: pauses.availability });
     const graph = WaitGraphService.withEpoch(storage, epoch, contracts, BlockerService.withEpoch(storage, epoch), { extraEdges: (projectId, tasks) => reviews.waitEdges(projectId, tasks) });
     // The routing table is refused unless the coordinator, the safety supervisor and every other role in it have a valid fallback list (card R04).
@@ -225,7 +229,7 @@ export async function startController(options: StartOptions): Promise<Controller
     }
     const transport = options.conversationTransport === undefined ? undefined : await ConversationTransport.listen({ ...options.conversationTransport, conversations, principals });
     return {
-      api, storage, epoch, check, filesystems, prerequisites, services: { principals, taskCredentials, grants, projects, assignments, waits, stall, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing, pauses, branches },
+      api, storage, epoch, check, filesystems, prerequisites, services: { principals, taskCredentials, grants, projects, assignments, waits, stall, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing, pauses, branches, jobs },
       ...(chat === undefined ? {} : { chat }), ...(coordinator === undefined ? {} : { coordinator }),
       ...(dispatch === undefined ? {} : { dispatch }), ...(dispatchProblem === undefined ? {} : { dispatchProblem }),
       ...(transport === undefined ? {} : { conversationUrl: transport.url }),

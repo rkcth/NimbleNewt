@@ -3676,6 +3676,25 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "T07b",
+      "parent": "N13",
+      "existing_issue": "AII-263",
+      "title": "Give agents job control through the tool bridge and bind jobs to the sandbox, the MCP client and the API",
+      "depends_on": [
+        "T07",
+        "T06b",
+        "H12g"
+      ],
+      "deliverable": "Split from T07 (2026-10-26): the job records, their states, stop operations, restart decisions and unknown-outcome reconciliation are built as a service; what is not built is the agent's way to use them and the production bindings. The bridge gains job tools (start a job, status, bounded output, cancel) with the call ID as the idempotency key, the sandbox launcher's process-tree stop and orphan report are bound to the stop confirmation, the MCP client uses the job records and the connection check (`McpService.usable`), and the state API reads jobs",
+      "acceptance_and_verification": "An agent starts a long-running job through the bridge and gets a durable handle; status, bounded output and cancel work from the handle after a worker or controller restart; a Stop or Force Stop through the real launcher ends the whole process tree and the orphans it could not end appear on the job record; a long-running MCP operation is a job and a revoked server admits no new one; the owner can read jobs, live jobs and unresolved outcomes through the API; every restart decision of T07 is reachable by the owner and a supervisor",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "T08",
       "parent": "N13",
       "existing_issue": "AII-263",
@@ -4581,6 +4600,7 @@
         "L01b",
         "V01b",
         "F04k",
+        "T07b",
         "H06c",
         "R05b",
         "R05c",

@@ -379,6 +379,11 @@ export class PauseService implements PauseGuard, PauseLookup {
   }
 
   /** Every gate on the task's chain (absent ones as they would be created, active), with the changes that lock the chain and the gates for the caller's commit. */
+  /** Whether a paused gate on the task's chain said `background: deny`: no background job is admitted for it and none records a result (card T07). */
+  async backgroundDenied(taskId: string): Promise<boolean> {
+    return (await this.#gates(checkTaskId(taskId))).entries.some((e) => e.body.intent === "pause" && e.body.background === "deny");
+  }
+
   async #gates(id: string): Promise<{ entries: { scope: PauseScope; body: PauseGateBody }[]; changes: Change[] }> {
     const task = (await this.#runner.get("task", id))?.body as unknown as TaskBody | undefined;
     const changes: Change[] = [];

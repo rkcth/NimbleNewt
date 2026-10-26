@@ -40,7 +40,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13 |
 | N11 / AII-261 | V01, V01b, V02 |
 | N12 / AII-262 | M00, M01, M02, M03, M04, M05, M05b, M06 |
-| N13 / AII-263 | T01, T02, T03, T06, T06b, T07, T08, T09 |
+| N13 / AII-263 | T01, T02, T03, T06, T06b, T07, T07b, T08, T09 |
 | N14 / AII-264 | P01, P02, P02b, P03, P04, P05, P06, P07 |
 | N15 / AII-265 | Q01, Q02, Q03, Q04 |
 | N16 / AII-266 | B01 |
@@ -1408,6 +1408,14 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** A long-running job returns a durable handle that survives worker and controller restart; operation ID, exit status, bounded output, logs and artifacts are recorded; a job record does not imply resumability; cancelling a model request, stopping a tool and stopping a remote job are separate recorded operations; on restart a live job is completed, cancelled, restarted from a tool checkpoint or recorded as a tracked exception; Pause keeps permitted background jobs running and records their results without unpausing; Stop and Force Stop terminate the whole process tree (job objects on Windows, process groups on POSIX) and orphaned children are reported; long-running MCP operations use the same records and a revoked connection blocks new calls.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
+### T07b — Give agents job control through the tool bridge and bind jobs to the sandbox, the MCP client and the API
+
+- **Parent:** N13 / AII-263.
+- **Blockers:** T07, T06b, H12g.
+- **Deliverable:** Split from T07 (2026-10-26): the job records, their states, stop operations, restart decisions and unknown-outcome reconciliation are built as a service; what is not built is the agent's way to use them and the production bindings. The bridge gains job tools (start a job, status, bounded output, cancel) with the call ID as the idempotency key, the sandbox launcher's process-tree stop and orphan report are bound to the stop confirmation, the MCP client uses the job records and the connection check (`McpService.usable`), and the state API reads jobs.
+- **Acceptance and verification:** An agent starts a long-running job through the bridge and gets a durable handle; status, bounded output and cancel work from the handle after a worker or controller restart; a Stop or Force Stop through the real launcher ends the whole process tree and the orphans it could not end appear on the job record; a long-running MCP operation is a job and a revoked server admits no new one; the owner can read jobs, live jobs and unresolved outcomes through the API; every restart decision of T07 is reachable by the owner and a supervisor.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
 ### T08 — Implement shared toolbox audiences, personal copies and patch proposals
 
 - **Parent:** N13 / AII-263.
@@ -1755,7 +1763,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D03 — Approve release readiness and publication decision
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** X08, D01, D02, F04h, T06b, U03b, C07d, L01b, V01b, F04k, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11.
+- **Blockers:** X08, D01, D02, F04h, T06b, U03b, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11.
 - **Deliverable:** Exact release manifest, known limitations and owner signoff.
 - **Acceptance and verification:** All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

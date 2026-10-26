@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **75 of 201 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **75 of 202 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -119,7 +119,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Agent messaging | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
 | Health and recovery | `░░░░░░░░░░░░` 0% | 0 of 3 |
 | Meetings | `░░░░░░░░░░░░` 0% | 0 of 8 |
-| Tools and skills | `▓▓▓▓░░░░░░░░` 37% | 3 of 8 |
+| Tools and skills | `▓▓▓▓░░░░░░░░` 33% | 3 of 9 |
 | Projects, repositories and workspaces | `░░░░░░░░░░░░` 0% | 0 of 8 |
 | Quality: deliverables, QA and defects | `░░░░░░░░░░░░` 0% | 0 of 4 |
 | Balancing delivery and improvement | `░░░░░░░░░░░░` 0% | 0 of 1 |
@@ -386,7 +386,7 @@ Scheduling, votes and decisions, stand-ups, attendance and return to work, and f
 </details>
 
 <details>
-<summary><strong>Tools and skills</strong> — ▓▓▓▓░░░░░░░░ 3 of 8</summary>
+<summary><strong>Tools and skills</strong> — ▓▓▓▓░░░░░░░░ 3 of 9</summary>
 
 The immutable tool and skill catalogue, review and promotion, MCP connections, the protected agent tool bridge and background jobs.
 
@@ -396,6 +396,7 @@ The immutable tool and skill catalogue, review and promotion, MCP connections, t
 - [ ] **T06b** · P30 · Wire the protected bridge into the composed worker across a process boundary _(needs T06, H12b, H12c)_
 - [ ] **T07** · P30 · Implement durable job records and job control _(needs T06, S05)_
 - [ ] **T09** · P30 · Implement command namespaces and alias dispatch _(needs T06, H11, U03)_
+- [ ] **T07b** · P31 · Give agents job control through the tool bridge and bind jobs to the sandbox, the MCP client and the API _(needs T07, T06b, H12g)_
 - [ ] **T02** · P33 · Implement review/promotion/deprecation and retention _(needs T01, A05, L04)_
 - [ ] **T08** · P35 · Implement shared toolbox audiences, personal copies and patch proposals _(needs T02, T06, M02, U08)_
 
@@ -500,7 +501,7 @@ Installation, documentation, QA on real machines, the release decision and closi
 
 - [ ] **D02** · P36 · Finish developer/API/security and license guidance _(needs T05, K03, F03)_
 - [ ] **D01** · P45 · Finish installation and chat-first user guidance _(needs X03, Q03, U11b)_
-- [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, C07d, L01b, V01b, F04k, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11)_
+- [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11)_
 - [ ] **D04** · P50 · Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
 - [ ] **D04b** · P51 · Measure code-navigation aids on real coding tasks (optional, after the first release) _(needs D04)_
 - [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, U03c, K06b, K01d, P02b, A08c)_

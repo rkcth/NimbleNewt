@@ -28,6 +28,7 @@ export const ACTIONS = [
   "responsibility.read", "responsibility.write", "responsibility.assign",
   "meeting.manage", "meeting.agenda", "meeting.read",
   "message.send", "message.urgent",
+  "job.write", "job.read", "job.control",
 ] as const;
 export type Action = (typeof ACTIONS)[number];
 
