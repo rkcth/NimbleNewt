@@ -747,7 +747,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Parent:** N05 / AII-255.
 - **Blockers:** L01, H12.
 - **Deliverable:** Split from L01: the controller builds the reconciler (with the pause lookup, so an inbox message for a paused task stays received) and runs it, and runs stall detection (scan) in the dispatcher's tick with the narrowest right it needs, an owner decision recorded in the build decisions: the dispatcher principal holds no grants today and the scan requires the recovery-read right everywhere.
-- **Acceptance and verification:** A paused task is not reported as stalled and its inbox messages are held, not admitted, across a controller restart; a task that stops making progress while not paused is reported as a suspected stall in the status view; the right the scan runs under is the narrowest the owner approved, and a controller without it says so instead of failing every tick.
+- **Acceptance and verification:** A paused task is not reported as stalled and its inbox messages are held, not admitted, across a controller restart; a task that stops making progress while not paused is reported as a suspected stall in the status view; the right the scan runs under is the narrowest the owner approved, and a controller without it says so instead of failing every tick; reassigning a task goes through the pause service's retention check (a paused agent keeps its tasks), which nothing calls in production today; the reconciler waits on its delivery destinations and bridges, which are not built, rather than on a right.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### L02 — Implement Suspend and graceful Stop

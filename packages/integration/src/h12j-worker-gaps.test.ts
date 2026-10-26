@@ -132,7 +132,7 @@ describe("the worker process is reaped however the attempt ends, and never holds
     } finally { model.server.close(); r.done(); }
   });
 
-  test("a recipe change restarts the sandbox from a checkpoint with the real launcher: the first process is reaped, the second continues the stored conversation, and neither holds the provider's key", async (t) => {
+  test("a recipe change restarts the sandbox from a checkpoint with the real launcher: the first process ends, and a new turn in the second process is answered with the earlier conversation in front of the model", async (t) => {
     const model = await endpoint([{ text: "first answer" }, { text: "second answer" }]);
     const r = await rig(t, model);
     if (r === undefined) { model.server.close(); return; }
@@ -141,19 +141,25 @@ describe("the worker process is reaped however the attempt ends, and never holds
       assert.equal((await handle.run(r.gateway)).status, "completed");
       const checkpoint = await handle.checkpoint();
       assert.ok(checkpoint["pi"] !== undefined, "the conversation was checkpointed");
-      // The recipe narrows: the sandbox is closed and a new one is opened from the checkpoint.
       await handle.restart({ revision: "r2", reach: [] } as never, checkpoint);
       assert.equal(r.tap.runs.length, 2, "a second process was started");
       // The directory scan of `reaped` would also see the second process, so the first is checked by its own exit.
-      const exit = await Promise.race([r.tap.runs[0]!.run.result, new Promise<undefined>((ok) => setTimeout(() => ok(undefined), 15_000))]);
+      let timer: NodeJS.Timeout | undefined;
+      const exit = await Promise.race([r.tap.runs[0]!.run.result, new Promise<undefined>((ok) => { timer = setTimeout(() => ok(undefined), 15_000); })]);
+      clearTimeout(timer);
       assert.ok(exit !== undefined, "the first process ended when the sandbox was closed");
-      // The second process holds the same stored conversation and runs a turn on it.
       assert.ok(filesUnder(join(r.dirs.home, "pi")).length > 0, "the conversation store survived the restart");
+      // A new turn (a new request, not the first one replayed from the store) in the second process.
+      (r.order as { requestId: string }).requestId = "req-2";
       const again = await handle.run(r.gateway);
       assert.equal(again.status, "completed", again.error);
+      assert.equal(again.text, "second answer");
+      assert.equal(model.seen.length, 2, "the model was asked again");
+      const asked = JSON.stringify(model.seen[1]!.body);
+      assert.ok(asked.includes("first answer"), "what the model said in the first process is in front of it in the second");
       await handle.stop();
       await reaped(r.tap.runs[1]!, r.directory);
-      for (const run of r.tap.runs) for (const text of [run.out.join(""), run.in.join("")]) assert.equal(text.includes("sk-provider"), false, "the provider key never reaches a worker process");
+      for (const run of r.tap.runs) for (const text of [run.out.join(""), run.in.join("")]) assert.equal(text.includes("sk-provider"), false, "the provider key is not on the channel of either process");
     } finally { model.server.close(); r.done(); }
   });
 
