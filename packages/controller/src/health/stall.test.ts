@@ -266,6 +266,22 @@ for (const backend of backends) {
     assert.throws(() => c.service({ hostStaleAfterMs: 5 }), DomainError);
   });
 
+  suite("the scan runs for the owner, for a service holding recovery.stall-scan or recovery.read everywhere, and for no one else", async (c) => {
+    const service = async (name: string, grants: Grant[]) => {
+      await c.principals.enroll(c.owner, { commandId: cid("e"), kind: "service", name, grants });
+      return c.principals.authenticate((await c.principals.issueCredential(c.owner, `service:${name}`)).token);
+    };
+    const narrow = await service("scanner", [{ action: "recovery.stall-scan", project: "*" }]);
+    const broad = await service("reader", [{ action: "recovery.read", project: "*" }]);
+    const scoped = await service("scoped", [{ action: "recovery.stall-scan", project: c.project }]);
+    const bare = await service("bare", []);
+    assert.equal((await c.stall.scan(narrow)).checked >= 0, true);
+    assert.equal((await c.stall.scan(broad)).checked >= 0, true);
+    await refuses("forbidden", () => c.stall.scan(scoped));
+    await refuses("forbidden", () => c.stall.scan(bare));
+    await refuses("forbidden", async () => c.stall.scan(await c.plain("ann")));
+  });
+
   suite("a task that waits on purpose is not suspected, and a concern clears when the wait opens", async (c) => {
     const h = await c.host("h1");
     const t = await c.work();

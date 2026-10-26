@@ -5,10 +5,11 @@ import { DecisionService } from "../decisions/index.js";
 import { ContextEnforcementService } from "../context/index.js";
 import { CachePolicies, type AttemptCache, type CachePolicyDeps } from "../dispatch/cache.js";
 import { MarkerService } from "../inference-cache/index.js";
-import { DispatchDriver, DispatcherService, QuiesceCoordinator, controllerGuards, type RuntimeGuards, type WorkOrder, activeAgents, attendanceLoops, decisionLoops, meetingLoops, eventLoops, reviewLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLoop, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
+import { DispatchDriver, DispatcherService, QuiesceCoordinator, controllerGuards, type RuntimeGuards, type WorkOrder, activeAgents, attendanceLoops, decisionLoops, meetingLoops, eventLoops, recoveryLoops, reviewLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLoop, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
 import { DomainError } from "../domain/errors.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import { BlockerService } from "../domain/blockers.js";
+import type { StallService } from "../health/index.js";
 import { EffectService } from "../domain/effects.js";
 import type { RunnerOptions } from "../domain/runner.js";
 import type { ProjectService } from "../domain/service.js";
@@ -98,6 +99,8 @@ export interface ComposeInput {
   readonly principals: PrincipalService; readonly grants: GrantService; readonly taskCredentials: TaskCredentialService; readonly projects: ProjectService; readonly assignments: AssignmentService; readonly waits: WaitService;
   readonly contracts: ContractService; readonly catalog: HarnessCatalog; readonly routing: RoutingService; readonly inquiries: InquiryService; readonly agents: AgentService; readonly histories: HistoryService; readonly reviews: ReviewService;
   readonly retrieval: RetrievalService;
+  /** The stall detection and the reconciler the controller built; the dispatcher's tick runs them (card L01b). */
+  readonly recovery?: { readonly stall: Pick<StallService, "scan">; readonly reconciler: { runPass(): Promise<unknown> } };
   readonly onError?: (error: unknown) => void;
 }
 
@@ -139,8 +142,10 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   const attendance = AttendanceService.withEpoch(storage, epoch, { meetings, pauses, projects: i.projects, assignments: i.assignments, agents: i.agents, histories: i.histories }, { ...ro, availability: pauses.availability });
   const standups = StandupService.withEpoch(storage, epoch, { meetings, assignments: i.assignments }, { ...ro, availability: pauses.availability });
   const projects = (): Promise<string[]> => projectIds(i.projects);
+  let stallNotices = 0;
   const loops: DispatcherLoop[] = [
     ...messageLoops(messages, () => activeAgents(storage)), ...attendanceLoops(attendance), ...meetingLoops(meetings, projects), ...standupLoops(standups, meetings, projects), ...eventLoops(events), ...reviewLoops(i.reviews, projects), ...decisionLoops(decisions, projects),
+    ...(i.recovery === undefined ? [] : recoveryLoops(i.recovery.stall, i.recovery.reconciler, () => notifications.emitFromController({ commandId: `stall-off:${epoch}:${++stallNotices}`, kind: "maintenance", ref: { kind: "principal", id: "dispatcher" }, detail: "Stall detection is not running: the dispatcher does not hold the recovery.stall-scan right. Grant it that right to turn stall detection on." }), () => i.principals.authenticate(issued.token))), ...decisionLoops(decisions, projects),
   ];
   // The local worker host gets its guards here, bound to the services built above (card H12k); the dispatcher then has it among its workers.
   const workers: WorkerHost[] = [...(i.options.workers ?? [])];

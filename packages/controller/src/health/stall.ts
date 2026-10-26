@@ -280,10 +280,10 @@ export class StallService {
   /**
    * One pass over assignments (a page of `limit`, from `afterId`): suspected concerns are opened, refreshed or cleared to match the signals, a dismissed concern whose time has run
    * out and is still true is reopened, and concerns of a task that is no longer running, or of an earlier generation, are cleared. Confirmed concerns are never changed here. For the
-   * owner or a service holding `recovery.read` everywhere. A pass changes only concern records; it repeats safely (each change is its own command, keyed by concern and revision).
+   * owner or a service holding `recovery.stall-scan` (which permits this scan and nothing else) or `recovery.read` everywhere. A pass changes only concern records; it repeats safely (each change is its own command, keyed by concern and revision).
    */
   async scan(by: Principal, page: { afterId?: string; limit?: number } = {}): Promise<ScanReport> {
-    if (!(by.kind === "owner" || (by.kind === "service" && allowsExactly(by, "recovery.read", "*")))) throw new DomainError("forbidden", `${by.id} may not run stall detection`);
+    if (!(by.kind === "owner" || (by.kind === "service" && (allowsExactly(by, "recovery.stall-scan", "*") || allowsExactly(by, "recovery.read", "*"))))) throw new DomainError("forbidden", `${by.id} may not run stall detection`);
     const limit = page.limit ?? 100;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > STALL_LIMITS.scan) invalid("limit", `must be a whole number from 1 to ${STALL_LIMITS.scan}`);
     const records = await this.#runner.list("assignment", { ...(page.afterId === undefined ? {} : { afterId: page.afterId }), limit });

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
+import { DomainError } from "../domain/errors.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
-import { activeAgents, attendanceLoops, decisionLoops, eventLoops, meetingLoops, messageLoops, projectIds, standupLoops } from "./loops.js";
+import { activeAgents, attendanceLoops, decisionLoops, eventLoops, meetingLoops, messageLoops, projectIds, recoveryLoops, standupLoops } from "./loops.js";
 import { buildWorld, workGrants } from "./testing/world.js";
 
 after(stopServer);
@@ -58,4 +59,30 @@ test("the meeting clock loop ticks every page of schedules and sends the invitat
   for (const l of loops) await l.run(by);
   assert.deepEqual(calls, ["tick first", "tick s-2", "invite occ-1", "invite occ-2", "invite occ-3"]);
   assert.deepEqual([...seenBy], ["service:dispatcher"]);
+});
+
+test("recovery loops: the pass runs; the scan continues from where it stopped and wraps; the principal is read again each tick so a right granted or revoked later takes effect; a missing right is reported once, and a notice that failed is tried again", async () => {
+  const seen: (string | undefined)[] = [];
+  let allowed = false; let pages = 0; let passes = 0; let notices = 0; let noticeFails = 1;
+  const stall = { scan: (async (by: { id: string }, page: { afterId?: string }) => {
+    if (!allowed) throw new DomainError("forbidden", `${by.id} may not run stall detection`);
+    seen.push(page.afterId); pages++;
+    return { checked: 1, opened: 0, reopened: 0, cleared: 0, contended: 0, ...(pages % 12 === 0 ? {} : { next: `a${pages}` }) };
+  }) as never };
+  let renewals = 0;
+  const loops = recoveryLoops(stall, { runPass: async () => { passes++; } }, async () => { if (noticeFails-- > 0) throw new Error("storage hiccup"); notices++; }, async () => { renewals++; return { id: "service:dispatcher" } as never; });
+  const [reconcile, scan] = loops;
+  await reconcile!.run({ id: "x" } as never);
+  assert.equal(passes, 1);
+  await assert.rejects(() => scan!.run({ id: "x" } as never), /storage hiccup/);
+  await scan!.run({ id: "x" } as never); await scan!.run({ id: "x" } as never);
+  assert.equal(notices, 1, "the failed notice was tried again, then said once");
+  allowed = true; // granted while running
+  await scan!.run({ id: "x" } as never);
+  assert.equal(seen.length, 10, "a tick scans at most ten pages");
+  await scan!.run({ id: "x" } as never);
+  assert.equal(seen[10], "a10", "the next tick continues from the cursor");
+  await scan!.run({ id: "x" } as never);
+  assert.equal(seen[12], undefined, "after the last page the scan wraps to the start");
+  assert.ok(renewals >= 5);
 });

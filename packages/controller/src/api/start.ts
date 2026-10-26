@@ -11,6 +11,9 @@ import {
 } from "../environment/index.js";
 import { AgentService } from "../agents/index.js";
 import { HarnessCatalog, type HarnessDeclaration } from "../harness/index.js";
+import { Reconciler } from "../domain/reconcile.js";
+import { InboxService } from "../domain/inbox.js";
+import { EffectService } from "../domain/effects.js";
 import { BlockerService } from "../domain/blockers.js";
 import { ContractService, WaitGraphService } from "../planning/index.js";
 import { ProjectPlanService, ProjectResourceService, ResponsibilityService } from "../projects/index.js";
@@ -259,10 +262,12 @@ export async function startController(options: StartOptions): Promise<Controller
         });
       }
     }
+    // The reconciler (card L01b) holds an inbox message for a paused task. No delivery destination or effect bridge is built yet, so it repairs, admits, recovers and settles waits only.
+    const reconciler = new Reconciler(storage, epoch, { projects, inbox: InboxService.withEpoch(storage, epoch, assignments), effects: EffectService.withEpoch(storage, epoch, assignments), blockers: BlockerService.withEpoch(storage, epoch), waits, pauses, destinations: [], bridges: {} }, { claimant: "controller" });
     let dispatchProblem: string | undefined;
     if (options.dispatch !== undefined) {
       try {
-        dispatch = await composeDispatch({ storage, epoch, options: options.dispatch, principals, grants, taskCredentials, projects, assignments, waits, contracts, catalog, routing, inquiries, agents, histories, reviews, retrieval, ...(options.onInternalError === undefined ? {} : { onError: options.onInternalError }) });
+        dispatch = await composeDispatch({ storage, epoch, options: options.dispatch, recovery: { stall, reconciler }, principals, grants, taskCredentials, projects, assignments, waits, contracts, catalog, routing, inquiries, agents, histories, reviews, retrieval, ...(options.onInternalError === undefined ? {} : { onError: options.onInternalError }) });
       } catch (error) {
         // A dispatcher the owner disabled, or a store that failed here, must not keep the rest of the controller from starting; the operator is told, and the reason stays on the controller.
         dispatchProblem = error instanceof Error ? error.message.slice(0, 300) : "the dispatcher could not be built";

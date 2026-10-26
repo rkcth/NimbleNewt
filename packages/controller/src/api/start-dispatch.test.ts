@@ -135,13 +135,13 @@ test("a dispatcher the owner disables while the controller runs is noticed on th
     const owner = await c.services.principals.authenticate((await c.services.principals.bootstrapOwner({ name: "rob" })).token);
     await timer.fire();
     assert.equal(c.dispatch?.driver.status().ticks, 1);
-    // A routine rotation at start was not reported.
-    assert.deepEqual(await c.storage.listAggregates("notification-item", { limit: 5 }), []);
+    // A routine rotation at start was not reported; the one notice is that the dispatcher does not yet hold the stall-scan right (card L01b).
+    assert.equal((await c.storage.listAggregates("notification-item", { limit: 5 })).length, 1);
     const dispatcher = (await c.services.principals.get("service:dispatcher"))!;
     await c.services.principals.disable(owner, { commandId: "dis", principalId: "service:dispatcher", expectedRevision: dispatcher.revision });
     await timer.fire();
     assert.deepEqual([c.dispatch?.driver.status().state, c.dispatch?.driver.status().ticks, timer.armed], ["disabled", 1, false]);
-    assert.equal((await c.storage.listAggregates("notification-item", { limit: 5 })).length, 1);
+    assert.equal((await c.storage.listAggregates("notification-item", { limit: 5 })).length, 1, "the notices coalesce into one item");
   } finally { await c.close(); cleanup(d); }
 });
 
@@ -204,4 +204,29 @@ test("start gives the local host one cache policy per attempt, from the owner's 
     // A route with no configured endpoint is a generic backend: nothing is sent.
     assert.equal((await cache.forOrder(order("att-3", "proj-a", "other/model"))).routed, false);
   } finally { await c.close(); cleanup(d); }
+});
+
+test("the tick runs the reconciler and stall detection; stall detection needs the dispatcher to hold recovery.stall-scan, and a dispatcher without it says so once instead of failing every tick", async () => {
+  const d = dir();
+  const timer = new ManualTimer();
+  const c = await open(join(d, "c.sqlite"), { harnesses: [PI], dispatch: { timer, intervalMs: 1000 } });
+  try {
+    assert.ok(c.dispatch !== undefined, c.dispatchProblem);
+    const owner = await c.services.principals.authenticate((await c.services.principals.bootstrapOwner({ name: "rob" })).token);
+    const ran = async () => (await c.dispatch!.dispatcher.tick()).loops.filter((l) => l.name.startsWith("recovery."));
+    const notices = async () => (await c.storage.listAggregates("notification-item", { limit: 100 })).filter((n) => JSON.stringify(n.body).includes("recovery.stall-scan")).length;
+    assert.deepEqual((await ran()).map((l) => [l.name, l.ok]), [["recovery.reconcile", true], ["recovery.stall-scan", true]], "no failing loop without the right");
+    await ran();
+    assert.equal(await notices(), 1, "the owner is told once");
+    // The owner grants the narrow right: the scan now runs, and the right is not the broad one.
+    await c.services.grants.grant(owner, { commandId: "g-scan", grantee: "service:dispatcher", action: "recovery.stall-scan", project: "*", source: "direct", basis: "run stall detection" });
+    const dispatcher = (await c.services.principals.get("service:dispatcher"))!;
+    assert.equal((await c.services.grants.explain(dispatcher as never, "recovery.stall-scan", "*", new Date().toISOString())).allowed, true);
+    assert.equal((await c.services.grants.explain(dispatcher as never, "recovery.read", "*", new Date().toISOString())).allowed, false, "the narrow right does not give the broad one");
+    assert.deepEqual((await ran()).map((l) => [l.name, l.ok]), [["recovery.reconcile", true], ["recovery.stall-scan", true]]);
+    assert.equal(await notices(), 1);
+  } finally {
+    await c.close();
+    cleanup(d);
+  }
 });
