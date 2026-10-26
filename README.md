@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **65 of 189 tasks implemented**.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **65 of 190 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -441,7 +441,11 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 ### Phase 51
 
-- [ ] **D05** Close the plan: every optional item built or deferred by the owner _(needs D04, K06b, K01d, P02b, A08c)_
+- [ ] **D04b** Measure code-navigation aids on real coding tasks (optional, after the first release) _(needs D04)_
+
+### Phase 52
+
+- [ ] **D05** Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, K06b, K01d, P02b, A08c)_
 
 ## More detail
 

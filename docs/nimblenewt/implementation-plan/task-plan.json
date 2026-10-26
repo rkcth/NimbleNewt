@@ -4289,19 +4289,37 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "D04b",
+      "parent": "N19",
+      "existing_issue": "AII-269",
+      "title": "Measure code-navigation aids on real coding tasks (optional, after the first release)",
+      "depends_on": [
+        "D04"
+      ],
+      "deliverable": "Optional, after the first release (owner decision 2026-10-26): run real coding tasks on real projects with each candidate aid and keep the ones that measurably help. Candidates: better ripgrep with paged output under the tool-output caps; an on-demand code map and references tool built inside the sandbox from a language-neutral parse (Tree-sitter or ctags, with the TypeScript compiler API as the precision layer for TypeScript projects; stamped with the tree hash, capped by a token and time budget, its reads recorded as dependencies, nothing stored by the controller); neighbour-file suggestions; a \"what calls the changed exports\" view for reviewers. Not candidates: graphify itself, model-extracted relationships, visualisation, a startup architecture summary (it breaks prompt-cache reuse), controller-side shared indexes. The languages measured follow the owner's real projects",
+      "acceptance_and_verification": "Each candidate is tried against the same task set with and without it and the results recorded: tokens and tool calls spent finding code, task success, review findings, and time; an aid is built into the product only if it measurably helps and its card names the evidence; the languages tried are named, and a language an aid does not support is reported as unsupported, never as an empty result; a candidate that does not help is recorded as dropped with the numbers",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "D05",
       "parent": "N19",
       "existing_issue": "AII-269",
       "title": "Close the plan: every optional item built or deferred by the owner",
       "depends_on": [
         "D04",
+        "D04b",
         "K06b",
         "K01d",
         "P02b",
         "A08c"
       ],
-      "deliverable": "Final bookkeeping after real-world QA: each optional, after-the-first-release card (K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete",
-      "acceptance_and_verification": "D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards",
+      "deliverable": "Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete",
+      "acceptance_and_verification": "D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",

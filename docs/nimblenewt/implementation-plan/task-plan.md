@@ -46,7 +46,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N16 / AII-266 | B01 |
 | N17 / AII-267 | K01, K01b, K01c, K01d, K02, K03, K04, K05, K06, K06b, K07 |
 | N18 / AII-268 | G06, X11, X09, X10, X01, X02, X03, X04, X05, X06, X07, X08, Y01, Y02, Y03 |
-| N19 / AII-269 | D01, D02, D03, D04, D05 |
+| N19 / AII-269 | D01, D02, D03, D04, D04b, D05 |
 | N07a / AII-519 | U01, U13, T04 |
 | N10a / AII-520 | U02, U02b, U12, T05 |
 | N16a / AII-615 | B02, B03, B04, B05, B06 |
@@ -1660,12 +1660,20 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** Detailed plan agreed with the owner before the run: install from a clean checkout and from the release artifact, full automated suite repeated, real-agent trial with a real model provider approved by the owner, long-running and restart scenarios, crash and power-loss style kills, unattended operation, antivirus and filesystem behaviour on Windows, sleep and network change on laptops, every supported PostgreSQL major released in the last three years re-verified, supported OS release floors confirmed; results recorded per platform; failures raised as typed blockers; this is the last item before the plan is closed (D05) and the owner accepts it; accepted only if the real-agent trial meets the approval-load targets (no more than three owner decisions per working day after the first week, no stall that reaches unrelated work).
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
+### D04b — Measure code-navigation aids on real coding tasks (optional, after the first release)
+
+- **Parent:** N19 / AII-269.
+- **Blockers:** D04.
+- **Deliverable:** Optional, after the first release (owner decision 2026-10-26): run real coding tasks on real projects with each candidate aid and keep the ones that measurably help. Candidates: better ripgrep with paged output under the tool-output caps; an on-demand code map and references tool built inside the sandbox from a language-neutral parse (Tree-sitter or ctags, with the TypeScript compiler API as the precision layer for TypeScript projects; stamped with the tree hash, capped by a token and time budget, its reads recorded as dependencies, nothing stored by the controller); neighbour-file suggestions; a "what calls the changed exports" view for reviewers. Not candidates: graphify itself, model-extracted relationships, visualisation, a startup architecture summary (it breaks prompt-cache reuse), controller-side shared indexes. The languages measured follow the owner's real projects.
+- **Acceptance and verification:** Each candidate is tried against the same task set with and without it and the results recorded: tokens and tool calls spent finding code, task success, review findings, and time; an aid is built into the product only if it measurably helps and its card names the evidence; the languages tried are named, and a language an aid does not support is reported as unsupported, never as an empty result; a candidate that does not help is recorded as dropped with the numbers.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** D04, K06b, K01d, P02b, A08c.
-- **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
-- **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
+- **Blockers:** D04, D04b, K06b, K01d, P02b, A08c.
+- **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
+- **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### Y01 — QA checkpoint 1: durable core
