@@ -851,7 +851,11 @@ export class DispatcherService {
     let id: string;
     try { id = (await budgets.reserve(this.#deps.principal, { commandId: `dpa-res:${d.body.attemptId}`, taskId: d.body.taskId, agentId: d.body.agentId, purpose: `attempt ${d.body.attemptId}`, ...want })).id; } catch (error) {
       if (isDomainError(error, "not_found")) return undefined;
-      if (isDomainError(error, "invalid_command")) return { kind: "skipped", check: "budget", reason: `the task's allowance cannot hold this attempt: ${errorText(error)}` };
+      if (isDomainError(error, "invalid_command")) {
+        // Refused inside the budget's own command, so nothing was held: the amounts are decided again at the next tick (a sibling may have taken part of the allowance meanwhile).
+        await this.#update(d.body.attemptId, (x) => { const { reserving: _r, ...rest } = x; void _r; return rest; });
+        return { kind: "skipped", check: "budget", reason: `the task's allowance cannot hold this attempt: ${errorText(error)}` };
+      }
       throw error;
     }
     await this.#update(d.body.attemptId, (x) => ({ ...x, reservationId: id, used: x.used ?? { costMicros: 0, computeMs: 0 } }));
