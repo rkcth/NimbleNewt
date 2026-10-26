@@ -125,6 +125,8 @@ async function checkoutRoots(storage: ControllerStorage, already: ReadonlySet<st
   for (let afterId: string | undefined; ;) {
     const page = await storage.listAggregates("project", { ...(afterId === undefined ? {} : { afterId }), limit: 200 });
     for (const a of page) {
+      // A retired project's checkouts are no longer worked in: a mount that has gone away must not keep the controller from starting.
+      if ((a.body as unknown as { state?: string }).state === "archived") continue;
       for (const repository of (a.body as unknown as { repositories?: readonly { location?: unknown }[] }).repositories ?? []) {
         if (typeof repository.location !== "string" || !isAbsolute(repository.location)) continue;
         const path = resolve(repository.location);
@@ -151,7 +153,7 @@ export async function startController(options: StartOptions): Promise<Controller
   const override = overrideRequested(options.argv, options.env);
   const facts = options.facts ?? detectEnvironment();
   const dataDirectory = options.dataDirectory ?? (options.storage.kind === "sqlite" ? dirname(resolve(options.storage.path)) : undefined);
-  const filesystems = await checkFilesystems([...(dataDirectory === undefined ? [] : [{ role: "data directory" as const, path: dataDirectory }]), ...(options.workspaceRoots ?? []).map((path) => ({ role: "workspace" as const, path }))], { platform: facts.platform, ...(options.filesystem === undefined ? {} : { detect: options.filesystem }) });
+  const filesystems: FilesystemReport[] = await checkFilesystems([...(dataDirectory === undefined ? [] : [{ role: "data directory" as const, path: dataDirectory }]), ...(options.workspaceRoots ?? []).map((path) => ({ role: "workspace" as const, path }))], { platform: facts.platform, ...(options.filesystem === undefined ? {} : { detect: options.filesystem }) });
   const needs: PrerequisiteNeed[] = ["start", options.storage.kind, ...(options.features ?? [])];
   const prerequisites = await checkPrerequisites({ platform: facts.platform, needs, probes: { ...realProbes({ sqlite: probeSqliteLibrary, postgres: probePostgresLibrary }), ...(options.probes ?? {}) } });
   const distribution = options.distribution === undefined ? detectDistribution() : options.distribution ?? undefined;
@@ -188,11 +190,13 @@ export async function startController(options: StartOptions): Promise<Controller
     // storage is open, so the decision is made again with these problems added: refused unless the F04h override was given, and then audited with the rest.
     const roots = await checkoutRoots(storage, new Set((options.workspaceRoots ?? []).map((r) => resolve(r))));
     if (roots.length > 0) {
-      const extra = (await checkFilesystems(roots.map((path) => ({ role: "workspace" as const, path })), { platform: facts.platform, ...(options.filesystem === undefined ? {} : { detect: options.filesystem }) })).flatMap((f) => (f.problem === undefined ? [] : [f.problem]));
+      const reports = await checkFilesystems(roots.map((path) => ({ role: "workspace" as const, path })), { platform: facts.platform, ...(options.filesystem === undefined ? {} : { detect: options.filesystem }) });
+      filesystems.push(...reports);
+      const extra = reports.flatMap((f) => (f.problem === undefined ? [] : [f.problem]));
       if (extra.length > 0) {
         try {
           const decided = decideStartup([...check.problems, ...extra], { allowUnsupported: override, host: check.host ?? host });
-          for (const line of check.output.length === 0 ? decided.output : decided.output.filter((l) => extra.some((p) => l.includes(`${p.item}: found`)))) print(line);
+          for (const line of check.output.length === 0 ? decided.output : decided.output.filter((l) => extra.some((p) => l.includes(`${p.item}: found ${p.found}`)))) print(line);
           check = decided;
         } catch (error) {
           if (error instanceof UnsupportedEnvironmentError) print(error.message);

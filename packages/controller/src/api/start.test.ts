@@ -324,11 +324,20 @@ test("the checkouts of registered projects are checked at every start: an unsupp
       return true;
     });
     assert.ok(asked.includes(join(d, "shared", "shop")) && !asked.some((p) => p.includes("example.invalid")), "the checkout is asked about; a remote location is not a workspace");
-    const c = await startController({ storage: sqliteAt(file), argv: [OVERRIDE_FLAG], env: {}, print: shown.print, facts: supported, filesystem: async (p) => where(p) });
+    const shownOverride = lines();
+    const c = await startController({ storage: sqliteAt(file), argv: [OVERRIDE_FLAG], env: {}, print: shownOverride.print, facts: supported, filesystem: async (p) => where(p), workspaceRoots: [join(d, "shared", "other")] });
     try {
       const records = await overrides(c);
       assert.equal(records.length, 1);
-      assert.deepEqual((records[0]!.detail["problems"] as { item: string }[]).map((p) => p.item), ["filesystem (workspace)"]);
+      assert.deepEqual((records[0]!.detail["problems"] as { item: string }[]).map((p) => p.item), ["filesystem (workspace)", "filesystem (workspace)"], "the listed root and the checkout are two problems");
+      assert.equal(shownOverride.out.filter((l) => l.includes(join(d, "shared", "other"))).length, 1, "a line already printed is not printed again");
+      assert.ok(c.filesystems.some((f) => f.path === join(d, "shared", "shop")), "the checkout's report is listed");
+      // Archiving the project takes its checkout out of the check.
+      const [shop] = await c.services.projects.listProjects({ limit: 10 });
+      await c.services.projects.updateProject({ commandId: "arch-1", actor: "owner:rob", projectId: shop!.id, expectedRevision: shop!.revision, state: "archived" });
     } finally { await c.close(); }
+    const again = await startController({ storage: sqliteAt(file), argv: [], env: {}, print: () => undefined, facts: supported, filesystem: async (p) => where(p) });
+    try { assert.equal(again.filesystems.some((f) => f.path === join(d, "shared", "shop")), false, "an archived project's checkout is not checked"); } finally { await again.close(); }
+
   } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
