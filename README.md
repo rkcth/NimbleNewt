@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **66 of 194 tasks implemented**.
+Work is ordered by dependency: each phase needs only tasks from earlier phases, so everything within a phase can proceed in parallel. Task IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **70 of 194 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -252,10 +252,10 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 - [x] **A08b** Enforce per-agent resource limits in the sandbox _(needs A08, A03)_
 - [x] **A10b** Implement per-task credentials for agents serving several projects _(needs A10, A01)_
 - [ ] **C01b** Implement the shared working-notes tier _(needs C01, A02, A10)_
-- [ ] **C06** Implement inference-cache adapters with per-backend tuning _(needs C05)_
-- [ ] **C07b** Wire context budgets into dispatch and bound compaction _(needs C07, C04, R01)_
+- [x] **C06** Implement inference-cache adapters with per-backend tuning _(needs C05)_
+- [x] **C07b** Wire context budgets into dispatch and bound compaction _(needs C07, C04, R01)_
 - [ ] **H13** Implement event source adapters and watchers _(needs H06, H01, R02)_
-- [ ] **L05** Implement generation interruption and late-result handling _(needs C05, F06, A02)_
+- [x] **L05** Implement generation interruption and late-result handling _(needs C05, F06, A02)_
 - [ ] **R03** Implement difficulty profiles and escalation _(needs R02, S10, H11)_
 - [ ] **R05** Implement cost and resource attribution and delegated budgets _(needs R02, H03, S10)_
 - [ ] **T05** Implement MCP durable conversation adapter _(needs U02, U02b, T04)_
@@ -265,7 +265,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 ### Phase 27
 
 - [ ] **A08c** Enforce per-agent resource limits on macOS and Windows (after the first release) _(needs A08b, A03b)_
-- [ ] **C06b** Make Pi agent prompts cache-stable across context switches _(needs C06, F05, F06)_
+- [x] **C06b** Make Pi agent prompts cache-stable across context switches _(needs C06, F05, F06)_
 - [ ] **C08** Implement owner decision records and correction propagation _(needs C03, C07, U03, H06)_
 - [ ] **G10** Benchmark native backend caching and branch markers _(needs C06)_
 - [ ] **L01** Implement Pause and background settlement _(needs C04, A02, S08, L05)_

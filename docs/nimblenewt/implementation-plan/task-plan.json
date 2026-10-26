@@ -1704,12 +1704,24 @@
       ],
       "deliverable": "Per-backend tuning profiles (owner decision 2026-10-22: NimbleNewt must work well with llama.cpp, vLLM, Radiance, the latest Strata, OpenAI and compatible services, and Claude, each with its own tuning, because switching context between agents is what makes NimbleNewt different): backend capability negotiation, opaque markers and bounded retention policy, and for each backend a profile that declares what it can do, the request settings that make its cache work and how to read its hits",
       "acceptance_and_verification": "Profiles exist for llama.cpp (slot reuse and slot save and restore), vLLM (automatic prefix caching and cache salt), Radiance (prefix cache, host tier and the hybrid model's state snapshots), Strata (inspected from its latest source, which differs from the installed version), OpenAI and compatible services (automatic prefix caching, prompt cache key and retention) and Claude (cache breakpoints, five-minute and one-hour lifetimes, model minimum lengths); an unknown backend gets a generic profile that assumes nothing; the profile is chosen from endpoint and model configuration, never guessed from a name; each profile reads its cache hits from the response (cached_tokens, cache_n and prompt_n, cache_read_input_tokens) and reports them to the usage ledger (R05); cache eviction or incompatibility falls back without context loss; quota and privacy enforced; pin, fork and decoder-resume advertised separately; each profile has tests against simulated responses built from the backend's documentation or source (responses captured from running servers are G10's); engine changes require a measured gap and a separate scoped patch",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "d6b9da8",
+          "a6d6474"
+        ],
+        "ci_runs": [
+          "40382971081"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Per-backend cache adapters and markers for llama.cpp, vLLM, Radiance, Strata, OpenAI-compatible services and Claude, wired through the composer. Tests use responses simulated from each backend's documentation or source; capturing responses from running servers moved to G10.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "C06b",
@@ -1723,12 +1735,23 @@
       ],
       "deliverable": "Owner decision 2026-10-22: the cache-ability of Pi Durable prompts is a serious performance issue to resolve, because context switching is the core of NimbleNewt. Audit and measure Pi Durable 1.3.0's actual prompt layout (Pi stores system sections and tool changes as appended positional entries, but before each request it replays them into one leading system message, so any change to a section or the tool set rewrites the head of the request and loses every cached prefix after it; the layout therefore suits an agent's growing history only while its sections and tools stay unchanged, and it shares no prefix between agents; pi-ai places Anthropic cache breakpoints on the system blocks, the last tool and the last user message and derives the OpenAI cache key from the session ID), then fix it on the NimbleNewt side or with a pinned, scoped Pi patch; model thinking on a context switch (owner decision 2026-10-22): when a conversation is resumed or switched, the model's thinking and reasoning items that the provider returned or requires are kept as part of the stored conversation and replayed to the model in order, so the model keeps its own reasoning and the provider accepts the history (for example Anthropic thinking blocks and OpenAI reasoning items, which are only valid in the conversation that produced them); stored thinking is readable only by the owner and never by peers, under the A10 inspection policy and with the same secret redaction as private scratch; its display in the owner's timeline (U09) and its deletion after the task (K06) are carried by those cards",
       "acceptance_and_verification": "The audit records what Pi renders first, how sections and tools are ordered, what changes between turns and what a suspend, resume, branch, inquiry or compaction does to the prefix; NimbleNewt orders every prompt stable-first (sorted tool declarations and a common preamble, then project context, then agent-specific sections, then volatile content) with no timestamps or random IDs early; agents that can share a prefix do, with the cache key chosen per shared prefix (for example per project or per meeting) and not per session; volatile content goes into appended user or context messages and never into system sections, and the system sections and tool set stay fixed for an agent's session and change only at deliberate boundaries; cache lifetime settings and session keys are set per backend profile (C06); compaction is bounded so it does not silently discard the prefix and its cost is reported; a test checks that the bytes of the provider request's prefix are unchanged across turns and context switches (not only the Pi log), and after a context switch the reusable prefix is reused on each qualified backend, measured with the backend's own hit fields and compared with the unmodified Pi layout; a change to Pi is a separate scoped patch against the pinned version with an upgrade test; results are recorded for G10; a resume after restart and after a harness change replays the stored thinking unchanged and the provider accepts the history; a provider that rejects stored thinking after a model change is handled by dropping only the invalid blocks and recording that; stored thinking is excluded from exports unless the owner turns that on; a peer or another conversation cannot read stored thinking and the A10 inspection policy and redaction apply to the owner's read",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "a6d6474"
+        ],
+        "ci_runs": [
+          "40382971081"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Cache-stable Pi prompts across context switches and stored thinking replay, measured on simulators; real measurements are G10's.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "C07",
@@ -1771,12 +1794,29 @@
       ],
       "deliverable": "Enforcement at dispatch of the C07 budgets (the startup limit and the working limit: startup plus likely tool output plus the reply reserve at most 60% of the window) with the first call measured against the provider's reported usage (Pi's system prompt and tool schemas included) and the reply reserve; explicit stream timeouts and retries, a short summary limit and a fallback summariser through Pi's beforeCompact hook, restart-safe; tool output limits applied to Pi's tools and to MCP tools; repeated overflow ends in a visible blocker; the hand-off written when an attempt ends without one (split from C07 on 2026-10-22)",
       "acceptance_and_verification": "A summariser that hangs hits its own short timeout and either uses the fallback route or ends the attempt as context_overflow without hanging; a restart in the middle of the hook neither duplicates nor loses the summary; the first call's size includes Pi's system prompt and tool schemas and is checked against the provider's reported usage; a second compressor on the same context is refused at registration; summary lineage is recorded and earlier owner decisions stay retrievable after repeated compactions and after model fallback; any compressed view, index or embedding keeps the source project and origin and is readable only by someone who can read every source (A10); a crash after a confirmed effect and before the hand-off still yields a hand-off written from the ledger and artifacts; repeated overflow stops with a visible blocker",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "d31e7a6",
+          "2c36a5b",
+          "f004287",
+          "9a31e13",
+          "6c68147",
+          "616dcf0",
+          "75ca210"
+        ],
+        "ci_runs": [
+          "40382971081"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Context budgets are enforced at dispatch: first-call admission, the provider's reported size recorded and used to calibrate, bounded compaction with an extractive fallback, tool output limits for Pi's tools and framed, bounded MCP results, overflow blockers and the hand-off at the end of an attempt. The route change to a smaller window and window-scaled MCP limits moved to C07d.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "C07d",
@@ -1849,12 +1889,24 @@
       ],
       "deliverable": "Finish-and-hold/cancel controls and revision-bound partial streams",
       "acceptance_and_verification": "Pause blocks new effects immediately; partial tool calls never execute; late response cannot override correction; optional decoder resume qualified separately",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "9be98d4",
+          "80b7ce5"
+        ],
+        "ci_runs": [
+          "40382971081"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Generation interruption and late-result handling in the generation service, with the pause guard used in production. Feeding the model stream into revision-bound generation moved to L05b; decoder resume stays unsupported and separate.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "L05b",
