@@ -79,7 +79,7 @@ export interface StartOptions {
   readonly dispatch?: DispatchStartOptions;
   /**
    * Owner chat (card U03): the interpreter that reads the owner's messages (a model behind the routed client in production; a scripted one in tests) and, optionally, the persistent coordinator's model and credential. Absent: no chat service is built.
-   * The coordinator is controller-managed and nothing depends on it: when it is paused, stopped or its routes fail, the chat and the rest of the controller carry on.
+   * Not wired yet: the approval profile (A07), status explanations (U05) and conversational policy edits (U04), so every order is a proposal, a status question is answered as unavailable and a policy instruction is refused until they are composed. The coordinator is controller-managed and nothing depends on it: when it is paused, stopped or its routes fail, the chat and the rest of the controller carry on.
    */
   readonly chat?: {
     readonly interpreter: ChatInterpreter;

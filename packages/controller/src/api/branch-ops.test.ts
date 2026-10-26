@@ -35,6 +35,22 @@ test("a controller offers retained context branches through the API: open, view,
     assert.equal(after.item.branch.state, "suspended");
     const pending = result(await call("branch.pending")) as { items: unknown[] };
     assert.ok(Array.isArray(pending.items));
+    // One branch alone: suspend, restore, write to it, read it back, and resume it to its destination.
+    const solo = result(await call("branch.open", { taskId: task, purpose: "which tools?" }, "b3"));
+    const rev = async (id: string) => ((result(await call("branch.get", { branchId: id })) as { item: { branch: { revision: number } } }).item.branch.revision);
+    result(await call("branch.suspend", { branchId: solo["id"], expectedRevision: await rev(solo["id"] as string), reason: "urgent task" }, "su2"));
+    result(await call("branch.restore", { branchId: solo["id"], expectedRevision: await rev(solo["id"] as string) }, "re1"));
+    const appended = result(await call("branch.append", { branchId: solo["id"], text: "the owner prefers hand tools" }, "ap1"));
+    assert.equal(appended["seq"], 1);
+    const history = result(await call("branch.history", { branchId: solo["id"], part: "branch" })) as { item: { entries?: unknown[]; items?: unknown[] } };
+    assert.ok(JSON.stringify(history).includes("hand tools"), "the branch's own history holds what was written");
+    const resumed = result(await call("branch.resume", { branchId: solo["id"], expectedRevision: await rev(solo["id"] as string) }, "rs1"));
+    assert.ok(resumed["returnedTo"] !== undefined, "it goes back to its destination");
+    // An agent that holds no right on the task may not open a branch on it.
+    const agent = (await s.agents.create(owner, { commandId: "ag9", friendlyName: "Eve" })).id;
+    const eve = (await s.principals.issueCredential(owner, `agent:${agent}`)).token;
+    const refused = await c.api.handle(eve, { v: API_VERSION, op: "branch.open", commandId: "b9", args: { taskId: task, purpose: "snoop" } });
+    assert.ok(!refused.ok && refused.error.code === "forbidden", JSON.stringify(refused));
     // Unknown branch reads like a missing one.
     const missing = await call("branch.get", { branchId: "branch-aaaaaaaaaaaaaaaaaaaa" });
     assert.ok(!missing.ok && missing.error.code === "not_found", JSON.stringify(missing));

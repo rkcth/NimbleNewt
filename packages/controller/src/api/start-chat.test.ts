@@ -16,10 +16,10 @@ test("start builds the owner chat and the coordinator when asked; the controller
   assert.equal(none.chat, undefined, "no chat unless asked");
   await none.close();
 
-  let modelCalls = 0;
+  let held: string | undefined;
   const c = await startController({
     storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4,
-    chat: { interpreter: new ScriptedInterpreter({}), coordinator: { model: { respond: async () => { modelCalls++; throw new Error("every route failed"); } }, token: async () => undefined } },
+    chat: { interpreter: new ScriptedInterpreter({}), coordinator: { model: { respond: async () => { throw new Error("every route failed"); } }, token: async () => held } },
   });
   try {
     assert.ok(c.chat !== undefined && c.coordinator !== undefined);
@@ -33,14 +33,22 @@ test("start builds the owner chat and the coordinator when asked; the controller
     const paused = await c.coordinator.answer(owner, { commandId: "a1", projectId: project, question: "what is next?" });
     assert.equal((paused as { kind: string }).kind, "unavailable");
     assert.ok(Array.isArray(await say("m2")));
-    // Running, but with no credential and a model that fails: still unavailable, still nothing else affected.
+    // Running, but with no credential: still unavailable, still nothing else affected.
     const rev = (await c.coordinator.get(owner))!.revision;
     await c.coordinator.setState(owner, { commandId: "run", expectedRevision: rev, to: "running" });
-    const failing = await c.coordinator.answer(owner, { commandId: "a2", projectId: project, question: "what is next?" }).catch((e: unknown) => ({ kind: "refused", why: String(e) }));
-    assert.notEqual((failing as { kind: string }).kind, "answered", JSON.stringify(failing));
+    const failing = await c.coordinator.answer(owner, { commandId: "a2", projectId: project, question: "what is next?" });
+    assert.equal((failing as { kind: string }).kind, "unavailable", JSON.stringify(failing));
+    assert.match(JSON.stringify(failing), /no valid credential/);
     assert.ok(Array.isArray(await say("m3")), "the chat still answers");
     assert.equal((await c.services.projects.getProject(project))?.name, "Garden", "and the controller's records are untouched");
-    void modelCalls;
+    // With the configured principal's credential the coordinator is reached, and a model whose every route fails is still unavailable, not an error.
+    await c.services.principals.enroll(owner, { commandId: "e-coord", kind: "agent", name: "coordinator", grants: [] });
+    held = (await c.services.principals.issueCredential(owner, "agent:coordinator")).token;
+    const reached = await c.coordinator.answer(owner, { commandId: "a3", projectId: project, question: "what is next?" });
+    assert.equal((reached as { kind: string }).kind, "insufficient", JSON.stringify(reached));
+    // The credential is revoked while the coordinator is configured: unavailable, never a thrown refusal.
+    held = undefined;
+    assert.equal(((await c.coordinator.answer(owner, { commandId: "a4", projectId: project, question: "again?" })) as { kind: string }).kind, "unavailable");
     // Stopped.
     const rev2 = (await c.coordinator.get(owner))!.revision;
     await c.coordinator.setState(owner, { commandId: "stop", expectedRevision: rev2, to: "stopped" });

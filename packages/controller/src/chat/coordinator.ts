@@ -161,7 +161,7 @@ export class CoordinatorService {
     }
     if (taskId === undefined) return { kind: "insufficient", note: "The records do not answer this, and no task was named to ask about." };
     // Ask whoever can answer: the agent named, else the task's own assignee; never the coordinator itself, and not the owner (who gave direction, not detail).
-    const coordinator = await this.#deps.principal();
+    const coordinator = state.principal;
     const assignment = command.to === undefined ? await this.#deps.assignments.getAssignment(taskId) : undefined;
     const to = command.to ?? (assignment?.state === "assigned" && assignment.owner?.kind === "agent" ? `agent:${assignment.owner.id}` : undefined);
     if (to === undefined || to === coordinator.id) return { kind: "insufficient", note: "The records do not answer this, and there is no agent named or assigned to the task who could." };
@@ -186,7 +186,7 @@ export class CoordinatorService {
     if (reply === undefined) return { kind: "unavailable", reason: "the coordinator could not be reached on any route" };
     const plan = checkPlan(reply, repositories);
 
-    const coordinator = await this.#deps.principal();
+    const coordinator = state.principal;
     const delegated = allows(coordinator, "assignment.manage", projectId);
     const steps: Omit<ChatStep, "commandId">[] = [];
     const notes: string[] = [];
@@ -232,7 +232,7 @@ export class CoordinatorService {
     const picks = checkAssignments(reply, open);
     const skipped = picks.filter((p) => open.find((t) => t.id === p.taskId)?.repositoryId === undefined).map((p) => `${p.taskId}: no repository`);
     const usable = picks.filter((p) => open.find((t) => t.id === p.taskId)?.repositoryId !== undefined);
-    const coordinator = await this.#deps.principal();
+    const coordinator = state.principal;
     const token = await this.#deps.token?.();
     if (usable.length === 0) return { kind: "made", assigned: [], skipped };
     if (allows(coordinator, "assignment.manage", projectId) && token !== undefined && this.#deps.api !== undefined) {
@@ -255,16 +255,17 @@ export class CoordinatorService {
     if (owner.kind !== "owner" || owner.taskScope !== undefined) throw new DomainError("forbidden", "only the owner uses the coordinator");
   }
 
-  async #usable(): Promise<{ kind: "ok"; body: CoordinatorBody } | { kind: "unavailable"; reason: string }> {
+  async #usable(): Promise<{ kind: "ok"; body: CoordinatorBody; principal: Principal } | { kind: "unavailable"; reason: string }> {
     const found = await this.#runner.get("coordinator", COORDINATOR_ID);
     if (found === undefined) return { kind: "unavailable", reason: "the coordinator is not set up" };
     const body = found.body as unknown as CoordinatorBody;
     // The credential the controller holds must be the principal the owner configured; otherwise the coordinator would act with someone else's grants.
     // A credential that is missing or no longer valid makes the coordinator unavailable; it is never an error for the caller.
-    const held = await this.#deps.principal().then((p) => p.id, () => undefined);
-    if (held === undefined) return { kind: "unavailable", reason: "the coordinator has no valid credential" };
+    const principal = await this.#deps.principal().then((p) => p, () => undefined);
+    const held = principal?.id;
+    if (principal === undefined || held === undefined) return { kind: "unavailable", reason: "the coordinator has no valid credential" };
     if (held !== body.principalId) return { kind: "unavailable", reason: "the coordinator's credential is not the configured principal" };
-    return body.state === "running" ? { kind: "ok", body } : { kind: "unavailable", reason: `the coordinator is ${body.state}` };
+    return body.state === "running" ? { kind: "ok", body, principal } : { kind: "unavailable", reason: `the coordinator is ${body.state}` };
   }
 
   /** The primary route, then the fallbacks in order, at most four tries; the first usable reply wins and none is a refusal to answer, not an error. */

@@ -237,6 +237,19 @@ Arguments:
 
 Result: `{ item: { branch, updates, counts } }`.
 
+#### `branch.history`
+
+The frozen parent's history up to where the branch began, or the branch's own, in order.
+
+Arguments:
+
+- `branchId`: the branch
+- `part`: `parent` or `branch`
+- `afterSeq` (optional): return entries after this number
+- `limit` (optional): how many, default 50
+
+Result: `{ item }`.
+
 #### `branch.pending`
 
 Branches that are waiting to be returned from.
@@ -562,6 +575,46 @@ Arguments:
 - `reason`: why
 
 Result: `{}`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `branch.restore`
+
+Brings a suspended branch back with exactly the history it had; anything others wrote to it meanwhile is reported, not hidden.
+
+Arguments:
+
+- `branchId`: the branch
+- `expectedRevision`: the revision you read
+
+Result: `{}`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `branch.redirect`
+
+Changes where a branch returns to; the destination otherwise stays until the branch is resumed.
+
+Arguments:
+
+- `branchId`: the branch
+- `expectedRevision`: the revision you read
+- `returnTo`: the new return destination
+
+Result: `{}`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `branch.append`
+
+Adds a line to the branch's own history (never to the frozen parent's).
+
+Arguments:
+
+- `branchId`: the branch
+- `text`: the text
+
+Result: `{ seq, replayed }`.
 
 Completion: finished when accepted (`completed: true`).
 
