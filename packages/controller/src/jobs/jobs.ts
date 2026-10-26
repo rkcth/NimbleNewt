@@ -6,7 +6,7 @@ import type { PauseService } from "../lifecycle/pause.js";
 import { allows, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
-import { redactText } from "../security/redact.js";
+import { REDACTED, redactText } from "../security/redact.js";
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
 
 /** What a job is. Cancelling a model request, stopping a tool and stopping a remote job are three different operations, so the kind says which one applies. An MCP operation is a remote job on a server the owner approved. */
@@ -206,8 +206,11 @@ export class JobService {
       const task = await this.#task(taskId);
       this.#requireWrite(principal, task, taskId);
       if (task.state === "done" || task.state === "cancelled") invalid("taskId", `task ${taskId} is ${task.state}; it takes no new job`);
+      let guardChanges: readonly Change[] = [];
       if (this.#pauses !== undefined) {
         const guard = await this.#pauses.guard(taskId);
+        // The gates are locked by the commit: a pause that lands between this check and the commit makes the admit fail and be decided again.
+        guardChanges = guard.changes;
         if (guard.blockedBy.length > 0) {
           if (!background) throw new DomainError("invalid_command", `task ${taskId} is paused; only a permitted background job is admitted`, { field: "pause" });
           if (await this.#pauses.backgroundDenied(taskId)) throw new DomainError("invalid_command", `task ${taskId} is paused with background work denied`, { field: "pause" });
@@ -224,7 +227,7 @@ export class JobService {
         taskId, projectId: task.projectId, kind, label, operationId, state: "admitted", resumability, background, ...(attemptId === undefined ? {} : { attemptId }), ...(host === undefined ? {} : { host }), ...(serverId === undefined ? {} : { serverId }),
         output: { tail: "", bytes: 0, truncated: false }, logs: [], artifacts: [], orphans: [], restarts: 0, reconciliations: [], history: [{ state: "admitted", at, by: principal.id }], admittedBy: principal.id, admittedAt: at,
       };
-      return { ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }], detail: { taskId, kind, operationId, resumability, background } };
+      return { ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }, ...guardChanges], detail: { taskId, kind, operationId, resumability, background } };
     }).then((r) => ({ id, replayed: r.replayed }));
   }
 
@@ -238,7 +241,6 @@ export class JobService {
     const artifacts = command.artifacts === undefined ? undefined : this.#refs(command.artifacts, "artifacts", JOB_LIMITS.artifacts);
     const checkpoint = command.checkpoint === undefined ? undefined : plain(command.checkpoint, "checkpoint", JOB_LIMITS.checkpoint);
     const host = command.host === undefined ? undefined : plain(command.host, "host", JOB_LIMITS.host);
-    await this.#checkRefs(jobId, [...(logs ?? []), ...(artifacts ?? [])]);
     let state: JobState = "admitted";
     const result = await this.#change("job.report", principal, command.commandId, jobId, "write", { state: command.state ?? null, output: output ?? null, logs: logs ?? null, artifacts: artifacts ?? null, checkpoint: checkpoint ?? null, host: host ?? null }, (job) => {
       if (TERMINAL.includes(job.state)) invalid("jobId", `job ${jobId} is ${job.state}; it takes no more reports`);
@@ -248,7 +250,7 @@ export class JobService {
       if (next !== job.state && !NEXT[job.state].includes(next)) invalid("state", `a ${job.state} job cannot become ${next}`);
       state = next;
       return { ...this.#move(job, next, principal.id, this.#runner.now()), ...(host === undefined ? {} : { host }), ...(checkpoint === undefined ? {} : { checkpoint }), output: output === undefined ? job.output : this.#append(job.output, output), logs: this.#merge(job.logs, logs, JOB_LIMITS.refs, "logs"), artifacts: this.#merge(job.artifacts, artifacts, JOB_LIMITS.artifacts, "artifacts") };
-    });
+    }, undefined, async (job) => { await this.#checkRefs(job, logs ?? [], "logs"); await this.#checkRefs(job, artifacts ?? [], "artifacts"); });
     return { id: jobId, state: (result.after?.state ?? state) as JobState, replayed: result.replayed };
   }
 
@@ -263,14 +265,13 @@ export class JobService {
     const logs = command.logs === undefined ? undefined : this.#refs(command.logs, "logs", JOB_LIMITS.refs);
     const artifacts = command.artifacts === undefined ? undefined : this.#refs(command.artifacts, "artifacts", JOB_LIMITS.artifacts);
     const orphans = command.orphans === undefined ? undefined : this.#orphans(command.orphans);
-    await this.#checkRefs(jobId, [...(logs ?? []), ...(artifacts ?? [])]);
     const done = await this.#change("job.finish", principal, command.commandId, jobId, "write", { outcome, exit: (exit ?? null) as unknown as JsonObject, output: output ?? null, logs: logs ?? null, artifacts: artifacts ?? null, orphans: orphans ?? null }, (job) => {
       if (job.state === "admitted") invalid("jobId", `job ${jobId} was never dispatched`);
       if (job.state === "outcome_unknown") invalid("jobId", `job ${jobId} is outcome-unknown; reconcile it with evidence instead`);
       if (!NEXT[job.state].includes(outcome)) invalid("outcome", `a ${job.state} job cannot become ${outcome}`);
       const at = this.#runner.now();
       return { ...this.#move(job, outcome, principal.id, at), finishedAt: at, ...(exit === undefined ? {} : { exit }), output: output === undefined ? job.output : this.#append(job.output, output), logs: this.#merge(job.logs, logs, JOB_LIMITS.refs, "logs"), artifacts: this.#merge(job.artifacts, artifacts, JOB_LIMITS.artifacts, "artifacts"), orphans: orphans ?? job.orphans };
-    });
+    }, undefined, async (job) => { await this.#checkRefs(job, logs ?? [], "logs"); await this.#checkRefs(job, artifacts ?? [], "artifacts"); });
     await this.#recordBackground(principal, jobId, command.commandId);
     return { id: jobId, state: done.after?.state ?? outcome, replayed: done.replayed };
   }
@@ -477,20 +478,19 @@ export class JobService {
   }
   #append(before: JobOutput, chunk: string): JobOutput {
     // The pieces are joined and redacted again, so a secret split across two reports is still caught; the end is kept, cut on a character boundary (the limit counts characters).
-    const joined = redactText(before.tail + chunk);
+    // If the stored end already had a secret cut out of it, the first characters of the next piece are the rest of that secret.
+    const rest = before.tail.endsWith(REDACTED) ? chunk.replace(/^[A-Za-z0-9._~+/=-]+/, "") : chunk;
+    const joined = redactText(before.tail + rest);
     const cut = joined.length > JOB_LIMITS.tail;
     let tail = cut ? joined.slice(joined.length - JOB_LIMITS.tail) : joined;
     if (cut && tail.length > 0 && tail.charCodeAt(0) >= 0xdc00 && tail.charCodeAt(0) <= 0xdfff) tail = tail.slice(1);
     return { tail, bytes: before.bytes + Buffer.byteLength(chunk), truncated: before.truncated || cut };
   }
-  /** A log or artifact a job names must exist and, if it belongs to a project, to the job's. */
-  async #checkRefs(jobId: string, ids: readonly string[]): Promise<void> {
-    if (ids.length === 0) return;
-    const job = (await this.#runner.get("job", jobId))?.body as unknown as JobBody | undefined;
-    if (job === undefined) throw new DomainError("not_found", `job ${jobId} does not exist`);
+  /** A log or artifact a job names must exist and, if it belongs to a project, to the job's. Checked inside the command, so a repeat is answered from its record even if an artifact has gone since. */
+  async #checkRefs(job: JobBody, ids: readonly string[], field: string): Promise<void> {
     for (const id of ids) {
       const found = (await this.#runner.get("artifact", id))?.body as unknown as { projectId?: string } | undefined;
-      if (found === undefined || (found.projectId !== undefined && found.projectId !== job.projectId)) invalid("artifacts", `${id} is not an artifact of this job's project`);
+      if (found === undefined || (found.projectId !== undefined && found.projectId !== job.projectId)) invalid(field, `${id} is not an artifact of this job's project`);
     }
   }
 
@@ -538,7 +538,7 @@ export class JobService {
   }
 
   /** Reads the job, authorizes the caller, applies `change` to its body and commits it (with any extra changes) in one command; a concurrent writer meets a revision check and the command is read and decided again. */
-  async #change(name: string, principal: Principal, commandId: unknown, jobId: string, level: "write" | "control", payload: JsonObject, change: (job: JobBody) => JobBody, extra?: (job: JobBody, at: string) => readonly Change[]) {
+  async #change(name: string, principal: Principal, commandId: unknown, jobId: string, level: "write" | "control", payload: JsonObject, change: (job: JobBody) => JobBody, extra?: (job: JobBody, at: string) => readonly Change[], pre?: (job: JobBody) => Promise<void>) {
     let after: JobBody | undefined;
     const result = await this.#command(name, principal, commandId, { jobId, ...payload }, async () => {
       const ref: AggregateRef = { kind: "job", id: jobId };
@@ -547,6 +547,7 @@ export class JobService {
       const job = found.body as unknown as JobBody;
       const task = await this.#task(job.taskId);
       if (level === "write" ? !this.#mayWrite(principal, task, job.taskId) : !this.#mayControl(principal, task, job.taskId)) throw new DomainError("forbidden", `${principal.id} may not ${level === "write" ? "record" : "control"} that job`);
+      await pre?.(job);
       const next = change(job);
       after = next;
       return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: clean(next) } as Change, ...(extra?.(job, this.#runner.now()) ?? [])], detail: { jobId, taskId: job.taskId, from: job.state, to: next.state } };

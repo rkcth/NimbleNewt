@@ -305,7 +305,8 @@ for (const backend of backends) {
     await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: id, output: "Authorization: Bearer abcdefghijklmnopqrstuvwxyz" });
     await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: id, output: "0123456789ABCD\u0000 end \ud800" });
     const out = (await c.read(id)).output.tail;
-    assert.equal(out.includes("abcdefghijklmnopqrstuvwxyz0123456789ABCD"), false, "a secret split across two reports is still caught");
+    assert.equal(out.includes("0123456789ABCD"), false, "the rest of a secret that began in the earlier report is gone too");
+    assert.equal(out.includes("abcdefghijklmnopqrstuvwxyz"), false);
     assert.equal(out.includes("\u0000"), false);
     assert.ok(out.endsWith("end \ufffd"));
     await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: id, output: "a".repeat(JOB_LIMITS.tail - 1) + "\u{1F600}" });
@@ -344,7 +345,25 @@ for (const backend of backends) {
     await c.jobs.finish(c.worker, { commandId: cid("fn"), jobId: id, outcome: "completed", artifacts: [await c.artifact("mine")] });
     await refuses("forbidden", () => c.jobs.list(c.stranger, derivedId("task", "no-such-task")));
     await refuses("not_found", () => c.jobs.list(c.owner, derivedId("task", "no-such-task")));
-    assert.deepEqual(await c.jobs.reconciliation(c.owner, id), []);
+    assert.deepEqual(await c.jobs.reconciliation(c.owner, id), [], "a job that was never unknown has none");
+    const lost = await c.admit(c.t1, { kind: "remote", resumability: "remote_tracked" });
+    await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: lost, state: "dispatched" });
+    await c.jobs.markUnknown(c.worker, { commandId: cid("uk"), jobId: lost, reason: "no answer" });
+    const settled = await c.jobs.reconcile(c.boss, { commandId: cid("rc"), jobId: lost, to: "failed", evidence: "the host's log shows it was killed" });
+    assert.deepEqual((await c.jobs.reconciliation(c.owner, lost)).map((r) => [r.id, r.to]), [[settled.reconciliationId, "failed"]]);
+  });
+
+  suite("the pause service records a finished job only for a background job of that task that has ended", async (c) => {
+    const bg = await c.admit(c.t1, { kind: "tool", background: true });
+    const plain = await c.admit(c.t1, { kind: "tool" });
+    for (const id of [bg, plain]) await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: id, state: "dispatched" });
+    const ask = (jobRef: string, taskId = c.t1) => c.pauses.recordFinishedJob(c.worker, { commandId: cid("fj"), taskId, jobRef, outcome: "succeeded", summary: "done" });
+    await refuses("forbidden", () => ask(bg), (e) => assert.match(e.message, /finished background job/));
+    await c.jobs.finish(c.worker, { commandId: cid("fn"), jobId: bg, outcome: "completed" });
+    await c.jobs.finish(c.worker, { commandId: cid("fn"), jobId: plain, outcome: "completed" });
+    await refuses("forbidden", () => ask(plain));
+    await refuses("forbidden", () => ask(bg, c.t2));
+    await refuses("forbidden", () => ask(derivedId("job", "nobody")));
   });
 
 }

@@ -320,6 +320,9 @@ export class PauseService implements PauseGuard, PauseLookup {
    */
   async recordFinishedJob(principal: Principal, command: Omit<BackgroundRequest, "answerWait">): Promise<{ id: string; pausedBy: readonly PauseScope[]; replayed: boolean }> {
     if ((command as BackgroundRequest).answerWait !== undefined) invalid("answerWait", "a finished job does not answer a wait");
+    // The trusted path checks itself: the reference must be a background job of this task that has ended.
+    const job = (await this.#runner.get("job", command.jobRef))?.body as unknown as { taskId?: string; background?: boolean; state?: string } | undefined;
+    if (job === undefined || job.taskId !== command.taskId || job.background !== true || !["completed", "failed", "cancelled"].includes(job.state ?? "")) throw new DomainError("forbidden", "that is not a finished background job of this task");
     const { answeredWaitId: _a, ...done } = await this.#recordBackground(principal, command, true);
     return done;
   }
