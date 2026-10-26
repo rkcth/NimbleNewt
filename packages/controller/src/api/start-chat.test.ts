@@ -91,6 +91,12 @@ test("the owner reaches the coordinator through the chat: sets it up and starts 
     const turn = async (id: string, text: string, intents: unknown[]) => { say[text] = intents; return (await c.chat!.submit(boot.token, { messageId: id, text })).outcomes; };
     await turn("m0", "work on Garden", [owner("switch_focus", { projectName: "Garden" }, "work on Garden")]);
 
+    // Setting up and starting in one message: the start expects the revision the set-up leaves.
+    const both = await turn("m0b", "set the coordinator up as agent:coordinator on llama/local and start the coordinator", [owner("coordinator", { action: "configure", principalId: "agent:coordinator", routes: ["llama/local"] }, "set the coordinator up"), owner("coordinator", { action: "start" }, "start the coordinator")]);
+    assert.deepEqual(both.map((o) => o.status), ["applied", "applied"], JSON.stringify(both));
+    assert.equal((await c.coordinator!.get(rob))!.state, "running");
+    await turn("m0c", "stop the coordinator", [owner("coordinator", { action: "stop" }, "stop the coordinator")]);
+
     // Set up and start through the chat.
     const cfg = await turn("m1", "set the coordinator up as agent:coordinator on llama/local", [owner("coordinator", { action: "configure", principalId: "agent:coordinator", routes: ["llama/local"] }, "set the coordinator up")]);
     assert.equal(cfg[0]!.status, "applied", JSON.stringify(cfg));

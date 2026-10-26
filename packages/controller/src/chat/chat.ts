@@ -341,6 +341,7 @@ export class ChatService {
     const profile = await this.#profile(owner);
     // Several commands in one message that change the same record: each write moves its revision on by one, so a later command expects the revision the earlier ones will have left.
     const pending = new Map<string, number>();
+    let coordinatorRevision: number | undefined;
     for (const [n, { intent, text: words, trusted, quoted }] of work.entries()) {
       const i = items.length;
       const push = (item: PlanItem): void => { items.push(item); workOf.push(n); };
@@ -395,9 +396,11 @@ export class ChatService {
         // The coordinator record's revision is read once, here, and counted for each earlier change to it in this message; a retry of the turn then sends the very same order.
         let expectedRevision: number | undefined;
         if (intent.action === "configure" || intent.action === "start" || intent.action === "pause" || intent.action === "stop") {
-          const current = await this.#deps.coordinator?.()?.get(owner);
-          if (current === undefined && intent.action !== "configure") { push({ i, kind: "refused", code: "not_found", message: "the coordinator is not set up yet" }); continue; }
-          if (current !== undefined) { expectedRevision = current.revision + (pending.get("coordinator") ?? 0); pending.set("coordinator", (pending.get("coordinator") ?? 0) + 1); }
+          // The revision the record will have when this item runs: as it stands now, plus one for each change to it that an earlier item of this message makes (a configure that creates it makes revision 1).
+          const now = coordinatorRevision ?? (await this.#deps.coordinator?.()?.get(owner))?.revision;
+          if (now === undefined && intent.action !== "configure") { push({ i, kind: "refused", code: "not_found", message: "the coordinator is not set up yet" }); continue; }
+          if (now !== undefined) expectedRevision = now;
+          coordinatorRevision = (now ?? 0) + 1;
         }
         push({ i, kind: "coordinator", action: intent.action, ...(expectedRevision === undefined ? {} : { expectedRevision }), ...(target === undefined ? {} : { projectId: target }), ...(intent.question === undefined ? {} : { question: intent.question }), ...(intent.outcome === undefined ? {} : { outcome: intent.outcome }), ...(intent.principalId === undefined ? {} : { principalId: intent.principalId }), ...(intent.routes === undefined ? {} : { routes: intent.routes }) });
         continue;
