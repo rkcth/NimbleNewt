@@ -115,3 +115,21 @@ test("the provider's count of the first call's input is reported once, whichever
   await text((await bad.relay(req("http://relay.invalid/m0/chat/completions"))).body);
   assert.deepEqual(told, [], "a failed call is not a measurement");
 });
+
+test("the count is not taken from a token-count probe, a cancelled reply or a number cut by the edge; a cache-aware count adds the cached tokens", async () => {
+  const run = async (respond: () => Response, path = "chat/completions", cancelAfter?: number): Promise<number[]> => {
+    const { relay } = setup({ respond });
+    const told: number[] = [];
+    const attempt = relay.forAttempt({ route: "llama/local", onFirstUsage: (u) => { told.push(u.inputTokens); } });
+    const res = await attempt.relay(req(`http://relay.invalid/m0/${path}`));
+    let n = 0;
+    for await (const _ of res.body ?? []) { if (cancelAfter !== undefined && ++n >= cancelAfter) break; }
+    return told;
+  };
+  const json = (o: unknown): Response => new Response(JSON.stringify(o), { status: 200, headers: { "content-type": "application/json" } });
+  const sse = (chunks: string[]): Response => new Response(new ReadableStream({ start(c) { for (const x of chunks) c.enqueue(new TextEncoder().encode(x)); c.close(); } }), { status: 200 });
+  assert.deepEqual(await run(() => json({ input_tokens: 55 }), "messages/count_tokens"), [], "a probe is not the call");
+  assert.deepEqual(await run(() => json({ usage: { input_tokens: 10, cache_read_input_tokens: 4000, cache_creation_input_tokens: 200 } }), "messages"), [4210]);
+  assert.deepEqual(await run(() => sse(["data: a\n\n", "data: b\n\n", "data: {\"prompt_tokens\":777}\n\n"]), "chat/completions", 1), [], "cancelled before the end");
+  assert.deepEqual(await run(() => new Response("{\"usage\":{\"prompt_tokens\":12", { status: 200 })), [], "a number cut off is not a number");
+});

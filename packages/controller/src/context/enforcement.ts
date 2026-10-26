@@ -190,7 +190,7 @@ export class ContextEnforcementService {
         const ref: AggregateRef = { kind: "ctx-admission", id };
         const calRef: AggregateRef = { kind: "ctx-calibration", id: derivedId("ctx", `${taskId}\0${body.route}\0calibration`) };
         const cal = await this.#runner.get(calRef.kind, calRef.id);
-        const calBody: CalibrationBody = { taskId, route: body.route, ratio, charsPerToken: cpt, reportedTokens: command.reportedInputTokens, attemptId };
+        const calBody: CalibrationBody = { taskId, route: body.route, ratio: cal === undefined ? ratio : Math.max(ratio, Math.round((cal.body as unknown as CalibrationBody).ratio * 80) / 100), charsPerToken: cpt, reportedTokens: command.reportedInputTokens, attemptId };
         return {
           ref, creates: false,
           changes: [{ type: "update", ref, expectedRevision: found.revision, body: next as unknown as JsonObject }, cal === undefined ? { type: "create", ref: calRef, body: calBody as unknown as JsonObject } : { type: "update", ref: calRef, expectedRevision: cal.revision, body: calBody as unknown as JsonObject }],

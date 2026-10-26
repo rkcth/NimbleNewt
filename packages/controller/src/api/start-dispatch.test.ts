@@ -151,7 +151,9 @@ test("start binds the controller's services to the local worker's guards, offers
   let gated = false;
   const c = await open(join(d, "c.sqlite"), {
     harnesses: [PI],
-    dispatch: { timer, manual: true, local: { window: () => 8192, close: async () => { closed++; }, build: (services) => { built.push(services); const limits = services.context({ route: "x" } as never); assert.ok(limits !== undefined && (limits.toolOutputBytes ?? 0) > 0 && limits.compaction?.fallback === "extractive", "the composer gives the host the context limits of the window"); return worker; } }, mcp: { resolve: async () => answer, gate: async () => { if (gated) throw new Error("the controller is paused"); } } },
+    dispatch: { timer, manual: true, local: { window: () => 8192, close: async () => { closed++; }, build: (services) => { built.push(services); const limits = services.context({ route: "x" } as never); const relay = services.attemptRelay({ attemptId: "att-r", route: "llama/local", expiresAt: "2999-01-01T00:00:00.000Z" } as never, { forAttempt: (a: { onFirstUsage?: unknown }) => ({ alias: "m0", relayBase: "x", relay: async () => { throw new Error(String(typeof a.onFirstUsage)); } }) } as never);
+          assert.equal(services.attemptRelay({ attemptId: "att-r", route: "llama/local", expiresAt: "2999-01-01T00:00:00.000Z" } as never, {} as never), relay, "one relay for every call of an attempt");
+          assert.ok(limits !== undefined && (limits.toolOutputBytes ?? 0) > 0 && limits.compaction?.fallback === "extractive", "the composer gives the host the context limits of the window"); return worker; } }, mcp: { resolve: async () => answer, gate: async () => { if (gated) throw new Error("the controller is paused"); } } },
   });
   try {
     assert.ok(c.dispatch !== undefined, c.dispatchProblem);

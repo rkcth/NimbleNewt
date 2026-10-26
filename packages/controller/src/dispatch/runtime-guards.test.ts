@@ -74,6 +74,9 @@ for (const backend of backends) {
       await guards.context!.confirm!(opened as never, { reportedInputTokens: 2500, promptChars: 9000 });
       const admissions = await storage.listAggregates("ctx-admission", { limit: 10 });
       assert.deepEqual(admissions.map((a) => (a.body as unknown as { reported?: { inputTokens: number } }).reported?.inputTokens), [2500]);
+      // Once recorded the round is forgotten; and a count no prompt could have is not recorded.
+      await guards.context!.confirm!(opened as never, { reportedInputTokens: 99_999_999, promptChars: 9000 });
+      assert.deepEqual((await storage.listAggregates("ctx-admission", { limit: 10 })).map((a) => (a.body as unknown as { reported?: { inputTokens: number } }).reported?.inputTokens), [2500]);
 
       // An urgent message from the owner reaches the running attempt at once, labelled as another party's words.
       await messages.send(w.owner, { commandId: "m1", taskId, to: "agent:ann", class: "urgent-control", purpose: "safety", text: "stop writing to the shared folder" });

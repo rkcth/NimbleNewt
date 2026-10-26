@@ -1,3 +1,4 @@
+import type { AttemptRelay, ModelRelay } from "../dispatch/relay.js";
 import { AdmissionService } from "../admission/index.js";
 import { BudgetService } from "../budgets/index.js";
 import { DecisionService } from "../decisions/index.js";
@@ -61,7 +62,7 @@ export interface DispatchStartOptions {
     /** The model's context window for the order's route, in tokens; `undefined` when the route does not say. */
     readonly window: (order: WorkOrder) => number | undefined;
     readonly storedTokens?: (from: NonNullable<WorkOrder["resumeFrom"]>) => number | undefined;
-    readonly build: (services: { readonly guards: RuntimeGuards; /** The process's context limits for an order (card C07b): tool output cut to the window\'s share and the extractive compaction fallback; `undefined` when the route does not say its window. The host\'s `context` option takes it. */ readonly context: (order: WorkOrder) => WorkerContextLimits | undefined; /** Records the input size the provider reported for the attempt\'s first model call (the relay\'s `onFirstUsage`) against the call that was admitted. Never throws. */ readonly confirmFirstCall: (order: WorkOrder, usage: { readonly inputTokens: number; readonly requestChars: number }) => Promise<void>; readonly cache?: { forOrder(order: WorkOrder): Promise<AttemptCache> } }) => WorkerHost | Promise<WorkerHost>;
+    readonly build: (services: { readonly guards: RuntimeGuards; /** The process's context limits for an order (card C07b): tool output cut to the window\'s share and the extractive compaction fallback; `undefined` when the route does not say its window. The host\'s `context` option takes it. */ readonly context: (order: WorkOrder) => WorkerContextLimits | undefined; /** Records the input size the provider reported for the attempt\'s first model call (the relay\'s `onFirstUsage`) against the call that was admitted. Never throws. */ readonly confirmFirstCall: (order: WorkOrder, usage: { readonly inputTokens: number; readonly requestChars: number }) => Promise<void>; /** The relay of one attempt (the same object for every call of the attempt, so that only its first call is measured), with the first-call count already going to `confirmFirstCall`. Use this instead of `relay.forAttempt`. */ readonly attemptRelay: (order: WorkOrder, relay: ModelRelay, options?: { readonly model?: string; readonly cache?: Parameters<ModelRelay["forAttempt"]>[1] }) => AttemptRelay; readonly cache?: { forOrder(order: WorkOrder): Promise<AttemptCache> } }) => WorkerHost | Promise<WorkerHost>;
     /** Shuts down what `build` made (live workers, the sandbox launcher, the relay). Called when the controller closes and when a later step of the start fails. */
     readonly close?: () => Promise<void>;
   };
@@ -183,7 +184,19 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     const confirmFirstCall = async (order: WorkOrder, usage: { readonly inputTokens: number; readonly requestChars: number }): Promise<void> => {
       try { await guards.context?.confirm?.(order, { reportedInputTokens: usage.inputTokens, promptChars: Math.max(1, usage.requestChars) }); } catch (error) { i.onError?.(error); }
     };
-    workers.push(await i.options.local.build({ guards, context: contextFor, confirmFirstCall, ...(cache === undefined ? {} : { cache }) }));
+    // One relay per attempt, kept until the attempt\'s own expiry.
+    const relays = new Map<string, { readonly relay: AttemptRelay; readonly until: number }>();
+    const attemptRelay = (order: WorkOrder, relay: ModelRelay, options: { readonly model?: string; readonly cache?: Parameters<ModelRelay["forAttempt"]>[1] } = {}): AttemptRelay => {
+      const clock = i.options.clock === undefined ? Date.now : (): number => Date.parse(i.options.clock!());
+      for (const [id, entry] of relays) if (entry.until < clock()) relays.delete(id);
+      let found = relays.get(order.attemptId);
+      if (found === undefined) {
+        found = { relay: relay.forAttempt({ route: order.route, ...(options.model === undefined ? {} : { model: options.model }), onFirstUsage: (usage) => { void confirmFirstCall(order, usage); } }, options.cache), until: Date.parse(order.expiresAt) + 60_000 };
+        relays.set(order.attemptId, found);
+      }
+      return found.relay;
+    };
+    workers.push(await i.options.local.build({ guards, context: contextFor, confirmFirstCall, attemptRelay, ...(cache === undefined ? {} : { cache }) }));
   }
   const dispatcher = DispatcherService.withEpoch(storage, epoch, {
     principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, hosts, workers,  contracts: i.contracts, harnesses: i.catalog, policy, effects, blockers, route,

@@ -110,7 +110,7 @@ export class ModelRelay {
           this.#options.onError?.(route, text);
           throw new Error(`the model endpoint could not be reached: ${text}`);
         }
-        const watch = firstCall && response.ok && response.body !== null;
+        const watch = firstCall && response.ok && response.body !== null && rest !== "messages/count_tokens";
         if (watch) firstCall = false;
         const requestChars = body?.length ?? 0;
         const out: [string, string][] = [];
@@ -123,21 +123,19 @@ export class ModelRelay {
 
 const SCAN = 16 * 1024;
 /**
- * Passes the reply on unchanged and, when it ends, tells `done` the input size the provider reported in it (OpenAI-style `prompt_tokens`, Anthropic-style `input_tokens`), read from the first and the last bytes of the reply
- * (a plain reply is small; a stream reports at its start or its end). Nothing is told when the reply holds no count or the count is not a sensible number.
+ * Passes the reply on unchanged and, when it has ended normally, tells `done` the input size the provider reported in it, read from the first and the last bytes of the reply (a plain reply is small; a stream reports at its start
+ * or its end). OpenAI-style `prompt_tokens` already includes cached tokens; Anthropic-style `input_tokens` leaves them out, so the cache read and creation counts are added. A reply that is cancelled part way, a number cut by the
+ * edge of what is read, or no count at all, tells nothing.
  */
 async function* reporting(body: AsyncIterable<Uint8Array>, done: (inputTokens: number) => void): AsyncGenerator<Uint8Array> {
   const head: Buffer[] = []; let headBytes = 0; let tail = Buffer.alloc(0);
-  try {
-    for await (const piece of body) {
-      if (headBytes < SCAN) { head.push(Buffer.from(piece.subarray(0, SCAN - headBytes))); headBytes += Math.min(piece.length, SCAN - headBytes); }
-      tail = Buffer.concat([tail, piece]).subarray(-SCAN);
-      yield piece;
-    }
-  } finally {
-    const text = `${Buffer.concat(head).toString("utf8")}\n${tail.toString("utf8")}`;
-    let best = 0;
-    for (const m of text.matchAll(/"(?:prompt_tokens|input_tokens)"\s*:\s*(\d{1,9})/g)) best = Math.max(best, Number(m[1]));
-    if (best >= 1) done(best);
+  for await (const piece of body) {
+    if (headBytes < SCAN) { head.push(Buffer.from(piece.subarray(0, SCAN - headBytes))); headBytes += Math.min(piece.length, SCAN - headBytes); }
+    tail = Buffer.concat([tail, piece.length > SCAN ? piece.subarray(-SCAN) : piece]).subarray(-SCAN);
+    yield piece;
   }
+  const text = `${Buffer.concat(head).toString("utf8")}\u0001${tail.toString("utf8")}`;
+  const most = (name: string): number => { let best = 0; for (const m of text.matchAll(new RegExp(`"${name}"\\s*:\\s*(\\d{1,9})(?=[,}\\s])`, "g"))) best = Math.max(best, Number(m[1])); return best; };
+  const total = most("prompt_tokens") || most("input_tokens") + most("cache_read_input_tokens") + most("cache_creation_input_tokens");
+  if (total >= 1) done(total);
 }

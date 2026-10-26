@@ -53,13 +53,17 @@ export function controllerGuards(binding: GuardBinding): RuntimeGuards {
       async admit(order, call, round) {
         const window = binding.window(order);
         if (window === undefined) return { admit: true, reasons: [] };
-        rounds.set(order.attemptId, round);
         const decision = await context.admit(binding.system, { taskId: order.taskId, attemptId: order.attemptId, round, window, route: order.route.replace(/[^A-Za-z0-9._:-]/g, ":").slice(0, 80), call });
+        if (decision.admit) rounds.set(order.attemptId, round);
         return { admit: decision.admit, reasons: decision.reasons };
       },
       async confirm(order, usage) {
         const round = rounds.get(order.attemptId);
-        if (round === undefined) return;
+        const window = binding.window(order);
+        if (round === undefined || window === undefined) return;
+        rounds.delete(order.attemptId);
+        // A count no sensible prompt could have (more than four windows, or fewer than half a character a token) is not a measurement.
+        if (usage.reportedInputTokens > window * 4 || usage.promptChars / usage.reportedInputTokens < 0.5) return;
         await context.confirmUsage(binding.system, { taskId: order.taskId, attemptId: order.attemptId, round, reportedInputTokens: usage.reportedInputTokens, promptChars: usage.promptChars });
       },
       async resume(order, storedTokens) {
