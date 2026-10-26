@@ -150,7 +150,8 @@ describe("the worker process is reaped however the attempt ends, and never holds
       third!.tap.runs[0]!.run.kill();
       const result = await running;
       assert.equal(result.status, "failed");
-      assert.match(String(result.error), /worker process ended/);
+      // Which of the two is reported first depends on whether the channel or the conversation notices the death first.
+      assert.match(String(result.error), /worker process ended|Harness is closed/);
       await reaped(third!.tap.runs[0]!, third!.directory);
       await handle.stop();
     } finally { silent2.server.close(); third!.done(); }
