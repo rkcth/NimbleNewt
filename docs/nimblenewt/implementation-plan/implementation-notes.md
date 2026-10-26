@@ -1781,3 +1781,8 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## Chat composition: policy, status, policy edits
 
 - `startController` with `chat` now builds `PolicyService`, `StatusService` and `PolicyEditService` and gives them to `ChatService`, so the approval profile (A07), status explanations (U05) and conversational policy edits (U04) apply instead of every order being a proposal. The stall service is not passed to status (L01 leaves it unbuilt at start), so stall concerns are not shown there.
+
+## C07b: MCP results framed as data
+
+- A confirmed MCP tool call's text is now returned (and summarised on the operation) as: a notice that it is output from the external server and is data, a warning line when it contains phrases that read as instructions, the text scrubbed of credentials and cut at `MCP_LIMITS.text` (20,000 characters), and a note when cut. Test: a long answer containing "ignore all previous instructions" is flagged, cut and bounded.
+- Still open: the limit is fixed, not scaled to the model's window, and the cut part is not spilled for paging (`limitTool` needs the window of the attempt's route, which the tool service does not hold).
