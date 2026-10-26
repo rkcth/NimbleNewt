@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
+import type { RuntimeGuards, WorkerHost } from "../dispatch/index.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import { PI } from "../dispatch/testing/world.js";
 import { startController } from "./index.js";
@@ -136,4 +137,36 @@ test("a dispatcher the owner disables while the controller runs is noticed on th
     assert.deepEqual([c.dispatch?.driver.status().state, c.dispatch?.driver.status().ticks, timer.armed], ["disabled", 1, false]);
     assert.equal((await c.storage.listAggregates("notification-item", { limit: 5 })).length, 1);
   } finally { await c.close(); cleanup(d); }
+});
+
+test("start binds the controller's services to the local worker's guards, offers the quiesce coordinator, and reaches remote MCP servers only at checked public addresses (card H12k)", async () => {
+  const d = dir();
+  const timer = new ManualTimer();
+  const built: { guards: RuntimeGuards }[] = [];
+  const worker = { hostId: "host:w1" } as unknown as WorkerHost;
+  let answer = ["10.0.0.5"];
+  let closed = 0;
+  let gated = false;
+  const c = await open(join(d, "c.sqlite"), {
+    harnesses: [PI],
+    dispatch: { timer, manual: true, local: { window: () => 8192, close: async () => { closed++; }, build: (services) => { built.push(services); return worker; } }, mcp: { resolve: async () => answer, gate: async () => { if (gated) throw new Error("the controller is paused"); } } },
+  });
+  try {
+    assert.ok(c.dispatch !== undefined, c.dispatchProblem);
+    assert.equal(built.length, 1, "the local host is built once, with guards");
+    const guards = built[0]!.guards;
+    assert.ok(guards.context !== undefined && guards.pause !== undefined && guards.messages !== undefined, "all three guards are bound");
+    // Nothing is running: the coordinator just runs the operation.
+    assert.equal(await c.dispatch.quiesce.around({ taskId: "tsk-aaaaaaaaaaaaaaaaaaaa" }, "integration", async (quiet) => quiet.attempts.length), 0);
+    // A remote server the owner approved is reached through the guard: a private answer is refused, a public one gives the checked address.
+    const owner = await c.services.principals.authenticate((await c.services.principals.bootstrapOwner({ name: "rob" })).token);
+    const project = (await c.services.projects.createProject({ commandId: "p1", actor: owner.id, name: "Garden" })).id;
+    const mcp = c.dispatch.mcp!;
+    const server = (await mcp.service.register(owner, { commandId: "m1", name: "docs", mode: "remote", transport: "streamable-http", protocolRevision: "2025-06-18", sdk: { name: "@modelcontextprotocol/sdk", version: "1.12.0" }, remote: { url: "https://mcp.example.com/v1", credentialRef: "docs.token", scopes: ["docs:read"] }, audience: [project], allowed: { tools: ["search"] } } as never)).id;
+    await assert.rejects(mcp.connector.connect(server, async () => "connected"), /internal address/);
+    answer = ["93.184.216.34"];
+    assert.equal(await mcp.connector.connect(server, async (t) => t.address), "93.184.216.34");
+    gated = true;
+    await assert.rejects(mcp.connector.connect(server, async () => "connected"), /paused/, "a paused controller gives out no endpoint");
+  } finally { await c.close(); assert.equal(closed, 1, "closing the controller shuts the local host down"); cleanup(d); }
 });
