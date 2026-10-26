@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **75 of 202 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **78 of 202 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -106,7 +106,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Part | Progress | Done |
 | --- | --- | --- |
 | Scope and early proofs | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
-| Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓░░░` 75% | 12 of 16 |
+| Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓░░░` 81% | 13 of 16 |
 | Pi runtime and inference caching | `▓▓▓▓▓▓▓▓░░░░` 72% | 8 of 11 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
 | Pause, suspend and resume | `▓▓░░░░░░░░░░` 22% | 2 of 9 |
@@ -114,12 +114,12 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Context and memory | `▓▓▓▓▓▓▓░░░░░` 60% | 6 of 10 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
 | Model routing, fallback and cost | `▓▓▓░░░░░░░░░` 25% | 2 of 8 |
-| Owner chat and web UI | `▓▓░░░░░░░░░░` 16% | 2 of 12 |
+| Owner chat and web UI | `▓▓▓░░░░░░░░░` 25% | 3 of 12 |
 | Workers, dispatch and teams | `▓▓▓▓░░░░░░░░` 34% | 9 of 26 |
 | Agent messaging | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
 | Health and recovery | `░░░░░░░░░░░░` 0% | 0 of 3 |
 | Meetings | `░░░░░░░░░░░░` 0% | 0 of 8 |
-| Tools and skills | `▓▓▓▓░░░░░░░░` 33% | 3 of 9 |
+| Tools and skills | `▓▓▓▓▓░░░░░░░` 44% | 4 of 9 |
 | Projects, repositories and workspaces | `░░░░░░░░░░░░` 0% | 0 of 8 |
 | Quality: deliverables, QA and defects | `░░░░░░░░░░░░` 0% | 0 of 4 |
 | Balancing delivery and improvement | `░░░░░░░░░░░░` 0% | 0 of 1 |
@@ -143,7 +143,7 @@ The accepted scope and the experiments that proved the foundations (durable engi
 </details>
 
 <details>
-<summary><strong>Foundation: storage, configuration and builds</strong> — ▓▓▓▓▓▓▓▓▓░░░ 12 of 16</summary>
+<summary><strong>Foundation: storage, configuration and builds</strong> — ▓▓▓▓▓▓▓▓▓░░░ 13 of 16</summary>
 
 The controller's transactional storage (SQLite and PostgreSQL), versioned configuration, package boundaries, portable CI and the platform checks.
 
@@ -158,7 +158,7 @@ The controller's transactional storage (SQLite and PostgreSQL), versioned config
 - [x] **F04f** · P12 · Move the SQLite adapter off the main thread _(needs F04)_
 - [x] **F04g** · P12 · Verify supported PostgreSQL versions _(needs F04)_
 - [x] **F04h** · P13 · Refuse unsupported environments unless explicitly overridden _(needs F04g)_
-- [ ] **F04i** · P14 · Refuse unsupported filesystems unless explicitly overridden _(needs F04h)_
+- [x] **F04i** · P14 · Refuse unsupported filesystems unless explicitly overridden _(needs F04h)_
 - [x] **F09** · P21 · Implement per-OS secret store backends _(needs F02, A01)_
 - [ ] **F04j** · P22 · Check required tools and libraries instead of distribution names _(needs F04i, A03)_
 - [ ] **F04k** · P24 · Pass workspace roots to the startup filesystem check _(needs F04i, U01)_
@@ -293,12 +293,12 @@ Routes and capability policy, provider failure fallback, difficulty profiles, dr
 </details>
 
 <details>
-<summary><strong>Owner chat and web UI</strong> — ▓▓░░░░░░░░░░ 2 of 12</summary>
+<summary><strong>Owner chat and web UI</strong> — ▓▓▓░░░░░░░░░ 3 of 12</summary>
 
 Talking to your agents: the chat interpreter, policy editing, status and blocker explanations, recovery chat, notifications and the responsive web interface.
 
 - [x] **U10** · P25 · Implement layered configuration, effective values and change history _(needs F02, R01, U01, H11)_
-- [ ] **U03b** · P26 · Back the owner chat interpreter and the coordinator with a routed model _(needs U01, U02, R01, R02)_
+- [x] **U03b** · P26 · Back the owner chat interpreter and the coordinator with a routed model _(needs U01, U02, R01, R02)_
 - [x] **U11** · P26 · Implement owner notifications _(needs U02, S08, U10)_
 - [ ] **U03** · P27 · Implement owner chat command interpretation _(needs U01, U02, R02, U03b)_
 - [ ] **U03c** · P28 · Run the coordinator as a hosted agent with its own lifecycle (optional, after the first release) _(needs U03, H11, L01)_
@@ -386,7 +386,7 @@ Scheduling, votes and decisions, stand-ups, attendance and return to work, and f
 </details>
 
 <details>
-<summary><strong>Tools and skills</strong> — ▓▓▓▓░░░░░░░░ 3 of 9</summary>
+<summary><strong>Tools and skills</strong> — ▓▓▓▓▓░░░░░░░ 4 of 9</summary>
 
 The immutable tool and skill catalogue, review and promotion, MCP connections, the protected agent tool bridge and background jobs.
 
@@ -394,7 +394,7 @@ The immutable tool and skill catalogue, review and promotion, MCP connections, t
 - [x] **T03** · P23 · Implement approved MCP client connections _(needs T01, A01, S05, F09)_
 - [x] **T06** · P29 · Implement the protected agent tool bridge and execution service _(needs H12, T01)_
 - [ ] **T06b** · P30 · Wire the protected bridge into the composed worker across a process boundary _(needs T06, H12b, H12c)_
-- [ ] **T07** · P30 · Implement durable job records and job control _(needs T06, S05)_
+- [x] **T07** · P30 · Implement durable job records and job control _(needs T06, S05)_
 - [ ] **T09** · P30 · Implement command namespaces and alias dispatch _(needs T06, H11, U03)_
 - [ ] **T07b** · P31 · Give agents job control through the tool bridge and bind jobs to the sandbox, the MCP client and the API _(needs T07, T06b, H12g)_
 - [ ] **T02** · P33 · Implement review/promotion/deprecation and retention _(needs T01, A05, L04)_

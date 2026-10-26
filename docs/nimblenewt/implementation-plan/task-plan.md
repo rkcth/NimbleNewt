@@ -262,6 +262,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F04i — Refuse unsupported filesystems unless explicitly overridden
 
 - **Parent:** N02 / AII-252.
+- **Status:** implemented; commits `2575465`, `dea2e5b`; CI runs 40411682946; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The filesystem check and its override are built and tested; passing workspace roots to it at start is F04k.
 - **Blockers:** F04h.
 - **Deliverable:** Startup check of the filesystem under the data directory and workspaces against the supported list (Linux: ext4, xfs, btrfs; macOS: APFS; Windows: NTFS; network filesystems are not supported for the data directory), reusing the F04h override switch (owner decision 2026-10-22: error, and allow an override).
 - **Acceptance and verification:** An unsupported or network filesystem makes the controller refuse to start with a message that says what was found, what is supported and the exact switch that overrides it, which is the F04h switch (owner decision 2026-10-22: the message always tells the owner how to override that specific error); the override starts the controller, records the override in the audit log and in startup output and never changes behaviour otherwise; the refusal is a hard stop, not a warning; case-insensitive and normalising filesystems are handled by the workspace bridge and tested; tested for supported, unsupported, network and overridden cases; the supported list lives in one place with the F04h list.
@@ -1167,6 +1169,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### U03b — Back the owner chat interpreter and the coordinator with a routed model
 
 - **Parent:** N09 / AII-259.
+- **Status:** implemented; commits `17f3200`, `4a2043c`; CI runs 40411682946; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Routed model for the owner chat and the coordinator with failure guard and a daily token cap; start-up configuration of it, a chat.budget right and measured reading speed are not part of this card.
 - **Blockers:** U01, U02, R01, R02.
 - **Deliverable:** The chat interpreter (reads the owner's free-form message into intents) and the coordinator's model are implemented over the routed model client: routes come from the routing table (R01), failures are classified and fall back (R02), the coordinator's routes are resolved from the table instead of being plain names, and the model sees only what the scripted interpreter was shown (the owner's words, quoted text marked as quoted, the focus, the open proposals).
 - **Acceptance and verification:** Against a recorded or simulated model: a clear order becomes the right intents; an ambiguous one asks; quoted text, and an instruction hidden in a record or a tool result, cannot become an intent that grants authority; a model that fails or answers with invalid intents leaves the chat answering that it is unavailable and nothing done; a route that fails falls back as R02 says and a cumulative budget is respected; the same message with the same command ID is one turn.
@@ -1403,6 +1407,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### T07 — Implement durable job records and job control
 
 - **Parent:** N13 / AII-263.
+- **Status:** implemented; commits `d2ffdb6`, `4ad8d5e`; CI runs 40411682946; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Durable job records and job control with the restart, stop, Force Stop and outcome-unknown rules; running the restart decisions at controller start and relaunching from a checkpoint is T07b.
 - **Blockers:** T06, S05.
 - **Deliverable:** Job records for long-running local and remote operations with their own state machine (admitted through outcome-unknown) and resumability class, durable handles with status, cancellation and tool checkpoint where supported, bounded output, logs and artifacts (README 321, 333; operational-contracts 21, 39, 47, 75; portability-and-configuration 29).
 - **Acceptance and verification:** A long-running job returns a durable handle that survives worker and controller restart; operation ID, exit status, bounded output, logs and artifacts are recorded; a job record does not imply resumability; cancelling a model request, stopping a tool and stopping a remote job are separate recorded operations; on restart a live job is completed, cancelled, restarted from a tool checkpoint or recorded as a tracked exception; Pause keeps permitted background jobs running and records their results without unpausing; Stop and Force Stop terminate the whole process tree (job objects on Windows, process groups on POSIX) and orphaned children are reported; long-running MCP operations use the same records and a revoked connection blocks new calls.
