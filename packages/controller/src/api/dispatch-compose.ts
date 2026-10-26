@@ -4,7 +4,7 @@ import { DecisionService } from "../decisions/index.js";
 import { ContextEnforcementService } from "../context/index.js";
 import { CachePolicies, type AttemptCache, type CachePolicyDeps } from "../dispatch/cache.js";
 import { MarkerService } from "../inference-cache/index.js";
-import { DispatchDriver, DispatcherService, QuiesceCoordinator, controllerGuards, type RuntimeGuards, type WorkOrder, activeAgents, attendanceLoops, decisionLoops, eventLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLoop, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
+import { DispatchDriver, DispatcherService, QuiesceCoordinator, controllerGuards, type RuntimeGuards, type WorkOrder, activeAgents, attendanceLoops, decisionLoops, meetingLoops, eventLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLoop, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
 import { DomainError } from "../domain/errors.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import { BlockerService } from "../domain/blockers.js";
@@ -23,7 +23,7 @@ import type { AgentService } from "../agents/index.js";
 import type { HistoryService } from "../context/index.js";
 import type { InquiryService } from "../inquiries/index.js";
 import { PauseService } from "../lifecycle/index.js";
-import { AttendanceService, MeetingService } from "../meetings/index.js";
+import { AttendanceService, MeetingService, type InvitationSink } from "../meetings/index.js";
 import { AgentMessageService } from "../messaging/index.js";
 import { NotificationService } from "../notifications/index.js";
 import type { ContractService } from "../planning/index.js";
@@ -70,6 +70,8 @@ export interface DispatchStartOptions {
     /** The pin marker the project holds for this attempt's route, if any (a pin is sent only while the marker is active). */
     readonly pinMarker?: (order: WorkOrder) => string | undefined;
   };
+  /** Where the invitations of scheduled meetings go (card M01): the host delivers them to the agents it can reach. Absent: invitations are decided and recorded but nothing is sent. */
+  readonly invitations?: InvitationSink;
   /** Remote MCP servers (cards T03, H12g): the name resolver the host uses. Given, the handle carries the MCP service and the connector that reaches an approved server only at a checked public address. */
   readonly mcp?: { readonly resolve: NameResolver; /** Refuses while the controller is paused or stopping (the lifecycle gate); default: never refuses. */ readonly gate?: () => Promise<void> };
 }
@@ -124,7 +126,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     const d = await difficulty.resolve(principal, { commandId, taskId, role: "worker", data: "local-only", paidAuthorized: false });
     return d.outcome === "chosen" ? { route: d.route!, ...(d.profile?.harness === undefined ? {} : { harness: d.profile.harness }), role: d.role, request: d.request, routing: d.routingRevision ?? 0, profiles: d.profilesRevision } : { none: true, reasons: d.reasons };
   });
-  const meetings = MeetingService.withEpoch(storage, epoch, { inquiries: i.inquiries }, { ...ro, availability: pauses.availability });
+  const meetings = MeetingService.withEpoch(storage, epoch, { inquiries: i.inquiries }, { ...ro, availability: pauses.availability, ...(i.options.invitations === undefined ? {} : { invitations: i.options.invitations }) });
   const messages = AgentMessageService.withEpoch(storage, epoch, {
     ...ro, availability: pauses.availability, taskPaused: (t) => pauses.isPaused(t), guard: (t) => pauses.guard(t), waits: i.waits, assignments: i.assignments, meetings, inquiries: i.inquiries, notifications,
   });
@@ -132,7 +134,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   const standups = StandupService.withEpoch(storage, epoch, { meetings, assignments: i.assignments }, { ...ro, availability: pauses.availability });
   const projects = (): Promise<string[]> => projectIds(i.projects);
   const loops: DispatcherLoop[] = [
-    ...messageLoops(messages, () => activeAgents(storage)), ...attendanceLoops(attendance), ...standupLoops(standups, meetings, projects), ...eventLoops(events), ...decisionLoops(decisions, projects),
+    ...messageLoops(messages, () => activeAgents(storage)), ...attendanceLoops(attendance), ...meetingLoops(meetings, projects), ...standupLoops(standups, meetings, projects), ...eventLoops(events), ...decisionLoops(decisions, projects),
   ];
   // The local worker host gets its guards here, bound to the services built above (card H12k); the dispatcher then has it among its workers.
   const workers: WorkerHost[] = [...(i.options.workers ?? [])];

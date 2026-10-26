@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { backends, stopServer } from "../domain/testing/backends.js";
-import { activeAgents, attendanceLoops, decisionLoops, eventLoops, messageLoops, projectIds, standupLoops } from "./loops.js";
+import { activeAgents, attendanceLoops, decisionLoops, eventLoops, meetingLoops, messageLoops, projectIds, standupLoops } from "./loops.js";
 import { buildWorld, workGrants } from "./testing/world.js";
 
 after(stopServer);
@@ -43,3 +43,19 @@ for (const backend of backends) {
     } finally { await store.close(); }
   });
 }
+
+test("the meeting clock loop ticks every page of schedules and sends the invitations of every planned occurrence of every project, as the dispatcher", async () => {
+  const calls: string[] = [];
+  const seenBy = new Set<string>();
+  const pages: Record<string, { created: never[]; missed: never[]; blocked: never[]; skipped: never[]; next?: string }> = { "": { created: [], missed: [], blocked: [], skipped: [], next: "s-2" }, "s-2": { created: [], missed: [], blocked: [], skipped: [] } };
+  const loops = meetingLoops({
+    tick: (async (by: { id: string }, page: { afterId?: string }) => { calls.push(`tick ${page.afterId ?? "first"}`); seenBy.add(by.id); return pages[page.afterId ?? ""]!; }) as never,
+    planned: (async (_by: unknown, projectId: string, page: { afterId?: string }) => (projectId === "p-1" && page.afterId === undefined ? { items: [{ id: "occ-1" }], next: "occ-1" } : projectId === "p-1" ? { items: [{ id: "occ-2" }] } : { items: [{ id: "occ-3" }] })) as never,
+    dispatchInvitations: (async (by: { id: string }, occurrence: string) => { calls.push(`invite ${occurrence}`); seenBy.add(by.id); return { invited: [], withheld: [] }; }) as never,
+  }, async () => ["p-1", "p-2"]);
+  assert.deepEqual(loops.map((l) => l.name), ["meetings.tick", "meetings.invite"]);
+  const by = { id: "service:dispatcher" } as never;
+  for (const l of loops) await l.run(by);
+  assert.deepEqual(calls, ["tick first", "tick s-2", "invite occ-1", "invite occ-2", "invite occ-3"]);
+  assert.deepEqual([...seenBy], ["service:dispatcher"]);
+});

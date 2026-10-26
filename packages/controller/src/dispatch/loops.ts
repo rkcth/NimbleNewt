@@ -73,6 +73,39 @@ export function standupLoops(standups: Pick<StandupService, "prepare" | "deliver
   ];
 }
 
+/**
+ * M01: the meeting clock. `tick` makes the occurrence for each schedule that is due (one for the latest slot after any downtime, a catch-up report for the rest), a page of schedules at a time; then, for each
+ * project, every planned occurrence has its invitations handed to the sink (once each: the service withholds the paused and the unavailable and sends nothing for a catch-up report or a settled meeting).
+ */
+export function meetingLoops(meetings: Pick<MeetingService, "tick" | "planned" | "dispatchInvitations">, projects: () => Promise<readonly string[]>): DispatcherLoop[] {
+  return [
+    {
+      name: "meetings.tick",
+      run: async (by) => {
+        for (let after: string | undefined, rounds = 0; rounds < ROUNDS; rounds++) {
+          const r = await meetings.tick(by, { ...(after === undefined ? {} : { afterId: after }), limit: PAGE });
+          if (r.next === undefined) break;
+          after = r.next;
+        }
+      },
+    },
+    {
+      name: "meetings.invite",
+      run: async (by) => {
+        for (const projectId of await projects()) {
+          for (let after: string | undefined; ;) {
+            const page = await meetings.planned(by, projectId, { ...(after === undefined ? {} : { afterId: after }), limit: 20 });
+            if (page === undefined) break;
+            for (const occurrence of page.items) await meetings.dispatchInvitations(by, occurrence.id);
+            if (page.next === undefined) break;
+            after = page.next;
+          }
+        }
+      },
+    },
+  ];
+}
+
 /** H06b: subscriptions idle past their time are expired and the Notices owed are filed. */
 export function eventLoops(events: Pick<EventService, "expireIdle">): DispatcherLoop[] {
   return [{ name: "events.expireIdle", run: (by) => drain(() => events.expireIdle(by)) }];

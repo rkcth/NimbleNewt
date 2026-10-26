@@ -68,6 +68,8 @@ test("start builds the dispatcher and its loops under the controller's epoch; th
     assert.equal(errors.length, 1, "and it reached the observer");
     // The gateway the worker is given is the dispatcher's, bound to the attempt.
     assert.equal(c.dispatch.dispatcher.gateway(attempt).attemptId, attempt);
+    // The meeting clock is among the loops the tick runs (card M01).
+    assert.ok((await c.dispatch.dispatcher.tick()).loops.some((l) => l.name === "meetings.tick" && l.ok), "the meeting clock ran");
   } finally {
     await c.close();
     assert.equal(c.dispatch?.driver.status().state, "stopped");
