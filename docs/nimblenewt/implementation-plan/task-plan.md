@@ -1095,7 +1095,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### U03 — Implement owner chat command interpretation
 
 - **Parent:** N09 / AII-259.
-- **Blockers:** U01, U02, R02.
+- **Blockers:** U01, U02, R02, U03b.
 - **Deliverable:** Intent-to-command mapping and audit links; a persistent coordinator agent (controller-managed, with its own grants, fallback list and lifecycle controls) answers from records and opens inquiries only when records are insufficient; proposal records; chat commands for agent, team and task-contract records.
 - **Acceptance and verification:** Clear authorized project/task edits apply; material ambiguity asks; quoted/untrusted text cannot grant authority; a drafted project or assignment is saved as a proposal and nothing is admitted until an explicit request applies it; per-project conversation context is retained across switches and changing focus never retargets a running task; every dispatched task carries an explicit project and checkout; the controller keeps working when the coordinator is unavailable; the coordinator decomposes an outcome into tasks with dependencies and proposes or, if granted, makes assignments.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
@@ -1127,7 +1127,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### U03b — Back the owner chat interpreter and the coordinator with a routed model
 
 - **Parent:** N09 / AII-259.
-- **Blockers:** U03, R01, R02.
+- **Blockers:** U01, U02, R01, R02.
 - **Deliverable:** The chat interpreter (reads the owner's free-form message into intents) and the coordinator's model are implemented over the routed model client: routes come from the routing table (R01), failures are classified and fall back (R02), the coordinator's routes are resolved from the table instead of being plain names, and the model sees only what the scripted interpreter was shown (the owner's words, quoted text marked as quoted, the focus, the open proposals).
 - **Acceptance and verification:** Against a recorded or simulated model: a clear order becomes the right intents; an ambiguous one asks; quoted text, and an instruction hidden in a record or a tool result, cannot become an intent that grants authority; a model that fails or answers with invalid intents leaves the chat answering that it is unavailable and nothing done; a route that fails falls back as R02 says and a cumulative budget is respected; the same message with the same command ID is one turn.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

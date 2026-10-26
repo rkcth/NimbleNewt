@@ -19,7 +19,7 @@ import { CHAT_LIMITS } from "./interpreter.js";
 /** What the coordinator's model is asked. The model call is behind this interface (scripted in tests); its answer is validated here and never acted on directly. */
 export type CoordinatorRequest =
   | { readonly kind: "answer"; readonly question: string; readonly records: readonly { readonly source: SourceRef; readonly title?: string; readonly snippet: string }[] }
-  | { readonly kind: "assign"; readonly project: { readonly id: string; readonly name: string }; readonly tasks: readonly { readonly id: string; readonly title: string; readonly repositoryId?: string }[] }
+  | { readonly kind: "assign"; readonly project: { readonly id: string; readonly name: string }; readonly tasks: readonly { readonly id: string; readonly title: string; readonly repositoryId?: string }[]; /** The active agents the model may pick from. */ readonly agents?: readonly { readonly id: string; readonly name: string; readonly roles: readonly string[] }[] }
   | { readonly kind: "decompose"; readonly outcome: string; readonly project: { readonly id: string; readonly name: string; readonly repositories: readonly string[] } };
 
 export interface CoordinatorModel {
@@ -64,6 +64,10 @@ export interface CoordinatorDeps {
   readonly api?: Pick<StateApi, "handle">;
   readonly token?: () => Promise<string | undefined>;
   readonly model: CoordinatorModel;
+  /** Where the routes come from, read at each question (the routing table, card U03b). Absent: the routes stored with the coordinator. */
+  readonly routes?: () => Promise<readonly string[]> | readonly string[];
+  /** The active agents the coordinator may assign to, shown to the model. Absent: none are shown, so no assignment is proposed. */
+  readonly agents?: () => Promise<readonly { readonly id: string; readonly name: string; readonly roles: readonly string[] }[]>;
   /** The coordinator's own authenticated principal (the controller holds its credential). */
   readonly principal: () => Promise<Principal>;
 }
@@ -227,7 +231,7 @@ export class CoordinatorService {
     for (const t of all) if ((await this.#deps.assignments.getAssignment(t.id)) === undefined) open.push({ id: t.id, title: t.title, ...(t.repositoryId === undefined ? {} : { repositoryId: t.repositoryId }) });
     const project = await this.#deps.projects.getProject(projectId);
     if (project === undefined) throw new DomainError("not_found", "no such project");
-    const reply = await this.#ask(state.body, { kind: "assign", project: { id: projectId, name: project.name }, tasks: open });
+    const reply = await this.#ask(state.body, { kind: "assign", project: { id: projectId, name: project.name }, tasks: open, agents: await this.#agents() });
     if (reply === undefined) return { kind: "unavailable", reason: "the coordinator could not be reached on any route" };
     const picks = checkAssignments(reply, open);
     const skipped = picks.filter((p) => open.find((t) => t.id === p.taskId)?.repositoryId === undefined).map((p) => `${p.taskId}: no repository`);
@@ -251,6 +255,10 @@ export class CoordinatorService {
 
   // ---- internals -------------------------------------------------------------------------------------------------------------
 
+  async #agents(): Promise<readonly { id: string; name: string; roles: readonly string[] }[]> {
+    try { return (await this.#deps.agents?.()) ?? []; } catch { return []; }
+  }
+
   #requireOwner(owner: Principal): void {
     if (owner.kind !== "owner" || owner.taskScope !== undefined) throw new DomainError("forbidden", "only the owner uses the coordinator");
   }
@@ -270,7 +278,8 @@ export class CoordinatorService {
 
   /** The primary route, then the fallbacks in order, at most four tries; the first usable reply wins and none is a refusal to answer, not an error. */
   async #ask(body: CoordinatorBody, request: CoordinatorRequest): Promise<unknown> {
-    for (const route of body.routes.slice(0, MAX_ROUTES)) {
+    const routes = this.#deps.routes === undefined ? body.routes : await this.#deps.routes();
+    for (const route of routes.slice(0, MAX_ROUTES)) {
       try { return await this.#deps.model.respond(route, request); } catch { /* try the next route */ }
     }
     return undefined;

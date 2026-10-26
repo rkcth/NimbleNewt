@@ -87,7 +87,7 @@ export interface StartOptions {
    */
   readonly chat?: {
     readonly interpreter: ChatInterpreter;
-    readonly coordinator?: { readonly model: CoordinatorModel; /** The coordinator agent's credential, held by the controller. */ readonly token: () => Promise<string | undefined> };
+    readonly coordinator?: { readonly model: CoordinatorModel; /** The coordinator agent's credential, held by the controller. */ readonly token: () => Promise<string | undefined>; /** Where its routes come from at each question (the routing table, via `chatRoutes`); absent: the routes stored with it. */ readonly routes?: () => Promise<readonly string[]> | readonly string[] };
   };
 }
 
@@ -208,7 +208,8 @@ export async function startController(options: StartOptions): Promise<Controller
       if (o.coordinator !== undefined) {
         const c = o.coordinator;
         coordinator = CoordinatorService.withEpoch(storage, epoch, {
-          chat, retrieval, inquiries, projects, assignments, api, token: c.token, model: c.model,
+          chat, retrieval, inquiries, projects, assignments, api, token: c.token, model: c.model, ...(c.routes === undefined ? {} : { routes: c.routes }),
+          agents: async () => { const who = await principals.authenticate((await c.token())!); return (await agents.list(who, { state: "active", limit: 100 })).items.map((a) => ({ id: a.id, name: a.friendlyName, roles: a.roles })); },
           principal: async () => { const t = await c.token(); if (t === undefined) throw new DomainError("unavailable", "the coordinator has no credential"); return principals.authenticate(t); },
         });
       }
