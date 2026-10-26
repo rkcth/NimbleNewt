@@ -29,9 +29,9 @@ export const PARTS = [
   ["N02", "Foundation: storage, configuration and builds", "The controller's transactional storage (SQLite and PostgreSQL), versioned configuration, package boundaries, portable CI and the platform checks."],
   ["N03", "Pi runtime and inference caching", "The pinned Pi adapter, how it is upgraded, and the per-backend cache tuning that makes switching context cheap."],
   ["N04", "Projects, tasks and reliable work", "Project and task records, assignments, durable delivery, the effect ledger and artifacts: work that survives crashes without repeating itself."],
-  ["N05", "Pause, suspend and resume", "Pause, suspend, stop, release and checked resume, and interrupting a model mid-generation."],
+  ["N05", "Pause, suspend and resume", "Pause, suspend, stop, release and checked resume, interrupting a model mid-generation, the remote watchdog, and shutdown and reboot handling."],
   ["N06", "Security: identity, approvals and sandboxing", "Authenticated principals, revisioned grants, the sandbox launchers, the protected filesystem and Git bridge, approval policy and resource limits."],
-  ["N07", "Context and memory", "Separated task, chat and meeting context, working notes, source-backed retrieval, safe-boundary continuation, retained branches and context budgets."],
+  ["N07", "Context and memory", "Separated task, chat and meeting context, working notes, source-backed retrieval, safe-boundary continuation, retained branches, context budgets, owner decisions and the activity record."],
   ["N07a", "State API and MCP state", "The versioned state API that every client uses, and the controller-backed MCP state."],
   ["N08", "Model routing, fallback and cost", "Routes and capability policy, provider failure fallback, difficulty profiles, drain and cutover, and cost attribution."],
   ["N09", "Owner chat and web UI", "Talking to your agents: the chat interpreter, policy editing, status and blocker explanations, recovery chat, notifications and the responsive web interface."],
@@ -42,10 +42,10 @@ export const PARTS = [
   ["N13", "Tools and skills", "The immutable tool and skill catalogue, review and promotion, MCP connections, the protected agent tool bridge and background jobs."],
   ["N14", "Projects, repositories and workspaces", "Repository-independent projects, isolated coding workspaces, non-code and sandbox operations, ongoing responsibilities and external contribution."],
   ["N15", "Quality: deliverables, QA and defects", "Deliverable submission and acceptance, independent QA, documentation impact and defect tracking."],
-  ["N16", "Budgets", "Production and improvement budgets."],
+  ["N16", "Balancing delivery and improvement", "How capacity is split between production work and work that improves NimbleNewt."],
   ["N16a", "Learning and improvement", "Observations, versioned lessons, bounded experiments, scoped adoption and optional agent work on NimbleNewt itself."],
   ["N17", "Backup, updates and operations", "Backup and restore, release staging, migration recovery, maintenance windows and update orchestration."],
-  ["N18", "Test campaigns and platforms", "Crash, policy, isolation and partition campaigns, Windows and macOS qualification, and the typical and exhaustive test tiers."],
+  ["N18", "Test campaigns and platforms", "Crash, policy, isolation and partition campaigns, QA checkpoints, Windows and macOS qualification, and the typical and exhaustive test tiers."],
   ["N19", "Release", "Installation, documentation, QA on real machines, the release decision and closing the plan."],
 ];
 
@@ -53,9 +53,11 @@ const BAR_CELLS = 12;
 /** A text progress bar that reads the same in any renderer: filled cells for implemented cards, half cells for those awaiting sign-off. */
 export function bar(done, review, total) {
   if (total === 0) return "░".repeat(BAR_CELLS);
-  const full = Math.floor((done / total) * BAR_CELLS);
-  const half = Math.min(BAR_CELLS - full, Math.round(((done + review) / total) * BAR_CELLS) - full);
-  return "▓".repeat(full) + "▒".repeat(Math.max(0, half)) + "░".repeat(BAR_CELLS - full - Math.max(0, half));
+  // At least one filled cell once anything is done, so progress is never drawn as empty.
+  const full = done === 0 ? 0 : Math.max(1, Math.floor((done / total) * BAR_CELLS));
+  // Half cells only when something is awaiting sign-off, and at least one then, so a single such card is never invisible.
+  const half = review === 0 ? 0 : Math.min(BAR_CELLS - full, Math.max(1, Math.floor(((done + review) / total) * BAR_CELLS) - full));
+  return "▓".repeat(full) + "▒".repeat(half) + "░".repeat(BAR_CELLS - full - half);
 }
 const percent = (n, total) => (total === 0 ? 0 : Math.floor((n / total) * 100));
 
@@ -70,13 +72,13 @@ export function renderRoadmap(plan) {
   const out = [
     "## Roadmap",
     "",
-    `NimbleNewt is built in ${PARTS.filter(([id]) => tasks.some((t) => t.parent === id)).length} major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order: a phase needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **${done} of ${tasks.length} tasks implemented**${review > 0 ? `, ${review} awaiting sign-off` : ""}.`,
+    `NimbleNewt is built in ${PARTS.filter(([id]) => tasks.some((t) => t.parent === id)).length} major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **${done} of ${tasks.length} tasks implemented**${review > 0 ? `, ${review} awaiting sign-off` : ""}.`,
     "",
     `> ${plan.execution_note ?? ""}`.trimEnd(),
     "",
     "This section is generated from `task-plan.json`: edit the PROGRESS table in `scripts/generate_task_plan.py`, run it, then run `npm run roadmap:write`; `npm test` fails if it is stale.",
     "",
-    "Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a human review) · `[~]` implemented, awaiting sign-off the implementer cannot give · `[ ]` not started. Bars: ▓ implemented, ▒ awaiting sign-off, ░ not yet. Task prefixes: G gates and experiments, F foundation, S state, L lifecycle, C context, A security, R routing, U interface, H workers, M meetings, T tools, P projects, Q quality, B budgets and learning, K operations, X test campaigns, D release.",
+    "Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a human review) · `[~]` implemented, awaiting sign-off the implementer cannot give · `[ ]` not started. Bars: ▓ implemented, ▒ awaiting sign-off, ░ not yet. Task prefixes: G gates and experiments, F foundation, S state, L lifecycle, C context, A security, R routing, U interface, H workers, M meetings, T tools, P projects, Q quality, B budgets and learning, K operations, V supervision, X test campaigns, Y QA checkpoints, D release.",
     "",
     "### Progress by part",
     "",
@@ -98,7 +100,7 @@ export function renderRoadmap(plan) {
     for (const t of ordered) {
       const needs = t.depends_on.length > 0 ? ` _(needs ${t.depends_on.join(", ")})_` : "";
       const note = t.progress?.roadmap_note ? ` — ${t.progress.roadmap_note}` : "";
-      out.push(`- [${MARK[t.status] ?? " "}] **${t.id}** ${t.title}${needs}${note}`);
+      out.push(`- [${MARK[t.status] ?? " "}] **${t.id}** · P${level.get(t.id)} · ${t.title}${needs}${note}`);
     }
     out.push("", "</details>", "");
   }

@@ -85,7 +85,7 @@ TypeScript is the default language for the controller, worker adapter, API, and 
 
 ## Design and implementation status
 
-NimbleNewt is under development. The lifecycle and context behavior above is the product contract to implement. Pi Durable is the selected initial runtime direction. The Pi adapter milestone (G02) is implemented and passing CI on Linux, macOS and Windows, and awaits real-hardware QA and owner sign-off; its record lists the capabilities that are still unsupported ([G02 acceptance record](docs/nimblenewt/implementation-plan/g02-acceptance.md)). Beneath it, versioned configuration, the controller storage layer (SQLite and PostgreSQL 17 and above, with journaled migrations), the protected tool registry, project and task records, and verified artifacts are implemented, as are assignment, delivery, the security layer (principals, grants, review), desks and histories, retrieval, routing, host registration, admission and inquiries, and the state API (see the roadmap for the exact list); the worker runtime, sandboxing, tools, the UI and everything else are not built. See the roadmap below. Efficiency and quality improvements are goals to evaluate, not measured performance claims or a launch-date commitment.
+NimbleNewt is under development. The lifecycle and context behavior above is the product contract to implement. Pi Durable is the selected initial runtime direction. The Pi adapter milestone (G02) is implemented and passes CI on Linux, macOS and Windows; real-hardware QA (D04) and owner sign-off are still to come; its record lists the capabilities that are still unsupported ([G02 acceptance record](docs/nimblenewt/implementation-plan/g02-acceptance.md)). Beneath it, versioned configuration, the controller storage layer (SQLite and PostgreSQL 17 and above, with journaled migrations), the protected tool registry, project and task records, and verified artifacts are implemented, as are assignment, delivery, the security layer (principals, grants, review), desks and histories, retrieval, routing, host registration, admission and inquiries, and the state API (see the roadmap for the exact list); the worker runtime, sandboxing, tools, the UI and everything else are not built. See the roadmap below. Efficiency and quality improvements are goals to evaluate, not measured performance claims or a launch-date commitment.
 
 Durable continuity uses recorded histories, tool results, notes, decisions, artifacts and checkpoints. These are distinct from arbitrary process-memory snapshots, hidden model state or a provider's live KV cache. Restore native history where supported and expose fidelity limits when reconstructing from portable records. Exact bit-for-bit continuation, zero latency and universal cache retention are not promised.
 
@@ -93,39 +93,39 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order: a phase needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **70 of 195 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **70 of 195 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
 This section is generated from `task-plan.json`: edit the PROGRESS table in `scripts/generate_task_plan.py`, run it, then run `npm run roadmap:write`; `npm test` fails if it is stale.
 
-Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a human review) · `[~]` implemented, awaiting sign-off the implementer cannot give · `[ ]` not started. Bars: ▓ implemented, ▒ awaiting sign-off, ░ not yet. Task prefixes: G gates and experiments, F foundation, S state, L lifecycle, C context, A security, R routing, U interface, H workers, M meetings, T tools, P projects, Q quality, B budgets and learning, K operations, X test campaigns, D release.
+Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a human review) · `[~]` implemented, awaiting sign-off the implementer cannot give · `[ ]` not started. Bars: ▓ implemented, ▒ awaiting sign-off, ░ not yet. Task prefixes: G gates and experiments, F foundation, S state, L lifecycle, C context, A security, R routing, U interface, H workers, M meetings, T tools, P projects, Q quality, B budgets and learning, K operations, V supervision, X test campaigns, Y QA checkpoints, D release.
 
 ### Progress by part
 
 | Part | Progress | Done |
 | --- | --- | --- |
 | Scope and early proofs | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
-| Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓▒░░` 80% | 12 of 15 |
-| Pi runtime and inference caching | `▓▓▓▓▓▓▓▓▒░░░` 72% | 8 of 11 |
+| Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓░░░` 80% | 12 of 15 |
+| Pi runtime and inference caching | `▓▓▓▓▓▓▓▓░░░░` 72% | 8 of 11 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
 | Pause, suspend and resume | `▓░░░░░░░░░░░` 11% | 1 of 9 |
-| Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▒░░░` 72% | 13 of 18 |
+| Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓░░░░` 72% | 13 of 18 |
 | Context and memory | `▓▓▓▓▓▓▓░░░░░` 60% | 6 of 10 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
-| Model routing, fallback and cost | `▓▓▓▓▒░░░░░░░` 40% | 2 of 5 |
+| Model routing, fallback and cost | `▓▓▓▓░░░░░░░░` 40% | 2 of 5 |
 | Owner chat and web UI | `▓▓░░░░░░░░░░` 16% | 2 of 12 |
-| Workers, dispatch and teams | `▓▓▒░░░░░░░░░` 24% | 6 of 25 |
+| Workers, dispatch and teams | `▓▓░░░░░░░░░░` 24% | 6 of 25 |
 | Agent messaging | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
 | Health and recovery | `░░░░░░░░░░░░` 0% | 0 of 2 |
 | Meetings | `░░░░░░░░░░░░` 0% | 0 of 8 |
 | Tools and skills | `▓▓▓░░░░░░░░░` 25% | 2 of 8 |
 | Projects, repositories and workspaces | `░░░░░░░░░░░░` 0% | 0 of 8 |
 | Quality: deliverables, QA and defects | `░░░░░░░░░░░░` 0% | 0 of 4 |
-| Budgets | `░░░░░░░░░░░░` 0% | 0 of 1 |
+| Balancing delivery and improvement | `░░░░░░░░░░░░` 0% | 0 of 1 |
 | Learning and improvement | `░░░░░░░░░░░░` 0% | 0 of 5 |
 | Backup, updates and operations | `░░░░░░░░░░░░` 0% | 0 of 11 |
-| Test campaigns and platforms | `▒░░░░░░░░░░░` 6% | 1 of 15 |
+| Test campaigns and platforms | `▓░░░░░░░░░░░` 6% | 1 of 15 |
 | Release | `░░░░░░░░░░░░` 0% | 0 of 6 |
 
 ### The parts in detail
@@ -135,52 +135,52 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 The accepted scope and the experiments that proved the foundations (durable engine, remote stop and failover).
 
-- [x] **G01** Record accepted scope and experiment prerequisites — recorded; open owner decisions (N00 budget, PostgreSQL versions, minimum OS versions) listed in the record
-- [x] **G07** Record current architecture and executable task manifest _(needs G01)_
-- [ ] **G04** Prove supporting durable engine integration _(needs S09, F04d, F04f, F04g, G09)_
-- [ ] **G08** Prove remote stop and failover authority contracts _(needs H09, K05)_
+- [x] **G01** · P1 · Record accepted scope and experiment prerequisites — recorded; open owner decisions (N00 budget, PostgreSQL versions, minimum OS versions) listed in the record
+- [x] **G07** · P2 · Record current architecture and executable task manifest _(needs G01)_
+- [ ] **G04** · P31 · Prove supporting durable engine integration _(needs S09, F04d, F04f, F04g, G09)_
+- [ ] **G08** · P41 · Prove remote stop and failover authority contracts _(needs H09, K05)_
 
 </details>
 
 <details>
-<summary><strong>Foundation: storage, configuration and builds</strong> — ▓▓▓▓▓▓▓▓▓▒░░ 12 of 15</summary>
+<summary><strong>Foundation: storage, configuration and builds</strong> — ▓▓▓▓▓▓▓▓▓░░░ 12 of 15</summary>
 
 The controller's transactional storage (SQLite and PostgreSQL), versioned configuration, package boundaries, portable CI and the platform checks.
 
-- [x] **F01** Create TypeScript package boundaries _(needs G07)_
-- [x] **F03** Establish portable CI and test fixtures _(needs F01)_
-- [x] **F02** Implement versioned configuration and secret references _(needs F01, G02, G03)_
-- [x] **F04a** Define transactional controller storage contract _(needs F01, G02, G03)_
-- [x] **F04b** Implement SQLite controller storage adapter _(needs F04a)_
-- [x] **F04c** Implement PostgreSQL controller storage adapter _(needs F04a)_
-- [x] **F04d** Qualify storage adapter parity and contention _(needs F04b, F04c)_
-- [x] **F04** Define storage schema migration runners _(needs F04d)_
-- [x] **F04f** Move the SQLite adapter off the main thread _(needs F04)_
-- [x] **F04g** Verify supported PostgreSQL versions _(needs F04)_
-- [x] **F04h** Refuse unsupported environments unless explicitly overridden _(needs F04g)_
-- [ ] **F04i** Refuse unsupported filesystems unless explicitly overridden _(needs F04h)_
-- [x] **F09** Implement per-OS secret store backends _(needs F02, A01)_
-- [ ] **F04j** Check required tools and libraries instead of distribution names _(needs F04i, A03)_
-- [ ] **F04e** Implement chat-controlled controller database transfer _(needs F04, K01, F06)_
+- [x] **F01** · P3 · Create TypeScript package boundaries _(needs G07)_
+- [x] **F03** · P4 · Establish portable CI and test fixtures _(needs F01)_
+- [x] **F02** · P8 · Implement versioned configuration and secret references _(needs F01, G02, G03)_
+- [x] **F04a** · P8 · Define transactional controller storage contract _(needs F01, G02, G03)_
+- [x] **F04b** · P9 · Implement SQLite controller storage adapter _(needs F04a)_
+- [x] **F04c** · P9 · Implement PostgreSQL controller storage adapter _(needs F04a)_
+- [x] **F04d** · P10 · Qualify storage adapter parity and contention _(needs F04b, F04c)_
+- [x] **F04** · P11 · Define storage schema migration runners _(needs F04d)_
+- [x] **F04f** · P12 · Move the SQLite adapter off the main thread _(needs F04)_
+- [x] **F04g** · P12 · Verify supported PostgreSQL versions _(needs F04)_
+- [x] **F04h** · P13 · Refuse unsupported environments unless explicitly overridden _(needs F04g)_
+- [ ] **F04i** · P14 · Refuse unsupported filesystems unless explicitly overridden _(needs F04h)_
+- [x] **F09** · P21 · Implement per-OS secret store backends _(needs F02, A01)_
+- [ ] **F04j** · P22 · Check required tools and libraries instead of distribution names _(needs F04i, A03)_
+- [ ] **F04e** · P33 · Implement chat-controlled controller database transfer _(needs F04, K01, F06)_
 
 </details>
 
 <details>
-<summary><strong>Pi runtime and inference caching</strong> — ▓▓▓▓▓▓▓▓▒░░░ 8 of 11</summary>
+<summary><strong>Pi runtime and inference caching</strong> — ▓▓▓▓▓▓▓▓░░░░ 8 of 11</summary>
 
 The pinned Pi adapter, how it is upgraded, and the per-backend cache tuning that makes switching context cheap.
 
-- [x] **F05** Implement pinned Pi adapter submission contract _(needs F01)_
-- [x] **F06** Implement adapter checkpoints and cancellation mapping _(needs F05)_
-- [x] **G02** Accept the Pi adapter first milestone _(needs F05, F06, F03)_ — implemented and passing CI; owner signed off 2026-10-22; real macOS/Windows QA is carried out under D04
-- [x] **G03** Qualify forward migration and compatibility rejection _(needs G02)_
-- [x] **F07** Enforce immutable extension and namespace registration _(needs F05, F02)_
-- [x] **F08** Declare harness capabilities and enforce per-task recovery requirements _(needs F06, S02)_
-- [x] **C06** Implement inference-cache adapters with per-backend tuning _(needs C05)_
-- [x] **C06b** Make Pi agent prompts cache-stable across context switches _(needs C06, F05, F06)_
-- [ ] **G10** Benchmark native backend caching and branch markers _(needs C06)_
-- [ ] **G09** Prove retained-context inquiry and mid-generation interruption _(needs C05, L05, L05b)_
-- [ ] **G11** Qualify the Pi Durable runtime upgrade path _(needs G03, F07, K07)_
+- [x] **F05** · P4 · Implement pinned Pi adapter submission contract _(needs F01)_
+- [x] **F06** · P5 · Implement adapter checkpoints and cancellation mapping _(needs F05)_
+- [x] **G02** · P6 · Accept the Pi adapter first milestone _(needs F05, F06, F03)_ — implemented and passing CI; owner signed off 2026-10-22; real macOS/Windows QA is carried out under D04
+- [x] **G03** · P7 · Qualify forward migration and compatibility rejection _(needs G02)_
+- [x] **F07** · P9 · Enforce immutable extension and namespace registration _(needs F05, F02)_
+- [x] **F08** · P14 · Declare harness capabilities and enforce per-task recovery requirements _(needs F06, S02)_
+- [x] **C06** · P26 · Implement inference-cache adapters with per-backend tuning _(needs C05)_
+- [x] **C06b** · P27 · Make Pi agent prompts cache-stable across context switches _(needs C06, F05, F06)_
+- [ ] **G10** · P27 · Benchmark native backend caching and branch markers _(needs C06)_
+- [ ] **G09** · P30 · Prove retained-context inquiry and mid-generation interruption _(needs C05, L05, L05b)_
+- [ ] **G11** · P36 · Qualify the Pi Durable runtime upgrade path _(needs G03, F07, K07)_
 
 </details>
 
@@ -189,78 +189,78 @@ The pinned Pi adapter, how it is upgraded, and the per-backend cache tuning that
 
 Project and task records, assignments, durable delivery, the effect ledger and artifacts: work that survives crashes without repeating itself.
 
-- [x] **S01** Implement project/task records and revisioned commands _(needs F04)_
-- [x] **S06** Implement artifact publication and integrity _(needs F04)_
-- [x] **S02** Implement assignment generations and attempt admission _(needs S01, F05)_
-- [x] **S03** Implement durable transition delivery _(needs S01)_
-- [x] **S04** Implement durable inbox and duplicate handling _(needs S03, S02)_
-- [x] **S05** Implement effect ledger and idempotent bridge _(needs S02, S04)_
-- [x] **S07** Implement startup and periodic reconciliation _(needs S03, S04, S05)_
-- [x] **S08** Implement typed waits and deadline settlement _(needs S04, S07)_
-- [x] **S09** Verify the durable vertical slice _(needs S05, S06, S07, S08, F06, G02, G03)_
-- [x] **S10** Implement task contracts and the task dependency graph _(needs S01, S08, A02)_
-- [x] **C03** Capture read/write/search dependency manifests _(needs S06, A04, C01)_
+- [x] **S01** · P12 · Implement project/task records and revisioned commands _(needs F04)_
+- [x] **S06** · P12 · Implement artifact publication and integrity _(needs F04)_
+- [x] **S02** · P13 · Implement assignment generations and attempt admission _(needs S01, F05)_
+- [x] **S03** · P13 · Implement durable transition delivery _(needs S01)_
+- [x] **S04** · P14 · Implement durable inbox and duplicate handling _(needs S03, S02)_
+- [x] **S05** · P15 · Implement effect ledger and idempotent bridge _(needs S02, S04)_
+- [x] **S07** · P16 · Implement startup and periodic reconciliation _(needs S03, S04, S05)_
+- [x] **S08** · P17 · Implement typed waits and deadline settlement _(needs S04, S07)_
+- [x] **S09** · P18 · Verify the durable vertical slice _(needs S05, S06, S07, S08, F06, G02, G03)_
+- [x] **S10** · P22 · Implement task contracts and the task dependency graph _(needs S01, S08, A02)_
+- [x] **C03** · P23 · Capture read/write/search dependency manifests _(needs S06, A04, C01)_
 
 </details>
 
 <details>
 <summary><strong>Pause, suspend and resume</strong> — ▓░░░░░░░░░░░ 1 of 9</summary>
 
-Pause, suspend, stop, release and checked resume, and interrupting a model mid-generation.
+Pause, suspend, stop, release and checked resume, interrupting a model mid-generation, the remote watchdog, and shutdown and reboot handling.
 
-- [x] **L05** Implement generation interruption and late-result handling _(needs C05, F06, A02)_
-- [ ] **L01** Implement Pause and background settlement _(needs C04, A02, S08, L05)_
-- [ ] **L01b** Run the reconciler and stall detection in the controller with the pause gates _(needs L01, H12)_
-- [ ] **L05b** Feed the model stream into revision-bound generation _(needs L05, H12)_
-- [ ] **L02** Implement Suspend and graceful Stop _(needs L01, T07)_
-- [ ] **H08** Implement remote disconnect watchdog and hard stop _(needs H02, L02)_
-- [ ] **L03** Implement prepared release and reassignment _(needs L02, S02, S05)_
-- [ ] **L04** Implement checked resume and evidence invalidation _(needs C03, L02, A02)_
-- [ ] **L06** Implement team and system shutdown, reboot and resume policy _(needs L02, L03, H08, U06, H11)_
+- [x] **L05** · P26 · Implement generation interruption and late-result handling _(needs C05, F06, A02)_
+- [ ] **L01** · P27 · Implement Pause and background settlement _(needs C04, A02, S08, L05)_
+- [ ] **L01b** · P29 · Run the reconciler and stall detection in the controller with the pause gates _(needs L01, H12)_
+- [ ] **L05b** · P29 · Feed the model stream into revision-bound generation _(needs L05, H12)_
+- [ ] **L02** · P31 · Implement Suspend and graceful Stop _(needs L01, T07)_
+- [ ] **H08** · P32 · Implement remote disconnect watchdog and hard stop _(needs H02, L02)_
+- [ ] **L03** · P32 · Implement prepared release and reassignment _(needs L02, S02, S05)_
+- [ ] **L04** · P32 · Implement checked resume and evidence invalidation _(needs C03, L02, A02)_
+- [ ] **L06** · P33 · Implement team and system shutdown, reboot and resume policy _(needs L02, L03, H08, U06, H11)_
 
 </details>
 
 <details>
-<summary><strong>Security: identity, approvals and sandboxing</strong> — ▓▓▓▓▓▓▓▓▒░░░ 13 of 18</summary>
+<summary><strong>Security: identity, approvals and sandboxing</strong> — ▓▓▓▓▓▓▓▓░░░░ 13 of 18</summary>
 
 Authenticated principals, revisioned grants, the sandbox launchers, the protected filesystem and Git bridge, approval policy and resource limits.
 
-- [x] **A01** Implement authenticated principals and capabilities _(needs S01, F02, S09, Y01)_
-- [x] **A02** Implement revisioned grants and restrictions _(needs A01)_
-- [x] **A03** Implement selected sandbox launcher _(needs A01, F03)_
-- [ ] **A03b** Implement the Windows Sandbox launcher _(needs A03)_
-- [x] **A04** Implement protected filesystem and Git bridge _(needs A03, S05)_
-- [x] **A05** Implement exact-operation review admission _(needs A02, S05, F07)_
-- [x] **A06** Implement human pre-commit gate and attribution _(needs A04, A05)_
-- [x] **A07** Implement action classes, default policy and effective-policy view _(needs A02, A05, F02)_
-- [ ] **G05** Prove selected isolation boundary per OS _(needs A03, A04)_
-- [x] **A07b** Implement standing-rule proposals and approval-load measurement _(needs A07, A05, H05)_
-- [x] **A08** Implement per-agent environments _(needs A03, T01, H11)_
-- [x] **A10** Implement private-record inspection and cross-project information boundaries _(needs C02, A02, H11)_
-- [x] **A07c** Implement the strict-to-derived profile suggestion _(needs A07, A07b)_
-- [x] **A08b** Enforce per-agent resource limits in the sandbox _(needs A08, A03)_
-- [x] **A10b** Implement per-task credentials for agents serving several projects _(needs A10, A01)_
-- [ ] **A08c** Enforce per-agent resource limits on macOS and Windows (after the first release) _(needs A08b, A03b)_
-- [ ] **A07d** Offer a choice of standing-grant lengths with a system-chosen default _(needs A07b, A07c, C09)_
-- [ ] **A09** Implement reviewed environment changes and maintenance requests _(needs A08, A05, H05, L02, T06)_
+- [x] **A01** · P20 · Implement authenticated principals and capabilities _(needs S01, F02, S09, Y01)_
+- [x] **A02** · P21 · Implement revisioned grants and restrictions _(needs A01)_
+- [x] **A03** · P21 · Implement selected sandbox launcher _(needs A01, F03)_
+- [ ] **A03b** · P22 · Implement the Windows Sandbox launcher _(needs A03)_
+- [x] **A04** · P22 · Implement protected filesystem and Git bridge _(needs A03, S05)_
+- [x] **A05** · P22 · Implement exact-operation review admission _(needs A02, S05, F07)_
+- [x] **A06** · P23 · Implement human pre-commit gate and attribution _(needs A04, A05)_
+- [x] **A07** · P23 · Implement action classes, default policy and effective-policy view _(needs A02, A05, F02)_
+- [ ] **G05** · P23 · Prove selected isolation boundary per OS _(needs A03, A04)_
+- [x] **A07b** · P25 · Implement standing-rule proposals and approval-load measurement _(needs A07, A05, H05)_
+- [x] **A08** · P25 · Implement per-agent environments _(needs A03, T01, H11)_
+- [x] **A10** · P25 · Implement private-record inspection and cross-project information boundaries _(needs C02, A02, H11)_
+- [x] **A07c** · P26 · Implement the strict-to-derived profile suggestion _(needs A07, A07b)_
+- [x] **A08b** · P26 · Enforce per-agent resource limits in the sandbox _(needs A08, A03)_
+- [x] **A10b** · P26 · Implement per-task credentials for agents serving several projects _(needs A10, A01)_
+- [ ] **A08c** · P27 · Enforce per-agent resource limits on macOS and Windows (after the first release) _(needs A08b, A03b)_
+- [ ] **A07d** · P31 · Offer a choice of standing-grant lengths with a system-chosen default _(needs A07b, A07c, C09)_
+- [ ] **A09** · P32 · Implement reviewed environment changes and maintenance requests _(needs A08, A05, H05, L02, T06)_
 
 </details>
 
 <details>
 <summary><strong>Context and memory</strong> — ▓▓▓▓▓▓▓░░░░░ 6 of 10</summary>
 
-Separated task, chat and meeting context, working notes, source-backed retrieval, safe-boundary continuation, retained branches and context budgets.
+Separated task, chat and meeting context, working notes, source-backed retrieval, safe-boundary continuation, retained branches, context budgets, owner decisions and the activity record.
 
-- [x] **C01** Implement separated task/chat/meeting histories _(needs S01, S06, A01, F06)_
-- [x] **C02** Implement bounded source-backed retrieval _(needs C01)_
-- [x] **C04** Implement safe-boundary continuation capture _(needs C02, C03, F06)_
-- [x] **C05** Implement retained context branches and selective updates _(needs C04, H04)_
-- [x] **C07** Implement context budgets, the startup builder and stall-proof helpers _(needs C04, R01)_
-- [ ] **C01b** Implement the shared working-notes tier _(needs C01, A02, A10)_
-- [x] **C07b** Wire context budgets into dispatch and bound compaction _(needs C07, C04, R01)_
-- [ ] **C08** Implement owner decision records and correction propagation _(needs C03, C07, U03, H06)_
-- [ ] **C07d** Rebuild the context view when a model route changes to a smaller window, and scale MCP result limits to the window _(needs C07b, R02, H12)_
-- [ ] **C09** Capture activity records and decision explanations _(needs C04, C08, T06, S05)_
+- [x] **C01** · P21 · Implement separated task/chat/meeting histories _(needs S01, S06, A01, F06)_
+- [x] **C02** · P22 · Implement bounded source-backed retrieval _(needs C01)_
+- [x] **C04** · P24 · Implement safe-boundary continuation capture _(needs C02, C03, F06)_
+- [x] **C05** · P25 · Implement retained context branches and selective updates _(needs C04, H04)_
+- [x] **C07** · P25 · Implement context budgets, the startup builder and stall-proof helpers _(needs C04, R01)_
+- [ ] **C01b** · P26 · Implement the shared working-notes tier _(needs C01, A02, A10)_
+- [x] **C07b** · P26 · Wire context budgets into dispatch and bound compaction _(needs C07, C04, R01)_
+- [ ] **C08** · P27 · Implement owner decision records and correction propagation _(needs C03, C07, U03, H06)_
+- [ ] **C07d** · P29 · Rebuild the context view when a model route changes to a smaller window, and scale MCP result limits to the window _(needs C07b, R02, H12)_
+- [ ] **C09** · P30 · Capture activity records and decision explanations _(needs C04, C08, T06, S05)_
 
 </details>
 
@@ -269,22 +269,22 @@ Separated task, chat and meeting context, working notes, source-backed retrieval
 
 The versioned state API that every client uses, and the controller-backed MCP state.
 
-- [x] **U01** Implement versioned state query/write API _(needs S01, A01, C02)_
-- [x] **T04** Implement controller-backed MCP state adapter _(needs U01, T03)_
-- [ ] **U13** Expose lifecycle, decisions, deliverables and activity through the state API _(needs U01, L02, Q01, C08, C09)_
+- [x] **U01** · P23 · Implement versioned state query/write API _(needs S01, A01, C02)_
+- [x] **T04** · P24 · Implement controller-backed MCP state adapter _(needs U01, T03)_
+- [ ] **U13** · P37 · Expose lifecycle, decisions, deliverables and activity through the state API _(needs U01, L02, Q01, C08, C09)_
 
 </details>
 
 <details>
-<summary><strong>Model routing, fallback and cost</strong> — ▓▓▓▓▒░░░░░░░ 2 of 5</summary>
+<summary><strong>Model routing, fallback and cost</strong> — ▓▓▓▓░░░░░░░░ 2 of 5</summary>
 
 Routes and capability policy, provider failure fallback, difficulty profiles, drain and cutover, and cost attribution.
 
-- [x] **R01** Implement model routing and capability policy _(needs F05, A02, F02)_
-- [x] **R02** Implement fallback and cumulative budget accounting _(needs R01, S05, C04)_
-- [ ] **R03** Implement difficulty profiles and escalation _(needs R02, S10, H11)_
-- [ ] **R05** Implement cost and resource attribution and delegated budgets _(needs R02, H03, S10)_
-- [ ] **R04** Implement provider drain, cutover and failback policy _(needs R02, L05)_
+- [x] **R01** · P22 · Implement model routing and capability policy _(needs F05, A02, F02)_
+- [x] **R02** · P25 · Implement fallback and cumulative budget accounting _(needs R01, S05, C04)_
+- [ ] **R03** · P26 · Implement difficulty profiles and escalation _(needs R02, S10, H11)_
+- [ ] **R05** · P26 · Implement cost and resource attribution and delegated budgets _(needs R02, H03, S10)_
+- [ ] **R04** · P27 · Implement provider drain, cutover and failback policy _(needs R02, L05)_
 
 </details>
 
@@ -293,51 +293,51 @@ Routes and capability policy, provider failure fallback, difficulty profiles, dr
 
 Talking to your agents: the chat interpreter, policy editing, status and blocker explanations, recovery chat, notifications and the responsive web interface.
 
-- [x] **U10** Implement layered configuration, effective values and change history _(needs F02, R01, U01, H11)_
-- [ ] **U03** Implement owner chat command interpretation _(needs U01, U02, R02)_
-- [x] **U11** Implement owner notifications _(needs U02, S08, U10)_
-- [ ] **U03b** Back the owner chat interpreter and the coordinator with a routed model _(needs U03, R01, R02)_
-- [ ] **U04** Implement conversational policy editing _(needs U03, A02, A05, A07, U10)_
-- [ ] **U05** Implement chat status and blocker explanations _(needs U03, S08, H01)_
-- [ ] **U03c** Run the coordinator as a hosted agent with its own lifecycle (optional, after the first release) _(needs U03, H11, L01)_
-- [ ] **U09** Implement read-only activity timeline and replay views _(needs C09, U05, A10, C06b)_
-- [ ] **U06** Implement deterministic recovery chat controls _(needs U01, L02, A02)_
-- [ ] **U07** Qualify responsive web chat over private networking _(needs U03, U06, A01, R05)_
-- [ ] **U08** Implement settings and administration views _(needs U07, U10, A07, F09, H11, R03, T03, A07b, A07c)_
-- [ ] **U11b** Implement notification levels, the Needs you view and escalation to Urgent _(needs U11, A07b, H05, M03, H12, K01, H01, H09, A08)_
+- [x] **U10** · P25 · Implement layered configuration, effective values and change history _(needs F02, R01, U01, H11)_
+- [ ] **U03** · P26 · Implement owner chat command interpretation _(needs U01, U02, R02)_
+- [x] **U11** · P26 · Implement owner notifications _(needs U02, S08, U10)_
+- [ ] **U03b** · P27 · Back the owner chat interpreter and the coordinator with a routed model _(needs U03, R01, R02)_
+- [ ] **U04** · P27 · Implement conversational policy editing _(needs U03, A02, A05, A07, U10)_
+- [ ] **U05** · P27 · Implement chat status and blocker explanations _(needs U03, S08, H01)_
+- [ ] **U03c** · P28 · Run the coordinator as a hosted agent with its own lifecycle (optional, after the first release) _(needs U03, H11, L01)_
+- [ ] **U09** · P31 · Implement read-only activity timeline and replay views _(needs C09, U05, A10, C06b)_
+- [ ] **U06** · P32 · Implement deterministic recovery chat controls _(needs U01, L02, A02)_
+- [ ] **U07** · P33 · Qualify responsive web chat over private networking _(needs U03, U06, A01, R05)_
+- [ ] **U08** · P34 · Implement settings and administration views _(needs U07, U10, A07, F09, H11, R03, T03, A07b, A07c)_
+- [ ] **U11b** · P34 · Implement notification levels, the Needs you view and escalation to Urgent _(needs U11, A07b, H05, M03, H12, K01, H01, H09, A08)_
 
 </details>
 
 <details>
-<summary><strong>Workers, dispatch and teams</strong> — ▓▓▒░░░░░░░░░ 6 of 25</summary>
+<summary><strong>Workers, dispatch and teams</strong> — ▓▓░░░░░░░░░░ 6 of 25</summary>
 
 Enrolled hosts, remote workers, priority admission, the local worker runtime and dispatcher, agents, teams and roles, reviews and wait-cycle handling.
 
-- [x] **H01** Implement worker enrollment and observation _(needs A01, S02)_
-- [x] **H03** Implement priority admission and reserved control capacity _(needs S08, H01)_
-- [x] **H04** Implement durable inquiries and correlation _(needs S04, C01, H03)_
-- [x] **H05** Implement review routing and wait-cycle prevention _(needs H04, A05)_
-- [x] **H06** Implement event subscriptions and gap recovery _(needs S07, C03)_
-- [x] **H11** Implement agent, team and role records _(needs A02, C01, R01, U01)_
-- [ ] **H06b** Expire idle event subscriptions _(needs H06)_
-- [ ] **H13** Implement event source adapters and watchers _(needs H06, H01, R02)_
-- [ ] **H05b** Implement reviewer pause and hold behaviour _(needs H05, L01)_
-- [ ] **H12** Implement the local worker runtime and attempt dispatcher _(needs A03, A05, R01, C07b, C06b, S05, C04, F08, H03)_
-- [ ] **H02** Implement subordinate remote work/artifact transport _(needs H01, S06, A03, H12)_
-- [ ] **H12b** Bind the real sandbox launcher and worker process to the local runtime _(needs H12, A03, A08)_
-- [ ] **H12c** Compose the dispatcher at controller start with a durable scan cursor _(needs H12)_
-- [ ] **H12d** Quiesce attempts before integration, refresh and quarantine _(needs H12, A04, A06)_
-- [ ] **H12e** Route Pi model calls through the cache adapter _(needs H12, C06b)_
-- [ ] **H12f** Wire context enforcement, pause observation and message boundaries into the runtime _(needs H12, C07b, L01, U12)_
-- [ ] **H12g** Use the DNS-rebinding guard in the remote MCP client _(needs H12, T03)_
-- [ ] **H12h** Route owner-mode reviews only to the owner _(needs H12, A05)_
-- [ ] **H07** Implement idle host polling and capability placement _(needs H02, H03)_
-- [ ] **H12a** Carry the dispatch contract to remote workers _(needs H12, H02)_
-- [ ] **H12i** Give tasks controlled network routes through the worker relay _(needs H12b, A07, T01, T03, A03b)_
-- [ ] **H12j** Close the H12b worker-process gaps _(needs H12b)_
-- [ ] **H12k** Compose the local worker host in the controller _(needs H12b, H12c, H12d, H12f, H12g)_
-- [ ] **H09** Implement reconnect reconciliation and primary epochs _(needs H08, L04, S05)_
-- [ ] **H10** Implement distributed agent capacity and fan-in limits _(needs H07, H09, H03, R05)_
+- [x] **H01** · P21 · Implement worker enrollment and observation _(needs A01, S02)_
+- [x] **H03** · P22 · Implement priority admission and reserved control capacity _(needs S08, H01)_
+- [x] **H04** · P23 · Implement durable inquiries and correlation _(needs S04, C01, H03)_
+- [x] **H05** · P24 · Implement review routing and wait-cycle prevention _(needs H04, A05)_
+- [x] **H06** · P24 · Implement event subscriptions and gap recovery _(needs S07, C03)_
+- [x] **H11** · P24 · Implement agent, team and role records _(needs A02, C01, R01, U01)_
+- [ ] **H06b** · P25 · Expire idle event subscriptions _(needs H06)_
+- [ ] **H13** · P26 · Implement event source adapters and watchers _(needs H06, H01, R02)_
+- [ ] **H05b** · P28 · Implement reviewer pause and hold behaviour _(needs H05, L01)_
+- [ ] **H12** · P28 · Implement the local worker runtime and attempt dispatcher _(needs A03, A05, R01, C07b, C06b, S05, C04, F08, H03)_
+- [ ] **H02** · P29 · Implement subordinate remote work/artifact transport _(needs H01, S06, A03, H12)_
+- [ ] **H12b** · P29 · Bind the real sandbox launcher and worker process to the local runtime _(needs H12, A03, A08)_
+- [ ] **H12c** · P29 · Compose the dispatcher at controller start with a durable scan cursor _(needs H12)_
+- [ ] **H12d** · P29 · Quiesce attempts before integration, refresh and quarantine _(needs H12, A04, A06)_
+- [ ] **H12e** · P29 · Route Pi model calls through the cache adapter _(needs H12, C06b)_
+- [ ] **H12f** · P29 · Wire context enforcement, pause observation and message boundaries into the runtime _(needs H12, C07b, L01, U12)_
+- [ ] **H12g** · P29 · Use the DNS-rebinding guard in the remote MCP client _(needs H12, T03)_
+- [ ] **H12h** · P29 · Route owner-mode reviews only to the owner _(needs H12, A05)_
+- [ ] **H07** · P30 · Implement idle host polling and capability placement _(needs H02, H03)_
+- [ ] **H12a** · P30 · Carry the dispatch contract to remote workers _(needs H12, H02)_
+- [ ] **H12i** · P30 · Give tasks controlled network routes through the worker relay _(needs H12b, A07, T01, T03, A03b)_
+- [ ] **H12j** · P30 · Close the H12b worker-process gaps _(needs H12b)_
+- [ ] **H12k** · P30 · Compose the local worker host in the controller _(needs H12b, H12c, H12d, H12f, H12g)_
+- [ ] **H09** · P33 · Implement reconnect reconciliation and primary epochs _(needs H08, L04, S05)_
+- [ ] **H10** · P34 · Implement distributed agent capacity and fan-in limits _(needs H07, H09, H03, R05)_
 
 </details>
 
@@ -346,10 +346,10 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 
 Durable conversations between agents, delivery classes, and the MCP conversation adapter.
 
-- [x] **U02** Implement durable conversation service (threads, messages, cursors, delivery states) _(needs U01, H04)_
-- [x] **U02b** Implement the conversation transport and remote exposure _(needs U02)_
-- [ ] **T05** Implement MCP durable conversation adapter _(needs U02, U02b, T04)_
-- [ ] **U12** Implement agent messages, delivery classes and interruption budget _(needs U02, S08, L05, M01)_
+- [x] **U02** · P24 · Implement durable conversation service (threads, messages, cursors, delivery states) _(needs U01, H04)_
+- [x] **U02b** · P25 · Implement the conversation transport and remote exposure _(needs U02)_
+- [ ] **T05** · P26 · Implement MCP durable conversation adapter _(needs U02, U02b, T04)_
+- [ ] **U12** · P28 · Implement agent messages, delivery classes and interruption budget _(needs U02, S08, L05, M01)_
 
 </details>
 
@@ -358,8 +358,8 @@ Durable conversations between agents, delivery classes, and the MCP conversation
 
 Stall detection and bounded supervisor recovery.
 
-- [ ] **V01** Implement health and progress stall detection _(needs H01, S08, C04, H11)_
-- [ ] **V02** Implement bounded supervisor recovery _(needs V01, L03, L04, R02, H05)_
+- [ ] **V01** · P25 · Implement health and progress stall detection _(needs H01, S08, C04, H11)_
+- [ ] **V02** · P33 · Implement bounded supervisor recovery _(needs V01, L03, L04, R02, H05)_
 
 </details>
 
@@ -368,14 +368,14 @@ Stall detection and bounded supervisor recovery.
 
 Scheduling, votes and decisions, stand-ups, attendance and return to work, and facilitation.
 
-- [ ] **M00** Prototype the meeting protocol and run meeting experiments _(needs G01)_
-- [ ] **M01** Implement durable meeting scheduling and agendas _(needs H04, U03)_
-- [ ] **M02** Implement votes, decisions and meeting summaries _(needs M01, A02, C02, C08)_
-- [ ] **M03** Implement stand-up preparation, briefs and agenda items _(needs M01, C02, U03)_
-- [ ] **M04** Implement meeting attendance and return to work _(needs M01, L01, L05, H04)_
-- [ ] **M05** Implement meeting facilitation and owner control _(needs M04, M02, U03, M00, A10, C01b)_
-- [ ] **M05b** Prove meeting desk reads are read-only and recorded per file _(needs M05, C01b)_
-- [ ] **M06** Implement meeting procedure, roster, quorum and ballots _(needs M02, A02, C08, T06, M00)_
+- [ ] **M00** · P2 · Prototype the meeting protocol and run meeting experiments _(needs G01)_
+- [ ] **M01** · P27 · Implement durable meeting scheduling and agendas _(needs H04, U03)_
+- [ ] **M02** · P28 · Implement votes, decisions and meeting summaries _(needs M01, A02, C02, C08)_
+- [ ] **M03** · P28 · Implement stand-up preparation, briefs and agenda items _(needs M01, C02, U03)_
+- [ ] **M04** · P28 · Implement meeting attendance and return to work _(needs M01, L01, L05, H04)_
+- [ ] **M05** · P29 · Implement meeting facilitation and owner control _(needs M04, M02, U03, M00, A10, C01b)_
+- [ ] **M05b** · P30 · Prove meeting desk reads are read-only and recorded per file _(needs M05, C01b)_
+- [ ] **M06** · P30 · Implement meeting procedure, roster, quorum and ballots _(needs M02, A02, C08, T06, M00)_
 
 </details>
 
@@ -384,14 +384,14 @@ Scheduling, votes and decisions, stand-ups, attendance and return to work, and f
 
 The immutable tool and skill catalogue, review and promotion, MCP connections, the protected agent tool bridge and background jobs.
 
-- [x] **T01** Implement immutable tool/skill catalog and attribution _(needs F07, A03, C01)_
-- [x] **T03** Implement approved MCP client connections _(needs T01, A01, S05, F09)_
-- [ ] **T06** Implement the protected agent tool bridge and execution service _(needs H12, T01)_
-- [ ] **T06b** Wire the protected bridge into the composed worker across a process boundary _(needs T06, H12b, H12c)_
-- [ ] **T07** Implement durable job records and job control _(needs T06, S05)_
-- [ ] **T09** Implement command namespaces and alias dispatch _(needs T06, H11, U03)_
-- [ ] **T02** Implement review/promotion/deprecation and retention _(needs T01, A05, L04)_
-- [ ] **T08** Implement shared toolbox audiences, personal copies and patch proposals _(needs T02, T06, M02, U08)_
+- [x] **T01** · P22 · Implement immutable tool/skill catalog and attribution _(needs F07, A03, C01)_
+- [x] **T03** · P23 · Implement approved MCP client connections _(needs T01, A01, S05, F09)_
+- [ ] **T06** · P29 · Implement the protected agent tool bridge and execution service _(needs H12, T01)_
+- [ ] **T06b** · P30 · Wire the protected bridge into the composed worker across a process boundary _(needs T06, H12b, H12c)_
+- [ ] **T07** · P30 · Implement durable job records and job control _(needs T06, S05)_
+- [ ] **T09** · P30 · Implement command namespaces and alias dispatch _(needs T06, H11, U03)_
+- [ ] **T02** · P33 · Implement review/promotion/deprecation and retention _(needs T01, A05, L04)_
+- [ ] **T08** · P35 · Implement shared toolbox audiences, personal copies and patch proposals _(needs T02, T06, M02, U08)_
 
 </details>
 
@@ -400,14 +400,14 @@ The immutable tool and skill catalogue, review and promotion, MCP connections, t
 
 Repository-independent projects, isolated coding workspaces, non-code and sandbox operations, ongoing responsibilities and external contribution.
 
-- [ ] **P01** Implement repository-independent projects and responsibilities _(needs U03, S01)_
-- [ ] **P04** Implement ongoing responsibility checks, incidents and coverage _(needs P01, S08, H13, V01, L03)_
-- [ ] **P06** Implement project and agent retirement and archival _(needs P01, H11, L03, K06)_
-- [ ] **P02** Implement isolated coding workspaces and integration _(needs P01, A04, L04, Y02, H12)_
-- [ ] **P03** Implement non-code and sandbox operations adapters _(needs P01, T01, S05, Y02, H12)_
-- [ ] **P02b** Implement optional work-in-progress branch backup (after the first release) _(needs P02, A06, A07, F09)_
-- [ ] **P05** Implement external contribution and pull-request workflow _(needs P02, A06, A07, T03, F09)_
-- [ ] **P07** Implement simulation mode _(needs P03, R02, T03)_
+- [ ] **P01** · P27 · Implement repository-independent projects and responsibilities _(needs U03, S01)_
+- [ ] **P04** · P33 · Implement ongoing responsibility checks, incidents and coverage _(needs P01, S08, H13, V01, L03)_
+- [ ] **P06** · P34 · Implement project and agent retirement and archival _(needs P01, H11, L03, K06)_
+- [ ] **P02** · P35 · Implement isolated coding workspaces and integration _(needs P01, A04, L04, Y02, H12)_
+- [ ] **P03** · P35 · Implement non-code and sandbox operations adapters _(needs P01, T01, S05, Y02, H12)_
+- [ ] **P02b** · P36 · Implement optional work-in-progress branch backup (after the first release) _(needs P02, A06, A07, F09)_
+- [ ] **P05** · P36 · Implement external contribution and pull-request workflow _(needs P02, A06, A07, T03, F09)_
+- [ ] **P07** · P36 · Implement simulation mode _(needs P03, R02, T03)_
 
 </details>
 
@@ -416,19 +416,19 @@ Repository-independent projects, isolated coding workspaces, non-code and sandbo
 
 Deliverable submission and acceptance, independent QA, documentation impact and defect tracking.
 
-- [ ] **Q01** Implement deliverable submission and acceptance _(needs S06, U01, P02, P03, S10)_
-- [ ] **Q02** Implement independent QA and dependency-bound evidence _(needs Q01, A06, C03, H05, C08)_
-- [ ] **Q03** Implement documentation impact and release evidence links _(needs Q02, C02)_
-- [ ] **Q04** Implement defect tracking, review cycles and overrides _(needs Q02, C08)_
+- [ ] **Q01** · P36 · Implement deliverable submission and acceptance _(needs S06, U01, P02, P03, S10)_
+- [ ] **Q02** · P37 · Implement independent QA and dependency-bound evidence _(needs Q01, A06, C03, H05, C08)_
+- [ ] **Q03** · P38 · Implement documentation impact and release evidence links _(needs Q02, C02)_
+- [ ] **Q04** · P38 · Implement defect tracking, review cycles and overrides _(needs Q02, C08)_
 
 </details>
 
 <details>
-<summary><strong>Budgets</strong> — ░░░░░░░░░░░░ 0 of 1</summary>
+<summary><strong>Balancing delivery and improvement</strong> — ░░░░░░░░░░░░ 0 of 1</summary>
 
-Production and improvement budgets.
+How capacity is split between production work and work that improves NimbleNewt.
 
-- [ ] **B01** Implement production/improvement budget admission _(needs H03, R02, Q01, Y03, R05)_
+- [ ] **B01** · P39 · Implement production/improvement budget admission _(needs H03, R02, Q01, Y03, R05)_
 
 </details>
 
@@ -437,11 +437,11 @@ Production and improvement budgets.
 
 Observations, versioned lessons, bounded experiments, scoped adoption and optional agent work on NimbleNewt itself.
 
-- [ ] **B02** Implement observations and provenance deduplication _(needs B01, H06, C01)_
-- [ ] **B03** Implement versioned lessons and triage _(needs B02, T01)_
-- [ ] **B04** Implement bounded baseline experiments _(needs B03, Q02, A08)_
-- [ ] **B05** Implement scoped adoption and monitored withdrawal _(needs B04, T02, L04)_
-- [ ] **B06** Implement optional agent work on NimbleNewt itself (off by default, asked ahead, owner-approved launch) _(needs B05, A10b, A08, K02, C09, H05)_
+- [ ] **B02** · P40 · Implement observations and provenance deduplication _(needs B01, H06, C01)_
+- [ ] **B03** · P41 · Implement versioned lessons and triage _(needs B02, T01)_
+- [ ] **B04** · P42 · Implement bounded baseline experiments _(needs B03, Q02, A08)_
+- [ ] **B05** · P43 · Implement scoped adoption and monitored withdrawal _(needs B04, T02, L04)_
+- [ ] **B06** · P44 · Implement optional agent work on NimbleNewt itself (off by default, asked ahead, owner-approved launch) _(needs B05, A10b, A08, K02, C09, H05)_
 
 </details>
 
@@ -450,40 +450,40 @@ Observations, versioned lessons, bounded experiments, scoped adoption and option
 
 Backup and restore, release staging, migration recovery, maintenance windows and update orchestration.
 
-- [ ] **K01** Implement consistent backup and restore _(needs S06, F04, L02, S05)_
-- [ ] **K01b** Implement encrypted backups with passcode and recovery-file unlock _(needs K01, F09)_
-- [ ] **K06** Implement retention, quotas, archive, export and deletion _(needs K01, S06, C02, C06b)_
-- [ ] **K01c** Implement the full configurable backup system (before 1.0) _(needs K01b, K06, U11)_
-- [ ] **K02** Implement deterministic release staging and activation _(needs K01, F02, T02)_
-- [ ] **K06b** Implement tiered retention (optional, after the first release) _(needs K06, C02)_
-- [ ] **K01d** Implement backup scope tiers (optional, after the first release) _(needs K01c, K06b)_
-- [ ] **K03** Implement migration recovery and rollback limits _(needs K02, G03)_
-- [ ] **K07** Implement maintenance windows and update orchestration _(needs K02, K01, L06, U11, G05)_
-- [ ] **K04** Implement selected standby replication and recovery watermarks _(needs K01, K03, H09, Y03)_
-- [ ] **K05** Implement fenced primary promotion and recovery chat _(needs K04, U06)_
+- [ ] **K01** · P32 · Implement consistent backup and restore _(needs S06, F04, L02, S05)_
+- [ ] **K01b** · P33 · Implement encrypted backups with passcode and recovery-file unlock _(needs K01, F09)_
+- [ ] **K06** · P33 · Implement retention, quotas, archive, export and deletion _(needs K01, S06, C02, C06b)_
+- [ ] **K01c** · P34 · Implement the full configurable backup system (before 1.0) _(needs K01b, K06, U11)_
+- [ ] **K02** · P34 · Implement deterministic release staging and activation _(needs K01, F02, T02)_
+- [ ] **K06b** · P34 · Implement tiered retention (optional, after the first release) _(needs K06, C02)_
+- [ ] **K01d** · P35 · Implement backup scope tiers (optional, after the first release) _(needs K01c, K06b)_
+- [ ] **K03** · P35 · Implement migration recovery and rollback limits _(needs K02, G03)_
+- [ ] **K07** · P35 · Implement maintenance windows and update orchestration _(needs K02, K01, L06, U11, G05)_
+- [ ] **K04** · P39 · Implement selected standby replication and recovery watermarks _(needs K01, K03, H09, Y03)_
+- [ ] **K05** · P40 · Implement fenced primary promotion and recovery chat _(needs K04, U06)_
 
 </details>
 
 <details>
-<summary><strong>Test campaigns and platforms</strong> — ▒░░░░░░░░░░░ 1 of 15</summary>
+<summary><strong>Test campaigns and platforms</strong> — ▓░░░░░░░░░░░ 1 of 15</summary>
 
-Crash, policy, isolation and partition campaigns, Windows and macOS qualification, and the typical and exhaustive test tiers.
+Crash, policy, isolation and partition campaigns, QA checkpoints, Windows and macOS qualification, and the typical and exhaustive test tiers.
 
-- [x] **Y01** QA checkpoint 1: durable core _(needs S09, F04h)_
-- [ ] **G06** Qualify actual Windows implementation _(needs G02, G03, G05, F03)_
-- [ ] **X11** Split the test suite into a typical and an exhaustive tier _(needs G04)_
-- [ ] **X09** Implement external release-test job protocol _(needs H07, H09, F03, S06)_
-- [ ] **Y02** QA checkpoint 2: isolation, stop and recovery _(needs G05, G06, A06, L04, H09, A03b, A08b, F04i, F04j, H06b)_
-- [ ] **X01** Run integrated crash and handoff campaign _(needs S09, V02, H02, Q02, K03, G04, H12, T07, K06, L06)_
-- [ ] **Y03** QA checkpoint 3: first complete chat-driven workflow _(needs U07, M02, P02, P03, Q02, K03, A07d)_
-- [ ] **X10** Run partition and remote-worker safety campaign _(needs X09, H10, K05, G08)_
-- [ ] **X03** Run chat-only complete product workflow _(needs U05, U06, U07, M02, P03, Q03, B05, K03, C06, L05, G09, C07, U09, U11, U12, U13, M03, M05, M06, R03, R04, P04, P06, P07, Q04, U08, H13, L06)_
-- [ ] **X02** Run policy, isolation and adversarial campaign _(needs A06, U04, T05, Q02, G05, A07, A09, A10, T08, T09, P05, H05b, A10b, M05b, B06, H12i)_
-- [ ] **X04** Qualify fresh macOS release candidate _(needs X01, X02, X03, X09, F03)_
-- [ ] **X05** Qualify fresh Linux release candidate _(needs X01, X02, X03, X09, F03)_
-- [ ] **X06** Qualify fresh Windows release candidate _(needs X01, X02, X03, X09, F03, G06)_
-- [ ] **X07** Measure load, inquiry latency and budget behavior _(needs X04, X05, X06)_
-- [ ] **X08** Run representative soak and independent release audit _(needs X07, X10, F04e, G10, K07, G11)_
+- [x] **Y01** · P19 · QA checkpoint 1: durable core _(needs S09, F04h)_
+- [ ] **G06** · P24 · Qualify actual Windows implementation _(needs G02, G03, G05, F03)_
+- [ ] **X11** · P32 · Split the test suite into a typical and an exhaustive tier _(needs G04)_
+- [ ] **X09** · P34 · Implement external release-test job protocol _(needs H07, H09, F03, S06)_
+- [ ] **Y02** · P34 · QA checkpoint 2: isolation, stop and recovery _(needs G05, G06, A06, L04, H09, A03b, A08b, F04i, F04j, H06b)_
+- [ ] **X01** · P38 · Run integrated crash and handoff campaign _(needs S09, V02, H02, Q02, K03, G04, H12, T07, K06, L06)_
+- [ ] **Y03** · P38 · QA checkpoint 3: first complete chat-driven workflow _(needs U07, M02, P02, P03, Q02, K03, A07d)_
+- [ ] **X10** · P42 · Run partition and remote-worker safety campaign _(needs X09, H10, K05, G08)_
+- [ ] **X03** · P44 · Run chat-only complete product workflow _(needs U05, U06, U07, M02, P03, Q03, B05, K03, C06, L05, G09, C07, U09, U11, U12, U13, M03, M05, M06, R03, R04, P04, P06, P07, Q04, U08, H13, L06)_
+- [ ] **X02** · P45 · Run policy, isolation and adversarial campaign _(needs A06, U04, T05, Q02, G05, A07, A09, A10, T08, T09, P05, H05b, A10b, M05b, B06, H12i)_
+- [ ] **X04** · P46 · Qualify fresh macOS release candidate _(needs X01, X02, X03, X09, F03)_
+- [ ] **X05** · P46 · Qualify fresh Linux release candidate _(needs X01, X02, X03, X09, F03)_
+- [ ] **X06** · P46 · Qualify fresh Windows release candidate _(needs X01, X02, X03, X09, F03, G06)_
+- [ ] **X07** · P47 · Measure load, inquiry latency and budget behavior _(needs X04, X05, X06)_
+- [ ] **X08** · P48 · Run representative soak and independent release audit _(needs X07, X10, F04e, G10, K07, G11)_
 
 </details>
 
@@ -492,12 +492,12 @@ Crash, policy, isolation and partition campaigns, Windows and macOS qualificatio
 
 Installation, documentation, QA on real machines, the release decision and closing the plan.
 
-- [ ] **D02** Finish developer/API/security and license guidance _(needs T05, K03, F03)_
-- [ ] **D01** Finish installation and chat-first user guidance _(needs X03, Q03, U11b)_
-- [ ] **D03** Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, C07d, L01b, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11)_
-- [ ] **D04** Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
-- [ ] **D04b** Measure code-navigation aids on real coding tasks (optional, after the first release) _(needs D04)_
-- [ ] **D05** Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, U03c, K06b, K01d, P02b, A08c)_
+- [ ] **D02** · P36 · Finish developer/API/security and license guidance _(needs T05, K03, F03)_
+- [ ] **D01** · P45 · Finish installation and chat-first user guidance _(needs X03, Q03, U11b)_
+- [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, C07d, L01b, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11)_
+- [ ] **D04** · P50 · Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
+- [ ] **D04b** · P51 · Measure code-navigation aids on real coding tasks (optional, after the first release) _(needs D04)_
+- [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, U03c, K06b, K01d, P02b, A08c)_
 
 </details>
 

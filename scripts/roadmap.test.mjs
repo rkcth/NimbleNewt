@@ -14,9 +14,9 @@ test("a card's phase is one more than the latest phase among its blockers", () =
 test("the roadmap marks done, in-review and not-started cards, counts them, and lists blockers", () => {
   const text = renderRoadmap({ execution_note: "Work began on the owner's instruction.", tasks: [card("G01", [], "implemented"), card("G07", ["G01"], "implemented-awaiting-signoff", { roadmap_note: "needs QA" }), card("F01", ["G07"]), card("N00")] });
   assert.match(text, /Progress: \*\*1 of 3 tasks implemented\*\*, 1 awaiting sign-off\./);
-  assert.match(text, /- \[x\] \*\*G01\*\* Card G01\n/);
-  assert.match(text, /- \[~\] \*\*G07\*\* Card G07 _\(needs G01\)_ — needs QA\n/);
-  assert.match(text, /- \[ \] \*\*F01\*\* Card F01 _\(needs G07\)_\n/);
+  assert.match(text, /- \[x\] \*\*G01\*\* · P1 · Card G01\n/);
+  assert.match(text, /- \[~\] \*\*G07\*\* · P2 · Card G07 _\(needs G01\)_ — needs QA\n/);
+  assert.match(text, /- \[ \] \*\*F01\*\* · P3 · Card F01 _\(needs G07\)_\n/);
   assert.ok(!text.includes("N00"), "the activation gate is not a roadmap task");
   assert.match(text, /> Work began on the owner's instruction\./);
   assert.match(text, /This section is generated from `task-plan.json`/);
@@ -65,6 +65,10 @@ test("the progress bar fills in proportion, shows sign-off cards as half cells a
   assert.equal(bar(2, 0, 4), "▓".repeat(6) + "░".repeat(6));
   assert.equal(bar(1, 1, 4), "▓".repeat(3) + "▒".repeat(3) + "░".repeat(6));
   assert.equal(bar(0, 0, 0), "░".repeat(12));
+  assert.equal(bar(12, 0, 15), "▓".repeat(9) + "░".repeat(3), "no sign-off cards, no half cells");
+  assert.equal(bar(1, 0, 15), "▓" + "░".repeat(11), "one finished card of fifteen is one filled cell, not empty and not awaiting sign-off");
+  assert.ok(!bar(1, 0, 15).includes("▒"));
+  assert.ok(bar(0, 1, 15).includes("▒"), "a single card awaiting sign-off is visible");
   for (const [d, r, n] of [[1, 0, 3], [2, 1, 7], [5, 5, 11], [0, 3, 3]]) assert.equal([...bar(d, r, n)].length, 12);
 });
 
