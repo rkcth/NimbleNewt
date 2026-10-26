@@ -80,8 +80,11 @@ for (const backend of backends) {
       // An impossible count is refused by the check itself: admit a second round, which it would otherwise be recorded against. Over four windows (window 32768), and then too few characters for the tokens.
       assert.equal((await guards.context!.admit(opened as never, { systemPromptChars: 3000, toolSchemaChars: 6000, startupTokens: 400, replyReserveTokens: 1000 }, 2)).admit, true);
       await guards.context!.confirm!(opened as never, { reportedInputTokens: 200_000, promptChars: 400_000 });
+      // Then too few characters for the tokens (under half a character a token): another round, also not recorded.
+      assert.equal((await guards.context!.admit(opened as never, { systemPromptChars: 3000, toolSchemaChars: 6000, startupTokens: 400, replyReserveTokens: 1000 }, 3)).admit, true);
+      await guards.context!.confirm!(opened as never, { reportedInputTokens: 20_000, promptChars: 5_000 });
       const after = await storage.listAggregates("ctx-admission", { limit: 10 });
-      assert.equal(after.length, 2);
+      assert.equal(after.length, 3);
       assert.deepEqual(after.map((a) => (a.body as unknown as { reported?: { inputTokens: number } }).reported?.inputTokens).filter((x) => x !== undefined), [2500], "the impossible count was not recorded");
 
       // An urgent message from the owner reaches the running attempt at once, labelled as another party's words.

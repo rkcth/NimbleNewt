@@ -53,6 +53,9 @@ test("a refused connection, a body that never ends and an error inside a 200 rep
   clearTimeout(keepAlive);
   const quota = mk(async () => new Response(JSON.stringify({ error: { message: "insufficient_quota" } }), { status: 200 }));
   await assert.rejects(quota.complete("a/b", { system: "s", user: "u" }), /^Error: credit/);
-  assert.deepEqual(seen.slice(0, 1).concat(seen.slice(-1)), ["outage", "credit"]);
-  assert.equal(seen.length, 3, "each was reported");
+  assert.deepEqual(seen, ["outage", "outage", "credit"], "each was reported with its class");
+  const typed = mk(async () => new Response(JSON.stringify({ error: { type: "insufficient_quota" } }), { status: 200 }));
+  await assert.rejects(typed.complete("a/b", { system: "s", user: "u" }), /^Error: credit/);
+  const nullCause = mk(async () => { throw Object.assign(new TypeError("fetch failed"), { cause: null }); });
+  await assert.rejects(nullCause.complete("a/b", { system: "s", user: "u" }), /fetch failed/);
 });
