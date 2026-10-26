@@ -1,3 +1,4 @@
+import type { ChannelContext } from "@nimblenewt/contracts";
 import { AdmissionService } from "../admission/index.js";
 import { BudgetService } from "../budgets/index.js";
 import { DecisionService } from "../decisions/index.js";
@@ -58,7 +59,7 @@ export interface DispatchStartOptions {
     /** The model's context window for the order's route, in tokens; `undefined` when the route does not say. */
     readonly window: (order: WorkOrder) => number | undefined;
     readonly storedTokens?: (from: NonNullable<WorkOrder["resumeFrom"]>) => number | undefined;
-    readonly build: (services: { readonly guards: RuntimeGuards; readonly cache?: { forOrder(order: WorkOrder): Promise<AttemptCache> } }) => WorkerHost | Promise<WorkerHost>;
+    readonly build: (services: { readonly guards: RuntimeGuards; /** The process's context limits for an order (card C07b): tool output cut to the window\'s share and the extractive compaction fallback; `undefined` when the route does not say its window. The host\'s `context` option takes it. */ readonly context: (order: WorkOrder) => ChannelContext | undefined; readonly cache?: { forOrder(order: WorkOrder): Promise<AttemptCache> } }) => WorkerHost | Promise<WorkerHost>;
     /** Shuts down what `build` made (live workers, the sandbox launcher, the relay). Called when the controller closes and when a later step of the start fails. */
     readonly close?: () => Promise<void>;
   };
@@ -170,7 +171,14 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         },
       };
     }
-    workers.push(await i.options.local.build({ guards, ...(cache === undefined ? {} : { cache }) }));
+    const windowOf = i.options.local.window;
+    const contextFor = (order: WorkOrder): ChannelContext | undefined => {
+      const window = windowOf(order);
+      if (window === undefined) return undefined;
+      const budget = context.budget(window);
+      return { toolOutputBytes: budget.toolOutputChars, compaction: { fallback: "extractive" } };
+    };
+    workers.push(await i.options.local.build({ guards, context: contextFor, ...(cache === undefined ? {} : { cache }) }));
   }
   const dispatcher = DispatcherService.withEpoch(storage, epoch, {
     principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, hosts, workers,  contracts: i.contracts, harnesses: i.catalog, policy, effects, blockers, route,

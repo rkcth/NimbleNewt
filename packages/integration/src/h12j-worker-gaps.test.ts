@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
+import type { ChannelContext } from "@nimblenewt/contracts";
 import { LocalWorker, ModelRelay, type ToolGateway, type ToolResult, type WorkOrder } from "@nimblenewt/controller";
 import { SandboxLauncher, appFromRepository, localWorkerParts } from "@nimblenewt/worker";
 import type { RunResult, SandboxRun } from "@nimblenewt/worker";
@@ -19,7 +20,7 @@ const KEY = "sk-provider-SECRET-0123456789abcdef";
 
 interface Tap { readonly runs: { run: SandboxRun; out: string[]; in: string[]; env: Record<string, string> | undefined }[] }
 
-async function rig(t: { skip: (why: string) => void }, model: { url: string }) {
+async function rig(t: { skip: (why: string) => void }, model: { url: string }, context?: (order: WorkOrder) => ChannelContext | undefined) {
   const real = await SandboxLauncher.create({ protectedPaths: [], audit: () => undefined });
   const usable = real.capacity.available && real.capacity.backend === "bubblewrap" && !["/usr", "/bin", "/lib"].includes(nodeRoot);
   if (!usable && required && process.platform === "linux") assert.fail(`the sandbox is required but unusable: ${real.capacity.reason}`);
@@ -48,6 +49,7 @@ async function rig(t: { skip: (why: string) => void }, model: { url: string }) {
     bridge: async () => ({ ok: true, result: { record: { id: "dsk-aaaaaaaaaaaaaaaaaaaa", body: "x" } } }),
     relay: (order, request) => relay.forAttempt({ route: order.route, model: "local" }).relay(request),
     requireEnforced: false,
+    ...(context === undefined ? {} : { context: context as never }),
   });
   const worker = new LocalWorker({ hostId: "host:w1", resources: { cpus: 1, memoryMb: 1024 }, version: "test", sandbox: parts.sandbox as never, runtimes: { open: (order, call, from) => parts.runtimes.open(order as never, call, from as never) as never }, capabilities: () => ({}) as never });
   const order: WorkOrder = { attemptId: "att-1", taskId: "t1", projectId: "p1", agentId: "agent:ann", generation: 1, route: "llama/local", credential: "task-credential-1", recipe: { revision: "r1", reach: [] } as never, content: "read the record", requestId: "req-1", expiresAt: new Date(Date.now() + 120_000).toISOString() };
@@ -111,6 +113,22 @@ describe("the worker process is reaped however the attempt ends, and never holds
       const files = [r.dirs.home, r.dirs.scratch, r.dirs.checkout].flatMap(filesUnder).filter((f) => statSync(f).size < 20 * 1024 * 1024);
       assert.ok(files.some((f) => f.startsWith(join(r.dirs.home, "pi"))), "the conversation store in the agent's home was scanned");
       for (const file of files) { const bytes = readFileSync(file); for (const form of encodings(KEY)) assert.equal(bytes.includes(form), false, `the provider key (${form === KEY ? "plain" : "encoded"}) is in ${file}`); }
+    } finally { model.server.close(); r.done(); }
+  });
+
+  test("the context limits the controller computes for the order reach the real worker process in its start message", async (t) => {
+    const model = await endpoint([{ text: "done" }]);
+    const seen: number[] = [];
+    // The same function the composer hands to `local.build`: tool output limited to the window's share, extractive compaction when there is no room.
+    const r = await rig(t, model, (order) => { seen.push(order.generation); return { toolOutputBytes: 6000, compaction: { fallback: "extractive" } }; });
+    if (r === undefined) { model.server.close(); return; }
+    try {
+      const handle = await r.worker.start(r.order);
+      assert.equal((await handle.run(r.gateway)).status, "completed");
+      await handle.stop();
+      assert.ok(seen.length >= 1, "the host asked for the order's limits");
+      const start = r.tap.runs[0]!.in.join("").split("\n").map((l) => (l.startsWith("{") ? JSON.parse(l) : undefined)).find((m) => m?.t === "start");
+      assert.deepEqual(start?.start?.context, { toolOutputBytes: 6000, compaction: { fallback: "extractive" } });
     } finally { model.server.close(); r.done(); }
   });
 
