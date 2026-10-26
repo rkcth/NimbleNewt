@@ -240,7 +240,7 @@ export class DispatcherService {
       if (d === undefined || (d.body.state !== "running" && d.body.state !== "parked")) continue;
       const expired = d.body.expiresAt <= at;
       if (expired || (d.body.state === "running" && d.body.lease !== undefined && d.body.lease.until <= at)) {
-        const result = await this.#end(id, "abandoned", expired ? "the attempt ran past its expiry" : "the worker stopped beating; its lease ran out", { readmit: !expired, lost: true });
+        const result = await this.#end(id, "abandoned", expired ? "the attempt ran past its expiry" : "the worker stopped beating; its lease ran out", { readmit: !expired, lost: !expired });
         lost.push(id);
         if (result.readmitted !== undefined) readmitted.push(result.readmitted);
       }
@@ -704,6 +704,12 @@ export class DispatcherService {
       if (report !== undefined && (exhausted(report.limit.costMicros, report.spent.costMicros + report.uncertain.costMicros) || exhausted(report.limit.computeMs, report.spent.computeMs + report.uncertain.computeMs))) {
         return block("budget", "dispatch_blocked", "the task's budget is used up; raise it or change the task");
       }
+      // An attempt that holds nothing yet needs some of a limited allowance to be free; holds that are never settled (a lost worker's uncertain one) would keep it waiting for ever without anyone being told.
+      const mine = (await this.#load(attemptId))?.body;
+      if (report !== undefined && this.#deps.budgets.reserve !== undefined && mine !== undefined && mine.reservationId === undefined && mine.reserving === undefined
+        && ((report.limit.computeMs > 0 && report.available.computeMs === 0) || (report.limit.costMicros > 0 && (this.#options.reserveCostMicros ?? 0) > 0 && report.available.costMicros === 0))) {
+        return block("budget", "dispatch_blocked", "none of the task's allowance is free: holds for other work, or for an attempt that was lost and not yet settled, use it all; settle them or raise the budget");
+      }
     }
     // 7. Grants: the task's instructions and the standing policy determine them, or the owner is asked.
     const contract = await this.#contractOf(taskId);
@@ -820,26 +826,31 @@ export class DispatcherService {
     return this.#start(d, pre.host, requestId);
   }
 
-  /** Holds the attempt's most possible spend. The reservation's command ID derives from the attempt, so a repeat after a crash finds it. Returns why the attempt cannot start when the allowance is not there. */
+  /** Holds the attempt's most possible spend. The amounts are decided once and written to the attempt before the budget is asked, and the reservation's command ID derives from the attempt, so a repeat after a crash (or a second dispatcher) asks for the same thing and finds the same hold. Returns why the attempt cannot start when the allowance is not there. */
   async #reserve(d: Loaded): Promise<AdvanceOutcome | undefined> {
     const budgets = this.#deps.budgets;
     if (budgets?.reserve === undefined || d.body.reservationId !== undefined) return undefined;
-    const report = await budgets.accounting(this.#deps.principal, d.body.taskId);
-    if (report === undefined) return undefined; // the task has no budget: nothing is held
-    const contract = await this.#contractOf(d.body.taskId);
-    // Only a dimension that has a limit is held (a limit of 0 states none), and no more than is still available: the three ceilings (the contract's time, the attempt's own expiry and the allowance) agree on the smallest.
-    const ms = Math.min(this.#options.attemptMs ?? 4 * 3_600_000, contract.maxMinutes === undefined ? Number.MAX_SAFE_INTEGER : contract.maxMinutes * 60_000);
-    const wantCost = this.#options.reserveCostMicros ?? 0;
-    const cost = report.limit.costMicros > 0 && wantCost > 0 ? Math.min(wantCost, report.available.costMicros) : 0;
-    const compute = report.limit.computeMs > 0 ? Math.min(ms, report.available.computeMs) : 0;
-    if (cost === 0 && compute === 0) {
-      const limited = (report.limit.computeMs > 0 && report.available.computeMs === 0) || (report.limit.costMicros > 0 && wantCost > 0 && report.available.costMicros === 0);
-      return limited ? { kind: "skipped", check: "budget", reason: "none of the task's allowance is free to hold for the attempt" } : undefined;
+    let want = d.body.reserving;
+    if (want === undefined) {
+      const report = await budgets.accounting(this.#deps.principal, d.body.taskId);
+      if (report === undefined) return undefined; // the task has no budget: nothing is held
+      const contract = await this.#contractOf(d.body.taskId);
+      // Only a dimension that has a limit is held (a limit of 0 states none), and no more than is still available: the contract's time, the attempt's own expiry and the allowance agree on the smallest.
+      const ms = Math.min(this.#options.attemptMs ?? 4 * 3_600_000, contract.maxMinutes === undefined ? Number.MAX_SAFE_INTEGER : contract.maxMinutes * 60_000);
+      const wantCost = this.#options.reserveCostMicros ?? 0;
+      const cost = report.limit.costMicros > 0 && wantCost > 0 ? Math.min(wantCost, report.available.costMicros) : 0;
+      const compute = report.limit.computeMs > 0 ? Math.min(ms, report.available.computeMs) : 0;
+      if (cost === 0 && compute === 0) {
+        const limited = (report.limit.computeMs > 0 && report.available.computeMs === 0) || (report.limit.costMicros > 0 && wantCost > 0 && report.available.costMicros === 0);
+        return limited ? { kind: "skipped", check: "budget", reason: "none of the task's allowance is free to hold for the attempt" } : undefined;
+      }
+      const intended = { ...(cost > 0 ? { costMicros: cost } : {}), ...(compute > 0 ? { computeMs: compute } : {}) };
+      // Written first; if another caller wrote its own first, that one stands.
+      want = (await this.#update(d.body.attemptId, (x) => ({ ...x, reserving: x.reserving ?? intended }))).reserving!;
     }
-    const want = { ...(cost > 0 ? { costMicros: cost } : {}), ...(compute > 0 ? { computeMs: compute } : {}) };
     let id: string;
     try { id = (await budgets.reserve(this.#deps.principal, { commandId: `dpa-res:${d.body.attemptId}`, taskId: d.body.taskId, agentId: d.body.agentId, purpose: `attempt ${d.body.attemptId}`, ...want })).id; } catch (error) {
-      if (isDomainError(error, "not_found")) return undefined; // the task has no budget: nothing is held
+      if (isDomainError(error, "not_found")) return undefined;
       if (isDomainError(error, "invalid_command")) return { kind: "skipped", check: "budget", reason: `the task's allowance cannot hold this attempt: ${errorText(error)}` };
       throw error;
     }
@@ -1109,7 +1120,15 @@ export class DispatcherService {
     // While a reservation is held the amounts are added to the attempt's own tally and settled when it ends (the hold already counts against the task); the cache figures are still recorded turn by turn.
     const reserved = d.body.reservationId !== undefined;
     if (reserved) {
-      await this.#update(attemptId, (x) => ({ ...x, used: { costMicros: (x.used?.costMicros ?? 0) + (usage.costMicros ?? 0), computeMs: (x.used?.computeMs ?? 0) + (usage.computeMs ?? 0) } }));
+      const digest = createHash("sha256").update(JSON.stringify(usage)).digest("hex").slice(0, 24);
+      await this.#update(attemptId, (x) => {
+        const seen = x.usedKeys?.find((k) => k.key === key);
+        if (seen !== undefined) {
+          if (seen.digest !== digest) throw new DomainError("command_conflict", `usage report ${key} was already received with different figures`, { field: "turnSeq" });
+          return x; // the same report again: counted once
+        }
+        return { ...x, usedKeys: [...(x.usedKeys ?? []).slice(-199), { key, digest }], used: { costMicros: (x.used?.costMicros ?? 0) + (usage.costMicros ?? 0), computeMs: (x.used?.computeMs ?? 0) + (usage.computeMs ?? 0) } };
+      });
       if (usage.cache === undefined) return;
     }
     await this.#deps.budgets.charge(this.#deps.principal, {

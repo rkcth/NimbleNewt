@@ -1354,4 +1354,43 @@ for (const backend of backends) {
     assert.deepEqual([done.uncertain.costMicros, done.spent.costMicros], [0, 9]);
   });
 
+  suite("a usage report resent while the allowance is held is counted once, and a different report under the same number is refused (card R05b)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const { taskId } = await c.task("t", ann);
+    await c.budgets.open(c.owner, { commandId: "bo", taskId, currency: "USD", costMicros: 10_000 });
+    let conflict: unknown;
+    c.worker.script = async ({ gateway }) => {
+      await gateway.usage({ turnSeq: 1, costMicros: 4 });
+      await gateway.usage({ turnSeq: 1, costMicros: 4 });
+      await gateway.usage({ costMicros: 6 }, "key-9");
+      await gateway.usage({ costMicros: 6 }, "key-9");
+      conflict = await gateway.usage({ turnSeq: 1, costMicros: 5 }).catch((e: unknown) => e);
+      return { status: "completed", text: "x" };
+    };
+    c.dispatcher = c.restart({}, { reserveCostMicros: 1000 });
+    await c.run();
+    assert.equal((await c.budgets.report(c.owner, taskId))!.spent.costMicros, 10, "4 once and 6 once");
+    assert.ok(conflict instanceof DomainError && conflict.code === "command_conflict", String(conflict));
+  });
+
+  suite("a crash between asking for the hold and recording it is recovered: the repeat asks for the same amounts and the attempt starts (card R05b)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const { taskId, attemptId } = await c.task("t", ann);
+    await c.budgets.open(c.owner, { commandId: "bo", taskId, currency: "USD", costMicros: 1000 });
+    c.worker.script = async () => ({ status: "completed", text: "x" });
+    const crashing = { ...c.budgets, accounting: c.budgets.accounting.bind(c.budgets), charge: c.budgets.charge.bind(c.budgets), settle: c.budgets.settle.bind(c.budgets), markUncertain: c.budgets.markUncertain.bind(c.budgets),
+      reserve: async (...args: Parameters<Ctx["budgets"]["reserve"]>) => { await c.budgets.reserve(...args); throw new Error("the process died here"); } };
+    const first = c.restart({ budgets: crashing as never }, { reserveCostMicros: 1000 });
+    await first.tick().catch(() => undefined);
+    await first.idle().catch(() => undefined);
+    assert.equal(c.worker.starts.length, 0, "nothing started");
+    assert.equal((await c.budgets.report(c.owner, taskId))!.reservedInFlight.costMicros, 1000, "the hold exists");
+    const second = c.restart({}, { reserveCostMicros: 1000 });
+    const report = await second.tick();
+    await second.idle();
+    assert.deepEqual(report.started, [attemptId], JSON.stringify(report));
+    const after = (await c.budgets.report(c.owner, taskId))!;
+    assert.deepEqual([after.reservedInFlight.costMicros, after.reservations.length], [0, 0], "the same hold was found, used and settled; no second one");
+  });
+
 }
