@@ -96,7 +96,7 @@ export class GuardedModelCall implements ModelCall {
       throw error;
     }
     // The call was made and paid for: a failure to count it must never turn a good reply into a route failure (the next route would repeat the paid call).
-    if (this.#o.spend !== undefined && reply.usage !== undefined) await this.#o.spend.record(reply.usage.inputTokens + reply.usage.outputTokens, `${process.pid}.${this.#id}.${this.#seq++}.${Date.now()}`).catch((error: unknown) => this.#o.onSpendFailure?.(error));
+    if (this.#o.spend !== undefined && reply.usage !== undefined) await this.#o.spend.record(reply.usage.inputTokens + reply.usage.outputTokens, `${process.pid}.${this.#id}.${this.#seq++}.${Date.now()}`).catch((error: unknown) => { try { this.#o.onSpendFailure?.(error); } catch { /* a report that fails changes nothing */ } });
     return reply;
   }
 }
