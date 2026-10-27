@@ -71,7 +71,7 @@ export function withNudge(delivery: InvitationSink, nudge: (n: Nudge) => Promise
       try {
         if (await busy(inv.agent)) return;
         // Not waited for: a hint that is slow or never comes back must not hold up the invitations of the others or the dispatcher's tick.
-        void Promise.resolve(nudge({ key: inv.key, agent: inv.agent, occurrenceId: inv.occurrenceId, projectId: inv.projectId, startsAt: inv.startsAt, urgent: inv.urgent })).catch((error: unknown) => onError?.(error));
+        void Promise.resolve(nudge({ key: inv.key, agent: inv.agent, occurrenceId: inv.occurrenceId, projectId: inv.projectId, startsAt: inv.startsAt, urgent: inv.urgent })).catch((error: unknown) => { try { onError?.(error); } catch { /* a failing reporter must not become an unhandled rejection */ } });
       } catch (error) { onError?.(error); }
     },
   };

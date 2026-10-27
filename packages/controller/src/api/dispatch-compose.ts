@@ -99,7 +99,7 @@ export interface DispatchStartOptions {
   readonly invitations?: InvitationSink;
   /**
    * A hint to an agent that a meeting it is invited to is coming (card M01d), sent once the invitation is in its inbox, and only for an agent with no attempt running: a busy agent is not interrupted and sees the invitation at its next
-   * stopping point. Idempotent by `key` on the host's side (an invitation tried again calls it again). A failure is reported, never allowed to lose the invitation. Absent: the inbox alone.
+   * stopping point. Idempotent by `key` on the host's side (an invitation tried again calls it again, possibly while the first call is still running). Not waited for. A failure is reported, never allowed to lose the invitation. Absent: the inbox alone.
    */
   readonly nudge?: (nudge: { readonly key: string; readonly agent: string; readonly occurrenceId: string; readonly projectId: string; readonly startsAt: string; readonly urgent: boolean }) => Promise<void>;
   /** Remote MCP servers (cards T03, H12g): the name resolver the host uses. Given, the handle carries the MCP service and the connector that reaches an approved server only at a checked public address. */
