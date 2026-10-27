@@ -72,6 +72,10 @@ export const RESOURCE = "project-resource";
 export const CLAIM = "resource-claim";
 export const CHECKOUT = "task-checkout";
 const REGISTRY = "resource-registry";
+/** One record per binding listing the tasks whose checkout is (or was) pinned to it, so ending a binding reads that list and not every checkout of every project. */
+const PINS = "resource-pins";
+/** A binding's pin list is pruned of finished tasks once it holds this many. */
+const PRUNE_AT = 50;
 
 // ---- scopes -------------------------------------------------------------------------------------------------------------------
 
@@ -233,7 +237,8 @@ export class ProjectResourceService {
           const body: ResourceBody = { projectId, kind, label, locator, ...(handle === undefined ? {} : { repositoryId: handle }), scope, state: "bound", locatorEpoch: 1, createdBy: by.id };
           changes.unshift({ type: "create", ref, body: body as unknown as JsonObject });
           if (known.length >= this.#scanLimit) invalid("projectId", `a project has at most ${this.#scanLimit} bindings (unbound ones count)`);
-          changes.push(this.#bump(projectId, snapshot, [...known, id]));
+          changes.push(this.#bump(projectId, snapshot, [...known, id], { ...await this.#locsOf(projectId, snapshot), [id]: locator }));
+          changes.push({ type: "create", ref: { kind: PINS, id }, body: { tasks: [] } });
           return { ref, creates: true, changes: mergeChanges(changes), detail: { projectId, kind, label, access: scope.mode }, contention: async () => raced() };
         },
       };
@@ -252,7 +257,8 @@ export class ProjectResourceService {
         payload: { resourceId: id, expectedRevision: expected, locator, ...(command.acknowledgeOverlap === true ? { acknowledgeOverlap: true } : {}) },
         build: async () => {
           const first = await this.#runner.get(RESOURCE, id);
-          const registry = await this.#touch((first?.body as unknown as ResourceBody | undefined)?.projectId ?? "unknown");
+          const where = (first?.body as unknown as ResourceBody | undefined)?.projectId ?? "unknown";
+          const snapshot = await this.#runner.get(REGISTRY, where);
           const { found, body } = await this.#resource(by, id, "resource.write", "move resources");
           if (found.revision !== expected) throw new DomainError("stale_revision", `resource ${id} is at revision ${found.revision}, not ${expected}`, { currentRevision: found.revision });
           if (body.state !== "bound") invalid("resourceId", "the resource is unbound");
@@ -269,7 +275,7 @@ export class ProjectResourceService {
             const repositories = owner.repositories.map((r) => (r.id === body.repositoryId ? { ...r, location: locator } : r));
             changes.push({ type: "update", ref: { kind: "project", id: body.projectId }, expectedRevision: project.revision, body: { ...owner, repositories } as unknown as JsonObject });
           }
-          changes.push(registry);
+          changes.push(this.#bump(body.projectId, snapshot, undefined, { ...await this.#locsOf(body.projectId, snapshot), [id]: locator }));
           return { ref, creates: false, changes: mergeChanges(changes), detail: { projectId: body.projectId, locatorEpoch: next.locatorEpoch }, contention: async () => raced() };
         },
       };
@@ -309,7 +315,8 @@ export class ProjectResourceService {
         payload: { resourceId: id, expectedRevision: expected },
         build: async () => {
           const first = await this.#runner.get(RESOURCE, id);
-          const registry = await this.#touch((first?.body as unknown as ResourceBody | undefined)?.projectId ?? "unknown");
+          const where = (first?.body as unknown as ResourceBody | undefined)?.projectId ?? "unknown";
+          const snapshot = await this.#runner.get(REGISTRY, where);
           const { found, body } = await this.#resource(by, id, "resource.write", "unbind resources");
           if (found.revision !== expected) throw new DomainError("stale_revision", `resource ${id} is at revision ${found.revision}, not ${expected}`, { currentRevision: found.revision });
           if (body.state !== "bound") invalid("resourceId", "the resource is already unbound");
@@ -320,7 +327,8 @@ export class ProjectResourceService {
           const ref: AggregateRef = { kind: RESOURCE, id };
           const changes: Change[] = [{ type: "update", ref, expectedRevision: expected, body: { ...body, state: "unbound" } as unknown as JsonObject }];
           if (claim !== undefined) changes.push({ type: "check", ref: { kind: CLAIM, id }, expectedRevision: claim.revision });
-          changes.push(registry);
+          const { [id]: _gone, ...remaining } = await this.#locsOf(body.projectId, snapshot);
+          changes.push(this.#bump(body.projectId, snapshot, undefined, remaining));
           return { ref, creates: false, changes: mergeChanges(changes), detail: { projectId: body.projectId }, contention: async () => raced() };
         },
       };
@@ -348,8 +356,9 @@ export class ProjectResourceService {
             record === undefined ? { type: "create", ref, body: body as unknown as JsonObject } : { type: "update", ref, expectedRevision: record.revision, body: body as unknown as JsonObject },
             { type: "check", ref: { kind: "task", id: taskId }, expectedRevision: revision },
             { type: "check", ref: { kind: RESOURCE, id: resource.id }, expectedRevision: resource.revision },
+            ...await this.#pinListChanges(taskId, resource.id),
           ];
-          return { ref, creates: record === undefined, changes, detail: { taskId, resourceId: resource.id, locatorEpoch: body.locatorEpoch }, contention: async () => raced() };
+          return { ref, creates: record === undefined, changes: mergeChanges(changes), detail: { taskId, resourceId: resource.id, locatorEpoch: body.locatorEpoch }, contention: async () => raced() };
         },
       };
     });
@@ -375,8 +384,9 @@ export class ProjectResourceService {
             { type: "update", ref, expectedRevision: expected, body: body as unknown as JsonObject },
             { type: "check", ref: { kind: "task", id: taskId }, expectedRevision: revision },
             { type: "check", ref: { kind: RESOURCE, id: resource.id }, expectedRevision: resource.revision },
+            ...await this.#pinListChanges(taskId, resource.id, (existing!.body as unknown as CheckoutBody).resourceId),
           ];
-          return { ref, creates: false, changes, detail: { taskId, resourceId: resource.id, locatorEpoch: body.locatorEpoch }, contention: async () => raced() };
+          return { ref, creates: false, changes: mergeChanges(changes), detail: { taskId, resourceId: resource.id, locatorEpoch: body.locatorEpoch }, contention: async () => raced() };
         },
       };
     });
@@ -404,7 +414,8 @@ export class ProjectResourceService {
           if (task.repositoryId !== undefined) invalid("taskId", `task ${taskId} still names repository ${task.repositoryId}; confirm the checkout with checkout.repin instead`);
           const ref: AggregateRef = { kind: CHECKOUT, id: taskId };
           const body: CheckoutBody = { ...pin!, released: { by: by.id, at: this.#runner.now() } };
-          return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: expected, body: body as unknown as JsonObject }, { type: "check", ref: { kind: "task", id: taskId }, expectedRevision: found.revision }], detail: { taskId }, contention: async () => raced() };
+          const changes: Change[] = [{ type: "update", ref, expectedRevision: expected, body: body as unknown as JsonObject }, { type: "check", ref: { kind: "task", id: taskId }, expectedRevision: found.revision }, ...await this.#pinListChanges(taskId, undefined, pin!.resourceId)];
+          return { ref, creates: false, changes: mergeChanges(changes), detail: { taskId }, contention: async () => raced() };
         },
       };
     });
@@ -491,7 +502,8 @@ export class ProjectResourceService {
     if (existing === undefined) {
       let bound: { id: string; revision: number; body: ResourceBody };
       try { bound = await this.#bindingFor(task); } catch (error) { if (isDomainError(error, "invalid_command")) return { kind: "unbound", reason: error.message }; throw error; }
-      const result = await this.#runner.command("checkout.pin", { commandId: scopedCommandId(command.actor, record === undefined ? command.commandId : `${command.commandId}:r${record.revision}`), actor: command.actor }, async () => ({
+      let result: CommandResult;
+      try { result = await this.#runner.command("checkout.pin", { commandId: scopedCommandId(command.actor, record === undefined ? command.commandId : `${command.commandId}:r${record.revision}`), actor: command.actor }, async () => ({
         payload: { taskId },
         build: async () => {
           const ref: AggregateRef = { kind: CHECKOUT, id: taskId };
@@ -500,10 +512,15 @@ export class ProjectResourceService {
             record === undefined ? { type: "create", ref, body: body as unknown as JsonObject } : { type: "update", ref, expectedRevision: record.revision, body: body as unknown as JsonObject },
             { type: "check", ref: { kind: "task", id: taskId }, expectedRevision: found.revision },
             { type: "check", ref: { kind: RESOURCE, id: bound.id }, expectedRevision: bound.revision },
+            ...await this.#pinListChanges(taskId, bound.id),
           ];
-          return { ref, creates: record === undefined, changes, detail: { taskId, resourceId: bound.id, locatorEpoch: body.locatorEpoch }, contention: async () => raced() };
+          return { ref, creates: record === undefined, changes: mergeChanges(changes), detail: { taskId, resourceId: bound.id, locatorEpoch: body.locatorEpoch }, contention: async () => raced() };
         },
-      }));
+      })); } catch (error) {
+        // Too many records to check safely: the work must not start, and the reason is told as a blocker (not a failed tick).
+        if (isDomainError(error, "unavailable")) return { kind: "unbound", reason: error.message };
+        throw error;
+      }
       pinnedNow = !result.replayed;
     }
     try { return { kind: "ok", checkout: await this.#resolve(taskId, task), pinnedNow }; } catch (error) {
@@ -564,38 +581,97 @@ export class ProjectResourceService {
     return withIds === true ? all : all.map((r) => r.body);
   }
 
-  /** Task IDs, not yet finished, whose checkout is pinned to the binding. */
+  /** Task IDs, not yet finished, whose checkout is pinned to the binding: from the binding's pin list, or (for a binding made before the list existed) by looking through the checkouts once. */
   async #liveTasksPinnedTo(resourceId: string): Promise<string[]> {
-    const pins = await scanAll(this.#runner, CHECKOUT, this.#scanLimit, (a) => (a.body as unknown as CheckoutBody).resourceId === resourceId && (a.body as unknown as CheckoutBody).released === undefined);
+    const list = await this.#runner.get(PINS, resourceId);
+    const ids = list !== undefined
+      ? (list.body as unknown as { tasks: string[] }).tasks
+      : (await scanAll(this.#runner, CHECKOUT, this.#scanLimit, (a) => (a.body as unknown as CheckoutBody).resourceId === resourceId && (a.body as unknown as CheckoutBody).released === undefined)).map((a) => a.id);
     const live: string[] = [];
-    for (const pin of pins) {
-      const task = (await this.#runner.get("task", pin.id))?.body as unknown as TaskBody | undefined;
-      if (task !== undefined && task.state !== "done" && task.state !== "cancelled") live.push(pin.id);
+    for (const id of ids) {
+      const pin = (await this.#runner.get(CHECKOUT, id))?.body as unknown as CheckoutBody | undefined;
+      if (pin === undefined || pin.resourceId !== resourceId || pin.released !== undefined) continue;
+      const task = (await this.#runner.get("task", id))?.body as unknown as TaskBody | undefined;
+      if (task !== undefined && task.state !== "done" && task.state !== "cancelled") live.push(id);
     }
     return live;
   }
 
-  /** Refuses a location that contains, or lies inside, a location bound to another project, unless acknowledged by someone who may give scopes. Equal locations are allowed (one repository, two projects). */
+  /**
+   * The changes that keep binding pin lists right when a task's checkout is pinned to `add`, taken from `drop`, or both. A binding made before the list existed gets it on its first pin,
+   * filled by one look through the checkouts (refused as `unavailable` past the scan limit, never made from part). A list holding many tasks is cleared of the finished ones first.
+   */
+  async #pinListChanges(taskId: string, add?: string, drop?: string): Promise<Change[]> {
+    const changes: Change[] = [];
+    if (drop !== undefined && drop !== add) {
+      const old = await this.#runner.get(PINS, drop);
+      if (old !== undefined) {
+        const tasks = (old.body as unknown as { tasks: string[] }).tasks;
+        if (tasks.includes(taskId)) changes.push({ type: "update", ref: { kind: PINS, id: drop }, expectedRevision: old.revision, body: { tasks: tasks.filter((t) => t !== taskId) } });
+      }
+    }
+    if (add !== undefined) {
+      const list = await this.#runner.get(PINS, add);
+      let tasks: string[] = list !== undefined
+        ? [...(list.body as unknown as { tasks: string[] }).tasks]
+        : (await scanAll(this.#runner, CHECKOUT, this.#scanLimit, (a) => (a.body as unknown as CheckoutBody).resourceId === add && (a.body as unknown as CheckoutBody).released === undefined)).map((a) => a.id);
+      if (tasks.length >= PRUNE_AT) {
+        const kept: string[] = [];
+        for (const id of tasks) {
+          const task = (await this.#runner.get("task", id))?.body as unknown as TaskBody | undefined;
+          if (id !== taskId && task !== undefined && task.state !== "done" && task.state !== "cancelled") kept.push(id);
+        }
+        tasks = kept;
+      }
+      if (!tasks.includes(taskId)) tasks.push(taskId);
+      if (tasks.length > this.#scanLimit) throw new DomainError("unavailable", `binding ${add} has more than ${this.#scanLimit} pinned tasks, too many to track safely`);
+      if (list === undefined) changes.push({ type: "create", ref: { kind: PINS, id: add }, body: { tasks } });
+      else if (JSON.stringify(tasks) !== JSON.stringify((list.body as unknown as { tasks: string[] }).tasks)) changes.push({ type: "update", ref: { kind: PINS, id: add }, expectedRevision: list.revision, body: { tasks } });
+      else changes.push({ type: "check", ref: { kind: PINS, id: add }, expectedRevision: list.revision });
+    }
+    return changes;
+  }
+
+  /**
+   * Refuses a location that contains, or lies inside, a location bound to another project, unless acknowledged by someone who may give scopes. Equal locations are allowed (one repository, two projects).
+   * It reads each project's registry (one record per project, listing its bound locations), not every binding of every project; the limit applies to the number of projects.
+   */
   async #checkOverlap(by: Principal, projectId: string, locator: string, acknowledged: boolean): Promise<void> {
-    const others = await scanAll(this.#runner, RESOURCE, this.#scanLimit, (a) => { const b = a.body as unknown as ResourceBody; return b.state === "bound" && b.projectId !== projectId && nested(b.locator, locator); });
-    if (others.length === 0) return;
+    const registries = await scanAll(this.#runner, REGISTRY, this.#scanLimit, (a) => a.id !== projectId);
+    let clash = false;
+    for (const registry of registries) {
+      for (const other of Object.values(await this.#locsOf(registry.id, registry))) if (nested(other, locator)) { clash = true; break; }
+      if (clash) break;
+    }
+    if (!clash) return;
     if (!acknowledged) invalid("locator", "this location contains, or lies inside, a location bound to another project, so access in one project could reach the other's files; bind it with acknowledgeOverlap if that is intended");
     if (!may(by, "resource.scope.write", projectId)) throw hidden(by, "bind overlapping locations");
   }
 
-  /**
-   * The per-project record every change to the project's bindings updates at the revision it read first (so uniqueness checks cannot be raced). It also lists the project's binding IDs (`ids`), so a lookup reads that
-   * project's bindings and not every binding of every project; `ids` given replaces the list (bind), absent keeps it.
-   */
-  async #touch(projectId: string, ids?: readonly string[]): Promise<Change> {
-    return this.#bump(projectId, await this.#runner.get(REGISTRY, projectId), ids);
+  /** The bound locations of a project by binding ID: from its registry, or (for a registry made before they were listed) from its bindings. */
+  async #locsOf(projectId: string, snapshot?: Aggregate): Promise<Record<string, string>> {
+    const registry = snapshot ?? await this.#runner.get(REGISTRY, projectId);
+    if (registry === undefined) return {};
+    const listed = (registry.body as unknown as { locs?: Record<string, string> }).locs;
+    if (listed !== undefined) return { ...listed };
+    const out: Record<string, string> = {};
+    for (const id of await this.#idsOf(projectId, registry)) {
+      const found = (await this.#runner.get(RESOURCE, id))?.body as unknown as ResourceBody | undefined;
+      if (found !== undefined && found.projectId === projectId && found.state === "bound") out[id] = found.locator;
+    }
+    return out;
   }
 
-  #bump(projectId: string, registry: Aggregate | undefined, ids?: readonly string[]): Change {
+  /**
+   * The per-project record every change to the project's bindings updates at the revision it read first (so uniqueness checks cannot be raced). It also lists the project's binding IDs (`ids`) and their bound locations (`locs`), so a lookup reads that
+   * project's bindings and not every binding of every project; `ids` given replaces the list (bind), absent keeps it.
+   */
+  #bump(projectId: string, registry: Aggregate | undefined, ids?: readonly string[], locs?: Record<string, string>): Change {
     const ref: AggregateRef = { kind: REGISTRY, id: projectId };
-    const old = registry?.body as unknown as { n: number; ids?: readonly string[] } | undefined;
+    const old = registry?.body as unknown as { n: number; ids?: readonly string[]; locs?: Record<string, string> } | undefined;
     const kept = ids ?? old?.ids;
-    const body = { n: (old?.n ?? 0) + 1, ...(kept === undefined ? {} : { ids: kept }) };
+    const keptLocs = locs ?? old?.locs;
+    const body = { n: (old?.n ?? 0) + 1, ...(kept === undefined ? {} : { ids: kept }), ...(keptLocs === undefined ? {} : { locs: keptLocs }) };
     return registry === undefined ? { type: "create", ref, body } : { type: "update", ref, expectedRevision: registry.revision, body };
   }
 

@@ -366,6 +366,110 @@ for (const backend of backends) {
     assert.equal((await resources.list(owner, p))!.length, 3);
   });
 
+  const T = "2026-10-22T10:00:00.000Z";
+  const raw = (resources: ProjectResourceService, changes: unknown[]) => resources.runner.storage.applyOperation({
+    operationId: cid("raw"), epoch: resources.runner.epoch, actor: "test", correlationId: cid("raw"), at: T,
+    changes: changes as never, audit: [{ type: "raw", detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [],
+  });
+
+  suite("the overlap check reads one record per project, not every binding: past the limit in bindings it still works, and moves and unbinds keep it right (card P01c)", async ({ owner, resources, project }) => {
+    const p = await project("P");
+    const q = await project("Q");
+    for (let i = 0; i < 4; i++) await resources.bindResource(owner, { commandId: cid("b"), projectId: q, kind: "output", label: `q${i}`, locator: `/q/${i}` } as never);
+    const tight = ProjectResourceService.withEpoch(resources.runner.storage, resources.runner.epoch, { scanLimit: 2, clock: () => T, pause: async () => undefined });
+    // Q has four bindings (more than the limit of 2): the old check read all of them and was unavailable; now it reads Q's one registry.
+    const ok = await tight.bindResource(owner, { commandId: cid("b"), projectId: p, kind: "output", label: "p0", locator: "/p/0" } as never);
+    await refuses("invalid_command", () => tight.bindResource(owner, { commandId: cid("b"), projectId: p, kind: "output", label: "in", locator: "/q/2/inside" } as never), (e) => assert.match(e.message, /another project/));
+    await refuses("invalid_command", () => tight.bindResource(owner, { commandId: cid("b"), projectId: p, kind: "output", label: "up", locator: "/q" } as never), (e) => assert.match(e.message, /another project/));
+    // A move updates the list: Q's binding moved away no longer clashes, and its new place does.
+    const q0 = (await resources.list(owner, q))!.find((r) => r.label === "q0")!;
+    await resources.moveResource(owner, { commandId: cid("mv"), resourceId: q0.id, expectedRevision: q0.revision, locator: "/elsewhere/0" } as never);
+    await resources.bindResource(owner, { commandId: cid("b"), projectId: p, kind: "output", label: "old-place", locator: "/q/0/x" } as never);
+    await refuses("invalid_command", () => resources.bindResource(owner, { commandId: cid("b"), projectId: p, kind: "output", label: "new-place", locator: "/elsewhere/0/x" } as never));
+    // An unbound binding stops clashing.
+    const moved = (await resources.get(owner, q0.id))!;
+    await resources.unbindResource(owner, { commandId: cid("ub"), resourceId: q0.id, expectedRevision: moved.revision } as never);
+    await resources.bindResource(owner, { commandId: cid("b"), projectId: p, kind: "output", label: "free", locator: "/elsewhere/0/x" } as never);
+    // The same place is allowed (equal is not nested) and an acknowledged overlap needs the scope right.
+    await resources.bindResource(owner, { commandId: cid("b"), projectId: p, kind: "output", label: "same", locator: "/q/1" } as never);
+    await resources.bindResource(owner, { commandId: cid("b"), projectId: p, kind: "output", label: "ack", locator: "/q/1/deep", acknowledgeOverlap: true } as never);
+    assert.ok(ok.id);
+  });
+
+  suite("a project whose registry was made before bound locations were listed is read from its bindings, and gets the list at its next change (card P01c)", async ({ owner, resources, project }) => {
+    const p = await project("P");
+    const q = await project("Q");
+    const first = await resources.bindResource(owner, { commandId: cid("b"), projectId: q, kind: "output", label: "q0", locator: "/q/0" } as never);
+    // Strip the location list from the registry, as a registry written by the earlier version would be.
+    const reg = (await resources.runner.storage.getAggregate({ kind: "resource-registry", id: q }))!;
+    const { locs: _locs, ...legacy } = reg.body as { locs?: unknown };
+    await raw(resources, [{ type: "update", ref: { kind: "resource-registry", id: q }, expectedRevision: reg.revision, body: legacy }]);
+    await refuses("invalid_command", () => resources.bindResource(owner, { commandId: cid("b"), projectId: p, kind: "output", label: "in", locator: "/q/0/in" } as never));
+    // The next change to Q lists its locations.
+    await resources.bindResource(owner, { commandId: cid("b"), projectId: q, kind: "output", label: "q1", locator: "/q/1" } as never);
+    const after = (await resources.runner.storage.getAggregate({ kind: "resource-registry", id: q }))!.body as { locs?: Record<string, string> };
+    assert.deepEqual(Object.values(after.locs!).sort(), ["/q/0", "/q/1"]);
+    assert.ok(first.id);
+  });
+
+  suite("ending a binding reads its own pin list: tasks that finished do not hold it, a repin or release moves the pin, and a binding without a list is filled from the checkouts once (card P01c)", async ({ owner, resources, projects, project, task }) => {
+    const p = await project("P");
+    const a = await resources.bindResource(owner, { commandId: cid("b"), projectId: p, kind: "repository", label: "a", locator: "/r/a", repositoryId: "a" } as never);
+    const b = await resources.bindResource(owner, { commandId: cid("b"), projectId: p, kind: "repository", label: "b", locator: "/r/b", repositoryId: "b" } as never);
+    const t1 = await task(p, "one", { repositoryId: "a" });
+    const t2 = await task(p, "two", { repositoryId: "a" });
+    await resources.pinCheckout(owner, { commandId: cid("pin"), taskId: t1 });
+    await resources.dispatchCheckout({ commandId: "dp:t2", taskId: t2, actor: "dispatcher", pin: true });
+    const pins = async (id: string) => ((await resources.runner.storage.getAggregate({ kind: "resource-pins", id }))!.body as { tasks: string[] }).tasks;
+    assert.deepEqual((await pins(a.id)).sort(), [t1, t2].sort());
+    await refuses("invalid_command", () => resources.unbindResource(owner, { commandId: cid("ub"), resourceId: a.id, expectedRevision: a.revision } as never), (e) => assert.match(e.message, /tasks still work/));
+    // Pointing t1 at the other repository and confirming it moves the pin between the lists.
+    await projects.updateTask({ commandId: cid("u"), actor: owner.id, taskId: t1, expectedRevision: (await projects.getTask(t1))!.revision, repositoryId: "b" } as never);
+    const pin1 = (await resources.getPin(owner, t1))!;
+    await resources.repinCheckout(owner, { commandId: cid("rp"), taskId: t1, expectedRevision: pin1.revision });
+    assert.deepEqual(await pins(a.id), [t2]);
+    assert.deepEqual(await pins(b.id), [t1]);
+    // A finished task does not hold the binding.
+    const t2rec = (await projects.getTask(t2))!;
+    await projects.transitionTask({ commandId: cid("c"), actor: owner.id, taskId: t2, expectedRevision: t2rec.revision, to: "cancelled" });
+    const afterCancel = (await resources.get(owner, a.id))!;
+    await resources.unbindResource(owner, { commandId: cid("ub"), resourceId: a.id, expectedRevision: afterCancel.revision } as never);
+    // A release removes the task from its list.
+    await projects.updateTask({ commandId: cid("u"), actor: owner.id, taskId: t1, expectedRevision: (await projects.getTask(t1))!.revision, repositoryId: null } as never);
+    const pin2 = (await resources.getPin(owner, t1))!;
+    await resources.releaseCheckout(owner, { commandId: cid("rel"), taskId: t1, expectedRevision: pin2.revision });
+    assert.deepEqual(await pins(b.id), []);
+    // A binding made before pin lists existed (a store that neither reads nor writes them): no list; ending it looks through the checkouts, and the first pin with the list in place fills it from them.
+    const storage = resources.runner.storage;
+    const earlier = new Proxy(storage, { get: (target, key) => {
+      if (key === "getAggregate") return (ref: { kind: string; id: string }) => (ref.kind === "resource-pins" ? Promise.resolve(undefined) : target.getAggregate(ref as never));
+      if (key === "applyOperation") return (input: { changes: { ref: { kind: string } }[] }) => target.applyOperation({ ...input, changes: input.changes.filter((c) => c.ref.kind !== "resource-pins") } as never);
+      const value = Reflect.get(target, key) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    } });
+    const old = ProjectResourceService.withEpoch(earlier, resources.runner.epoch, { clock: () => T, pause: async () => undefined });
+    const c = await old.bindResource(owner, { commandId: cid("b"), projectId: p, kind: "repository", label: "c", locator: "/r/c", repositoryId: "c" } as never);
+    const t3 = await task(p, "three", { repositoryId: "c" });
+    await old.pinCheckout(owner, { commandId: cid("pin"), taskId: t3 });
+    assert.equal(await storage.getAggregate({ kind: "resource-pins", id: c.id }), undefined);
+    await refuses("invalid_command", () => resources.unbindResource(owner, { commandId: cid("ub"), resourceId: c.id, expectedRevision: c.revision } as never), (e) => assert.match(e.message, /tasks still work/));
+    const t4 = await task(p, "four", { repositoryId: "c" });
+    await resources.pinCheckout(owner, { commandId: cid("pin"), taskId: t4 });
+    assert.deepEqual((await pins(c.id)).sort(), [t3, t4].sort(), "filled from the checkouts at the first pin, t3 included");
+  });
+
+  suite("a pin the scan limit forbids is a blocker, not a failure: the dispatcher's pin is answered with the reason (card P01c)", async ({ owner, resources, project, task }) => {
+    const p = await project("P");
+    const a = await resources.bindResource(owner, { commandId: cid("b"), projectId: p, kind: "repository", label: "a", locator: "/r/a", repositoryId: "a" } as never);
+    const tight = ProjectResourceService.withEpoch(resources.runner.storage, resources.runner.epoch, { scanLimit: 2, clock: () => T, pause: async () => undefined });
+    for (let i = 0; i < 2; i++) await resources.pinCheckout(owner, { commandId: cid("pin"), taskId: await task(p, `t${i}`, { repositoryId: "a" }) });
+    const third = await task(p, "t3", { repositoryId: "a" });
+    const answer = await tight.dispatchCheckout({ commandId: "dp:third", taskId: third, actor: "dispatcher", pin: true });
+    assert.equal(answer.kind, "unbound");
+    assert.match((answer as { reason: string }).reason, /too many to track safely/);
+    assert.ok(a.id);
+  });
+
   suite("dispatching needs assignment.manage on the task; reading a checkout needs the task and resource read rights and an outsider sees nothing", async ({ owner, resources, project, task, agent }) => {
     const p = await project("P");
     const q = await project("Q");
