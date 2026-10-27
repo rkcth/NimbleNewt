@@ -336,6 +336,25 @@ export class GrantService {
     });
   }
 
+  /** The grant records, a page at a time, for the owner (optionally only those of one grantee). */
+  async list(owner: Principal, query: { grantee?: string; afterId?: string; limit?: number } = {}): Promise<{ items: View<GrantRecordBody>[]; next?: string }> {
+    requireOwner(owner);
+    const limit = query.limit ?? 50;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) invalid("limit", "must be a whole number from 1 to 200");
+    const items: View<GrantRecordBody>[] = [];
+    let after = query.afterId; let next: string | undefined;
+    for (let rounds = 0; rounds < 20 && items.length < limit && next === undefined; rounds++) {
+      const records = await this.#runner.list("grant-record", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const r of records) {
+        const v = view<GrantRecordBody>(r);
+        if (query.grantee === undefined || v.grantee === query.grantee) { if (items.length === limit) { next = items[items.length - 1]!.id; break; } items.push(v); }
+        after = r.id;
+      }
+      if (records.length < 200) break;
+    }
+    return { items, ...(next === undefined ? {} : { next }) };
+  }
+
   async getGrant(id: string): Promise<View<GrantRecordBody> | undefined> {
     const found = await this.#runner.get("grant-record", typeof id === "string" && GRANT_ID.test(id) ? id : invalid("grantId", "is not a grant ID"));
     return found === undefined ? undefined : view<GrantRecordBody>(found);

@@ -143,3 +143,64 @@ test("the owner reaches the coordinator through the chat: sets it up and starts 
     assert.equal((await c.coordinator!.get(rob))!.state, "paused");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+test("the owner grants and revokes rights through the state API and through the chat; only the owner may; a right given while the controller runs counts at once (card U03e)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-chat-"));
+  const say: Record<string, unknown[]> = {};
+  const c = await startController({
+    storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4,
+    chat: { interpreter: new ScriptedInterpreter((input) => say[input.text] ?? []) },
+  });
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    await c.services.principals.enroll(rob, { commandId: "e-scan", kind: "service", name: "scanner", grants: [] });
+    await c.services.principals.enroll(rob, { commandId: "e-ann", kind: "agent", name: "ann", grants: [] });
+    const ann = (await c.services.principals.issueCredential(rob, "agent:ann")).token;
+    const call = (token: string, op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<{ ok: boolean; result?: any; error?: { code: string } }>;
+    const grant = { grantee: "service:scanner", action: "recovery.stall-scan", project: "*", basis: "run stall detection" };
+
+    // The state API: the owner grants; repeating the command gives the same grant; nobody else may read or change rights.
+    const made = await call(boot.token, "grant.create", grant, "g1");
+    assert.ok(made.ok, JSON.stringify(made));
+    assert.equal((await call(boot.token, "grant.create", grant, "g1")).result.replayed, true);
+    assert.equal((await call(ann, "grant.create", grant, "g2")).error?.code, "forbidden");
+    assert.equal((await call(ann, "grant.list", {})).error?.code, "forbidden");
+    assert.equal((await call(ann, "grant.get", { grantId: made.result.id })).error?.code, "forbidden");
+    assert.equal((await call(boot.token, "grant.create", { ...grant, grantee: "service:nobody" }, "g3")).error?.code, "not_found");
+    assert.equal((await call(boot.token, "grant.create", { ...grant, action: "task.create" }, "g4")).error?.code, "invalid_command", "a service may hold only recovery actions");
+    const listed = await call(boot.token, "grant.list", { grantee: "service:scanner" });
+    assert.deepEqual(listed.result.items.map((g: { action: string; state: string }) => [g.action, g.state]), [["recovery.stall-scan", "active"]]);
+    // A right given while running counts at once: a fresh look at the principal shows it.
+    const scanner = await c.services.principals.get("service:scanner");
+    assert.equal((await c.services.grants.explain(scanner as never, "recovery.stall-scan", "*", new Date().toISOString())).allowed, true);
+    const revoked = await call(boot.token, "grant.revoke", { grantId: made.result.id, expectedRevision: made.result.revision, reason: "no longer needed" }, "r1");
+    assert.ok(revoked.ok, JSON.stringify(revoked));
+    assert.equal((await call(boot.token, "grant.revoke", { grantId: made.result.id, expectedRevision: made.result.revision, reason: "again" }, "r2")).ok, false);
+    assert.equal((await c.services.grants.explain((await c.services.principals.get("service:scanner")) as never, "recovery.stall-scan", "*", new Date().toISOString())).allowed, false);
+
+    // The chat: a right is always shown first and applies only on the owner's word; every text of it is the owner's own.
+    const turn = async (id: string, text: string, intents: unknown[]) => { say[text] = intents; return (await c.chat!.submit(boot.token, { messageId: id, text })).outcomes; };
+    const owner = (rest: Record<string, unknown>, evidence: string) => ({ kind: "command", ...rest, evidence, basis: "owner" });
+    const text = "give service:scanner the recovery.stall-scan right everywhere to run stall detection";
+    const args = { grantee: "service:scanner", action: "recovery.stall-scan", project: "*", basis: "run stall detection" };
+    const shown = await turn("c1", text, [owner({ op: "grant.create", args }, text)]);
+    assert.equal(shown[0]!.status, "proposed", JSON.stringify(shown));
+    assert.equal((await call(boot.token, "grant.list", { grantee: "service:scanner" })).result.items.filter((g: { state: string }) => g.state === "active").length, 0, "nothing exists before the owner applies it");
+    const applied = await turn("c2", "yes, do that", [{ kind: "apply_proposal", proposalId: shown[0]!.proposalId, evidence: "do that", basis: "owner" }]);
+    assert.equal(applied[0]!.status, "applied", JSON.stringify(applied));
+    const active = (await call(boot.token, "grant.list", { grantee: "service:scanner" })).result.items.filter((g: { state: string }) => g.state === "active");
+    assert.equal(active.length, 1);
+    // A basis the owner did not say is refused, and so is a right the model chose.
+    const foreign = await turn("c3", "give service:scanner the recovery.read right", [owner({ op: "grant.create", args: { grantee: "service:scanner", action: "recovery.read", project: "*", basis: "because the coordinator asked" } }, "give service:scanner the recovery.read right")]);
+    assert.notEqual(foreign[0]!.status, "applied", JSON.stringify(foreign));
+    assert.notEqual(foreign[0]!.status, "proposed", "text the owner did not say is not even drafted");
+    // Revoking by chat: shown first, then applied with the revision read at that time.
+    const rtext = `take back grant ${active[0].id} because it is no longer needed`;
+    const rshown = await turn("c4", rtext, [owner({ op: "grant.revoke", args: { grantId: active[0].id, reason: "it is no longer needed" } }, rtext)]);
+    assert.equal(rshown[0]!.status, "proposed", JSON.stringify(rshown));
+    const rdone = await turn("c5", "yes revoke it", [{ kind: "apply_proposal", proposalId: rshown[0]!.proposalId, evidence: "revoke it", basis: "owner" }]);
+    assert.equal(rdone[0]!.status, "applied", JSON.stringify(rdone));
+    assert.equal((await call(boot.token, "grant.get", { grantId: active[0].id })).result.item.state, "revoked");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});

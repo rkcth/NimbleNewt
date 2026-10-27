@@ -32,6 +32,28 @@ One door to the controller's state for chat, command-line and HTTP clients. A cl
 
 ### Queries
 
+#### `grant.list`
+
+The rights the owner has granted, with their IDs and revisions (owner only).
+
+Arguments:
+
+- `grantee` (optional): only this principal's grants
+- `limit` (optional): 1 to 100, default 20
+- `after` (optional): the `next` of the previous page
+
+Result: `{ items, next? }`: each grant with its grantee, action, project, state (`active` or `revoked`), basis and revision.
+
+#### `grant.get`
+
+One grant record (owner only).
+
+Arguments:
+
+- `grantId`: the grant's ID
+
+Result: `{ item }`: the grant, with its revision.
+
 #### `project.get`
 
 One project.
@@ -390,6 +412,37 @@ Arguments:
 Result: `{ items, next? }`.
 
 ### Commands
+
+#### `grant.create`
+
+The owner gives a principal a right (owner only). A service may hold only recovery actions and a client only conversation actions. Repeating the same command ID gives the same grant.
+
+Arguments:
+
+- `grantee`: the principal, for example `service:dispatcher`
+- `action`: the action, for example `recovery.stall-scan`
+- `project`: a project ID, or `*` for every project
+- `basis`: the reason, in the owner's words
+- `notBefore` (optional): ISO time the grant starts
+- `expiresAt` (optional): ISO time the grant ends
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `grant.revoke`
+
+The owner takes a grant back (owner only; the revision you read must still be current). It stops counting at the next check.
+
+Arguments:
+
+- `grantId`: the grant's ID
+- `expectedRevision`: the revision you read
+- `reason`: why, in the owner's words
+
+Result: `{ ok: true }`.
+
+Completion: finished when accepted (`completed: true`).
 
 #### `agent.create`
 

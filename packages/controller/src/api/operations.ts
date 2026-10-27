@@ -11,6 +11,7 @@ import type { ContextBranchService } from "../branches/index.js";
 import type { MeetingService } from "../meetings/index.js";
 import type { AgentMessageService } from "../messaging/index.js";
 import { shownLines } from "../standups/standups.js";
+import type { GrantService } from "../security/grants.js";
 import type { Principal } from "../security/principals.js";
 import type { SecureApi } from "../security/secured.js";
 import type { JsonObject } from "../storage/types.js";
@@ -35,6 +36,8 @@ export interface Context {
   readonly meetings?: MeetingService;
   /** Absent when the controller runs without context branches (card C05). */
   readonly branches?: ContextBranchService;
+  /** Absent when the controller runs without grants (card U03e). */
+  readonly grants?: Pick<GrantService, "grant" | "revoke" | "getGrant" | "list">;
   /** Absent when the controller runs without agent messages (card U12): questions to the owner. */
   readonly ownerQuestions?: Pick<AgentMessageService, "askOwner" | "ownerQuestions" | "answerOwner">;
 }
@@ -84,6 +87,7 @@ const resources = (c: Context): ProjectResourceService => c.resources ?? unavail
 const plans = (c: Context): ProjectPlanService => c.plans ?? unavailable("project plans");
 const ownerQuestionsOf = (c: Context): NonNullable<Context["ownerQuestions"]> => c.ownerQuestions ?? unavailable("questions to the owner");
 const branchesOf = (c: Context): ContextBranchService => c.branches ?? unavailable("context branches");
+const grantsOf = (c: Context): NonNullable<Context["grants"]> => c.grants ?? unavailable("rights");
 const meetingsOf = (c: Context): MeetingService => c.meetings ?? unavailable("meetings");
 const duties = (c: Context): ResponsibilityService => c.responsibilities ?? unavailable("responsibilities");
 const optNum = (args: Args, key: string): number | undefined => { const v = args[key]; return v === undefined ? undefined : (typeof v === "number" ? v : invalid(`args.${key}`, "must be a number")); };
@@ -97,6 +101,14 @@ const rest = (args: Args, ...skip: string[]): Args => Object.fromEntries(Object.
 
 /** The version-1 operations. The documentation (`renderApiDocs`) is generated from this table, so it cannot drift. */
 export const OPERATIONS: readonly Operation[] = [
+  { name: "grant.list", kind: "query", summary: "The rights the owner has granted, with their IDs and revisions (owner only).", args: { "grantee?": "only this principal's grants", "limit?": `1 to ${PAGE.max}, default ${PAGE.default}`, "after?": "the `next` of the previous page" }, result: "`{ items, next? }`: each grant with its grantee, action, project, state (`active` or `revoked`), basis and revision.",
+    run: async (c, a) => { only(a, ["grantee", "limit", "after"]); return page(await grantsOf(c).list(c.principal, { limit: limitOf(a), ...(optStr(a, "grantee") === undefined ? {} : { grantee: optStr(a, "grantee")! }), ...(optStr(a, "after") === undefined ? {} : { afterId: optStr(a, "after")! }) })); } },
+  { name: "grant.get", kind: "query", summary: "One grant record (owner only).", args: { grantId: "the grant's ID" }, result: "`{ item }`: the grant, with its revision.",
+    run: async (c, a) => { only(a, ["grantId"]); if (c.principal.kind !== "owner") throw new DomainError("forbidden", "only the owner may read grants"); return found("grant", await grantsOf(c).getGrant(str(a, "grantId"))); } },
+  { name: "grant.create", kind: "command", summary: "The owner gives a principal a right (owner only). A service may hold only recovery actions and a client only conversation actions. Repeating the same command ID gives the same grant.", args: { grantee: "the principal, for example `service:dispatcher`", action: "the action, for example `recovery.stall-scan`", project: "a project ID, or `*` for every project", basis: "the reason, in the owner's words", "notBefore?": "ISO time the grant starts", "expiresAt?": "ISO time the grant ends" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["grantee", "action", "project", "basis", "notBefore", "expiresAt"]); return written(await grantsOf(c).grant(c.principal, { commandId: need(id), ...(a as object), source: "direct" } as never)); } },
+  { name: "grant.revoke", kind: "command", summary: "The owner takes a grant back (owner only; the revision you read must still be current). It stops counting at the next check.", args: { grantId: "the grant's ID", expectedRevision: "the revision you read", reason: "why, in the owner's words" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["grantId", "expectedRevision", "reason"]); await grantsOf(c).revoke(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
   { name: "project.get", kind: "query", summary: "One project.", args: { projectId: "the project's ID" }, result: "`{ item }`: the project, with its ID, revision and timestamps.",
     run: async (c, a) => { only(a, ["projectId"]); return found("project", await c.secure.getProject(str(a, "projectId"))); } },
   { name: "project.list", kind: "query", summary: "The projects the caller may read.", args: { "limit?": `1 to ${PAGE.max}, default ${PAGE.default}`, "after?": "the `next` of the previous page" }, result: "`{ items, next? }`.",

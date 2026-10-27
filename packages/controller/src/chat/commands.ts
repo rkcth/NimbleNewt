@@ -10,7 +10,7 @@ export interface ChatOp {
   readonly verb: string;
   /** `apply`: at once. `propose`: always a proposal. `profile`: an explicit owner order applies directly in the derived and autonomous profiles and is a proposal in the strict one (or when read failed). */
   readonly mode: "apply" | "propose" | "profile";
-  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda";
+  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "grant";
   /** The project the command is about is needed, and comes from the conversation's focus when the owner does not name it. */
   readonly needsProject?: boolean;
   /** The command hands a task to someone: it carries an explicit project and repository (checkout) and is always a proposal. */
@@ -34,6 +34,9 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "agent.retire": { verb: "Retire agent", mode: "profile", revision: "agent" },
   "team.create": { verb: "Create team", mode: "apply" },
   "role.define": { verb: "Define role", mode: "propose" },
+  // Rights (card U03e): giving or taking back a right is always shown first and applies only when the owner says so; every text of it must be in the owner's own words.
+  "grant.create": { verb: "Grant right", mode: "propose" },
+  "grant.revoke": { verb: "Revoke grant", mode: "propose", revision: "grant" },
   // Project resources, plan and responsibilities (card P01). A read-only bind of a location the owner typed in their own words follows the profile like other explicit orders; write access, an acknowledged overlap and anything quoted are shown first.
   "resource.bind": { verb: "Bind resource", mode: "profile", needsProject: true },
   "project.plan": { verb: "Plan project", mode: "apply", revision: "project", needsProject: true },
@@ -124,7 +127,7 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
   if ((AUTHORITY_FIELDS[op] ?? []).some((f) => args[f] !== undefined)) return "it changes what someone may do or where work is done";
   // The request type is authority: an instruction or a decision left to the team is shown to the owner before it is recorded, whatever the profile, so a paraphrase cannot slip one in.
   if ((op === "agenda.capture" || op === "agenda.correct") && (args["intent"] === "owner-instruction" || args["intent"] === "delegated-decision")) return "it records an instruction or a decision for the team, so it is shown first";
-  if (spec.mode === "propose") return op === "project.create" ? "a new project is drafted first" : "a role's capabilities are shown first";
+  if (spec.mode === "propose") return op === "project.create" ? "a new project is drafted first" : op.startsWith("grant.") ? "a right is shown first" : "a role's capabilities are shown first";
   if (context.quoted && (!PLAIN_EDITS.has(op) || (op === "project.update" && args["state"] !== undefined))) return "your message carried quoted text, so this is shown first";
   if (!context.said) return "your own words do not say this move, so it is shown first";
   const strict = context.profile === "strict";
@@ -135,7 +138,7 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
 }
 
 /** Keys whose values name records or fixed choices; every other text in a command must be in the owner's own words. */
-const EXEMPT = new Set(["taskId", "projectId", "prerequisiteId", "agentId", "supervisorId", "teamId", "parentTeamId", "repositoryId", "resourceId", "responsibilityId", "ownerId", "managed", "access", "expectedRevision", "expectedVersion", "to", "state", "workClass", "difficulty", "recovery", "kind", "priority", "itemId", "sourceTurnId", "intent", "urgency", "category", "participants"]);
+const EXEMPT = new Set(["taskId", "projectId", "project", "prerequisiteId", "agentId", "supervisorId", "teamId", "parentTeamId", "repositoryId", "resourceId", "responsibilityId", "ownerId", "managed", "access", "expectedRevision", "expectedVersion", "to", "state", "workClass", "difficulty", "recovery", "kind", "priority", "itemId", "sourceTurnId", "intent", "urgency", "category", "participants"]);
 
 /** The first text value of a command's arguments that is not the owner's own words (and not a record reference or fixed choice), or undefined. */
 export function foreignValue(args: Readonly<Record<string, unknown>>, ownText: string, path = ""): string | undefined {
