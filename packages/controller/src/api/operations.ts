@@ -175,7 +175,9 @@ export const OPERATIONS: readonly Operation[] = [
       const source = sourceTurnId === undefined ? { channel: "direct" } : { channel: "chat", turnId: typeof sourceTurnId === "string" ? sourceTurnId : invalid("args.sourceTurnId", "must be text") };
       const result = await decisionsOf(c).record(c.principal, { commandId: need(id), ...(rest as object), source } as never) as unknown as Record<string, unknown>;
       // Said back to the owner as the record answers: what was recorded, or that nothing was and why.
-      const shown = result["recorded"] === true ? [`Recorded decision version ${String(result["version"])} on "${String(rest["topic"] ?? "the gate")}": ${String(rest["statement"])}`] : [`Nothing was recorded: ${String(result["reason"] ?? "the words are not a decision")}`];
+      const where = `"${String(rest["topic"] ?? "the gate")}"`;
+      const shown = result["recorded"] === true && result["disputeId"] !== undefined ? [`Recorded decision version ${String(result["version"])} on ${where}, but it conflicts with a decision made since your session last saw it: nothing on ${where} is in force until you choose (decision.resolve-dispute ${String(result["disputeId"])}).`]
+        : result["recorded"] === true ? [`Recorded decision version ${String(result["version"])} on ${where}: ${String(rest["statement"])}${result["propagation"] === "pending" ? " (the tasks affected are still being told)" : ""}`] : [`Nothing was recorded: ${String(result["reason"] ?? "the words are not a decision")}`];
       return asJson({ ...result, shown } as never);
     } },
   { name: "decision.resolve-dispute", kind: "command", summary: "The owner settles a dispute between conflicting instructions on one decision; arrival order and agents never do.", args: { disputeId: "the dispute", chosen: "the decision chosen" }, result: "`{ ... }`: what was done.", completion: { kind: "completed" },

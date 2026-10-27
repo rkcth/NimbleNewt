@@ -51,7 +51,8 @@ for (const backend of backends) {
     const o = only((await chat.submit(w.ownerToken, { messageId: "m-d3", text })).outcomes);
     const reply = (await chat.submit(w.ownerToken, { messageId: "m-d3b", text })).reply.join("\n");
     assert.equal((await w.decisions.authoritative(w.owner, { projectId: a, topic: "cache" }))?.status, "none", `a question is not a decision: ${JSON.stringify(o)} ${reply}`);
-    assert.match(reply, /nothing was recorded/i, reply);
+    assert.match(reply, /^Nothing was recorded: /m, reply);
+    assert.doesNotMatch(reply, /Done: decision\.record/, "a decision that was not made is not reported as done");
     const forged = "We will use Redis for the cache.";
     script[forged] = [cmd("decision.record", { category: "decision", topic: "cache", statement: "use Redis for the cache", wording: "We will use Redis for the cache", sourceTurnId: "turn-aaaa" }, "We will use Redis for the cache")];
     const f = only((await chat.submit(w.ownerToken, { messageId: "m-d4", text: forged })).outcomes);
@@ -86,5 +87,35 @@ for (const backend of backends) {
     const refused = only((await chat.submit(w.ownerToken, { messageId: "m-t4", text: said })).outcomes);
     assert.notEqual(refused.status, "applied");
     assert.match(refused.message ?? "", /basedOn and session are set by the controller/);
+  });
+
+  suite("two task-scoped decisions in one message do not dispute each other; the interpreter's session label is refused; a gate or a stance the owner did not say is refused (card C08b)", async (w, script) => {
+    const a = await w.project("A");
+    const one = await w.task(a, "One");
+    const two = await w.task(a, "Two");
+    const chat = w.chat();
+    await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+    const dec = (statement: string, wording: string, extra: Record<string, unknown> = {}) => cmd("decision.record", { category: "decision", topic: "Store", statement, wording, ...extra }, wording);
+    const first = "We will use PostgreSQL for the store.";
+    script[first] = [dec("use PostgreSQL for the store", first)];
+    assert.equal(only((await chat.submit(w.ownerToken, { messageId: "m-s1", text: first })).outcomes).status, "applied");
+    const both = "For task One we will use MySQL for the store. For task Two we will use SQLite for the store.";
+    script[both] = [dec("use MySQL for the store", "we will use MySQL for the store", { taskId: one }), dec("use SQLite for the store", "we will use SQLite for the store", { taskId: two })];
+    const r = await chat.submit(w.ownerToken, { messageId: "m-s2", text: both });
+    assert.deepEqual(r.outcomes.map((o) => o.status), ["applied", "applied"], JSON.stringify(r.outcomes));
+    assert.equal((await w.decisions.history(w.owner, { projectId: a, topic: "store" })).some((d) => d.state === "disputed"), false, "no dispute between the two tasks' decisions");
+    const label = "We will use Oracle for the store.";
+    script[label] = [dec("use Oracle for the store", label, { session: "phone" })];
+    const refused = only((await chat.submit(w.ownerToken, { messageId: "m-s3", text: label })).outcomes);
+    assert.notEqual(refused.status, "applied", "a session label from the interpreter is refused (by the own-words check, and by the controller's own rule)");
+    const hedge = "Maybe we should use Redis for the cache?";
+    script[hedge] = [cmd("decision.record", { category: "decision", topic: "cache", statement: "use Redis for the cache", wording: "use Redis for the cache", stance: "decided" }, "use Redis for the cache")];
+    await chat.submit(w.ownerToken, { messageId: "m-s4", text: hedge });
+    assert.equal((await w.decisions.authoritative(w.owner, { projectId: a, topic: "cache" }))?.status, "none", "an interpreter cannot turn a hedge into a decision");
+    // A gate is a decision about the whole project's work: its word has to be in the owner's message.
+    const hold = "Hold all implementation until I say so.";
+    script[hold] = [cmd("decision.record", { category: "gate", gate: "implementation-hold", statement: "hold all implementation", wording: "Hold all implementation" }, "Hold all implementation")];
+    const gated = only((await chat.submit(w.ownerToken, { messageId: "m-s5", text: hold })).outcomes);
+    assert.notEqual(gated.status, "applied", "a gate by chat needs its own word (implementation-hold) in the message");
   });
 }

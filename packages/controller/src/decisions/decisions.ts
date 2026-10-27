@@ -615,7 +615,7 @@ export class DecisionService implements DecisionGuard {
         failures.push({ taskId, step: step_, code: error instanceof DomainError ? error.code : "error", message: error instanceof Error ? error.message : String(error) });
         pendingTasks.push(taskId);
       }
-      if (generationWaiting) pendingTasks.push(taskId);
+      if (generationWaiting && !pendingTasks.includes(taskId)) pendingTasks.push(taskId);
       steps[taskId] = step;
     }
     await this.#saveProgress(by, propId, steps, pendingTasks.length === 0);

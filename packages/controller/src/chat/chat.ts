@@ -670,7 +670,11 @@ export class ChatService {
         const relevant = history.filter((e) => e["state"] !== "superseded" && (taskId === undefined || e["taskId"] === undefined || e["taskId"] === taskId));
         if (relevant.some((e) => e["state"] === "disputed")) return refuse("invalid_command", "that topic is in dispute between two of your instructions; settle the dispute first");
         const version = relevant.reduce((m, e) => Math.max(m, typeof e["version"] === "number" ? (e["version"] as number) : 0), 0);
-        return { ok: true, name: "basedOn", value: version + ahead(`decision:${args["projectId"] as string}:${normalTopic(args["topic"] as string)}`) };
+        // Decisions of this message not yet applied count only where they apply to this one: a project-wide one applies to all, a task's own to that task and to project-wide ones.
+        const base = `decision:${args["projectId"] as string}:${normalTopic(args["topic"] as string)}:`;
+        let before = 0;
+        for (const [key, n] of pending) { if (!key.startsWith(base)) continue; const scope = key.slice(base.length); if (scope.includes(":")) continue; if (taskId === undefined || scope === "*" || scope === taskId) before += n; }
+        return { ok: true, name: "basedOn", value: version + before };
       }
       case "grant": {
         const item = typeof args["grantId"] === "string" ? await this.#get(token, "grant.get", { grantId: args["grantId"] }) : undefined;
@@ -1084,7 +1088,7 @@ function recordOf(step: ChatStep): string | undefined {
     case "resource.bind": return a["kind"] === "repository" ? `project:${a["projectId"] as string}` : undefined;
     case "agent.update": return `agent:${a["agentId"] as string}`;
     case "contract.set": return `contract:${a["taskId"] as string}`;
-    case "decision.record": return `decision:${a["projectId"] as string}:${normalTopic(String(a["topic"] ?? ""))}`;
+    case "decision.record": return `decision:${a["projectId"] as string}:${normalTopic(String(a["topic"] ?? ""))}:${typeof a["taskId"] === "string" ? a["taskId"] : "*"}`;
     case "agenda.correct": return `agenda:${a["itemId"] as string}`;
     default: return undefined;
   }
@@ -1156,7 +1160,7 @@ export function replyOf(outcomes: readonly Outcome[]): string[] {
         break;
       case "proposed": lines.push(o.editId !== undefined ? `Proposed, nothing has changed yet (${o.message ?? ""}). ${edit} Edit ${o.editId}: say to apply it, or to discard it.` : `Proposed, nothing has happened yet (${o.message ?? ""}). Proposal ${o.proposalId ?? ""}: ${(o.preview ?? []).join("; ")}. Say to apply it, or to discard it.`); break;
       case "applied":
-        lines.push(o.editId !== undefined ? `Done. ${edit}${o.takesEffect === undefined ? "" : ` It takes effect ${o.takesEffect}.`} Recorded as ${o.editId}.` : o.proposalId !== undefined ? `Applied proposal ${o.proposalId}.` : `Done: ${o.op ?? ""}${o.completed === false ? `, accepted but not complete yet (${o.awaits ?? "waiting"})` : ""}.`);
+        if (!(o.op === "decision.record" && o.shown !== undefined)) lines.push(o.editId !== undefined ? `Done. ${edit}${o.takesEffect === undefined ? "" : ` It takes effect ${o.takesEffect}.`} Recorded as ${o.editId}.` : o.proposalId !== undefined ? `Applied proposal ${o.proposalId}.` : `Done: ${o.op ?? ""}${o.completed === false ? `, accepted but not complete yet (${o.awaits ?? "waiting"})` : ""}.`);
         // A captured or corrected agenda topic is shown as it now reads, so the owner can check it.
         for (const l of o.shown ?? []) lines.push(l);
         for (const r of o.results ?? []) for (const l of r.shown ?? []) lines.push(l);
