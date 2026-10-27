@@ -84,7 +84,8 @@ test("through the composed controller a paused agent and an agent the host repor
   const slot = Date.parse(`${new Date(Date.now() + day).toISOString().slice(0, 10)}T08:00:00.000Z`);
   let now = Date.now();
   const stopped = new Set<string>();
-  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], availability: async (id) => (stopped.has(id) ? "stopped" : "available"), dispatch: { timer: new ManualTimer(), intervalMs: 1000, clock: () => new Date(now).toISOString() } });
+  const sent: string[] = [];
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], availability: async (id) => (stopped.has(id) ? "stopped" : "available"), dispatch: { timer: new ManualTimer(), intervalMs: 1000, clock: () => new Date(now).toISOString(), invitations: { invite: async (i) => { sent.push(i.agent); } } } });
   try {
     const s = c.services;
     const boot = await s.principals.bootstrapOwner({ name: "rob" });
@@ -111,7 +112,9 @@ test("through the composed controller a paused agent and an agent the host repor
     const status = (n: string): string => occ.participants.find((p: { id: string }) => p.id === `agent:${ids[n]}`).status;
     assert.deepEqual([status("ann"), status("bob"), status("cat")], ["eligible", "withheld-paused", "withheld-unavailable"]);
     assert.equal(await s.pauses.availability(`agent:${ids.bob}`), "paused", "being withheld did not lift the pause");
-    assert.ok(occ.agenda.length === 1, "the occurrence took the agenda item");
+    assert.deepEqual(sent, [`agent:${ids.ann}`], "only the available agent was invited; the paused and the stopped one were not");
+    assert.deepEqual(occ.agenda, [topic.result.id], "the occurrence took the agenda item");
+    assert.deepEqual((await call("agenda.list", { projectId: project })).result.items, [], "and it is off the open agenda while the occurrence holds it");
     // Settled without reaching it: the item is still open for the next meeting.
     assert.ok((await call("meeting.settle", { occurrenceId: sched.lastOccurrenceId, outcome: "cancelled", reason: "nobody came" }, "st1")).ok);
     const open = await call("agenda.list", { projectId: project });
