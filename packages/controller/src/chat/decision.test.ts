@@ -105,6 +105,23 @@ for (const backend of backends) {
     assert.deepEqual(history.map((d) => [d.version, d.state]), [[1, "superseded"], [2, "active"]]);
   });
 
+  suite("a turn sent twice at once: the copy that finds its decision recorded between the look and the send answers applied, not command_conflict (card C08b)", async (w, script) => {
+    const a = await w.project("A");
+    await w.chat().setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+    const text = "We will use PostgreSQL for the store.";
+    script[text] = [cmd("decision.record", { category: "decision", topic: "Store", statement: "use PostgreSQL for the store", wording: text }, text)];
+    let raced = false;
+    // The other copy gets in first with the same command but the version it read.
+    const racing = { handle: async (token: string, raw: unknown) => {
+      const r = raw as { op?: string; args?: Record<string, unknown> };
+      if (r.op === "decision.record" && !raced) { raced = true; await w.api.handle(token, { ...r, args: { ...r.args, basedOn: 9 } } as never); }
+      return w.api.handle(token, raw as never);
+    } };
+    const out = await w.chat({ api: racing as never }).submit(w.ownerToken, { messageId: "m-race", text });
+    assert.deepEqual(out.outcomes.map((o) => o.status), ["applied"], JSON.stringify(out.outcomes));
+    assert.equal((await w.decisions.history(w.owner, { projectId: a, topic: "store" })).length, 1);
+  });
+
   suite("a decision proposed and applied later keeps the stale-session check: what moved in between makes it a dispute, not an overwrite (card C08b)", async (w, script) => {
     const a = await w.project("A");
     const chat = w.chat();

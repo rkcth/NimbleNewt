@@ -806,13 +806,27 @@ export class ChatService {
         if (item.op === "decision.record") {
           // The version a decision is based on is read when it is applied, after the earlier steps of this message were (a restatement that changes nothing, or a decision for another task, moves nothing or moves it by its own scope): predicting it from the plan is only right for a proposal that waits for the owner.
           // A turn run again (after a crash, or sent twice at once) has this step's decision already: it is the same command, answered from the record, not sent again with a version that now includes itself.
-          const done = await this.#get(token, "decision.get", { decisionId: derivedId("dec", scopedCommandId(owner.id, item.commandId)) });
-          if (done !== undefined) return { i: item.i, status: "applied", op: item.op, commandId: item.commandId, id: done["id"] as string, accepted: true, completed: true };
+          // Found only if it is this turn's own record (a direct decision that happens to use the same command ID is not).
+          const known = async (): Promise<Record<string, unknown> | undefined> => {
+            const done = await this.#get(token, "decision.get", { decisionId: derivedId("dec", scopedCommandId(owner.id, item.commandId)) });
+            const src = done?.["source"] as { turnId?: string } | undefined;
+            if (done === undefined || src?.turnId !== turnId) return undefined;
+            const text = done["state"] === "disputed" ? `Recorded decision version ${String(done["version"])}, but it conflicts with a decision made after the version it was based on: nothing on that topic is in force until you choose.` : `Recorded decision version ${String(done["version"])} on "${String(done["topic"] ?? "the gate")}": ${String(done["statement"] ?? "")}`;
+            return { i: item.i, status: "applied", op: item.op, commandId: item.commandId, id: done["id"] as string, shown: [text.slice(0, 600)], accepted: true, completed: true } as Record<string, unknown>;
+          };
+          const already = await known();
+          if (already !== undefined) return already as never;
           const fresh = await this.#revisionFor(token, "decision", args, undefined, new Map());
           if (!fresh.ok) return { i: item.i, status: "refused", op: item.op, commandId: item.commandId, code: "kind" in fresh && fresh.kind === "refuse" ? fresh.code : "invalid_command", message: "kind" in fresh && fresh.kind === "refuse" ? fresh.message : "that decision needs more from you" };
           args = { ...args, basedOn: fresh.value as number };
         }
         const response = await this.#deps.api.handle(token, { v: API_VERSION, op: item.op, commandId: item.commandId, args });
+        if (!response.ok && response.error.code === "command_conflict" && item.op === "decision.record") {
+          // The same turn was sent twice at once and the other copy recorded this step between the look and the send: it is done.
+          const recorded = await this.#get(token, "decision.get", { decisionId: derivedId("dec", scopedCommandId(owner.id, item.commandId)) });
+          const src = recorded?.["source"] as { turnId?: string } | undefined;
+          if (recorded !== undefined && src?.turnId === turnId) return { i: item.i, status: "applied", op: item.op, commandId: item.commandId, id: recorded["id"] as string, shown: [`Recorded decision version ${String(recorded["version"])} on "${String(recorded["topic"] ?? "the gate")}".`], accepted: true, completed: true } as never;
+        }
         if (!response.ok) return { i: item.i, status: "refused", op: item.op, commandId: item.commandId, code: response.error.code, message: response.error.message };
         return { i: item.i, status: "applied", op: item.op, commandId: item.commandId, id: response.result["id"] as string, ...(typeof response.result["revision"] === "number" ? { revision: response.result["revision"] } : {}), ...(shownOf(response.result) === undefined ? {} : { shown: shownOf(response.result) as string[] }), accepted: true, completed: response.completed ?? true, ...(response.awaits === undefined ? {} : { awaits: response.awaits }) };
       }
