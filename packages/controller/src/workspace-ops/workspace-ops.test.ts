@@ -275,6 +275,30 @@ for (const backend of backends) {
     } finally { await r.store.close(); }
   });
 
+  test(`${backend.name}: an attempt that started after the record's list was read is still released by recovery (card H12l)`, async () => {
+    const r = await rig(async () => ({}));
+    try {
+      const stay = keepAlive(r);
+      await r.d.tick();
+      await r.inCall;
+      let asked = 0;
+      let finish!: () => void;
+      const hold = new Promise<void>((ok) => { finish = ok; });
+      const blind = { ...control(r), live: async (taskId: string) => (asked === 0 ? [] : control(r).live(taskId)) };
+      const port: WorkspacePort = { run: async () => { asked++; await hold; return { ok: true, summary: "x" }; } };
+      const make = () => WorkspaceOpService.withEpoch(r.w.storage, r.w.epoch, { quiesce: r.coordinator, portOf: async () => port, attempts: blind }, { clock: r.w.clock.now });
+      const pending = make().request(r.w.owner, { commandId: "z1", operation: "integration", taskId: r.taskId, reason: "merge" });
+      while (asked === 0) await new Promise((ok) => setTimeout(ok, 5));
+      assert.deepEqual((await records(r))[0]!.held ?? [], [], "the list read before did not have it");
+      assert.equal((await make().recover(r.w.owner)).length, 1);
+      assert.equal((await r.d.get(r.w.owner, r.attemptId))!.frozen, undefined);
+      finish();
+      await pending;
+      stay();
+      await r.d.idle();
+    } finally { await r.store.close(); }
+  });
+
   test(`${backend.name}: a call that ignores the stop signal is not taken as settled: the host is not asked (card H12d)`, async () => {
     const r = await rig(async () => ({}), true);
     try {

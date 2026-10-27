@@ -153,15 +153,16 @@ export class WorkspaceOpService {
   async recover(by: Principal): Promise<string[]> {
     if (!((by.kind === "owner" || by.kind === "service" || by.kind === "host") && by.taskScope === undefined)) throw new DomainError("forbidden", `${by.id} may not recover workspace requests`);
     const resolved: string[] = [];
+    let failed: unknown;
     for (let after: string | undefined;;) {
       const page = await this.#runner.list(OPEN, { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
       for (const a of page) {
         after = a.id;
         const open = (a.body as unknown as { requestId?: string }).requestId;
         if (open === undefined || this.#busy.has(a.id)) continue;
-        if (await this.#resolveOpen(a.id)) resolved.push(open);
+        try { if (await this.#resolveOpen(a.id)) resolved.push(open); } catch (error) { failed ??= error; }
       }
-      if (page.length < 100) return resolved;
+      if (page.length < 100) { if (failed !== undefined) throw failed; return resolved; }
     }
   }
 
@@ -170,10 +171,10 @@ export class WorkspaceOpService {
     const open = ((await this.#runner.get(OPEN, taskId))?.body as unknown as { requestId?: string } | undefined)?.requestId;
     if (open === undefined) return false;
     const rec = await this.#get(open);
-    if (rec === undefined) return false;
+    if (rec === undefined || this.#busy.get(taskId) === open) return false;
     if (rec.body.state === "started") { await this.#resolveLeft(open, rec, `${open}:recovered`); return true; }
     // A repeat marked it `uncertain` while its first call was running here and that process stopped: the freeze is still its, and the index still names it.
-    await this.#release(rec.body.held ?? [], open);
+    await this.#release(await this.#toRelease(rec.body), open);
     const ref: AggregateRef = { kind: OPEN, id: taskId };
     await this.#runner.command("workspace.close", { commandId: `${open}:closed`, actor: "controller" }, async () => ({
       payload: { requestId: open },
@@ -184,7 +185,7 @@ export class WorkspaceOpService {
 
   /** The request was left running by a controller that stopped: its freeze is lifted first (if that fails it stays open and is tried again), then it is recorded as `uncertain`. */
   async #resolveLeft(id: string, rec: { readonly body: WorkspaceRecordBody; readonly revision: number }, commandId: string): Promise<void> {
-    await this.#release(rec.body.held ?? [], id);
+    await this.#release(await this.#toRelease(rec.body), id);
     await this.#markUncertain("controller", id, rec, "the controller stopped while the host worked; check the checkout before asking again", commandId);
   }
 
@@ -197,6 +198,12 @@ export class WorkspaceOpService {
       if (!(error instanceof DomainError && error.code === "stale_revision")) throw error;
       return (await this.#get(id))?.body ?? body;
     }
+  }
+
+  /** The attempts a left request may have frozen: those it recorded, and any that started after (the tag keeps this from lifting anything that is not its own). */
+  async #toRelease(body: WorkspaceRecordBody): Promise<string[]> {
+    const live = (await this.#deps.attempts?.live(body.taskId).catch(() => [] as string[])) ?? [];
+    return [...new Set([...(body.held ?? []), ...live])];
   }
 
   async #release(attempts: readonly string[], requestId: string): Promise<void> {
