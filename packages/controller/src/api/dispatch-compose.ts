@@ -260,7 +260,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       let queue: Promise<unknown> = Promise.resolve(); let calls = 0; let seq = 0;
       const send = (event: StallEvent): void => {
         const commandId = `relay:${order.attemptId}:${++seq}`;
-        queue = queue.then(() => reporter({ commandId, taskId: order.taskId, generation: order.generation, attemptId: order.attemptId, event })).catch((error) => { if (!(error instanceof DomainError && (error.code === "fenced" || error.code === "not_found" || error.code === "invalid_command"))) i.onError?.(error); });
+        queue = queue.then(() => reporter({ commandId, taskId: order.taskId, generation: order.generation, attemptId: order.attemptId, event })).catch((error) => { if (!(error instanceof DomainError && (error.code === "fenced" || error.code === "not_found" || (error.code === "invalid_command" && /is not the open request/.test(error.message))))) i.onError?.(error); });
       };
       const tokensOf = (chars: number): number => Math.ceil(chars / RELAY_CHARS_PER_TOKEN);
       return {
