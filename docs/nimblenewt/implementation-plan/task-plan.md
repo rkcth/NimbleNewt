@@ -981,6 +981,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H12l — Give the controller integration, checkout refresh and quarantine operations
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `c86321e`; CI runs 40531157739; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Integration, checkout refresh and quarantine are controller operations: attempts are made quiet first (tagged freeze), the operation is recorded and recovered after a restart. Binding to the local and remote hosts is H12m.
 - **Blockers:** H12, A04, A06.
 - **Deliverable:** Split from H12d (2026-10-27): the quiesce coordinator exists but the controller has no integration, checkout-refresh or quarantine operation for it to wrap (the file work lives in the worker); controller operations that request each of the three on an agent's work, run on the host that holds the checkout, and report a typed result.
 - **Acceptance and verification:** An owner or a permitted caller can request integration, refresh or quarantine of an agent's checkout through the state API; the request reaches the host that holds the checkout and returns a typed result or refusal; every request is recorded against the task and agent; tested with a simulated host that accepts, refuses and drops the request.
@@ -1141,6 +1143,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### R05d — Charge meeting presence to the budget ledger
 
 - **Parent:** N08 / AII-258.
+- **Status:** implemented; commits `d31a5d1`; CI runs 40531157739; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Meeting presence is charged to the budget ledger once per attendance (compute, never the owner). Supervision, review and jobs are R05f.
 - **Blockers:** R05, M01.
 - **Deliverable:** Split from R05 (audit 2026-10-26): the ledger takes any charge, but the only production caller charges model calls; done: the time an agent is present in a meeting is charged once (compute, wall-clock between joining and leaving) to its meeting task.
 - **Acceptance and verification:** An agent's presence in a meeting is charged when it leaves or the meeting ends, once per attendance, never the owner's, and a failing ledger never keeps the agent in the room; the measurement basis is stated; tests: Attendance unit tests with a recording ledger (leave, end of meeting, replay, owner, failing ledger).
@@ -1207,6 +1211,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### U03e — Let the owner grant and revoke rights through the state API and the chat
 
 - **Parent:** N09 / AII-259.
+- **Status:** implemented; commits `a953f5c`; CI runs 40531157739; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The owner grants and revokes rights through the state API and the chat (one plain form, permanent only); a right given while the controller runs counts from the next tick.
 - **Blockers:** U03, L01b.
 - **Deliverable:** Split from L01b (2026-10-26): the dispatcher needs the owner to grant it recovery.stall-scan, and nothing outside the running process can grant a right: the state API has no grant operation and the chat cannot grant this action; stall detection stays off until then.
 - **Acceptance and verification:** An owner-only state API operation and a chat intent grant or revoke a named right for a named principal (the recovery.stall-scan grant for service:dispatcher first, with the service-may-hold-only-recovery-actions rule kept), applied once per command, shown in the activity record; a non-owner and a quoted or foreign-worded request are refused; a grant given while the controller runs reaches the next scan without a restart; docs/nimblenewt/grant-stall-scan.md is replaced by the one-line instruction.
@@ -1215,6 +1221,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### U05b — Verify artifacts and inspect failed handlings in the composed status
 
 - **Parent:** N09 / AII-259.
+- **Status:** implemented; commits `ee9373c`; CI runs 40531157739; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Artifacts are verified and failed handlings are inspectable in the composed status.
 - **Blockers:** U05, H06c.
 - **Deliverable:** Split from U05 (2026-10-27): the composed status answers the task, overview, noticeboard, changes, tools, delivered and failed-event views, but artifact verification (verifyArtifact) is not composed and inspecting a seeded failed handling is proven at service level only; The composed status verifies a named artifact against the record and lists then inspects a seeded failed handling; a non-owner without the right sees them as missing.
 - **Acceptance and verification:** Composed tests with a verified and a tampered artifact and a seeded failed handling, each through the state API.
@@ -1223,7 +1231,9 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### R05e — Tell the delegated holder of a budget request
 
 - **Parent:** N08 / AII-258.
-- **Blockers:** R05c, H13.
+- **Status:** implemented; commits `66c1615`; CI runs 40531157739; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** A budget request addressed to a delegated holder reaches that holder from the controller sender; the reserved controller sender stands in for a provisioned identity (owner question).
+- **Blockers:** R05c.
 - **Deliverable:** Split from R05c (2026-10-27): the owner is told once, but a request addressed to a delegated holder is only found in budget.pending; an event on the node stream reaches no one unless a watch exists on it, and the controller has no provisioned identity to publish with; A request addressed to a holder reaches that holder through a provisioned controller identity (not hand-built), is not lost under backpressure, and wakes the holder only within its pause and interruption rules.
 - **Acceptance and verification:** Composed test: the holder is told once and finds the request; a paused holder is not woken; a full queue retries rather than dropping the notice.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
@@ -1231,6 +1241,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### C08b — Record decisions from the chat and interrupt running generation on correction
 
 - **Parent:** N07 / AII-257.
+- **Status:** implemented; commits `b625cfe`; CI runs 40531157739; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Decisions are recorded from the chat (version read when applied, replay-safe) and a correction interrupts running generation through the dispatcher. Gates by chat need the gate word in the owner message (owner question).
 - **Blockers:** C08, U03, L05.
 - **Deliverable:** Split from C08 (2026-10-27): decisions are recorded, corrected and gated through the state API with the stored guard, but the chat has no decision intent, no service is given the generation service so a running generation is not interrupted (and the propagation marks that step done without it), and propagation across a paused or restarted agent is unproven; A chat decision records from the owner's own turn wording; a correction interrupts a running generation and the step is marked only when it was done; links, revalidation and propagation hold across a pause and a restart.
 - **Acceptance and verification:** Composed tests for the chat decision, the interrupted generation, and a paused and a restarted agent.
@@ -1239,6 +1251,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### P01b — Mend the checkout pin edge cases
 
 - **Parent:** N14 / AII-264.
+- **Status:** implemented; commits `42e0ca9`; CI runs 40531157739; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** A cleared repository can be released and repinned; resource lists are per project; a blocked or failed pin gives its place and unused allowance back crash-safely. Kind-wide pin and overlap scans are P01c.
 - **Blockers:** P01.
 - **Deliverable:** Split from P01 (2026-10-27): the dispatcher pins the checkout and blocks a moved one, but a task whose repository is cleared after pinning cannot be repinned, resource lookups cover every project, and a blocked pinned task keeps its allowance reserved; done: a cleared repository can be released and repinned, the resource list is per project and a bind past the scan limit is refused as unavailable, a blocked or failed pin gives its place and its unused allowance back (crash-safe), an attempt that already used budget keeps its hold.
 - **Acceptance and verification:** A cleared repository can be repinned or released; the resource list is per project; a pin failure releases the allowance; tests: Tests for each case through the dispatcher.
@@ -1255,6 +1269,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### M01b — Hold meetings with real participants through the composed API
 
 - **Parent:** N12 / AII-262.
+- **Status:** implemented; commits `0359440`; CI runs 40531157739; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Meetings are held with real participants through the composed API; host-stopped agents are withheld.
 - **Blockers:** M01, U03.
 - **Deliverable:** Split from M01 (2026-10-27): schedules, restart and catch-up are composed and proven, but absent and paused participants withheld without a wake, and agenda retention across occurrences, are proven only at service level; Through the composed API with real agent records, a paused or absent participant is withheld and not woken and the agenda items survive the occurrence.
 - **Acceptance and verification:** Composed test with a paused and an absent agent and an agenda item.
@@ -1263,6 +1279,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### M01c — Wire the owner time zone and the invitation sink into the composed meetings
 
 - **Parent:** N12 / AII-262.
+- **Status:** implemented; commits `e2291a4`; CI runs 40531157739; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The owner time zone and a per-agent invitation inbox are wired into the composed meetings; a task credential sees only its own project.
 - **Blockers:** M01.
 - **Deliverable:** Split from M01 (2026-10-27): the API instance has no owner time zone setting and no invitation sink, so schedules must name a zone and invitations are decided only by the dispatcher instance; A schedule without a zone uses the owner meeting.timeZone setting; invitations reach agents through a host sink in the composed controller.
 - **Acceptance and verification:** Composed test for a schedule without a zone and a delivered invitation.
@@ -1271,6 +1289,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H02b — Fence a remote handle's controls by placement and close every failed startup
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `cc2819b`; CI runs 40531157739; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Remote control messages carry their placement and are fenced in the commit; the checkpoint wait ends fenced after a move; every startup failure closes what was built. The rest is H02c.
 - **Blockers:** H02.
 - **Deliverable:** Split from H02 (2026-10-27): the composed controller places attempts on remote hosts and refuses an incompatible protocol, but a control message did not carry its placement number, the production handle's checkpoint wait did not stop when the attempt moved, and a failed startup after the local host was built leaked it; done: control messages name their placement and are refused in the commit that would write them when another placement holds the attempt, the checkpoint wait ends fenced after a move, a startup failure closes the listener and the local host, an unsupported host's reason is visible.
 - **Acceptance and verification:** A control message carries its placement number and a stale one is fenced; every startup failure closes what was built; an unsupported host fails visibly; tests: Relocation and start-remote suites.
