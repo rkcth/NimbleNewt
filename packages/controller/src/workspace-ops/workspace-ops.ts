@@ -8,14 +8,14 @@ import { allowsExactly, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
-import type { Aggregate, AggregateRef, JsonObject } from "../storage/types.js";
+import type { Aggregate, AggregateRef, Change, JsonObject } from "../storage/types.js";
 
 /**
  * Integration, checkout refresh and quarantine of an agent's work as controller operations (cards H12l and H12d). The file work lives on the host that holds the checkout (the worker's workspace code), so the controller asks
  * the host through a `WorkspacePort`; this service is what makes that safe and answerable: the caller needs `workspace.manage` on the task's project (the owner always has it; a task credential never does), the request is
  * recorded before anything runs, and the host is asked only while every live attempt of the task is quiet (`QuiesceCoordinator.around`: new calls refused, calls in flight settled, a checkpoint taken). If an attempt cannot be made
- * quiet the operation does not run and the answer says which blocker. One operation runs per task at a time (a second is `unavailable` until the first ends). The attempts this operation froze are written into its record, so a
- * controller that crashed while the host worked can release them (`recover`). A repeat of a command returns the recorded answer; a request that was recorded but whose outcome was never written is answered `uncertain` and is not run
+ * quiet the operation does not run and the answer says which blocker. One operation runs per task at a time (a second is `unavailable` until the first ends). The attempts this operation may freeze are written into its record before it starts, and each freeze carries the request's ID, so a
+ * controller that crashed can release exactly those (`recover`, or the next request for the task). A repeat of a command returns the recorded answer; a request that was recorded but whose outcome was never written is answered `uncertain` and is not run
  * again, because the host may have done it; if the original call then finishes it replaces `uncertain` with what really happened.
  */
 export const WORKSPACE_OPERATIONS = ["integration", "refresh", "quarantine"] as const;
@@ -25,9 +25,11 @@ export type WorkspaceState = "started" | "done" | "refused" | "failed" | "uncert
 export const WORKSPACE_LIMITS = { reason: 500, summary: 1000, detailBytes: 4000 } as const;
 
 const RECORD = "workspace-request";
+/** One record per task: the request that is open on it, if any (so a leftover is found without reading every request ever made). */
+const OPEN = "workspace-open";
 const WORKSPACE_ID = /^wsr-[a-z2-7]{20}$/;
-/** The reason the quiesce gives the freeze it sets; recovery lifts only a freeze that says this. */
-const FROZEN_BY = /^(integration|refresh|quarantine): the agent's work is being changed$/;
+/** A freeze set for this request says so in its reason (the quiesce writes the tag); recovery lifts only that one. */
+const frozenFor = (reason: string, requestId: string): boolean => /^(integration|refresh|quarantine): the agent's work is being changed \(/.test(reason) && reason.endsWith(`(${requestId})`);
 
 /** What the host is asked, with the attempts that were made quiet for it. */
 export interface WorkspaceCall {
@@ -66,8 +68,8 @@ export interface WorkspaceDeps {
   readonly quiesce: Pick<QuiesceCoordinator, "around">;
   /** The host's side for the task's checkout (the host that runs its live attempt, else the one its checkout is pinned to); `undefined` when no host that can do this holds it. */
   readonly portOf: (taskId: string) => Promise<WorkspacePort | undefined>;
-  /** What an attempt's freeze says (`undefined`: not frozen), and lifting it. For `recover` and the release after a repeat only. */
-  readonly attempts?: { frozenReason(attemptId: string): Promise<string | undefined>; release(attemptId: string): Promise<void> };
+  /** The live attempts of a task, what an attempt's freeze says (`undefined`: not frozen), and lifting it. For recovery only. */
+  readonly attempts?: { live(taskId: string): Promise<string[]>; frozenReason(attemptId: string): Promise<string | undefined>; release(attemptId: string): Promise<void> };
 }
 
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
@@ -80,7 +82,7 @@ const boundedDetail = (value: unknown): JsonObject | undefined => {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
   try {
     const encoded = JSON.stringify(value);
-    return encoded.length <= WORKSPACE_LIMITS.detailBytes && redactText(encoded) === encoded ? JSON.parse(encoded) as JsonObject : undefined;
+    return Buffer.byteLength(encoded, "utf8") <= WORKSPACE_LIMITS.detailBytes && redactText(encoded) === encoded ? JSON.parse(encoded) as JsonObject : undefined;
   } catch { return undefined; }
 };
 
@@ -108,28 +110,29 @@ export class WorkspaceOpService {
     const scoped = scopedCommandId(by.id, command.commandId);
     const id = derivedId("wsr", scoped);
 
-    // A repeat finds the record: a finished one is returned as it was; one still running here is `uncertain` for the repeat (the first call goes on and writes the real outcome); one from before a restart is `uncertain`.
+    // A repeat finds the record: a finished one is returned as it was. One still running here is `uncertain` for the repeat (the first call goes on, keeps its freeze and writes the real outcome). One left by a stopped controller
+    // is resolved: its freeze lifted, then it is `uncertain`.
     const existing = await this.#get(id);
     if (existing !== undefined) {
       if (existing.body.state !== "started") return { ...existing.body, id, replayed: true };
-      const body: WorkspaceRecordBody = { ...existing.body, state: "uncertain", finishedAt: this.#runner.now(), summary: "it is not known whether the host did this (the first call has not finished, or the controller restarted); check the checkout before asking again" };
-      let marked = body;
-      try { await this.#write(by.id, `${scoped}:finish:uncertain`, "workspace.finish", id, { creates: false, payload: { state: "uncertain" }, body: () => body, expectedRevision: existing.revision }); } catch (error) {
-        if (!(error instanceof DomainError && error.code === "stale_revision")) throw error;
-        marked = (await this.#get(id))?.body ?? body;
+      if (this.#busy.get(taskId) === id) {
+        const marked = await this.#markUncertain(by.id, id, existing, "it is not known whether the host did this (the first call has not finished); check the checkout before asking again", `${scoped}:finish:uncertain`, false);
+        return { ...marked, id, replayed: true };
       }
-      // The freeze is the first call's while it runs; from before a restart it is nobody's, and is lifted.
-      if (this.#busy.get(existing.body.taskId) !== id && marked.state === "uncertain") await this.#release(existing.body.held ?? []);
-      return { ...marked, id, replayed: true };
+      await this.#resolveLeft(id, existing, `${scoped}:finish:uncertain`);
+      return { ...(await this.#get(id))!.body, id, replayed: true };
     }
     // One operation per task: two would race on the same checkout and one's release would lift the other's freeze.
     if (this.#busy.has(taskId)) throw new DomainError("unavailable", `task ${taskId} already has a workspace operation running; ask again when it ends`);
     this.#busy.set(taskId, id);
     try {
-      const make: WorkspaceRecordBody = { operation, taskId, projectId, requestedBy: by.id, reason, state: "started", at: this.#runner.now() };
-      await this.#write(by.id, scoped, "workspace.request", id, { creates: true, payload: { operation, taskId, reason }, body: () => make });
+      // What an earlier controller left open on this task is resolved first, so its freeze cannot be taken for ours.
+      await this.#resolveOpen(taskId);
+      const intended = (await this.#deps.attempts?.live(taskId)) ?? [];
+      const make: WorkspaceRecordBody = { operation, taskId, projectId, requestedBy: by.id, reason, state: "started", at: this.#runner.now(), ...(intended.length === 0 ? {} : { held: intended }) };
+      await this.#write(by.id, scoped, "workspace.request", id, { creates: true, payload: { operation, taskId, reason }, body: () => make, also: () => this.#openChange(taskId, id) });
       const started = (await this.#get(id))!;
-      const outcome = await this.#run(id, scoped, by, started);
+      const outcome = await this.#run(id, started.body);
       return await this.#settle(by.id, scoped, id, outcome);
     } finally { this.#busy.delete(taskId); }
   }
@@ -144,43 +147,70 @@ export class WorkspaceOpService {
   }
 
   /**
-   * After a restart: requests that were `started` when the controller stopped are `uncertain` (the host may have acted), and the attempts they froze are released if they still carry that freeze. For the controller's own loop;
-   * not an API operation. Returns the requests it resolved.
+   * After a restart: requests that were open when the controller stopped are `uncertain` (the host may have acted) and the attempts they froze are released. Only the open index is read, and a task with an operation running in
+   * this process is left to that operation. For the controller's own loop; not an API operation. Returns the requests it resolved.
    */
   async recover(by: Principal): Promise<string[]> {
     if (!((by.kind === "owner" || by.kind === "service" || by.kind === "host") && by.taskScope === undefined)) throw new DomainError("forbidden", `${by.id} may not recover workspace requests`);
     const resolved: string[] = [];
     for (let after: string | undefined;;) {
-      const page = await this.#runner.list(RECORD, { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
+      const page = await this.#runner.list(OPEN, { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
       for (const a of page) {
         after = a.id;
-        const body = a.body as unknown as WorkspaceRecordBody;
-        if (body.state !== "started" || this.#busy.get(body.taskId) === a.id) continue;
-        const next: WorkspaceRecordBody = { ...body, state: "uncertain", finishedAt: this.#runner.now(), summary: "the controller restarted while the host worked; check the checkout before asking again" };
-        try { await this.#write("controller", `${a.id}:recovered`, "workspace.finish", a.id, { creates: false, payload: { state: "uncertain" }, body: () => next, expectedRevision: a.revision }); } catch (error) {
-          if (error instanceof DomainError && error.code === "stale_revision") continue;
-          throw error;
-        }
-        await this.#release(body.held ?? []);
-        resolved.push(a.id);
+        const open = (a.body as unknown as { requestId?: string }).requestId;
+        if (open === undefined || this.#busy.has(a.id)) continue;
+        if (await this.#resolveOpen(a.id)) resolved.push(open);
       }
       if (page.length < 100) return resolved;
     }
   }
 
-  async #release(attempts: readonly string[]): Promise<void> {
+  /** Resolves the request left open on a task by a controller that stopped, if there is one. */
+  async #resolveOpen(taskId: string): Promise<boolean> {
+    const open = ((await this.#runner.get(OPEN, taskId))?.body as unknown as { requestId?: string } | undefined)?.requestId;
+    if (open === undefined) return false;
+    const rec = await this.#get(open);
+    if (rec === undefined) return false;
+    if (rec.body.state === "started") { await this.#resolveLeft(open, rec, `${open}:recovered`); return true; }
+    // A repeat marked it `uncertain` while its first call was running here and that process stopped: the freeze is still its, and the index still names it.
+    await this.#release(rec.body.held ?? [], open);
+    const ref: AggregateRef = { kind: OPEN, id: taskId };
+    await this.#runner.command("workspace.close", { commandId: `${open}:closed`, actor: "controller" }, async () => ({
+      payload: { requestId: open },
+      build: async () => ({ ref, creates: false, changes: await this.#openChange(taskId, null, open), detail: { taskId } , contention: async () => new DomainError("stale_revision", "the workspace request changed at the same moment") }),
+    })).catch((error: unknown) => { if (!(error instanceof DomainError && error.code === "stale_revision")) throw error; });
+    return true;
+  }
+
+  /** The request was left running by a controller that stopped: its freeze is lifted first (if that fails it stays open and is tried again), then it is recorded as `uncertain`. */
+  async #resolveLeft(id: string, rec: { readonly body: WorkspaceRecordBody; readonly revision: number }, commandId: string): Promise<void> {
+    await this.#release(rec.body.held ?? [], id);
+    await this.#markUncertain("controller", id, rec, "the controller stopped while the host worked; check the checkout before asking again", commandId);
+  }
+
+  async #markUncertain(actor: string, id: string, rec: { readonly body: WorkspaceRecordBody; readonly revision: number }, summary: string, commandId: string, clearOpen = true): Promise<WorkspaceRecordBody> {
+    const body: WorkspaceRecordBody = { ...rec.body, state: "uncertain", finishedAt: this.#runner.now(), summary };
+    try {
+      await this.#write(actor, commandId, "workspace.finish", id, { creates: false, payload: { state: "uncertain" }, body: () => body, expectedRevision: rec.revision, also: () => clearOpen ? this.#openChange(rec.body.taskId, null, id) : Promise.resolve([]) });
+      return body;
+    } catch (error) {
+      if (!(error instanceof DomainError && error.code === "stale_revision")) throw error;
+      return (await this.#get(id))?.body ?? body;
+    }
+  }
+
+  async #release(attempts: readonly string[], requestId: string): Promise<void> {
     const control = this.#deps.attempts;
     if (control === undefined) return;
     for (const attemptId of attempts) {
       try {
         const why = await control.frozenReason(attemptId);
-        if (why !== undefined && FROZEN_BY.test(why)) await control.release(attemptId);
+        if (why !== undefined && frozenFor(why, requestId)) await control.release(attemptId);
       } catch (error) { if (!(error instanceof DomainError && error.code === "not_found")) throw error; }
     }
   }
 
-  async #run(id: string, scoped: string, by: Principal, started: { readonly body: WorkspaceRecordBody; readonly revision: number }): Promise<WorkspaceRecordBody> {
-    const body = started.body;
+  async #run(id: string, body: WorkspaceRecordBody): Promise<WorkspaceRecordBody> {
     const done = (state: WorkspaceState, more: Partial<WorkspaceRecordBody>): WorkspaceRecordBody => { const { held: _held, ...rest } = body; void _held; return clean({ ...rest, state, finishedAt: this.#runner.now(), ...more }); };
     let port: WorkspacePort | undefined;
     try { port = await this.#deps.portOf(body.taskId); } catch (error) { return done("failed", { summary: `no host could be found: ${safe(error, WORKSPACE_LIMITS.summary)}` }); }
@@ -189,10 +219,8 @@ export class WorkspaceOpService {
     try {
       const outcome = await this.#deps.quiesce.around({ taskId: body.taskId }, body.operation, async (quiet) => {
         quietAttempts = quiet.attempts.map((a) => a.attemptId);
-        // Written before the host is asked, so a crash while it works leaves the freeze findable.
-        if (quietAttempts.length > 0) await this.#write(by.id, `${scoped}:held`, "workspace.hold", id, { creates: false, payload: { held: [...quietAttempts] }, body: () => ({ ...body, held: quietAttempts, quietAttempts }), expectedRevision: started.revision });
         return port!.run({ requestId: id, operation: body.operation, taskId: body.taskId, projectId: body.projectId, reason: body.reason, quietAttempts });
-      });
+      }, undefined, id);
       if (outcome !== null && typeof outcome === "object" && outcome.ok === true) {
         const detail = boundedDetail(outcome.detail);
         return done("done", { summary: safe(outcome.summary, WORKSPACE_LIMITS.summary), ...(detail === undefined ? {} : { detail }), quietAttempts });
@@ -210,13 +238,24 @@ export class WorkspaceOpService {
     for (let attempt = 0; attempt < 5; attempt++) {
       const current = (await this.#get(id))!;
       try {
-        await this.#write(actor, `${scoped}:finish:${outcome.state}`, "workspace.finish", id, { creates: false, payload: { state: outcome.state }, body: () => outcome, expectedRevision: current.revision });
+        await this.#write(actor, `${scoped}:finish:${outcome.state}`, "workspace.finish", id, { creates: false, payload: { state: outcome.state }, body: () => outcome, expectedRevision: current.revision, also: () => this.#openChange(outcome.taskId, null, id) });
         return { ...outcome, id, replayed: false };
       } catch (error) {
         if (!(error instanceof DomainError && error.code === "stale_revision")) throw error;
       }
     }
     throw new DomainError("unavailable", "the outcome of the workspace operation could not be recorded; the request says uncertain");
+  }
+
+  /** The open index of a task: set to `requestId`, or cleared (only when it still names `from`). */
+  async #openChange(taskId: string, requestId: string | null, from?: string): Promise<Change[]> {
+    const ref: AggregateRef = { kind: OPEN, id: taskId };
+    const current = await this.#runner.get(OPEN, taskId);
+    if (requestId === null) {
+      if (current === undefined || (current.body as unknown as { requestId?: string }).requestId !== from) return [];
+      return [{ type: "update", ref, expectedRevision: current.revision, body: json({}) }];
+    }
+    return [current === undefined ? { type: "create", ref, body: json({ requestId }) } : { type: "update", ref, expectedRevision: current.revision, body: json({ requestId }) }];
   }
 
   async #authorize(by: Principal, taskId: string): Promise<string> {
@@ -233,14 +272,15 @@ export class WorkspaceOpService {
     return found === undefined ? undefined : { body: found.body as unknown as WorkspaceRecordBody, revision: found.revision };
   }
 
-  async #write(actor: string, commandId: string, type: string, id: string, w: { creates: boolean; payload: JsonObject; body: () => WorkspaceRecordBody; expectedRevision?: number }) {
+  async #write(actor: string, commandId: string, type: string, id: string, w: { creates: boolean; payload: JsonObject; body: () => WorkspaceRecordBody; expectedRevision?: number; also?: () => Promise<Change[]> }) {
     const ref: AggregateRef = { kind: RECORD, id };
     return this.#runner.command(type, { commandId, actor }, async () => ({
       payload: w.payload,
       build: async () => ({
         ref, creates: w.creates,
-        changes: [w.creates ? { type: "create" as const, ref, body: json(w.body()) } : { type: "update" as const, ref, expectedRevision: w.expectedRevision!, body: json(w.body()) }],
+        changes: [w.creates ? { type: "create" as const, ref, body: json(w.body()) } : { type: "update" as const, ref, expectedRevision: w.expectedRevision!, body: json(w.body()) }, ...(w.also === undefined ? [] : await w.also())],
         detail: { operation: w.body().operation, taskId: w.body().taskId },
+        contention: async () => new DomainError("stale_revision", "the workspace request changed at the same moment"),
       }),
     }));
   }

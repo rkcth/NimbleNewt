@@ -188,41 +188,89 @@ for (const backend of backends) {
     } finally { await r.store.close(); }
   });
 
-  test(`${backend.name}: a controller that stopped while the host worked leaves the request uncertain and the attempt it froze is released; a freeze that is not this operation's is left alone (card H12l)`, async () => {
+  const control = (r: Awaited<ReturnType<typeof rig>>) => ({ live: (taskId: string) => r.d.liveAttemptsOf(r.w.owner, { taskId }), frozenReason: async (id: string) => (await r.d.get(r.w.owner, id))?.frozen?.reason, release: async (id: string) => { await r.d.release(r.w.owner, id); } });
+  const records = async (r: Awaited<ReturnType<typeof rig>>) => (await r.w.storage.listAggregates("workspace-request", { limit: 10 })).map((a) => ({ id: a.id, ...(a.body as unknown as { state: string; held?: string[] }) }));
+  const keepAlive = (r: Awaited<ReturnType<typeof rig>>) => { let stay!: () => void; const alive = new Promise<void>((ok) => { stay = ok; }); r.turn.second = async () => { await alive; return "x"; }; return stay; };
+
+  test(`${backend.name}: a controller that stopped while the host worked leaves the request uncertain, the attempt it froze is released, and the freeze of anything else is not (card H12l)`, async () => {
     const r = await rig(async () => ({}));
     try {
-      let stay!: () => void;
-      const alive = new Promise<void>((ok) => { stay = ok; });
-      r.turn.second = async () => { await alive; return "x"; };
+      const stay = keepAlive(r);
       await r.d.tick();
       await r.inCall;
-      const control = { frozenReason: async (id: string) => (await r.d.get(r.w.owner, id))?.frozen?.reason, release: async (id: string) => { await r.d.release(r.w.owner, id); } };
       let finish!: () => void;
       const hold = new Promise<void>((ok) => { finish = ok; });
       let asked = 0;
       const port: WorkspacePort = { run: async () => { asked++; await hold; return { ok: true, summary: "late" }; } };
-      const make = () => WorkspaceOpService.withEpoch(r.w.storage, r.w.epoch, { quiesce: r.coordinator, portOf: async () => port, attempts: control }, { clock: r.w.clock.now });
-      const before = make();
-      const pending = before.request(r.w.owner, { commandId: "k1", operation: "integration", taskId: r.taskId, reason: "merge" });
+      const make = () => WorkspaceOpService.withEpoch(r.w.storage, r.w.epoch, { quiesce: r.coordinator, portOf: async () => port, attempts: control(r) }, { clock: r.w.clock.now });
+      const pending = make().request(r.w.owner, { commandId: "k1", operation: "integration", taskId: r.taskId, reason: "merge" });
       while (asked === 0) await new Promise((ok) => setTimeout(ok, 5));
-      assert.ok((await r.d.get(r.w.owner, r.attemptId))!.frozen !== undefined, "the attempt is frozen while the host works");
-      // A new controller process over the same records (the first one is gone as far as the records go).
+      const frozen = (await r.d.get(r.w.owner, r.attemptId))!.frozen;
+      assert.ok(frozen !== undefined && frozen.reason.endsWith(`(${(await records(r))[0]!.id})`), "the freeze names the request");
+      // A new controller process over the same records: it resolves the open request and lifts that freeze.
       const after = make();
-      assert.deepEqual(await after.recover(r.w.owner), [(await r.w.storage.listAggregates("workspace-request", { limit: 5 }))[0]!.id]);
+      const [only] = await records(r);
+      assert.deepEqual(await after.recover(r.w.owner), [only!.id]);
       assert.equal((await r.d.get(r.w.owner, r.attemptId))!.frozen, undefined, "the freeze was lifted");
-      const stored = (await r.w.storage.listAggregates("workspace-request", { limit: 5 }))[0]!.body as unknown as { state: string; held?: unknown };
-      assert.equal(stored.state, "uncertain");
+      assert.equal((await records(r))[0]!.state, "uncertain");
       assert.deepEqual(await after.recover(r.w.owner), [], "and it is resolved once");
       finish();
       await pending;
-      // Somebody else's freeze is not lifted by a recovery.
-      await r.d.quiesce(r.w.owner, r.attemptId, "the owner stopped it", { strictMs: 1000 });
-      const keep = await after.recover(r.w.owner);
-      assert.deepEqual(keep, []);
-      assert.ok((await r.d.get(r.w.owner, r.attemptId))!.frozen !== undefined, "an unrelated freeze stays");
+      // Somebody else's freeze on the attempt of a request that is still open is not lifted by a recovery.
+      const open = make();
+      let hold2!: () => void;
+      const gate = new Promise<void>((ok) => { hold2 = ok; });
+      let asked2 = 0;
+      const second = WorkspaceOpService.withEpoch(r.w.storage, r.w.epoch, { quiesce: r.coordinator, portOf: async () => ({ run: async () => { asked2++; await gate; return { ok: true, summary: "x" }; } }), attempts: control(r) }, { clock: r.w.clock.now });
+      const running = second.request(r.w.owner, { commandId: "k2", operation: "refresh", taskId: r.taskId, reason: "base moved" });
+      while (asked2 === 0) await new Promise((ok) => setTimeout(ok, 5));
+      // The process that is running it neither recovers it nor lifts its freeze for a repeat of the command.
+      assert.deepEqual(await second.recover(r.w.owner), []);
+      const repeat = await second.request(r.w.owner, { commandId: "k2", operation: "refresh", taskId: r.taskId, reason: "base moved" });
+      assert.deepEqual([repeat.state, repeat.replayed], ["uncertain", true]);
+      assert.ok((await r.d.get(r.w.owner, r.attemptId))!.frozen !== undefined, "the first call still holds its freeze");
+      assert.deepEqual(await second.recover(r.w.owner), [], "marking it uncertain did not make it recoverable here");
+      await r.d.release(r.w.owner, r.attemptId);
+      await r.d.freeze(r.w.owner, r.attemptId, "the owner stopped it");
+      // After a restart the open index still names the request (the repeat did not clear it), so it is found and resolved.
+      const openId = (await records(r)).find((x) => x.id !== only!.id)!.id;
+      assert.deepEqual(await open.recover(r.w.owner), [openId]);
+      assert.equal((await r.d.get(r.w.owner, r.attemptId))!.frozen?.reason, "the owner stopped it", "a freeze that is not the request's stays");
+      hold2();
+      await running;
       await r.d.release(r.w.owner, r.attemptId);
       stay();
-      r.turn.release?.();
+      await r.d.idle();
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: a stop while the attempt is still being made quiet (the host not yet asked) leaves the freeze findable and released, and a new request resolves what was left before it freezes (card H12l)`, async () => {
+    let gate!: () => void;
+    const wait = new Promise<void>((ok) => { gate = ok; });
+    let entered = 0;
+    const r = await rig(async () => { entered++; if (entered === 1) await wait; return {}; });
+    try {
+      const stay = keepAlive(r);
+      await r.d.tick();
+      await r.inCall;
+      let asked = 0;
+      const port: WorkspacePort = { run: async () => { asked++; return { ok: true, summary: "x" }; } };
+      const make = () => WorkspaceOpService.withEpoch(r.w.storage, r.w.epoch, { quiesce: r.coordinator, portOf: async () => port, attempts: control(r) }, { clock: r.w.clock.now });
+      const first = make().request(r.w.owner, { commandId: "q1", operation: "integration", taskId: r.taskId, reason: "merge" });
+      while (entered === 0) await new Promise((ok) => setTimeout(ok, 5));
+      const [rec] = await records(r);
+      assert.deepEqual([rec!.state, rec!.held], ["started", [r.attemptId]], "the attempt it may freeze is recorded before the quiesce");
+      assert.ok((await r.d.get(r.w.owner, r.attemptId))!.frozen !== undefined);
+      // The next controller: a new request on the task resolves the leftover (lifting its freeze) before it does anything of its own.
+      const next = await make().request(r.w.owner, { commandId: "q2", operation: "refresh", taskId: r.taskId, reason: "base moved" });
+      assert.equal((await records(r)).find((x) => x.id === rec!.id)!.state, "uncertain");
+      gate();
+      const answered = await first;
+      assert.equal(asked >= 1, true);
+      assert.ok(["done", "uncertain"].includes(answered.state), answered.state);
+      assert.ok(["done", "refused", "failed"].includes(next.state), next.state);
+      assert.equal((await r.d.get(r.w.owner, r.attemptId))!.frozen, undefined, "nothing stays frozen");
+      stay();
       await r.d.idle();
     } finally { await r.store.close(); }
   });

@@ -114,7 +114,7 @@ export interface DispatchHandle {
   /** The host side of workspace operations for a task's checkout (card H12l): the host of its live attempt, else the only host that has one; `undefined` when none can be named. */
   readonly workspacePortOf: (taskId: string) => Promise<WorkspacePort | undefined>;
   /** What an attempt's freeze says and lifting it, for the workspace service's recovery (card H12l). */
-  readonly attemptControl: { frozenReason(attemptId: string): Promise<string | undefined>; release(attemptId: string): Promise<void> };
+  readonly attemptControl: { live(taskId: string): Promise<string[]>; frozenReason(attemptId: string): Promise<string | undefined>; release(attemptId: string): Promise<void> };
   /** The MCP service and the only way the host reaches a remote server (cards T03, H12g); present when `mcp` was given. */
   readonly mcp?: { readonly service: McpService; readonly connector: RemoteMcpConnector };
 }
@@ -271,7 +271,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   return {
     dispatcher, driver, closeWorkers: async () => { await transport?.close().catch(() => undefined); await i.options.local?.close?.(); },
     ...(transport === undefined ? {} : { workerUrl: transport.url }),
-    attemptControl: { frozenReason: async (id) => (await dispatcher.get(principal, id))?.frozen?.reason, release: (id) => dispatcher.release(principal, id) },
+    attemptControl: { live: (taskId) => dispatcher.liveAttemptsOf(principal, { taskId }), frozenReason: async (id) => (await dispatcher.get(principal, id))?.frozen?.reason, release: (id) => dispatcher.release(principal, id) },
     workspacePortOf: async (taskId) => {
       const capable = workers.filter((w) => w.workspace !== undefined);
       for (const attemptId of await dispatcher.liveAttemptsOf(principal, { taskId })) {
