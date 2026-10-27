@@ -124,6 +124,25 @@ for (const backend of backends) {
     assert.ok(history.some((d) => d.statement === "use Oracle for the store" && d.state !== "superseded"), "the owner's change was not superseded");
   });
 
+  suite("a replayed project-wide step does not overwrite a change an earlier task-scoped step of the same turn could not see (card C08d)", async (w, script) => {
+    const a = await w.project("A");
+    const one = await w.task(a, "One");
+    const two = await w.task(a, "Two");
+    await w.chat().setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+    const dec = (statement: string, wording: string, extra: Record<string, unknown> = {}) => cmd("decision.record", { category: "decision", topic: "Store", statement, wording, ...extra }, wording);
+    const text = "For task One we will use MySQL for the store. Everywhere else we will use Oracle for the store.";
+    script[text] = [dec("use MySQL for the store", "we will use MySQL for the store", { taskId: one }), dec("use Oracle for the store", "we will use Oracle for the store")];
+    const down = { handle: async (token: string, raw: unknown) => { if ((raw as { op?: string }).op === "decision.record") throw new Error("crash"); return w.api.handle(token, raw as never); } };
+    await assert.rejects(w.chat({ api: down as never }).submit(w.ownerToken, { messageId: "m-x", text }), /crash/);
+    // The owner decides for task Two meanwhile (nothing of this turn was recorded).
+    await w.decisions.record(w.owner, { commandId: cid("mid"), projectId: a, taskId: two, category: "decision", topic: "Store", statement: "use Derby for the store", wording: "We will use Derby for the store", source: { channel: "direct" }, basedOn: 0 } as never);
+    await w.chat().submit(w.ownerToken, { messageId: "m-x", text });
+    const history = await w.decisions.history(w.owner, { projectId: a, topic: "store" });
+    const derby = history.find((d) => d.statement === "use Derby for the store")!;
+    assert.notEqual(derby.state, "superseded", `the owner's decision stands: ${JSON.stringify(history.map((d) => [d.version, d.state, d.statement]))}`);
+    assert.ok(history.some((d) => d.state === "disputed"), "the project-wide step is a dispute");
+  });
+
   suite("a turn sent twice at once: the copy that finds its decision recorded between the look and the send answers applied, not command_conflict (card C08b)", async (w, script) => {
     const a = await w.project("A");
     await w.chat().setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });

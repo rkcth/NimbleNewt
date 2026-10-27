@@ -645,20 +645,19 @@ export class ChatService {
 
   /**
    * The version a decision step is based on when it is applied. Normally the topic as it is now. But when someone else (not this turn) recorded a decision on the topic after the message was planned, the step is
-   * based on the version the message saw (plus what this turn recorded itself), so the later change is a dispute and is never overwritten by a step that read the topic only now (a turn run again after a crash).
+   * based on the version the message saw: that is below the change, so the decision service records a dispute and the later change stands, even for a step that read the topic only now (a turn run again after a crash).
+   * What this turn recorded itself is not added: it may have been written in a narrower scope that never saw the change.
    */
   async #decisionBase(token: string, turnId: string, args: Record<string, unknown>, planBase: number | undefined, current: number): Promise<number> {
     if (planBase === undefined) return current;
     const taskId = typeof args["taskId"] === "string" ? args["taskId"] : undefined;
     const history = ((await this.#get(token, "decision.history", { projectId: args["projectId"], topic: args["topic"], ...(taskId === undefined ? {} : { taskId }) })) as unknown as Record<string, unknown>[] | undefined) ?? [];
-    let others = 0;
-    let own = 0;
     for (const e of history) {
       if (e["state"] === "superseded" || (taskId !== undefined && e["taskId"] !== undefined && e["taskId"] !== taskId)) continue;
       const version = typeof e["version"] === "number" ? (e["version"] as number) : 0;
-      if ((e["source"] as { turnId?: string } | undefined)?.turnId === turnId) own = Math.max(own, version); else others = Math.max(others, version);
+      if (version > planBase && (e["source"] as { turnId?: string } | undefined)?.turnId !== turnId) return planBase;
     }
-    return others > planBase ? Math.max(planBase, own) : current;
+    return current;
   }
 
   async #revisionFor(token: string, what: NonNullable<(typeof CHAT_OPS)[string]["revision"]>, args: Record<string, unknown>, task: { revision: number } | undefined, pending: ReadonlyMap<string, number>): Promise<{ ok: true; name?: string; value?: number } | Resolved & { ok: false }> {
