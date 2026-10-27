@@ -1872,3 +1872,10 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - `start.ts` builds the `Reconciler` with the pause lookup (an inbox message for a paused task stays received), the wait service and the inbox/effect services. Delivery destinations and effect bridges are not built yet, so `destinations` and `bridges` are empty: it repairs task events, admits inbox messages, recovers effects (reports unbridged ones) and settles waits.
 - The scan reads the dispatcher principal again each tick, so a right granted or revoked while the controller runs takes effect at the next tick (no restart); its cursor is kept between ticks and wraps, so every assignment is reached however many there are; a notice that failed is tried again.
 - Known limits: reassignment through the pause service's retention check still has no caller; the acceptance sentence "a paused task is not reported stalled" rests on the existing `isPaused` option of the stall service (tested in health/stall.test.ts), and the composed test proves the loops and the right, not a time-driven stall.
+
+## H06c notes (idle-expiry notices in the running controller)
+
+- The composed `EventService` is built with `notify: noticeThroughNotifications(notifications)`, so an idle expiry that left events waiting files one maintenance notice for the owner (commandId `events-expired-<subscription>-<time>`; the next ticks add none). The expiry is in the activity record (`events.expire`).
+- A subscription made before idle expiry existed (no stored idle time) uses the owner-configured idle time, default 900 seconds, as `idleOf` already did: nothing needs migrating at start.
+- State API: `events.configure-idle` (owner) and `events.cancel` (the subscriber or the owner). `start.ts` gives the API its own `EventService` on the same store.
+- Known limit: the U11b notice kind does not exist yet, so the notice is the generic `maintenance` kind.

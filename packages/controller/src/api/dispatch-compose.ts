@@ -14,7 +14,7 @@ import { EffectService } from "../domain/effects.js";
 import type { RunnerOptions } from "../domain/runner.js";
 import type { ProjectService } from "../domain/service.js";
 import type { WaitService } from "../domain/waits.js";
-import { EventService } from "../events/index.js";
+import { EventService, noticeThroughNotifications } from "../events/index.js";
 import { GenerationService } from "../generation/index.js";
 import type { HarnessCatalog } from "../harness/index.js";
 import { HostService } from "../hosts/index.js";
@@ -127,7 +127,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   const policy = PolicyService.withEpoch(storage, epoch, i.grants, ro);
   const budgets = BudgetService.withEpoch(storage, epoch, ro);
   const pauses = PauseService.withEpoch(storage, epoch, { waits: i.waits }, ro);
-  const events = EventService.withEpoch(storage, epoch, ro);
+  const events = EventService.withEpoch(storage, epoch, { ...ro, notify: noticeThroughNotifications(notifications) });
   const decisions = DecisionService.withEpoch(storage, epoch, { events, effects }, ro);
   const generation = GenerationService.withEpoch(storage, epoch, { assignments: i.assignments, effects, pauses, decisions }, ro);
   const difficulty = DifficultyService.withEpoch(storage, epoch, i.routing, i.contracts, ro);

@@ -391,6 +391,30 @@ Result: `{ items, next? }`.
 
 ### Commands
 
+#### `events.configure-idle`
+
+Sets how long an event subscription may sit without acknowledging before it expires (owner only). A subscription that was made before this existed, or without its own time, uses this one.
+
+Arguments:
+
+- `idleSeconds`: whole seconds, 10 to 604800
+
+Result: `{ ok: true }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `events.cancel`
+
+Cancels an event subscription (its subscriber or the owner). Its events stay in the stream.
+
+Arguments:
+
+- `subscriptionId`: the subscription's ID
+
+Result: `{ ok: true }`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `agent.create`
 
 Creates an agent with a new durable ID and its own identity (no grants, no credential). Needs `agent.manage`.
