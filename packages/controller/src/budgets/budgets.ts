@@ -481,9 +481,10 @@ export class BudgetService {
         return { ref, creates: true, changes: [{ type: "update", ref: treeRef, expectedRevision: found.revision, body: tree as unknown as JsonObject }, { type: "create", ref, body: body as unknown as JsonObject }], detail: { taskId, to, ...want }, contention: async () => new DomainError("stale_revision", "the budget changed meanwhile") };
       },
     })));
-    if (result.replayed) to = ((await this.#runner.get(REQUEST, id))?.body as unknown as BudgetRequestBody).to;
+    let stillOpen = true;
+    if (result.replayed) { const stored = (await this.#runner.get(REQUEST, id))?.body as unknown as BudgetRequestBody; to = stored.to; stillOpen = stored.state === "open"; }
     // A repeat of the command tells again (the notice has its own command ID, so it is filed once): a call that crashed between the commit and the notice is mended by the caller's retry.
-    if (this.#notify !== undefined) {
+    if (this.#notify !== undefined && stillOpen) {
       const tree = (await this.#tree(treeId)).body;
       try { await this.#notify({ requestId: id, taskId, ...(tree.nodes[taskId]?.parentId === undefined ? {} : { parentTaskId: tree.nodes[taskId]!.parentId! }), to, requestedBy: by.id, costMicros: want.costMicros, computeMs: want.computeMs }); } catch { /* the request is stored; `pending` shows it */ }
     }
@@ -571,7 +572,7 @@ export class BudgetService {
         after = a.id;
         if (++scanned > BUDGET_LIMITS.scan) return out;
         const r = a.body as unknown as BudgetRequestBody;
-        if (r.state !== "open" || r.to === "owner") continue;
+        if (r.state !== "open" || !/^agent:/.test(r.to)) continue;
         const tree = (await this.#tree(r.treeId)).body;
         const parentId = tree.nodes[r.taskId]?.parentId;
         out.push({ requestId: a.id, taskId: r.taskId, ...(parentId === undefined ? {} : { parentTaskId: parentId }), to: r.to, requestedBy: r.requestedBy, costMicros: r.costMicros, computeMs: r.computeMs });

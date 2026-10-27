@@ -159,8 +159,13 @@ export function decisionLoops(decisions: Pick<DecisionService, "resume">, projec
 /** R05e: the delegated holders who have not yet been told of a request addressed to them are told (filing is idempotent, so a notice filed already is not filed twice). A holder who can no longer be told is skipped; a full inbox is tried again on the next tick. */
 export function budgetNoticeLoops(budgets: Pick<BudgetService, "openForHolders">, tell: (notice: RequestNotice) => Promise<unknown>): DispatcherLoop[] {
   return [{ name: "budgets.notifyHolders", run: async () => {
+    // One request that cannot be told never holds back the others; the first real fault is reported after all were tried.
+    let fault: unknown;
     for (const notice of await budgets.openForHolders()) {
-      try { await tell(notice); } catch (error) { if (!(error instanceof DomainError && (error.code === "forbidden" || error.code === "unavailable"))) throw error; }
+      try { await tell(notice); } catch (error) {
+        if (!(error instanceof DomainError && (error.code === "forbidden" || error.code === "unavailable"))) fault ??= error;
+      }
     }
+    if (fault !== undefined) throw fault;
   } }];
 }

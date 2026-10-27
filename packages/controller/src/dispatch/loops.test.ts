@@ -104,3 +104,11 @@ test("the budget notice loop tells every holder again until the notice is filed,
   const [broken] = budgetNoticeLoops({ openForHolders: async () => owed }, async () => { throw new Error("storage hiccup"); });
   await assert.rejects(() => broken!.run({ id: "x" } as never), /storage hiccup/);
 });
+
+test("a request that cannot be told does not hold back the ones after it, and its fault still surfaces (card R05e)", async () => {
+  const owed = [1, 2, 3].map((n) => ({ requestId: `r${n}`, taskId: `t${n}`, to: `agent:h${n}`, requestedBy: "agent:x", costMicros: 1, computeMs: 0 }));
+  const told: string[] = [];
+  const [loop] = budgetNoticeLoops({ openForHolders: async () => owed }, async (n) => { if (n.requestId === "r1") throw new DomainError("invalid_command", "bad request"); told.push(n.requestId); });
+  await assert.rejects(() => loop!.run({ id: "x" } as never), /bad request/);
+  assert.deepEqual(told, ["r2", "r3"], "the holders after the bad request were still told");
+});

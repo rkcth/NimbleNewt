@@ -813,10 +813,13 @@ export class AgentMessageService {
       build: async () => {
         const now = this.#runner.now();
         const projectId = ((await this.#runner.get("task", taskId))?.body as unknown as TaskBody | undefined)?.projectId;
-        if (projectId === undefined || (await this.#reachable(to, projectId, taskId)) === undefined) throw new DomainError("forbidden", `${to} cannot be told about that task`);
+        const holder = projectId === undefined ? undefined : await this.#fresh(to);
+        // A holder who may decide a request (`budget.manage`) is told even when it holds no right to read the task.
+        if (projectId === undefined || holder === undefined || ((await this.#reachable(to, projectId, taskId)) === undefined && !allows(holder, "budget.manage", projectId, { resource: { kind: "task", id: taskId }, now }))) throw new DomainError("forbidden", `${to} cannot be told about that task`);
         const inboxAgg = await this.#runner.get("agent-inbox", inboxIdOf(to));
         const inbox = inboxAgg === undefined ? this.#emptyInbox(now) : inboxAgg.body as unknown as InboxBody;
         if (inbox.pending.length >= MESSAGE_LIMITS.queue) throw new DomainError("unavailable", `${to} already has ${inbox.pending.length} messages waiting; the notice is retried once some are read`);
+        if (inbox.pending.filter((p) => p.sender === SYSTEM).length >= MESSAGE_LIMITS.perSenderQueue) throw new DomainError("unavailable", `${to} already has ${MESSAGE_LIMITS.perSenderQueue} notices from the controller waiting, so others cannot crowd out its other messages; the notice is retried once some are read`);
         const availability = await this.#availabilityOf(to);
         const message: AgentMessageBody = {
           taskId, projectId, sender: SYSTEM, to, kind: "notice", purpose, text, class: "advice", effectiveClass: "advice", urgency: URGENCY.advice, correlationId: id, depth: 0,

@@ -74,6 +74,11 @@ test("a request for more budget tells the owner once, budgets are read, asked fo
     assert.ok((await call(ann, "budget.decide", { requestId: sub.result.id, approve: true, costMicros: 5_000 }, "bd2")).ok);
     assert.equal((await call(ann, "budget.pending", {})).result.requests.length, 0);
     assert.equal((await call(ann, "budget.report", { taskId: grandchild })).result.item.limit.costMicros, 55_000);
+    // A repeat of the request after it was decided tells nobody to decide a closed request.
+    await c.storage.listAggregates("agent-message", { limit: 100 });
+    assert.equal((await noticesTo("agent:ann")).length, 1);
+    assert.equal((await call(ann, "budget.request-more", { taskId: grandchild, costMicros: 10_000, reason: "more water" }, "bq2")).result.replayed, true);
+    assert.equal((await noticesTo("agent:ann")).length, 1, "no new notice for a decided request");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 

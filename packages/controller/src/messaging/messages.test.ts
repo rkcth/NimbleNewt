@@ -703,13 +703,17 @@ for (const backend of backends) {
     // Somebody who cannot read the task is not told about it, and an unknown field is refused.
     await refuses("forbidden", () => note("n-2", c.eve.pid));
     await refuses("invalid_command", () => c.msgs.noticeFromController({ commandId: "n-3", taskId: c.tAnn, to: c.ann.pid, purpose: "p", text: "t", class: "urgent-control" } as never));
+    // A holder who may decide budget requests but cannot read the task is told; and the controller cannot fill an inbox with notices.
+    const decider = await c.agent("decider", [{ action: "budget.manage", project: c.a }]);
+    assert.equal((await note("n-5", decider.pid)).replayed, false);
+    for (let i = 1; i < MESSAGE_LIMITS.perSenderQueue; i++) await note(`cap-${i}`, decider.pid);
+    await refuses("unavailable", () => note("cap-over", decider.pid), (e) => assert.match(e.message, /crowd out/));
     // A paused recipient keeps the notice queued and nothing resumes it.
     await c.pauses.pause(c.owner, { commandId: cid("pz"), scope: { kind: "agent", id: c.cat.aid }, reason: "hold" });
     const held = await note("n-4", c.cat.pid);
     assert.deepEqual([(await c.msgs.get(c.cat.p, held.id))!.reach, (await c.msgs.get(c.cat.p, held.id))!.state], ["queued", "accepted"]);
-    // A full inbox is `unavailable` and nothing is stored, so the same command succeeds once there is room.
-    for (let i = 0; i < MESSAGE_LIMITS.queue - 1; i++) await note(`fill-${i}`, c.ben.pid);
-    await note("fill-last", c.ben.pid);
+    // A full per-sender share is `unavailable` and nothing is stored, so the same command succeeds once there is room.
+    for (let i = 0; i < MESSAGE_LIMITS.perSenderQueue; i++) await note(`fill-${i}`, c.ben.pid);
     await refuses("unavailable", () => note("late", c.ben.pid));
     const read = await c.msgs.readable(c.ben.p, { boundary: "safe-boundary" });
     await c.msgs.acknowledge(c.ben.p, { commandId: cid("ack"), boundary: "safe-boundary", messageIds: read.items.slice(0, 3).map((i) => i.id) });
