@@ -2,6 +2,8 @@ import { ProjectResourceService } from "../projects/index.js";
 import type { AttemptRelay, ModelRelay } from "../dispatch/relay.js";
 import { AdmissionService } from "../admission/index.js";
 import { BudgetService } from "../budgets/index.js";
+import { ArtifactService, FileBlobStore } from "../artifacts/index.js";
+import { RemoteWorkerHost, RemoteWorkerService, WorkerTransport, type RemoteDeps, type RemoteOptions, type RemoteWorkerHostOptions, type WorkerTransportOptions } from "../remote/index.js";
 import { DecisionService } from "../decisions/index.js";
 import { ContextEnforcementService } from "../context/index.js";
 import { CachePolicies, type AttemptCache, type CachePolicyDeps } from "../dispatch/cache.js";
@@ -41,7 +43,22 @@ import type { ControllerStorage } from "../storage/types.js";
 /** The worker process's context limits for an order, in the shape of the channel's `ChannelContext` (the controller does not depend on the contracts package; the host's `context` option takes it structurally). */
 export interface WorkerContextLimits { readonly toolOutputBytes?: number; readonly toolOutputLines?: number; readonly compaction?: { readonly timeoutMs?: number; readonly fallback?: "extractive" } }
 
+/** Remote workers (card H02): the artifact folder the controller owns, the listener workers connect to and the hosts the dispatcher may place attempts on. */
+export interface RemoteStartOptions {
+  /** The controller's own folder for artifacts and checkpoints. Workers never mount a database or this folder: they fetch through the transport. */
+  readonly blobDirectory: string;
+  /** Where the transport listens. Default: loopback on any free port. Exposure beyond loopback needs `allowRemote`, TLS and `publicHosts` (see `WorkerTransportOptions`). */
+  readonly transport?: Omit<WorkerTransportOptions, "remote" | "principals">;
+  readonly protocol?: RemoteOptions["protocol"];
+  readonly fileBytes?: number;
+  readonly relocationPolicy?: RemoteDeps["relocationPolicy"];
+  /** The remote hosts attempts may be placed on, with what each attempt asks of them and what it needs. */
+  readonly hosts: readonly ({ readonly hostId: string } & RemoteWorkerHostOptions)[];
+}
+
 export interface DispatchStartOptions {
+  /** Remote workers: a transport workers connect to, and hosts placed after the local ones. */
+  readonly remote?: RemoteStartOptions;
   /** The worker hosts, local or remote, tried in order. None: attempts are admitted and checked but no worker starts (the loops still run). */
   readonly workers?: readonly WorkerHost[];
   /** How the route and harness of a task are chosen. Default: the owner's configured execution profiles and routing table (R03). */
@@ -89,6 +106,8 @@ export interface DispatchHandle {
   readonly quiesce: QuiesceCoordinator;
   /** Shuts down the local worker host the operator built, if it gave a way to. */
   readonly closeWorkers: () => Promise<void>;
+  /** Where remote workers connect (present when `remote` was given). */
+  readonly workerUrl?: string;
   /** The host an agent's live attempt runs on, if it has one (the review service judges a reviewer's host with it, card H05b). */
   readonly hostOfAgent: (agentId: string) => Promise<string | undefined>;
   /** The MCP service and the only way the host reaches a remote server (cards T03, H12g); present when `mcp` was given. */
@@ -208,10 +227,31 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     };
     workers.push(await i.options.local.build({ guards, context: contextFor, confirmFirstCall, attemptRelay, ...(cache === undefined ? {} : { cache }) }));
   }
+  // Remote workers: the dispatcher is built with a way to ask who owns an agent's native store, and the remote service is built on the dispatcher afterwards.
+  let remote: RemoteWorkerService | undefined;
+  let blobs: FileBlobStore | undefined;
+  const holder: { dispatcher?: DispatcherService } = {};
+  if (i.options.remote !== undefined) {
+    blobs = await FileBlobStore.open({ directory: i.options.remote.blobDirectory });
+    const artifacts = ArtifactService.withEpoch(storage, epoch, blobs, ro);
+    const d = (): DispatcherService => holder.dispatcher!;
+    remote = RemoteWorkerService.withEpoch(storage, epoch, {
+      principal, hosts, artifacts,
+      dispatch: { gateway: (id) => d().gateway(id), get: (by, id) => d().get(by, id), relocate: (by, id, m) => d().relocate(by, id, m), quiesce: (by, id, r) => d().quiesce(by, id, r), release: (by, id) => d().release(by, id) },
+      ...(i.options.remote.relocationPolicy === undefined ? {} : { relocationPolicy: i.options.remote.relocationPolicy }),
+    }, { ...ro, ...(i.options.remote.protocol === undefined ? {} : { protocol: i.options.remote.protocol }), ...(i.options.remote.fileBytes === undefined ? {} : { fileBytes: i.options.remote.fileBytes }) });
+    for (const h of i.options.remote.hosts) workers.push(new RemoteWorkerHost(h.hostId, remote, principal, h));
+  }
   const dispatcher = DispatcherService.withEpoch(storage, epoch, {
     principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, hosts, workers,  contracts: i.contracts, harnesses: i.catalog, policy, effects, blockers, route,
     routing: i.routing, pauses, decisions, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
+    ...(remote === undefined ? {} : { storeOwner: (agentId: string, attemptId: string) => remote!.storeOwner(principal, agentId, attemptId) }), routing: i.routing, pauses, decisions, generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
   }, { ...ro, holder: "dispatcher", ...(i.onError === undefined ? {} : { onError: i.onError }), ...(i.options.dispatcher ?? {}) });
+  holder.dispatcher = dispatcher;
+  let transport: WorkerTransport | undefined;
+  if (remote !== undefined) {
+    try { transport = await WorkerTransport.listen({ ...(i.options.remote?.transport ?? {}), remote, principals: i.principals }); } catch (error) { await i.options.local?.close?.().catch(() => undefined); throw error; }
+  }
   const driver = new DispatchDriver({
     dispatcher, storage, epoch, record: { storage, options: ro },
     ...(i.options.intervalMs === undefined ? {} : { intervalMs: i.options.intervalMs }), ...(i.options.timer === undefined ? {} : { timer: i.options.timer }), ...(i.options.clock === undefined ? {} : { clock: i.options.clock }),
@@ -222,7 +262,8 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   if (i.options.manual !== true) driver.start();
   const mcpService = i.options.mcp === undefined ? undefined : McpService.withEpoch(storage, epoch, { ...ro, ...(i.options.mcp?.gate === undefined ? {} : { gate: i.options.mcp.gate }) });
   return {
-    dispatcher, driver, closeWorkers: async () => { await i.options.local?.close?.(); },
+    dispatcher, driver, closeWorkers: async () => { await transport?.close().catch(() => undefined); await i.options.local?.close?.(); },
+    ...(transport === undefined ? {} : { workerUrl: transport.url }),
     hostOfAgent: async (agentId) => { for (const attemptId of await dispatcher.liveAttemptsOf(principal, { agentId })) { const d = await dispatcher.get(principal, attemptId); const host = d?.state === "running" ? d.hostId : d?.pinnedHost; if (host !== undefined) return host; } return undefined; }, quiesce: new QuiesceCoordinator({ dispatcher, blockers, principal }),
     ...(mcpService === undefined || i.options.mcp === undefined ? {} : { mcp: { service: mcpService, connector: new RemoteMcpConnector({ mcp: mcpService, resolve: i.options.mcp.resolve, principal }) } }),
   };
