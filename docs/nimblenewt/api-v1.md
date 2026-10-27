@@ -439,6 +439,25 @@ Arguments:
 - `grantId`: the grant's ID
 - `expectedRevision`: the revision you read
 - `reason`: why, in the owner's words
+#### `events.configure-idle`
+
+Sets how long an event subscription may sit without acknowledging before it expires (owner only). A subscription that was made before this existed, or without its own time, uses this one.
+
+Arguments:
+
+- `idleSeconds`: whole seconds, 10 to 604800
+
+Result: `{ ok: true }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `events.cancel`
+
+Cancels an event subscription (its subscriber or the owner). Its events stay in the stream.
+
+Arguments:
+
+- `subscriptionId`: the subscription's ID
 
 Result: `{ ok: true }`.
 

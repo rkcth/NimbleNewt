@@ -372,6 +372,35 @@ export class EventService {
     }));
   }
 
+  /**
+   * Gives every subscription made before idle expiry existed (no `lastActiveAt`) the time of this call as its last activity, so the idle time counts from now and not from the day it was made.
+   * It does nothing for a subscription that has one, and repeating it changes nothing more. For the owner or a service; the controller runs it at start.
+   */
+  async stampIdle(by: Principal): Promise<{ stamped: number }> {
+    if (!(by.kind === "owner" || by.kind === "service")) throw new DomainError("forbidden", `${by.id} may not stamp subscriptions`);
+    let stamped = 0;
+    for (let after: string | undefined; ;) {
+      const page = await this.#runner.list("subscription", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const rec of page) {
+        after = rec.id;
+        const sub = rec.body as unknown as SubscriptionBody;
+        if (sub.state !== "active" || sub.lastActiveAt !== undefined) continue;
+        const ref: AggregateRef = { kind: "subscription", id: rec.id };
+        const at = this.#runner.now();
+        try { await this.#runner.command("events.idle-stamp", { commandId: `idle-stamp-${rec.id}`, actor: by.id }, async () => ({
+          payload: { subscriptionId: rec.id },
+          build: async () => {
+            const current = await this.#runner.get(ref.kind, ref.id);
+            const body = current?.body as unknown as SubscriptionBody | undefined;
+            if (current === undefined || body === undefined || body.lastActiveAt !== undefined) throw new NotIdle();
+            return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: { ...body, lastActiveAt: at } as unknown as JsonObject }], detail: { subscriber: body.subscriber } };
+          },
+        })); stamped++; } catch (error) { if (error instanceof NotIdle || (error instanceof DomainError && error.code === "stale_revision")) continue; throw error; }
+      }
+      if (page.length < 200) return { stamped };
+    }
+  }
+
   /** The subscriber says it is alive and working (a long batch in hand), so the idle time starts again. Acknowledging does the same. */
   async heartbeat(by: Principal, command: NoActor & { subscriptionId: string }): Promise<void> {
     onlyKnown(command, ["commandId", "subscriptionId"]);

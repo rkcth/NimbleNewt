@@ -1,3 +1,4 @@
+import { EventService } from "../events/index.js";
 import { StallService } from "../health/index.js";
 import { DomainError } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
@@ -247,7 +248,7 @@ export async function startController(options: StartOptions): Promise<Controller
     const branches = ContextBranchService.withEpoch(storage, epoch, { histories, retrieval });
     // Event watches (card H13): an agent's watch on a stream, its handling attempts and the failed queue, which the status answers and the state API read.
     const watchService = WatchService.withEpoch(storage, epoch, { events: EventService.withEpoch(storage, epoch), inbox: InboxService.withEpoch(storage, epoch, assignments), assignments, projects });
-    const api = new StateApi({ branches, grants, watches: watchService, ownerQuestions: messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
+    const api = new StateApi({ branches, grants, watches: watchService, events: EventService.withEpoch(storage, epoch), ownerQuestions: messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
     let chat: ChatService | undefined;
     let coordinator: CoordinatorService | undefined;
     if (options.chat !== undefined) {

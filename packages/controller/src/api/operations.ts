@@ -3,6 +3,7 @@ import type { AssignmentService } from "../domain/assignments.js";
 import type { ProjectService } from "../domain/service.js";
 import type { AgentService } from "../agents/index.js";
 import type { WatchService } from "../events/handling.js";
+import type { EventService } from "../events/index.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
 import type { ProjectPlanService, ProjectResourceService, ResponsibilityService } from "../projects/index.js";
@@ -38,6 +39,8 @@ export interface Context {
   readonly branches?: ContextBranchService;
   /** Absent when the controller runs without grants (card U03e). */
   readonly grants?: Pick<GrantService, "grant" | "revoke" | "getGrant" | "list">;
+  /** Absent when the controller runs without events (card H06c). */
+  readonly events?: Pick<EventService, "configureIdle" | "cancel">;
   /** Absent when the controller runs without agent messages (card U12): questions to the owner. */
   readonly ownerQuestions?: Pick<AgentMessageService, "askOwner" | "ownerQuestions" | "answerOwner">;
 }
@@ -90,6 +93,7 @@ const plans = (c: Context): ProjectPlanService => c.plans ?? unavailable("projec
 const ownerQuestionsOf = (c: Context): NonNullable<Context["ownerQuestions"]> => c.ownerQuestions ?? unavailable("questions to the owner");
 const branchesOf = (c: Context): ContextBranchService => c.branches ?? unavailable("context branches");
 const grantsOf = (c: Context): NonNullable<Context["grants"]> => c.grants ?? unavailable("rights");
+const eventsOf = (c: Context): NonNullable<Context["events"]> => c.events ?? unavailable("events");
 const meetingsOf = (c: Context): MeetingService => c.meetings ?? unavailable("meetings");
 const duties = (c: Context): ResponsibilityService => c.responsibilities ?? unavailable("responsibilities");
 const optNum = (args: Args, key: string): number | undefined => { const v = args[key]; return v === undefined ? undefined : (typeof v === "number" ? v : invalid(`args.${key}`, "must be a number")); };
@@ -111,6 +115,10 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => { only(a, ["grantee", "action", "project", "basis", "notBefore", "expiresAt"]); return written(await grantsOf(c).grant(c.principal, { commandId: need(id), ...(a as object), source: "direct" } as never)); } },
   { name: "grant.revoke", kind: "command", summary: "The owner takes a grant back (owner only; the revision you read must still be current). It stops counting at the next check.", args: { grantId: "the grant's ID", expectedRevision: "the revision you read", reason: "why, in the owner's words" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["grantId", "expectedRevision", "reason"]); await grantsOf(c).revoke(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
+  { name: "events.configure-idle", kind: "command", summary: "Sets how long an event subscription may sit without acknowledging before it expires (owner only). A subscription that was made before this existed, or without its own time, uses this one.", args: { idleSeconds: "whole seconds, 10 to 604800" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["idleSeconds"]); await eventsOf(c).configureIdle(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
+  { name: "events.cancel", kind: "command", summary: "Cancels an event subscription (its subscriber or the owner). Its events stay in the stream.", args: { subscriptionId: "the subscription's ID" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["subscriptionId"]); await eventsOf(c).cancel(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
   { name: "project.get", kind: "query", summary: "One project.", args: { projectId: "the project's ID" }, result: "`{ item }`: the project, with its ID, revision and timestamps.",
     run: async (c, a) => { only(a, ["projectId"]); return found("project", await c.secure.getProject(str(a, "projectId"))); } },
   { name: "project.list", kind: "query", summary: "The projects the caller may read.", args: { "limit?": `1 to ${PAGE.max}, default ${PAGE.default}`, "after?": "the `next` of the previous page" }, result: "`{ items, next? }`.",

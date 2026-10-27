@@ -11,6 +11,7 @@ import type { ProjectPlanService, ProjectResourceService, ResponsibilityService 
 import type { ContextBranchService } from "../branches/index.js";
 import type { MeetingService } from "../meetings/index.js";
 import type { AgentMessageService } from "../messaging/index.js";
+import type { EventService } from "../events/index.js";
 import { SecureApi } from "../security/secured.js";
 import type { GrantService } from "../security/grants.js";
 import type { PrincipalService } from "../security/principals.js";
@@ -63,6 +64,8 @@ export interface StateApiDeps {
   readonly ownerQuestions?: Pick<AgentMessageService, "askOwner" | "ownerQuestions" | "answerOwner">;
   /** When present, the owner can grant and revoke rights through the API (card U03e). */
   readonly grants?: Pick<GrantService, "grant" | "revoke" | "getGrant" | "list">;
+  /** When present, the owner can set the idle time of event subscriptions and cancel one through the API (card H06c). */
+  readonly events?: Pick<EventService, "configureIdle" | "cancel">;
   /** When present, a task credential (`tcr-…`) is accepted too and acts for its one task (card A10b). */
   readonly taskCredentials?: TaskCredentialService;
   /** Called with errors that are not part of the contract (so they are not shown to the client). */
@@ -110,6 +113,7 @@ export class StateApi {
         ...(this.#deps.branches === undefined ? {} : { branches: this.#deps.branches }),
         ...(this.#deps.ownerQuestions === undefined ? {} : { ownerQuestions: this.#deps.ownerQuestions }),
         ...(this.#deps.grants === undefined ? {} : { grants: this.#deps.grants }),
+        ...(this.#deps.events === undefined ? {} : { events: this.#deps.events }),
       };
       const result = await operation.run(context, args, request.commandId);
       if (operation.kind === "query") return { v: API_VERSION, op: request.op, ok: true, result };
