@@ -23,6 +23,7 @@ test("a schedule made through the state API is held once per slot by the compose
   let token = "";
   let project = "";
   let scheduleId = "";
+  let first = "";
   try {
     const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
     token = boot.token;
@@ -30,10 +31,10 @@ test("a schedule made through the state API is held once per slot by the compose
     project = (await c.services.projects.createProject({ commandId: "p1", actor: rob.id, name: "Garden" })).id;
     for (const n of ["ann", "bob"]) await c.services.principals.enroll(rob, { commandId: `e-${n}`, kind: "agent", name: n, grants: [{ action: "task.read", project }] });
     const call = (op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<{ ok: boolean; result?: any; error?: { code: string } }>;
-    const made = await call("meeting.schedule", { projectId: project, title: "Stand-up", roster: ["agent:ann", "agent:bob"], time: "08:00", timeZone: "UTC", recurrence: { kind: "daily" } }, "ms1");
+    const made = await call("meeting.schedule", { projectId: project, title: "Stand-up", roster: ["agent:ann", "agent:bob"], time: "08:00", timeZone: "UTC", startDate: new Date(at(1, "00:00")).toISOString().slice(0, 10), recurrence: { kind: "daily" } }, "ms1");
     assert.ok(made.ok, JSON.stringify(made));
     scheduleId = made.result.id;
-    assert.equal((await call("meeting.schedule", { projectId: project, title: "Stand-up", roster: ["agent:ann", "agent:bob"], time: "08:00", timeZone: "UTC", recurrence: { kind: "daily" } }, "ms1")).result.replayed, true);
+    assert.equal((await call("meeting.schedule", { projectId: project, title: "Stand-up", roster: ["agent:ann", "agent:bob"], time: "08:00", timeZone: "UTC", startDate: new Date(at(1, "00:00")).toISOString().slice(0, 10), recurrence: { kind: "daily" } }, "ms1")).result.replayed, true);
     assert.ok((await call("meeting.schedule-get", { scheduleId })).ok);
     // An agent without meeting.manage cannot schedule.
     const annToken = (await c.services.principals.issueCredential(rob, "agent:ann")).token;
@@ -45,12 +46,15 @@ test("a schedule made through the state API is held once per slot by the compose
     // Before the slot nothing is planned.
     await c.dispatch!.dispatcher.tick();
     assert.equal((await call("meeting.schedule-get", { scheduleId })).result.item.occurrences, 0, "nothing before the slot");
-    now = at(1, "08:30");
+    now = at(1, "08:00");
     const rep = await c.dispatch!.dispatcher.tick();
     assert.ok(rep.loops.every((l) => l.ok), JSON.stringify(rep.loops));
     await c.dispatch!.dispatcher.tick();
     const count = async (): Promise<number> => (await call("meeting.schedule-get", { scheduleId })).result.item.occurrences;
     assert.equal(await count(), 1, "one occurrence for the slot, however often the clock ticked");
+    first = (await call("meeting.schedule-get", { scheduleId })).result.item.lastOccurrenceId;
+    const firstOcc = (await call("meeting.occurrence", { occurrenceId: first })).result.item.occurrence;
+    assert.notEqual(firstOcc.mode, "catch-up", "the slot was met on time, not caught up");
     assert.ok((await call("meeting.planned", { projectId: project })).ok);
   } finally { await c.close(); }
   try {
@@ -62,6 +66,11 @@ test("a schedule made through the state API is held once per slot by the compose
     await c.dispatch!.dispatcher.tick();
     await c.dispatch!.dispatcher.tick();
     assert.equal(await count(), 2, "one catch-up occurrence for the days missed, not one per missed slot");
+    const last = (await call("meeting.schedule-get", { scheduleId })).result.item.lastOccurrenceId;
+    const lastOcc = (await call("meeting.occurrence", { occurrenceId: last })).result.item.occurrence;
+    assert.equal(lastOcc.mode, "catch-up");
+    assert.ok(lastOcc.skippedCount >= 1, JSON.stringify(lastOcc));
+    assert.notEqual(last, first, "a new occurrence, not the first one again");
     await c.close();
     c = await open();
     await c.dispatch!.dispatcher.tick();
