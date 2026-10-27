@@ -215,6 +215,38 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `meeting.schedule-get`
+
+One schedule.
+
+Arguments:
+
+- `scheduleId`: the schedule
+
+Result: `{ item }`.
+
+#### `meeting.occurrence`
+
+One occurrence with its agenda.
+
+Arguments:
+
+- `occurrenceId`: the occurrence
+
+Result: `{ item }`.
+
+#### `meeting.planned`
+
+A project's planned meetings.
+
+Arguments:
+
+- `projectId`: the project
+- `limit` (optional): 1 to 100, default 20
+- `after` (optional): the `next` of the previous page
+
+Result: `{ items, next? }`.
+
 #### `project.get`
 
 One project.
@@ -849,6 +881,83 @@ Arguments:
 - `correctiveEffectId` (optional): the effect that corrected it
 
 Result: `{ ... }`: what was done.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `meeting.schedule`
+
+Creates a recurring or one-off meeting schedule for a project. Meetings are held for the roster; a restart or a catch-up creates one occurrence per slot. Needs `meeting.manage`.
+
+Arguments:
+
+- `projectId`: the project
+- `title`: the meeting's title
+- `roster`: participant principal IDs
+- `time`: wall-clock time such as 09:30
+- `recurrence` (optional): how often (default daily)
+- `timeZone`: an IANA zone such as Europe/Berlin
+- `startDate` (optional): YYYY-MM-DD
+- `endDate` (optional): YYYY-MM-DD
+- `durationMinutes` (optional): length
+- `prepareMinutes` (optional): preparation time
+- `budgetTokens` (optional): token budget
+- `window` (optional): `{ from, to }` times of day
+
+Result: `{ id, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `meeting.update-schedule`
+
+Changes, pauses or ends a schedule. Quote the revision you read.
+
+Arguments:
+
+- `scheduleId`: the schedule
+- `expectedRevision`: the revision you read
+- `state` (optional): the new state
+- `title` (optional): title
+- `roster` (optional): participants
+- `time` (optional): time
+- `recurrence` (optional): recurrence
+- `timeZone` (optional): zone
+- `startDate` (optional): date or null
+- `endDate` (optional): date or null
+- `durationMinutes` (optional): length
+- `prepareMinutes` (optional): preparation
+- `window` (optional): times of day
+
+Result: `{ ok: true }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `meeting.call-urgent`
+
+Calls an urgent meeting for a roster. Participants who are absent or paused are not woken without authority; they are withheld and recorded. Needs `meeting.manage`.
+
+Arguments:
+
+- `projectId`: the project
+- `title`: title
+- `reason`: why it cannot wait
+- `roster`: participants
+- `durationMinutes` (optional): length
+
+Result: `{ id, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `meeting.settle`
+
+Marks an occurrence held or cancelled.
+
+Arguments:
+
+- `occurrenceId`: the occurrence
+- `outcome`: `held` or `cancelled`
+- `reason` (optional): why
+
+Result: `{ ok: true }`.
 
 Completion: finished when accepted (`completed: true`).
 
