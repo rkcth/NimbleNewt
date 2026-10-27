@@ -182,7 +182,7 @@ test("the owner grants and revokes rights through the state API and through the 
     // The chat: a right is always shown first and applies only on the owner's word; every text of it is the owner's own.
     const turn = async (id: string, text: string, intents: unknown[]) => { say[text] = intents; return (await c.chat!.submit(boot.token, { messageId: id, text })).outcomes; };
     const owner = (rest: Record<string, unknown>, evidence: string) => ({ kind: "command", ...rest, evidence, basis: "owner" });
-    const text = "give service:scanner the recovery.stall-scan right everywhere, permanently, to run stall detection";
+    const text = "give service:scanner the recovery.stall-scan right everywhere permanently";
     const args = { grantee: "service:scanner", action: "recovery.stall-scan", project: "*", basis: "run stall detection" };
     const shown = await turn("c1", text, [owner({ op: "grant.create", args }, text)]);
     assert.equal(shown[0]!.status, "proposed", JSON.stringify(shown));
@@ -192,23 +192,26 @@ test("the owner grants and revokes rights through the state API and through the 
     const active = (await call(boot.token, "grant.list", { grantee: "service:scanner" })).result.items.filter((g: { state: string }) => g.state === "active");
     assert.equal(active.length, 1);
     // A basis the owner did not say is refused, and so is a right the model chose.
-    const foreign = await turn("c3", "give service:scanner the recovery.read right permanently everywhere", [owner({ op: "grant.create", args: { grantee: "service:scanner", action: "recovery.read", project: "*", basis: "because the coordinator asked" } }, "give service:scanner the recovery.read right permanently everywhere")]);
-    assert.notEqual(foreign[0]!.status, "applied", JSON.stringify(foreign));
-    assert.notEqual(foreign[0]!.status, "proposed", "text the owner did not say is not even drafted");
+    const foreign = await turn("c3", "give service:scanner the recovery.stall-scan right permanently everywhere", [owner({ op: "grant.create", args: { grantee: "service:scanner", action: "recovery.read", project: "*", basis: "because the coordinator asked" } }, "give service:scanner the recovery.stall-scan right permanently everywhere")]);
+    assert.equal(foreign[0]!.status, "refused", "a right the owner did not name is not even drafted");
+    for (const [n, said] of [["semi", "give service:scanner the recovery.stall-scan right everywhere semi-permanent"], ["til", "give service:scanner the recovery.stall-scan right everywhere permanently til Friday"], ["for", "give service:scanner the recovery.stall-scan right everywhere permanently for now"], ["why", "give service:scanner the recovery.stall-scan right everywhere permanently to run stall detection"]] as const) {
+      const r = await turn(`c3${n}`, said, [owner({ op: "grant.create", args }, said)]);
+      assert.equal(r[0]!.status, "refused", `${said}: ${JSON.stringify(r)}`);
+    }
     // Whole words only: a prefix of the principal, and a scope the owner did not say, are refused.
     const prefix = await turn("c3b", "give service:scanner the recovery.stall-scan right everywhere to run stall detection", [owner({ op: "grant.create", args: { ...args, grantee: "service:scan" } }, text)]);
     assert.equal(prefix[0]!.status, "refused", JSON.stringify(prefix));
-    const noScope = await turn("c3c", "give service:scanner the recovery.stall-scan right permanently to run stall detection", [owner({ op: "grant.create", args }, "give service:scanner the recovery.stall-scan right permanently to run stall detection")]);
+    const noScope = await turn("c3c", "give service:scanner the recovery.stall-scan right permanently", [owner({ op: "grant.create", args }, "give service:scanner the recovery.stall-scan right permanently")]);
     assert.equal(noScope[0]!.status, "refused", "everywhere is not what the owner said");
-    const named = await turn("c3d", "give service:scanner the recovery.stall-scan right permanently to run stall detection", [owner({ op: "grant.create", args: { ...args, projectName: "Garden" } }, "give service:scanner the recovery.stall-scan right permanently to run stall detection")]);
+    const named = await turn("c3d", "give service:scanner the recovery.stall-scan right permanently", [owner({ op: "grant.create", args: { ...args, projectName: "Garden" } }, "give service:scanner the recovery.stall-scan right permanently")]);
     assert.equal(named[0]!.status, "refused", "the scope is `project`, not a name the chat would drop");
     // A sentence-ending full stop is not part of the word; a scope said about something else, and a dropped time limit, are refused.
-    const stop = "give service:scanner recovery.stall-scan everywhere permanently to run stall detection.";
+    const stop = "give service:scanner the recovery.stall-scan right everywhere permanently.";
     const dotted = await turn("c3e", stop, [owner({ op: "grant.create", args }, stop)]);
     assert.equal(dotted[0]!.status, "proposed", JSON.stringify(dotted));
-    const elsewhere = "give service:scanner recovery.stall-scan permanently to run stall detection. There are bugs everywhere.";
+    const elsewhere = "give service:scanner the recovery.stall-scan right permanently. There are bugs everywhere.";
     assert.equal((await turn("c3f", elsewhere, [owner({ op: "grant.create", args }, elsewhere)]))[0]!.status, "refused");
-    const limited = "give service:scanner recovery.stall-scan everywhere permanently. Actually, this week only";
+    const limited = "give service:scanner the recovery.stall-scan right everywhere permanently, expires Friday";
     assert.equal((await turn("c3g", limited, [owner({ op: "grant.create", args }, limited)]))[0]!.status, "refused", "a time limit is not understood by the chat");
     // The list is paged without skipping a grant.
     for (const n of [1, 2, 3]) await call(boot.token, "grant.create", { ...grant, basis: `extra ${n}` }, `gp${n}`);

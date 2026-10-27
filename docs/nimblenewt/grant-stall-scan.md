@@ -11,7 +11,7 @@ Using the owner credential, call the state API:
   "args": { "grantee": "service:dispatcher", "action": "recovery.stall-scan", "project": "*", "basis": "run stall detection" } }
 ```
 
-Or say it in the owner chat (it makes permanent rights only, and only when you say "permanently"; a limited right uses `grant.create` with `expiresAt`): *"give service:dispatcher the recovery.stall-scan right everywhere, permanently, to run stall detection"*. The chat shows the grant first; answer "yes" to apply it.
+Or say exactly this in the owner chat: *"give service:dispatcher the recovery.stall-scan right everywhere permanently"*. The chat accepts only that plain form (a few filler words such as please, the, in all projects are fine; any other word, such as a reason or a time limit, is refused). It shows the grant first; answer "yes" to apply it. A limited right uses `grant.create` with `expiresAt`.
 
 No restart is needed: the scan reads the dispatcher's principal at every tick, so the right counts from the next tick. To take it back, use `grant.list` (with `grantee`) to find the grant and `grant.revoke`, or tell the chat.
 

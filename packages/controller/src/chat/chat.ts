@@ -412,7 +412,7 @@ export class ChatService {
       }
       // Every text in the command must be the owner's own words (or a record, or a fixed choice): a model cannot add content the owner never said.
       if (hasRefMarker(intent.args)) { push({ i, kind: "refused", code: "invalid_command", message: "$ref is reserved for steps the controller builds" }); continue; }
-      const foreign = foreignValue(intent.args, words);
+      const foreign = foreignValue(intent.op === "grant.create" ? Object.fromEntries(Object.entries(intent.args).filter(([k]) => k !== "basis")) : intent.args, words); // the reason recorded with a right is the owner's message, set by the chat
       if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: `${foreign} is not in your message, so it was not done. Say what it should be.` }); continue; }
       const resolved = await this.#resolve(token, intent, currentFocus, pending, profile, words, quoted);
       if (!resolved.ok) { push(askOrRefuse(i, resolved, n)); continue; }
@@ -482,13 +482,16 @@ export class ChatService {
       for (const key of ["grantee", "action", "grantId"]) if (typeof args[key] === "string" && !wholeWord(words, args[key] as string)) return refuse("unsupported_value", `${key} is not in your message as written, so it was not done. Say it exactly.`);
       if (intent.op === "grant.create") {
         const scope = args["project"];
-        const said = typeof args["grantee"] === "string" ? words.split(/(?<=[.!?])\s+|\n+/).filter((part) => wholeWord(part, args["grantee"] as string)).join(" ") : "";
-        // The chat gives permanent rights, and only when the owner says so outright: no list of time words can be complete, so a right is never permanent by silence (a limited right uses the API's `expiresAt`).
+        // The chat gives a right only in one plain form, so nothing can limit, negate or change it unseen: "give <principal> the <action> right everywhere permanently" (or in <project ID>). Every word that is not one of those, or filler from a short fixed list, refuses the message; the reason recorded with the right is the owner's message itself.
         if (args["expiresAt"] !== undefined || args["notBefore"] !== undefined) return refuse("unsupported_value", "the chat gives rights with no time limit; for a limited right use the grant.create operation with expiresAt");
-        // The whole message states the right on its own: permanence outright, and no word that limits, negates or changes it (a word list cannot be complete, so this errs towards refusing; the proposal then shows the right as permanent, with no end time).
-        if (!/\b(permanent(ly)?|indefinite(ly)?|forever|with no (time )?limit|without (a )?(time )?limit)\b/i.test(words)) return refuse("unsupported_value", "say that the right is permanent (or use the grant.create operation with expiresAt for a limited one), so it was not done");
-        if (/\b(not|never|no longer|only|until|till|through|except|unless|actually|instead|but|however|temporar\w*|week|weeks|day|days|hour|hours|month|months|today|tomorrow|tonight|while|during|before|after|by|once|when|if)\b|n't/i.test(words.replace(/\b(with no (time )?limit|without (a )?(time )?limit)\b/gi, ""))) return refuse("unsupported_value", "state the right on its own, as permanent, in plain words; anything that limits or changes it is not understood by the chat (use the grant.create operation for a limited right)");
-        if (scope === "*") { if (!/\b(everywhere|all projects|every project)\b|\*/i.test(said)) return refuse("unsupported_value", "everywhere is not what you said, so it was not done. Name the project, or say everywhere."); }
+        const FILL = new Set(["please", "give", "grant", "allow", "let", "the", "right", "permission", "access", "to", "everywhere", "permanently", "in", "all", "every", "projects", "project"]);
+        let rest = words.toLowerCase();
+        for (const v of [args["grantee"], args["action"], scope]) if (typeof v === "string" && v !== "*") rest = rest.split(v.toLowerCase()).join(" ");
+        const leftover = rest.split(/[\s,;.!?:]+/).filter((w) => w.length > 0 && w !== "*" && !FILL.has(w));
+        if (leftover.length > 0) return refuse("unsupported_value", `"${leftover[0]!.slice(0, 40)}" is not understood in a request for a right. Say only: give <who> the <action> right everywhere permanently (a limited right uses the grant.create operation).`);
+        if (!/\bpermanently\b/i.test(words)) return refuse("unsupported_value", "say that the right is permanent: give <who> the <action> right everywhere permanently");
+        args["basis"] = `owner chat: ${words}`.slice(0, 200);
+        if (scope === "*") { if (!/\b(everywhere|all projects|every project)\b|\*/i.test(words)) return refuse("unsupported_value", "everywhere is not what you said, so it was not done. Name the project, or say everywhere."); }
         else if (typeof scope === "string") {
           if (!wholeWord(words, scope)) return refuse("unsupported_value", "project is not in your message as written, so it was not done. Say it exactly.");
           const found = await this.#projectByIntent(token, scope, undefined);
