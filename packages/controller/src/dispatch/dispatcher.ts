@@ -823,11 +823,6 @@ export class DispatcherService {
       return pre;
     }
     if (pre.kind !== "ok") return { kind: "waiting" };
-    // Every check passed: the checkout is pinned now, so a task that only waited holds no pin (card P01).
-    if (this.#deps.checkouts !== undefined) {
-      const pinned = await this.#deps.checkouts.dispatchCheckout({ commandId: `dpa-pin:${b.taskId}`, taskId: b.taskId, actor: DISPATCHER_ACTOR, pin: true });
-      if (pinned.kind === "changed" || pinned.kind === "unbound") { if (b.requestId !== undefined) await this.#giveBack(d); return { kind: "skipped", check: "checkout", reason: pinned.reason }; }
-    }
     // The place. The request ID derives from the dispatch and the number of requests so far, so a repeat after a crash finds the same request.
     const requestId = await this.#request(d, pre.host);
     const where = await this.#deps.admission.where(requestId);
@@ -835,6 +830,11 @@ export class DispatcherService {
     // Card R05b: the allowance is held before the attempt starts, so two attempts of sibling tasks cannot count on the same money or compute. Nothing to reserve with: nothing is held.
     const held = await this.#reserve(d);
     if (held !== undefined) { await this.#giveBack(d); return held; }
+    // The place is held and the allowance reserved: the checkout is pinned now, just before the start, so a task that only waited (for a place or an allowance) holds no pin (card P01).
+    if (this.#deps.checkouts !== undefined) {
+      const pinned = await this.#deps.checkouts.dispatchCheckout({ commandId: `dpa-pin:${b.taskId}`, taskId: b.taskId, actor: DISPATCHER_ACTOR, pin: true });
+      if (pinned.kind === "changed" || pinned.kind === "unbound") { await this.#giveBack(d); return { kind: "skipped", check: "checkout", reason: pinned.reason }; }
+    }
     return this.#start(d, pre.host, requestId);
   }
 
