@@ -869,7 +869,8 @@ export class AttendanceService {
       const body = (await this.#runner.get("meeting-attendance", attId))?.body as unknown as AttendanceBody | undefined;
       if (body?.joinedAt === undefined || body.leftAt === undefined) return;
       const room = await this.#roomFor(body.occurrenceId);
-      if (room === undefined || room.body.ownerAttendance === body.who) return;
+      // Only an agent has a budget: the owner's presence ("owner:...") is charged to nobody.
+      if (room === undefined || !body.who.startsWith("agent:")) return;
       const computeMs = Math.max(0, ms(body.leftAt) - ms(body.joinedAt));
       await this.#charge({ commandId: `att-use:${attId}`, projectId: room.body.projectId, agentId: body.who, computeMs, ...(body.meetingTaskId === undefined ? {} : { taskId: body.meetingTaskId }) });
     } catch (error) {

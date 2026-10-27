@@ -428,7 +428,24 @@ for (const backend of backends) {
     assert.equal(charges[0]!.computeMs, 7 * 60_000);
     assert.equal(charges[0]!.agentId, c.pA);
     assert.equal(charges[0]!.taskId, joined.meetingTaskId);
-    // The owner's own presence is nobody's budget.
+    assert.equal(charges[0]!.projectId, c.a);
+  });
+
+  suite("a meeting that ends charges the agents still in the room once, and the owner's presence is nobody's budget (card R05d)", async (c) => {
+    const charges: { commandId: string; projectId: string; agentId: string; computeMs: number; taskId?: string }[] = [];
+    const charged = c.make({ charge: async (u) => { charges.push(u); } });
+    const id = await c.urgent([c.pA, c.pB]);
+    await c.room(id);
+    await c.prep(id, c.pA);
+    const joined = await charged.join(c.asA, { commandId: cid("jn"), occurrenceId: id, agent: c.pA });
+    await charged.joinAsOwner(c.owner, { commandId: cid("jo"), occurrenceId: id });
+    minutes(12);
+    await charged.endMeeting(c.owner, { commandId: cid("end"), occurrenceId: id });
+    assert.deepEqual(charges.map((x) => [x.agentId, x.computeMs, x.taskId]), [[c.pA, 12 * 60_000, joined.meetingTaskId]], "A is charged at the end; the owner is not");
+    // Ending again, or A leaving afterwards, is the same charge under the same command ID.
+    await charged.endMeeting(c.owner, { commandId: cid("end2"), occurrenceId: id }).catch(() => undefined);
+    await charged.leave(c.asA, { commandId: cid("lv"), occurrenceId: id, agent: c.pA }).catch(() => undefined);
+    assert.equal(new Set(charges.map((x) => x.commandId)).size, 1);
   });
 
   suite("a bounded attendance lapses with its lease, and an owner invitation is needed for each meeting", async (c) => {
