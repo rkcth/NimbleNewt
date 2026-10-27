@@ -45,7 +45,7 @@ test("the owner records, corrects and gates through the state API; the correctio
     const stale = await call(boot.token, "decision.record", { ...base, statement: "Use MySQL", wording: "use MySQL", basedOn: 1, session: "phone" }, "dr5");
     assert.ok(stale.ok, JSON.stringify(stale));
     assert.ok(stale.result.disputeId !== undefined, JSON.stringify(stale));
-    assert.match(stale.result.shown[0], /conflicts with a decision made since/);
+    assert.match(stale.result.shown[0], /conflicts with a decision made after/);
 
     // A gate blocks the task at the stored guard, which the dispatcher consults.
     const gate = await call(boot.token, "decision.record", { projectId: project, category: "gate", gate: "implementation-hold", topic: "implementation-gate", statement: "Hold implementation", wording: "hold all implementation", basedOn: 0 }, "dr6");

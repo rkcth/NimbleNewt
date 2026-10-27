@@ -89,6 +89,31 @@ for (const backend of backends) {
     assert.match(refused.message ?? "", /basedOn and session are set by the controller/);
   });
 
+  suite("a restatement, a decision for another task and a repeat inside one message never turn the owner's own instructions into a dispute (card C08b)", async (w, script) => {
+    const a = await w.project("A");
+    const one = await w.task(a, "One");
+    const two = await w.task(a, "Two");
+    const chat = w.chat();
+    await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+    const dec = (statement: string, wording: string, extra: Record<string, unknown> = {}) => cmd("decision.record", { category: "decision", topic: "Store", statement, wording, ...extra }, wording);
+    const base = "We will use PostgreSQL for the store.";
+    script[base] = [dec("use PostgreSQL for the store", base)];
+    await chat.submit(w.ownerToken, { messageId: "m-r1", text: base });
+    // A: restating what already stands, then a decision for one task.
+    const A = "We will use PostgreSQL for the store. For task One we will use SQLite for the store.";
+    script[A] = [dec("use PostgreSQL for the store", "We will use PostgreSQL for the store"), dec("use SQLite for the store", "we will use SQLite for the store", { taskId: one })];
+    const ra = await chat.submit(w.ownerToken, { messageId: "m-r2", text: A });
+    assert.equal(ra.outcomes[1]!.status, "applied");
+    // B: a task, then project-wide, then another task. C: a task, another task, and the other task again.
+    const B = "For task One we will use MySQL for the store. Everywhere else we will use Oracle for the store. For task Two we will use Firebird for the store.";
+    script[B] = [dec("use MySQL for the store", "we will use MySQL for the store", { taskId: one }), dec("use Oracle for the store", "we will use Oracle for the store"), dec("use Firebird for the store", "we will use Firebird for the store", { taskId: two })];
+    assert.deepEqual((await chat.submit(w.ownerToken, { messageId: "m-r3", text: B })).outcomes.map((o) => o.status), ["applied", "applied", "applied"]);
+    const C = "For task Two we will use Derby for the store. For task One we will use H2 for the store. For task Two we will use HSQL for the store.";
+    script[C] = [dec("use Derby for the store", "we will use Derby for the store", { taskId: two }), dec("use H2 for the store", "we will use H2 for the store", { taskId: one }), dec("use HSQL for the store", "we will use HSQL for the store", { taskId: two })];
+    assert.deepEqual((await chat.submit(w.ownerToken, { messageId: "m-r4", text: C })).outcomes.map((o) => o.status), ["applied", "applied", "applied"]);
+    assert.equal((await w.decisions.history(w.owner, { projectId: a, topic: "store" })).some((d) => d.state === "disputed"), false, "no dispute anywhere");
+  });
+
   suite("two task-scoped decisions in one message do not dispute each other; the interpreter's session label is refused; a gate or a stance the owner did not say is refused (card C08b)", async (w, script) => {
     const a = await w.project("A");
     const one = await w.task(a, "One");
