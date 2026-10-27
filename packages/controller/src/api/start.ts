@@ -1,3 +1,5 @@
+import { BudgetService } from "../budgets/index.js";
+import { NotificationService } from "../notifications/index.js";
 import { StallService } from "../health/index.js";
 import { DomainError } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
@@ -26,7 +28,6 @@ import { StateApi } from "./state-api.js";
 import { ConfigurationService } from "../configuration/index.js";
 import { ConversationService, type Availability } from "../conversations/index.js";
 import { AgentMessageService } from "../messaging/index.js";
-import { NotificationService } from "../notifications/index.js";
 import { PolicyEditService } from "../chat/index.js";
 import { PolicyService } from "../policy/index.js";
 import { StatusService } from "../status/index.js";
@@ -243,7 +244,9 @@ export async function startController(options: StartOptions): Promise<Controller
     const notifications = NotificationService.withEpoch(storage, epoch);
     const messages = AgentMessageService.withEpoch(storage, epoch, { availability: pauses.availability, taskPaused: (t) => pauses.isPaused(t), guard: (t) => pauses.guard(t), waits, assignments, inquiries, notifications });
     const branches = ContextBranchService.withEpoch(storage, epoch, { histories, retrieval });
-    const api = new StateApi({ branches, ownerQuestions: messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
+    // A new request for more budget tells the owner when it is addressed to them (card R05c). Only the controller's own facts go in the notice, never the requester's words.
+    const budgets = BudgetService.withEpoch(storage, epoch, { notify: async (n) => { if (n.to === "owner") await notifications.emitFromController({ commandId: `bgt-req-${n.requestId}`, kind: "maintenance", ref: { kind: "budget-request", id: n.requestId }, detail: `${n.requestedBy} asked for more budget for task ${n.taskId} (${n.costMicros} millionths, ${n.computeMs} ms of compute). Decide it with budget.decide.` }); } });
+    const api = new StateApi({ branches, budgets, ownerQuestions: messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
     let chat: ChatService | undefined;
     let coordinator: CoordinatorService | undefined;
     if (options.chat !== undefined) {

@@ -2,6 +2,7 @@ import { DomainError } from "../domain/errors.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import type { ProjectService } from "../domain/service.js";
 import type { AgentService } from "../agents/index.js";
+import type { BudgetService } from "../budgets/index.js";
 import type { WatchService } from "../events/handling.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
@@ -35,6 +36,8 @@ export interface Context {
   readonly meetings?: MeetingService;
   /** Absent when the controller runs without context branches (card C05). */
   readonly branches?: ContextBranchService;
+  /** Absent when the controller runs without budgets (card R05c). */
+  readonly budgets?: Pick<BudgetService, "report" | "usage" | "request" | "pending" | "requestMore" | "decide">;
   /** Absent when the controller runs without agent messages (card U12): questions to the owner. */
   readonly ownerQuestions?: Pick<AgentMessageService, "askOwner" | "ownerQuestions" | "answerOwner">;
 }
@@ -84,6 +87,7 @@ const resources = (c: Context): ProjectResourceService => c.resources ?? unavail
 const plans = (c: Context): ProjectPlanService => c.plans ?? unavailable("project plans");
 const ownerQuestionsOf = (c: Context): NonNullable<Context["ownerQuestions"]> => c.ownerQuestions ?? unavailable("questions to the owner");
 const branchesOf = (c: Context): ContextBranchService => c.branches ?? unavailable("context branches");
+const budgetsOf = (c: Context): NonNullable<Context["budgets"]> => c.budgets ?? unavailable("budgets");
 const meetingsOf = (c: Context): MeetingService => c.meetings ?? unavailable("meetings");
 const duties = (c: Context): ResponsibilityService => c.responsibilities ?? unavailable("responsibilities");
 const optNum = (args: Args, key: string): number | undefined => { const v = args[key]; return v === undefined ? undefined : (typeof v === "number" ? v : invalid(`args.${key}`, "must be a number")); };
@@ -97,6 +101,18 @@ const rest = (args: Args, ...skip: string[]): Args => Object.fromEntries(Object.
 
 /** The version-1 operations. The documentation (`renderApiDocs`) is generated from this table, so it cannot drift. */
 export const OPERATIONS: readonly Operation[] = [
+  { name: "budget.report", kind: "query", summary: "A task's budget: limit, delegated to children, in flight, uncertain, spent, overrun and available, for money and for compute, with the reservations and open requests behind them. A task you may not read reads like a missing one.", args: { taskId: "the task" }, result: "`{ item }`: the report.",
+    run: async (c, a) => { only(a, ["taskId"]); return found("budget", await budgetsOf(c).report(c.principal, str(a, "taskId"))); } },
+  { name: "budget.usage", kind: "query", summary: "What has been spent, by project, task or agent, with work and shared overhead apart and the cache figures.", args: { "projectId?": "only this project", "taskId?": "only this task", "agentId?": "only this agent", "category?": "`work` or `shared-overhead`" }, result: "`{ item }`: the summary.",
+    run: async (c, a) => { only(a, ["projectId", "taskId", "agentId", "category"]); const category = optStr(a, "category"); if (category !== undefined && category !== "work" && category !== "shared-overhead") invalid("args.category", "must be work or shared-overhead"); return found("usage", await budgetsOf(c).usage(c.principal, { ...(optStr(a, "projectId") === undefined ? {} : { projectId: optStr(a, "projectId")! }), ...(optStr(a, "taskId") === undefined ? {} : { taskId: optStr(a, "taskId")! }), ...(optStr(a, "agentId") === undefined ? {} : { agentId: optStr(a, "agentId")! }), ...(category === undefined ? {} : { category: category as "work" | "shared-overhead" }) })); } },
+  { name: "budget.pending", kind: "query", summary: "The open requests for more budget addressed to you (the owner: those that went to the owner), with whether the list may be partial.", args: {}, result: "`{ requests, truncated }`; when `truncated` is true some older open requests may be missing (read each task's `budget.report`).",
+    run: async (c, a) => { only(a, []); return asJson(await budgetsOf(c).pending(c.principal)); } },
+  { name: "budget.get-request", kind: "query", summary: "One request for more budget (its requester, its addressee and the owner may read it).", args: { requestId: "the request's ID" }, result: "`{ item }`: the request.",
+    run: async (c, a) => { only(a, ["requestId"]); return found("request", await budgetsOf(c).request(c.principal, str(a, "requestId"))); } },
+  { name: "budget.request-more", kind: "command", summary: "A task asks for more budget. It goes to the holder of the parent node, or to the owner, who is told.", args: { taskId: "the task", "costMicros?": "money wanted, in millionths", "computeMs?": "compute wanted, in milliseconds", reason: "why" }, result: "`{ id, to, replayed }`: the request and who it was addressed to.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["taskId", "costMicros", "computeMs", "reason"]); const r = await budgetsOf(c).requestMore(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson(r); } },
+  { name: "budget.decide", kind: "command", summary: "Approves (possibly less than asked) or denies a request. The owner may add new money; the holder it was addressed to may only move allowance from its own node.", args: { requestId: "the request", approve: "true or false", "costMicros?": "money to grant, at most what was asked", "computeMs?": "compute to grant, at most what was asked", "note?": "a note" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["requestId", "approve", "costMicros", "computeMs", "note"]); await budgetsOf(c).decide(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
   { name: "project.get", kind: "query", summary: "One project.", args: { projectId: "the project's ID" }, result: "`{ item }`: the project, with its ID, revision and timestamps.",
     run: async (c, a) => { only(a, ["projectId"]); return found("project", await c.secure.getProject(str(a, "projectId"))); } },
   { name: "project.list", kind: "query", summary: "The projects the caller may read.", args: { "limit?": `1 to ${PAGE.max}, default ${PAGE.default}`, "after?": "the `next` of the previous page" }, result: "`{ items, next? }`.",
