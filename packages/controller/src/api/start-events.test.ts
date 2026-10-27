@@ -48,6 +48,20 @@ test("an idle event subscription with events waiting is expired by the running c
     const [activity] = (await c.storage.listAudit({ afterSeq: 0, limit: 1000 })).filter((e) => e.type === "events.expire");
     assert.ok(activity !== undefined, "the expiry is in the activity record");
 
+    // A subscription that predates idle expiry (no last activity recorded, made long ago) is not expired at the first tick after upgrade: its idle time counts from the stamp at start.
+    const legacy = await events.subscribe(owner, { commandId: "sb-old", stream });
+    const rec = (await c.storage.getAggregate({ kind: "subscription", id: legacy.id }))!;
+    const { lastActiveAt: _drop, ...old } = rec.body as Record<string, unknown>;
+    await c.storage.applyOperation({ operationId: "op-legacy", epoch: c.epoch, actor: "test", correlationId: "cor-legacy", at: clock(), changes: [{ type: "update", ref: { kind: "subscription", id: legacy.id }, expectedRevision: rec.revision, body: { ...old, createdAt: "2026-01-01T00:00:00.000Z" } as never }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
+    const service = await c.services.principals.authenticate((await c.services.principals.provisionService("dispatcher")).token);
+    assert.deepEqual(await events.stampIdle(service), { stamped: 1 });
+    assert.deepEqual(await events.stampIdle(service), { stamped: 0 }, "once");
+    await c.dispatch.dispatcher.tick();
+    assert.equal((await events.status(owner, legacy.id)).state, "active", "not expired by the first sweep");
+    now += 61_000;
+    await c.dispatch.dispatcher.tick();
+    assert.equal((await events.status(owner, legacy.id)).state, "expired", "idle for the idle time from the stamp");
+
     // Cancelling: the subscriber or the owner may, another agent may not.
     const other = await events.subscribe(owner, { commandId: "sb2", stream });
     assert.equal((await call(ann, "events.cancel", { subscriptionId: other.id }, "cn-ann")).error?.code, "forbidden");

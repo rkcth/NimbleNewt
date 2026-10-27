@@ -1876,6 +1876,6 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## H06c notes (idle-expiry notices in the running controller)
 
 - The composed `EventService` is built with `notify: noticeThroughNotifications(notifications)`, so an idle expiry that left events waiting files one maintenance notice for the owner (commandId `events-expired-<subscription>-<time>`; the next ticks add none). The expiry is in the activity record (`events.expire`).
-- A subscription made before idle expiry existed (no stored idle time) uses the owner-configured idle time, default 900 seconds, as `idleOf` already did: nothing needs migrating at start.
+- A subscription made before idle expiry existed has no stored idle time (it uses the owner-configured one, default 900 seconds) and no last activity, which counted idle from the day it was made. `EventService.stampIdle` gives each such active subscription the time of the call as its last activity; the composer runs it once at start (repeating changes nothing), and a test seeds a subscription made long ago with no last activity and shows it is not expired by the first sweep.
 - State API: `events.configure-idle` (owner) and `events.cancel` (the subscriber or the owner). `start.ts` gives the API its own `EventService` on the same store.
 - Known limit: the U11b notice kind does not exist yet, so the notice is the generic `maintenance` kind.
