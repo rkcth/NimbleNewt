@@ -296,6 +296,11 @@ export class ConfigurationService {
     return { ...(await this.#combined(chain)), complete };
   }
 
+  /** One setting's installation-level value, for the controller's own reading (no rights check: it is not an answer to a caller). `undefined` when the setting is not known or unset. */
+  async installationValue(key: string): Promise<unknown> {
+    return (await this.#combined([await this.#link("installation", "installation")])).values[key]?.value;
+  }
+
   // ---- routing binding (card R01) -------------------------------------------------------------------------------------------
 
   /**

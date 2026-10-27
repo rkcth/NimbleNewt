@@ -1,4 +1,4 @@
-import { MeetingService } from "../meetings/index.js";
+import { InvitationInbox, MEETING_SETTINGS, MeetingService } from "../meetings/index.js";
 import { EventService } from "../events/index.js";
 import { BudgetService, holderNotice } from "../budgets/index.js";
 import { NotificationService } from "../notifications/index.js";
@@ -246,7 +246,7 @@ export async function startController(options: StartOptions): Promise<Controller
     const graph = WaitGraphService.withEpoch(storage, epoch, contracts, BlockerService.withEpoch(storage, epoch), { extraEdges: (projectId, tasks) => reviews.waitEdges(projectId, tasks) });
     // The routing table is refused unless the coordinator, the safety supervisor and every other role in it have a valid fallback list (card R04).
     const routing = RoutingService.withEpoch(storage, epoch, {}, {});
-    const configuration = ConfigurationService.withEpoch(storage, epoch, { routing });
+    const configuration = ConfigurationService.withEpoch(storage, epoch, { routing, settings: MEETING_SETTINGS });
     const conversations = ConversationService.withEpoch(storage, epoch, { availability: pauses.availability });
     const resources = ProjectResourceService.withEpoch(storage, epoch);
     const plans = ProjectPlanService.withEpoch(storage, epoch);
@@ -261,11 +261,13 @@ export async function startController(options: StartOptions): Promise<Controller
     const budgets = BudgetService.withEpoch(storage, epoch, { notify: async (n) => { if (n.to === "owner") await notifications.emitFromController({ commandId: `bgt-req-${n.requestId}`, kind: "maintenance", ref: { kind: "budget-request", id: n.requestId }, detail: `${n.requestedBy} asked for more budget for task ${n.taskId} (${n.costMicros} millionths, ${n.computeMs} ms of compute). Decide it with budget.decide.` }); else if (n.to.startsWith("agent:")) { const { purpose, text } = holderNotice(n); await messages.noticeFromController({ commandId: `bgt-hold-${n.requestId}`, taskId: n.parentTaskId ?? n.taskId, to: n.to, purpose, text, admit: "budget.manage" }); } } });
     // Event watches (card H13): an agent's watch on a stream, its handling attempts and the failed queue, which the status answers and the state API read.
     const watchService = WatchService.withEpoch(storage, epoch, { events: EventService.withEpoch(storage, epoch), inbox: InboxService.withEpoch(storage, epoch, assignments), assignments, projects });
-    const meetings = MeetingService.withEpoch(storage, epoch, { inquiries }, { availability: pauses.availability });
+    // A schedule that names no zone uses the owner's `meeting.timeZone` setting (card M01c).
+    const invitationInbox = InvitationInbox.withEpoch(storage, epoch);
+    const meetings = MeetingService.withEpoch(storage, epoch, { inquiries }, { availability: pauses.availability, ownerTimeZone: async () => { const v = await configuration.installationValue("meeting.timeZone"); return typeof v === "string" ? v : undefined; } });
     const workspaceOps = WorkspaceOpService.withEpoch(storage, epoch, { quiesce: { around: (scope, operation, run, after) => dispatch === undefined ? run({ attempts: [] }) : dispatch.quiesce.around(scope, operation, run, after) }, portOf: async (taskId) => dispatch?.workspacePortOf(taskId), attempts: { live: async (taskId) => (await dispatch?.attemptControl.live(taskId)) ?? [], frozenReason: async (id) => dispatch?.attemptControl.frozenReason(id), release: async (id) => { await dispatch?.attemptControl.release(id); } } });
     const checked = options.artifacts === undefined ? undefined : ArtifactService.withEpoch(storage, epoch, await FileBlobStore.open({ directory: options.artifacts.directory }));
     const status = StatusService.withEpoch(storage, epoch, { assignments, waits, blockers: BlockerService.withEpoch(storage, epoch), contracts, pauses, stall, watch: watchService, ...(checked === undefined ? {} : { verifyArtifact: async (id: string) => ({ ok: (await checked.verify(id)).ok }) }) });
-    const api = new StateApi({ status, workspaceOps, branches, meetings, grants, watches: watchService, events: EventService.withEpoch(storage, epoch), budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
+    const api = new StateApi({ status, workspaceOps, branches, meetings, invitations: invitationInbox, grants, watches: watchService, events: EventService.withEpoch(storage, epoch), budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
     let chat: ChatService | undefined;
     let coordinator: CoordinatorService | undefined;
     if (options.chat !== undefined) {

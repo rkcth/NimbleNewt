@@ -29,7 +29,7 @@ import type { AgentService } from "../agents/index.js";
 import type { HistoryService } from "../context/index.js";
 import type { InquiryService } from "../inquiries/index.js";
 import { PauseService } from "../lifecycle/index.js";
-import { AttendanceService, MeetingService, type InvitationSink } from "../meetings/index.js";
+import { AttendanceService, InvitationInbox, MeetingService, type InvitationSink } from "../meetings/index.js";
 import { AgentMessageService } from "../messaging/index.js";
 import { NotificationService } from "../notifications/index.js";
 import type { ContractService } from "../planning/index.js";
@@ -94,7 +94,7 @@ export interface DispatchStartOptions {
     /** The pin marker the project holds for this attempt's route, if any (a pin is sent only while the marker is active). */
     readonly pinMarker?: (order: WorkOrder) => string | undefined;
   };
-  /** Where the invitations of scheduled meetings go (card M01): the host delivers them to the agents it can reach. Absent: invitations are decided and recorded but nothing is sent. */
+  /** Where the invitations of scheduled meetings go (card M01): the host delivers them to the agents it can reach. Absent: they go to the controller's own invitation inbox, which the agent reads through `meeting.invitations`. */
   readonly invitations?: InvitationSink;
   /** Remote MCP servers (cards T03, H12g): the name resolver the host uses. Given, the handle carries the MCP service and the connector that reaches an approved server only at a checked public address. */
   readonly mcp?: { readonly resolve: NameResolver; /** Refuses while the controller is paused or stopping (the lifecycle gate); default: never refuses. */ readonly gate?: () => Promise<void> };
@@ -164,7 +164,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     const d = await difficulty.resolve(principal, { commandId, taskId, role: "worker", data: "local-only", paidAuthorized: false });
     return d.outcome === "chosen" ? { route: d.route!, ...(d.profile?.harness === undefined ? {} : { harness: d.profile.harness }), role: d.role, request: d.request, routing: d.routingRevision ?? 0, profiles: d.profilesRevision } : { none: true, reasons: d.reasons };
   });
-  const meetings = MeetingService.withEpoch(storage, epoch, { inquiries: i.inquiries }, { ...ro, availability: pauses.availability, ...(i.options.invitations === undefined ? {} : { invitations: i.options.invitations }) });
+  const meetings = MeetingService.withEpoch(storage, epoch, { inquiries: i.inquiries }, { ...ro, availability: pauses.availability, invitations: i.options.invitations ?? InvitationInbox.withEpoch(storage, epoch, ro) });
   const messages = AgentMessageService.withEpoch(storage, epoch, {
     ...ro, availability: pauses.availability, taskPaused: (t) => pauses.isPaused(t), guard: (t) => pauses.guard(t), waits: i.waits, assignments: i.assignments, meetings, inquiries: i.inquiries, notifications,
   });
