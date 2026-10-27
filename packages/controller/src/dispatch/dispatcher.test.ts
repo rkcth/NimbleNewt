@@ -131,6 +131,45 @@ for (const backend of backends) {
     assert.ok((await c.run()).started.includes(t.attemptId!), "the next tick starts it");
   });
 
+  suite("a blocked task does not keep its allowance: a pin that fails gives the hold back with the place (also when the process stops half way), and the next tick holds it afresh, once, and the end charges what was used (card P01b)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    await c.resources.bindResource(c.owner, { commandId: "b1", projectId: c.project, kind: "repository", label: "Web", locator: "/work/web", repositoryId: "web" });
+    const t = await c.task("Fix web", ann, { repositoryId: "web" });
+    await c.budgets.open(c.owner, { commandId: "bo", taskId: t.taskId, currency: "USD", costMicros: 10_000, computeMs: 3_600_000 });
+    let during: Awaited<ReturnType<Ctx["budgets"]["report"]>>;
+    c.worker.script = async ({ gateway }) => { during = await c.budgets.report(c.owner, t.taskId); await gateway.usage({ turnSeq: 1, costMicros: 7, computeMs: 40 }); return { status: "completed", text: "x" }; };
+    c.dispatcher = c.restart({}, { reserveCostMicros: 1000 });
+    const realCheckout = c.resources.dispatchCheckout.bind(c.resources);
+    let broken = true;
+    (c.resources as { dispatchCheckout: unknown }).dispatchCheckout = async (cmd: Parameters<typeof realCheckout>[0]) => { if (cmd.pin && broken) throw new Error("store fault"); return realCheckout(cmd); };
+    // The first give-back stops after the hold was marked for release but before the budget released it.
+    const realRelease = c.budgets.release.bind(c.budgets);
+    let crash = true;
+    (c.budgets as { release: unknown }).release = async (...a: Parameters<typeof realRelease>) => { if (crash) { crash = false; throw new Error("the process stopped"); } return realRelease(...a); };
+    await c.run();
+    assert.equal((await c.budgets.report(c.owner, t.taskId))!.reservedInFlight.costMicros, 1000, "the release did not happen yet");
+    broken = false;
+    const second = await c.run();
+    assert.ok(second.started.includes(t.attemptId!), JSON.stringify({ s: second.skipped, f: second.failures, w: second.waiting, b: second.blocked }));
+    assert.deepEqual([during!.reservedInFlight.costMicros, during!.reservedInFlight.computeMs], [1000, 3_600_000], "one hold while it runs, not two and not none");
+    const after = (await c.budgets.report(c.owner, t.taskId))!;
+    assert.deepEqual([after.reservedInFlight.costMicros, after.spent.costMicros], [0, 7], "settled at the end, and what it used was charged");
+  });
+
+  suite("a pin that fails while the attempt is being started gives the place back, so the next tick can start it (card P01b)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    await c.resources.bindResource(c.owner, { commandId: "b1", projectId: c.project, kind: "repository", label: "Web", locator: "/work/web", repositoryId: "web" });
+    const t = await c.task("Fix web", ann, { repositoryId: "web" });
+    const real = c.resources.dispatchCheckout.bind(c.resources);
+    let broken = true;
+    (c.resources as { dispatchCheckout: unknown }).dispatchCheckout = async (cmd: Parameters<typeof real>[0]) => { if (cmd.pin && broken) throw new Error("store fault"); return real(cmd); };
+    const first = await c.run();
+    assert.ok(!first.started.includes(t.attemptId!));
+    assert.equal((await c.admission.snapshot()).running.length, 0, "no place is held by an attempt that never started");
+    broken = false;
+    assert.ok((await c.run()).started.includes(t.attemptId!), "the next tick starts it");
+  });
+
   suite("a blocked task does not keep its allowance: a pin that fails or a checkout that moved gives the hold back with the place, and the next tick holds it afresh (card P01b)", async (c) => {
     const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
     await c.resources.bindResource(c.owner, { commandId: "b1", projectId: c.project, kind: "repository", label: "Web", locator: "/work/web", repositoryId: "web" });

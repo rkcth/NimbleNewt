@@ -71,6 +71,8 @@ export interface DispatchBody {
   readonly reservationId?: string;
   /** How many holds this attempt has given back; the next hold's command ID carries it, so it is not taken for the released one. */
   readonly reserveRound?: number;
+  /** A hold being given back: set before the budget is asked to release it, cleared after, so a stopped process can finish it. */
+  readonly releasingId?: string;
   readonly used?: { readonly costMicros: number; readonly computeMs: number };
   /** What the attempt meant to hold, written before the reservation is asked for, so a repeat after a crash asks for exactly the same amounts. */
   readonly reserving?: { readonly costMicros?: number; readonly computeMs?: number };

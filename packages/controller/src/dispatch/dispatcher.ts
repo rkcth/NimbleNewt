@@ -812,6 +812,8 @@ export class DispatcherService {
 
   /** Takes a claimed attempt as far as it can go: asks for a place, and starts the worker when it has one. */
   async #advance(d: Loaded): Promise<AdvanceOutcome> {
+    // A release a stopped process began is finished before anything is judged: the hold it still shows would count against the task's own allowance.
+    if (d.body.releasingId !== undefined) { await this.#giveBack(d); d = (await this.#load(d.body.attemptId)) ?? d; }
     const b = d.body;
     const task = await this.#deps.projects.getTask(b.taskId);
     const assignment = await this.#deps.assignments.getAssignment(b.taskId);
@@ -824,13 +826,14 @@ export class DispatcherService {
     const pre = await this.#checks(task, true, b.attemptId, b.agentId);
     if (pre.kind === "skipped" || pre.kind === "blocked") {
       // A passing reason gives the place back (nothing waits on a place for work that may not start); a lasting one is already a blocker.
-      if (b.requestId !== undefined) await this.#giveBack(d);
+      if (b.requestId !== undefined || b.reservationId !== undefined || b.releasingId !== undefined) await this.#giveBack(d);
       return pre;
     }
     if (pre.kind !== "ok") return { kind: "waiting" };
     // The place. The request ID derives from the dispatch and the number of requests so far, so a repeat after a crash finds the same request.
     const requestId = await this.#request(d, pre.host);
     const where = await this.#deps.admission.where(requestId);
+    if (where.state !== "running" && where.state !== "waiting") await this.#giveBack(d);
     if (where.state !== "running") return where.state === "waiting" ? { kind: "waiting" } : { kind: "skipped", check: "place", reason: where.state === "withdrawn" ? `the request for a place was withdrawn: ${where.reason}` : "the request for a place is gone" };
     // Card R05b: the allowance is held before the attempt starts, so two attempts of sibling tasks cannot count on the same money or compute. Nothing to reserve with: nothing is held.
     const held = await this.#reserve(d);
@@ -840,10 +843,10 @@ export class DispatcherService {
       let pinned: Awaited<ReturnType<NonNullable<DispatcherDeps["checkouts"]>["dispatchCheckout"]>>;
       try { pinned = await this.#deps.checkouts.dispatchCheckout({ commandId: `dpa-pin:${b.taskId}`, taskId: b.taskId, actor: DISPATCHER_ACTOR, pin: true }); } catch (error) {
         // The place and the allowance are held: a pin that could not be written gives them back before the fault goes on, so nothing waits on an attempt that never starts.
-        await this.#giveBack({ ...d, body: { ...d.body, requestId } });
+        await this.#giveBack(d).catch((e: unknown) => this.#options.onError?.(e));
         throw error;
       }
-      if (pinned.kind === "changed" || pinned.kind === "unbound") { await this.#giveBack({ ...d, body: { ...d.body, requestId } }); return { kind: "skipped", check: "checkout", reason: pinned.reason }; }
+      if (pinned.kind === "changed" || pinned.kind === "unbound") { await this.#giveBack(d); return { kind: "skipped", check: "checkout", reason: pinned.reason }; }
     }
     return this.#start(d, pre.host, requestId);
   }
@@ -851,7 +854,10 @@ export class DispatcherService {
   /** Holds the attempt's most possible spend. The amounts are decided once and written to the attempt before the budget is asked, and the reservation's command ID derives from the attempt, so a repeat after a crash (or a second dispatcher) asks for the same thing and finds the same hold. Returns why the attempt cannot start when the allowance is not there. */
   async #reserve(d: Loaded): Promise<AdvanceOutcome | undefined> {
     const budgets = this.#deps.budgets;
-    if (budgets?.reserve === undefined || d.body.reservationId !== undefined) return undefined;
+    if (budgets?.reserve === undefined) return undefined;
+    // A release a stopped process began is finished first, so the new hold is never taken for the old one.
+    if (d.body.releasingId !== undefined) { await this.#giveBack(d); d = (await this.#load(d.body.attemptId)) ?? d; }
+    if (d.body.reservationId !== undefined) return undefined;
     let want = d.body.reserving;
     if (want === undefined) {
       const report = await budgets.accounting(this.#deps.principal, d.body.taskId);
@@ -908,14 +914,22 @@ export class DispatcherService {
       await this.#update(fresh.attemptId, (b) => { const { requestId: _r, ...rest } = b; void _r; return rest; });
     }
     const budgets = this.#deps.budgets;
-    if (fresh.reservationId !== undefined && budgets?.release !== undefined) {
-      try { await budgets.release(this.#deps.principal, { commandId: `dpa-rrel:${fresh.attemptId}:${fresh.reserveRound ?? 0}`, reservationId: fresh.reservationId }); } catch (error) {
-        // Already settled or released: nothing is held either way. Anything else keeps the hold (and the fault goes on) so the next tick tries again.
-        if (!isDomainError(error, "invalid_transition") && !isDomainError(error, "not_found")) throw error;
-      }
+    if (budgets?.release === undefined) return;
+    // The hold is first moved to `releasingId` (and the round counted) in one write, then released under a command ID that derives from the round, then the mark is cleared: a process that stops in between finds the mark and finishes the release,
+    // so an attempt is never started on a hold that was already released.
+    let marked = fresh;
+    if (fresh.reservationId !== undefined) {
       const held = fresh.reservationId;
-      await this.#update(fresh.attemptId, (b) => { if (b.reservationId !== held) return b; const { reservationId: _h, reserving: _w, ...rest } = b; void _h; void _w; return { ...rest, reserveRound: (b.reserveRound ?? 0) + 1 }; });
+      marked = await this.#update(fresh.attemptId, (b) => { if (b.reservationId !== held) return b; const { reservationId: _h, reserving: _w, ...rest } = b; void _h; void _w; return { ...rest, releasingId: held, reserveRound: (b.reserveRound ?? 0) + 1 }; });
     }
+    const releasing = marked.releasingId;
+    if (releasing === undefined) return;
+    try { await budgets.release(this.#deps.principal, { commandId: `dpa-rrel:${marked.attemptId}:${(marked.reserveRound ?? 1) - 1}`, reservationId: releasing }); } catch (error) {
+      // Already settled or released, or held as uncertain (which must be settled with what happened, not released): either way there is nothing more to release here. Anything else keeps the mark and goes on, so the next tick tries again.
+      if (isDomainError(error, "invalid_transition")) this.#options.onError?.(error);
+      else if (!isDomainError(error, "not_found")) throw error;
+    }
+    await this.#update(marked.attemptId, (b) => { if (b.releasingId !== releasing) return b; const { releasingId: _r, ...rest } = b; void _r; return rest; });
   }
 
   async #start(d: Loaded, host: WorkerHost, requestId: string): Promise<AdvanceOutcome> {
