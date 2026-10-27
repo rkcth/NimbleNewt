@@ -11,6 +11,7 @@ import type { ProjectPlanService, ProjectResourceService, ResponsibilityService 
 import type { ContextBranchService } from "../branches/index.js";
 import type { MeetingService } from "../meetings/index.js";
 import type { AgentMessageService } from "../messaging/index.js";
+import type { DifficultyService } from "../routing/difficulty.js";
 import { SecureApi } from "../security/secured.js";
 import type { PrincipalService } from "../security/principals.js";
 import type { TaskCredentialService } from "../security/task-credentials.js";
@@ -60,6 +61,8 @@ export interface StateApiDeps {
   readonly branches?: ContextBranchService;
   /** When present, an agent can ask the owner a question and the owner can see and answer the questions (card U12). */
   readonly ownerQuestions?: Pick<AgentMessageService, "askOwner" | "ownerQuestions" | "answerOwner">;
+  /** When present, difficulty profiles, delegation and escalation can be used through the API (card R03). */
+  readonly difficulty?: Pick<DifficultyService, "profiles" | "setProfiles" | "decisions" | "decision" | "delegate" | "reassignParent" | "delegation" | "setDifficulty" | "escalate" | "decide" | "escalations">;
   /** When present, a task credential (`tcr-…`) is accepted too and acts for its one task (card A10b). */
   readonly taskCredentials?: TaskCredentialService;
   /** Called with errors that are not part of the contract (so they are not shown to the client). */
@@ -106,6 +109,7 @@ export class StateApi {
         ...(this.#deps.meetings === undefined ? {} : { meetings: this.#deps.meetings }),
         ...(this.#deps.branches === undefined ? {} : { branches: this.#deps.branches }),
         ...(this.#deps.ownerQuestions === undefined ? {} : { ownerQuestions: this.#deps.ownerQuestions }),
+        ...(this.#deps.difficulty === undefined ? {} : { difficulty: this.#deps.difficulty }),
       };
       const result = await operation.run(context, args, request.commandId);
       if (operation.kind === "query") return { v: API_VERSION, op: request.op, ok: true, result };

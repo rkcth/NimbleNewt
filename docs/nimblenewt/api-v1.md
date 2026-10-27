@@ -32,6 +32,59 @@ One door to the controller's state for chat, command-line and HTTP clients. A cl
 
 ### Queries
 
+#### `difficulty.profiles`
+
+The difficulty profiles and the mapping from difficulty to profile (owner, or someone with `routing.write`).
+
+Arguments:
+
+- none
+
+Result: `{ item }`: the profiles, with the revision to quote when replacing them.
+
+#### `difficulty.delegation`
+
+A task's delegation: parent, ceiling and the budgets left.
+
+Arguments:
+
+- `taskId`: the task
+
+Result: `{ item }`.
+
+#### `escalation.list`
+
+A task's escalations.
+
+Arguments:
+
+- `taskId`: the task
+
+Result: `{ items }`.
+
+#### `routing.decisions`
+
+The persisted routing decisions of a task: which profile and route were chosen and why.
+
+Arguments:
+
+- `taskId`: the task
+- `limit` (optional): 1 to 100, default 20
+- `after` (optional): the `next` of the previous page
+
+Result: `{ items, next? }`.
+
+#### `routing.decision`
+
+One routing decision of a task.
+
+Arguments:
+
+- `taskId`: the task
+- `decisionId`: the decision
+
+Result: `{ item }`.
+
 #### `project.get`
 
 One project.
@@ -390,6 +443,93 @@ Arguments:
 Result: `{ items, next? }`.
 
 ### Commands
+
+#### `difficulty.set-profiles`
+
+Replaces the profiles and the mapping in one validated step (owner, or someone with `routing.write`). It applies to the next dispatch only.
+
+Arguments:
+
+- `expectedRevision`: the revision you read (0 for the first)
+- `profiles`: the profiles and mapping
+
+Result: `{ revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `difficulty.set`
+
+Sets (or with `null` clears) a task's difficulty. The task's parent may; anyone else needs the ordinary right to change its contract.
+
+Arguments:
+
+- `taskId`: the task
+- `expectedVersion`: the contract version you read
+- `difficulty`: a difficulty name, or null
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `difficulty.delegate`
+
+The caller (the parent) delegates a task to a child agent with a difficulty ceiling and retry and total budgets for escalation.
+
+Arguments:
+
+- `taskId`: the task delegated
+- `child`: the child agent principal (agent:<name>)
+- `ceiling`: the highest difficulty the child may escalate to on its own
+- `retryBudget` (optional): failures before it must escalate
+- `totalBudget` (optional): escalations in all
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `difficulty.reassign-parent`
+
+Moves a delegated task to another parent (the owner only).
+
+Arguments:
+
+- `taskId`: the delegated task
+- `parent`: the new parent's principal ID
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `escalation.request`
+
+A blocked or repeatedly failing child asks for a harder profile, within its ceiling or by asking its parent.
+
+Arguments:
+
+- `taskId`: the task
+- `kind`: `blocked` or `failing`
+- `reason`: why
+- `blockerId` (optional): the blocker, for `blocked`
+- `to` (optional): the difficulty asked for
+
+Result: `{ item }`: the escalation and how it was decided or who decides.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `escalation.decide`
+
+The parent approves or denies a child's escalation.
+
+Arguments:
+
+- `taskId`: the child task
+- `escalationId`: the escalation
+- `approve`: true or false
+- `reason`: why
+
+Result: `{ item }`.
+
+Completion: finished when accepted (`completed: true`).
 
 #### `agent.create`
 
