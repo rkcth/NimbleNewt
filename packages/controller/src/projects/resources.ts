@@ -435,11 +435,11 @@ export class ProjectResourceService {
   }
 
   /**
-   * The dispatcher's step (card P01): a task that names a repository is pinned to the binding and location version it has now, the first time it is dispatched, and every later dispatch must find the
+   * The dispatcher's step (card P01): a task that names a repository is pinned to the binding and location version it has now, the moment its work is about to start (`pin: true`; before that the call only looks, so a waiting task holds nothing), and every later dispatch must find the
    * same checkout. It takes no caller's rights: only code that builds the services can run it (the dispatcher acts as the controller, whose service principal holds no `assignment.manage`), and it writes
    * only the pin. `none` for a task that names no repository (nothing to bind), `unbound` or `changed` with the reason when the work must not start.
    */
-  async dispatchCheckout(command: { commandId: string; taskId: string; actor: string }): Promise<{ kind: "none" } | { kind: "ok"; checkout: Checkout; pinnedNow: boolean } | { kind: "unbound" | "changed"; reason: string }> {
+  async dispatchCheckout(command: { commandId: string; taskId: string; actor: string; /** Write the pin (when the work is about to start); otherwise only look. */ pin: boolean }): Promise<{ kind: "none" } | { kind: "ok"; checkout: Checkout; pinnedNow: boolean } | { kind: "unbound" | "changed"; reason: string }> {
     const taskId = checkTaskId(command.taskId);
     const found = await this.#runner.get("task", taskId);
     const task = found?.body as unknown as TaskBody | undefined;
@@ -447,6 +447,10 @@ export class ProjectResourceService {
     const existing = await this.#runner.get(CHECKOUT, taskId);
     if (task.repositoryId === undefined && existing === undefined) return { kind: "none" };
     let pinnedNow = false;
+    if (existing === undefined && !command.pin) {
+      try { await this.#bindingFor(task); } catch (error) { if (isDomainError(error, "invalid_command")) return { kind: "unbound", reason: error.message }; throw error; }
+      return { kind: "none" };
+    }
     if (existing === undefined) {
       let bound: { id: string; revision: number; body: ResourceBody };
       try { bound = await this.#bindingFor(task); } catch (error) { if (isDomainError(error, "invalid_command")) return { kind: "unbound", reason: error.message }; throw error; }

@@ -78,7 +78,7 @@ export interface DispatcherDeps {
   readonly pauses: PauseGuard;
   readonly decisions?: DecisionGuard;
   /** Pins the checkout a task is dispatched against and refuses work whose repository moved or was unbound (card P01). */
-  readonly checkouts?: { dispatchCheckout(command: { commandId: string; taskId: string; actor: string }): Promise<{ kind: "none" } | { kind: "ok" } | { kind: "unbound" | "changed"; reason: string }> };
+  readonly checkouts?: { dispatchCheckout(command: { commandId: string; taskId: string; actor: string; pin: boolean }): Promise<{ kind: "none" } | { kind: "ok" } | { kind: "unbound" | "changed"; reason: string }> };
   /** `GenerationService.guardFor` is handed to every effect that is started (it adds the generation hold to the pause and decision guards). */
   readonly generation?: Pick<GenerationService, "guardFor">;
   readonly reviews?: Pick<ReviewService, "request" | "admit" | "get">;
@@ -687,7 +687,7 @@ export class DispatcherService {
     }
     // 3b. The checkout: a task that names a repository is pinned to the binding and location it has now, and a moved, unbound or re-pointed one does not start until the owner confirms it (card P01).
     if (this.#deps.checkouts !== undefined) {
-      const c = await this.#deps.checkouts.dispatchCheckout({ commandId: `dpa-pin:${taskId}`, taskId, actor: DISPATCHER_ACTOR });
+      const c = await this.#deps.checkouts.dispatchCheckout({ commandId: `dpa-pin:${taskId}`, taskId, actor: DISPATCHER_ACTOR, pin: false });
       if (c.kind === "changed" || c.kind === "unbound") return block("checkout", "dispatch_blocked", c.reason);
     }
     // 4. Meeting decisions that need the agent's acknowledgement, and a meeting about to start.
@@ -823,6 +823,11 @@ export class DispatcherService {
       return pre;
     }
     if (pre.kind !== "ok") return { kind: "waiting" };
+    // Every check passed: the checkout is pinned now, so a task that only waited holds no pin (card P01).
+    if (this.#deps.checkouts !== undefined) {
+      const pinned = await this.#deps.checkouts.dispatchCheckout({ commandId: `dpa-pin:${b.taskId}`, taskId: b.taskId, actor: DISPATCHER_ACTOR, pin: true });
+      if (pinned.kind === "changed" || pinned.kind === "unbound") { if (b.requestId !== undefined) await this.#giveBack(d); return { kind: "skipped", check: "checkout", reason: pinned.reason }; }
+    }
     // The place. The request ID derives from the dispatch and the number of requests so far, so a repeat after a crash finds the same request.
     const requestId = await this.#request(d, pre.host);
     const where = await this.#deps.admission.where(requestId);

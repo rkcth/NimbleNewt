@@ -76,15 +76,38 @@ for (const backend of backends) {
     // A task that names no repository is not held up by any of this.
     const plain = await c.task("Write notes", ann);
     assert.ok((await c.run()).started.includes(plain.attemptId!));
-    // The location moves: the pinned task no longer resolves to the new place without the owner confirming it, so a later dispatch of it is refused.
+    // The location moves: the pinned task resolves to `changed`, and a same-handle binding in another project does not redirect it.
     const bound = (await c.resources.list(c.owner, c.project))![0]!;
     await c.resources.moveResource(c.owner, { commandId: "mv1", resourceId: bound.id, expectedRevision: bound.revision, locator: "/work/web-new" });
-    const again = await c.resources.dispatchCheckout({ commandId: "again", taskId: first.taskId, actor: "dispatcher" });
-    assert.equal(again.kind, "changed");
-    // Another project binding the same handle at another location does not redirect the pinned task.
+    assert.equal((await c.resources.dispatchCheckout({ commandId: "again", taskId: first.taskId, actor: "dispatcher", pin: false })).kind, "changed");
     const other = (await c.projects.createProject({ commandId: "p2", actor: c.owner.id, name: "Other" })).id;
     await c.resources.bindResource(c.owner, { commandId: "b2", projectId: other, kind: "repository", label: "Web", locator: "/work/web", repositoryId: "web" });
-    assert.equal((await c.resources.dispatchCheckout({ commandId: "again2", taskId: first.taskId, actor: "dispatcher" })).kind, "changed", "still the moved checkout, not the other project's");
+    assert.equal((await c.resources.dispatchCheckout({ commandId: "again2", taskId: first.taskId, actor: "dispatcher", pin: false })).kind, "changed", "still the moved checkout, not the other project's");
+  });
+
+  suite("a task pinned to a checkout that then moved is blocked by the dispatcher with a reason and a blocker, the same one on the next tick (card P01)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    await c.resources.bindResource(c.owner, { commandId: "b1", projectId: c.project, kind: "repository", label: "Web", locator: "/work/web", repositoryId: "web" });
+    const t = await c.task("Fix web", ann, { repositoryId: "web" });
+    assert.equal((await c.resources.dispatchCheckout({ commandId: "pre", taskId: t.taskId, actor: "owner", pin: true })).kind, "ok");
+    const bound = (await c.resources.list(c.owner, c.project))![0]!;
+    await c.resources.moveResource(c.owner, { commandId: "mv1", resourceId: bound.id, expectedRevision: bound.revision, locator: "/work/web-new" });
+    const first = await c.run();
+    assert.ok(!first.started.includes(t.attemptId!));
+    assert.equal(first.blocked.length, 1);
+    assert.equal(first.blocked[0]!.check, "checkout");
+    const second = await c.run();
+    assert.equal(second.blocked[0]?.blockerId, first.blocked[0]!.blockerId, "the same blocker, not a new one each tick");
+  });
+
+  suite("a task that waits does not hold a pin (card P01)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    await c.resources.bindResource(c.owner, { commandId: "b1", projectId: c.project, kind: "repository", label: "Web", locator: "/work/web", repositoryId: "web" });
+    const t = await c.task("Fix web", ann, { repositoryId: "web" });
+    await c.pauses.pause(c.owner, { commandId: "pz", scope: { kind: "task", id: t.taskId }, reason: "hold" });
+    const r = await c.run();
+    assert.ok(!r.started.includes(t.attemptId!));
+    assert.equal(await c.resources.getPin(c.owner, t.taskId), undefined, "no pin while the work could not start");
   });
 
   suite("every tool call, read-only included, is a durable operation with its tool version, invocation, state, times and resource use; payloads are redacted; a tool call alone is not progress", async (c) => {
