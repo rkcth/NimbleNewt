@@ -77,3 +77,44 @@ test("a schedule made through the state API is held once per slot by the compose
     assert.equal(await count(), 2, "a second restart creates nothing more");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+test("through the composed controller a paused agent and an agent the host reports stopped are withheld from a scheduled meeting and not woken, and an agenda item taken by the occurrence is still open after it is settled (card M01b)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-meet-"));
+  const day = 86_400_000;
+  const slot = Date.parse(`${new Date(Date.now() + day).toISOString().slice(0, 10)}T08:00:00.000Z`);
+  let now = Date.now();
+  const stopped = new Set<string>();
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], availability: async (id) => (stopped.has(id) ? "stopped" : "available"), dispatch: { timer: new ManualTimer(), intervalMs: 1000, clock: () => new Date(now).toISOString() } });
+  try {
+    const s = c.services;
+    const boot = await s.principals.bootstrapOwner({ name: "rob" });
+    const rob = await s.principals.authenticate(boot.token);
+    const project = (await s.projects.createProject({ commandId: "p1", actor: rob.id, name: "Garden" })).id;
+    const ids: Record<string, string> = {};
+    for (const n of ["ann", "bob", "cat"]) {
+      ids[n] = (await s.agents.create(rob, { commandId: `ag-${n}`, friendlyName: n })).id;
+      await s.grants.grant(rob, { commandId: `g-${n}`, grantee: `agent:${ids[n]}`, action: "task.read", project, source: "direct", basis: "test" });
+    }
+    const call = (op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<{ ok: boolean; result?: any; error?: { message: string } }>;
+    const topic = await call("agenda.capture", { projectId: project, topic: "Fence repairs", question: "who pays?" }, "ag1");
+    assert.ok(topic.ok, JSON.stringify(topic));
+    const made = await call("meeting.schedule", { projectId: project, title: "Stand-up", roster: ["ann", "bob", "cat"].map((n) => `agent:${ids[n]}`), time: "08:00", timeZone: "UTC", startDate: new Date(slot).toISOString().slice(0, 10), recurrence: { kind: "daily" } }, "ms1");
+    assert.ok(made.ok, JSON.stringify(made));
+    // Bob is paused by the owner; the host reports Cat stopped. Ann is available.
+    await s.pauses.pause(rob, { commandId: "pz", scope: { kind: "agent", id: ids.bob! }, reason: "the owner asked" });
+    stopped.add(`agent:${ids.cat}`);
+    now = slot;
+    for (let i = 0; i < 2; i++) await c.dispatch!.dispatcher.tick();
+    const sched = (await call("meeting.schedule-get", { scheduleId: made.result.id })).result.item;
+    assert.equal(sched.occurrences, 1);
+    const occ = (await call("meeting.occurrence", { occurrenceId: sched.lastOccurrenceId })).result.item.occurrence;
+    const status = (n: string): string => occ.participants.find((p: { id: string }) => p.id === `agent:${ids[n]}`).status;
+    assert.deepEqual([status("ann"), status("bob"), status("cat")], ["eligible", "withheld-paused", "withheld-unavailable"]);
+    assert.equal(await s.pauses.availability(`agent:${ids.bob}`), "paused", "being withheld did not lift the pause");
+    assert.ok(occ.agenda.length === 1, "the occurrence took the agenda item");
+    // Settled without reaching it: the item is still open for the next meeting.
+    assert.ok((await call("meeting.settle", { occurrenceId: sched.lastOccurrenceId, outcome: "cancelled", reason: "nobody came" }, "st1")).ok);
+    const open = await call("agenda.list", { projectId: project });
+    assert.deepEqual(open.result.items.map((i: { id: string }) => i.id), [topic.result.id]);
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});

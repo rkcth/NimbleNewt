@@ -28,6 +28,7 @@ import type { AgentService } from "../agents/index.js";
 import type { HistoryService } from "../context/index.js";
 import type { InquiryService } from "../inquiries/index.js";
 import { PauseService } from "../lifecycle/index.js";
+import type { Availability } from "../conversations/index.js";
 import { AttendanceService, MeetingService, type InvitationSink } from "../meetings/index.js";
 import { AgentMessageService } from "../messaging/index.js";
 import { NotificationService } from "../notifications/index.js";
@@ -115,6 +116,8 @@ export interface DispatchHandle {
 }
 
 export interface ComposeInput {
+  /** Whether an agent can be reached apart from its pause gates (the controller's `availability` option): `suspended` and `stopped` agents are withheld from meetings, the same as in the API's own instance. */
+  readonly availability?: (principalId: string) => Promise<Availability>;
   readonly storage: ControllerStorage; readonly epoch: number; readonly options: DispatchStartOptions;
   readonly principals: PrincipalService; readonly grants: GrantService; readonly taskCredentials: TaskCredentialService; readonly projects: ProjectService; readonly assignments: AssignmentService; readonly waits: WaitService;
   readonly contracts: ContractService; readonly catalog: HarnessCatalog; readonly routing: RoutingService; readonly inquiries: InquiryService; readonly agents: AgentService; readonly histories: HistoryService; readonly reviews: ReviewService;
@@ -146,7 +149,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   const blockers = BlockerService.withEpoch(storage, epoch, ro);
   const policy = PolicyService.withEpoch(storage, epoch, i.grants, ro);
   const budgets = BudgetService.withEpoch(storage, epoch, ro);
-  const pauses = PauseService.withEpoch(storage, epoch, { waits: i.waits }, ro);
+  const pauses = PauseService.withEpoch(storage, epoch, { waits: i.waits }, { ...ro, ...(i.availability === undefined ? {} : { otherAvailability: i.availability }) });
   const events = EventService.withEpoch(storage, epoch, { ...ro, notify: noticeThroughNotifications(notifications) });
   // A subscription made before idle expiry existed is counted idle from now, not from the day it was made (card H06c).
   await events.stampIdle(principal).catch((error: unknown) => i.onError?.(error));
