@@ -39,7 +39,7 @@ import { ContextBranchService } from "../branches/index.js";
 import { JobService } from "../jobs/index.js";
 import { PauseService } from "../lifecycle/index.js";
 import { ReviewService } from "../review/index.js";
-import { RoutingService } from "../routing/index.js";
+import { DifficultyService, RoutingService } from "../routing/index.js";
 import { composeDispatch, type DispatchHandle, type DispatchStartOptions } from "./dispatch-compose.js";
 import { ConversationTransport, type TransportOptions } from "../transport/index.js";
 
@@ -251,7 +251,7 @@ export async function startController(options: StartOptions): Promise<Controller
     const budgets = BudgetService.withEpoch(storage, epoch, { notify: async (n) => { if (n.to === "owner") await notifications.emitFromController({ commandId: `bgt-req-${n.requestId}`, kind: "maintenance", ref: { kind: "budget-request", id: n.requestId }, detail: `${n.requestedBy} asked for more budget for task ${n.taskId} (${n.costMicros} millionths, ${n.computeMs} ms of compute). Decide it with budget.decide.` }); } });
     // Event watches (card H13): an agent's watch on a stream, its handling attempts and the failed queue, which the status answers and the state API read.
     const watchService = WatchService.withEpoch(storage, epoch, { events: EventService.withEpoch(storage, epoch), inbox: InboxService.withEpoch(storage, epoch, assignments), assignments, projects });
-    const api = new StateApi({ branches, grants, watches: watchService, events: EventService.withEpoch(storage, epoch), budgets, ownerQuestions: messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
+    const api = new StateApi({ branches, grants, watches: watchService, events: EventService.withEpoch(storage, epoch), budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), ownerQuestions: messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
     let chat: ChatService | undefined;
     let coordinator: CoordinatorService | undefined;
     if (options.chat !== undefined) {

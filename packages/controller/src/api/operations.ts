@@ -5,6 +5,7 @@ import type { AgentService } from "../agents/index.js";
 import type { BudgetService } from "../budgets/index.js";
 import type { WatchService } from "../events/handling.js";
 import type { EventService } from "../events/index.js";
+import type { DifficultyService } from "../routing/difficulty.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
 import type { ProjectPlanService, ProjectResourceService, ResponsibilityService } from "../projects/index.js";
@@ -44,6 +45,8 @@ export interface Context {
   readonly events?: Pick<EventService, "configureIdle" | "cancel">;
   /** Absent when the controller runs without budgets (card R05c). */
   readonly budgets?: Pick<BudgetService, "report" | "usage" | "request" | "pending" | "requestMore" | "decide">;
+  /** Absent when the controller runs without difficulty profiles (card R03). */
+  readonly difficulty?: Pick<DifficultyService, "profiles" | "setProfiles" | "decisions" | "decision" | "delegate" | "reassignParent" | "delegation" | "setDifficulty" | "escalate" | "decide" | "escalations">;
   /** Absent when the controller runs without agent messages (card U12): questions to the owner. */
   readonly ownerQuestions?: Pick<AgentMessageService, "askOwner" | "ownerQuestions" | "answerOwner">;
 }
@@ -100,6 +103,9 @@ const eventsOf = (c: Context): NonNullable<Context["events"]> => c.events ?? una
 /** A task credential acts for its one task: it may not list or total budgets across tasks. */
 const notFromTask = (c: Context, what: string): void => { if (c.principal.taskScope !== undefined) throw new DomainError("forbidden", `a task credential may not ${what}`); };
 const budgetsOf = (c: Context): NonNullable<Context["budgets"]> => c.budgets ?? unavailable("budgets");
+/** A task credential acts for its one task: an operation on another task reads as missing. */
+const ownTask = (c: Context, taskId: string): string => { if (c.principal.taskScope !== undefined && c.principal.taskScope.taskId !== taskId) throw new DomainError("not_found", "no such task"); return taskId; };
+const difficultyOf = (c: Context): NonNullable<Context["difficulty"]> => c.difficulty ?? unavailable("difficulty profiles");
 const meetingsOf = (c: Context): MeetingService => c.meetings ?? unavailable("meetings");
 const duties = (c: Context): ResponsibilityService => c.responsibilities ?? unavailable("responsibilities");
 const optNum = (args: Args, key: string): number | undefined => { const v = args[key]; return v === undefined ? undefined : (typeof v === "number" ? v : invalid(`args.${key}`, "must be a number")); };
@@ -137,6 +143,28 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => { only(a, ["taskId", "costMicros", "computeMs", "reason"]); const r = await budgetsOf(c).requestMore(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson(r); } },
   { name: "budget.decide", kind: "command", summary: "Approves (possibly less than asked) or denies a request. The owner may add new money; the holder it was addressed to may only move allowance from its own node.", args: { requestId: "the request", approve: "true or false", "costMicros?": "money to grant, at most what was asked", "computeMs?": "compute to grant, at most what was asked", "note?": "a note" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["requestId", "approve", "costMicros", "computeMs", "note"]); await budgetsOf(c).decide(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
+  { name: "difficulty.profiles", kind: "query", summary: "The difficulty profiles and the mapping from difficulty to profile (owner, or someone with `routing.write`).", args: {}, result: "`{ item }`: the profiles, with the revision to quote when replacing them.",
+    run: async (c, a) => { only(a, []); return found("difficulty profiles", await difficultyOf(c).profiles(c.principal)); } },
+  { name: "difficulty.set-profiles", kind: "command", summary: "Replaces the profiles and the mapping in one validated step (owner, or someone with `routing.write`). It applies to the next dispatch only.", args: { expectedRevision: "the revision you read (0 for the first)", profiles: "the profiles and mapping" }, result: "`{ revision, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["expectedRevision", "profiles"]); return asJson(await difficultyOf(c).setProfiles(c.principal, { commandId: need(id), ...(a as object) } as never)); } },
+  { name: "difficulty.set", kind: "command", summary: "Sets (or with `null` clears) a task's difficulty. The task's parent may; anyone else needs the ordinary right to change its contract.", args: { taskId: "the task", expectedVersion: "the contract version you read", difficulty: "a difficulty name, or null" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { ownTask(c, str(a, "taskId")); only(a, ["taskId", "expectedVersion", "difficulty"]); return asJson(await difficultyOf(c).setDifficulty(c.principal, { commandId: need(id), ...(a as object) } as never)); } },
+  { name: "difficulty.delegate", kind: "command", summary: "The caller (the parent) delegates a task to a child agent with a difficulty ceiling and retry and total budgets for escalation.", args: { taskId: "the task delegated", child: "the child agent principal (agent:<name>)", ceiling: "the highest difficulty the child may escalate to on its own", "retryBudget?": "failures before it must escalate", "totalBudget?": "escalations in all" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { ownTask(c, str(a, "taskId")); only(a, ["taskId", "child", "ceiling", "retryBudget", "totalBudget"]); return asJson(await difficultyOf(c).delegate(c.principal, { commandId: need(id), ...(a as object) } as never)); } },
+  { name: "difficulty.reassign-parent", kind: "command", summary: "Moves a delegated task to another parent (the owner only).", args: { taskId: "the delegated task", parent: "the new parent's principal ID" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { ownTask(c, str(a, "taskId")); only(a, ["taskId", "parent"]); return asJson(await difficultyOf(c).reassignParent(c.principal, { commandId: need(id), ...(a as object) } as never)); } },
+  { name: "difficulty.delegation", kind: "query", summary: "A task's delegation: parent, ceiling and the budgets left.", args: { taskId: "the task" }, result: "`{ item }`.",
+    run: async (c, a) => { ownTask(c, str(a, "taskId")); only(a, ["taskId"]); return found("delegation", await difficultyOf(c).delegation(c.principal, str(a, "taskId"))); } },
+  { name: "escalation.request", kind: "command", summary: "A blocked or repeatedly failing child asks for a harder profile, within its ceiling or by asking its parent.", args: { taskId: "the task", kind: "`blocked` or `failing`", reason: "why", "blockerId?": "the blocker, for `blocked`", "to?": "the difficulty asked for" }, result: "`{ item }`: the escalation and how it was decided or who decides.", completion: { kind: "completed" },
+    run: async (c, a, id) => { ownTask(c, str(a, "taskId")); only(a, ["taskId", "kind", "reason", "blockerId", "to"]); return asJson({ item: await difficultyOf(c).escalate(c.principal, { commandId: need(id), ...(a as object) } as never) }); } },
+  { name: "escalation.decide", kind: "command", summary: "The parent approves or denies a child's escalation.", args: { taskId: "the child task", escalationId: "the escalation", approve: "true or false", reason: "why" }, result: "`{ item }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { ownTask(c, str(a, "taskId")); only(a, ["taskId", "escalationId", "approve", "reason"]); return asJson({ item: await difficultyOf(c).decide(c.principal, { commandId: need(id), ...(a as object) } as never) }); } },
+  { name: "escalation.list", kind: "query", summary: "A task's escalations.", args: { taskId: "the task" }, result: "`{ items }`.",
+    run: async (c, a) => { ownTask(c, str(a, "taskId")); only(a, ["taskId"]); return asJson({ items: await difficultyOf(c).escalations(c.principal, str(a, "taskId")) }); } },
+  { name: "routing.decisions", kind: "query", summary: "The persisted routing decisions of a task: which profile and route were chosen and why.", args: { taskId: "the task", "limit?": `1 to ${PAGE.max}, default ${PAGE.default}`, "after?": "the `next` of the previous page" }, result: "`{ items, next? }`.",
+    run: async (c, a) => { ownTask(c, str(a, "taskId")); only(a, ["taskId", "limit", "after"]); return page(await difficultyOf(c).decisions(c.principal, str(a, "taskId"), { limit: limitOf(a), ...(optStr(a, "after") === undefined ? {} : { afterId: optStr(a, "after")! }) })); } },
+  { name: "routing.decision", kind: "query", summary: "One routing decision of a task.", args: { taskId: "the task", decisionId: "the decision" }, result: "`{ item }`.",
+    run: async (c, a) => { ownTask(c, str(a, "taskId")); only(a, ["taskId", "decisionId"]); return found("decision", await difficultyOf(c).decision(c.principal, str(a, "taskId"), str(a, "decisionId"))); } },
   { name: "project.get", kind: "query", summary: "One project.", args: { projectId: "the project's ID" }, result: "`{ item }`: the project, with its ID, revision and timestamps.",
     run: async (c, a) => { only(a, ["projectId"]); return found("project", await c.secure.getProject(str(a, "projectId"))); } },
   { name: "project.list", kind: "query", summary: "The projects the caller may read.", args: { "limit?": `1 to ${PAGE.max}, default ${PAGE.default}`, "after?": "the `next` of the previous page" }, result: "`{ items, next? }`.",
