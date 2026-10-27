@@ -933,7 +933,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `meeting.call-urgent`
 
-Calls an urgent meeting for a roster. Participants who are absent or paused are not woken without authority; they are withheld and recorded. Needs `meeting.manage`.
+Calls an urgent meeting for a roster. Needs `meeting.manage`. Invitations are decided by the dispatcher's own instance; absent or paused participants are withheld there (not composed in the API instance).
 
 Arguments:
 
