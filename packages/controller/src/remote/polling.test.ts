@@ -14,7 +14,11 @@ after(stopServer);
 
 const sleepMs = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const seeded = (seed: number) => () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 2 ** 32; };
-const never = new AbortController().signal;
+/** Waits (up to 15 s, a slow runner may take long to deliver a request) until this many polls are held. */
+const openPolls = async (c: Ctx, n: number): Promise<void> => {
+  for (let i = 0; i < 300 && c.remote.pollStats(c.dispatcherPrincipal).open !== n; i++) await sleepMs(50);
+  assert.equal(c.remote.pollStats(c.dispatcherPrincipal).open, n, "the poll reached the controller");
+};
 
 /** A new task for agent ann, ticked until the dispatcher starts it on `host` and has offered it (the worker has not accepted yet). */
 const offered = async (c: Ctx, host: RemoteHost, title = "Order seeds"): Promise<string> => {
@@ -37,8 +41,8 @@ for (const backend of backends) {
     assert.equal(c.remote.pollStats(c.dispatcherPrincipal).timedOut, 1);
     // A held poll is answered when the dispatcher offers the host an attempt.
     const poll = h.client.offers({ waitMs: 20_000 });
-    let early = false; void poll.then(() => { early = true; });
-    await sleepMs(100);
+    let early = false; poll.then(() => { early = true; }, () => undefined);
+    await openPolls(c, 1); await sleepMs(100);
     assert.equal(early, false);
     assert.equal(c.remote.pollStats(c.dispatcherPrincipal).open, 1);
     const attemptId = await offered(c, h);
@@ -61,10 +65,11 @@ for (const backend of backends) {
   suite("a host has one held poll: a newer poll takes over and the earlier one ends empty; a new session ends the old one as fenced; stopping ends them all (card H07)", async (c) => {
     const h = await c.host("h1");
     const first = h.client.offers({ waitMs: 20_000 });
-    await sleepMs(50);
+    await openPolls(c, 1);
     const second = h.client.offers({ waitMs: 20_000 });
+    second.catch(() => undefined);
     assert.deepEqual(await first, [], "the earlier poll is ended by the newer one");
-    await sleepMs(30);
+    await openPolls(c, 1);
     const stats = c.remote.pollStats(c.dispatcherPrincipal);
     assert.deepEqual([stats.open, stats.superseded], [1, 1]);
     // The same credential connecting again is a new session: the poll of the old one is fenced.
@@ -73,7 +78,7 @@ for (const backend of backends) {
     await assert.rejects(second, (e: unknown) => e instanceof WorkerRequestError && e.fenced);
     // Stopping the service ends a held poll without error (the transport is closing too).
     const third = other.offers({ waitMs: 20_000 });
-    await sleepMs(50);
+    await openPolls(c, 1);
     c.remote.close();
     assert.deepEqual(await third, []);
   });
@@ -189,7 +194,7 @@ for (const backend of backends) {
   suite("a stopped service answers polls at once and holds none (card H07)", async (c) => {
     const h = await c.host("h1");
     const held = h.client.offers({ waitMs: 20_000 });
-    await sleepMs(50);
+    await openPolls(c, 1);
     c.remote.close();
     assert.deepEqual(await held, []);
     const t = Date.now();
