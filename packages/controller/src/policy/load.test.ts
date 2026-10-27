@@ -5,7 +5,7 @@ import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { ReviewService } from "../review/index.js";
 import { GrantService, PrincipalService, type Grant, type Principal } from "../security/index.js";
-import { ApprovalLoadService, LOAD_LIMITS, PolicyService, ProfileSuggestionService } from "./index.js";
+import { ApprovalLoadService, GRANT_LENGTHS, LOAD_LIMITS, chooseStandingLength, PolicyService, ProfileSuggestionService } from "./index.js";
 
 after(stopServer);
 
@@ -67,6 +67,93 @@ for (const backend of backends) {
     assert.deepEqual((await c.load.propose(c.owner, { commandId: cid("pr") })).opened, []);
     assert.deepEqual(await c.load.proposals(c.ann), []);
     await refuses("forbidden", () => c.load.propose(c.ann, { commandId: cid("pr") }));
+  });
+
+  const DAY = 86_400_000;
+  /** Three approvals of one class by ann, `gapDays` apart, and the proposal they make. */
+  const proposal = async (c: Ctx, gapDays: number, tool = "git-commit") => {
+    for (let i = 0; i < 3; i++) { if (i > 0 && gapDays > 0) now += gapDays * DAY; await c.approve(c.ann, tool); }
+    await c.load.propose(c.owner, { commandId: cid("pr") });
+    const cls = { "git-commit": "commit", "git-push": "push", "git-merge": "merge", deploy: "deploy" }[tool];
+    return (await c.load.proposals(c.owner, "open")).find((x) => x.cls === cls)!;
+  };
+  const accept = async (c: Ctx, p: { id: string; revision: number }, extra: Record<string, unknown> = {}) => {
+    const at = now;
+    const r = await c.load.accept(c.owner, { commandId: cid("ac"), proposalId: p.id, expectedRevision: p.revision, ...extra } as never);
+    return { ...r, grant: (await c.grants.getGrant(r.grantId))!, at };
+  };
+
+  suite("a proposal shows the lengths on offer and the one the system chose with its reason; the default follows the span of the approvals and the owner's words, a one-off or an explicit length win, and nothing to go on means 30 days (card A07d)", async (c) => {
+    assert.deepEqual(GRANT_LENGTHS, [1, 7, 30, 90]);
+    // Approvals made over a few days: the shortest option that covers the pattern.
+    const p = await proposal(c, 1.5);
+    assert.deepEqual(p.lengthOptions, [1, 7, 30, 90]);
+    assert.deepEqual([p.defaultLength!.days, p.suggestion.days], [7, 7]);
+    assert.match(p.defaultLength!.why, /over 3 days, so 7 days covers the same pattern/);
+    // Choosing the default: the grant runs that long and carries the reason.
+    const a = await accept(c, p);
+    assert.deepEqual([a.days, a.grant.expiresAt], [7, new Date(a.at + 7 * DAY).toISOString()]);
+    assert.match(a.why, /7 days covers/);
+    assert.match(a.grant.basis, /7 days: you approved this over 3 days/);
+    assert.equal((await c.load.proposals(c.owner, "accepted"))[0]!.chosenLength!.source, "default");
+  });
+
+  suite("what the owner said wins: a stated length is used as stated up to the longest option, a one-off is the shortest, an explicit length is used exactly and must be a whole number of days up to the longest option, and a reserved class is still never offered (card A07d)", async (c) => {
+    const p1 = await proposal(c, 0);
+    assert.deepEqual([p1.defaultLength!.days, p1.defaultLength!.why], [30, "there is nothing to go on yet, so the usual 30 days"], "all at one moment: the 30-day fallback");
+    const stated = await accept(c, p1, { statedDays: 2 });
+    assert.deepEqual([stated.days, stated.grant.expiresAt], [2, new Date(stated.at + 2 * DAY).toISOString()]);
+    assert.match(stated.why, /you asked for 2 days/);
+    // Another class: a stated length longer than the longest option is cut to it and says so.
+    const p2 = await proposal(c, 0, "git-push");
+    const cut = await accept(c, p2, { statedDays: 400 });
+    assert.equal(cut.days, 90);
+    assert.match(cut.why, /you asked for 400 days; the longest a standing rule runs is 90 days/);
+    const p3 = await proposal(c, 0, "git-merge");
+    assert.equal((await accept(c, p3, { oneOff: true })).days, 1);
+    // An explicit length is used exactly (any whole number of days up to the longest option), and cannot be combined with what to derive it from.
+    now += 100 * DAY;
+    const p4 = await proposal(c, 0, "deploy");
+    await refuses("invalid_command", () => c.load.accept(c.owner, { commandId: cid("ac"), proposalId: p4.id, expectedRevision: p4.revision, days: 120 } as never), (e) => assert.equal(e.field, "days"));
+    await refuses("invalid_command", () => c.load.accept(c.owner, { commandId: cid("ac"), proposalId: p4.id, expectedRevision: p4.revision, days: 14, oneOff: true } as never));
+    await refuses("invalid_command", () => c.load.accept(c.owner, { commandId: cid("ac"), proposalId: p4.id, expectedRevision: p4.revision, days: 1.5 } as never));
+    const exact = await accept(c, p4, { days: 14 });
+    assert.deepEqual([exact.days, exact.grant.expiresAt], [14, new Date(exact.at + 14 * DAY).toISOString()]);
+    assert.equal((await c.load.proposals(c.owner, "accepted")).find((x) => x.id === p4.id)!.chosenLength!.source, "owner");
+    // Retrying the same acceptance makes the same grant for the same length.
+    const again = await c.load.accept(c.owner, { commandId: "same-ac", proposalId: p1.id, expectedRevision: p1.revision, statedDays: 2 } as never).catch((e: unknown) => e);
+    assert.ok(again instanceof DomainError, "a proposal that is already accepted is not accepted again");
+  });
+
+  suite("a length follows what earlier standing rules of the class showed: one that ran its full term and was asked for again gets the next longer, one the owner took back early gets a shorter one (card A07d)", async (c) => {
+    const p = await proposal(c, 0);
+    const first = await accept(c, p, { days: 7 });
+    now += 8 * DAY;
+    const next = await proposal(c, 0);
+    assert.deepEqual([next.defaultLength!.days], [30]);
+    assert.match(next.defaultLength!.why, /ran its full 7 days and you approved the same again, so 30 days this time/);
+    const second = await accept(c, next);
+    assert.equal(second.days, 30);
+    // The owner takes the 30-day one back; the next proposal of the class is shorter than what was taken back.
+    const g = (await c.grants.getGrant(second.grantId))!;
+    await c.grants.revoke(c.owner, { commandId: cid("rv"), grantId: second.grantId, expectedRevision: g.revision, reason: "too wide" });
+    now += 1 * DAY;
+    const third = await proposal(c, 0);
+    assert.equal(third.defaultLength!.days, 7);
+    assert.match(third.defaultLength!.why, /taken back before its 30 days were up, so 7 days this time/);
+    void first;
+  });
+
+  test("the length rule alone: order of the inputs, caps and the fallback (card A07d)", () => {
+    const base = { spanDays: 0, earlier: [] as { days: number; revoked: boolean }[] };
+    assert.equal(chooseStandingLength({ ...base, statedDays: 3, oneOff: true, spanDays: 40 }).days, 3, "the owner's words come first");
+    assert.equal(chooseStandingLength({ ...base, oneOff: true, spanDays: 40, earlier: [{ days: 7, revoked: false }] }).days, 1, "then a one-off");
+    assert.equal(chooseStandingLength({ ...base, spanDays: 40, earlier: [{ days: 7, revoked: true }] }).days, 1, "then earlier grants: revoked at 7 is shorter than 7");
+    assert.equal(chooseStandingLength({ ...base, spanDays: 1, earlier: [{ days: 90, revoked: false }] }).days, 90, "never above the longest option");
+    assert.equal(chooseStandingLength({ ...base, spanDays: 40 }).days, 90);
+    assert.equal(chooseStandingLength({ ...base, spanDays: 0.4 }).days, 1);
+    assert.equal(chooseStandingLength({ ...base, spanDays: 200 }).days, 90);
+    assert.equal(chooseStandingLength(base).days, 30);
   });
 
   suite("a reserved tool, an unclassified one and an agent's approvals never produce a proposal", async (c) => {
