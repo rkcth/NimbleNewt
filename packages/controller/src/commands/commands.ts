@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { parseName } from "@nimblenewt/registry";
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
-import { onlyKnown, text, type View } from "../domain/model.js";
+import { commandId as checkCommandId, onlyKnown, text, type View } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
@@ -122,7 +122,7 @@ export class CommandService {
     const resolver = this.resolver();
     const asked = createHash("sha256").update(JSON.stringify([typed, context.agent ?? null, context.scope ?? null, context.version ?? null])).digest("hex");
     // A command already queued under this command ID is answered from its record even when the name no longer resolves (a revoked version, a removed alias): the work is queued.
-    const prior = await this.#runner.get("queued-command", derivedId("qcm", command.commandId + "|" + by.id));
+    const prior = await this.#runner.get("queued-command", derivedId("qcm", checkCommandId(command.commandId) + "|" + by.id));
     if (prior !== undefined) {
       const body = prior.body as unknown as QueuedBody;
       if (body.asked !== asked) throw new DomainError("command_conflict", "that command ID was used for something else", { field: "commandId" });
