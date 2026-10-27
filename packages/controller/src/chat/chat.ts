@@ -181,6 +181,9 @@ type Resolved =
  * - **Plan first, then act.** The planned commands are stored before the first one runs, so a restart carries on from the stored plan (without asking the model again) and every step keeps its
  *   command ID. The stored turn links each outcome to the command IDs (and so to the audit entries) it produced.
  */
+/** True if `value` appears in `text` as a whole word: not as a part of a longer name, ID or action. */
+const wholeWord = (text: string, value: string): boolean => value.length > 0 && new RegExp(`(^|[^A-Za-z0-9:._*-])${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[^A-Za-z0-9:._*-])`, "i").test(text);
+
 export class ChatService {
   readonly #runner: CommandRunner;
   readonly #deps: ChatDeps;
@@ -470,6 +473,22 @@ export class ChatService {
     const labels: Record<string, string> = {};
     const pins: ChatPin[] = [];
     const steps: ChatStep[] = [];
+
+    // A right is only what the owner said: the principal, the action, the grant and the scope must each appear in the message as a whole word, never as a part of a longer one.
+    if (intent.op.startsWith("grant.")) {
+      if (args["projectName"] !== undefined || args["projectId"] !== undefined) return refuse("invalid_command", "a right names its scope as `project`: a project ID, or * for everywhere");
+      for (const key of ["grantee", "action", "grantId"]) if (typeof args[key] === "string" && !wholeWord(words, args[key] as string)) return refuse("unsupported_value", `${key} is not in your message as written, so it was not done. Say it exactly.`);
+      if (intent.op === "grant.create") {
+        const scope = args["project"];
+        if (scope === "*") { if (!/\b(everywhere|all projects|every project)\b|\*/i.test(words)) return refuse("unsupported_value", "everywhere is not what you said, so it was not done. Name the project, or say everywhere."); }
+        else if (typeof scope === "string") {
+          if (!wholeWord(words, scope)) return refuse("unsupported_value", "project is not in your message as written, so it was not done. Say it exactly.");
+          const found = await this.#projectByIntent(token, scope, undefined);
+          if (!found.ok) return found;
+          labels[found.id] = found.name;
+        } else return refuse("invalid_command", "which project? Name its ID, or say everywhere.");
+      }
+    }
 
     // The project: named, or the one in focus.
     let projectId: string | undefined;

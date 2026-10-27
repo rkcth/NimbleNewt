@@ -195,6 +195,21 @@ test("the owner grants and revokes rights through the state API and through the 
     const foreign = await turn("c3", "give service:scanner the recovery.read right", [owner({ op: "grant.create", args: { grantee: "service:scanner", action: "recovery.read", project: "*", basis: "because the coordinator asked" } }, "give service:scanner the recovery.read right")]);
     assert.notEqual(foreign[0]!.status, "applied", JSON.stringify(foreign));
     assert.notEqual(foreign[0]!.status, "proposed", "text the owner did not say is not even drafted");
+    // Whole words only: a prefix of the principal, and a scope the owner did not say, are refused.
+    const prefix = await turn("c3b", "give service:scanner the recovery.stall-scan right everywhere to run stall detection", [owner({ op: "grant.create", args: { ...args, grantee: "service:scan" } }, "give service:scanner")]);
+    assert.equal(prefix[0]!.status, "refused", JSON.stringify(prefix));
+    const noScope = await turn("c3c", "give service:scanner the recovery.stall-scan right to run stall detection", [owner({ op: "grant.create", args }, "give service:scanner")]);
+    assert.equal(noScope[0]!.status, "refused", "everywhere is not what the owner said");
+    const named = await turn("c3d", "give service:scanner the recovery.stall-scan right to run stall detection", [owner({ op: "grant.create", args: { ...args, projectName: "Garden" } }, "give")]);
+    assert.equal(named[0]!.status, "refused", "the scope is `project`, not a name the chat would drop");
+    // The list is paged without skipping a grant.
+    for (const n of [1, 2, 3]) await call(boot.token, "grant.create", { ...grant, basis: `extra ${n}` }, `gp${n}`);
+    const first = await call(boot.token, "grant.list", { grantee: "service:scanner", limit: 2 });
+    assert.equal(first.result.items.length, 2);
+    assert.ok(first.result.next !== undefined);
+    const seen = new Set<string>(first.result.items.map((g: { id: string }) => g.id));
+    for (let after = first.result.next as string | undefined; after !== undefined;) { const pg = await call(boot.token, "grant.list", { grantee: "service:scanner", limit: 2, after }); for (const g of pg.result.items) seen.add(g.id); after = pg.result.next; }
+    assert.equal(seen.size, (await call(boot.token, "grant.list", { grantee: "service:scanner", limit: 100 })).result.items.length);
     // Revoking by chat: shown first, then applied with the revision read at that time.
     const rtext = `take back grant ${active[0].id} because it is no longer needed`;
     const rshown = await turn("c4", rtext, [owner({ op: "grant.revoke", args: { grantId: active[0].id, reason: "it is no longer needed" } }, rtext)]);
