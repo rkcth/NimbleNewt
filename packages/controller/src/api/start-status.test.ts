@@ -60,7 +60,7 @@ test("a status question in the owner chat of the started controller is answered 
 test("a task credential may not read the failed event queue (card U05)", async () => {
   const { OPERATION_BY_NAME } = await import("./operations.js");
   const ctx = { principal: { id: "agent:ann", kind: "agent", name: "ann", grants: [], taskScope: { taskId: "task-aaaaaaaaaaaaaaaaaaaa", projectId: "proj-aaaaaaaaaaaaaaaaaaaa" } }, watches: { failures: async () => ({ items: [] }), inspect: async () => undefined } } as never;
-  for (const op of ["events.failures", "events.handling", "events.loops"]) await assert.rejects(() => OPERATION_BY_NAME.get(op)!.run(ctx, {}, undefined), (e: { code?: string }) => e.code === "forbidden", op);
+  for (const op of ["events.failures", "events.handling", "events.loops", "status.ask"]) await assert.rejects(() => OPERATION_BY_NAME.get(op)!.run(ctx, op === "status.ask" ? { request: { kind: "task", taskId: "task-aaaaaaaaaaaaaaaaaaaa" } } : {}, undefined), (e: { code?: string }) => e.code === "forbidden", op);
 });
 
 test("delivered artifacts are checked against their files and a failed event handling is listed and inspected, through the state API of the composed controller; a reader without the right sees none of it (card U05b)", async () => {
@@ -83,7 +83,7 @@ test("delivered artifacts are checked against their files and a failed event han
     unlinkSync(blobs.pathOf((await blobs.put(Buffer.from("a file that goes missing"))).digest));
     const changed = blobs.pathOf((await blobs.put(Buffer.from("bytes that are replaced"))).digest);
     chmodSync(changed, 0o600);
-    writeFileSync(changed, "tampered");
+    writeFileSync(changed, "bytes that are REPLACED"); // the same length as the original, so only the hash can tell
     const delivered = lines(await ask(boot.token, { kind: "delivered", projectId: project }));
     const of = (name: string) => delivered.filter((l) => l.includes(`Artifact ${name} `));
     assert.equal(of("plans.txt").length, 1);
@@ -106,10 +106,12 @@ test("delivered artifacts are checked against their files and a failed event han
 
     // Rights: one who may read the project's histories sees the handling; one who may only read tasks sees neither it nor the artifacts.
     const tok = async (name: string, grants: { action: string; project: string }[]) => { await c.services.principals.enroll(rob, { commandId: `e-${name}`, kind: "agent", name, grants }); return (await c.services.principals.issueCredential(rob, `agent:${name}`)).token; };
-    const hal = await tok("hal", [{ action: "task.read", project }, { action: "history.read", project }]);
+    const hal = await tok("hal", [{ action: "task.read", project }, { action: "history.read", project }, { action: "artifact.read", project }]);
     const eve = await tok("eve", [{ action: "task.read", project }]);
     assert.deepEqual((await call(hal, "events.failures", {})).result.items.map((i: { id: string }) => i.id), [id], "a reader with history.read sees it");
     assert.ok((await ask(hal, { kind: "failed_event", handlingId: id })).ok);
+    const halDelivered = lines(await ask(hal, { kind: "delivered", projectId: project }));
+    assert.ok(halDelivered.some((l) => /plans\.txt.*checked and match/.test(l)), "a reader with artifact.read sees the checked artifact");
     const eveList = await call(eve, "events.failures", {});
     assert.ok(eveList.ok && eveList.result.items.length === 0, JSON.stringify(eveList));
     assert.equal((await call(eve, "events.handling", { handlingId: id })).error?.code, "not_found");

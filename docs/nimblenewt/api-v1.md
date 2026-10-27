@@ -85,7 +85,7 @@ Arguments:
 
 - `request`: `{ kind, ... }` as the view needs (for example `{ kind: "delivered", projectId }`, `{ kind: "failed_event", handlingId }`)
 
-Result: `{ item }`: `{ observedAt, lines, ... }`, or `not_found` when the subject is missing or unreadable.
+Result: `{ item }`: `{ observedAt, lines, ... }`, or `not_found` when the subject (a task, a failed handling) is missing or unreadable; a view of a project the caller may not read is empty.
 
 #### `budget.pending`
 
