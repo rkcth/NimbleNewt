@@ -1,3 +1,4 @@
+import { DISPATCHER_PRINCIPAL } from "../security/task-credentials.js";
 import { createHash } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
@@ -141,6 +142,9 @@ export interface GenerationServiceOptions extends RunnerOptions {
  * - **Effects after an interruption.** An admitted effect that has not started is withdrawn (ledger `failed`) by a cancel, correction or supersession, and `execute` refuses to start one while the task is
  *   held. One that already started is never cut: it settles in the ledger, and `reconcile` records that outcome on the call marked as after the interruption.
  */
+/** The dispatcher's service principal: it carries owner corrections to running generations (card C08b). */
+const isDispatcher = (p: Principal): boolean => p.kind === "service" && p.id === DISPATCHER_PRINCIPAL && p.taskScope === undefined;
+
 export class GenerationService {
   readonly #runner: CommandRunner;
   readonly #assignments: AssignmentService | undefined;
@@ -390,7 +394,7 @@ export class GenerationService {
     const taskId = checkTaskId(command.taskId);
     const expected = whole(command.expectedContextRevision, "expectedContextRevision");
     const reason = plain(command.reason, "reason", GENERATION_LIMITS.reason);
-    const task = await this.#task(principal, "assignment.manage", taskId);
+    const task = await this.#task(principal, "assignment.manage", taskId, isDispatcher(principal));
     const scoped = scopedCommandId(principal.id, command.commandId);
     return this.#retrying(async () => {
       const result = await this.#runner.command("generation.correct", { commandId: scoped, actor: principal.id }, async () => ({
@@ -564,7 +568,7 @@ export class GenerationService {
   // ---- internals -------------------------------------------------------------------------------------------------------------
 
   #mayRead(viewer: Principal, run: { projectId: string; taskId: string; owner: string }): boolean {
-    if (viewer.kind === "owner") return true;
+    if (viewer.kind === "owner" || (isDispatcher(viewer) && run.owner === "")) return true;
     if (!inTaskScope(viewer, run.projectId)) return false;
     const resource = { resource: { kind: "task", id: run.taskId } } as const;
     return viewer.id === run.owner ? allows(viewer, "attempt.work", run.projectId, resource) : allows(viewer, "assignment.read", run.projectId, resource);
@@ -596,10 +600,10 @@ export class GenerationService {
     return undefined;
   }
 
-  async #task(principal: Principal, action: string, taskId: string): Promise<TaskBody> {
+  async #task(principal: Principal, action: string, taskId: string, named = false): Promise<TaskBody> {
     const task = (await this.#runner.get("task", taskId))?.body as unknown as TaskBody | undefined;
-    // A task the caller may not act on reads exactly like one that does not exist.
-    if (task === undefined || !allows(principal, action, task.projectId, { resource: { kind: "task", id: taskId } }) || !inTaskScope(principal, task.projectId)) throw new DomainError("forbidden", `${principal.id} may not do that on that task`);
+    // A task the caller may not act on reads exactly like one that does not exist. `named`: the caller is the dispatcher's service principal, which passes owner corrections on in every project (card C08b).
+    if (task === undefined || !(named || (allows(principal, action, task.projectId, { resource: { kind: "task", id: taskId } }) && inTaskScope(principal, task.projectId)))) throw new DomainError("forbidden", `${principal.id} may not do that on that task`);
     if (task.state === "done" || task.state === "cancelled") throw new DomainError("invalid_command", `task ${taskId} is ${task.state}`, { field: "taskId" });
     return task;
   }

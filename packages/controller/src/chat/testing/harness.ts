@@ -6,6 +6,7 @@ import { BlockerService } from "../../domain/blockers.js";
 import { ProjectService } from "../../domain/service.js";
 import { WaitService } from "../../domain/waits.js";
 import type { Backend } from "../../domain/testing/backends.js";
+import { DecisionService } from "../../decisions/index.js";
 import { InquiryService } from "../../inquiries/index.js";
 import { MeetingService } from "../../meetings/index.js";
 import { ContractService, WaitGraphService } from "../../planning/index.js";
@@ -38,7 +39,8 @@ export async function openWorld(backend: Backend, script: ConstructorParameters<
   const plans = ProjectPlanService.withEpoch(world.storage, projects.epoch, options);
   const responsibilities = ResponsibilityService.withEpoch(world.storage, projects.epoch, options);
   const meetings = MeetingService.withEpoch(world.storage, projects.epoch, { inquiries }, { availability: async () => "available", ...options });
-  const api = new StateApi({ principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, meetings });
+  const decisions = DecisionService.withEpoch(world.storage, projects.epoch, {}, options);
+  const api = new StateApi({ decisions, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, meetings });
   const ownerToken = (await principals.bootstrapOwner({ name: "rob" })).token;
   const owner = await principals.authenticate(ownerToken);
   const agent = async (name: string, grants: Grant[]): Promise<{ token: string; principal: Principal }> => {
@@ -60,6 +62,6 @@ export async function openWorld(backend: Backend, script: ConstructorParameters<
   };
   const project = async (name: string, repositories: { id: string; location: string }[] = [{ id: "main", location: "/tmp/x" }]) => (await projects.createProject({ commandId: cid("p"), actor: "owner:rob", name, repositories })).id;
   const task = async (projectId: string, title: string, extra: Record<string, unknown> = {}) => (await projects.createTask({ commandId: cid("t"), actor: "owner:rob", projectId, title, ...extra } as never)).id;
-  return { profile, world, meetings, resources, plans, responsibilities, projects, principals, assignments, desks, retrieval, inquiries, agents, contracts, api, ownerToken, owner, agent, interpreter, chat, coordinator, project, task, close: () => world.close() };
+  return { profile, world, decisions, meetings, resources, plans, responsibilities, projects, principals, assignments, desks, retrieval, inquiries, agents, contracts, api, ownerToken, owner, agent, interpreter, chat, coordinator, project, task, close: () => world.close() };
 }
 export type World = Awaited<ReturnType<typeof openWorld>>;

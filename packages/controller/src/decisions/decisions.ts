@@ -683,7 +683,8 @@ export class DecisionService implements DecisionGuard {
   /** A running generation of the task is interrupted (L05 `correct`), so what it was producing cannot be applied. A task that never generated, or is finished, needs nothing. */
   async #interrupt(by: Principal, propId: string, taskId: string, rec: PropagationBody): Promise<void> {
     const generation = this.#deps.generation;
-    if (generation === undefined) return;
+    // No generation service here (the API's own instance): the step is not done. The dispatcher's instance, which has one, finishes it when it resumes the propagation.
+    if (generation === undefined) throw new DomainError("unavailable", "no generation service is attached in this process, so a running generation cannot be interrupted here; the dispatcher finishes this step");
     const gate = await generation.gate(by, taskId);
     if (gate === undefined) return;
     try {

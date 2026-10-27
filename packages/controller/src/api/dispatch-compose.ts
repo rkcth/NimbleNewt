@@ -4,7 +4,7 @@ import { AdmissionService } from "../admission/index.js";
 import { BudgetService } from "../budgets/index.js";
 import { ArtifactService, FileBlobStore } from "../artifacts/index.js";
 import { RemoteWorkerHost, RemoteWorkerService, WorkerTransport, type RemoteDeps, type RemoteOptions, type RemoteWorkerHostOptions, type WorkerTransportOptions } from "../remote/index.js";
-import { DecisionService } from "../decisions/index.js";
+import { DecisionService, type DecisionDeps } from "../decisions/index.js";
 import { ContextEnforcementService } from "../context/index.js";
 import { CachePolicies, type AttemptCache, type CachePolicyDeps } from "../dispatch/cache.js";
 import { MarkerService } from "../inference-cache/index.js";
@@ -150,8 +150,11 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   const events = EventService.withEpoch(storage, epoch, { ...ro, notify: noticeThroughNotifications(notifications) });
   // A subscription made before idle expiry existed is counted idle from now, not from the day it was made (card H06c).
   await events.stampIdle(principal).catch((error: unknown) => i.onError?.(error));
-  const decisions = DecisionService.withEpoch(storage, epoch, { events, effects }, ro);
+  // The generation service is built from the decisions, and the decisions interrupt a running generation: the dependency is filled in once both exist.
+  const decisionDeps: { -readonly [K in keyof DecisionDeps]: DecisionDeps[K] } = { events, effects };
+  const decisions = DecisionService.withEpoch(storage, epoch, decisionDeps, ro);
   const generation = GenerationService.withEpoch(storage, epoch, { assignments: i.assignments, effects, pauses, decisions }, ro);
+  decisionDeps.generation = generation;
   const difficulty = DifficultyService.withEpoch(storage, epoch, i.routing, i.contracts, ro);
   const route: RouteResolver = i.options.route ?? (async ({ commandId, taskId }) => {
     const d = await difficulty.resolve(principal, { commandId, taskId, role: "worker", data: "local-only", paidAuthorized: false });

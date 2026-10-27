@@ -795,6 +795,7 @@ Arguments:
 - `basedOn`: the version of this topic you saw (0 for none)
 - `session` (optional): a label for the session or device
 - `stance` (optional): how the words were read
+- `sourceTurnId` (optional): set by the owner's chat to the turn the words came from; the words must be in that turn, and a direct caller leaves it out
 
 Result: `{ recorded, ... }`: the decision, or why none was made.
 

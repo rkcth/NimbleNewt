@@ -418,7 +418,7 @@ export class ChatService {
       if (!resolved.ok) { push(askOrRefuse(i, resolved, n)); continue; }
       projectId = resolved.projectId ?? projectId;
       // A captured topic is linked to this very turn (set here, after the interpreter's arguments were checked, so it cannot be named by anyone else).
-      const steps = resolved.steps.map((st) => (st.op === "agenda.capture" ? { ...st, args: { ...st.args, sourceTurnId: turnId } } : st));
+      const steps = resolved.steps.map((st) => (st.op === "agenda.capture" || st.op === "decision.record" ? { ...st, args: { ...st.args, sourceTurnId: turnId } } : st));
       if (resolved.reason === undefined) {
         // An explicit order applies now, one API command per step (a first step such as setting the repository, then the order itself).
         const last = steps.length - 1;
@@ -469,7 +469,7 @@ export class ChatService {
     if (spec === undefined || accepted === undefined) return refuse("not_a_chat_command", `${intent.op.slice(0, 60)} is not something that can be done by chat`);
     if (hasRefMarker(intent.args)) return refuse("invalid_command", "$ref is reserved for steps the controller builds");
     // Which conversation a topic came from is the controller's to say, never the interpreter's.
-    if (intent.op === "agenda.capture" && intent.args["sourceTurnId"] !== undefined) return refuse("invalid_command", "sourceTurnId is set by the controller");
+    if ((intent.op === "agenda.capture" || intent.op === "decision.record") && intent.args["sourceTurnId"] !== undefined) return refuse("invalid_command", "sourceTurnId is set by the controller");
     for (const key of Object.keys(intent.args)) if (!accepted.includes(key) && !(key === "repositoryId" && spec.dispatch === true)) return refuse("invalid_command", `${key} is not an argument of ${intent.op}`);
     const args: Record<string, unknown> = { ...intent.args };
     const labels: Record<string, string> = {};
@@ -658,6 +658,15 @@ export class ChatService {
       case "agenda": {
         const item = typeof args["itemId"] === "string" ? await this.#get(token, "agenda.get", { itemId: args["itemId"] }) : undefined;
         return item === undefined ? refuse("not_found", "no such agenda item") : { ok: true, name: "expectedRevision", value: (item["revision"] as number) + ahead(`agenda:${args["itemId"] as string}`) };
+      }
+      case "decision": {
+        // The version of the topic the owner's session sees now (0 when nothing was decided): a decision that moved meanwhile is never overwritten.
+        if (typeof args["projectId"] !== "string" || typeof args["topic"] !== "string") return refuse("invalid_command", "a decision needs a project and a topic");
+        const item = await this.#get(token, "decision.authoritative", { projectId: args["projectId"], topic: args["topic"], ...(typeof args["taskId"] === "string" ? { taskId: args["taskId"] } : {}) });
+        if (item?.["status"] === "disputed") return refuse("invalid_command", "that topic is in dispute between two of your instructions; settle the dispute first");
+        const current = (item?.["decision"] as { version?: unknown } | undefined)?.version;
+        const version = item?.["status"] === "decided" && typeof current === "number" ? current : 0;
+        return { ok: true, name: "basedOn", value: version + ahead(`decision:${args["projectId"] as string}:${args["topic"] as string}`) };
       }
       case "grant": {
         const item = typeof args["grantId"] === "string" ? await this.#get(token, "grant.get", { grantId: args["grantId"] }) : undefined;
