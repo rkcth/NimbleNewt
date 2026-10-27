@@ -37,7 +37,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C08, C09, C08b |
 | N08 / AII-258 | R01, R02, R03, R04, R05, R05b, R05c, R05d, R05e |
 | N09 / AII-259 | U03, U03d, U03e, U05b, U04, U05, U06, U03b, U03c, U07, U09, U08, U10, U11, U11b |
-| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H02b |
+| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12l, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H02b |
 | N11 / AII-261 | V01, V01b, V02 |
 | N12 / AII-262 | M01b, M01c, M00, M01, M02, M03, M04, M05, M05b, M06 |
 | N13 / AII-263 | T01, T02, T03, T06, T06b, T07, T07b, T08, T09 |
@@ -973,9 +973,17 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H12d — Quiesce attempts before integration, refresh and quarantine
 
 - **Parent:** N10 / AII-260.
-- **Blockers:** H12, A04, A06.
+- **Blockers:** H12, A04, A06, H12l.
 - **Deliverable:** Call the H12 quiesce (freeze, settle, checkpoint) from the A04 integration, A06 release and refresh paths and from quarantine.
 - **Acceptance and verification:** Integration, refresh or quarantine never runs while an attempt has an unsettled tool call; the attempt checkpoints and resumes after; a failed settle blocks the operation with a typed blocker; tested with a call in flight.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### H12l — Give the controller integration, checkout refresh and quarantine operations
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H12, A04, A06.
+- **Deliverable:** Split from H12d (2026-10-27): the quiesce coordinator exists but the controller has no integration, checkout-refresh or quarantine operation for it to wrap (the file work lives in the worker); controller operations that request each of the three on an agent's work, run on the host that holds the checkout, and report a typed result.
+- **Acceptance and verification:** An owner or a permitted caller can request integration, refresh or quarantine of an agent's checkout through the state API; the request reaches the host that holds the checkout and returns a typed result or refusal; every request is recorded against the task and agent; tested with a simulated host that accepts, refuses and drops the request.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### H12e — Route Pi model calls through the cache adapter
@@ -1879,7 +1887,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D03 — Approve release readiness and publication decision
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11, U05b, R05e, C08b, P01b, M01b, M01c, H02b.
+- **Blockers:** X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, X11, U05b, R05e, C08b, P01b, M01b, M01c, H02b.
 - **Deliverable:** Exact release manifest, known limitations and owner signoff.
 - **Acceptance and verification:** All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

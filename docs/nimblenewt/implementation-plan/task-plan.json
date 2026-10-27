@@ -2617,10 +2617,30 @@
       "depends_on": [
         "H12",
         "A04",
-        "A06"
+        "A06",
+        "H12l"
       ],
       "deliverable": "Call the H12 quiesce (freeze, settle, checkpoint) from the A04 integration, A06 release and refresh paths and from quarantine",
       "acceptance_and_verification": "Integration, refresh or quarantine never runs while an attempt has an unsettled tool call; the attempt checkpoints and resumes after; a failed settle blocks the operation with a typed blocker; tested with a call in flight",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "H12l",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Give the controller integration, checkout refresh and quarantine operations",
+      "depends_on": [
+        "H12",
+        "A04",
+        "A06"
+      ],
+      "deliverable": "Split from H12d (2026-10-27): the quiesce coordinator exists but the controller has no integration, checkout-refresh or quarantine operation for it to wrap (the file work lives in the worker); controller operations that request each of the three on an agent's work, run on the host that holds the checkout, and report a typed result",
+      "acceptance_and_verification": "An owner or a permitted caller can request integration, refresh or quarantine of an agent's checkout through the state API; the request reaches the host that holds the checkout and returns a typed result or refusal; every request is recorded against the task and agent; tested with a simulated host that accepts, refuses and drops the request",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -5051,6 +5071,7 @@
         "H12i",
         "H12j",
         "H12k",
+        "H12l",
         "X11",
         "U05b",
         "R05e",

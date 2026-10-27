@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **97 of 211 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **97 of 212 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -115,7 +115,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
 | Model routing, fallback and cost | `▓▓▓▓▓▓▓▓░░░░` 66% | 6 of 9 |
 | Owner chat and web UI | `▓▓▓▓░░░░░░░░` 40% | 6 of 15 |
-| Workers, dispatch and teams | `▓▓▓▓▓▓░░░░░░` 51% | 14 of 27 |
+| Workers, dispatch and teams | `▓▓▓▓▓▓░░░░░░` 50% | 14 of 28 |
 | Agent messaging | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
 | Health and recovery | `▓▓▓▓░░░░░░░░` 33% | 1 of 3 |
 | Meetings | `▓░░░░░░░░░░░` 10% | 1 of 10 |
@@ -318,7 +318,7 @@ Talking to your agents: the chat interpreter, policy editing, status and blocker
 </details>
 
 <details>
-<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓▓░░░░░░ 14 of 27</summary>
+<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓▓░░░░░░ 14 of 28</summary>
 
 Enrolled hosts, remote workers, priority admission, the local worker runtime and dispatcher, agents, teams and roles, reviews and wait-cycle handling.
 
@@ -336,13 +336,14 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 - [x] **H02** · P29 · Implement subordinate remote work/artifact transport _(needs H01, S06, A03, H12)_
 - [ ] **H12b** · P29 · Bind the real sandbox launcher and worker process to the local runtime _(needs H12, A03, A08)_
 - [x] **H12c** · P29 · Compose the dispatcher at controller start with a durable scan cursor _(needs H12)_
-- [ ] **H12d** · P29 · Quiesce attempts before integration, refresh and quarantine _(needs H12, A04, A06)_
 - [ ] **H12e** · P29 · Route Pi model calls through the cache adapter _(needs H12, C06b)_
 - [x] **H12g** · P29 · Use the DNS-rebinding guard in the remote MCP client _(needs H12, T03)_
 - [x] **H12h** · P29 · Route owner-mode reviews only to the owner _(needs H12, A05)_
+- [ ] **H12l** · P29 · Give the controller integration, checkout refresh and quarantine operations _(needs H12, A04, A06)_
 - [ ] **H02b** · P30 · Prove remote worker fencing, relocation and the store owner in the composed controller _(needs H02)_
 - [ ] **H07** · P30 · Implement idle host polling and capability placement _(needs H02, H03)_
 - [ ] **H12a** · P30 · Carry the dispatch contract to remote workers _(needs H12, H02)_
+- [ ] **H12d** · P30 · Quiesce attempts before integration, refresh and quarantine _(needs H12, A04, A06, H12l)_
 - [ ] **H12i** · P30 · Give tasks controlled network routes through the worker relay _(needs H12b, A07, T01, T03, A03b)_
 - [ ] **H12j** · P30 · Close the H12b worker-process gaps _(needs H12b)_
 - [ ] **H12f** · P31 · Wire context enforcement, pause observation and message boundaries into the runtime _(needs H12, C07b, L01, U12)_
@@ -510,7 +511,7 @@ Installation, documentation, QA on real machines, the release decision and closi
 
 - [ ] **D02** · P36 · Finish developer/API/security and license guidance _(needs T05, K03, F03)_
 - [ ] **D01** · P45 · Finish installation and chat-first user guidance _(needs X03, Q03, U11b)_
-- [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11, U05b, R05e, C08b, P01b, M01b, M01c, H02b)_
+- [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, X11, U05b, R05e, C08b, P01b, M01b, M01c, H02b)_
 - [ ] **D04** · P50 · Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
 - [ ] **D04b** · P51 · Measure code-navigation aids on real coding tasks (optional, after the first release) _(needs D04)_
 - [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, U03c, K06b, K01d, P02b, A08c)_
