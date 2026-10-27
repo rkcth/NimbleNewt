@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { DomainError } from "../domain/errors.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
-import { activeAgents, attendanceLoops, decisionLoops, eventLoops, meetingLoops, messageLoops, projectIds, recoveryLoops, standupLoops } from "./loops.js";
+import { activeAgents, attendanceLoops, budgetNoticeLoops, decisionLoops, eventLoops, meetingLoops, messageLoops, projectIds, recoveryLoops, standupLoops } from "./loops.js";
 import { buildWorld, workGrants } from "./testing/world.js";
 
 after(stopServer);
@@ -85,4 +85,22 @@ test("recovery loops: the pass runs; the scan continues from where it stopped an
   await scan!.run({ id: "x" } as never);
   assert.equal(seen[12], undefined, "after the last page the scan wraps to the start");
   assert.ok(renewals >= 5);
+});
+
+test("the budget notice loop tells every holder again until the notice is filed, skips a holder who cannot be told, and lets a real fault out (card R05e)", async () => {
+  const owed = [1, 2, 3].map((n) => ({ requestId: `r${n}`, taskId: `t${n}`, to: `agent:h${n}`, requestedBy: "agent:x", costMicros: 1, computeMs: 0 }));
+  const told: string[] = [];
+  let full = true;
+  const [loop] = budgetNoticeLoops({ openForHolders: async () => owed }, async (n) => {
+    if (n.requestId === "r1" && full) throw new DomainError("unavailable", "the inbox is full");
+    if (n.requestId === "r2") throw new DomainError("forbidden", "cannot be told");
+    told.push(n.requestId);
+  });
+  await loop!.run({ id: "x" } as never);
+  assert.deepEqual(told, ["r3"], "a full inbox and a holder who cannot be told do not stop the others");
+  full = false;
+  await loop!.run({ id: "x" } as never);
+  assert.deepEqual(told, ["r3", "r1", "r3"], "the notice that could not be filed is tried again on the next tick");
+  const [broken] = budgetNoticeLoops({ openForHolders: async () => owed }, async () => { throw new Error("storage hiccup"); });
+  await assert.rejects(() => broken!.run({ id: "x" } as never), /storage hiccup/);
 });

@@ -795,6 +795,44 @@ export class AgentMessageService {
     return result;
   }
 
+  /**
+   * A notice from the controller itself (card R05e): it tells `to` something about a task, filed as advice in the recipient's inbox with the controller as the sender, as an escalation is. It needs no sender principal and no right,
+   * so no agent or conversation can use it and the dispatcher's service principal is not widened; it is called only by code that builds the services. It never wakes anyone: the recipient reads it at a boundary, and a
+   * paused, suspended or stopped recipient keeps it queued. The same `commandId` files it once. A full inbox is `unavailable` (the caller retries later); a recipient who can no longer see the task is `forbidden`.
+   */
+  async noticeFromController(command: { commandId: string; taskId: string; to: string; purpose: string; text: string }): Promise<{ id: string; replayed: boolean }> {
+    onlyKnown(command, ["commandId", "taskId", "to", "purpose", "text"]);
+    const purpose = plain(command.purpose, "purpose", MESSAGE_LIMITS.purpose);
+    const text = plain(command.text, "text", MESSAGE_LIMITS.text);
+    const taskId = checkTaskId(command.taskId);
+    const to = this.#principalId(command.to, "to");
+    const scoped = scopedCommandId(SYSTEM, command.commandId);
+    const id = derivedId("amg", scoped);
+    return this.#retrying(() => this.#runner.command("message.notice", { commandId: scoped, actor: SYSTEM }, async () => ({
+      payload: { taskId, to, purpose, text } as unknown as JsonObject,
+      build: async () => {
+        const now = this.#runner.now();
+        const projectId = ((await this.#runner.get("task", taskId))?.body as unknown as TaskBody | undefined)?.projectId;
+        if (projectId === undefined || (await this.#reachable(to, projectId, taskId)) === undefined) throw new DomainError("forbidden", `${to} cannot be told about that task`);
+        const inboxAgg = await this.#runner.get("agent-inbox", inboxIdOf(to));
+        const inbox = inboxAgg === undefined ? this.#emptyInbox(now) : inboxAgg.body as unknown as InboxBody;
+        if (inbox.pending.length >= MESSAGE_LIMITS.queue) throw new DomainError("unavailable", `${to} already has ${inbox.pending.length} messages waiting; the notice is retried once some are read`);
+        const availability = await this.#availabilityOf(to);
+        const message: AgentMessageBody = {
+          taskId, projectId, sender: SYSTEM, to, kind: "notice", purpose, text, class: "advice", effectiveClass: "advice", urgency: URGENCY.advice, correlationId: id, depth: 0,
+          state: "accepted", reach: availability === "available" ? "ready" : availability === "stopped" ? "unavailable" : "queued", count: 1, sentAt: now, lastAt: now,
+        };
+        const ref: AggregateRef = { kind: "agent-message", id };
+        const entry: PendingEntry = { id, class: "advice", sender: SYSTEM, taskId, at: now };
+        return {
+          ref, creates: true,
+          changes: [{ type: "create", ref, body: message as unknown as JsonObject }, this.#put("agent-inbox", inboxIdOf(to), inboxAgg, { ...inbox, pending: [...inbox.pending, entry] })],
+          detail: { to, taskId }, contention: async () => new DomainError("stale_revision", "the inbox changed at the same moment"),
+        };
+      },
+    }))).then((result) => ({ id, replayed: result.replayed }));
+  }
+
   async #unlist(id: string, by: Principal): Promise<void> {
     await this.#retrying(() => this.#runner.command("message.unlist", { commandId: `${id}-unlist`, actor: by.id }, async () => ({
       payload: { messageId: id },

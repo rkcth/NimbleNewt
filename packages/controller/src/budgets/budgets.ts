@@ -62,6 +62,10 @@ export interface BudgetRequestBody { readonly taskId: string; readonly treeId: s
 
 /** What the addressee of a request for more budget is told: who asked, for which task, how much, and where it was addressed (`to` is `owner` or the delegated holder's principal). */
 export interface RequestNotice { readonly requestId: string; readonly taskId: string; readonly parentTaskId?: string; readonly to: string; readonly requestedBy: string; readonly costMicros: number; readonly computeMs: number }
+/** What a delegated holder is told of a request addressed to it (card R05e). The notice is filed on the parent task, the one the holder holds, else on the requesting task. */
+export function holderNotice(n: RequestNotice): { purpose: string; text: string } {
+  return { purpose: `budget request ${n.requestId}`, text: `${n.requestedBy} asked for more budget for task ${n.taskId} (${n.costMicros} millionths, ${n.computeMs} ms of compute). It is addressed to you: find it with budget.pending and decide it with budget.decide.` };
+}
 export type NotifyRequest = (notice: RequestNotice) => Promise<void>;
 
 export interface BudgetReport {
@@ -552,6 +556,28 @@ export class BudgetService {
       if (page.length < BUDGET_LIMITS.page) break;
     }
     return { requests, truncated };
+  }
+
+  /**
+   * The open requests addressed to a delegated holder rather than the owner, as the notices owed (card R05e). For the controller's own loop, which tells each holder again until the notice is filed (filing is idempotent);
+   * it is not an API operation. Scans like `pending`, at most `BUDGET_LIMITS.scan` records a call.
+   */
+  async openForHolders(): Promise<RequestNotice[]> {
+    const out: RequestNotice[] = [];
+    let scanned = 0;
+    for (let after: string | undefined;;) {
+      const page = await this.#runner.list(REQUEST, { ...(after === undefined ? {} : { afterId: after }), limit: BUDGET_LIMITS.page });
+      for (const a of page) {
+        after = a.id;
+        if (++scanned > BUDGET_LIMITS.scan) return out;
+        const r = a.body as unknown as BudgetRequestBody;
+        if (r.state !== "open" || r.to === "owner") continue;
+        const tree = (await this.#tree(r.treeId)).body;
+        const parentId = tree.nodes[r.taskId]?.parentId;
+        out.push({ requestId: a.id, taskId: r.taskId, ...(parentId === undefined ? {} : { parentTaskId: parentId }), to: r.to, requestedBy: r.requestedBy, costMicros: r.costMicros, computeMs: r.computeMs });
+      }
+      if (page.length < BUDGET_LIMITS.page) return out;
+    }
   }
 
   /** One request. Readable by its requester, the addressee and the owner; anyone else sees nothing. */

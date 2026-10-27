@@ -689,4 +689,30 @@ for (const backend of backends) {
     assert.match(e2.text, /can no longer take it/);
     assert.equal(e2.reach, "ready");
   });
+
+  suite("a notice from the controller (R05e) is filed once as advice, never wakes anyone, keeps while the recipient is paused, and is refused for a full inbox or a recipient who cannot see the task", async (c) => {
+    const note = (id: string, to = c.ann.pid, taskId = c.tAnn) => c.msgs.noticeFromController({ commandId: id, taskId, to, purpose: "budget request", text: `Request ${id} is addressed to you.` });
+    const first = await note("n-1");
+    assert.equal(first.replayed, false);
+    assert.equal((await note("n-1")).replayed, true, "the same command files it once");
+    const m = (await c.msgs.get(c.ann.p, first.id))!;
+    assert.deepEqual([m.sender, m.to, m.kind, m.class, m.effectiveClass, m.state, m.reach, m.taskId], ["controller", c.ann.pid, "notice", "advice", "advice", "accepted", "ready", c.tAnn]);
+    assert.equal((await c.msgs.inbox(c.ann.p, c.ann.pid))!.items.length, 1);
+    assert.deepEqual((await c.msgs.readable(c.ann.p, { boundary: "safe-boundary" })).items.map((i) => i.id), [first.id]);
+    assert.equal((await c.msgs.readable(c.ann.p, { boundary: "interrupt" })).items.length, 0, "advice is never an interruption");
+    // Somebody who cannot read the task is not told about it, and an unknown field is refused.
+    await refuses("forbidden", () => note("n-2", c.eve.pid));
+    await refuses("invalid_command", () => c.msgs.noticeFromController({ commandId: "n-3", taskId: c.tAnn, to: c.ann.pid, purpose: "p", text: "t", class: "urgent-control" } as never));
+    // A paused recipient keeps the notice queued and nothing resumes it.
+    await c.pauses.pause(c.owner, { commandId: cid("pz"), scope: { kind: "agent", id: c.cat.aid }, reason: "hold" });
+    const held = await note("n-4", c.cat.pid);
+    assert.deepEqual([(await c.msgs.get(c.cat.p, held.id))!.reach, (await c.msgs.get(c.cat.p, held.id))!.state], ["queued", "accepted"]);
+    // A full inbox is `unavailable` and nothing is stored, so the same command succeeds once there is room.
+    for (let i = 0; i < MESSAGE_LIMITS.queue - 1; i++) await note(`fill-${i}`, c.ben.pid);
+    await note("fill-last", c.ben.pid);
+    await refuses("unavailable", () => note("late", c.ben.pid));
+    const read = await c.msgs.readable(c.ben.p, { boundary: "safe-boundary" });
+    await c.msgs.acknowledge(c.ben.p, { commandId: cid("ack"), boundary: "safe-boundary", messageIds: read.items.slice(0, 3).map((i) => i.id) });
+    assert.equal((await note("late", c.ben.pid)).replayed, false, "retried after room was made, it is filed");
+  });
 }

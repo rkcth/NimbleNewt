@@ -1,3 +1,4 @@
+import type { BudgetService, RequestNotice } from "../budgets/index.js";
 import type { DecisionService } from "../decisions/index.js";
 import { DomainError } from "../domain/errors.js";
 import type { Principal } from "../security/principals.js";
@@ -153,4 +154,13 @@ export function eventLoops(events: Pick<EventService, "expireIdle">): Dispatcher
 /** C08: the corrections whose propagation did not finish (a step that failed, a restart) are finished for each project. */
 export function decisionLoops(decisions: Pick<DecisionService, "resume">, projects: () => Promise<readonly string[]>): DispatcherLoop[] {
   return [{ name: "decisions.resume", run: async (by) => { for (const projectId of await projects()) await drain(() => decisions.resume(by, { projectId })); } }];
+}
+
+/** R05e: the delegated holders who have not yet been told of a request addressed to them are told (filing is idempotent, so a notice filed already is not filed twice). A holder who can no longer be told is skipped; a full inbox is tried again on the next tick. */
+export function budgetNoticeLoops(budgets: Pick<BudgetService, "openForHolders">, tell: (notice: RequestNotice) => Promise<unknown>): DispatcherLoop[] {
+  return [{ name: "budgets.notifyHolders", run: async () => {
+    for (const notice of await budgets.openForHolders()) {
+      try { await tell(notice); } catch (error) { if (!(error instanceof DomainError && (error.code === "forbidden" || error.code === "unavailable"))) throw error; }
+    }
+  } }];
 }

@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { BudgetService } from "../budgets/index.js";
+import { ManualTimer } from "../dispatch/testing/timer.js";
+import { PI } from "../dispatch/testing/world.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { startController } from "./index.js";
 
@@ -59,6 +61,14 @@ test("a request for more budget tells the owner once, budgets are read, asked fo
     assert.ok(sub.ok, JSON.stringify(sub));
     assert.equal(sub.result.to, "agent:ann");
     assert.equal(await budgetNotices(), 1, "the owner is not told of a request addressed to a holder");
+    // The holder is told once, in its inbox, as advice from the controller on the task it holds; repeating the command tells nothing more.
+    const noticesTo = async (to: string) => (await c.storage.listAggregates("agent-message", { limit: 100 })).map((m) => m.body as unknown as { to: string; sender: string; kind: string; effectiveClass: string; taskId: string; text: string }).filter((m) => m.to === to);
+    const told = await noticesTo("agent:ann");
+    assert.deepEqual(told.map((m) => [m.sender, m.kind, m.effectiveClass, m.taskId]), [["controller", "notice", "advice", child]]);
+    assert.match(told[0]!.text, new RegExp(`${grandchild}.*budget\\.pending`));
+    assert.equal((await call(ann, "budget.request-more", { taskId: grandchild, costMicros: 10_000, reason: "more water" }, "bq2")).result.replayed, true);
+    assert.equal((await noticesTo("agent:ann")).length, 1, "repeating the command tells the holder nothing more");
+    assert.equal((await noticesTo("owner")).length, 0);
     assert.deepEqual((await call(ann, "budget.pending", {})).result.requests.map((r: { id: string }) => r.id), [sub.result.id]);
     // The holder decides within what it holds.
     assert.ok((await call(ann, "budget.decide", { requestId: sub.result.id, approve: true, costMicros: 5_000 }, "bd2")).ok);
@@ -75,4 +85,35 @@ test("a task credential may not list, total or read budgets beyond its own task,
   await assert.rejects(() => run("budget.usage", { projectId: "proj-aaaaaaaaaaaaaaaaaaaa" }), (e: { code?: string }) => e.code === "forbidden");
   await assert.rejects(() => run("budget.get-request", { requestId: "bgq-aaaaaaaaaaaaaaaaaaaa" }), (e: { code?: string }) => e.code === "not_found", "another task's request reads as missing");
   assert.ok(await run("budget.get-request", { requestId: "bgq-aaaaaaaaaaaaaaaaaaaa" }, "task-bbbbbbbbbbbbbbbbbbbb"), "its own task's request is readable");
+});
+
+test("a request addressed to a holder whose notice was lost (a crash after the commit) is told by the dispatcher's next tick, once (card R05e)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-budget-"));
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI], dispatch: { timer: new ManualTimer(), intervalMs: 1000 } });
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const project = (await c.services.projects.createProject({ commandId: "p1", actor: rob.id, name: "Garden" })).id;
+    const mk = async (n: string) => (await c.services.projects.createTask({ commandId: `t-${n}`, actor: rob.id, projectId: project, title: n })).id;
+    const root = await mk("root"), child = await mk("child"), grand = await mk("grand");
+    await c.services.principals.enroll(rob, { commandId: "e-ann", kind: "agent", name: "ann", grants: [{ action: "attempt.work", project }, { action: "budget.manage", project }] });
+    const ann = await c.services.principals.authenticate((await c.services.principals.issueCredential(rob, "agent:ann")).token);
+    // A service with no notice hook stands for the crash: the request is committed and nobody was told.
+    const silent = BudgetService.withEpoch(c.storage, c.epoch);
+    await silent.open(rob, { commandId: "b-open", taskId: root, currency: "USD", costMicros: 1_000_000, computeMs: 60_000 });
+    await silent.delegate(rob, { commandId: "b-del", parentTaskId: root, childTaskId: child, costMicros: 200_000, computeMs: 10_000, holder: "agent:ann" });
+    await silent.delegate(rob, { commandId: "b-del2", parentTaskId: child, childTaskId: grand, costMicros: 50_000, computeMs: 1_000 });
+    const asked = await silent.requestMore(ann, { commandId: "bq", taskId: grand, costMicros: 10_000, reason: "more water" });
+    assert.equal(asked.to, "agent:ann");
+    const told = async () => (await c.storage.listAggregates("agent-message", { limit: 100 })).filter((m) => (m.body as unknown as { to: string }).to === "agent:ann").length;
+    assert.equal(await told(), 0, "nobody was told");
+    const first = await c.dispatch!.dispatcher.tick();
+    assert.ok(first.loops.some((l) => l.name === "budgets.notifyHolders" && l.ok), "the notice loop ran");
+    assert.equal(await told(), 1, "the holder was told");
+    await c.dispatch!.dispatcher.tick();
+    assert.equal(await told(), 1, "and only once");
+    // Decided, the request is no longer owed.
+    await silent.decide(ann, { commandId: "bd", requestId: asked.id, approve: true });
+    assert.deepEqual(await silent.openForHolders(), []);
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
