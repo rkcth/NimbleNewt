@@ -37,6 +37,19 @@ test("a status question in the owner chat of the started controller is answered 
     const board = await turn("s3", "what is on the noticeboard", { kind: "noticeboard", projectId: project });
     assert.equal(board.outcomes[0]!.status, "answered", JSON.stringify(board.outcomes));
     assert.equal(await audit(), before, "answering writes no record");
+    // The other views are reached too, each answered or honestly empty, never refused as unavailable: what changed, tools used, what was delivered, the failed event queue.
+    for (const [id, text, request] of [
+      ["s5", "what changed in Garden since the start", { kind: "changes", projectId: project, since: "2020-01-01T00:00:00.000Z" }],
+      ["s6", "which tools were used in Garden", { kind: "tools", projectId: project }],
+      ["s7", "what was delivered in Garden", { kind: "delivered", projectId: project }],
+      ["s8", "show the failed events of Garden", { kind: "failed_events", projectId: project }],
+    ] as const) {
+      const r = await turn(id, text, { ...request });
+      assert.ok(r.outcomes[0]!.status === "answered" || r.outcomes[0]!.status === "refused" && r.outcomes[0]!.code === "not_found", `${request.kind}: ${JSON.stringify(r.outcomes)}`);
+      assert.notEqual((r.outcomes[0] as { code?: string }).code, "unavailable", `${request.kind} is wired`);
+    }
+    const queue = await turn("s9", "show the failed events of Garden again", { kind: "failed_events", projectId: project });
+    assert.equal(queue.outcomes[0]!.status, "answered", "the failed event queue can be listed in the running controller");
     // A made-up task is not a fabricated answer.
     const none = await turn("s4", "how is the moon task going", { kind: "task", taskId: "task-aaaaaaaaaaaaaaaaaaaa" });
     assert.notEqual(none.outcomes[0]!.status, "answered", JSON.stringify(none.outcomes));
