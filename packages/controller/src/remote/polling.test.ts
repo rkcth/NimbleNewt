@@ -14,6 +14,8 @@ after(stopServer);
 
 const sleepMs = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const seeded = (seed: number) => () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 2 ** 32; };
+/** Waits (up to 15 s) until the condition holds. */
+const until = async (cond: () => boolean | Promise<boolean>): Promise<void> => { for (let i = 0; i < 750 && !(await cond()); i++) await sleepMs(20); };
 /** Waits (up to 15 s, a slow runner may take long to deliver a request) until this many polls are held. */
 const openPolls = async (c: Ctx, n: number): Promise<void> => {
   for (let i = 0; i < 300 && c.remote.pollStats(c.dispatcherPrincipal).open !== n; i++) await sleepMs(50);
@@ -90,11 +92,11 @@ for (const backend of backends) {
     const poller = new HostPoller({ client: h.client, capabilities: REMOTE_CAPS, waitMs: 2000, heartbeatMs: 400, minGapMs: 100, spreadMs: 0, onOffers: async (o) => { seen.push(...o); } });
     const running = poller.run(stop.signal);
     try {
-    await sleepMs(300);
+    await until(async () => h.client.session !== undefined && (await c.hosts.status(c.dispatcherPrincipal, h.id))?.freshness === "fresh");
     assert.ok(h.client.session !== undefined, "connected");
     assert.equal((await c.hosts.status(c.dispatcherPrincipal, h.id))?.freshness, "fresh", "heartbeats went");
     const attemptId = await offered(c, h);
-    for (let i = 0; i < 100 && seen.length === 0; i++) await sleepMs(20);
+    await until(() => seen.length > 0);
     assert.deepEqual([...new Set(seen.map((o) => o.order.attemptId))], [attemptId], "the offer is handed over (again, until it is accepted)");
     // Accepted, the offer is not offered again; the poller keeps one poll open.
     await h.client.attempt(attemptId, seen[0]!.placement).accept();
@@ -115,18 +117,18 @@ for (const backend of backends) {
     });
     const running = poller.run(stop.signal);
     try {
-    await sleepMs(200);
+    await until(() => h.client.session !== undefined);
     const before = h.client.session!.sessionId;
     // Another process connects with the same credential: the poller's session is gone.
     const other = new (h.client.constructor as new (o: never) => typeof h.client)({ url: c.transport.url, token: h.token, workerVersion: "worker-9.1.0" } as never);
     await other.connect({ ...REMOTE_CAPS } as never);
-    for (let i = 0; i < 100 && (h.client.session === undefined || h.client.session.sessionId === before); i++) await sleepMs(20);
+    await until(() => h.client.session !== undefined && h.client.session.sessionId !== before);
     assert.notEqual(h.client.session?.sessionId, before, "it connected again");
     assert.ok(troubles.some((t) => t === "poll:fenced"), JSON.stringify(troubles));
     // A revoked credential is not hammered: the delay is the longest backoff.
     await c.principals.disable(c.owner, { commandId: "dis-h1", principalId: h.id, expectedRevision: (await c.principals.get(h.id))!.revision });
     const mark = delays.length;
-    for (let i = 0; i < 100 && delays.length === mark; i++) await sleepMs(20);
+    await until(() => delays.length > mark);
     await sleepMs(50);
     assert.ok(delays.slice(mark).every((d) => d >= 30 && d <= 40) && delays.length > mark, JSON.stringify(delays.slice(mark)));
     } finally { stop.abort(); await running; }
