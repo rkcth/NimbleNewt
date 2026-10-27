@@ -8,7 +8,7 @@ import type { Invitation, InvitationSink } from "./meetings.js";
 
 const KIND = "meeting-inbox";
 const AGENT = /^agent:[A-Za-z0-9_-]{1,80}$/;
-/** An agent's inbox keeps its newest invitations; older ones drop off the end. */
+/** An agent's inbox keeps the invitations most recently sent; older ones drop off the end. */
 export const INVITATION_LIMITS = { kept: 50 } as const;
 
 export type InvitationView = Invitation;
