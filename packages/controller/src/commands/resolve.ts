@@ -153,6 +153,7 @@ export class CommandResolver {
     const canonical = await this.#aliases(context.scope, inv.name);
     if (canonical === undefined) return { status: "unknown", typed, reason: `no custom command ${inv.name} in that scope` };
     const resolved = await this.#canonical(by, typed, canonical, inv.rest, context.version);
-    return resolved;
+    // A target the caller cannot see answers like an alias that does not exist, so it reveals neither the alias nor whose command it names.
+    return resolved.status === "unknown" ? { status: "unknown", typed, reason: `no custom command ${inv.name} in that scope` } : resolved;
   }
 }

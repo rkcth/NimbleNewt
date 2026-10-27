@@ -151,7 +151,11 @@ for (const backend of backends) {
     const hit = await c.resolve(c.ann, "/custom.t", { scope: "project:a" });
     assert.deepEqual(hit.status === "resolved" && hit.target.operationId, `${c.annNs}.run-tests`);
     assert.equal((await c.resolve(c.ann, "/custom.t", { scope: "project:b" })).status, "unknown", "another scope has no such command");
-    assert.equal((await c.resolve(c.ben, "/custom.t", { scope: "project:a" })).status, "unknown", "the alias grants nothing: ben cannot see ann's personal command");
+    const blind = await c.resolve(c.ben, "/custom.t", { scope: "project:a" });
+    const none = await c.resolve(c.ben, "/custom.zz", { scope: "project:a" });
+    assert.deepEqual([blind.status, none.status], ["unknown", "unknown"], "the alias grants nothing: ben cannot see ann's personal command");
+    assert.equal(blind.status === "unknown" && blind.reason.replace("t in", "zz in"), none.status === "unknown" && none.reason, "and the answer does not say the alias exists or whose it names");
+    await refuses("forbidden", () => c.cmd.removeAlias(c.ann, { commandId: cid("rm"), scope: "project:a", alias: "t", expectedRevision: 1 }));
     // An alias names a canonical command, not another alias; a missing or invisible target and a bad name or scope are refused; an existing one cannot be overwritten.
     await refuses("invalid_command", () => c.cmd.defineAlias(c.owner, { commandId: cid("al"), scope: "project:a", alias: "u", target: "custom.t" }), (e) => assert.equal(e.field, "target"));
     await refuses("not_found", () => c.cmd.defineAlias(c.owner, { commandId: cid("al"), scope: "project:a", alias: "u", target: "toolbox.nothing" }));
@@ -200,10 +204,17 @@ for (const backend of backends) {
     const mine = await c.cmd.enqueue(c.ann, { commandId: "q3", typed: `/${c.annNs}.run-tests token=sk-ABCDEFGHIJKLMNOPQRSTUV` });
     assert.equal(mine.status, "queued");
     if (mine.status === "queued") {
-      assert.ok(!(await c.cmd.queued(c.ann, mine.id))!.args.includes("sk-ABCDEFGHIJKLMNOPQRSTUV"));
+      const rec = (await c.cmd.queued(c.ann, mine.id))!;
+      assert.ok(!rec.args.includes("sk-ABCDEFGHIJKLMNOPQRSTUV") && !rec.typed.includes("sk-ABCDEFGHIJKLMNOPQRSTUV"), "the secret is in neither the arguments nor the typed text");
       assert.equal(await c.cmd.queued(c.ben, mine.id), undefined);
       assert.ok(await c.cmd.queued(c.owner, mine.id));
     }
+    // A retry of a queued command is answered from the record even after the name stopped resolving; the same ID for something else conflicts.
+    await c.cat.revoke(c.owner, { commandId: cid("rv"), name: `${c.annNs}.run-tests`, version: "1.0.0", reason: "gone" });
+    const retry = await c.cmd.enqueue(c.owner, { commandId: "q1", typed: "/agent.run-tests --fast", context: { agent: c.annNs.slice(2) } });
+    assert.deepEqual(retry.status === "queued" && [retry.id, retry.replayed], [first.id, true]);
+    await refuses("command_conflict", () => c.cmd.enqueue(c.owner, { commandId: "q1", typed: "/agent.run-tests --slow", context: { agent: c.annNs.slice(2) } }));
+    await refuses("forbidden", () => c.cmd.enqueue({ kind: "host", id: "host:h" } as Principal, { commandId: cid("qx"), typed: "/nimblenewt.pause" }));
     await refuses("invalid_command", () => c.cmd.enqueue(c.owner, { commandId: cid("qx"), typed: "x".repeat(5000) }));
     await refuses("invalid_command", () => c.cmd.enqueue(c.owner, { commandId: cid("qx"), typed: "/nimblenewt.pause", context: { agent: "abcdef1", extra: 1 } as never }));
   });

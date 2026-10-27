@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { parseName } from "@nimblenewt/registry";
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
@@ -14,6 +15,8 @@ export interface AliasBody { readonly scope: string; readonly alias: string; rea
 /** A command waiting to run: the resolved target and the arguments as typed. The shortcut is kept only to show what was typed. */
 export interface QueuedBody {
   readonly typed: string;
+  /** A digest of what was asked (the text and the context), so the same command ID with something else is a conflict, not a replay. */
+  readonly asked: string;
   readonly target: Target;
   readonly args: string;
   readonly requestedBy: string;
@@ -117,6 +120,14 @@ export class CommandService {
     const context = command.context ?? {};
     onlyKnown(context, ["agent", "scope", "version"]);
     const resolver = this.resolver();
+    const asked = createHash("sha256").update(JSON.stringify([typed, context.agent ?? null, context.scope ?? null, context.version ?? null])).digest("hex");
+    // A command already queued under this command ID is answered from its record even when the name no longer resolves (a revoked version, a removed alias): the work is queued.
+    const prior = await this.#runner.get("queued-command", derivedId("qcm", command.commandId + "|" + by.id));
+    if (prior !== undefined) {
+      const body = prior.body as unknown as QueuedBody;
+      if (body.asked !== asked) throw new DomainError("command_conflict", "that command ID was used for something else", { field: "commandId" });
+      return { status: "queued", id: prior.id, revision: prior.revision, replayed: true, target: body.target };
+    }
     const first = await resolver.resolve(by, typed, context);
     if (first.status !== "resolved") return first;
     const done = await this.#runner.command("command.queue", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
@@ -127,7 +138,7 @@ export class CommandService {
         if (now.status !== "resolved") throw new DomainError("command_conflict", `the command no longer resolves: ${now.status}`);
         const id = derivedId("qcm", command.commandId + "|" + by.id);
         const ref: AggregateRef = { kind: "queued-command", id };
-        const body: QueuedBody = { typed: typed.slice(0, 80), target: now.target, args: redactText(now.rest).slice(0, COMMAND_LIMITS.args), requestedBy: by.id, queuedAt: this.#runner.now(), context: { ...(context.agent === undefined ? {} : { agent: context.agent }), ...(context.scope === undefined ? {} : { scope: context.scope }) } };
+        const body: QueuedBody = { typed: redactText(typed).slice(0, 80), asked, target: now.target, args: redactText(now.rest).slice(0, COMMAND_LIMITS.args), requestedBy: by.id, queuedAt: this.#runner.now(), context: { ...(context.agent === undefined ? {} : { agent: context.agent }), ...(context.scope === undefined ? {} : { scope: context.scope }) } };
         return { ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { operation: now.target.operationId, version: now.target.version } };
       },
     }));
