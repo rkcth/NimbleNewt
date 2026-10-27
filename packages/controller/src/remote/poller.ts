@@ -79,10 +79,10 @@ export class HostPoller {
         // A hold longer than the time to the next heartbeat would let the heartbeat go late.
         const hold = Math.max(0, Math.min(this.#o.waitMs, this.#o.heartbeatMs - (this.#now() - beat)));
         const offers = await this.#o.client.offers({ waitMs: hold });
-        this.#failures = 0;
-        if (offers.length > 0) {
+        if (offers.length > 0 && !signal.aborted) {
           try { await this.#o.onOffers(offers); } catch (error) { await this.#trouble(error, "offers", signal); continue; }
         }
+        this.#failures = 0;
         const gap = this.#o.minGapMs - (this.#now() - started);
         if (gap > 0) await this.#sleep(gap, signal);
       } catch (error) {
@@ -97,7 +97,8 @@ export class HostPoller {
     let retryAfter = 0; let delay: number;
     if (error instanceof WorkerRequestError && (error.fenced || error.code === "not_connected")) this.#o.client.forgetSession();
     if (error instanceof WorkerRequestError && error.code === "rate_limited") retryAfter = 1000;
-    if (error instanceof WorkerRequestError && (error.code === "protocol_unsupported" || error.status === 426 || error.status === 401 || error.status === 403)) delay = this.#o.maxBackoffMs;
+    // Refused outright: the longest wait, with a spread so hosts refused together do not return together.
+    if (error instanceof WorkerRequestError && (error.code === "protocol_unsupported" || error.status === 426 || error.status === 401 || error.status === 403)) delay = Math.floor(this.#o.maxBackoffMs * (0.75 + 0.25 * this.#random()));
     else delay = this.backoff(this.#failures, retryAfter);
     this.#o.onTrouble?.({ error, retryInMs: delay, kind });
     await this.#sleep(delay, signal);

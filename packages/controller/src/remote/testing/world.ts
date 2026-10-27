@@ -87,22 +87,23 @@ export interface RemoteWorld extends DispatchWorld {
   done(): Promise<void>;
 }
 
-export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?: RelocationPolicyFor; placement?: PlacementPolicyFor; protocol?: VersionRange; fileBytes?: number; transport?: Partial<WorkerTransportOptions> } = {}): Promise<RemoteWorld> {
+export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?: RelocationPolicyFor; /** The placement policy; absent: every host of the world may hold local-only data; null: no policy hook at all (the product default). */ placement?: PlacementPolicyFor | null; protocol?: VersionRange; fileBytes?: number; transport?: Partial<WorkerTransportOptions> } = {}): Promise<RemoteWorld> {
   const w = await buildWorld(storage);
   const dir = mkdtempSync(join(tmpdir(), "nn remote-"));
   const blobs = await FileBlobStore.open({ directory: join(dir, "blobs") });
   const artifacts = ArtifactService.withEpoch(storage, w.epoch, blobs, w.options);
   const holder: { dispatcher: DispatcherService } = { dispatcher: w.dispatcher };
+  const workers: RemoteTestHost[] = [];
+  const workerIds = (): string[] => workers.map((x) => x.hostId);
   const remote = RemoteWorkerService.withEpoch(storage, w.epoch, {
     principal: w.dispatcherPrincipal, hosts: w.hosts, artifacts,
     dispatch: { gateway: (id) => holder.dispatcher.gateway(id), get: (by, id) => holder.dispatcher.get(by, id), relocate: (by, id, m) => holder.dispatcher.relocate(by, id, m), quiesce: (by, id, r) => holder.dispatcher.quiesce(by, id, r), release: (by, id) => holder.dispatcher.release(by, id) },
     ...(o.policy === undefined ? {} : { relocationPolicy: o.policy }),
-    ...(o.placement === undefined ? {} : { placementPolicy: o.placement }),
+    ...(o.placement === null ? {} : { placementPolicy: o.placement ?? (async () => ({ dataHosts: workerIds() })) }),
   }, { ...w.options, ...(o.protocol === undefined ? {} : { protocol: o.protocol }), ...(o.fileBytes === undefined ? {} : { fileBytes: o.fileBytes }) });
   const transports: WorkerTransport[] = [];
   const listen = async (options: Partial<WorkerTransportOptions> = {}): Promise<WorkerTransport> => { const t = await WorkerTransport.listen({ remote, principals: w.principals, ...o.transport, ...options }); transports.push(t); return t; };
   const transport = await listen();
-  const workers: RemoteTestHost[] = [];
   let n = 0;
   const world: RemoteWorld = Object.assign(w, {
     remote, artifacts, blobs, transport,

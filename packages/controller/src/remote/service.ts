@@ -110,7 +110,7 @@ export interface RelocationPolicy {
   /** Hosts that may hold `local-only` data. Default: none, so an attempt with local-only data is never moved. */
   readonly dataHosts?: readonly string[];
 }
-/** What may be placed where, beyond what a host can do (card H07). Absent fields do not restrict, except that `local-only` data needs the host to be listed in `dataHosts` once a policy is in force. */
+/** What may be placed where, beyond what a host can do (card H07). Absent fields do not restrict, except that `local-only` data needs the host to be listed in `dataHosts`, with or without a policy hook (default: never placed remotely). */
 export interface PlacementPolicy {
   /** Hosts that may be given the attempt's task credential. Absent or empty: any enrolled host. */
   readonly credentialHosts?: readonly string[];
@@ -290,10 +290,14 @@ export class RemoteWorkerService {
     set.add(hostId);
   }
 
-  #endPoll(hostId: string): void { this.#polls.get(hostId)?.end(); }
+  /** Counts the offers made to each host, so a poll can tell that one arrived between its read and its wait. */
+  readonly #made = new Map<string, number>();
+  #closed = false;
+
+  #endPoll(hostId: string): void { this.#made.set(hostId, (this.#made.get(hostId) ?? 0) + 1); this.#polls.get(hostId)?.end(); }
 
   /** Ends every open poll (the controller is stopping). */
-  close(): void { for (const poll of [...this.#polls.values()]) poll.end(); }
+  close(): void { this.#closed = true; for (const poll of [...this.#polls.values()]) poll.end(); }
 
   /** How many polls are held open and how they ended, for the owner and for tests (card H07). */
   pollStats(by: Principal): { readonly open: number; readonly polls: number; readonly held: number; readonly woken: number; readonly superseded: number; readonly timedOut: number } {
@@ -392,7 +396,7 @@ export class RemoteWorkerService {
     const session = await this.#connected(hostId);
     const reasons = capabilityReasons(hostId, status, requirements);
     if (session === undefined) reasons.push(`${hostId} has not connected to the controller`);
-    if (this.#deps.placementPolicy !== undefined) reasons.push(...policyReasons(hostId, requirements, await this.#deps.placementPolicy({ attemptId, taskId: order.taskId, projectId: order.projectId, agentId: order.agentId, requirements })));
+    reasons.push(...policyReasons(hostId, requirements, this.#deps.placementPolicy === undefined ? {} : await this.#deps.placementPolicy({ attemptId, taskId: order.taskId, projectId: order.projectId, agentId: order.agentId, requirements })));
     if (reasons.length > 0) throw new DomainError("invalid_command", `${hostId} cannot take attempt ${attemptId}: ${reasons.join("; ")}`, { field: "hostId" });
     for (const id of inputs) await this.#deps.artifacts.assertResumable([id]);
     const placed = { ...requirements, os: status!.capabilities!.os, arch: status!.capabilities!.arch };
@@ -444,7 +448,7 @@ export class RemoteWorkerService {
     const requirements = checkRequirements(query.requirements);
     const keys = [...this.#byPlatform.keys()].filter((k) => { const [os, arch] = k.split("/"); return (requirements.os === undefined || os === requirements.os) && (requirements.arch === undefined || arch === requirements.arch); });
     const pool = keys.flatMap((k) => [...this.#byPlatform.get(k)!]);
-    const policy = this.#deps.placementPolicy === undefined ? undefined : await this.#deps.placementPolicy({ ...(query.attemptId === undefined ? {} : { attemptId: query.attemptId }), taskId: query.taskId, projectId: query.projectId, agentId: query.agentId, requirements });
+    const policy = this.#deps.placementPolicy === undefined ? {} : await this.#deps.placementPolicy({ ...(query.attemptId === undefined ? {} : { attemptId: query.attemptId }), taskId: query.taskId, projectId: query.projectId, agentId: query.agentId, requirements });
     const load = new Map<string, number>();
     for (const o of this.#offers.values()) load.set(o.hostId, (load.get(o.hostId) ?? 0) + 1);
     const eligible: string[] = []; const refused: { hostId: string; reasons: string[] }[] = [];
@@ -452,7 +456,7 @@ export class RemoteWorkerService {
       const status = await this.#deps.hosts.status(this.#deps.principal, hostId);
       const reasons = capabilityReasons(hostId, status, requirements);
       if ((await this.#connected(hostId)) === undefined) reasons.push(`${hostId} has not connected to the controller`);
-      if (policy !== undefined) reasons.push(...policyReasons(hostId, requirements, policy));
+      reasons.push(...policyReasons(hostId, requirements, policy));
       if (reasons.length === 0) eligible.push(hostId); else refused.push({ hostId, reasons });
     }
     eligible.sort((a, b) => (load.get(a) ?? 0) - (load.get(b) ?? 0) || (a < b ? -1 : 1));
@@ -620,8 +624,13 @@ export class RemoteWorkerService {
     const session = await this.#session(host, sessionId);
     this.#pollStats.polls++;
     if (!this.#platformOf.has(host.id)) this.#index(host.id, (await this.#deps.hosts.status(this.#deps.principal, host.id))?.capabilities);
-    const first = await this.#pending(host);
-    if (first.length > 0 || waitMs === 0) return first;
+    let first: Offer[]; let seen: number;
+    do {
+      seen = this.#made.get(host.id) ?? 0;
+      first = await this.#pending(host);
+      // An offer made while the read was under way is read again, not waited for.
+    } while (first.length === 0 && waitMs > 0 && (this.#made.get(host.id) ?? 0) !== seen);
+    if (first.length > 0 || waitMs === 0 || this.#closed) return first;
     const earlier = this.#polls.get(host.id);
     if (earlier !== undefined) { this.#pollStats.superseded++; earlier.end(); }
     this.#pollStats.held++;

@@ -57,6 +57,8 @@ export interface RemoteStartOptions {
   readonly protocol?: RemoteOptions["protocol"];
   readonly fileBytes?: number;
   readonly relocationPolicy?: RemoteDeps["relocationPolicy"];
+  /** Which hosts may hold local-only data, see the repository or be given the task credential (card H07). Default: local-only data is never placed on a remote host. */
+  readonly placementPolicy?: RemoteDeps["placementPolicy"];
   /** The remote hosts attempts may be placed on, with what each attempt asks of them and what it needs. */
   readonly hosts: readonly ({ readonly hostId: string } & RemoteWorkerHostOptions)[];
 }
@@ -305,6 +307,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         principal, hosts, artifacts,
         dispatch: { gateway: (id) => d().gateway(id), get: (by, id) => d().get(by, id), relocate: (by, id, m) => d().relocate(by, id, m), quiesce: (by, id, r) => d().quiesce(by, id, r), release: (by, id) => d().release(by, id) },
         ...(i.options.remote.relocationPolicy === undefined ? {} : { relocationPolicy: i.options.remote.relocationPolicy }),
+        ...(i.options.remote.placementPolicy === undefined ? {} : { placementPolicy: i.options.remote.placementPolicy }),
       }, { ...ro, ...(i.options.remote.protocol === undefined ? {} : { protocol: i.options.remote.protocol }), ...(i.options.remote.fileBytes === undefined ? {} : { fileBytes: i.options.remote.fileBytes }) });
       for (const h of i.options.remote.hosts) workers.push(new RemoteWorkerHost(h.hostId, remote, principal, h));
     }
@@ -329,7 +332,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     // Started last, so a failure above leaves no driver ticking a dispatcher whose host is being closed.
     if (i.options.manual !== true) driver.start();
     return {
-      dispatcher, driver, closeWorkers: async () => { await transport?.close().catch(() => undefined); await i.options.local?.close?.(); },
+      dispatcher, driver, closeWorkers: async () => { remote?.close(); await transport?.close().catch(() => undefined); await i.options.local?.close?.(); },
       ...(transport === undefined ? {} : { workerUrl: transport.url }), ...(remote === undefined ? {} : { remote }),
       attemptControl: { live: (taskId) => dispatcher.liveAttemptsOf(principal, { taskId }), frozenReason: async (id) => (await dispatcher.get(principal, id))?.frozen?.reason, release: (id) => dispatcher.release(principal, id) },
       workspacePortOf: async (taskId) => {
