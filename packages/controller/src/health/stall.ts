@@ -296,15 +296,19 @@ export class StallService {
   }
 
   /**
-   * The controller's own report of a model call it relayed (card V01b): the request started, its first output, progress, its end. It has no principal; the evidence keeps the worker's own `reportedBy` (the relay is
+   * The controller's own report of a model call it relayed (card V01b): the request started, its first output, progress, its end. It has no principal, is not reachable from the state API, and is fenced by attempt as well as generation; the evidence keeps the worker's own `reportedBy` (the relay is
    * not a second reporter), and a task that is not assigned at that generation is refused (`fenced`) like any report. Never call it with an event the caller did not see happen.
    */
-  async reportFromRelay(command: NoActor & { taskId: string; generation: number; event: StallEvent }): Promise<{ id: string; revision: number; replayed: boolean }> {
-    onlyKnown(command, ["commandId", "taskId", "generation", "event"]);
+  async reportFromRelay(command: NoActor & { taskId: string; generation: number; attemptId: string; event: StallEvent }): Promise<{ id: string; revision: number; replayed: boolean }> {
+    onlyKnown(command, ["commandId", "taskId", "generation", "attemptId", "event"]);
     const taskId = checkTaskId(command.taskId);
     const task = (await this.#runner.get("task", taskId))?.body as unknown as TaskBody | undefined;
     if (task === undefined) throw new DomainError("not_found", "no such task");
-    return this.#record("controller", undefined, command, task, true);
+    // Attempts of one generation share it, so the relay of an attempt that is not the active one (abandoned, left running) reports nothing.
+    const assignment = await this.#assignments.getAssignment(taskId);
+    if (assignment === undefined || assignment.activeAttemptId !== command.attemptId) throw new DomainError("fenced", "that attempt is not the task's active attempt");
+    const { attemptId: _attempt, ...rest } = command;
+    return this.#record("controller", undefined, rest, task, true);
   }
 
   async #record(actorId: string, reporterHost: string | undefined, command: NoActor & { taskId: string; generation: number; event: StallEvent }, task: TaskBody, relayed = false): Promise<{ id: string; revision: number; replayed: boolean }> {

@@ -754,11 +754,19 @@ for (const backend of backends) {
     await c.send(h, t, started());
     now += 20 * MIN;
     await c.send(h, t, { type: "first_output", requestId: "r1" });
+    const firstAt = new Date(now).toISOString();
+    now += MIN;
     await c.send(h, t, { type: "first_output", requestId: "r1" });
     const ev = (await c.stall.evidence(c.owner, t))!;
-    assert.equal(ev.request!.firstOutputAt, new Date(now).toISOString(), "a repeat does not move it");
-    assert.equal(ev.lastProgressAt, new Date(now).toISOString());
+    assert.equal(ev.request!.firstOutputAt, firstAt, "a repeat does not move it");
     assert.equal((await c.stall.assess(c.owner, t))!.signals.reading, undefined, "the allowance is over");
+    // Output progress with the first-output event lost still ends the allowance.
+    const lost = await c.work({ difficulty: "easy" });
+    await c.send(h, lost, started());
+    now += MIN;
+    await c.send(h, lost, { type: "output_progress", requestId: "r1", tokens: 10 });
+    assert.equal((await c.stall.evidence(c.owner, lost))!.request!.firstOutputAt, new Date(now).toISOString());
+    assert.equal((await c.stall.assess(c.owner, lost))!.signals.reading, undefined);
     // Writing slowly for much longer than the silence time is fine while the relay reports tokens written.
     for (let i = 1; i <= 8; i++) { now += 4 * MIN; await c.send(h, t, { type: "output_progress", requestId: "r1", tokens: i * 100 }); }
     assert.deepEqual(await kinds(c, t), [], "32 minutes of output, a report every 4");
@@ -821,6 +829,27 @@ for (const backend of backends) {
     assert.equal(r.source, "measured");
     assert.ok(Math.abs(r.tokensPerSecond - sp.readTps!) < 0.001);
   }, { declaredSpeed: () => ({ readTokensPerSecond: 7 }) });
+
+  suite("the controller's own reports of relayed calls are fenced by attempt as well as generation, leave the worker as the reporter, and count toward the route's speed (card V01b)", async (c) => {
+    const h = await c.host("h1");
+    const t = await c.work({ difficulty: "easy" });
+    const active = (await c.assignments.getAssignment(t))!.activeAttemptId!;
+    await c.send(h, t, step("hello", "hello"));
+    const relay = (attemptId: string, event: StallEvent) => c.stall.reportFromRelay({ commandId: cid("rel"), taskId: t, generation: 1, attemptId, event });
+    await relay(active, started({ requestId: "r1", promptTokens: 6000 }));
+    assert.equal((await c.stall.evidence(c.owner, t))!.reportedBy, h.id, "the relay is not a second reporter");
+    // A leftover relay of another attempt of the same generation changes nothing.
+    await refuses("fenced", () => relay("att-other", started({ requestId: "x" })));
+    await refuses("fenced", () => relay("att-other", { type: "output_progress", requestId: "r1", tokens: 5 }));
+    assert.equal((await c.stall.evidence(c.owner, t))!.request!.id, "r1");
+    now += 60_000;
+    await relay(active, { type: "first_output", requestId: "r1" });
+    now += 30_000;
+    await relay(active, { type: "request_finished", requestId: "r1", outcome: "ok", inputTokens: 6000, outputTokens: 300 });
+    const sp = (await c.stall.speed(c.owner, "local/slow", "-"))!;
+    assert.deepEqual([Math.round(sp.readTps!), Math.round(sp.writeTps!)], [100, 10]);
+    await refuses("fenced", () => c.stall.reportFromRelay({ commandId: cid("rel"), taskId: t, generation: 2, attemptId: active, event: step("x") }));
+  }, { declaredSpeed: (route: string) => slowRoute(route) });
 
   test("assessStall is a pure function of its inputs", () => {
     const base = { now: T0 + 60 * MIN, running: true, waiting: false, difficulty: "medium" as const, thresholds: DEFAULT_THRESHOLDS.medium, attemptStart: T0, budget: {}, requiredEvidence: 0 };

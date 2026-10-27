@@ -140,8 +140,10 @@ test("the monitor is told when a call starts, when its first bytes arrive, at a 
     const { relay } = setup({ respond });
     const told: string[] = [];
     const attempt = relay.forAttempt({ route: "llama/local", progressMs: opts.progressMs ?? 1_000_000, monitor: {
-      started: (c) => { told.push(`started:${c.requestChars > 0}`); }, firstOutput: () => { told.push("first"); }, progress: (b) => { told.push(`progress:${b > 0}`); },
-      finished: (c) => { told.push(`finished:${c.ok}:${c.inputTokens ?? "-"}:${c.cachedTokens ?? "-"}:${c.outputTokens ?? "-"}`); },
+      started: (c) => {
+        told.push(`started:${c.requestChars > 0}`);
+        return { firstOutput: () => { told.push("first"); }, progress: (b: number) => { told.push(`progress:${b > 0}`); }, finished: (d) => { told.push(`finished:${d.ok}:${d.inputTokens ?? "-"}:${d.cachedTokens ?? "-"}:${d.outputTokens ?? "-"}`); } };
+      },
     } });
     const res = await attempt.relay(req(`http://relay.invalid/m0/${path}`));
     let n = 0;
@@ -158,7 +160,7 @@ test("the monitor is told when a call starts, when its first bytes arrive, at a 
   assert.ok(progress >= 1 && progress <= 3, `${progress} progress reports for about 60 ms at 20 ms`);
   assert.equal(slow.at(-1), "finished:true:900:300:40");
   // Anthropic-style counts: input and the two cache counts.
-  assert.equal((await watch(() => sse(["event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":100,\"cache_read_input_tokens\":700,\"cache_creation_input_tokens\":50}}}\n\n", "data: {\"usage\":{\"output_tokens\":12}}\n\n"], )))[2], "finished:true:850:750:12");
+  assert.equal((await watch(() => sse(["event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":100,\"cache_read_input_tokens\":700,\"cache_creation_input_tokens\":50}}}\n\n", "data: {\"usage\":{\"output_tokens\":12}}\n\n"], )))[2], "finished:true:850:700:12");
   // A reply with no counts still ends well.
   assert.equal((await watch(() => sse(["data: a\n\n"])))[2], "finished:true:-:-:-");
   // A refused call (500) is told started then failed, with no first output; so is a call that cannot reach the endpoint.
@@ -171,6 +173,38 @@ test("the monitor is told when a call starts, when its first bytes arrive, at a 
   // A monitor that throws leaves the call alone.
   const { relay } = setup({ respond: () => sse(["data: a\n\n", usage]) });
   const boom = (): never => { throw new Error("boom"); };
-  const attempt = relay.forAttempt({ route: "llama/local", monitor: { started: boom, firstOutput: boom, progress: boom, finished: boom }, progressMs: 1 });
+  const attempt = relay.forAttempt({ route: "llama/local", monitor: { started: () => ({ firstOutput: boom, progress: boom, finished: boom }) }, progressMs: 1 });
   assert.equal(await text((await attempt.relay(req("http://relay.invalid/m0/chat/completions"))).body), `data: a\n\n${usage}`);
+});
+
+test("each call has its own monitor handle, so overlapping calls are never mixed up; keep-alive comments and pings are not output; cache creation is read work, cache reads are the cached part (card V01b)", async () => {
+  // Two calls at once: the first is abandoned after the second began; each end is told to its own call.
+  const bodies = [
+    (): Response => new Response(new ReadableStream({ async start(c) { c.enqueue(new TextEncoder().encode("data: a\n\n")); await new Promise((r) => setTimeout(r, 40)); c.enqueue(new TextEncoder().encode("data: b\n\n")); c.close(); } }), { status: 200 }),
+    (): Response => new Response(new ReadableStream({ async start(c) { await new Promise((r) => setTimeout(r, 10)); c.enqueue(new TextEncoder().encode("data: {\"usage\":{\"prompt_tokens\":500}}\n\n")); c.close(); } }), { status: 200 }),
+  ];
+  let k = 0;
+  const { relay } = setup({ respond: () => bodies[k++]!() });
+  const told: string[] = [];
+  let ids = 0;
+  const attempt = relay.forAttempt({ route: "llama/local", monitor: { started: () => { const id = ++ids; told.push(`start${id}`); return { firstOutput: () => { told.push(`first${id}`); }, progress: () => undefined, finished: (d) => { told.push(`end${id}:${d.ok}:${d.inputTokens ?? "-"}`); } }; } } });
+  const first = await attempt.relay(req("http://relay.invalid/m0/chat/completions"));
+  const second = await attempt.relay(req("http://relay.invalid/m0/chat/completions"));
+  const one = (async () => { for await (const _ of first.body ?? []) break; })();
+  await one;
+  await text(second.body);
+  assert.ok(told.indexOf("end1:false:-") >= 0, JSON.stringify(told));
+  assert.ok(told.indexOf("end2:true:500") >= 0, JSON.stringify(told));
+  assert.deepEqual(told.filter((x) => x.startsWith("first")), ["first1", "first2"]);
+  // Keep-alives do not count as output.
+  const quiet = setup({ respond: () => new Response(new ReadableStream({ async start(c) { for (const x of [": keep-alive\n\n", "event: ping\ndata: {\"type\": \"ping\"}\n\n", ": OPENROUTER PROCESSING\n\n"]) { c.enqueue(new TextEncoder().encode(x)); await new Promise((r) => setTimeout(r, 5)); } c.enqueue(new TextEncoder().encode("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")); c.close(); } }), { status: 200 }) });
+  const events: string[] = [];
+  const a2 = quiet.relay.forAttempt({ route: "llama/local", monitor: { started: () => ({ firstOutput: () => { events.push("first"); }, progress: () => { events.push("progress"); }, finished: () => { events.push("end"); } }) }, progressMs: 1 });
+  await text((await a2.relay(req("http://relay.invalid/m0/chat/completions"))).body);
+  assert.deepEqual(events, ["first", "end"], "the first output is the first real data, and nothing before it was progress");
+  // Anthropic counts: creation is read work in the total; only the cache read is cached.
+  const counts: { inputTokens?: number; cachedTokens?: number }[] = [];
+  const a3 = setup({ respond: () => new Response("{\"usage\":{\"input_tokens\":50,\"cache_read_input_tokens\":700,\"cache_creation_input_tokens\":30000,\"output_tokens\":9}}", { status: 200 }) }).relay.forAttempt({ route: "llama/local", monitor: { started: () => ({ firstOutput: () => undefined, progress: () => undefined, finished: (d) => { counts.push(d); } }) } });
+  await text((await a3.relay(req("http://relay.invalid/m0/chat/completions"))).body);
+  assert.deepEqual([counts[0]!.inputTokens, counts[0]!.cachedTokens], [30750, 700]);
 });

@@ -256,17 +256,24 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     // What the relay tells stall detection about every model call of an attempt (card V01b): reports are sent one after another so they arrive in order, and a failure of the report never reaches the call.
     const reporter = i.recovery?.stall.reportFromRelay?.bind(i.recovery.stall);
     const monitorOf = reporter === undefined ? undefined : (order: WorkOrder): RelayMonitor => {
-      let queue: Promise<unknown> = Promise.resolve(); let calls = 0; let current = ""; let seq = 0;
+      // Reports are sent one after another so they arrive in order; each call has its own request ID, and every report names the attempt, so a leftover process of an earlier attempt is fenced.
+      let queue: Promise<unknown> = Promise.resolve(); let calls = 0; let seq = 0;
       const send = (event: StallEvent): void => {
         const commandId = `relay:${order.attemptId}:${++seq}`;
-        queue = queue.then(() => reporter({ commandId, taskId: order.taskId, generation: order.generation, event })).catch((error) => { if (!(error instanceof DomainError && (error.code === "fenced" || error.code === "not_found"))) i.onError?.(error); });
+        queue = queue.then(() => reporter({ commandId, taskId: order.taskId, generation: order.generation, attemptId: order.attemptId, event })).catch((error) => { if (!(error instanceof DomainError && (error.code === "fenced" || error.code === "not_found" || error.code === "invalid_command"))) i.onError?.(error); });
       };
       const tokensOf = (chars: number): number => Math.ceil(chars / RELAY_CHARS_PER_TOKEN);
       return {
-        started: ({ requestChars }) => { current = `${order.attemptId}:${++calls}`; send({ type: "request_started", requestId: current, promptTokens: tokensOf(requestChars), route: order.route }); },
-        firstOutput: () => { send({ type: "first_output", requestId: current }); },
-        progress: (bytes) => { send({ type: "output_progress", requestId: current, tokens: tokensOf(bytes) }); },
-        finished: (call) => { send({ type: "request_finished", requestId: current, outcome: call.ok ? "ok" : "error", ...(call.inputTokens === undefined ? {} : { inputTokens: call.inputTokens }), ...(call.cachedTokens === undefined ? {} : { cachedTokens: call.cachedTokens }), ...(call.outputTokens === undefined ? {} : { outputTokens: call.outputTokens }) }); },
+        started: ({ requestChars }) => {
+          const requestId = `${order.attemptId}:${++calls}`;
+          send({ type: "request_started", requestId, promptTokens: tokensOf(requestChars), route: order.route });
+          return {
+            firstOutput: () => { send({ type: "first_output", requestId }); },
+            // A rough count: the bytes of the stream over the same characters per token. The provider's own count arrives with the end of the call.
+            progress: (bytes) => { send({ type: "output_progress", requestId, tokens: tokensOf(bytes) }); },
+            finished: (call) => { send({ type: "request_finished", requestId, outcome: call.ok ? "ok" : "error", ...(call.inputTokens === undefined ? {} : { inputTokens: call.inputTokens }), ...(call.cachedTokens === undefined ? {} : { cachedTokens: call.cachedTokens }), ...(call.outputTokens === undefined ? {} : { outputTokens: call.outputTokens }) }); },
+          };
+        },
       };
     };
     // One relay per attempt, kept until the attempt\'s own expiry.

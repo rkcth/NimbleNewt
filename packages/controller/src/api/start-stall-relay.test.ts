@@ -17,10 +17,12 @@ test("a model call the relay carries is reported to stall detection by the contr
   const d = mkdtempSync(join(tmpdir(), "nn-stallrelay-"));
   const problems: unknown[] = [];
   let services: Parameters<Parameters<NonNullable<NonNullable<Parameters<typeof startController>[0]["dispatch"]>["local"]>["build"]>[0] extends infer S ? (s: S) => void : never>[0] | undefined;
-  const hold: { release?: () => void } = {};
+  const hold: { release?: () => void; first?: () => void } = {};
   const fetch: typeof globalThis.fetch = async () => new Response(new ReadableStream({
     async start(c) {
-      c.enqueue(new TextEncoder().encode("data: a\n\n"));
+      // The model reads for a while, then writes for a while, so the call tells the route's speed.
+      await new Promise<void>((resolve) => { hold.first = resolve; });
+      c.enqueue(new TextEncoder().encode("data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n"));
       await new Promise<void>((resolve) => { hold.release = resolve; });
       c.enqueue(new TextEncoder().encode("data: {\"usage\":{\"prompt_tokens\":9000,\"completion_tokens\":50}}\n\n"));
       c.close();
@@ -44,25 +46,37 @@ test("a model call the relay carries is reported to stall detection by the contr
     await c.services.assignments.admitAttempt({ commandId: "ad", actor: rob.id, taskId: task, expectedRevision: a.revision, generation: a.generation, owner: ann, harness: "pi" });
     const t = (await c.services.projects.getTask(task))!;
     await c.services.projects.transitionTask({ commandId: "ip", actor: rob.id, taskId: task, expectedRevision: t.revision, to: "in_progress" });
-    const order = { attemptId: "att-1", taskId: task, projectId: project, agentId: "ann", generation: a.generation, route: "llama/local", expiresAt: "2999-01-01T00:00:00.000Z" };
+    const live = (await c.services.assignments.getAssignment(task))!.activeAttemptId!;
+    const order = { attemptId: live, taskId: task, projectId: project, agentId: "ann", generation: a.generation, route: "llama/local", expiresAt: "2999-01-01T00:00:00.000Z" };
     const attempt = services!.attemptRelay(order as never, relay);
     const body = Buffer.from(JSON.stringify({ model: "x", messages: [{ role: "user", content: "x".repeat(30_000) }] }));
     const response = await attempt.relay({ url: `${attempt.relayBase}/${attempt.alias}/chat/completions`, method: "POST", headers: [["content-type", "application/json"]], body, signal: new AbortController().signal } as never);
     const reader = (async () => { let n = 0; for await (const _ of response.body ?? []) n++; return n; })();
     const evidence = async () => c.services.stall.evidence(rob, task);
-    const until = async (ok: () => Promise<boolean>): Promise<void> => { for (let i = 0; i < 200 && !(await ok()); i++) await new Promise((r) => setTimeout(r, 10)); assert.ok(await ok(), "reported in time"); };
+    const until = async (ok: () => Promise<boolean>): Promise<void> => { for (let i = 0; i < 200 && !(await ok()); i++) await new Promise((r) => setTimeout(r, 10)); assert.ok(await ok(), `reported in time: ${ok.toString().slice(0, 90)}`); };
     // While the model is still reading: the prompt's size (the body over 3 characters a token, rounded up) and the route.
-    await until(async () => (await evidence())?.request?.firstOutputAt !== undefined);
+    await until(async () => (await evidence())?.request !== undefined);
     const open = (await evidence())!.request!;
+    assert.equal(open.firstOutputAt, undefined);
     assert.equal(open.route, "llama/local");
     assert.equal(open.promptTokens, Math.ceil(body.length / 3));
-    assert.equal(open.id, "att-1:1");
+    assert.equal(open.id, `${live}:1`);
+    await new Promise((r) => setTimeout(r, 1100));
+    await until(async () => hold.first !== undefined);
+    hold.first!();
+    await until(async () => (await evidence())?.request?.firstOutputAt !== undefined);
+    await new Promise((r) => setTimeout(r, 1100));
+    await until(async () => hold.release !== undefined);
     hold.release!();
     assert.ok(await reader >= 1);
     await until(async () => (await evidence())?.request === undefined || (await evidence())?.lastRequestMs !== undefined);
     const done = (await evidence())!;
     assert.equal(done.request, undefined, "the call is closed");
     assert.equal(done.reportedBy, "controller", "the relay is the only reporter here");
+    // The provider's counts and the two durations made a measurement: 9000 tokens read in a little over a second.
+    const speed = (await c.services.stall.speed(rob, "llama/local", "-"))!;
+    assert.ok(speed.readTps! > 1000 && speed.readTps! < 9000, `read speed ${speed.readTps}`);
+    assert.ok(speed.writeTps! > 5 && speed.writeTps! < 60, `write speed ${speed.writeTps}`);
     assert.deepEqual(problems, []);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

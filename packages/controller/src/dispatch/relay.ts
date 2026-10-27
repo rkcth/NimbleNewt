@@ -35,13 +35,15 @@ export interface ModelRelayOptions {
  * must not throw (a throw is ignored, and the call is not affected).
  */
 export interface RelayMonitor {
-  /** The call is about to be sent. `requestChars` is the size of the body. */
-  started(call: { readonly requestChars: number }): void;
-  /** The first bytes of the reply arrived. */
+  /** The call is about to be sent. `requestChars` is the size of the body. The handle it returns is told about this call only, so calls that overlap (a retry while the first is still being read) are never mixed up. */
+  started(call: { readonly requestChars: number }): CallMonitor;
+}
+export interface CallMonitor {
+  /** The first output of the reply arrived (not a keep-alive comment or a ping). */
   firstOutput(): void;
   /** At most once in `progressMs` while the reply streams: the bytes of reply received so far. */
   progress(bytes: number): void;
-  /** The call ended: with `ok` false it failed, was refused or was cancelled. The counts are what the provider reported, when it did. */
+  /** The call ended: with `ok` false it failed, was refused or was cancelled. The counts are what the provider reported, when it did: `inputTokens` is everything the model read, `cachedTokens` the part of it served from a cache. */
   finished(call: { readonly ok: boolean; readonly inputTokens?: number; readonly cachedTokens?: number; readonly outputTokens?: number }): void;
 }
 
@@ -123,27 +125,28 @@ export class ModelRelay {
         const wrapped = cache?.fetch === undefined ? inner : cache.fetch(inner);
         const monitor = rest === "messages/count_tokens" ? undefined : attempt.monitor;
         const tell = (f: () => void): void => { try { f(); } catch { /* the call is not affected */ } };
-        if (monitor !== undefined) tell(() => monitor.started({ requestChars: body?.length ?? 0 }));
+        let call: CallMonitor | undefined;
+        if (monitor !== undefined) { try { call = monitor.started({ requestChars: body?.length ?? 0 }); } catch { /* the call is not affected */ } }
         let response: Response;
         try {
           response = await wrapped(target, { method: request.method, headers, ...(body === undefined || request.method === "GET" ? {} : { body: Buffer.from(body) }), signal: request.signal, redirect: "error" });
         } catch (error) {
           const text = redactText(error instanceof Error ? error.message : String(error)).slice(0, 300);
           this.#options.onError?.(route, text);
-          if (monitor !== undefined) tell(() => monitor.finished({ ok: false }));
+          if (call !== undefined) tell(() => call!.finished({ ok: false }));
           throw new Error(`the model endpoint could not be reached: ${text}`);
         }
-        if (monitor !== undefined && (!response.ok || response.body === null)) tell(() => monitor.finished({ ok: response.ok }));
+        if (call !== undefined && (!response.ok || response.body === null)) tell(() => call!.finished({ ok: response.ok }));
         const watch = firstCall && response.ok && response.body !== null && rest !== "messages/count_tokens";
         if (watch) firstCall = false;
         const requestChars = body?.length ?? 0;
         const out: [string, string][] = [];
         response.headers.forEach((value, name) => { if (KEEP.has(name.toLowerCase())) out.push([name, value]); });
-        const watching = monitor !== undefined && response.ok && response.body !== null;
+        const watching = call !== undefined && response.ok && response.body !== null;
         if (!watch && !watching) return { status: response.status, statusText: response.statusText, headers: out, body: response.body === null ? null : (response.body as unknown as AsyncIterable<Uint8Array>) };
         const hooks: ReplyHooks = {
           ...(watch ? { inputTokens: (tokens) => { try { attempt.onFirstUsage?.({ inputTokens: tokens, requestChars }); } catch { /* the call is not affected */ } } } : {}),
-          ...(watching ? { monitor: { first: () => tell(() => monitor!.firstOutput()), progress: (bytes) => tell(() => monitor!.progress(bytes)), finished: (call) => tell(() => monitor!.finished(call)) }, progressMs: attempt.progressMs ?? 15_000 } : {}),
+          ...(watching ? { monitor: { first: () => tell(() => call!.firstOutput()), progress: (bytes) => tell(() => call!.progress(bytes)), finished: (done) => tell(() => call!.finished(done)) }, progressMs: attempt.progressMs ?? 15_000 } : {}),
         };
         return { status: response.status, statusText: response.statusText, headers: out, body: reporting(response.body as unknown as AsyncIterable<Uint8Array>, hooks) };
       },
@@ -152,6 +155,12 @@ export class ModelRelay {
 }
 
 const SCAN = 16 * 1024;
+/** A piece that is only SSE comments (`: keep-alive`, `: PROCESSING`) or a ping event says the connection is alive, not that the model has produced anything. */
+function keepAlive(piece: Uint8Array): boolean {
+  if (piece.length > 512) return false;
+  const lines = Buffer.from(piece).toString("utf8").split(/\r?\n/).filter((l) => l.trim() !== "");
+  return lines.length > 0 && lines.every((l) => l.startsWith(":") || l === "event: ping" || /^data:\s*\{\s*"type"\s*:\s*"ping"\s*\}\s*$/.test(l));
+}
 interface ReplyHooks {
   /** The provider's input size, once the reply has ended normally. */
   readonly inputTokens?: (tokens: number) => void;
@@ -171,7 +180,7 @@ async function* reporting(body: AsyncIterable<Uint8Array>, hooks: ReplyHooks): A
       if (headBytes < SCAN) { head.push(Buffer.from(piece.subarray(0, SCAN - headBytes))); headBytes += Math.min(piece.length, SCAN - headBytes); }
       tail = Buffer.concat([tail, piece.length > SCAN ? piece.subarray(-SCAN) : piece]).subarray(-SCAN);
       bytes += piece.length;
-      if (hooks.monitor !== undefined && piece.length > 0) {
+      if (hooks.monitor !== undefined && piece.length > 0 && !keepAlive(piece)) {
         if (first) { first = false; hooks.monitor.first(); lastProgress = Date.now(); }
         else if (Date.now() - lastProgress >= (hooks.progressMs ?? 15_000)) { lastProgress = Date.now(); hooks.monitor.progress(bytes); }
       }
@@ -184,8 +193,9 @@ async function* reporting(body: AsyncIterable<Uint8Array>, hooks: ReplyHooks): A
   }
   const text = `${Buffer.concat(head).toString("utf8")}\u0001${tail.toString("utf8")}`;
   const most = (name: string): number => { let best = 0; for (const m of text.matchAll(new RegExp(`"${name}"\\s*:\\s*(\\d{1,9})(?=[,}\\s])`, "g"))) best = Math.max(best, Number(m[1])); return best; };
-  const cached = most("cache_read_input_tokens") + most("cache_creation_input_tokens");
-  const total = most("prompt_tokens") || most("input_tokens") + cached;
+  // Cache creation is prefilled like any other input, so it is read work: it is in the total and not in the cached part.
+  const cached = most("cache_read_input_tokens");
+  const total = most("prompt_tokens") || most("input_tokens") + cached + most("cache_creation_input_tokens");
   const output = most("completion_tokens") || most("output_tokens");
   const cachedOpenAi = most("cached_tokens");
   if (total >= 1) hooks.inputTokens?.(total);
