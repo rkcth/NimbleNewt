@@ -135,13 +135,27 @@ test("a failure after the listener opened (while the driver or the MCP service i
   const d = mkdtempSync(join(tmpdir(), "nn-remote-"));
   const net = await import("node:net");
   const freePort = async (): Promise<number> => { const s = net.createServer(); await new Promise<void>((ok) => s.listen(0, "127.0.0.1", ok)); const p = (s.address() as { port: number }).port; await new Promise<void>((ok) => s.close(() => ok())); return p; };
+  let restore = (): void => undefined;
   const refused = (port: number): Promise<boolean> => new Promise((ok) => { const s = net.connect(port, "127.0.0.1"); s.once("connect", () => { s.destroy(); ok(false); }); s.once("error", () => ok(true)); });
   try {
     let closed = 0;
     const local = { window: () => 8192, close: async () => { closed++; }, build: () => ({ hostId: "host:w1", resources: { cpus: 1, memoryMb: 1024 } }) as never };
-    const boom = (): never => { throw new Error("injected failure"); };
+    // The failure is injected where the listener is already open: the servers that listen are watched, and at the moment of the failure one must be listening on the port.
+    const http = await import("node:http");
+    const servers: import("node:http").Server[] = [];
+    const listen = http.Server.prototype.listen;
+    http.Server.prototype.listen = function (this: import("node:http").Server, ...args: never[]) { servers.push(this); return (listen as (...a: never[]) => import("node:http").Server).apply(this, args); } as never;
+    restore = () => { http.Server.prototype.listen = listen; };
+    const openAt: boolean[] = [];
+    let probePort = 0;
+    const boom = (): never => {
+      openAt.push(servers.some((s) => s.listening && (s.address() as { port?: number } | null)?.port === probePort));
+      throw new Error("injected failure");
+    };
     for (const [n, inject] of [["driver", (o: Record<string, unknown>) => { Object.defineProperty(o, "intervalMs", { get: boom, enumerable: true }); }], ["mcp", (o: Record<string, unknown>) => { o["mcp"] = { resolve: async () => undefined, get gate() { return boom(); } }; }]] as const) {
       const port = await freePort();
+      probePort = port;
+      openAt.length = 0;
       const timer = new ManualTimer();
       const dispatch: Record<string, unknown> = { timer, local, remote: { blobDirectory: join(d, `blobs-${n}`), hosts: [], transport: { port } } };
       inject(dispatch);
@@ -149,11 +163,12 @@ test("a failure after the listener opened (while the driver or the MCP service i
       try {
         assert.equal(c.dispatch, undefined, n);
         assert.match(c.dispatchProblem ?? "", /injected failure/, n);
+        assert.deepEqual(openAt, [true], `${n}: the listener was open when the step failed`);
         assert.equal(await refused(port), true, `${n}: the listener that was opened is closed`);
         assert.equal(timer.armed, false, `${n}: nothing is ticking`);
         assert.deepEqual(timer.delays, [], `${n}: no timer was ever asked for`);
       } finally { await c.close(); }
     }
     assert.equal(closed, 2, "the local host was closed once for each failed start");
-  } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+  } finally { restore(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
