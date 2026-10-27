@@ -8,6 +8,7 @@ import { DecisionService } from "../decisions/index.js";
 import { ContextEnforcementService } from "../context/index.js";
 import { CachePolicies, type AttemptCache, type CachePolicyDeps } from "../dispatch/cache.js";
 import { MarkerService } from "../inference-cache/index.js";
+import type { WorkspacePort } from "../workspace-ops/index.js";
 import { DispatchDriver, DispatcherService, QuiesceCoordinator, controllerGuards, type RuntimeGuards, type WorkOrder, activeAgents, attendanceLoops, decisionLoops, meetingLoops, eventLoops, recoveryLoops, reviewLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLoop, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
 import { DomainError } from "../domain/errors.js";
 import type { AssignmentService } from "../domain/assignments.js";
@@ -110,6 +111,8 @@ export interface DispatchHandle {
   readonly workerUrl?: string;
   /** The host an agent's live attempt runs on, if it has one (the review service judges a reviewer's host with it, card H05b). */
   readonly hostOfAgent: (agentId: string) => Promise<string | undefined>;
+  /** The host side of workspace operations for a task's checkout (card H12l): the host of its live attempt, else the only host that has one; `undefined` when none can be named. */
+  readonly workspacePortOf: (taskId: string) => Promise<WorkspacePort | undefined>;
   /** The MCP service and the only way the host reaches a remote server (cards T03, H12g); present when `mcp` was given. */
   readonly mcp?: { readonly service: McpService; readonly connector: RemoteMcpConnector };
 }
@@ -264,6 +267,16 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   return {
     dispatcher, driver, closeWorkers: async () => { await transport?.close().catch(() => undefined); await i.options.local?.close?.(); },
     ...(transport === undefined ? {} : { workerUrl: transport.url }),
+    workspacePortOf: async (taskId) => {
+      const capable = workers.filter((w) => w.workspace !== undefined);
+      for (const attemptId of await dispatcher.liveAttemptsOf(principal, { taskId })) {
+        const d = await dispatcher.get(principal, attemptId);
+        const host = d?.state === "running" ? d.hostId : d?.pinnedHost;
+        if (host !== undefined) return workers.find((w) => w.hostId === host)?.workspace;
+      }
+      // No live attempt names a host: the checkout is on the only host that can do this, if there is exactly one.
+      return capable.length === 1 ? capable[0]!.workspace : undefined;
+    },
     hostOfAgent: async (agentId) => { for (const attemptId of await dispatcher.liveAttemptsOf(principal, { agentId })) { const d = await dispatcher.get(principal, attemptId); const host = d?.state === "running" ? d.hostId : d?.pinnedHost; if (host !== undefined) return host; } return undefined; }, quiesce: new QuiesceCoordinator({ dispatcher, blockers, principal }),
     ...(mcpService === undefined || i.options.mcp === undefined ? {} : { mcp: { service: mcpService, connector: new RemoteMcpConnector({ mcp: mcpService, resolve: i.options.mcp.resolve, principal }) } }),
   };

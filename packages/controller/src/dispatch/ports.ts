@@ -1,3 +1,4 @@
+import type { WorkspacePort } from "../workspace-ops/workspace-ops.js";
 import type { EffectBridge } from "../domain/effects.js";
 import type { JsonObject } from "../storage/types.js";
 
@@ -74,6 +75,8 @@ export interface WorkerHost {
   /** What one attempt asks of the host, for admission (H03). */
   readonly resources: { readonly cpus: number; readonly memoryMb: number };
   start(order: WorkOrder): Promise<WorkerHandle>;
+  /** The host's side of integration, checkout refresh and quarantine for the checkouts it holds (cards H12l, H12m). A host with none leaves it out and those requests are refused for it. */
+  readonly workspace?: WorkspacePort;
 }
 
 // ---- tool calls -----------------------------------------------------------------------------------------------------------

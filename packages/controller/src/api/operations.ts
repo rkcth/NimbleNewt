@@ -3,6 +3,7 @@ import type { AssignmentService } from "../domain/assignments.js";
 import type { ProjectService } from "../domain/service.js";
 import type { AgentService } from "../agents/index.js";
 import type { BudgetService } from "../budgets/index.js";
+import type { WorkspaceOpService } from "../workspace-ops/index.js";
 import type { DecisionService } from "../decisions/index.js";
 import type { WatchService } from "../events/handling.js";
 import type { EventService } from "../events/index.js";
@@ -38,6 +39,8 @@ export interface Context {
   readonly responsibilities?: ResponsibilityService;
   /** Absent when the controller runs without meetings (cards M01 and M03). */
   readonly meetings?: MeetingService;
+  /** Absent when the controller runs without a dispatcher (cards H12l, H12d). */
+  readonly workspaceOps?: Pick<WorkspaceOpService, "request" | "get">;
   /** Absent when the controller runs without context branches (card C05). */
   readonly branches?: ContextBranchService;
   /** Absent when the controller runs without grants (card U03e). */
@@ -103,6 +106,7 @@ const ownerQuestionsOf = (c: Context): NonNullable<Context["ownerQuestions"]> =>
 const branchesOf = (c: Context): ContextBranchService => c.branches ?? unavailable("context branches");
 const grantsOf = (c: Context): NonNullable<Context["grants"]> => c.grants ?? unavailable("rights");
 const eventsOf = (c: Context): NonNullable<Context["events"]> => c.events ?? unavailable("events");
+const workspaceOf = (c: Context): NonNullable<Context["workspaceOps"]> => c.workspaceOps ?? unavailable("workspace operations");
 const budgetsOf = (c: Context): NonNullable<Context["budgets"]> => c.budgets ?? unavailable("budgets");
 /** A task credential acts for its one task: an operation on another task reads as missing. */
 const ownTask = (c: Context, taskId: string): string => { if (c.principal.taskScope !== undefined && c.principal.taskScope.taskId !== taskId) throw new DomainError("not_found", "no such task"); return taskId; };
@@ -137,6 +141,10 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, ["taskId"]); return found("budget", await budgetsOf(c).report(c.principal, str(a, "taskId"))); } },
   { name: "budget.usage", kind: "query", summary: "What has been spent, by project, task or agent, with work and shared overhead apart and the cache figures.", args: { "projectId?": "only this project", "taskId?": "only this task", "agentId?": "only this agent", "category?": "`work` or `shared-overhead`" }, result: "`{ item }`: the summary.",
     run: async (c, a) => { only(a, ["projectId", "taskId", "agentId", "category"]); notFromTask(c, "total budgets across tasks"); const category = optStr(a, "category"); if (category !== undefined && category !== "work" && category !== "shared-overhead") invalid("args.category", "must be work or shared-overhead"); return found("usage", await budgetsOf(c).usage(c.principal, { ...(optStr(a, "projectId") === undefined ? {} : { projectId: optStr(a, "projectId")! }), ...(optStr(a, "taskId") === undefined ? {} : { taskId: optStr(a, "taskId")! }), ...(optStr(a, "agentId") === undefined ? {} : { agentId: optStr(a, "agentId")! }), ...(category === undefined ? {} : { category: category as "work" | "shared-overhead" }) })); } },
+  { name: "workspace.request", kind: "command", summary: "Integrates, refreshes or quarantines a task's checkout on the host that holds it. The task's running attempts are made quiet first (new calls refused, calls in flight settled, a checkpoint taken) and go on afterwards; if one cannot be made quiet nothing runs and a blocker says why.", args: { operation: "`integration`, `refresh` or `quarantine`", taskId: "the task", reason: "why" }, result: "`{ id, state, operation, taskId, summary?, blocker?, quietAttempts?, replayed }`; `state` is `done`, `refused`, `failed` or `uncertain` (a repeat while the host was still working: check the checkout before asking again).", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["operation", "taskId", "reason"]); notFromTask(c, "manage a checkout"); return asJson(await workspaceOf(c).request(c.principal, { commandId: need(id), ...(a as object) } as never)); } },
+  { name: "workspace.get", kind: "query", summary: "One workspace request and what came of it.", args: { requestId: "the request" }, result: "`{ item }`.",
+    run: async (c, a) => { only(a, ["requestId"]); notFromTask(c, "read a workspace request"); return found("workspace request", await workspaceOf(c).get(c.principal, str(a, "requestId"))); } },
   { name: "budget.pending", kind: "query", summary: "The open requests for more budget addressed to you (the owner: those that went to the owner), with whether the list may be partial.", args: {}, result: "`{ requests, truncated }`; when `truncated` is true some older open requests may be missing (read each task's `budget.report`).",
     run: async (c, a) => { only(a, []); notFromTask(c, "list requests for budget across tasks"); return asJson(await budgetsOf(c).pending(c.principal)); } },
   { name: "budget.get-request", kind: "query", summary: "One request for more budget (its requester, its addressee and the owner may read it).", args: { requestId: "the request's ID" }, result: "`{ item }`: the request.",
