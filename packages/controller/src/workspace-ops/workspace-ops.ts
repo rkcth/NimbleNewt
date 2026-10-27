@@ -159,7 +159,7 @@ export class WorkspaceOpService {
       for (const a of page) {
         after = a.id;
         const open = (a.body as unknown as { requestId?: string }).requestId;
-        if (open === undefined || this.#busy.has(a.id)) continue;
+        if (open === undefined) continue;
         try { if (await this.#resolveOpen(a.id)) resolved.push(open); } catch (error) { failed ??= error; }
       }
       if (page.length < 100) { if (failed !== undefined) throw failed; return resolved; }
@@ -202,7 +202,7 @@ export class WorkspaceOpService {
 
   /** The attempts a left request may have frozen: those it recorded, and any that started after (the tag keeps this from lifting anything that is not its own). */
   async #toRelease(body: WorkspaceRecordBody): Promise<string[]> {
-    const live = (await this.#deps.attempts?.live(body.taskId).catch(() => [] as string[])) ?? [];
+    const live = (await this.#deps.attempts?.live(body.taskId)) ?? [];
     return [...new Set([...(body.held ?? []), ...live])];
   }
 
