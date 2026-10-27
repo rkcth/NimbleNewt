@@ -45,3 +45,36 @@ test("a background job that ends is charged to its task as background-job use, o
     assert.deepEqual(problems, []);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+test("an agent reviewer's allow is charged to the task reviewed as review use, with the reviewer, and shows in budget.usage through the state API (card R05f)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-usage-"));
+  const problems: unknown[] = [];
+  const c = await startController({
+    storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+    dispatch: { timer: new ManualTimer(), intervalMs: 1000 }, onInternalError: (e) => { problems.push(e); },
+  });
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const project = (await c.services.projects.createProject({ commandId: "p1", actor: rob.id, name: "Garden" })).id;
+    const task = (await c.services.projects.createTask({ commandId: "t1", actor: rob.id, projectId: project, title: "Build" })).id;
+    const agent = async (name: string, grants: { action: string; project: string }[]) => { await c.services.principals.enroll(rob, { commandId: `e-${name}`, kind: "agent", name, grants }); return c.services.principals.authenticate((await c.services.principals.issueCredential(rob, `agent:${name}`)).token); };
+    const ann = await agent("ann", [{ action: "review.request", project }, { action: "attempt.work", project }, { action: "tool.run-script", project }]);
+    const r1 = await agent("r1", [{ action: "review.decide", project }, { action: "attempt.work", project }]);
+    await BudgetService.withEpoch(c.storage, c.epoch).open(rob, { commandId: "b-open", taskId: task, currency: "USD", costMicros: 1_000_000, computeMs: 600_000 });
+    await c.services.reviews.setPolicy(rob, { commandId: "pol", projectId: project, policy: { reviewers: ["agent:r1"] } });
+    const asked = await c.services.reviews.request(ann, { commandId: "rq", taskId: task, operation: { name: "run-script", args: { cwd: "/work" }, script: "echo hi\n", target: { kind: "workspace", id: "main" } }, context: { toolVersion: "1.2.3", authoritySource: "task grant", expectedEffects: ["prints"] } });
+    await new Promise((r) => setTimeout(r, 30));
+    const v = (await c.services.reviews.get(rob, asked.id))!;
+    await c.services.reviews.decide(r1, { commandId: "dc", requestId: asked.id, expectedRevision: v.revision, verdict: "allow", reason: "looks fine" });
+    const entries = (await c.storage.listAggregates("budget-entry", { limit: 50 })).map((e) => e.body as unknown as { activity: string; taskId?: string; agentId?: string; computeMs: number });
+    const mine = entries.filter((e) => e.activity === "review");
+    assert.equal(mine.length, 1);
+    assert.deepEqual([mine[0]!.taskId, mine[0]!.agentId], [task, "agent:r1"]);
+    assert.ok(mine[0]!.computeMs >= 25, `the time from assignment to decision is charged (${mine[0]!.computeMs} ms)`);
+    const usage = await c.api.handle(boot.token, { v: 1, op: "budget.usage", args: { projectId: project } } as never) as { ok: boolean; result: unknown };
+    assert.ok(usage.ok);
+    assert.match(JSON.stringify(usage.result), /review/);
+    assert.deepEqual(problems, []);
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});

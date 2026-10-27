@@ -131,7 +131,7 @@ for (const backend of backends) {
     // The same finish again is told again with the same key, so the host's charge counts it once.
     await jobs.finish(c.worker, { commandId: "fin-use", jobId: id, outcome: "completed", exit: { code: 0 } });
     assert.deepEqual(new Set(seen.map((u) => u.commandId)).size, 1);
-    // A job that is stopped is charged for the time it ran too; one that is not a background job is charged as well.
+    // A job that is not a background job is charged as well, and one that failed.
     const other = (await jobs.admit(c.worker, { commandId: cid("ad"), taskId: c.t2, kind: "tool", label: "test", operationId: "op-use-2" })).id;
     await jobs.report(c.worker, { commandId: cid("rp"), jobId: other, state: "dispatched", host: "host-1" });
     await jobs.report(c.worker, { commandId: cid("rp"), jobId: other, state: "running" });
@@ -145,6 +145,44 @@ for (const backend of backends) {
     await failing.report(c.worker, { commandId: cid("rp"), jobId: third, state: "running" });
     await assert.rejects(failing.finish(c.worker, { commandId: "fin-fail", jobId: third, outcome: "completed", exit: { code: 0 } }), /ledger down/);
     assert.equal((await c.read(third)).state, "completed", "the job is recorded as ended");
+  });
+
+  suite("every way a job ends is reported once for charging: a stop that was obeyed, a reconciliation, a restart decision of complete; nothing else is (card R05f)", async (c) => {
+    const seen: string[] = [];
+    const jobs = c.reopen({ onUsage: async (u) => { seen.push(`${u.jobId}:${u.computeMs}`); } });
+    const go = async (kind: "tool" | "remote", extra: Record<string, unknown> = {}): Promise<string> => {
+      const id = (await jobs.admit(c.worker, { commandId: cid("ad"), taskId: c.t1, kind, label: "x", operationId: `op-e-${cid("o")}`, ...(kind === "remote" ? { resumability: "remote_tracked" as const } : {}), ...extra })).id;
+      await jobs.report(c.worker, { commandId: cid("rp"), jobId: id, state: "dispatched", host: "h-1" });
+      await jobs.report(c.worker, { commandId: cid("rp"), jobId: id, state: "running" });
+      now += 10_000;
+      return id;
+    };
+    // A stop asked for and not obeyed charges nothing; the obeyed stop does.
+    const stopped = await go("tool");
+    await jobs.requestCancel(c.boss, { commandId: cid("cx"), jobId: stopped, reason: "stop" });
+    await jobs.confirmCancel(c.worker, { commandId: cid("cc"), jobId: stopped, result: "uncooperative" });
+    assert.deepEqual(seen, []);
+    await jobs.confirmCancel(c.worker, { commandId: cid("cc"), jobId: stopped, result: "stopped" });
+    assert.deepEqual(seen, [`${stopped}:10000`]);
+    // An outcome that was unknown is charged when the evidence settles it, not before.
+    const unknown = await go("remote");
+    await jobs.markUnknown(c.worker, { commandId: cid("uk"), jobId: unknown, reason: "the host stopped answering" });
+    assert.equal(seen.length, 1);
+    now += 5_000;
+    await jobs.reconcile(c.boss, { commandId: cid("rc"), jobId: unknown, to: "completed", evidence: "the log shows exit 0", exit: { code: 0 } });
+    assert.deepEqual(seen.at(-1), `${unknown}:15000`);
+    // A restart decision of complete is charged; restart, exception and a request to cancel are not (the job goes on).
+    const complete = await go("tool");
+    const restart = await go("tool", { resumability: "tool_checkpoint" });
+    await jobs.report(c.worker, { commandId: cid("rp"), jobId: restart, checkpoint: "ckpt-1" });
+    const tracked = await go("remote");
+    const before = seen.length;
+    await jobs.decide(c.boss, { commandId: cid("dc"), jobId: restart, decision: "restart", reason: "controller restarted" });
+    await jobs.decide(c.boss, { commandId: cid("dc"), jobId: tracked, decision: "exception", reason: "outlives the controller", tracker: "owner" });
+    assert.equal(seen.length, before, "a job that goes on is not charged yet");
+    await jobs.decide(c.boss, { commandId: cid("dc"), jobId: complete, decision: "complete", reason: "its output is complete", exit: { code: 0, reason: "found the finished file" } });
+    assert.equal(seen.length, before + 1);
+    assert.match(seen.at(-1)!, new RegExp(`^${complete}:\\d+$`));
   });
 
   suite("the handle survives a restart of the controller: a new service over the same store reads the job, and a repeated command still answers once", async (c) => {
