@@ -240,55 +240,63 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     };
     workers.push(await i.options.local.build({ guards, context: contextFor, confirmFirstCall, attemptRelay, ...(cache === undefined ? {} : { cache }) }));
   }
-  // Remote workers: the dispatcher is built with a way to ask who owns an agent's native store, and the remote service is built on the dispatcher afterwards.
-  let remote: RemoteWorkerService | undefined;
-  let blobs: FileBlobStore | undefined;
-  const holder: { dispatcher?: DispatcherService } = {};
-  if (i.options.remote !== undefined) {
-    blobs = await FileBlobStore.open({ directory: i.options.remote.blobDirectory });
-    const artifacts = ArtifactService.withEpoch(storage, epoch, blobs, ro);
-    const d = (): DispatcherService => holder.dispatcher!;
-    remote = RemoteWorkerService.withEpoch(storage, epoch, {
-      principal, hosts, artifacts,
-      dispatch: { gateway: (id) => d().gateway(id), get: (by, id) => d().get(by, id), relocate: (by, id, m) => d().relocate(by, id, m), quiesce: (by, id, r) => d().quiesce(by, id, r), release: (by, id) => d().release(by, id) },
-      ...(i.options.remote.relocationPolicy === undefined ? {} : { relocationPolicy: i.options.remote.relocationPolicy }),
-    }, { ...ro, ...(i.options.remote.protocol === undefined ? {} : { protocol: i.options.remote.protocol }), ...(i.options.remote.fileBytes === undefined ? {} : { fileBytes: i.options.remote.fileBytes }) });
-    for (const h of i.options.remote.hosts) workers.push(new RemoteWorkerHost(h.hostId, remote, principal, h));
-  }
-  const dispatcher = DispatcherService.withEpoch(storage, epoch, {
-    principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, hosts, workers,  contracts: i.contracts, harnesses: i.catalog, policy, effects, blockers, route,
-    routing: i.routing, pauses, decisions, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
-    ...(remote === undefined ? {} : { storeOwner: (agentId: string, attemptId: string) => remote!.storeOwner(principal, agentId, attemptId) }),
-  }, { ...ro, holder: "dispatcher", ...(i.onError === undefined ? {} : { onError: i.onError }), ...(i.options.dispatcher ?? {}) });
-  holder.dispatcher = dispatcher;
+  // Whatever was built before a later step fails is closed again: the listener, and the local host built above (a host the controller was given the means to build owns real resources).
   let transport: WorkerTransport | undefined;
-  if (remote !== undefined) {
-    try { transport = await WorkerTransport.listen({ ...(i.options.remote?.transport ?? {}), remote, principals: i.principals }); } catch (error) { await i.options.local?.close?.().catch(() => undefined); throw error; }
+  try {
+    // Remote workers: the dispatcher is built with a way to ask who owns an agent's native store, and the remote service is built on the dispatcher afterwards.
+    let remote: RemoteWorkerService | undefined;
+    let blobs: FileBlobStore | undefined;
+    const holder: { dispatcher?: DispatcherService } = {};
+    if (i.options.remote !== undefined) {
+      blobs = await FileBlobStore.open({ directory: i.options.remote.blobDirectory });
+      const artifacts = ArtifactService.withEpoch(storage, epoch, blobs, ro);
+      const d = (): DispatcherService => holder.dispatcher!;
+      remote = RemoteWorkerService.withEpoch(storage, epoch, {
+        principal, hosts, artifacts,
+        dispatch: { gateway: (id) => d().gateway(id), get: (by, id) => d().get(by, id), relocate: (by, id, m) => d().relocate(by, id, m), quiesce: (by, id, r) => d().quiesce(by, id, r), release: (by, id) => d().release(by, id) },
+        ...(i.options.remote.relocationPolicy === undefined ? {} : { relocationPolicy: i.options.remote.relocationPolicy }),
+      }, { ...ro, ...(i.options.remote.protocol === undefined ? {} : { protocol: i.options.remote.protocol }), ...(i.options.remote.fileBytes === undefined ? {} : { fileBytes: i.options.remote.fileBytes }) });
+      for (const h of i.options.remote.hosts) workers.push(new RemoteWorkerHost(h.hostId, remote, principal, h));
+    }
+    const dispatcher = DispatcherService.withEpoch(storage, epoch, {
+      principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, hosts, workers,  contracts: i.contracts, harnesses: i.catalog, policy, effects, blockers, route,
+      routing: i.routing, pauses, decisions, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
+      ...(remote === undefined ? {} : { storeOwner: (agentId: string, attemptId: string) => remote!.storeOwner(principal, agentId, attemptId) }),
+    }, { ...ro, holder: "dispatcher", ...(i.onError === undefined ? {} : { onError: i.onError }), ...(i.options.dispatcher ?? {}) });
+    holder.dispatcher = dispatcher;
+    if (remote !== undefined) {
+      transport = await WorkerTransport.listen({ ...(i.options.remote?.transport ?? {}), remote, principals: i.principals });
+    }
+    const driver = new DispatchDriver({
+      dispatcher, storage, epoch, record: { storage, options: ro },
+      ...(i.options.intervalMs === undefined ? {} : { intervalMs: i.options.intervalMs }), ...(i.options.timer === undefined ? {} : { timer: i.options.timer }), ...(i.options.clock === undefined ? {} : { clock: i.options.clock }),
+      ...(i.onError === undefined ? {} : { onError: i.onError }),
+      enabled: async () => (await i.principals.get(DISPATCHER_PRINCIPAL))?.state === "active",
+      onDisabled: async (why) => { await tell(why); },
+    });
+    const mcpService = i.options.mcp === undefined ? undefined : McpService.withEpoch(storage, epoch, { ...ro, ...(i.options.mcp?.gate === undefined ? {} : { gate: i.options.mcp.gate }) });
+    // Started last, so a failure above leaves no driver ticking a dispatcher whose host is being closed.
+    if (i.options.manual !== true) driver.start();
+    return {
+      dispatcher, driver, closeWorkers: async () => { await transport?.close().catch(() => undefined); await i.options.local?.close?.(); },
+      ...(transport === undefined ? {} : { workerUrl: transport.url }),
+      attemptControl: { live: (taskId) => dispatcher.liveAttemptsOf(principal, { taskId }), frozenReason: async (id) => (await dispatcher.get(principal, id))?.frozen?.reason, release: (id) => dispatcher.release(principal, id) },
+      workspacePortOf: async (taskId) => {
+        const capable = workers.filter((w) => w.workspace !== undefined);
+        for (const attemptId of await dispatcher.liveAttemptsOf(principal, { taskId })) {
+          const d = await dispatcher.get(principal, attemptId);
+          const host = d?.state === "running" ? d.hostId : d?.pinnedHost;
+          if (host !== undefined) return workers.find((w) => w.hostId === host)?.workspace;
+        }
+        // No live attempt names a host: the checkout is on the only host that can do this, if there is exactly one.
+        return capable.length === 1 ? capable[0]!.workspace : undefined;
+      },
+      hostOfAgent: async (agentId) => { for (const attemptId of await dispatcher.liveAttemptsOf(principal, { agentId })) { const d = await dispatcher.get(principal, attemptId); const host = d?.state === "running" ? d.hostId : d?.pinnedHost; if (host !== undefined) return host; } return undefined; }, quiesce: new QuiesceCoordinator({ dispatcher, blockers, principal }),
+      ...(mcpService === undefined || i.options.mcp === undefined ? {} : { mcp: { service: mcpService, connector: new RemoteMcpConnector({ mcp: mcpService, resolve: i.options.mcp.resolve, principal }) } }),
+    };
+  } catch (error) {
+    await transport?.close().catch(() => undefined);
+    await i.options.local?.close?.().catch(() => undefined);
+    throw error;
   }
-  const driver = new DispatchDriver({
-    dispatcher, storage, epoch, record: { storage, options: ro },
-    ...(i.options.intervalMs === undefined ? {} : { intervalMs: i.options.intervalMs }), ...(i.options.timer === undefined ? {} : { timer: i.options.timer }), ...(i.options.clock === undefined ? {} : { clock: i.options.clock }),
-    ...(i.onError === undefined ? {} : { onError: i.onError }),
-    enabled: async () => (await i.principals.get(DISPATCHER_PRINCIPAL))?.state === "active",
-    onDisabled: async (why) => { await tell(why); },
-  });
-  if (i.options.manual !== true) driver.start();
-  const mcpService = i.options.mcp === undefined ? undefined : McpService.withEpoch(storage, epoch, { ...ro, ...(i.options.mcp?.gate === undefined ? {} : { gate: i.options.mcp.gate }) });
-  return {
-    dispatcher, driver, closeWorkers: async () => { await transport?.close().catch(() => undefined); await i.options.local?.close?.(); },
-    ...(transport === undefined ? {} : { workerUrl: transport.url }),
-    attemptControl: { live: (taskId) => dispatcher.liveAttemptsOf(principal, { taskId }), frozenReason: async (id) => (await dispatcher.get(principal, id))?.frozen?.reason, release: (id) => dispatcher.release(principal, id) },
-    workspacePortOf: async (taskId) => {
-      const capable = workers.filter((w) => w.workspace !== undefined);
-      for (const attemptId of await dispatcher.liveAttemptsOf(principal, { taskId })) {
-        const d = await dispatcher.get(principal, attemptId);
-        const host = d?.state === "running" ? d.hostId : d?.pinnedHost;
-        if (host !== undefined) return workers.find((w) => w.hostId === host)?.workspace;
-      }
-      // No live attempt names a host: the checkout is on the only host that can do this, if there is exactly one.
-      return capable.length === 1 ? capable[0]!.workspace : undefined;
-    },
-    hostOfAgent: async (agentId) => { for (const attemptId of await dispatcher.liveAttemptsOf(principal, { agentId })) { const d = await dispatcher.get(principal, attemptId); const host = d?.state === "running" ? d.hostId : d?.pinnedHost; if (host !== undefined) return host; } return undefined; }, quiesce: new QuiesceCoordinator({ dispatcher, blockers, principal }),
-    ...(mcpService === undefined || i.options.mcp === undefined ? {} : { mcp: { service: mcpService, connector: new RemoteMcpConnector({ mcp: mcpService, resolve: i.options.mcp.resolve, principal }) } }),
-  };
 }

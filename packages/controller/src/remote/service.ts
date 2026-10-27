@@ -470,14 +470,16 @@ export class RemoteWorkerService {
     return [{ type: "update", ref: { kind: STORE_KIND, id: b.agentId }, expectedRevision: store.revision, body: rest as unknown as JsonObject }];
   }
 
-  /** Sends the worker a message (tell the agent, restart the sandbox, take a checkpoint, stop). Bounded; the worker reads it with `pollControl`. */
-  async control(by: Principal, attemptId: string, message: ControlMessage): Promise<number> {
+  /** Sends the worker a message (tell the agent, restart the sandbox, take a checkpoint, stop). With `placement` it is refused (`fenced`) unless that is the placement now holding the attempt. Bounded; the worker reads it with `pollControl`. */
+  async control(by: Principal, attemptId: string, message: ControlMessage, placement?: number): Promise<number> {
     this.#staff(by);
     attemptIdOf(attemptId);
     const msg = checkControl(message);
     const done = await this.#changePlacement(attemptId, async (current) => {
       if (current === undefined) throw new DomainError("not_found", `attempt ${attemptId} has no remote placement`);
       if (!LIVE.has(current.body.state)) throw new DomainError("fenced", `the placement of attempt ${attemptId} is ${current.body.state}`);
+      // The caller's placement is checked in the same commit as the message: a move that landed meanwhile cannot take an old handle's message.
+      if (placement !== undefined && current.body.placement !== placement) throw new DomainError("fenced", `attempt ${attemptId} is held under placement ${current.body.placement}, not ${placement}`);
       const seq = current.body.controlSeq + 1;
       return { next: { ...current.body, controlSeq: seq, control: [...current.body.control, { ...msg, seq }].slice(-REMOTE_LIMITS.control) } };
     }, "control");

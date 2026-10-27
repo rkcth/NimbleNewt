@@ -32,7 +32,7 @@ export class RemoteWorkerHost implements WorkerHost {
   }
 }
 
-class RemoteWorkerHandle implements WorkerHandle {
+export class RemoteWorkerHandle implements WorkerHandle {
   readonly workerVersion = "remote";
   constructor(private readonly remote: RemoteWorkerService, private readonly by: Principal, readonly attemptId: string, readonly placement: number, private readonly options: RemoteWorkerHostOptions) {}
   run(_gateway: ToolGateway): Promise<WorkerTurnResult> { void _gateway; return this.remote.waitForResult(this.by, this.attemptId, this.placement) as Promise<WorkerTurnResult>; }
@@ -44,16 +44,19 @@ class RemoteWorkerHandle implements WorkerHandle {
   async checkpoint(): Promise<JsonObject> {
     await this.#current();
     const before = (await this.remote.placement(this.by, this.attemptId))?.checkpoint?.sequence ?? 0;
-    await this.remote.control(this.by, this.attemptId, { kind: "checkpoint" });
+    await this.remote.control(this.by, this.attemptId, { kind: "checkpoint" }, this.placement);
     const until = Date.now() + (this.options.checkpointWaitMs ?? 5_000);
     for (;;) {
-      const seen = (await this.remote.placement(this.by, this.attemptId))?.checkpoint?.sequence ?? 0;
+      const now = await this.remote.placement(this.by, this.attemptId);
+      // The wait is for this placement's checkpoint: after a move the new host's checkpoint is not the answer to this handle's request.
+      if (now === undefined || now.placement !== this.placement) throw new DomainError("fenced", `attempt ${this.attemptId} is no longer held under placement ${this.placement}`);
+      const seen = now.checkpoint?.sequence ?? 0;
       if (seen > before) { const latest = await this.remote.latestCheckpoint(this.by, this.attemptId); if (latest !== undefined) return latest.checkpoint; }
       if (Date.now() >= until) throw new Error("the worker did not send a checkpoint in time");
       await new Promise((resolve) => setTimeout(resolve, this.options.pollMs ?? 100));
     }
   }
-  async restart(recipe: RecipeSummary, from: JsonObject): Promise<void> { await this.#current(); await this.remote.control(this.by, this.attemptId, { kind: "restart", recipe, checkpoint: from }); }
-  async tell(text: string): Promise<void> { await this.#current(); await this.remote.control(this.by, this.attemptId, { kind: "tell", text }); }
+  async restart(recipe: RecipeSummary, from: JsonObject): Promise<void> { await this.#current(); await this.remote.control(this.by, this.attemptId, { kind: "restart", recipe, checkpoint: from }, this.placement); }
+  async tell(text: string): Promise<void> { await this.#current(); await this.remote.control(this.by, this.attemptId, { kind: "tell", text }, this.placement); }
   async stop(): Promise<void> { await this.remote.end(this.by, this.attemptId, "the dispatcher stopped the worker", this.placement); }
 }

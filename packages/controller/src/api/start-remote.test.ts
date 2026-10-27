@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -59,5 +59,74 @@ test("the composed controller places an attempt on a remote host over its own tr
     // The dispatcher names the host the agent's attempt runs on.
     const owner = await c.dispatch!.hostOfAgent("agent:agt-abcdefghijklmnopqrst");
     assert.equal(owner, "host:r1");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("a step that fails after the local host was built closes that host again, whichever step it is, and the controller says why the dispatcher is not running (card H02b)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-remote-"));
+  try {
+    // The artifact folder cannot be opened (its parent is a file): the local host built just before is closed.
+    writeFileSync(join(d, "afile"), "x");
+    let closed = 0;
+    const local = { window: () => 8192, close: async () => { closed++; }, build: () => ({ hostId: "host:w1", resources: { cpus: 1, memoryMb: 1024 } }) as never };
+    const c = await startController({
+      storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+      dispatch: { timer: new ManualTimer(), manual: true, local, remote: { blobDirectory: join(d, "afile", "blobs"), hosts: [] } },
+    });
+    try {
+      assert.equal(c.dispatch, undefined);
+      assert.ok(c.dispatchProblem !== undefined && c.dispatchProblem.length > 0);
+      assert.equal(closed, 1, "the local host built before the failure was closed");
+    } finally { await c.close(); }
+    assert.equal(closed, 1, "and not closed a second time by the controller's own close");
+    // A listener that cannot start (a port already taken) closes it as well.
+    const net = await import("node:net");
+    const taken = net.createServer();
+    await new Promise<void>((ok) => taken.listen(0, "127.0.0.1", ok));
+    const port = (taken.address() as { port: number }).port;
+    try {
+      const c2 = await startController({
+        storage: { kind: "sqlite", path: join(d, "c2.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+        dispatch: { timer: new ManualTimer(), manual: true, local, remote: { blobDirectory: join(d, "blobs2"), hosts: [], transport: { port } as never } },
+      });
+      try { assert.equal(c2.dispatch, undefined); assert.equal(closed, 2); } finally { await c2.close(); }
+    } finally { await new Promise<void>((ok) => taken.close(() => ok())); }
+  } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+
+test("a host that cannot meet the attempt's requirements is not given it: the refusal names the unmet requirement and the attempt does not start there (card H02b)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-remote-"));
+  const c = await startController({
+    storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+    dispatch: {
+      timer: new ManualTimer(), manual: true,
+      route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: false } }),
+      remote: { blobDirectory: join(d, "blobs"), hosts: [{ hostId: "host:r1", checkpointWaitMs: 300, pollMs: 20, resources: { cpus: 1, memoryMb: 1024 }, requirements: () => ({ data: "cloud-allowed", harness: "pi", isolation: ["firecracker"] }) }] },
+    },
+  });
+  try {
+    assert.ok(c.dispatch?.workerUrl !== undefined, c.dispatchProblem);
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const project = (await c.services.projects.createProject({ commandId: "p1", actor: rob.id, name: "Garden" })).id;
+    await c.services.principals.enroll(rob, { commandId: "e-r1", kind: "host", name: "r1", grants: [] });
+    const hostToken = (await c.services.principals.issueCredential(rob, "host:r1")).token;
+    await AdmissionService.withEpoch(c.storage, c.epoch).setCapacity({ commandId: "cap", actor: rob.id, host: "host:r1", capacity: { cpus: 8, memoryMb: 16_384 } });
+    await c.services.principals.enroll(rob, { commandId: "e-ann", kind: "agent", name: "agt-abcdefghijklmnopqrst", grants: [{ action: "attempt.work", project }, { action: "task.read", project }, { action: "effect.perform", project }, { action: "review.request", project }] });
+    const task = (await c.services.projects.createTask({ commandId: "t1", actor: rob.id, projectId: project, title: "Order seeds" })).id;
+    await c.services.projects.transitionTask({ commandId: "r1", actor: rob.id, taskId: task, expectedRevision: 1, to: "ready" });
+    await c.services.assignments.assignTask({ commandId: "as1", actor: rob.id, taskId: task, owner: { kind: "agent", id: "agt-abcdefghijklmnopqrst" } });
+    const a = (await c.services.assignments.getAssignment(task))!;
+    const attemptId = (await c.services.assignments.admitAttempt({ commandId: "ad1", actor: "inbox", taskId: task, expectedRevision: a.revision, generation: a.generation, owner: { kind: "agent", id: "agt-abcdefghijklmnopqrst" }, harness: "pi" })).id;
+
+    const client = new RemoteWorkerClient({ url: c.dispatch!.workerUrl!, token: hostToken, workerVersion: "worker-9.1.0" });
+    await client.connect(CAPS as never);
+    await client.heartbeat(1);
+    const report = await c.dispatch!.dispatcher.tick();
+    assert.ok(!report.started.includes(attemptId), "not started on a host that cannot isolate it");
+    const why = JSON.stringify({ s: report.skipped, f: report.failures, w: report.waiting, b: report.blocked });
+    assert.match(why, /firecracker|isolation|requirement/i, why);
+    assert.deepEqual(await client.offers(), [], "nothing was offered to that host");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

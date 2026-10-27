@@ -6,6 +6,7 @@ import { DomainError } from "../domain/errors.js";
 import { commitOperation } from "../storage/commit.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import type { RelocationPolicyFor } from "./service.js";
+import { RemoteWorkerHandle } from "./host.js";
 import { READ, local, refuses, remoteSuite, wireRefuses, type Ctx } from "./testing/suite.js";
 import { REMOTE_CAPS, type RemoteHost } from "./testing/world.js";
 
@@ -32,6 +33,28 @@ for (const backend of backends) {
     return { r1, r2, input: input.id, out: out.artifactId, ...s };
   }
 
+  suite("the dispatcher's handle on the old placement controls nothing after a move: a stale view of the placement still meets the fence in the commit, and a checkpoint wait ends when the placement moved (card H02b)", async (c) => {
+    const { attemptId, placement, r2 } = await running(c);
+    // The handle thinks it still holds the old placement (its read was taken before the move); the service decides.
+    let stale = true;
+    let controls = 0;
+    const over: Record<string, unknown> = {};
+    const view = new Proxy(c.remote, { get: (target, key) => (key in over ? over[key as string] : typeof (target as never)[key] === "function" ? ((target as never)[key] as Function).bind(target) : (target as never)[key]) }) as typeof c.remote;
+    over["placement"] = async (by: never, id: string) => { const real = (await c.remote.placement(by, id))!; return stale ? { ...real, placement } : real; };
+    const handle = new RemoteWorkerHandle(view, c.owner, attemptId, placement, { resources: { cpus: 1, memoryMb: 64 }, requirements: () => ({ data: "local-only", harness: "pi", isolation: ["bubblewrap"], workspaces: ["garden"] }), checkpointWaitMs: 300, pollMs: 10 });
+    await c.remote.relocate(c.owner, MOVE(c, attemptId, r2));
+    await refuses("fenced", () => handle.tell("late"));
+    await refuses("fenced", () => handle.restart({ revision: "r-2", reach: ["read-file"] } as never, {}));
+    await refuses("fenced", () => handle.checkpoint());
+    // The wait: the control message is taken (stubbed here), the view first shows the old placement and then the new one; the new host's checkpoint is not this handle's answer.
+    over["control"] = async () => { controls++; return 1; };
+    let reads = 0;
+    over["placement"] = async (by: never, id: string) => { const real = (await c.remote.placement(by, id))!; reads++; return reads <= 3 ? { ...real, placement } : real; };
+    await refuses("fenced", () => handle.checkpoint());
+    assert.equal(controls, 1);
+    stale = false;
+  }, { policy: open });
+
   suite("relocating an attempt fences the old host, transfers the checkpoint and the artifacts with their hashes verified, hands over the native store, and restarts it on the new host from the checkpoint", async (c) => {
     const { r1, r2, input, out, attemptId, attempt, placement, order } = await running(c);
     const moved = await c.remote.relocate(c.owner, MOVE(c, attemptId, r2));
@@ -52,6 +75,9 @@ for (const backend of backends) {
     await wireRefuses("fenced", () => attempt.pollControl(), 409);
     await wireRefuses("fenced", () => attempt.accept(), 409);
     assert.deepEqual(await r1.client.offers(), []);
+    // The old handle's control message names its placement and is refused in the commit that would write it; the new placement's is taken.
+    await refuses("fenced", () => c.remote.control(c.owner, attemptId, { kind: "tell", text: "late" }, placement), (e) => assert.match(e.message, new RegExp(`not ${placement}`)));
+    assert.equal(typeof (await c.remote.control(c.owner, attemptId, { kind: "tell", text: "now" }, placement + 1)), "number");
     // The store belongs to the new host in the same commit.
     assert.deepEqual([(await c.remote.store(c.owner, "agent:ann"))!.ownerHostId, (await c.remote.store(c.owner, "agent:ann"))!.moves], [r2.id, 1]);
     // Same command again: the same move, nothing twice.
