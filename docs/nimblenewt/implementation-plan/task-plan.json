@@ -3135,6 +3135,130 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "U05b",
+      "parent": "N09",
+      "existing_issue": "AII-259",
+      "title": "Verify artifacts and inspect failed handlings in the composed status",
+      "depends_on": [
+        "U05",
+        "H06c"
+      ],
+      "deliverable": "Split from U05 (2026-10-27): the composed status answers the task, overview, noticeboard, changes, tools, delivered and failed-event views, but artifact verification (verifyArtifact) is not composed and inspecting a seeded failed handling is proven at service level only; The composed status verifies a named artifact against the record and lists then inspects a seeded failed handling; a non-owner without the right sees them as missing",
+      "acceptance_and_verification": "Composed tests with a verified and a tampered artifact and a seeded failed handling, each through the state API",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "R05e",
+      "parent": "N08",
+      "existing_issue": "AII-258",
+      "title": "Tell the delegated holder of a budget request",
+      "depends_on": [
+        "R05c",
+        "H13"
+      ],
+      "deliverable": "Split from R05c (2026-10-27): the owner is told once, but a request addressed to a delegated holder is only found in budget.pending; an event on the node stream reaches no one unless a watch exists on it, and the controller has no provisioned identity to publish with; A request addressed to a holder reaches that holder through a provisioned controller identity (not hand-built), is not lost under backpressure, and wakes the holder only within its pause and interruption rules",
+      "acceptance_and_verification": "Composed test: the holder is told once and finds the request; a paused holder is not woken; a full queue retries rather than dropping the notice",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "C08b",
+      "parent": "N07",
+      "existing_issue": "AII-257",
+      "title": "Record decisions from the chat and interrupt running generation on correction",
+      "depends_on": [
+        "C08",
+        "U03",
+        "L05"
+      ],
+      "deliverable": "Split from C08 (2026-10-27): decisions are recorded, corrected and gated through the state API with the stored guard, but the chat has no decision intent, no service is given the generation service so a running generation is not interrupted (and the propagation marks that step done without it), and propagation across a paused or restarted agent is unproven; A chat decision records from the owner's own turn wording; a correction interrupts a running generation and the step is marked only when it was done; links, revalidation and propagation hold across a pause and a restart",
+      "acceptance_and_verification": "Composed tests for the chat decision, the interrupted generation, and a paused and a restarted agent",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "P01b",
+      "parent": "N14",
+      "existing_issue": "AII-264",
+      "title": "Mend the checkout pin edge cases",
+      "depends_on": [
+        "P01"
+      ],
+      "deliverable": "Split from P01 (2026-10-27): the dispatcher pins the checkout and blocks a moved one, but a task whose repository is cleared after pinning cannot be repinned, resource scans cover every project, and a blocked pinned task keeps its allowance reserved; A cleared repository can be repinned or released; the resource lookups are per project and a scan limit opens a blocker instead of failing silently; a pin failure releases the allowance",
+      "acceptance_and_verification": "Tests for each case through the dispatcher",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "M01b",
+      "parent": "N12",
+      "existing_issue": "AII-262",
+      "title": "Hold meetings with real participants through the composed API",
+      "depends_on": [
+        "M01",
+        "U03"
+      ],
+      "deliverable": "Split from M01 (2026-10-27): schedules, restart and catch-up are composed and proven, but absent and paused participants withheld without a wake, and agenda retention across occurrences, are proven only at service level; Through the composed API with real agent records, a paused or absent participant is withheld and not woken and the agenda items survive the occurrence",
+      "acceptance_and_verification": "Composed test with a paused and an absent agent and an agenda item",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "M01c",
+      "parent": "N12",
+      "existing_issue": "AII-262",
+      "title": "Wire the owner time zone and the invitation sink into the composed meetings",
+      "depends_on": [
+        "M01"
+      ],
+      "deliverable": "Split from M01 (2026-10-27): the API instance has no owner time zone setting and no invitation sink, so schedules must name a zone and invitations are decided only by the dispatcher instance; A schedule without a zone uses the owner meeting.timeZone setting; invitations reach agents through a host sink in the composed controller",
+      "acceptance_and_verification": "Composed test for a schedule without a zone and a delivered invitation",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "H02b",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Prove remote worker fencing, relocation and the store owner in the composed controller",
+      "depends_on": [
+        "H02"
+      ],
+      "deliverable": "Split from H02 (2026-10-27): the composed controller places attempts on remote hosts and refuses an incompatible protocol, but partition and delayed-packet fencing, an unsupported host failing visibly, no self-promotion, relocation with integrity and policy refusals, the exclusive native-store owner, and the production host stop, tell and checkpoint paths are proven only against a test host; the handle check is check-then-act and a failed startup after the local host is built leaks it; Each named clause holds through the composed controller and the production host; a control message carries its placement number; every startup failure closes what was built",
+      "acceptance_and_verification": "Composed tests per clause",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "U04",
       "parent": "N09",
       "existing_issue": "AII-259",
@@ -4813,7 +4937,14 @@
         "H12i",
         "H12j",
         "H12k",
-        "X11"
+        "X11",
+        "U05b",
+        "R05e",
+        "C08b",
+        "P01b",
+        "M01b",
+        "M01c",
+        "H02b"
       ],
       "deliverable": "Exact release manifest, known limitations and owner signoff",
       "acceptance_and_verification": "All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded",

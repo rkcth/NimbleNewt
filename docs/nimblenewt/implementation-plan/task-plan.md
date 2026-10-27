@@ -34,14 +34,14 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
 | N05 / AII-255 | L05, L05b, L01, L01b, L02, L03, L04, L06, H08 |
 | N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A08, A08b, A08c, A09, A10, A10b |
-| N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C08, C09 |
-| N08 / AII-258 | R01, R02, R03, R04, R05, R05b, R05c, R05d |
-| N09 / AII-259 | U03, U03d, U03e, U04, U05, U06, U03b, U03c, U07, U09, U08, U10, U11, U11b |
-| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13 |
+| N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C08, C09, C08b |
+| N08 / AII-258 | R01, R02, R03, R04, R05, R05b, R05c, R05d, R05e |
+| N09 / AII-259 | U03, U03d, U03e, U05b, U04, U05, U06, U03b, U03c, U07, U09, U08, U10, U11, U11b |
+| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H02b |
 | N11 / AII-261 | V01, V01b, V02 |
-| N12 / AII-262 | M00, M01, M02, M03, M04, M05, M05b, M06 |
+| N12 / AII-262 | M01b, M01c, M00, M01, M02, M03, M04, M05, M05b, M06 |
 | N13 / AII-263 | T01, T02, T03, T06, T06b, T07, T07b, T08, T09 |
-| N14 / AII-264 | P01, P02, P02b, P03, P04, P05, P06, P07 |
+| N14 / AII-264 | P01b, P01, P02, P02b, P03, P04, P05, P06, P07 |
 | N15 / AII-265 | Q01, Q02, Q03, Q04 |
 | N16 / AII-266 | B01 |
 | N17 / AII-267 | K01, K01b, K01c, K01d, K02, K03, K04, K05, K06, K06b, K07 |
@@ -1176,6 +1176,62 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** An owner-only state API operation and a chat intent grant or revoke a named right for a named principal (the recovery.stall-scan grant for service:dispatcher first, with the service-may-hold-only-recovery-actions rule kept), applied once per command, shown in the activity record; a non-owner and a quoted or foreign-worded request are refused; a grant given while the controller runs reaches the next scan without a restart; docs/nimblenewt/grant-stall-scan.md is replaced by the one-line instruction.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
+### U05b — Verify artifacts and inspect failed handlings in the composed status
+
+- **Parent:** N09 / AII-259.
+- **Blockers:** U05, H06c.
+- **Deliverable:** Split from U05 (2026-10-27): the composed status answers the task, overview, noticeboard, changes, tools, delivered and failed-event views, but artifact verification (verifyArtifact) is not composed and inspecting a seeded failed handling is proven at service level only; The composed status verifies a named artifact against the record and lists then inspects a seeded failed handling; a non-owner without the right sees them as missing.
+- **Acceptance and verification:** Composed tests with a verified and a tampered artifact and a seeded failed handling, each through the state API.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### R05e — Tell the delegated holder of a budget request
+
+- **Parent:** N08 / AII-258.
+- **Blockers:** R05c, H13.
+- **Deliverable:** Split from R05c (2026-10-27): the owner is told once, but a request addressed to a delegated holder is only found in budget.pending; an event on the node stream reaches no one unless a watch exists on it, and the controller has no provisioned identity to publish with; A request addressed to a holder reaches that holder through a provisioned controller identity (not hand-built), is not lost under backpressure, and wakes the holder only within its pause and interruption rules.
+- **Acceptance and verification:** Composed test: the holder is told once and finds the request; a paused holder is not woken; a full queue retries rather than dropping the notice.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### C08b — Record decisions from the chat and interrupt running generation on correction
+
+- **Parent:** N07 / AII-257.
+- **Blockers:** C08, U03, L05.
+- **Deliverable:** Split from C08 (2026-10-27): decisions are recorded, corrected and gated through the state API with the stored guard, but the chat has no decision intent, no service is given the generation service so a running generation is not interrupted (and the propagation marks that step done without it), and propagation across a paused or restarted agent is unproven; A chat decision records from the owner's own turn wording; a correction interrupts a running generation and the step is marked only when it was done; links, revalidation and propagation hold across a pause and a restart.
+- **Acceptance and verification:** Composed tests for the chat decision, the interrupted generation, and a paused and a restarted agent.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### P01b — Mend the checkout pin edge cases
+
+- **Parent:** N14 / AII-264.
+- **Blockers:** P01.
+- **Deliverable:** Split from P01 (2026-10-27): the dispatcher pins the checkout and blocks a moved one, but a task whose repository is cleared after pinning cannot be repinned, resource scans cover every project, and a blocked pinned task keeps its allowance reserved; A cleared repository can be repinned or released; the resource lookups are per project and a scan limit opens a blocker instead of failing silently; a pin failure releases the allowance.
+- **Acceptance and verification:** Tests for each case through the dispatcher.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### M01b — Hold meetings with real participants through the composed API
+
+- **Parent:** N12 / AII-262.
+- **Blockers:** M01, U03.
+- **Deliverable:** Split from M01 (2026-10-27): schedules, restart and catch-up are composed and proven, but absent and paused participants withheld without a wake, and agenda retention across occurrences, are proven only at service level; Through the composed API with real agent records, a paused or absent participant is withheld and not woken and the agenda items survive the occurrence.
+- **Acceptance and verification:** Composed test with a paused and an absent agent and an agenda item.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### M01c — Wire the owner time zone and the invitation sink into the composed meetings
+
+- **Parent:** N12 / AII-262.
+- **Blockers:** M01.
+- **Deliverable:** Split from M01 (2026-10-27): the API instance has no owner time zone setting and no invitation sink, so schedules must name a zone and invitations are decided only by the dispatcher instance; A schedule without a zone uses the owner meeting.timeZone setting; invitations reach agents through a host sink in the composed controller.
+- **Acceptance and verification:** Composed test for a schedule without a zone and a delivered invitation.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### H02b — Prove remote worker fencing, relocation and the store owner in the composed controller
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H02.
+- **Deliverable:** Split from H02 (2026-10-27): the composed controller places attempts on remote hosts and refuses an incompatible protocol, but partition and delayed-packet fencing, an unsupported host failing visibly, no self-promotion, relocation with integrity and policy refusals, the exclusive native-store owner, and the production host stop, tell and checkpoint paths are proven only against a test host; the handle check is check-then-act and a failed startup after the local host is built leaks it; Each named clause holds through the composed controller and the production host; a control message carries its placement number; every startup failure closes what was built.
+- **Acceptance and verification:** Composed tests per clause.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
 ### U04 — Implement conversational policy editing
 
 - **Parent:** N09 / AII-259.
@@ -1805,7 +1861,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D03 — Approve release readiness and publication decision
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11.
+- **Blockers:** X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11, U05b, R05e, C08b, P01b, M01b, M01c, H02b.
 - **Deliverable:** Exact release manifest, known limitations and owner signoff.
 - **Acceptance and verification:** All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
