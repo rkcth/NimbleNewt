@@ -20,7 +20,7 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, check
 const context = { toolVersion: "1.0", authoritySource: "task grant", expectedEffects: ["does the thing"] };
 
 for (const backend of backends) {
-  interface Ctx { load: ApprovalLoadService; policy: PolicyService; review: ReviewService; grants: GrantService; owner: Principal; ann: Principal; ben: Principal; rev: Principal; a: string; task: string; approve(who: Principal, tool: string, by?: Principal, args?: object): Promise<string> }
+  interface Ctx { rewrite(id: string, edit: (body: Record<string, unknown>) => Record<string, unknown>): Promise<void>; load: ApprovalLoadService; policy: PolicyService; review: ReviewService; grants: GrantService; owner: Principal; ann: Principal; ben: Principal; rev: Principal; a: string; task: string; approve(who: Principal, tool: string, by?: Principal, args?: object): Promise<string> }
   const suite = (name: string, body: (c: Ctx) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
       now = Date.parse("2026-10-21T09:00:00.000Z");
@@ -46,6 +46,11 @@ for (const backend of backends) {
         };
         await body({
           load: ApprovalLoadService.withEpoch(world.storage, projects.epoch, grants, { ...options, profile: ProfileSuggestionService.withEpoch(world.storage, projects.epoch, PolicyService.withEpoch(world.storage, projects.epoch, grants, options), options) }), policy: PolicyService.withEpoch(world.storage, projects.epoch, grants, options), review, grants, owner, ann, ben, rev, a, task, approve,
+          rewrite: async (id, edit) => {
+            const ref = { kind: "standing-proposal", id };
+            const found = (await world.storage.getAggregate(ref))!;
+            await world.storage.applyOperation({ operationId: cid("rw"), epoch: projects.epoch, actor: "owner:rob", correlationId: "rw", at: new Date(now).toISOString(), changes: [{ type: "update", ref, expectedRevision: found.revision, body: edit(found.body as Record<string, unknown>) as never }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] });
+          },
         });
       } finally { await world.close(); }
     });
@@ -89,13 +94,14 @@ for (const backend of backends) {
     const p = await proposal(c, 1.5);
     assert.deepEqual(p.lengthOptions, [1, 7, 30, 90]);
     assert.deepEqual([p.defaultLength!.days, p.suggestion.days], [7, 7]);
-    assert.match(p.defaultLength!.why, /over 3 days, so 7 days covers the same pattern/);
+    assert.match(p.defaultLength!.why, /spread over about 3 days, so 7 days covers the same pattern/);
     // Choosing the default: the grant runs that long and carries the reason.
     const a = await accept(c, p);
     assert.deepEqual([a.days, a.grant.expiresAt], [7, new Date(a.at + 7 * DAY).toISOString()]);
     assert.match(a.why, /7 days covers/);
-    assert.match(a.grant.basis, /7 days: you approved this over 3 days/);
+    assert.match(a.grant.basis, /7 days: the approvals were spread over about 3 days/);
     assert.equal((await c.load.proposals(c.owner, "accepted"))[0]!.chosenLength!.source, "default");
+    assert.equal(p.spanDays, 3);
   });
 
   suite("what the owner said wins: a stated length is used as stated up to the longest option, a one-off is the shortest, an explicit length is used exactly and must be a whole number of days up to the longest option, and a reserved class is still never offered (card A07d)", async (c) => {
@@ -104,6 +110,7 @@ for (const backend of backends) {
     const stated = await accept(c, p1, { statedDays: 2 });
     assert.deepEqual([stated.days, stated.grant.expiresAt], [2, new Date(stated.at + 2 * DAY).toISOString()]);
     assert.match(stated.why, /you asked for 2 days/);
+    assert.equal((await c.load.proposals(c.owner, "accepted")).find((x) => x.id === p1.id)!.chosenLength!.source, "owner", "the owner's words are recorded as the owner's");
     // Another class: a stated length longer than the longest option is cut to it and says so.
     const p2 = await proposal(c, 0, "git-push");
     const cut = await accept(c, p2, { statedDays: 400 });
@@ -131,7 +138,7 @@ for (const backend of backends) {
     now += 8 * DAY;
     const next = await proposal(c, 0);
     assert.deepEqual([next.defaultLength!.days], [30]);
-    assert.match(next.defaultLength!.why, /ran its full 7 days and you approved the same again, so 30 days this time/);
+    assert.match(next.defaultLength!.why, /the last standing rule of this kind ran its full 7-day term and the same was approved again, so 30 days this time/);
     const second = await accept(c, next);
     assert.equal(second.days, 30);
     // The owner takes the 30-day one back; the next proposal of the class is shorter than what was taken back.
@@ -140,8 +147,102 @@ for (const backend of backends) {
     now += 1 * DAY;
     const third = await proposal(c, 0);
     assert.equal(third.defaultLength!.days, 7);
-    assert.match(third.defaultLength!.why, /taken back before its 30 days were up, so 7 days this time/);
+    assert.match(third.defaultLength!.why, /taken back before its 30-day term was up, so 7 days this time/);
     void first;
+  });
+
+  suite("an open proposal stored before A07d (no default length, span or history) is accepted at the length it showed, never at a newly derived one (card A07d)", async (c) => {
+    const p = await proposal(c, 20);
+    assert.equal(p.defaultLength!.days, 90, "a new proposal over 40 days shows 90");
+    await c.rewrite(p.id, (b) => { const { defaultLength: _d, lengthOptions: _l, spanDays: _s, history: _h, ...old } = b; return { ...old, suggestion: { ...(b["suggestion"] as object), days: 30 } }; });
+    const fresh = (await c.load.proposals(c.owner, "open"))[0]!;
+    assert.equal(fresh.suggestion.days, 30);
+    const a = await accept(c, fresh);
+    assert.deepEqual([a.days, a.why], [30, "the usual length"]);
+    assert.equal(a.grant.expiresAt, new Date(a.at + 30 * DAY).toISOString());
+  });
+
+  suite("a grant that ran its full term and was revoked afterwards counts as having run its full term, not as taken back (card A07d)", async (c) => {
+    const p = await proposal(c, 0);
+    const first = await accept(c, p, { days: 7 });
+    now += 8 * DAY;
+    const g = (await c.grants.getGrant(first.grantId))!;
+    await c.grants.revoke(c.owner, { commandId: cid("rv"), grantId: first.grantId, expectedRevision: g.revision, reason: "tidying up" });
+    assert.equal((await c.grants.getGrant(first.grantId))!.revokedAt, new Date(now).toISOString());
+    now += 1 * DAY;
+    const next = await proposal(c, 0);
+    assert.equal(next.defaultLength!.days, 30);
+    assert.match(next.defaultLength!.why, /ran its full 7-day term/);
+  });
+
+  suite("what happened to earlier grants is kept for the same requester, project, class and environment only, survives an offer the owner dismissed, and the latest one decides (card A07d)", async (c) => {
+    const p = await proposal(c, 15);
+    assert.equal(p.defaultLength!.days, 30);
+    const first = await accept(c, p);
+    const g = (await c.grants.getGrant(first.grantId))!;
+    now += 1 * DAY;
+    await c.grants.revoke(c.owner, { commandId: cid("rv"), grantId: first.grantId, expectedRevision: g.revision, reason: "too wide" });
+    // Another requester's first proposal of the class is not shortened by it.
+    for (let i = 0; i < 3; i++) await c.approve(c.ben, "git-commit");
+    await c.load.propose(c.owner, { commandId: cid("pr") });
+    const benOffer = (await c.load.proposals(c.owner, "open")).find((x) => x.requester === "agent:ben")!;
+    assert.match(benOffer.defaultLength!.why, /nothing to go on|spread over/, "no history for ben");
+    assert.equal(benOffer.history, undefined);
+    // The re-offer to ann is shorter, and the owner dismisses it.
+    now += 1 * DAY;
+    await c.approve(c.ann, "git-commit");
+    await c.load.propose(c.owner, { commandId: cid("pr") });
+    const again = (await c.load.proposals(c.owner, "open")).find((x) => x.requester === "agent:ann")!;
+    assert.deepEqual([again.defaultLength!.days, again.history], [7, [{ days: 30, revoked: true }]]);
+    await c.load.dismiss(c.owner, { commandId: cid("ds"), proposalId: again.id, expectedRevision: again.revision, reason: "later" });
+    // After the quiet time and more approvals spread over 30 days, the history is still there: 7, not the 30 the span alone would give.
+    now += 31 * DAY;
+    for (let i = 0; i < 3; i++) { await c.approve(c.ann, "git-commit"); now += 15 * DAY; }
+    await c.load.propose(c.owner, { commandId: cid("pr") });
+    const third = (await c.load.proposals(c.owner, "open")).find((x) => x.requester === "agent:ann")!;
+    assert.deepEqual([third.defaultLength!.days, third.history], [7, [{ days: 30, revoked: true }]]);
+    // The owner accepts it and it runs its full term; the next offer is longer than 7, and the history keeps both.
+    const ran = await accept(c, third);
+    now += 8 * DAY;
+    for (let i = 0; i < 3; i++) await c.approve(c.ann, "git-commit");
+    await c.load.propose(c.owner, { commandId: cid("pr") });
+    const fourth = (await c.load.proposals(c.owner, "open")).find((x) => x.requester === "agent:ann")!;
+    assert.deepEqual([fourth.defaultLength!.days, fourth.history], [30, [{ days: 30, revoked: true }, { days: 7, revoked: false }]]);
+    void ran;
+  });
+
+  suite("a retry after the grant step failed finishes the acceptance at the length already fixed, whatever length the retry names, and a repeat never differs from the first answer (card A07d)", async (c) => {
+    const p = await proposal(c, 0);
+    // The proposal was marked accepted at 7 days and then the grant step failed.
+    await c.rewrite(p.id, (b) => ({ ...b, state: "accepted", decidedBy: c.owner.id, decidedAt: new Date(now).toISOString(), chosenLength: { days: 7, source: "owner", why: "you picked 7 days" }, suggestion: { ...(b["suggestion"] as object), days: 7 } }));
+    const stuck = (await c.load.proposals(c.owner, "accepted"))[0]!;
+    assert.equal(stuck.grantId, undefined);
+    const done = await c.load.accept(c.owner, { commandId: cid("ac"), proposalId: p.id, expectedRevision: stuck.revision, days: 14 } as never);
+    assert.equal(done.days, 7);
+    const g = (await c.grants.getGrant(done.grantId))!;
+    assert.equal(g.expiresAt, new Date(now + 7 * DAY).toISOString());
+    assert.equal((await c.load.proposals(c.owner, "accepted"))[0]!.grantId, done.grantId);
+    // Done now: a further accept is refused.
+    await refuses("invalid_command", () => c.load.accept(c.owner, { commandId: cid("ac"), proposalId: p.id, expectedRevision: stuck.revision + 1, days: 14 } as never), (e) => assert.match(e.message, /is accepted/));
+  });
+
+  test("the length rule: the latest earlier grant decides, a span just over an option steps up, and the words say what was seen (card A07d)", () => {
+    const base = { spanDays: 0, earlier: [] as { days: number; revoked: boolean }[] };
+    assert.equal(chooseStandingLength({ ...base, earlier: [{ days: 7, revoked: true }, { days: 1, revoked: false }] }).days, 7, "ran 1 day last: longer than 1");
+    assert.equal(chooseStandingLength({ ...base, earlier: [{ days: 1, revoked: false }, { days: 7, revoked: true }] }).days, 1, "taken back at 7 last: shorter than 7");
+    assert.equal(chooseStandingLength({ ...base, earlier: [{ days: 90, revoked: false }, { days: 30, revoked: false }] }).days, 90);
+    assert.deepEqual([7, 7.01, 2.0001, 30.5, 91].map((d) => chooseStandingLength({ ...base, spanDays: d }).days), [7, 30, 7, 90, 90]);
+    assert.match(chooseStandingLength({ ...base, spanDays: 2.0001 }).why, /about 2 days, so 7 days covers/);
+    assert.equal(chooseStandingLength({ ...base, statedDays: 5 }).source, "owner");
+    assert.equal(chooseStandingLength({ ...base, oneOff: true }).source, "owner");
+    assert.equal(chooseStandingLength(base).source, "default");
+  });
+
+  suite("a length given with oneOff false is fine, and a length over the longest option names that limit (card A07d)", async (c) => {
+    const p = await proposal(c, 0);
+    await refuses("invalid_command", () => c.load.accept(c.owner, { commandId: cid("ac"), proposalId: p.id, expectedRevision: p.revision, days: 120 } as never), (e) => assert.match(e.message, /from 1 to 90/));
+    const r = await accept(c, p, { days: 14, oneOff: false });
+    assert.equal(r.days, 14);
   });
 
   test("the length rule alone: order of the inputs, caps and the fallback (card A07d)", () => {

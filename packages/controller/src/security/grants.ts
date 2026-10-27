@@ -55,6 +55,8 @@ export interface GrantRecordBody {
   readonly state: "active" | "revoked";
   readonly revokedBy?: string;
   readonly revokedReason?: string;
+  /** When the owner revoked it (grants revoked before card A07d have none). */
+  readonly revokedAt?: string;
 }
 
 const ENVIRONMENT = /^[a-z][a-z0-9-]{0,39}$/;
@@ -286,7 +288,7 @@ export class GrantService {
           const body = current.body as unknown as GrantRecordBody;
           if (body.state === "revoked") throw new DomainError("invalid_command", `grant ${id} is already revoked`, { field: "grantId" });
           const ref: AggregateRef = { kind: "grant-record", id };
-          const next: GrantRecordBody = { ...body, state: "revoked", revokedBy: owner.id, revokedReason: reason };
+          const next: GrantRecordBody = { ...body, state: "revoked", revokedBy: owner.id, revokedReason: reason, revokedAt: this.#runner.now() };
           return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject }], detail: { grantee: body.grantee, action: body.action } };
         },
       };

@@ -27,6 +27,10 @@ export interface ProposalBody {
   /** The lengths the owner can pick from, and the one the system chose for them with the reason, in plain words (card A07d). `suggestion.days` is the default. */
   readonly lengthOptions?: readonly number[];
   readonly defaultLength?: { readonly days: number; readonly why: string };
+  /** Days from the first to the last of the approvals it was drawn from (so a length can be derived again without the approvals, of which only the last 20 are kept). */
+  readonly spanDays?: number;
+  /** How the standing grants this same requester, project, class and environment were given before ended, oldest first, at most `HISTORY_KEPT`: how long each was approved for and whether the owner took it back before its end. Kept when the proposal is offered again. */
+  readonly history?: readonly { readonly days: number; readonly revoked: boolean }[];
   /** What the owner's acceptance fixed: the length used and how it was chosen. The grant expires that many days after the acceptance. */
   readonly chosenLength?: { readonly days: number; readonly source: "owner" | "default"; readonly why: string };
   readonly state: "open" | "accepted" | "dismissed";
@@ -51,9 +55,9 @@ export const GRANT_LENGTHS: readonly number[] = [1, 7, 30, 90];
 export interface LengthInputs {
   /** Days from the first to the last of the approvals the proposal is drawn from. */
   readonly spanDays: number;
-  /** Earlier standing grants of the same class that have ended: how long each was approved for and whether the owner revoked it before its end. */
+  /** Earlier standing grants of the same requester, project, class and environment that have ended, oldest first: how long each was approved for and whether the owner revoked it before its end. The latest one decides. */
   readonly earlier: readonly { readonly days: number; readonly revoked: boolean }[];
-  /** A length the owner stated in words (days); it wins over everything derived. */
+  /** A length the owner stated in words (days); it is used as stated, over everything derived. */
   readonly statedDays?: number;
   /** The work is marked as a one-off. */
   readonly oneOff?: boolean;
@@ -63,33 +67,31 @@ const dayWord = (n: number): string => `${n} day${n === 1 ? "" : "s"}`;
 const optionAtLeast = (days: number): number => GRANT_LENGTHS.find((o) => o >= days) ?? GRANT_LENGTHS[GRANT_LENGTHS.length - 1]!;
 
 /**
- * The length the system chooses for a standing grant, with the reason in plain words (card A07d). In order: a length the owner stated in words (used as stated, at most the longest option); a one-off piece of
- * work (the shortest option); what earlier grants of the class showed (one the owner revoked early: the next shorter option than the shortest such; ones that ran to their end: the next longer option than the longest);
- * the span of the approvals themselves (the shortest option that covers it); when none of these says anything, 30 days.
+ * The length the system chooses for a standing grant, with the reason in plain words (card A07d). In order: a length the owner stated in words (used as stated, at most the longest option) or a one-off piece of
+ * work (the shortest option), both with source `owner`; what the last earlier grant of the same requester, project, class and environment showed (taken back early: the next shorter option than its length; ran to its end: the
+ * next longer one); the span of the approvals themselves (the shortest option that covers it); when none of these says anything, 30 days.
  */
-export function chooseStandingLength(input: LengthInputs): { days: number; why: string } {
+export function chooseStandingLength(input: LengthInputs): { days: number; why: string; source: "owner" | "default" } {
   const longest = GRANT_LENGTHS[GRANT_LENGTHS.length - 1]!;
   if (input.statedDays !== undefined) {
     const days = Math.min(longest, input.statedDays);
-    return { days, why: `you asked for ${dayWord(input.statedDays)}${days === input.statedDays ? "" : `; the longest a standing rule runs is ${dayWord(longest)}`}` };
+    return { days, source: "owner", why: `you asked for ${dayWord(input.statedDays)}${days === input.statedDays ? "" : `; the longest a standing rule runs is ${dayWord(longest)}`}` };
   }
-  if (input.oneOff === true) return { days: GRANT_LENGTHS[0]!, why: `this is marked as one-off work, so ${dayWord(GRANT_LENGTHS[0]!)} is enough` };
-  const early = input.earlier.filter((e) => e.revoked);
-  if (early.length > 0) {
-    const shortest = Math.min(...early.map((e) => e.days));
-    const days = [...GRANT_LENGTHS].reverse().find((o) => o < shortest) ?? GRANT_LENGTHS[0]!;
-    return { days, why: `an earlier standing rule of this kind was taken back before its ${dayWord(shortest)} were up, so ${dayWord(days)} this time` };
+  if (input.oneOff === true) return { days: GRANT_LENGTHS[0]!, source: "owner", why: `this is marked as one-off work, so ${dayWord(GRANT_LENGTHS[0]!)} is enough` };
+  const last = input.earlier.at(-1);
+  if (last !== undefined && last.revoked) {
+    const days = [...GRANT_LENGTHS].reverse().find((o) => o < last.days) ?? GRANT_LENGTHS[0]!;
+    return { days, why: `the last standing rule of this kind was taken back before its ${last.days}-day term was up, so ${dayWord(days)} this time`, source: "default" };
   }
-  if (input.earlier.length > 0) {
-    const longestRan = Math.max(...input.earlier.map((e) => e.days));
-    const days = GRANT_LENGTHS.find((o) => o > longestRan) ?? longest;
-    return { days, why: `an earlier standing rule of this kind ran its full ${dayWord(longestRan)} and you approved the same again, so ${dayWord(days)} this time` };
+  if (last !== undefined) {
+    const days = GRANT_LENGTHS.find((o) => o > last.days) ?? longest;
+    return { days, why: `the last standing rule of this kind ran its full ${last.days}-day term and the same was approved again, so ${dayWord(days)} this time`, source: "default" };
   }
   if (input.spanDays > 0) {
-    const days = optionAtLeast(Math.ceil(input.spanDays));
-    return { days, why: `you approved this over ${input.spanDays < 1 ? "less than a day" : dayWord(Math.ceil(input.spanDays))}, so ${dayWord(days)} covers the same pattern` };
+    const days = optionAtLeast(input.spanDays);
+    return { days, why: `the approvals were spread over ${input.spanDays < 1 ? "less than a day" : `about ${dayWord(Math.round(input.spanDays))}`}, so ${dayWord(days)} covers the same pattern`, source: "default" };
   }
-  return { days: LOAD_LIMITS.proposalDays, why: `there is nothing to go on yet, so the usual ${dayWord(LOAD_LIMITS.proposalDays)}` };
+  return { days: LOAD_LIMITS.proposalDays, source: "default", why: `there is nothing to go on yet, so the usual ${dayWord(LOAD_LIMITS.proposalDays)}` };
 }
 
 const COUNTER_SHARDS = 8;
@@ -99,7 +101,7 @@ const PROPOSABLE_ENVIRONMENTS = new Set<Environment>(["development", "testing"])
 const ACTION_ID = /^[A-Za-z0-9._:-]{1,100}$/;
 const PROPOSAL_ID = /^spr-[a-z2-7]{20}$/;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
-const spanOf = (p: ProposalBody): number => (p.covered.length < 2 ? 0 : Math.max(0, (Date.parse(p.covered[p.covered.length - 1]!.at) - Date.parse(p.covered[0]!.at)) / 86_400_000));
+const HISTORY_KEPT = 5;
 const dayOf = (iso: string): string => iso.slice(0, 10);
 const addDays = (iso: string, days: number): string => new Date(Date.parse(iso) + days * 86_400_000).toISOString();
 
@@ -207,10 +209,13 @@ export class ApprovalLoadService {
         if (old.state === "accepted" && ((await this.#grantLive(old.grantId, now)) || latest <= (old.decidedAt ?? ""))) continue;
       }
       const first = Date.parse(run.covered[0]!.at), last = Date.parse(run.covered[run.covered.length - 1]!.at);
-      const chosen = chooseStandingLength({ spanDays: Math.max(0, (last - first) / 86_400_000), earlier: await this.#earlierGrants(run.cls, now) });
+      const spanDays = Math.max(0, (last - first) / 86_400_000);
+      // What happened to the grant this same proposal made before is added to its history, which a dismissed or still-open re-offer keeps.
+      const history = old === undefined ? [] : await this.#historyWith(old, now);
+      const chosen = chooseStandingLength({ spanDays, earlier: history });
       const body: ProposalBody = {
         requester: run.requester, projectId: run.projectId, cls: run.cls, environment: run.environment, covered: run.covered.slice(-20), count: run.covered.length,
-        suggestion: { action: `approve.class.${run.cls}`, project: run.projectId, environments: [run.environment], days: chosen.days }, lengthOptions: GRANT_LENGTHS, defaultLength: chosen, state: "open", createdAt: now,
+        suggestion: { action: `approve.class.${run.cls}`, project: run.projectId, environments: [run.environment], days: chosen.days }, lengthOptions: GRANT_LENGTHS, defaultLength: { days: chosen.days, why: chosen.why }, spanDays, ...(history.length === 0 ? {} : { history }), state: "open", createdAt: now,
       };
       await this.#runner.command("approval.propose", { commandId: scopedCommandId(owner.id, `${command.commandId}.${id}`), actor: owner.id }, async () => ({
         payload: { id, count: body.count },
@@ -233,30 +238,35 @@ export class ApprovalLoadService {
   }
 
   /**
-   * The owner accepts a proposal: the proposal is marked accepted, then the approval grant is made for the requester, scoped to the project and environment and expiring 30 days after the
-   * acceptance. The grant's command ID and expiry come from the stored proposal, so a repeated call (or a retry after a failure between the steps) makes no second grant and finishes the link.
+   * The owner accepts a proposal: the proposal is marked accepted with the length fixed, then the approval grant is made for the requester, scoped to the project and environment and expiring that many days after the
+   * acceptance (card A07d: with nothing said, the length the proposal showed; `days` is the owner's own pick, 1 to 90; `statedDays` or `oneOff` is what the owner said in words). The grant's command ID and expiry come from the
+   * stored proposal, so a repeated call (or a retry after a failure between the steps, whatever length it names) makes no second grant and finishes the grant and the link.
    */
   async accept(owner: Principal, command: NoActor & { proposalId: string; expectedRevision: number; days?: number; statedDays?: number; oneOff?: boolean }): Promise<{ grantId: string; days: number; why: string }> {
     this.#shape(owner, command, ["commandId", "proposalId", "expectedRevision", "days", "statedDays", "oneOff"]);
-    const whole = (v: unknown, field: string): number | undefined => (v === undefined ? undefined : Number.isSafeInteger(v) && (v as number) >= 1 && (v as number) <= 3650 ? (v as number) : invalid(field, "must be a whole number of days from 1 to 3650"));
-    const days = whole(command.days, "days"), statedDays = whole(command.statedDays, "statedDays");
+    const longest = GRANT_LENGTHS[GRANT_LENGTHS.length - 1]!;
+    const whole = (v: unknown, field: string, max: number): number | undefined => (v === undefined ? undefined : Number.isSafeInteger(v) && (v as number) >= 1 && (v as number) <= max ? (v as number) : invalid(field, `must be a whole number of days from 1 to ${max}`));
+    const days = whole(command.days, "days", longest), statedDays = whole(command.statedDays, "statedDays", 3650);
     if (command.oneOff !== undefined && typeof command.oneOff !== "boolean") invalid("oneOff", "must be true or false");
-    if (days !== undefined && days > GRANT_LENGTHS[GRANT_LENGTHS.length - 1]!) invalid("days", `a standing rule runs at most ${dayWord(GRANT_LENGTHS[GRANT_LENGTHS.length - 1]!)}`);
-    if (days !== undefined && (statedDays !== undefined || command.oneOff !== undefined)) invalid("days", "give a length, or what to derive it from, not both");
-    const done = await this.#runner.command("approval.accept", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
-      payload: { proposalId: command.proposalId, expectedRevision: command.expectedRevision, days: days ?? null, statedDays: statedDays ?? null, oneOff: command.oneOff ?? null },
+    if (days !== undefined && (statedDays !== undefined || command.oneOff === true)) invalid("days", "give a length, or what to derive it from, not both");
+    // A proposal accepted whose grant (or link) step failed is finished with the length already fixed, whatever length this call names.
+    const before = await this.#runner.get("standing-proposal", typeof command.proposalId === "string" ? command.proposalId : "");
+    const half = before === undefined ? undefined : before.body as unknown as ProposalBody;
+    const finishing = half !== undefined && half.state === "accepted" && half.via !== "profile" && half.chosenLength !== undefined && half.grantId === undefined && half.decidedBy === owner.id;
+    const done = finishing ? { id: before!.id, revision: before!.revision } : await this.#runner.command("approval.accept", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
+      payload: { proposalId: command.proposalId, expectedRevision: command.expectedRevision, ...(days === undefined ? {} : { days }), ...(statedDays === undefined ? {} : { statedDays }), ...(command.oneOff === undefined ? {} : { oneOff: command.oneOff }) },
       build: async () => {
         const current = await this.#runner.existing("standing-proposal", command.proposalId, command.expectedRevision);
         const body = current.body as unknown as ProposalBody;
         if (body.state !== "open") throw new DomainError("invalid_command", `proposal ${current.id} is ${body.state}`, { field: "proposalId" });
         const ref: AggregateRef = { kind: "standing-proposal", id: current.id };
         const at = this.#runner.now();
-        // The length is fixed in the same step that accepts, so a retry after a failure makes the same grant. The owner's own length is used exactly; otherwise it is derived again with what the owner said.
-        const length = days !== undefined
-          ? { days, source: "owner" as const, why: `you picked ${dayWord(days)}` }
-          : statedDays === undefined && command.oneOff !== true && body.defaultLength !== undefined
-            ? { days: body.defaultLength.days, source: "default" as const, why: body.defaultLength.why }
-            : { ...chooseStandingLength({ spanDays: spanOf(body), earlier: await this.#earlierGrants(body.cls, at), ...(statedDays === undefined ? {} : { statedDays }), ...(command.oneOff === true ? { oneOff: true } : {}) }), source: "default" as const };
+        // The length is fixed in the same step that accepts, so a retry makes the same grant. The owner's own length is used exactly; their words are used as stated; with nothing said it is the length that was shown.
+        const length: NonNullable<ProposalBody["chosenLength"]> = days !== undefined
+          ? { days, source: "owner", why: `you picked ${dayWord(days)}` }
+          : statedDays === undefined && command.oneOff !== true
+            ? { ...(body.defaultLength ?? { days: body.suggestion.days, why: "the usual length" }), source: "default" }
+            : chooseStandingLength({ spanDays: 0, earlier: [], ...(statedDays === undefined ? {} : { statedDays }), ...(command.oneOff === true ? { oneOff: true } : {}) });
         const next: ProposalBody = { ...body, state: "accepted", decidedBy: owner.id, decidedAt: at, chosenLength: length, suggestion: { ...body.suggestion, days: length.days } };
         return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject }], detail: { days: length.days } };
       },
@@ -281,7 +291,7 @@ export class ApprovalLoadService {
   }
 
   /**
-   * The other way to answer a proposal: instead of the suggested 30-day grant, switch the installation to the derived profile, for good (`permanent`, the default) or for a seven-day trial.
+   * The other way to answer a proposal: instead of the suggested grant, switch the installation to the derived profile, for good (`permanent`, the default) or for a seven-day trial.
    * Needs a strict installation. The proposal is marked accepted by the profile and no grant is made.
    */
   async acceptBySwitching(owner: Principal, command: NoActor & { proposalId: string; expectedRevision: number; mode?: "permanent" | "trial" }): Promise<{ switched: boolean }> {
@@ -372,22 +382,20 @@ export class ApprovalLoadService {
 
   // ---- internals ------------------------------------------------------------------------------------------------------------
 
-  /** The standing grants earlier proposals of this class made that have ended, by how long each was approved for and whether the owner took it back early (card A07d). */
-  async #earlierGrants(cls: ActionClass, now: string): Promise<{ days: number; revoked: boolean }[]> {
-    const out: { days: number; revoked: boolean }[] = [];
-    for (let after: string | undefined; ;) {
-      const page = await this.#runner.list("standing-proposal", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
-      for (const row of page) {
-        after = row.id;
-        const b = row.body as unknown as ProposalBody;
-        if (b.cls !== cls || b.state !== "accepted" || b.via === "profile" || b.grantId === undefined) continue;
-        const grant = await this.#grants.getGrant(b.grantId);
-        if (grant === undefined) continue;
-        if (grant.state === "revoked") out.push({ days: b.suggestion.days, revoked: true });
-        else if (grant.expiresAt !== undefined && grant.expiresAt <= now) out.push({ days: b.suggestion.days, revoked: false });
-      }
-      if (page.length < 200) return out;
-    }
+  /**
+   * The history of a proposal offered again (card A07d): what it had, and when it was accepted with a grant (not by switching the profile) how that grant ended. A grant still running adds nothing; one the owner revoked
+   * before its end counts as taken back (a revocation with no time recorded, from before this card, as well); one that ended, or was revoked after its end, ran its full term.
+   */
+  async #historyWith(old: ProposalBody, now: string): Promise<{ days: number; revoked: boolean }[]> {
+    const kept = [...(old.history ?? [])];
+    if (old.state !== "accepted" || old.via === "profile" || old.grantId === undefined) return kept;
+    const grant = await this.#grants.getGrant(old.grantId);
+    if (grant === undefined) return kept;
+    const ended = grant.expiresAt !== undefined && grant.expiresAt <= now;
+    const early = grant.state === "revoked" && (grant.revokedAt === undefined || grant.expiresAt === undefined || grant.revokedAt < grant.expiresAt);
+    if (early) kept.push({ days: old.suggestion.days, revoked: true });
+    else if (ended || grant.state === "revoked") kept.push({ days: old.suggestion.days, revoked: false });
+    return kept.slice(-HISTORY_KEPT);
   }
 
   /** A day's counts, the shards added up. */
