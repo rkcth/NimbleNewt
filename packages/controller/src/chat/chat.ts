@@ -59,7 +59,7 @@ export interface ChatProposalBody {
 }
 
 type PlanItem =
-  | { readonly i: number; readonly kind: "apply"; readonly op: string; readonly args: JsonObject; readonly commandId: string; readonly preview: string }
+  | { readonly i: number; readonly kind: "apply"; readonly op: string; readonly args: JsonObject; readonly commandId: string; readonly preview: string; /** For a decision: the version of its topic when the message was planned, before any step of the message. A decision applied later (a turn run again) is based on it when someone else changed the topic since, so the change becomes a dispute and is not overwritten. */ readonly planBase?: number }
   | { readonly i: number; readonly kind: "propose"; readonly proposalId: string; readonly steps: readonly ChatStep[]; readonly pins: readonly ChatPin[]; readonly preview: readonly string[]; readonly reason: string }
   | { readonly i: number; readonly kind: "focus"; readonly projectId: string; readonly preview: string }
   | { readonly i: number; readonly kind: "apply_proposal" | "discard_proposal"; readonly proposalId: string; readonly lengthDays?: number }
@@ -426,8 +426,9 @@ export class ChatService {
         const last = steps.length - 1;
         for (const [k, step] of steps.entries()) {
           const written = recordOf(step);
+          const base = step.op === "decision.record" ? await this.#revisionFor(token, "decision", step.args, undefined, new Map()) : undefined;
           if (written !== undefined) pending.set(written, (pending.get(written) ?? 0) + 1);
-          push({ i: items.length, kind: "apply", op: step.op, args: asJson(step.args), commandId: k === last ? `${turnId}-c${i}` : `${turnId}-c${i}-${k}`, preview: describe(step.op, step.args, resolved.labels) });
+          push({ i: items.length, kind: "apply", op: step.op, args: asJson(step.args), commandId: k === last ? `${turnId}-c${i}` : `${turnId}-c${i}-${k}`, preview: describe(step.op, step.args, resolved.labels), ...(base?.ok === true && base.value !== undefined ? { planBase: base.value } : {}) });
         }
       } else {
         const proposalId = `prop-${hash(scopedCommandId(owner.id, `${turnId}-p${i}`))}`;
@@ -642,6 +643,24 @@ export class ChatService {
     return { ok: true, steps, pins, labels, ...(projectId === undefined ? {} : { projectId }), ...(reason === undefined ? {} : { reason }), args, op: intent.op };
   }
 
+  /**
+   * The version a decision step is based on when it is applied. Normally the topic as it is now. But when someone else (not this turn) recorded a decision on the topic after the message was planned, the step is
+   * based on the version the message saw (plus what this turn recorded itself), so the later change is a dispute and is never overwritten by a step that read the topic only now (a turn run again after a crash).
+   */
+  async #decisionBase(token: string, turnId: string, args: Record<string, unknown>, planBase: number | undefined, current: number): Promise<number> {
+    if (planBase === undefined) return current;
+    const taskId = typeof args["taskId"] === "string" ? args["taskId"] : undefined;
+    const history = ((await this.#get(token, "decision.history", { projectId: args["projectId"], topic: args["topic"], ...(taskId === undefined ? {} : { taskId }) })) as unknown as Record<string, unknown>[] | undefined) ?? [];
+    let others = 0;
+    let own = 0;
+    for (const e of history) {
+      if (e["state"] === "superseded" || (taskId !== undefined && e["taskId"] !== undefined && e["taskId"] !== taskId)) continue;
+      const version = typeof e["version"] === "number" ? (e["version"] as number) : 0;
+      if ((e["source"] as { turnId?: string } | undefined)?.turnId === turnId) own = Math.max(own, version); else others = Math.max(others, version);
+    }
+    return others > planBase ? Math.max(planBase, own) : current;
+  }
+
   async #revisionFor(token: string, what: NonNullable<(typeof CHAT_OPS)[string]["revision"]>, args: Record<string, unknown>, task: { revision: number } | undefined, pending: ReadonlyMap<string, number>): Promise<{ ok: true; name?: string; value?: number } | Resolved & { ok: false }> {
     const ahead = (key: string | undefined): number => (key === undefined ? 0 : pending.get(key) ?? 0);
     switch (what) {
@@ -818,7 +837,7 @@ export class ChatService {
           if (already !== undefined) return already as never;
           const fresh = await this.#revisionFor(token, "decision", args, undefined, new Map());
           if (!fresh.ok) return { i: item.i, status: "refused", op: item.op, commandId: item.commandId, code: "kind" in fresh && fresh.kind === "refuse" ? fresh.code : "invalid_command", message: "kind" in fresh && fresh.kind === "refuse" ? fresh.message : "that decision needs more from you" };
-          args = { ...args, basedOn: fresh.value as number };
+          args = { ...args, basedOn: await this.#decisionBase(token, turnId, args, item.planBase, fresh.value as number) };
         }
         const response = await this.#deps.api.handle(token, { v: API_VERSION, op: item.op, commandId: item.commandId, args });
         if (!response.ok && response.error.code === "command_conflict" && item.op === "decision.record") {

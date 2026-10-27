@@ -105,6 +105,25 @@ for (const backend of backends) {
     assert.deepEqual(history.map((d) => [d.version, d.state]), [[1, "superseded"], [2, "active"]]);
   });
 
+  suite("a turn run again after the topic changed meanwhile: the step not yet recorded becomes a dispute and the change stands (card C08d)", async (w, script) => {
+    const a = await w.project("A");
+    await w.chat().setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+    const dec = (statement: string, wording: string) => cmd("decision.record", { category: "decision", topic: "Store", statement, wording }, wording);
+    const text = "We will use PostgreSQL for the store. Then we will use SQLite for the store instead.";
+    script[text] = [dec("use PostgreSQL for the store", "We will use PostgreSQL for the store"), dec("use SQLite for the store", "we will use SQLite for the store instead")];
+    let calls = 0;
+    const flaky = { handle: async (token: string, raw: unknown) => { if ((raw as { op?: string }).op === "decision.record" && ++calls === 2) throw new Error("crash"); return w.api.handle(token, raw as never); } };
+    await assert.rejects(w.chat({ api: flaky as never }).submit(w.ownerToken, { messageId: "m-cd", text }), /crash/);
+    // The first step is recorded (version 1); meanwhile the owner changes the topic directly (version 2).
+    await w.decisions.record(w.owner, { commandId: cid("mid"), projectId: a, category: "decision", topic: "Store", statement: "use Oracle for the store", wording: "We will use Oracle for the store", source: { channel: "direct" }, basedOn: 1 } as never);
+    const resumed = await w.chat().submit(w.ownerToken, { messageId: "m-cd", text });
+    const history = await w.decisions.history(w.owner, { projectId: a, topic: "store" });
+    assert.ok(history.some((d) => d.state === "disputed"), `the replayed step is a dispute: ${JSON.stringify(history.map((d) => [d.version, d.state, d.statement]))}`);
+    assert.match(JSON.stringify(resumed.outcomes), /conflicts with a decision made after/);
+    assert.equal((await w.decisions.authoritative(w.owner, { projectId: a, topic: "store" }))?.status, "disputed", "nothing is in force until the owner chooses, and the Oracle change was not silently replaced");
+    assert.ok(history.some((d) => d.statement === "use Oracle for the store" && d.state !== "superseded"), "the owner's change was not superseded");
+  });
+
   suite("a turn sent twice at once: the copy that finds its decision recorded between the look and the send answers applied, not command_conflict (card C08b)", async (w, script) => {
     const a = await w.project("A");
     await w.chat().setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
