@@ -143,6 +143,71 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `decision.get`
+
+One decision (superseded ones stay visible, marked non-authoritative).
+
+Arguments:
+
+- `decisionId`: the decision
+
+Result: `{ item }`.
+
+#### `decision.history`
+
+Every version of a topic, oldest first, superseded ones marked.
+
+Arguments:
+
+- `projectId`: the project
+- `topic`: the topic
+- `taskId` (optional): narrow to a task
+
+Result: `{ item }`.
+
+#### `decision.authoritative`
+
+What is decided on a topic now, or that it is open or disputed.
+
+Arguments:
+
+- `projectId`: the project
+- `topic`: the topic
+- `taskId` (optional): narrow to a task
+
+Result: `{ item }`.
+
+#### `decision.context`
+
+The versioned record of current decisions, permissions, pending questions and goals.
+
+Arguments:
+
+- `projectId`: the project
+- `taskId` (optional): narrow to a task
+
+Result: `{ item }`.
+
+#### `decision.reliance`
+
+The decisions a task relies on, which are stale, its follow-ups and revalidations.
+
+Arguments:
+
+- `taskId`: the task
+
+Result: `{ item }`.
+
+#### `decision.propagation`
+
+The progress of a correction reaching the affected tasks.
+
+Arguments:
+
+- `propagationId`: the propagation
+
+Result: `{ item }`.
+
 #### `project.get`
 
 One project.
@@ -604,6 +669,43 @@ Completion: finished when accepted (`completed: true`).
 #### `escalation.request`
 
 A blocked or repeatedly failing child asks for a harder profile, within its ceiling or by asking its parent.
+#### `decision.record`
+
+The owner records a decision, correction or gate in their own words (direct channel; a chat decision is recorded from the chat turn). A correction supersedes only the conflicting decisions in its scope and takes effect at once; dependent work is marked and blocked until revalidated. Anything but `stance: decided` records nothing.
+
+Arguments:
+
+- `projectId`: the project
+- `taskId` (optional): narrow to one task
+- `category`: the kind of decision
+- `topic`: what it is about
+- `statement`: the decided choice
+- `wording`: the owner's own words
+- `gate` (optional): for a gate, which
+- `basedOn`: the version of this topic you saw (0 for none)
+- `session` (optional): a label for the session or device
+- `stance` (optional): how the words were read
+
+Result: `{ recorded, ... }`: the decision, or why none was made.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `decision.resolve-dispute`
+
+The owner settles a dispute between conflicting instructions on one decision; arrival order and agents never do.
+
+Arguments:
+
+- `disputeId`: the dispute
+- `chosen`: the decision chosen
+
+Result: `{ ... }`: what was done.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `decision.ask`
+
+A task asks the owner a question on a topic; a decided topic answers itself and a disputed one is surfaced instead.
 
 Arguments:
 
@@ -650,6 +752,67 @@ Arguments:
 - `reason`: why
 
 Result: `{ item }`.
+- `topic`: the topic
+- `question`: the question
+
+Result: `{ ... }`: what was done.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `decision.dismiss-question`
+
+Drops a pending question.
+
+Arguments:
+
+- `questionId`: the question
+- `reason`: why
+
+Result: `{ ... }`: what was done.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `decision.link`
+
+Records that a plan, contract, review or pending action relies on decisions.
+
+Arguments:
+
+- `taskId`: the task
+- `subject`: `{ kind, id }` of what relies on them
+- `decisions`: the decision IDs
+
+Result: `{ ... }`: what was done.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `decision.revalidate`
+
+Confirms that work still stands after decisions changed, which unblocks its next action.
+
+Arguments:
+
+- `taskId`: the task
+- `decisions`: the decision IDs now current
+- `note`: what was checked
+- `subjects` (optional): which linked things
+
+Result: `{ ... }`: what was done.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `decision.close-follow-up`
+
+Closes a corrective follow-up recorded for an effect that already happened (it is never claimed undone).
+
+Arguments:
+
+- `followUpId`: the follow-up
+- `state`: `addressed` or `accepted`
+- `note`: what was done
+- `correctiveEffectId` (optional): the effect that corrected it
+
+Result: `{ ... }`: what was done.
 
 Completion: finished when accepted (`completed: true`).
 

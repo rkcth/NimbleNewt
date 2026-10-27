@@ -14,6 +14,7 @@ import type { AgentMessageService } from "../messaging/index.js";
 import type { EventService } from "../events/index.js";
 import type { BudgetService } from "../budgets/index.js";
 import type { DifficultyService } from "../routing/difficulty.js";
+import type { DecisionService } from "../decisions/index.js";
 import { SecureApi } from "../security/secured.js";
 import type { GrantService } from "../security/grants.js";
 import type { PrincipalService } from "../security/principals.js";
@@ -72,6 +73,8 @@ export interface StateApiDeps {
   readonly budgets?: Pick<BudgetService, "report" | "usage" | "request" | "pending" | "requestMore" | "decide">;
   /** When present, difficulty profiles, delegation and escalation can be used through the API (card R03). */
   readonly difficulty?: Pick<DifficultyService, "profiles" | "setProfiles" | "decisions" | "decision" | "delegate" | "reassignParent" | "delegation" | "setDifficulty" | "escalate" | "decide" | "escalations">;
+  /** When present, owner decisions can be recorded, read and corrected through the API (card C08). */
+  readonly decisions?: Pick<DecisionService, "record" | "resolveDispute" | "ask" | "dismissQuestion" | "link" | "revalidate" | "closeFollowUp" | "get" | "history" | "authoritative" | "context" | "reliance" | "propagation">;
   /** When present, a task credential (`tcr-…`) is accepted too and acts for its one task (card A10b). */
   readonly taskCredentials?: TaskCredentialService;
   /** Called with errors that are not part of the contract (so they are not shown to the client). */
@@ -118,6 +121,7 @@ export class StateApi {
         ...(this.#deps.meetings === undefined ? {} : { meetings: this.#deps.meetings }),
         ...(this.#deps.branches === undefined ? {} : { branches: this.#deps.branches }),
         ...(this.#deps.ownerQuestions === undefined ? {} : { ownerQuestions: this.#deps.ownerQuestions }),
+        ...(this.#deps.decisions === undefined ? {} : { decisions: this.#deps.decisions }),
         ...(this.#deps.grants === undefined ? {} : { grants: this.#deps.grants }),
         ...(this.#deps.events === undefined ? {} : { events: this.#deps.events }),
         ...(this.#deps.budgets === undefined ? {} : { budgets: this.#deps.budgets }),
