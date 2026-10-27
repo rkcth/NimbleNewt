@@ -89,6 +89,40 @@ for (const backend of backends) {
     assert.match(refused.message ?? "", /basedOn and session are set by the controller/);
   });
 
+  suite("a turn run again after a crash answers an already recorded decision as applied, and records nothing twice (card C08b)", async (w, script) => {
+    const a = await w.project("A");
+    const chat0 = w.chat();
+    await chat0.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+    const dec = (statement: string, wording: string) => cmd("decision.record", { category: "decision", topic: "Store", statement, wording }, wording);
+    const text = "We will use PostgreSQL for the store. Then we will use SQLite for the store instead.";
+    script[text] = [dec("use PostgreSQL for the store", "We will use PostgreSQL for the store"), dec("use SQLite for the store", "we will use SQLite for the store instead")];
+    let calls = 0;
+    const flaky = { handle: async (token: string, raw: unknown) => { if ((raw as { op?: string }).op === "decision.record" && ++calls === 2) throw new Error("crash"); return w.api.handle(token, raw as never); } };
+    await assert.rejects(w.chat({ api: flaky as never }).submit(w.ownerToken, { messageId: "m-crash", text }), /crash/);
+    const resumed = await w.chat().submit(w.ownerToken, { messageId: "m-crash", text });
+    assert.deepEqual(resumed.outcomes.map((o) => o.status), ["applied", "applied"], JSON.stringify(resumed.outcomes));
+    const history = await w.decisions.history(w.owner, { projectId: a, topic: "store" });
+    assert.deepEqual(history.map((d) => [d.version, d.state]), [[1, "superseded"], [2, "active"]]);
+  });
+
+  suite("a decision proposed and applied later keeps the stale-session check: what moved in between makes it a dispute, not an overwrite (card C08b)", async (w, script) => {
+    const a = await w.project("A");
+    const chat = w.chat();
+    await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+    const first = "We will use PostgreSQL for the store.";
+    script[first] = [cmd("decision.record", { category: "decision", topic: "Store", statement: "use PostgreSQL for the store", wording: first }, first)];
+    await chat.submit(w.ownerToken, { messageId: "m-p1", text: first });
+    const second = "Draft: we will use MySQL for the store.";
+    script[second] = [{ ...cmd("decision.record", { category: "decision", topic: "Store", statement: "use MySQL for the store", wording: "we will use MySQL for the store" }, "we will use MySQL for the store"), draft: true } as never];
+    const proposed = await chat.submit(w.ownerToken, { messageId: "m-p2", text: second });
+    const pid = proposed.outcomes[0]!.proposalId;
+    assert.ok(pid !== undefined, "the draft is kept as a proposal");
+    await w.decisions.record(w.owner, { commandId: cid("mid"), projectId: a, category: "decision", topic: "Store", statement: "use Oracle for the store", wording: "use Oracle for the store", source: { channel: "direct" }, basedOn: 1 } as never);
+    const applied = await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: pid! });
+    assert.equal(applied.applied, true, JSON.stringify(applied));
+    assert.equal((await w.decisions.history(w.owner, { projectId: a, topic: "store" })).some((d) => d.state === "disputed"), true);
+  });
+
   suite("a restatement, a decision for another task and a repeat inside one message never turn the owner's own instructions into a dispute (card C08b)", async (w, script) => {
     const a = await w.project("A");
     const one = await w.task(a, "One");

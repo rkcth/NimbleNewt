@@ -5,6 +5,7 @@ import { normalTopic } from "../decisions/records.js";
 import { DomainError } from "../domain/errors.js";
 import { onlyKnown } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
+import { derivedId } from "../domain/ids.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { Principal, PrincipalService } from "../security/principals.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
@@ -804,6 +805,9 @@ export class ChatService {
         let args = item.args;
         if (item.op === "decision.record") {
           // The version a decision is based on is read when it is applied, after the earlier steps of this message were (a restatement that changes nothing, or a decision for another task, moves nothing or moves it by its own scope): predicting it from the plan is only right for a proposal that waits for the owner.
+          // A turn run again (after a crash, or sent twice at once) has this step's decision already: it is the same command, answered from the record, not sent again with a version that now includes itself.
+          const done = await this.#get(token, "decision.get", { decisionId: derivedId("dec", scopedCommandId(owner.id, item.commandId)) });
+          if (done !== undefined) return { i: item.i, status: "applied", op: item.op, commandId: item.commandId, id: done["id"] as string, accepted: true, completed: true };
           const fresh = await this.#revisionFor(token, "decision", args, undefined, new Map());
           if (!fresh.ok) return { i: item.i, status: "refused", op: item.op, commandId: item.commandId, code: "kind" in fresh && fresh.kind === "refuse" ? fresh.code : "invalid_command", message: "kind" in fresh && fresh.kind === "refuse" ? fresh.message : "that decision needs more from you" };
           args = { ...args, basedOn: fresh.value as number };
