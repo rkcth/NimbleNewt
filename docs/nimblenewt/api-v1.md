@@ -1462,6 +1462,19 @@ Result: `{ id, revision, replayed }`.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `checkout.release`
+
+Gives up the pin of a task whose repository was cleared after it was dispatched, so it holds no checkout (it is pinned afresh if it names a repository again). Refused while the task still names a repository.
+
+Arguments:
+
+- `taskId`: the task
+- `expectedRevision`: the pin's revision you read
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `project.plan`
 
 Sets a project's optional due date, workstreams, milestones and authorized participants (each given field replaces that field; `dueDate: null` clears it). A due date is information: passing it changes no state.

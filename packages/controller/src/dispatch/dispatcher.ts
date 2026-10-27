@@ -687,7 +687,12 @@ export class DispatcherService {
     }
     // 3b. The checkout: a task that names a repository is pinned to the binding and location it has now, and a moved, unbound or re-pointed one does not start until the owner confirms it (card P01).
     if (this.#deps.checkouts !== undefined) {
-      const c = await this.#deps.checkouts.dispatchCheckout({ commandId: `dpa-pin:${taskId}`, taskId, actor: DISPATCHER_ACTOR, pin: false });
+      let c: Awaited<ReturnType<NonNullable<DispatcherDeps["checkouts"]>["dispatchCheckout"]>>;
+      try { c = await this.#deps.checkouts.dispatchCheckout({ commandId: `dpa-pin:${taskId}`, taskId, actor: DISPATCHER_ACTOR, pin: false }); } catch (error) {
+        // Too many records to look through safely, or a store fault that is the project's: the task is blocked with a reason the owner sees, not failed on every tick without a word.
+        if (!isDomainError(error, "unavailable")) throw error;
+        return block("checkout", "dispatch_blocked", `the checkout could not be looked up: ${error.message}`.slice(0, 800));
+      }
       if (c.kind === "changed" || c.kind === "unbound") return block("checkout", "dispatch_blocked", c.reason);
     }
     // 4. Meeting decisions that need the agent's acknowledgement, and a meeting about to start.
@@ -832,8 +837,13 @@ export class DispatcherService {
     if (held !== undefined) { await this.#giveBack(d); return held; }
     // The place is held and the allowance reserved: the checkout is pinned now, just before the start, so a task that only waited (for a place or an allowance) holds no pin (card P01).
     if (this.#deps.checkouts !== undefined) {
-      const pinned = await this.#deps.checkouts.dispatchCheckout({ commandId: `dpa-pin:${b.taskId}`, taskId: b.taskId, actor: DISPATCHER_ACTOR, pin: true });
-      if (pinned.kind === "changed" || pinned.kind === "unbound") { await this.#giveBack(d); return { kind: "skipped", check: "checkout", reason: pinned.reason }; }
+      let pinned: Awaited<ReturnType<NonNullable<DispatcherDeps["checkouts"]>["dispatchCheckout"]>>;
+      try { pinned = await this.#deps.checkouts.dispatchCheckout({ commandId: `dpa-pin:${b.taskId}`, taskId: b.taskId, actor: DISPATCHER_ACTOR, pin: true }); } catch (error) {
+        // The place and the allowance are held: a pin that could not be written gives them back before the fault goes on, so nothing waits on an attempt that never starts.
+        await this.#giveBack({ ...d, body: { ...d.body, requestId } });
+        throw error;
+      }
+      if (pinned.kind === "changed" || pinned.kind === "unbound") { await this.#giveBack({ ...d, body: { ...d.body, requestId } }); return { kind: "skipped", check: "checkout", reason: pinned.reason }; }
     }
     return this.#start(d, pre.host, requestId);
   }

@@ -100,6 +100,37 @@ for (const backend of backends) {
     assert.equal(second.blocked[0]?.blockerId, first.blocked[0]!.blockerId, "the same blocker, not a new one each tick");
   });
 
+  suite("a checkout lookup that is refused as unavailable blocks the task with a reason, the same blocker next tick; a pin that cannot be written gives the place back (card P01b)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    await c.resources.bindResource(c.owner, { commandId: "b1", projectId: c.project, kind: "repository", label: "Web", locator: "/work/web", repositoryId: "web" });
+    const t = await c.task("Fix web", ann, { repositoryId: "web" });
+    assert.equal((await c.resources.dispatchCheckout({ commandId: "pre", taskId: t.taskId, actor: "owner", pin: true })).kind, "ok");
+    const real = c.resources.dispatchCheckout.bind(c.resources);
+    (c.resources as { dispatchCheckout: unknown }).dispatchCheckout = async () => { throw new DomainError("unavailable", "there are more than 3 project-resource records, too many to check safely"); };
+    const first = await c.run();
+    assert.ok(!first.started.includes(t.attemptId!));
+    assert.equal(first.blocked.length, 1);
+    assert.equal(first.blocked[0]!.check, "checkout");
+    assert.equal((await c.run()).blocked[0]?.blockerId, first.blocked[0]!.blockerId, "the same blocker");
+    // The scan limit goes away: the task starts.
+    (c.resources as { dispatchCheckout: unknown }).dispatchCheckout = real;
+    assert.ok((await c.run()).started.includes(t.attemptId!));
+  });
+
+  suite("a pin that fails while the attempt is being started gives the place back, so the next tick can start it (card P01b)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    await c.resources.bindResource(c.owner, { commandId: "b1", projectId: c.project, kind: "repository", label: "Web", locator: "/work/web", repositoryId: "web" });
+    const t = await c.task("Fix web", ann, { repositoryId: "web" });
+    const real = c.resources.dispatchCheckout.bind(c.resources);
+    let broken = true;
+    (c.resources as { dispatchCheckout: unknown }).dispatchCheckout = async (cmd: Parameters<typeof real>[0]) => { if (cmd.pin && broken) throw new Error("store fault"); return real(cmd); };
+    const first = await c.run();
+    assert.ok(!first.started.includes(t.attemptId!));
+    assert.equal((await c.admission.snapshot()).running.length, 0, "no place is held by an attempt that never started");
+    broken = false;
+    assert.ok((await c.run()).started.includes(t.attemptId!), "the next tick starts it");
+  });
+
   suite("a task that waits does not hold a pin (card P01)", async (c) => {
     const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
     await c.resources.bindResource(c.owner, { commandId: "b1", projectId: c.project, kind: "repository", label: "Web", locator: "/work/web", repositoryId: "web" });
