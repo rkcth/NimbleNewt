@@ -69,6 +69,8 @@ export interface DispatchBody {
   /** Calls started and not yet settled (at most `DISPATCH_LIMITS.inFlight`), and calls waiting for an approval (at most `DISPATCH_LIMITS.parked`). */
   /** The budget reservation held for the attempt (card R05b), and what it has used so far; settled to the use when the attempt ends, held as uncertain when the worker was lost. */
   readonly reservationId?: string;
+  /** How many holds this attempt has given back; the next hold's command ID carries it, so it is not taken for the released one. */
+  readonly reserveRound?: number;
   readonly used?: { readonly costMicros: number; readonly computeMs: number };
   /** What the attempt meant to hold, written before the reservation is asked for, so a repeat after a crash asks for exactly the same amounts. */
   readonly reserving?: { readonly costMicros?: number; readonly computeMs?: number };

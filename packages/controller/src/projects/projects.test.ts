@@ -330,7 +330,8 @@ for (const backend of backends) {
     const p = await project("P");
     const bound = await resources.bindResource(owner, { commandId: cid("b"), projectId: p, kind: "repository", label: "one", locator: "/r/one", repositoryId: "one" } as never);
     const t = await task(p, "T", { repositoryId: "one" });
-    const pin = await resources.pinCheckout(owner, { commandId: cid("pin"), taskId: t });
+    await resources.dispatchCheckout({ commandId: "dpa-pin:fixed", taskId: t, actor: "dispatcher", pin: true });
+    const pin = { revision: (await resources.getPin(owner, t) as unknown as { revision: number }).revision };
     await refuses("invalid_command", () => resources.releaseCheckout(owner, { commandId: cid("rel"), taskId: t, expectedRevision: pin.revision }), (e) => assert.match(e.message, /still names/));
     await projects.updateTask({ commandId: cid("u"), actor: owner.id, taskId: t, expectedRevision: 1, repositoryId: null });
     await refuses("stale_revision", () => resources.releaseCheckout(owner, { commandId: cid("rel"), taskId: t, expectedRevision: pin.revision + 5 }));
@@ -342,9 +343,11 @@ for (const backend of backends) {
     await resources.unbindResource(owner, { commandId: cid("ub"), resourceId: bound.id, expectedRevision: (await resources.list(owner, p))![0]!.revision } as never);
     await resources.bindResource(owner, { commandId: cid("b2"), projectId: p, kind: "repository", label: "two", locator: "/r/one2", repositoryId: "two" } as never);
     await projects.updateTask({ commandId: cid("u"), actor: owner.id, taskId: t, expectedRevision: 2, repositoryId: "two" });
-    const again = await resources.dispatchCheckout({ commandId: cid("d2"), taskId: t, actor: "dispatcher", pin: true });
+    // The dispatcher uses one fixed command ID per task: pinning again after a release must not be answered with the first pin's result.
+    const again = await resources.dispatchCheckout({ commandId: "dpa-pin:fixed", taskId: t, actor: "dispatcher", pin: true });
     assert.equal(again.kind, "ok");
-    assert.equal((await resources.getPin(owner, t))!.locatorEpoch !== undefined, true);
+    assert.equal((await resources.getPin(owner, t))!.pinnedBy, "dispatcher", "pinned afresh, not answered from the first pin's command");
+    assert.equal((await resources.getPin(owner, t) as unknown as { released?: unknown }).released, undefined);
     assert.equal((await resources.resolveCheckout(owner, t))!.locator, "/r/one2");
   });
 

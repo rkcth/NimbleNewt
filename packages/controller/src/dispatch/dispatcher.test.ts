@@ -131,6 +131,24 @@ for (const backend of backends) {
     assert.ok((await c.run()).started.includes(t.attemptId!), "the next tick starts it");
   });
 
+  suite("a blocked task does not keep its allowance: a pin that fails or a checkout that moved gives the hold back with the place, and the next tick holds it afresh (card P01b)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    await c.resources.bindResource(c.owner, { commandId: "b1", projectId: c.project, kind: "repository", label: "Web", locator: "/work/web", repositoryId: "web" });
+    const t = await c.task("Fix web", ann, { repositoryId: "web" });
+    await c.budgets.open(c.owner, { commandId: "bo", taskId: t.taskId, currency: "USD", costMicros: 10_000, computeMs: 3_600_000 });
+    c.dispatcher = c.restart({}, { reserveCostMicros: 1000 });
+    const real = c.resources.dispatchCheckout.bind(c.resources);
+    let broken = true;
+    (c.resources as { dispatchCheckout: unknown }).dispatchCheckout = async (cmd: Parameters<typeof real>[0]) => { if (cmd.pin && broken) throw new Error("store fault"); return real(cmd); };
+    await c.run();
+    const held = (await c.budgets.report(c.owner, t.taskId))!;
+    assert.deepEqual(held.reservedInFlight, { costMicros: 0, computeMs: 0 }, "nothing stays reserved for an attempt that did not start");
+    broken = false;
+    assert.ok((await c.run()).started.includes(t.attemptId!), "the next tick holds it again and starts");
+    const after = (await c.budgets.report(c.owner, t.taskId))!;
+    assert.deepEqual(after.reservedInFlight, { costMicros: 0, computeMs: 0 }, "and settles it at the end");
+  });
+
   suite("a task that waits does not hold a pin (card P01)", async (c) => {
     const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
     await c.resources.bindResource(c.owner, { commandId: "b1", projectId: c.project, kind: "repository", label: "Web", locator: "/work/web", repositoryId: "web" });

@@ -491,7 +491,7 @@ export class ProjectResourceService {
     if (existing === undefined) {
       let bound: { id: string; revision: number; body: ResourceBody };
       try { bound = await this.#bindingFor(task); } catch (error) { if (isDomainError(error, "invalid_command")) return { kind: "unbound", reason: error.message }; throw error; }
-      const result = await this.#runner.command("checkout.pin", { commandId: scopedCommandId(command.actor, command.commandId), actor: command.actor }, async () => ({
+      const result = await this.#runner.command("checkout.pin", { commandId: scopedCommandId(command.actor, record === undefined ? command.commandId : `${command.commandId}:r${record.revision}`), actor: command.actor }, async () => ({
         payload: { taskId },
         build: async () => {
           const ref: AggregateRef = { kind: CHECKOUT, id: taskId };

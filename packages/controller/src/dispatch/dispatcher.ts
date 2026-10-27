@@ -82,7 +82,7 @@ export interface DispatcherDeps {
   /** `GenerationService.guardFor` is handed to every effect that is started (it adds the generation hold to the pause and decision guards). */
   readonly generation?: Pick<GenerationService, "guardFor">;
   readonly reviews?: Pick<ReviewService, "request" | "admit" | "get">;
-  readonly budgets?: Pick<BudgetService, "accounting" | "charge"> & Partial<Pick<BudgetService, "reserve" | "settle" | "markUncertain">>;
+  readonly budgets?: Pick<BudgetService, "accounting" | "charge"> & Partial<Pick<BudgetService, "reserve" | "settle" | "markUncertain" | "release">>;
   readonly mcp?: Pick<McpService, "authorizeCall" | "recordOutcome">;
   /** Whether the approved manifest of this exact tool version says a call may be run again after a restart (T06: the catalogue answers, as the agent; the worker never says). Without it no catalogue tool is replay-safe. */
   readonly replaySafe?: (tool: ToolIdentity, agent: Principal, attemptId: string, callId: string) => Promise<boolean>;
@@ -871,7 +871,7 @@ export class DispatcherService {
       want = (await this.#update(d.body.attemptId, (x) => ({ ...x, reserving: x.reserving ?? intended }))).reserving!;
     }
     let id: string;
-    try { id = (await budgets.reserve(this.#deps.principal, { commandId: `dpa-res:${d.body.attemptId}`, taskId: d.body.taskId, agentId: d.body.agentId, purpose: `attempt ${d.body.attemptId}`, ...want })).id; } catch (error) {
+    try { id = (await budgets.reserve(this.#deps.principal, { commandId: `dpa-res:${d.body.attemptId}${(d.body.reserveRound ?? 0) === 0 ? "" : `:${d.body.reserveRound}`}`, taskId: d.body.taskId, agentId: d.body.agentId, purpose: `attempt ${d.body.attemptId}`, ...want })).id; } catch (error) {
       if (isDomainError(error, "not_found")) return undefined;
       if (isDomainError(error, "invalid_command")) {
         // Refused inside the budget's own command, so nothing was held: the amounts are decided again at the next tick (a sibling may have taken part of the allowance meanwhile).
@@ -896,11 +896,26 @@ export class DispatcherService {
     return asked.id;
   }
 
+  /**
+   * The attempt cannot start now: its place is given back and so is the allowance it held, so nothing waits on work that is not running. The record is read again first (the caller's copy may be older than the
+   * request or reservation made in this very advance). A later tick asks for a place and holds the allowance afresh (`reserveRound` keeps the new hold's command apart from the released one).
+   */
   async #giveBack(d: Loaded): Promise<void> {
-    const id = d.body.requestId;
-    if (id === undefined) return;
-    await this.#deps.admission.release({ commandId: `dpa-rel:${d.body.attemptId}:${d.body.requests ?? 0}`, actor: DISPATCHER_ACTOR, requestId: id, reason: "the attempt cannot start now" }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
-    await this.#update(d.body.attemptId, (b) => { const { requestId: _r, ...rest } = b; void _r; return rest; });
+    const fresh = (await this.#load(d.body.attemptId))?.body ?? d.body;
+    const id = fresh.requestId;
+    if (id !== undefined) {
+      await this.#deps.admission.release({ commandId: `dpa-rel:${fresh.attemptId}:${fresh.requests ?? 0}`, actor: DISPATCHER_ACTOR, requestId: id, reason: "the attempt cannot start now" }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
+      await this.#update(fresh.attemptId, (b) => { const { requestId: _r, ...rest } = b; void _r; return rest; });
+    }
+    const budgets = this.#deps.budgets;
+    if (fresh.reservationId !== undefined && budgets?.release !== undefined) {
+      try { await budgets.release(this.#deps.principal, { commandId: `dpa-rrel:${fresh.attemptId}:${fresh.reserveRound ?? 0}`, reservationId: fresh.reservationId }); } catch (error) {
+        // Already settled or released: nothing is held either way. Anything else keeps the hold (and the fault goes on) so the next tick tries again.
+        if (!isDomainError(error, "invalid_transition") && !isDomainError(error, "not_found")) throw error;
+      }
+      const held = fresh.reservationId;
+      await this.#update(fresh.attemptId, (b) => { if (b.reservationId !== held) return b; const { reservationId: _h, reserving: _w, ...rest } = b; void _h; void _w; return { ...rest, reserveRound: (b.reserveRound ?? 0) + 1 }; });
+    }
   }
 
   async #start(d: Loaded, host: WorkerHost, requestId: string): Promise<AdvanceOutcome> {
