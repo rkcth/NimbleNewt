@@ -717,6 +717,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### C08 — Implement owner decision records and correction propagation
 
 - **Parent:** N07 / AII-257.
+- **Status:** implemented; commits `497b4fc`, `6408dbd`; CI runs 40455633733; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Owner decisions are recorded (direct channel), corrected, gated, linked, revalidated and read through the state API; a correction supersedes only what conflicts and stays visible; a stale session is surfaced as a dispute; a gate blocks at the stored guard. Chat recording, interrupting a running generation and propagation across pause and restart are card C08b.
 - **Blockers:** C03, C07, U03, H06.
 - **Deliverable:** Owner decision records (source utterance, scope, version, supersedes, authenticated origin) kept apart from agent conclusions; links from plans, task contracts, reviews and pending actions to the decisions they rely on; a versioned context record of current decisions, permissions, pending questions and goals supplied by the C07 startup builder (README 72, 204, 213-221, 607, 636; pitfalls-and-safeguards 81; operational-contracts 85-87).
 - **Acceptance and verification:** A correction supersedes only the conflicting decisions in its scope and is authoritative at once; dependent plans, reviews and queued actions are marked superseded, owning agents notified and each affected task's next action blocked until revalidated, including busy, paused and suspended agents on resume and after restart; completed external effects are recorded with corrective follow-up and never claimed undone; brainstorming, hypotheticals, quoted text and an agent's paraphrase create no decision and a decided choice is not re-asked; conflicting instructions on one decision from concurrent owner sessions or devices are surfaced and block the disputed action, never settled by arrival order or agent vote; a planning-only instruction or implementation hold is a binding gate that admits no work; agent agreement or a team vote cannot restore superseded guidance; superseded decisions stay visible marked non-authoritative; the context record and links to original wording survive repeated compaction; applying or reloading configuration (U10) leaves pending decisions in place.
@@ -813,6 +815,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H02 — Implement subordinate remote work/artifact transport
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `f54ae17`, `eb68d88`, `173b2d8`; CI runs 40455633733; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The composed controller places attempts on remote hosts over its own loopback-by-default transport with a production remote host, refuses an incompatible worker protocol and confines the host credential. Fencing, relocation, store owner and the host control paths in the composed controller are card H02b.
 - **Blockers:** H01, S06, A03, H12.
 - **Deliverable:** Authenticated remote admission and artifact fetch; workers use the H12 dispatch contract and negotiate a controller-worker protocol version.
 - **Acceptance and verification:** Network partition and delayed packets preserve fencing; no shared database mount; unsupported host fails visibly; remote workers cannot self-promote or admit independent work; relocating an attempt to another host fences the old attempt, transfers checkpoint and artifacts with integrity checks and refuses when platform, path, credential or data-location policy is unmet; the native Pi store has one exclusive owner host; an incompatible worker protocol version is refused visibly.
@@ -881,6 +885,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H06c — Deliver idle-expiry notices in the running controller
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `2097bed`, `8ce9845`, `5f55cfe`; CI runs 40455633733; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Idle-expiry notices reach the owner from the running controller; operations for the idle time and cancel; old subscriptions are stamped once at start and a restart test shows the first tick does not expire them.
 - **Blockers:** H06b, U11.
 - **Deliverable:** Split from H06b (audit 2026-10-26): expiry is built and recorded in the audit trail, but the composed controller passes no notifier to the event service, so no notice is sent in production; and subscriptions created before H06b were never given an idle time.
 - **Acceptance and verification:** Expiring an idle subscription that had events waiting produces exactly one owner notice in a dispatch-compose test; the expiry appears in the activity record (U09) and as a U11b notice when those exist; subscriptions that predate idle expiry are given the default idle time at start, once; the owner can set the idle time and cancel a subscription through the state API (the service has both; no operation exposes them yet).
@@ -991,6 +997,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H12g — Use the DNS-rebinding guard in the remote MCP client
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `60d6d78`; CI runs 40455633733; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The composed controller refuses a rebinding remote MCP address and uses the checked one; proven through the running controller.
 - **Blockers:** H12, T03.
 - **Deliverable:** The remote MCP client connects only through the H12 resolvePublic/connectPublic guard.
 - **Acceptance and verification:** A remote MCP address that resolves to a private or changing address is refused; the connection uses the checked address; a revoked connection blocks new calls; tested with a rebinding resolver.
@@ -1069,6 +1077,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### R03 — Implement difficulty profiles and escalation
 
 - **Parent:** N08 / AII-258.
+- **Status:** implemented; commits `bfff850`, `5306df1`; CI runs 40455633733; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Difficulty profiles, delegation, difficulty setting, escalation and routing decisions are in the state API with the service rights and task credentials confined; the dispatcher already resolves profiles in production. Composed proof of a real escalation and of a dispatch using a chosen profile is at service level only.
 - **Blockers:** R02, S10, H11.
 - **Deliverable:** Difficulty-to-profile mapping separate from priority with no built-in provider defaults; profile fields for harness, provider, model, reasoning settings, context needs, tool permissions and spending limit; child escalation requests (README 9, 67, 74, 148, 441-453; portability-and-configuration 15, 49).
 - **Acceptance and verification:** The parent-set difficulty selects the configured profile at dispatch and a changed mapping affects only the next dispatch; changing priority does not change the profile or the reverse; no tier implies locality, provider or model; a non-parent without a grant cannot set difficulty; a blocked or repeatedly failing child escalates within its delegated ceiling or to its parent; retry and total budgets stop an escalation loop; routing decisions and reasons are persisted and queryable.
@@ -1105,6 +1115,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### R05c — Budget requests reach their addressee and budgets are exposed in the API
 
 - **Parent:** N08 / AII-258.
+- **Status:** implemented; commits `bdec9d1`, `cf8cc9e`; CI runs 40455633733; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Budgets are in the state API (report, usage, pending, request, decide) with task credentials confined; a request for more budget tells the owner once. Telling a delegated holder is card R05e (an attempt via an event on the node stream was not merged: nothing watches it).
 - **Blockers:** R05, U11.
 - **Deliverable:** Split from R05 (audit 2026-10-26): request-more-budget is routed and stored, but nothing tells the owner or the delegated holder and no operation lets anyone see budgets or decide a request.
 - **Acceptance and verification:** A request for more budget produces a notice for the owner or the delegated holder; budget report, usage, request, decide and pending requests are API operations with rights and tests; outstanding and uncertain charges are visible through them.
@@ -1243,6 +1255,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### U05 — Implement chat status and blocker explanations
 
 - **Parent:** N09 / AII-259.
+- **Status:** implemented; commits `60d6d78`, `a8089a0`, `b0bcf64`, `13751a0`; CI runs 40455633733; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The composed status answers the task, overview, noticeboard, changes, tools, delivered and failed-event views through the state API and chat; a task credential cannot read the failed queue. Artifact verification and inspecting a seeded failed handling in the composed controller are card U05b.
 - **Blockers:** U03, S08, H01.
 - **Deliverable:** Evidence-linked status and task/project inspection views.
 - **Acceptance and verification:** Owner versus observed active attempt distinguished; exact pending dependency/retry shown; no fabricated completion; answers what changed since a given time, which tools were used (MCP server and capability included) and what was delivered, with links; the overview filters by project, agent and state and shows observation time, freshness and uncertainty; routine status comes from records without waking workers and stale reports are flagged; a blocker shows its kind (technical, enforced permission, policy conflict) and resolution route, and a supervisor or team preference cannot be a blocker on an owner-decided outcome; a permission-filtered noticeboard summarizes current assignments, latest stand-up reports and deliverables with links to owner desks; the failed-event queue can be listed and inspected.
@@ -1379,6 +1393,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### M01 — Implement durable meeting scheduling and agendas
 
 - **Parent:** N12 / AII-262.
+- **Status:** implemented; commits `dc3d026`, `f386402`, `65d3db2`; CI runs 40455633733; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Meeting schedules, urgent calls and settling are in the state API; a schedule is created once, a slot yields one on-time occurrence and a restart creates one catch-up occurrence, with nothing more on a second restart. Participants with real agent records and agendas are card M01b; the owner time zone and invitation sink are M01c.
 - **Blockers:** H04, U03.
 - **Deliverable:** Scheduled/urgent meetings and idempotent occurrences.
 - **Acceptance and verification:** Restart/catch-up creates one occurrence; absent/paused participants handled without unauthorized wake; agenda retained.
@@ -1533,6 +1549,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### P01 — Implement repository-independent projects and responsibilities
 
 - **Parent:** N14 / AII-264.
+- **Status:** implemented; commits `6141080`, `3983efa`, `9aa7d1f`, `2195bc0`; CI runs 40455633733; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The dispatcher pins the checkout just before the start and blocks a moved checkout with a typed blocker, once; a same-handle binding in another project does not redirect it; a waiting task holds no pin. Edge cases are card P01b.
 - **Blockers:** U03, S01.
 - **Deliverable:** Project/resource binding and ongoing responsibility records; optional workstreams, milestones and due dates and authorized participants on the project record.
 - **Acceptance and verification:** Start project in chat then bind two repos and non-code output; internal state stays outside target repos; passing a due date changes no progress state; one repository bound to two projects with separate access scopes; a moved or same-named checkout does not redirect a task.
