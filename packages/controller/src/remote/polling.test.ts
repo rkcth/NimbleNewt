@@ -247,13 +247,12 @@ for (const backend of backends) {
       assert.ok(troubles.length - before >= 50, "the burst really fenced the pollers");
       stop.abort();
       await Promise.all(runs);
-      // 6 s at 3 s a poll is 2 or 3 polls a host, not hundreds: no loop of requests and no one-per-agent polling.
+      // 12 s at 6 s a poll is 2 or 3 polls a host, not hundreds: no loop of requests and no one-per-agent polling.
       const used = end.polls - mid.polls;
       assert.ok(used <= 100 * (windowMs / waitMs + 2), `${used} polls from 100 idle hosts in ${windowMs} ms`);
       assert.ok(used >= 100 * 1.5, `${used}`);
       assert.equal(end.superseded, 0, "no host ever had two polls at once");
       assert.equal((await Promise.all(hosts.slice(0, 5).map((h) => c.hosts.status(c.dispatcherPrincipal, h.id)))).every((s) => s?.freshness === "fresh"), true);
-      // A reconnect burst: every host's session is replaced at once; each poll ends fenced, and the pollers connect again spread by their own jitter.
     });
   }
 }
