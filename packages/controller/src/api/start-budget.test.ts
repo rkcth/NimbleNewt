@@ -20,7 +20,7 @@ test("a request for more budget tells the owner once, budgets are read, asked fo
     const mk = async (n: string, title: string) => (await c.services.projects.createTask({ commandId: `t-${n}`, actor: rob.id, projectId: project, title })).id;
     const root = await mk("root", "Plant the garden"); const child = await mk("child", "Dig the bed");
     const tok = async (name: string, grants: { action: string; project: string }[]) => { await c.services.principals.enroll(rob, { commandId: `e-${name}`, kind: "agent", name, grants }); return (await c.services.principals.issueCredential(rob, `agent:${name}`)).token; };
-    const ann = await tok("ann", [{ action: "attempt.work", project }]);
+    const ann = await tok("ann", [{ action: "attempt.work", project }, { action: "budget.manage", project }]);
     const bob = await tok("bob", []);
     const budgets = BudgetService.withEpoch(c.storage, c.epoch);
     await budgets.open(rob, { commandId: "b-open", taskId: root, currency: "USD", costMicros: 1_000_000, computeMs: 60_000 });
@@ -40,7 +40,7 @@ test("a request for more budget tells the owner once, budgets are read, asked fo
     // Rights: the requester and the owner may read it; a stranger sees nothing; only the addressee may decide.
     assert.ok((await call(ann, "budget.get-request", { requestId: asked.result.id })).ok);
     assert.equal((await call(bob, "budget.get-request", { requestId: asked.result.id })).error?.code, "not_found");
-    assert.equal((await call(ann, "budget.decide", { requestId: asked.result.id, approve: true }, "bd0")).error?.code, "forbidden");
+    assert.equal((await call(ann, "budget.decide", { requestId: asked.result.id, approve: true }, "bd0")).error?.code, "forbidden", "a request addressed to the owner is the owner's to decide");
     assert.equal((await call(bob, "budget.report", { taskId: root })).error?.code, "not_found");
     const before = (await call(boot.token, "budget.report", { taskId: root })).result.item;
     assert.ok(before.limit !== undefined && before.uncertain !== undefined && before.reservedInFlight !== undefined, "outstanding and uncertain charges are in the report");
@@ -60,5 +60,19 @@ test("a request for more budget tells the owner once, budgets are read, asked fo
     assert.equal(sub.result.to, "agent:ann");
     assert.equal(await budgetNotices(), 1, "the owner is not told of a request addressed to a holder");
     assert.deepEqual((await call(ann, "budget.pending", {})).result.requests.map((r: { id: string }) => r.id), [sub.result.id]);
+    // The holder decides within what it holds.
+    assert.ok((await call(ann, "budget.decide", { requestId: sub.result.id, approve: true, costMicros: 5_000 }, "bd2")).ok);
+    assert.equal((await call(ann, "budget.pending", {})).result.requests.length, 0);
+    assert.equal((await call(ann, "budget.report", { taskId: grandchild })).result.item.limit.costMicros, 55_000);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("a task credential may not list, total or read budgets beyond its own task, and a request addressed to a holder is theirs to decide (card R05c)", async () => {
+  const { OPERATION_BY_NAME } = await import("./operations.js");
+  const ctx = (taskId: string) => ({ principal: { id: "agent:ann", kind: "agent", name: "ann", grants: [], taskScope: { taskId, projectId: "proj-aaaaaaaaaaaaaaaaaaaa" } }, budgets: { pending: async () => ({ requests: [{ taskId: "task-bbbbbbbbbbbbbbbbbbbb" }], truncated: false }), usage: async () => ({}), request: async () => ({ taskId: "task-bbbbbbbbbbbbbbbbbbbb" }) } } as never);
+  const run = (op: string, args: Record<string, unknown>, taskId = "task-aaaaaaaaaaaaaaaaaaaa") => OPERATION_BY_NAME.get(op)!.run(ctx(taskId), args, undefined);
+  await assert.rejects(() => run("budget.pending", {}), (e: { code?: string }) => e.code === "forbidden");
+  await assert.rejects(() => run("budget.usage", { projectId: "proj-aaaaaaaaaaaaaaaaaaaa" }), (e: { code?: string }) => e.code === "forbidden");
+  await assert.rejects(() => run("budget.get-request", { requestId: "bgq-aaaaaaaaaaaaaaaaaaaa" }), (e: { code?: string }) => e.code === "not_found", "another task's request reads as missing");
+  assert.ok(await run("budget.get-request", { requestId: "bgq-aaaaaaaaaaaaaaaaaaaa" }, "task-bbbbbbbbbbbbbbbbbbbb"), "its own task's request is readable");
 });

@@ -478,7 +478,8 @@ export class BudgetService {
       },
     })));
     if (result.replayed) to = ((await this.#runner.get(REQUEST, id))?.body as unknown as BudgetRequestBody).to;
-    else if (this.#notify !== undefined) {
+    // A repeat of the command tells again (the notice has its own command ID, so it is filed once): a call that crashed between the commit and the notice is mended by the caller's retry.
+    if (this.#notify !== undefined) {
       const tree = (await this.#tree(treeId)).body;
       try { await this.#notify({ requestId: id, taskId, ...(tree.nodes[taskId]?.parentId === undefined ? {} : { parentTaskId: tree.nodes[taskId]!.parentId! }), to, requestedBy: by.id, costMicros: want.costMicros, computeMs: want.computeMs }); } catch { /* the request is stored; `pending` shows it */ }
     }
