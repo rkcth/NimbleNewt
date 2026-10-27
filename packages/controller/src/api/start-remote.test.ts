@@ -14,14 +14,14 @@ const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
 const CAPS = { os: "linux", arch: "x64", harnesses: [{ name: "pi", version: "1.3.0" }], isolation: ["bubblewrap"], tools: [], workspaces: [] };
 
-test("the composed controller places an attempt on a remote host over its own transport; the worker fetches the order, cannot admit work, an incompatible protocol is refused, and the native store has one owner host (card H02)", async () => {
+test("the composed controller places an attempt on a remote host over its own transport; the worker fetches the order, cannot admit work, an incompatible protocol is refused (card H02: composed placement and protocol negotiation)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-remote-"));
   const c = await startController({
     storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
     dispatch: {
       timer: new ManualTimer(), manual: true,
       route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: false } }),
-      remote: { blobDirectory: join(d, "blobs"), hosts: [{ hostId: "host:r1", resources: { cpus: 1, memoryMb: 1024 }, requirements: () => ({ data: "cloud-allowed", harness: "pi" }) }] },
+      remote: { blobDirectory: join(d, "blobs"), hosts: [{ hostId: "host:r1", checkpointWaitMs: 300, pollMs: 20, resources: { cpus: 1, memoryMb: 1024 }, requirements: () => ({ data: "cloud-allowed", harness: "pi" }) }] },
     },
   });
   try {
@@ -54,8 +54,9 @@ test("the composed controller places an attempt on a remote host over its own tr
     await client.attempt(attemptId, offer!.placement).accept();
     // The worker's credential is a host credential: it cannot admit work or call the state API as the owner.
     const api = await c.api.handle(hostToken, { v: 1, op: "project.create", commandId: "x", args: { name: "Evil" } } as never) as { ok: boolean };
-    assert.equal(api.ok, false, "a remote worker cannot create projects");
-    // The native store of an agent has one exclusive owner host while it works there.
+    assert.equal(api.ok, false);
+    assert.equal((api as { error?: { code: string } }).error?.code, "forbidden", "a remote worker cannot create projects");
+    // The dispatcher names the host the agent's attempt runs on.
     const owner = await c.dispatch!.hostOfAgent("agent:agt-abcdefghijklmnopqrst");
     assert.equal(owner, "host:r1");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }

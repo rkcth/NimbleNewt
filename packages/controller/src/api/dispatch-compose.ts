@@ -248,7 +248,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   holder.dispatcher = dispatcher;
   let transport: WorkerTransport | undefined;
   if (remote !== undefined) {
-    try { transport = await WorkerTransport.listen({ ...(i.options.remote?.transport ?? {}), remote, principals: i.principals }); } catch (error) { await blobs?.lock.exclusive(async () => undefined).catch(() => undefined); throw error; }
+    try { transport = await WorkerTransport.listen({ ...(i.options.remote?.transport ?? {}), remote, principals: i.principals }); } catch (error) { await i.options.local?.close?.().catch(() => undefined); throw error; }
   }
   const driver = new DispatchDriver({
     dispatcher, storage, epoch, record: { storage, options: ro },
