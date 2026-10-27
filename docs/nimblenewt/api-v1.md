@@ -225,6 +225,16 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `meeting.invitations`
+
+The meeting invitations addressed to an agent (it reads its own; the owner reads anyone's; anyone else sees none). Nothing wakes the agent: it reads them when it next looks.
+
+Arguments:
+
+- `agent`: the agent principal ID, e.g. agent:abc
+
+Result: `{ items }`, oldest meeting first, at most 50.
+
 #### `meeting.occurrence`
 
 One occurrence with its agenda.

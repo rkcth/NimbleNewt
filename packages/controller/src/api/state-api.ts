@@ -9,7 +9,7 @@ import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
 import type { ProjectPlanService, ProjectResourceService, ResponsibilityService } from "../projects/index.js";
 import type { ContextBranchService } from "../branches/index.js";
-import type { MeetingService } from "../meetings/index.js";
+import type { InvitationInbox, MeetingService } from "../meetings/index.js";
 import type { AgentMessageService } from "../messaging/index.js";
 import type { EventService } from "../events/index.js";
 import type { BudgetService } from "../budgets/index.js";
@@ -61,6 +61,7 @@ export interface StateApiDeps {
   readonly responsibilities?: ResponsibilityService;
   /** When present, agenda items can be captured, corrected and listed through the API (cards M01 and M03). */
   readonly meetings?: MeetingService;
+  readonly invitations?: InvitationInbox;
   /** When present, context branches can be opened, switched, resumed and delegated through the API (card C05). */
   readonly branches?: ContextBranchService;
   /** When present, an agent can ask the owner a question and the owner can see and answer the questions (card U12). */
@@ -119,6 +120,7 @@ export class StateApi {
         ...(this.#deps.plans === undefined ? {} : { plans: this.#deps.plans }),
         ...(this.#deps.responsibilities === undefined ? {} : { responsibilities: this.#deps.responsibilities }),
         ...(this.#deps.meetings === undefined ? {} : { meetings: this.#deps.meetings }),
+        ...(this.#deps.invitations === undefined ? {} : { invitations: this.#deps.invitations }),
         ...(this.#deps.branches === undefined ? {} : { branches: this.#deps.branches }),
         ...(this.#deps.ownerQuestions === undefined ? {} : { ownerQuestions: this.#deps.ownerQuestions }),
         ...(this.#deps.decisions === undefined ? {} : { decisions: this.#deps.decisions }),

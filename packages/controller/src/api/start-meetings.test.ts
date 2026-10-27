@@ -77,3 +77,39 @@ test("a schedule made through the state API is held once per slot by the compose
     assert.equal(await count(), 2, "a second restart creates nothing more");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+test("a schedule that names no zone uses the owner's meeting.timeZone setting, and an urgent meeting's invitations reach the agent through the composed inbox, once, and only to the one it is for (card M01c)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-meet-"));
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], dispatch: { timer: new ManualTimer(), intervalMs: 1000 } });
+  try {
+    const s = c.services;
+    const boot = await s.principals.bootstrapOwner({ name: "rob" });
+    const rob = await s.principals.authenticate(boot.token);
+    const project = (await s.projects.createProject({ commandId: "p1", actor: rob.id, name: "Garden" })).id;
+    const ann = (await s.agents.create(rob, { commandId: "ag-ann", friendlyName: "Ann" })).id;
+    const bob = (await s.agents.create(rob, { commandId: "ag-bob", friendlyName: "Bob" })).id;
+    for (const id of [ann, bob]) await s.grants.grant(rob, { commandId: `g-${id}`, grantee: `agent:${id}`, action: "task.read", project, source: "direct", basis: "test" });
+    const call = (token: string, op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<{ ok: boolean; result?: any; error?: { code: string; message: string } }>;
+    // No zone and no setting: refused with the reason. Then the owner sets it and the same request works, with the zone recorded as the owner's.
+    const sched = { projectId: project, title: "Stand-up", roster: [`agent:${ann}`], time: "09:00" };
+    const refused = await call(boot.token, "meeting.schedule", sched, "ms0");
+    assert.equal(refused.ok, false);
+    assert.match(refused.error!.message, /meeting.timeZone/);
+    const staged = await s.configuration.stage(rob, { commandId: "cfg1", layer: "installation", set: { "meeting.timeZone": "Asia/Kolkata" } });
+    await s.configuration.apply(rob, { commandId: "cfg2", layer: "installation", expectedRevision: staged.revision });
+    const made = await call(boot.token, "meeting.schedule", sched, "ms1");
+    assert.ok(made.ok, JSON.stringify(made));
+    const got = (await call(boot.token, "meeting.schedule-get", { scheduleId: made.result.id })).result.item;
+    assert.deepEqual([got.timeZone, got.timeZoneFromOwnerSetting], ["Asia/Kolkata", true]);
+    // An urgent meeting for Ann and Bob: both are invited by the dispatcher's tick; each reads only its own, the owner reads either, a task credential none.
+    const urgent = await call(boot.token, "meeting.call-urgent", { projectId: project, title: "Hotfix", reason: "prod is down", roster: [`agent:${ann}`, `agent:${bob}`] }, "mu1");
+    assert.ok(urgent.ok, JSON.stringify(urgent));
+    for (let i = 0; i < 3; i++) await c.dispatch!.dispatcher.tick();
+    const annToken = (await s.principals.issueCredential(rob, `agent:${ann}`)).token;
+    const mine = await call(annToken, "meeting.invitations", { agent: `agent:${ann}` });
+    assert.ok(mine.ok, JSON.stringify(mine));
+    assert.deepEqual(mine.result.items.map((i: { agent: string; occurrenceId: string; urgent: boolean }) => [i.agent, i.occurrenceId, i.urgent]), [[`agent:${ann}`, urgent.result.id, true]], "one invitation, however often the dispatcher ticked");
+    assert.deepEqual((await call(annToken, "meeting.invitations", { agent: `agent:${bob}` })).result.items, [], "not Bob's");
+    assert.equal((await call(boot.token, "meeting.invitations", { agent: `agent:${bob}` })).result.items.length, 1, "the owner reads Bob's");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});

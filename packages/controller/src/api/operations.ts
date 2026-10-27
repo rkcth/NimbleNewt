@@ -12,7 +12,7 @@ import type { ContractService, WaitGraphService } from "../planning/index.js";
 import type { ProjectPlanService, ProjectResourceService, ResponsibilityService } from "../projects/index.js";
 import type { RetrievalService } from "../context/index.js";
 import type { ContextBranchService } from "../branches/index.js";
-import type { MeetingService } from "../meetings/index.js";
+import type { InvitationInbox, MeetingService } from "../meetings/index.js";
 import type { AgentMessageService } from "../messaging/index.js";
 import { shownLines } from "../standups/standups.js";
 import type { GrantService } from "../security/grants.js";
@@ -38,6 +38,7 @@ export interface Context {
   readonly responsibilities?: ResponsibilityService;
   /** Absent when the controller runs without meetings (cards M01 and M03). */
   readonly meetings?: MeetingService;
+  readonly invitations?: InvitationInbox;
   /** Absent when the controller runs without context branches (card C05). */
   readonly branches?: ContextBranchService;
   /** Absent when the controller runs without grants (card U03e). */
@@ -203,6 +204,8 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => { only(a, ["occurrenceId", "outcome", "reason"]); await meetingsOf(c).settle(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
   { name: "meeting.schedule-get", kind: "query", summary: "One schedule.", args: { scheduleId: "the schedule" }, result: "`{ item }`.",
     run: async (c, a) => { only(a, ["scheduleId"]); return found("schedule", await meetingsOf(c).schedule(c.principal, str(a, "scheduleId"))); } },
+  { name: "meeting.invitations", kind: "query", summary: "The meeting invitations addressed to an agent (it reads its own; the owner reads anyone's; anyone else sees none). Nothing wakes the agent: it reads them when it next looks.", args: { agent: "the agent principal ID, e.g. agent:abc" }, result: "`{ items }`, oldest meeting first, at most 50.",
+    run: async (c, a) => { only(a, ["agent"]); if (c.principal.taskScope !== undefined) throw new DomainError("forbidden", "a task credential may not read meeting invitations"); return asJson({ items: await (c.invitations ?? unavailable("invitations")).forAgent(c.principal, str(a, "agent")) }); } },
   { name: "meeting.occurrence", kind: "query", summary: "One occurrence with its agenda.", args: { occurrenceId: "the occurrence" }, result: "`{ item }`.",
     run: async (c, a) => { only(a, ["occurrenceId"]); return found("occurrence", await meetingsOf(c).occurrence(c.principal, str(a, "occurrenceId"))); } },
   { name: "meeting.planned", kind: "query", summary: "A project's planned meetings.", args: { projectId: "the project", "limit?": `1 to ${PAGE.max}, default ${PAGE.default}`, "after?": "the `next` of the previous page" }, result: "`{ items, next? }`.",
