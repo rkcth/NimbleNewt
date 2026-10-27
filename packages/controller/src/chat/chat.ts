@@ -483,8 +483,9 @@ export class ChatService {
       if (intent.op === "grant.create") {
         const scope = args["project"];
         const said = typeof args["grantee"] === "string" ? words.split(/(?<=[.!?])\s+|\n+/).filter((part) => wholeWord(part, args["grantee"] as string)).join(" ") : "";
-        // The chat makes permanent rights only: a message that speaks of a time limit, or a command that carries one, is refused (the state API takes `expiresAt` and `notBefore`).
-        if (args["expiresAt"] !== undefined || args["notBefore"] !== undefined || /\b(until|till|through|expires?|expired|temporar\w*|only (for )?(today|tomorrow|tonight|this|next)|for (the next )?(\d+|an?|one|two|three|four|five|six|seven|eight|nine|ten|few|several) (minutes?|hours?|days?|weeks?|months?)|today|tomorrow|tonight)\b/i.test(words)) return refuse("unsupported_value", "the chat gives rights with no time limit; for a limited right use the grant.create operation with expiresAt");
+        // The chat gives permanent rights, and only when the owner says so outright: no list of time words can be complete, so a right is never permanent by silence (a limited right uses the API's `expiresAt`).
+        if (args["expiresAt"] !== undefined || args["notBefore"] !== undefined) return refuse("unsupported_value", "the chat gives rights with no time limit; for a limited right use the grant.create operation with expiresAt");
+        if (!/\b(permanent(ly)?|indefinite(ly)?|forever|with no (time )?limit|without (a )?(time )?limit)\b/i.test(said)) return refuse("unsupported_value", "say that the right is permanent (or use the grant.create operation with expiresAt for a limited one), so it was not done");
         if (scope === "*") { if (!/\b(everywhere|all projects|every project)\b|\*/i.test(said)) return refuse("unsupported_value", "everywhere is not what you said, so it was not done. Name the project, or say everywhere."); }
         else if (typeof scope === "string") {
           if (!wholeWord(words, scope)) return refuse("unsupported_value", "project is not in your message as written, so it was not done. Say it exactly.");
