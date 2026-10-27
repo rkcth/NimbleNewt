@@ -45,7 +45,7 @@ test("a status question in the owner chat of the started controller is answered 
       ["s8", "show the failed events of Garden", { kind: "failed_events", projectId: project }],
     ] as const) {
       const r = await turn(id, text, { ...request });
-      assert.ok(r.outcomes[0]!.status === "answered" || r.outcomes[0]!.status === "refused" && r.outcomes[0]!.code === "not_found", `${request.kind}: ${JSON.stringify(r.outcomes)}`);
+      assert.equal(r.outcomes[0]!.status, "answered", `${request.kind}: ${JSON.stringify(r.outcomes)}`);
       assert.notEqual((r.outcomes[0] as { code?: string }).code, "unavailable", `${request.kind} is wired`);
     }
     const queue = await turn("s9", "show the failed events of Garden again", { kind: "failed_events", projectId: project });
@@ -54,4 +54,10 @@ test("a status question in the owner chat of the started controller is answered 
     const none = await turn("s4", "how is the moon task going", { kind: "task", taskId: "task-aaaaaaaaaaaaaaaaaaaa" });
     assert.notEqual(none.outcomes[0]!.status, "answered", JSON.stringify(none.outcomes));
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("a task credential may not read the failed event queue (card U05)", async () => {
+  const { OPERATION_BY_NAME } = await import("./operations.js");
+  const ctx = { principal: { id: "agent:ann", kind: "agent", name: "ann", grants: [], taskScope: { taskId: "task-aaaaaaaaaaaaaaaaaaaa", projectId: "proj-aaaaaaaaaaaaaaaaaaaa" } }, watches: { failures: async () => ({ items: [] }), inspect: async () => undefined } } as never;
+  for (const op of ["events.failures", "events.handling", "events.loops"]) await assert.rejects(() => OPERATION_BY_NAME.get(op)!.run(ctx, {}, undefined), (e: { code?: string }) => e.code === "forbidden", op);
 });
