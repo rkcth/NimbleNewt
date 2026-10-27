@@ -36,7 +36,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A08, A08b, A08c, A09, A10, A10b |
 | N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C08, C09 |
 | N08 / AII-258 | R01, R02, R03, R04, R05, R05b, R05c, R05d |
-| N09 / AII-259 | U03, U03d, U04, U05, U06, U03b, U03c, U07, U09, U08, U10, U11, U11b |
+| N09 / AII-259 | U03, U03d, U03e, U04, U05, U06, U03b, U03c, U07, U09, U08, U10, U11, U11b |
 | N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13 |
 | N11 / AII-261 | V01, V01b, V02 |
 | N12 / AII-262 | M00, M01, M02, M03, M04, M05, M05b, M06 |
@@ -1168,6 +1168,14 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** Through the composed controller: a question is answered from a cited record, a plan is a proposal that exists only after the owner applies it, assignment shows the model the active agents, set-up and start in one message work, quoted text and text the owner did not say are refused, and a pending question holds the order.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
+### U03e — Let the owner grant and revoke rights through the state API and the chat
+
+- **Parent:** N09 / AII-259.
+- **Blockers:** U03, L01b.
+- **Deliverable:** Split from L01b (2026-10-26): the dispatcher needs the owner to grant it recovery.stall-scan, and nothing outside the running process can grant a right: the state API has no grant operation and the chat cannot grant this action; stall detection stays off until then.
+- **Acceptance and verification:** An owner-only state API operation and a chat intent grant or revoke a named right for a named principal (the recovery.stall-scan grant for service:dispatcher first, with the service-may-hold-only-recovery-actions rule kept), applied once per command, shown in the activity record; a non-owner and a quoted or foreign-worded request are refused; a grant given while the controller runs reaches the next scan without a restart; docs/nimblenewt/grant-stall-scan.md is replaced by the one-line instruction.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
 ### U04 — Implement conversational policy editing
 
 - **Parent:** N09 / AII-259.
@@ -1797,7 +1805,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D03 — Approve release readiness and publication decision
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** X08, D01, D02, F04h, T06b, U03b, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11.
+- **Blockers:** X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11.
 - **Deliverable:** Exact release manifest, known limitations and owner signoff.
 - **Acceptance and verification:** All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

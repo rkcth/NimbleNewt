@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **88 of 203 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **88 of 204 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -114,7 +114,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Context and memory | `▓▓▓▓▓▓▓░░░░░` 60% | 6 of 10 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
 | Model routing, fallback and cost | `▓▓▓▓▓▓░░░░░░` 50% | 4 of 8 |
-| Owner chat and web UI | `▓▓▓▓░░░░░░░░` 38% | 5 of 13 |
+| Owner chat and web UI | `▓▓▓▓░░░░░░░░` 35% | 5 of 14 |
 | Workers, dispatch and teams | `▓▓▓▓▓░░░░░░░` 42% | 11 of 26 |
 | Agent messaging | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
 | Health and recovery | `▓▓▓▓░░░░░░░░` 33% | 1 of 3 |
@@ -293,7 +293,7 @@ Routes and capability policy, provider failure fallback, difficulty profiles, dr
 </details>
 
 <details>
-<summary><strong>Owner chat and web UI</strong> — ▓▓▓▓░░░░░░░░ 5 of 13</summary>
+<summary><strong>Owner chat and web UI</strong> — ▓▓▓▓░░░░░░░░ 5 of 14</summary>
 
 Talking to your agents: the chat interpreter, policy editing, status and blocker explanations, recovery chat, notifications and the responsive web interface.
 
@@ -305,6 +305,7 @@ Talking to your agents: the chat interpreter, policy editing, status and blocker
 - [ ] **U03c** · P29 · Run the coordinator as a hosted agent with its own lifecycle (optional, after the first release) _(needs U03, H11, L01)_
 - [ ] **U04** · P29 · Implement conversational policy editing _(needs U03, A02, A05, A07, U10)_
 - [ ] **U05** · P29 · Implement chat status and blocker explanations _(needs U03, S08, H01)_
+- [ ] **U03e** · P30 · Let the owner grant and revoke rights through the state API and the chat _(needs U03, L01b)_
 - [ ] **U09** · P31 · Implement read-only activity timeline and replay views _(needs C09, U05, A10, C06b)_
 - [ ] **U06** · P32 · Implement deterministic recovery chat controls _(needs U01, L02, A02)_
 - [ ] **U07** · P33 · Qualify responsive web chat over private networking _(needs U03, U06, A01, R05)_
@@ -502,7 +503,7 @@ Installation, documentation, QA on real machines, the release decision and closi
 
 - [ ] **D02** · P36 · Finish developer/API/security and license guidance _(needs T05, K03, F03)_
 - [ ] **D01** · P45 · Finish installation and chat-first user guidance _(needs X03, Q03, U11b)_
-- [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11)_
+- [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, X11)_
 - [ ] **D04** · P50 · Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
 - [ ] **D04b** · P51 · Measure code-navigation aids on real coding tasks (optional, after the first release) _(needs D04)_
 - [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, U03c, K06b, K01d, P02b, A08c)_

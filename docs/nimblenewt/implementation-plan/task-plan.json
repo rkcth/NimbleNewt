@@ -3117,6 +3117,24 @@
       }
     },
     {
+      "id": "U03e",
+      "parent": "N09",
+      "existing_issue": "AII-259",
+      "title": "Let the owner grant and revoke rights through the state API and the chat",
+      "depends_on": [
+        "U03",
+        "L01b"
+      ],
+      "deliverable": "Split from L01b (2026-10-26): the dispatcher needs the owner to grant it recovery.stall-scan, and nothing outside the running process can grant a right: the state API has no grant operation and the chat cannot grant this action; stall detection stays off until then",
+      "acceptance_and_verification": "An owner-only state API operation and a chat intent grant or revoke a named right for a named principal (the recovery.stall-scan grant for service:dispatcher first, with the service-may-hold-only-recovery-actions rule kept), applied once per command, shown in the activity record; a non-owner and a quoted or foreign-worded request are refused; a grant given while the controller runs reaches the next scan without a restart; docs/nimblenewt/grant-stall-scan.md is replaced by the one-line instruction",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "U04",
       "parent": "N09",
       "existing_issue": "AII-259",
@@ -4774,6 +4792,7 @@
         "F04h",
         "T06b",
         "U03b",
+        "U03e",
         "C07d",
         "L01b",
         "V01b",
