@@ -32,7 +32,7 @@ export class RemoteWorkerHost implements WorkerHost {
   }
 }
 
-class RemoteWorkerHandle implements WorkerHandle {
+export class RemoteWorkerHandle implements WorkerHandle {
   readonly workerVersion = "remote";
   constructor(private readonly remote: RemoteWorkerService, private readonly by: Principal, readonly attemptId: string, readonly placement: number, private readonly options: RemoteWorkerHostOptions) {}
   run(_gateway: ToolGateway): Promise<WorkerTurnResult> { void _gateway; return this.remote.waitForResult(this.by, this.attemptId, this.placement) as Promise<WorkerTurnResult>; }

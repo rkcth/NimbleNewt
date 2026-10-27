@@ -261,8 +261,9 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       enabled: async () => (await i.principals.get(DISPATCHER_PRINCIPAL))?.state === "active",
       onDisabled: async (why) => { await tell(why); },
     });
-    if (i.options.manual !== true) driver.start();
     const mcpService = i.options.mcp === undefined ? undefined : McpService.withEpoch(storage, epoch, { ...ro, ...(i.options.mcp?.gate === undefined ? {} : { gate: i.options.mcp.gate }) });
+    // Started last, so a failure above leaves no driver ticking a dispatcher whose host is being closed.
+    if (i.options.manual !== true) driver.start();
     return {
       dispatcher, driver, closeWorkers: async () => { await transport?.close().catch(() => undefined); await i.options.local?.close?.(); },
       ...(transport === undefined ? {} : { workerUrl: transport.url }),
