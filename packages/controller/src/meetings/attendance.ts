@@ -298,7 +298,7 @@ export class AttendanceService {
   async #lead(): Promise<number> {
     try {
       const v = await this.#leadMinutes?.();
-      return typeof v === "number" && Number.isInteger(v) && v > 0 ? Math.min(v, 720) : 0;
+      return typeof v === "number" && Number.isInteger(v) && v > 0 ? Math.min(v, MEETING_LIMITS.leadMax) : 0;
     } catch { return 0; }
   }
 

@@ -185,7 +185,12 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   const delivery = i.options.invitations ?? InvitationInbox.withEpoch(storage, epoch, ro);
   const nudge = i.options.nudge;
   // The invitation first; then, for an agent with no attempt running, a hint that a meeting is coming (card M01d). Until the dispatcher exists nobody can be told apart, so no hint goes out.
-  const invitations: InvitationSink = nudge === undefined ? delivery : withNudge(delivery, nudge, async (agent) => live.dispatcher === undefined || (await live.dispatcher.liveAttemptsOf(principal, { agentId: agent })).length > 0, i.onError);
+  const invitations: InvitationSink = nudge === undefined ? delivery : withNudge(delivery, nudge, async (agent) => {
+    if (live.dispatcher === undefined) return true;
+    // Busy is an attempt running now; one waiting for a place or parked on an approval is not working and is kept free like any idle agent.
+    for (const id of await live.dispatcher.liveAttemptsOf(principal, { agentId: agent })) if ((await live.dispatcher.get(principal, id))?.state === "running") return true;
+    return false;
+  }, i.onError);
   const meetings = MeetingService.withEpoch(storage, epoch, { inquiries: i.inquiries }, { ...ro, availability: pauses.availability, invitations, ...(i.leadMinutes === undefined ? {} : { leadMinutes: i.leadMinutes }) });
   const messages = AgentMessageService.withEpoch(storage, epoch, {
     ...ro, availability: pauses.availability, taskPaused: (t) => pauses.isPaused(t), guard: (t) => pauses.guard(t), waits: i.waits, assignments: i.assignments, meetings, inquiries: i.inquiries, notifications,

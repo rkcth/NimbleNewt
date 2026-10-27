@@ -55,6 +55,8 @@ test("a scheduled meeting is made five minutes before it starts by default, and 
     const sched = (title: string, n: number) => call("meeting.schedule", { projectId: project, title, roster: ["agent:ann"], time: "08:00", timeZone: "UTC", recurrence: { kind: "once", date: date(n) } }, `ms-${n}`);
     const first = await sched("Stand-up", 2);
     assert.ok(first.ok, JSON.stringify(first));
+    const preparedAt = (await call("meeting.schedule-get", { scheduleId: first.result.id })).result.item.nextPrepareAt as string;
+    assert.equal(preparedAt, new Date(dayAt(2, "07:55")).toISOString(), "the schedule says when it will be made, with the lead");
     const count = async (id: string): Promise<number> => (await call("meeting.schedule-get", { scheduleId: id })).result.item.occurrences;
     now = dayAt(2, "07:54");
     await c.dispatch!.dispatcher.tick();
@@ -75,5 +77,24 @@ test("a scheduled meeting is made five minutes before it starts by default, and 
     now = dayAt(3, "07:45");
     await c.dispatch!.dispatcher.tick();
     assert.equal(await count(second.result.id), 1, "fifteen minutes ahead, as set");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("a hint that never returns does not hold back the invitations of the others or the dispatcher's tick (card M01d)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-lead-"));
+  const c = await startController({
+    storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+    dispatch: { timer: new ManualTimer(), intervalMs: 1000, nudge: () => new Promise<void>(() => undefined) },
+  });
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const project = (await c.services.projects.createProject({ commandId: "p1", actor: rob.id, name: "Garden" })).id;
+    for (const n of ["ann", "bob"]) await c.services.principals.enroll(rob, { commandId: `e-${n}`, kind: "agent", name: n, grants: [{ action: "task.read", project }] });
+    const call = (op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<{ ok: boolean; result?: any }>;
+    assert.ok((await call("meeting.call-urgent", { projectId: project, title: "Hotfix", reason: "prod is down", roster: ["agent:ann", "agent:bob"] }, "mu1")).ok);
+    const finished = await Promise.race([c.dispatch!.dispatcher.tick().then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), 3000))]);
+    assert.equal(finished, true, "the tick ended");
+    for (const a of ["agent:ann", "agent:bob"]) assert.equal(((await call("meeting.invitations", { agent: a })).result?.items ?? []).length, 1, a);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

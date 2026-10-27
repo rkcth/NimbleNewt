@@ -62,7 +62,7 @@ export interface Nudge { readonly key: string; readonly agent: string; readonly 
 
 /**
  * An invitation sink that, after the invitation is delivered, sends a hint that a meeting is coming (card M01d) to an agent that is not busy. A busy agent (`busy` says so) is not interrupted: its invitation is waiting
- * and it sees it at its next stopping point. A failing hint or busy check is reported, never allowed to lose or repeat the invitation's delivery.
+ * and it sees it at its next stopping point. A failing hint or busy check is reported, never allowed to lose or repeat the invitation's delivery; the hint is not waited for, so a slow one holds nothing up.
  */
 export function withNudge(delivery: InvitationSink, nudge: (n: Nudge) => Promise<void>, busy: (agent: string) => Promise<boolean>, onError?: (error: unknown) => void): InvitationSink {
   return {
@@ -70,7 +70,8 @@ export function withNudge(delivery: InvitationSink, nudge: (n: Nudge) => Promise
       await delivery.invite(inv);
       try {
         if (await busy(inv.agent)) return;
-        await nudge({ key: inv.key, agent: inv.agent, occurrenceId: inv.occurrenceId, projectId: inv.projectId, startsAt: inv.startsAt, urgent: inv.urgent });
+        // Not waited for: a hint that is slow or never comes back must not hold up the invitations of the others or the dispatcher's tick.
+        void Promise.resolve(nudge({ key: inv.key, agent: inv.agent, occurrenceId: inv.occurrenceId, projectId: inv.projectId, startsAt: inv.startsAt, urgent: inv.urgent })).catch((error: unknown) => onError?.(error));
       } catch (error) { onError?.(error); }
     },
   };
