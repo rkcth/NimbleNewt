@@ -704,6 +704,8 @@ for (const backend of backends) {
     await refuses("forbidden", () => note("n-2", c.eve.pid));
     await refuses("invalid_command", () => c.msgs.noticeFromController({ commandId: "n-3", taskId: c.tAnn, to: c.ann.pid, purpose: "p", text: "t", class: "urgent-control" } as never));
     // A holder who may decide budget requests but cannot read the task is told; and the controller cannot fill an inbox with notices.
+    await refuses("invalid_command", () => note("n-6", c.ann.pid, c.tAnn, "task.read" as never), (e) => assert.match(e.message, /admit/));
+    await refuses("invalid_command", () => note("n-7", "host:h1"), (e) => assert.match(e.message, /to:/));
     const decider = await c.agent("decider", [{ action: "budget.manage", project: c.a }]);
     await refuses("forbidden", () => note("n-5x", decider.pid), (e) => assert.match(e.message, /cannot be told/));
     assert.equal((await note("n-5", decider.pid, c.tAnn, "budget.manage")).replayed, false);

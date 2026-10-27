@@ -798,7 +798,7 @@ export class AgentMessageService {
   /**
    * A notice from the controller itself (card R05e): it tells `to` something about a task, filed as advice in the recipient's inbox with the controller as the sender, as an escalation is. It needs no sender principal and no right,
    * so no agent or conversation can use it and the dispatcher's service principal is not widened; it is called only by code that builds the services. It never wakes anyone: the recipient reads it at a boundary, and a
-   * paused, suspended or stopped recipient keeps it queued. The same `commandId` files it once. A full inbox is `unavailable` (the caller retries later); a recipient who can no longer see the task is `forbidden`.
+   * paused or suspended recipient keeps it queued (a stopped one, with reach `unavailable`). Only agents are told. A recipient must be able to read the task, unless the caller names `admit: "budget.manage"` and the recipient holds that right on it. The same `commandId` files it once. A full inbox is `unavailable` (the caller retries later); a recipient who can no longer see the task is `forbidden`.
    */
   async noticeFromController(command: { commandId: string; taskId: string; to: string; purpose: string; text: string; /** A right that admits a recipient who cannot read the task (the budget holder who may decide). */ admit?: "budget.manage" }): Promise<{ id: string; replayed: boolean }> {
     onlyKnown(command, ["commandId", "taskId", "to", "purpose", "text", "admit"]);
@@ -815,7 +815,7 @@ export class AgentMessageService {
         const now = this.#runner.now();
         const projectId = ((await this.#runner.get("task", taskId))?.body as unknown as TaskBody | undefined)?.projectId;
         const holder = projectId === undefined ? undefined : await this.#fresh(to);
-        // A holder who may decide a request (`budget.manage`) is told even when it holds no right to read the task.
+        // With `admit: "budget.manage"`, a holder who may decide a request is told even when it holds no right to read the task.
         if (projectId === undefined || holder === undefined || holder.kind !== "agent" || ((await this.#reachable(to, projectId, taskId)) === undefined && !(command.admit === "budget.manage" && allows(holder, "budget.manage", projectId, { resource: { kind: "task", id: taskId }, now })))) throw new DomainError("forbidden", `${to} cannot be told about that task`);
         const inboxAgg = await this.#runner.get("agent-inbox", inboxIdOf(to));
         const inbox = inboxAgg === undefined ? this.#emptyInbox(now) : inboxAgg.body as unknown as InboxBody;
