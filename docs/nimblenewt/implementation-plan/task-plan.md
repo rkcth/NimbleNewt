@@ -35,13 +35,13 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N05 / AII-255 | L05, L05b, L01, L01b, L02, L03, L04, L06, H08 |
 | N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A08, A08b, A08c, A09, A10, A10b |
 | N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C08, C09, C08b |
-| N08 / AII-258 | R01, R02, R03, R04, R05, R05b, R05c, R05d, R05e |
+| N08 / AII-258 | R01, R02, R03, R04, R05, R05b, R05c, R05d, R05f, R05e |
 | N09 / AII-259 | U03, U03d, U03e, U05b, U04, U05, U06, U03b, U03c, U07, U09, U08, U10, U11, U11b |
-| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H02b |
+| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H02b, H02c |
 | N11 / AII-261 | V01, V01b, V02 |
 | N12 / AII-262 | M01b, M01c, M00, M01, M02, M03, M04, M05, M05b, M06 |
 | N13 / AII-263 | T01, T02, T03, T06, T06b, T07, T07b, T08, T09 |
-| N14 / AII-264 | P01b, P01, P02, P02b, P03, P04, P05, P06, P07 |
+| N14 / AII-264 | P01b, P01c, P01, P02, P02b, P03, P04, P05, P06, P07 |
 | N15 / AII-265 | Q01, Q02, Q03, Q04 |
 | N16 / AII-266 | B01 |
 | N17 / AII-267 | K01, K01b, K01c, K01d, K02, K03, K04, K05, K06, K06b, K07 |
@@ -1138,12 +1138,20 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** A request for more budget produces a notice for the owner or the delegated holder; budget report, usage, request, decide and pending requests are API operations with rights and tests; outstanding and uncertain charges are visible through them.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
-### R05d — Charge meetings, supervision and background jobs to their work or a shared category
+### R05d — Charge meeting presence to the budget ledger
 
 - **Parent:** N08 / AII-258.
 - **Blockers:** R05, M01.
-- **Deliverable:** Split from R05 (audit 2026-10-26): the ledger takes any charge, but the only production caller charges model calls.
-- **Acceptance and verification:** Meeting turns, supervisor activity and background jobs are charged to the task they serve or to a named shared-overhead category by their own services, tested end to end; nothing is charged twice; the measurement basis for local compute is stated.
+- **Deliverable:** Split from R05 (audit 2026-10-26): the ledger takes any charge, but the only production caller charges model calls; done: the time an agent is present in a meeting is charged once (compute, wall-clock between joining and leaving) to its meeting task.
+- **Acceptance and verification:** An agent's presence in a meeting is charged when it leaves or the meeting ends, once per attendance, never the owner's, and a failing ledger never keeps the agent in the room; the measurement basis is stated; tests: Attendance unit tests with a recording ledger (leave, end of meeting, replay, owner, failing ledger).
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### R05f — Charge supervision, review and background jobs and prove the charges through the state API
+
+- **Parent:** N08 / AII-258.
+- **Blockers:** R05d, T07b.
+- **Deliverable:** Split from R05d (2026-10-27): meeting presence is charged but supervisor activity, reviews and background jobs are not, the job service is not composed in the controller, a charge lost while the ledger was down is not found again, no composed test shows a held meeting in budget.usage, and meeting-turn model use must not be counted twice against the same meeting task.
+- **Acceptance and verification:** Supervisor activity, reviews and background jobs are charged to the task they serve or to a named shared-overhead category by their own services; a charge that failed is retried until it lands; a held meeting appears in budget.usage through the composed controller; nothing is charged twice (a meeting turn dispatched as an attempt is not also charged as presence); tests: Tests for each activity and a composed test through the state API.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### U01 — Implement versioned state query/write API
@@ -1232,8 +1240,16 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 
 - **Parent:** N14 / AII-264.
 - **Blockers:** P01.
-- **Deliverable:** Split from P01 (2026-10-27): the dispatcher pins the checkout and blocks a moved one, but a task whose repository is cleared after pinning cannot be repinned, resource scans cover every project, and a blocked pinned task keeps its allowance reserved; A cleared repository can be repinned or released; the resource lookups are per project and a scan limit opens a blocker instead of failing silently; a pin failure releases the allowance.
-- **Acceptance and verification:** Tests for each case through the dispatcher.
+- **Deliverable:** Split from P01 (2026-10-27): the dispatcher pins the checkout and blocks a moved one, but a task whose repository is cleared after pinning cannot be repinned, resource lookups cover every project, and a blocked pinned task keeps its allowance reserved; done: a cleared repository can be released and repinned, the resource list is per project and a bind past the scan limit is refused as unavailable, a blocked or failed pin gives its place and its unused allowance back (crash-safe), an attempt that already used budget keeps its hold.
+- **Acceptance and verification:** A cleared repository can be repinned or released; the resource list is per project; a pin failure releases the allowance; tests: Tests for each case through the dispatcher.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### P01c — Scan the pin and overlap checks per project
+
+- **Parent:** N14 / AII-264.
+- **Blockers:** P01b.
+- **Deliverable:** Split from P01b (2026-10-27): the overlap check and the lookup of live tasks pinned to a checkout still scan every project's resources; a scan limit should open a blocker instead of failing.
+- **Acceptance and verification:** The overlap and pinned-task lookups read one project's records; a scan limit opens a blocker with a reason; tests: Tests with many projects and a tight limit.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### M01b — Hold meetings with real participants through the composed API
@@ -1252,12 +1268,20 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** Composed test for a schedule without a zone and a delivered invitation.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
-### H02b — Prove remote worker fencing, relocation and the store owner in the composed controller
+### H02b — Fence a remote handle's controls by placement and close every failed startup
 
 - **Parent:** N10 / AII-260.
 - **Blockers:** H02.
-- **Deliverable:** Split from H02 (2026-10-27): the composed controller places attempts on remote hosts and refuses an incompatible protocol, but partition and delayed-packet fencing, an unsupported host failing visibly, no self-promotion, relocation with integrity and policy refusals, the exclusive native-store owner, and the production host stop, tell and checkpoint paths are proven only against a test host; the handle check is check-then-act and a failed startup after the local host is built leaks it; Each named clause holds through the composed controller and the production host; a control message carries its placement number; every startup failure closes what was built.
-- **Acceptance and verification:** Composed tests per clause.
+- **Deliverable:** Split from H02 (2026-10-27): the composed controller places attempts on remote hosts and refuses an incompatible protocol, but a control message did not carry its placement number, the production handle's checkpoint wait did not stop when the attempt moved, and a failed startup after the local host was built leaked it; done: control messages name their placement and are refused in the commit that would write them when another placement holds the attempt, the checkpoint wait ends fenced after a move, a startup failure closes the listener and the local host, an unsupported host's reason is visible.
+- **Acceptance and verification:** A control message carries its placement number and a stale one is fenced; every startup failure closes what was built; an unsupported host fails visibly; tests: Relocation and start-remote suites.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### H02c — Prove partition fencing, relocation integrity and the store owner in the composed controller
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H02b.
+- **Deliverable:** Split from H02b (2026-10-27): partition and delayed-packet fencing, no self-promotion, relocation with integrity and policy refusals, the exclusive native-store owner, the production host stop path, closing the listener when a step fails after it opened, and no driver started when a later startup step fails are not yet proven through the composed controller.
+- **Acceptance and verification:** Each named clause holds through the composed controller and the production host; a failure injected into the driver or MCP construction after the listener opened leaves nothing listening or ticking; a new host's checkpoint can never answer an old handle's request; tests: Composed tests per clause.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### U04 — Implement conversational policy editing
@@ -1895,7 +1919,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D03 — Approve release readiness and publication decision
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, H02b.
+- **Blockers:** X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, H02b, P01c, H02c, R05f.
 - **Deliverable:** Exact release manifest, known limitations and owner signoff.
 - **Acceptance and verification:** All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

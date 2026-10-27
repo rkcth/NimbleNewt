@@ -3064,13 +3064,31 @@
       "id": "R05d",
       "parent": "N08",
       "existing_issue": "AII-258",
-      "title": "Charge meetings, supervision and background jobs to their work or a shared category",
+      "title": "Charge meeting presence to the budget ledger",
       "depends_on": [
         "R05",
         "M01"
       ],
-      "deliverable": "Split from R05 (audit 2026-10-26): the ledger takes any charge, but the only production caller charges model calls",
-      "acceptance_and_verification": "Meeting turns, supervisor activity and background jobs are charged to the task they serve or to a named shared-overhead category by their own services, tested end to end; nothing is charged twice; the measurement basis for local compute is stated",
+      "deliverable": "Split from R05 (audit 2026-10-26): the ledger takes any charge, but the only production caller charges model calls; done: the time an agent is present in a meeting is charged once (compute, wall-clock between joining and leaving) to its meeting task",
+      "acceptance_and_verification": "An agent's presence in a meeting is charged when it leaves or the meeting ends, once per attendance, never the owner's, and a failing ledger never keeps the agent in the room; the measurement basis is stated; tests: Attendance unit tests with a recording ledger (leave, end of meeting, replay, owner, failing ledger)",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "R05f",
+      "parent": "N08",
+      "existing_issue": "AII-258",
+      "title": "Charge supervision, review and background jobs and prove the charges through the state API",
+      "depends_on": [
+        "R05d",
+        "T07b"
+      ],
+      "deliverable": "Split from R05d (2026-10-27): meeting presence is charged but supervisor activity, reviews and background jobs are not, the job service is not composed in the controller, a charge lost while the ledger was down is not found again, no composed test shows a held meeting in budget.usage, and meeting-turn model use must not be counted twice against the same meeting task",
+      "acceptance_and_verification": "Supervisor activity, reviews and background jobs are charged to the task they serve or to a named shared-overhead category by their own services; a charge that failed is retried until it lands; a held meeting appears in budget.usage through the composed controller; nothing is charged twice (a meeting turn dispatched as an attempt is not also charged as presence); tests: Tests for each activity and a composed test through the state API",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -3310,8 +3328,25 @@
       "depends_on": [
         "P01"
       ],
-      "deliverable": "Split from P01 (2026-10-27): the dispatcher pins the checkout and blocks a moved one, but a task whose repository is cleared after pinning cannot be repinned, resource scans cover every project, and a blocked pinned task keeps its allowance reserved; A cleared repository can be repinned or released; the resource lookups are per project and a scan limit opens a blocker instead of failing silently; a pin failure releases the allowance",
-      "acceptance_and_verification": "Tests for each case through the dispatcher",
+      "deliverable": "Split from P01 (2026-10-27): the dispatcher pins the checkout and blocks a moved one, but a task whose repository is cleared after pinning cannot be repinned, resource lookups cover every project, and a blocked pinned task keeps its allowance reserved; done: a cleared repository can be released and repinned, the resource list is per project and a bind past the scan limit is refused as unavailable, a blocked or failed pin gives its place and its unused allowance back (crash-safe), an attempt that already used budget keeps its hold",
+      "acceptance_and_verification": "A cleared repository can be repinned or released; the resource list is per project; a pin failure releases the allowance; tests: Tests for each case through the dispatcher",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "P01c",
+      "parent": "N14",
+      "existing_issue": "AII-264",
+      "title": "Scan the pin and overlap checks per project",
+      "depends_on": [
+        "P01b"
+      ],
+      "deliverable": "Split from P01b (2026-10-27): the overlap check and the lookup of live tasks pinned to a checkout still scan every project's resources; a scan limit should open a blocker instead of failing",
+      "acceptance_and_verification": "The overlap and pinned-task lookups read one project's records; a scan limit opens a blocker with a reason; tests: Tests with many projects and a tight limit",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -3358,12 +3393,29 @@
       "id": "H02b",
       "parent": "N10",
       "existing_issue": "AII-260",
-      "title": "Prove remote worker fencing, relocation and the store owner in the composed controller",
+      "title": "Fence a remote handle's controls by placement and close every failed startup",
       "depends_on": [
         "H02"
       ],
-      "deliverable": "Split from H02 (2026-10-27): the composed controller places attempts on remote hosts and refuses an incompatible protocol, but partition and delayed-packet fencing, an unsupported host failing visibly, no self-promotion, relocation with integrity and policy refusals, the exclusive native-store owner, and the production host stop, tell and checkpoint paths are proven only against a test host; the handle check is check-then-act and a failed startup after the local host is built leaks it; Each named clause holds through the composed controller and the production host; a control message carries its placement number; every startup failure closes what was built",
-      "acceptance_and_verification": "Composed tests per clause",
+      "deliverable": "Split from H02 (2026-10-27): the composed controller places attempts on remote hosts and refuses an incompatible protocol, but a control message did not carry its placement number, the production handle's checkpoint wait did not stop when the attempt moved, and a failed startup after the local host was built leaked it; done: control messages name their placement and are refused in the commit that would write them when another placement holds the attempt, the checkpoint wait ends fenced after a move, a startup failure closes the listener and the local host, an unsupported host's reason is visible",
+      "acceptance_and_verification": "A control message carries its placement number and a stale one is fenced; every startup failure closes what was built; an unsupported host fails visibly; tests: Relocation and start-remote suites",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "H02c",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Prove partition fencing, relocation integrity and the store owner in the composed controller",
+      "depends_on": [
+        "H02b"
+      ],
+      "deliverable": "Split from H02b (2026-10-27): partition and delayed-packet fencing, no self-promotion, relocation with integrity and policy refusals, the exclusive native-store owner, the production host stop path, closing the listener when a step fails after it opened, and no driver started when a later startup step fails are not yet proven through the composed controller",
+      "acceptance_and_verification": "Each named clause holds through the composed controller and the production host; a failure injected into the driver or MCP construction after the listener opened leaves nothing listening or ticking; a new host's checkpoint can never answer an old handle's request; tests: Composed tests per clause",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -5100,7 +5152,10 @@
         "P01b",
         "M01b",
         "M01c",
-        "H02b"
+        "H02b",
+        "P01c",
+        "H02c",
+        "R05f"
       ],
       "deliverable": "Exact release manifest, known limitations and owner signoff",
       "acceptance_and_verification": "All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded",

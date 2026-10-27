@@ -253,7 +253,9 @@ export class DispatcherService {
     for (const id of await this.#liveIds()) {
       const d = await this.#load(id);
       if (d === undefined || d.body.state !== "waiting") continue;
-      const outcome = await this.#advance(d);
+      // One attempt that cannot be advanced (a pin that fails, a ledger that is down) is told in the report and tried again next tick; it never stops the others from starting.
+      let outcome: AdvanceOutcome;
+      try { outcome = await this.#advance(d); } catch (error) { failures.push({ taskId: d.body.taskId, attemptId: id, error: errorText(error) }); continue; }
       if (outcome.kind === "started") started.push(id);
       else if (outcome.kind === "waiting") waiting.push(id);
       else if (outcome.kind === "skipped") skipped.push({ taskId: d.body.taskId, attemptId: id, check: outcome.check, reason: outcome.reason });
