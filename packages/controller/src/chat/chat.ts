@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import { OPERATION_BY_NAME } from "../api/operations.js";
 import { API_VERSION, type StateApi } from "../api/state-api.js";
+import { normalTopic } from "../decisions/records.js";
 import { DomainError } from "../domain/errors.js";
 import { onlyKnown } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
+import { derivedId } from "../domain/ids.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { Principal, PrincipalService } from "../security/principals.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
@@ -418,7 +420,7 @@ export class ChatService {
       if (!resolved.ok) { push(askOrRefuse(i, resolved, n)); continue; }
       projectId = resolved.projectId ?? projectId;
       // A captured topic is linked to this very turn (set here, after the interpreter's arguments were checked, so it cannot be named by anyone else).
-      const steps = resolved.steps.map((st) => (st.op === "agenda.capture" ? { ...st, args: { ...st.args, sourceTurnId: turnId } } : st));
+      const steps = resolved.steps.map((st) => (st.op === "agenda.capture" || st.op === "decision.record" ? { ...st, args: { ...st.args, sourceTurnId: turnId } } : st));
       if (resolved.reason === undefined) {
         // An explicit order applies now, one API command per step (a first step such as setting the repository, then the order itself).
         const last = steps.length - 1;
@@ -469,7 +471,9 @@ export class ChatService {
     if (spec === undefined || accepted === undefined) return refuse("not_a_chat_command", `${intent.op.slice(0, 60)} is not something that can be done by chat`);
     if (hasRefMarker(intent.args)) return refuse("invalid_command", "$ref is reserved for steps the controller builds");
     // Which conversation a topic came from is the controller's to say, never the interpreter's.
-    if (intent.op === "agenda.capture" && intent.args["sourceTurnId"] !== undefined) return refuse("invalid_command", "sourceTurnId is set by the controller");
+    if ((intent.op === "agenda.capture" || intent.op === "decision.record") && intent.args["sourceTurnId"] !== undefined) return refuse("invalid_command", "sourceTurnId is set by the controller");
+    // The version a decision is based on is read from the records and the session label is the controller's: neither is the interpreter's to say.
+    if (intent.op === "decision.record" && (intent.args["basedOn"] !== undefined || intent.args["session"] !== undefined)) return refuse("invalid_command", "basedOn and session are set by the controller");
     for (const key of Object.keys(intent.args)) if (!accepted.includes(key) && !(key === "repositoryId" && spec.dispatch === true)) return refuse("invalid_command", `${key} is not an argument of ${intent.op}`);
     const args: Record<string, unknown> = { ...intent.args };
     const labels: Record<string, string> = {};
@@ -659,6 +663,20 @@ export class ChatService {
         const item = typeof args["itemId"] === "string" ? await this.#get(token, "agenda.get", { itemId: args["itemId"] }) : undefined;
         return item === undefined ? refuse("not_found", "no such agenda item") : { ok: true, name: "expectedRevision", value: (item["revision"] as number) + ahead(`agenda:${args["itemId"] as string}`) };
       }
+      case "decision": {
+        // The version of the topic the owner's session sees now (0 when nothing was decided): the newest live version that applies to the scope (task-level ones count for a project-wide decision), so a decision that moved meanwhile is never overwritten.
+        if (typeof args["projectId"] !== "string" || typeof args["topic"] !== "string") return refuse("invalid_command", "a decision needs a project and a topic");
+        const taskId = typeof args["taskId"] === "string" ? args["taskId"] : undefined;
+        const history = ((await this.#get(token, "decision.history", { projectId: args["projectId"], topic: args["topic"], ...(taskId === undefined ? {} : { taskId }) })) as unknown as Record<string, unknown>[] | undefined) ?? [];
+        const relevant = history.filter((e) => e["state"] !== "superseded" && (taskId === undefined || e["taskId"] === undefined || e["taskId"] === taskId));
+        if (relevant.some((e) => e["state"] === "disputed")) return refuse("invalid_command", "that topic is in dispute between two of your instructions; settle the dispute first");
+        const version = relevant.reduce((m, e) => Math.max(m, typeof e["version"] === "number" ? (e["version"] as number) : 0), 0);
+        // Decisions of this message not yet applied count only where they apply to this one: a project-wide one applies to all, a task's own to that task and to project-wide ones.
+        const base = `decision:${args["projectId"] as string}:${normalTopic(args["topic"] as string)}:`;
+        let before = 0;
+        for (const [key, n] of pending) { if (!key.startsWith(base)) continue; const scope = key.slice(base.length); if (scope.includes(":")) continue; if (taskId === undefined || scope === "*" || scope === taskId) before += n; }
+        return { ok: true, name: "basedOn", value: version + before };
+      }
       case "grant": {
         const item = typeof args["grantId"] === "string" ? await this.#get(token, "grant.get", { grantId: args["grantId"] }) : undefined;
         return item === undefined ? refuse("not_found", "no such grant") : { ok: true, name: "expectedRevision", value: item["revision"] as number };
@@ -784,7 +802,31 @@ export class ChatService {
         return { i: item.i, status: "focused", projectId: item.projectId };
       }
       case "apply": {
-        const response = await this.#deps.api.handle(token, { v: API_VERSION, op: item.op, commandId: item.commandId, args: item.args });
+        let args = item.args;
+        if (item.op === "decision.record") {
+          // The version a decision is based on is read when it is applied, after the earlier steps of this message were (a restatement that changes nothing, or a decision for another task, moves nothing or moves it by its own scope): predicting it from the plan is only right for a proposal that waits for the owner.
+          // A turn run again (after a crash, or sent twice at once) has this step's decision already: it is the same command, answered from the record, not sent again with a version that now includes itself.
+          // Found only if it is this turn's own record (a direct decision that happens to use the same command ID is not).
+          const known = async (): Promise<Record<string, unknown> | undefined> => {
+            const done = await this.#get(token, "decision.get", { decisionId: derivedId("dec", scopedCommandId(owner.id, item.commandId)) });
+            const src = done?.["source"] as { turnId?: string } | undefined;
+            if (done === undefined || src?.turnId !== turnId) return undefined;
+            const text = done["state"] === "disputed" ? `Recorded decision version ${String(done["version"])}, but it conflicts with a decision made after the version it was based on: nothing on that topic is in force until you choose.` : `Recorded decision version ${String(done["version"])} on "${String(done["topic"] ?? "the gate")}": ${String(done["statement"] ?? "")}`;
+            return { i: item.i, status: "applied", op: item.op, commandId: item.commandId, id: done["id"] as string, shown: [text.slice(0, 600)], accepted: true, completed: true } as Record<string, unknown>;
+          };
+          const already = await known();
+          if (already !== undefined) return already as never;
+          const fresh = await this.#revisionFor(token, "decision", args, undefined, new Map());
+          if (!fresh.ok) return { i: item.i, status: "refused", op: item.op, commandId: item.commandId, code: "kind" in fresh && fresh.kind === "refuse" ? fresh.code : "invalid_command", message: "kind" in fresh && fresh.kind === "refuse" ? fresh.message : "that decision needs more from you" };
+          args = { ...args, basedOn: fresh.value as number };
+        }
+        const response = await this.#deps.api.handle(token, { v: API_VERSION, op: item.op, commandId: item.commandId, args });
+        if (!response.ok && response.error.code === "command_conflict" && item.op === "decision.record") {
+          // The same turn was sent twice at once and the other copy recorded this step between the look and the send: it is done.
+          const recorded = await this.#get(token, "decision.get", { decisionId: derivedId("dec", scopedCommandId(owner.id, item.commandId)) });
+          const src = recorded?.["source"] as { turnId?: string } | undefined;
+          if (recorded !== undefined && src?.turnId === turnId) return { i: item.i, status: "applied", op: item.op, commandId: item.commandId, id: recorded["id"] as string, shown: [`Recorded decision version ${String(recorded["version"])} on "${String(recorded["topic"] ?? "the gate")}".`], accepted: true, completed: true } as never;
+        }
         if (!response.ok) return { i: item.i, status: "refused", op: item.op, commandId: item.commandId, code: response.error.code, message: response.error.message };
         return { i: item.i, status: "applied", op: item.op, commandId: item.commandId, id: response.result["id"] as string, ...(typeof response.result["revision"] === "number" ? { revision: response.result["revision"] } : {}), ...(shownOf(response.result) === undefined ? {} : { shown: shownOf(response.result) as string[] }), accepted: true, completed: response.completed ?? true, ...(response.awaits === undefined ? {} : { awaits: response.awaits }) };
       }
@@ -1071,6 +1113,7 @@ function recordOf(step: ChatStep): string | undefined {
     case "resource.bind": return a["kind"] === "repository" ? `project:${a["projectId"] as string}` : undefined;
     case "agent.update": return `agent:${a["agentId"] as string}`;
     case "contract.set": return `contract:${a["taskId"] as string}`;
+    case "decision.record": return `decision:${a["projectId"] as string}:${normalTopic(String(a["topic"] ?? ""))}:${typeof a["taskId"] === "string" ? a["taskId"] : "*"}`;
     case "agenda.correct": return `agenda:${a["itemId"] as string}`;
     default: return undefined;
   }
@@ -1142,7 +1185,7 @@ export function replyOf(outcomes: readonly Outcome[]): string[] {
         break;
       case "proposed": lines.push(o.editId !== undefined ? `Proposed, nothing has changed yet (${o.message ?? ""}). ${edit} Edit ${o.editId}: say to apply it, or to discard it.` : `Proposed, nothing has happened yet (${o.message ?? ""}). Proposal ${o.proposalId ?? ""}: ${(o.preview ?? []).join("; ")}. Say to apply it, or to discard it.`); break;
       case "applied":
-        lines.push(o.editId !== undefined ? `Done. ${edit}${o.takesEffect === undefined ? "" : ` It takes effect ${o.takesEffect}.`} Recorded as ${o.editId}.` : o.proposalId !== undefined ? `Applied proposal ${o.proposalId}.` : `Done: ${o.op ?? ""}${o.completed === false ? `, accepted but not complete yet (${o.awaits ?? "waiting"})` : ""}.`);
+        if (!(o.op === "decision.record" && o.shown !== undefined)) lines.push(o.editId !== undefined ? `Done. ${edit}${o.takesEffect === undefined ? "" : ` It takes effect ${o.takesEffect}.`} Recorded as ${o.editId}.` : o.proposalId !== undefined ? `Applied proposal ${o.proposalId}.` : `Done: ${o.op ?? ""}${o.completed === false ? `, accepted but not complete yet (${o.awaits ?? "waiting"})` : ""}.`);
         // A captured or corrected agenda topic is shown as it now reads, so the owner can check it.
         for (const l of o.shown ?? []) lines.push(l);
         for (const r of o.results ?? []) for (const l of r.shown ?? []) lines.push(l);

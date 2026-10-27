@@ -416,6 +416,20 @@ for (const backend of backends) {
     assert.equal((await r.effects.get(done))!.status, "confirmed");
   });
 
+  suite("a process with no generation service still tells the tasks, but the correction stays pending until one that has it passes it on, and nobody is told twice (card C08b)", async (r) => {
+    const old = await r.recorded({});
+    await link(r, r.t1, { kind: "task", id: r.t1 }, [old.id]);
+    const saved = r.deps.generation;
+    delete r.deps.generation;
+    const fix = await r.recorded({ statement: "Use MySQL", wording: "use MySQL, not PostgreSQL", basedOn: 1 });
+    assert.equal(fix.propagation, "pending", "the generation step could not be done here");
+    assert.deepEqual([...r.published], [`task:${r.t1}:decision-superseded`], "the task was told all the same");
+    if (saved !== undefined) r.deps.generation = saved;
+    const resumed = await r.decisions.resume(r.host, { projectId: r.a });
+    assert.deepEqual([resumed.done, resumed.pending], [1, 0]);
+    assert.equal(r.published.length, 1, "and not told twice");
+  });
+
   suite("agents are told through their task's event stream, once, and a pass that dies half way is finished after a restart without telling anyone twice", async (r) => {
     const old = await r.recorded({});
     await link(r, r.t1, { kind: "task", id: r.t1 }, [old.id]);

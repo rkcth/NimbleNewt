@@ -595,10 +595,15 @@ export class DecisionService implements DecisionGuard {
     for (const taskId of [...tasks].sort()) {
       let step: PropagationStep = steps[taskId] ?? {};
       let step_ = "links";
+      let generationWaiting = false;
       try {
         if (rec.reason !== "disputed" && step.links === undefined) { await this.#markLinks(by, propId, taskId, rec); step = { ...step, links: true }; }
         step_ = "generation";
-        if (rec.reason !== "resolved" && step.generation === undefined) { await this.#interrupt(by, propId, taskId, rec); step = { ...step, generation: true }; }
+        if (rec.reason !== "resolved" && step.generation === undefined) {
+          // No generation service in this process (the API's own instance): the task is still told below, but the step is not done, so the propagation stays pending until a process that has one (the dispatcher's) finishes it.
+          if (this.#deps.generation === undefined) { generationWaiting = true; failures.push({ taskId, step: "generation", code: "unavailable", message: "no generation service is attached in this process; the dispatcher interrupts a running generation" }); }
+          else { await this.#interrupt(by, propId, taskId, rec); step = { ...step, generation: true }; }
+        }
         step_ = "notice";
         if (step.notified === undefined && this.#deps.events !== undefined) {
           const published = await this.#deps.events.publish(by, { commandId: `${propId}-e-${taskId}`, stream: `task:${taskId}`, kind: noticeKind, ref: { kind: "owner-decision", id: subject }, key: `decision:${propId.slice(4, 20)}` });
@@ -610,6 +615,7 @@ export class DecisionService implements DecisionGuard {
         failures.push({ taskId, step: step_, code: error instanceof DomainError ? error.code : "error", message: error instanceof Error ? error.message : String(error) });
         pendingTasks.push(taskId);
       }
+      if (generationWaiting && !pendingTasks.includes(taskId)) pendingTasks.push(taskId);
       steps[taskId] = step;
     }
     await this.#saveProgress(by, propId, steps, pendingTasks.length === 0);
