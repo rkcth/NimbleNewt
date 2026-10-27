@@ -120,8 +120,18 @@ test("a schedule that names no zone uses the owner's meeting.timeZone setting, a
     for (let i = 0; i < 55; i++) await inbox.invite({ ...one, key: `${one.key}:${i}`, startsAt: new Date(Date.UTC(2030, 0, 1 + i)).toISOString() });
     const kept = (await call(annToken, "meeting.invitations", { agent: `agent:${ann}` })).result.items;
     assert.equal(kept.length, 50);
-    assert.equal(kept[0].key, `${one.key}:54`, "newest first");
-    // A task credential of that agent reads its own list too.
-    assert.ok(kept.every((i: { agent: string }) => i.agent === `agent:${ann}`));
+    assert.equal(kept[0].key, `${one.key}:54`, "latest sent first");
+    // A task credential of that agent reads its own list (its project's invitations only); another agent's task credential reads nothing of Ann's.
+    const taskFor = (agentId: string) => {
+      return { kind: "agent" as const, id: `agent:${agentId}`, name: agentId, grants: [], taskScope: { taskId: "task-aaaaaaaaaaaaaaaaaaaa", projectId: project } };
+    };
+    const annTask = taskFor(ann);
+    assert.equal((await inbox.forAgent(annTask as never, `agent:${ann}`)).length, 50, "a task credential of Ann reads Ann's list");
+    assert.deepEqual(await inbox.forAgent(taskFor(bob) as never, `agent:${ann}`), [], "and Bob's reads none of it");
+    const elsewhere = { ...annTask, taskScope: { taskId: "task-aaaaaaaaaaaaaaaaaaaa", projectId: "proj-aaaaaaaaaaaaaaaaaaaa" } };
+    assert.deepEqual(await inbox.forAgent(elsewhere as never, `agent:${ann}`), [], "a task credential of another project sees none of this project's");
+    // Invitations delivered at the same moment are all kept.
+    await Promise.all([1, 2, 3, 4].map((n) => inbox.invite({ ...one, agent: `agent:${bob}`, key: `${one.key}:c${n}` })));
+    assert.equal((await call(boot.token, "meeting.invitations", { agent: `agent:${bob}` })).result.items.length, 5);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

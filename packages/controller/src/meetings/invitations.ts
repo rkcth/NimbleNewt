@@ -1,6 +1,7 @@
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
+import { inTaskScope } from "../security/access.js";
 import type { Principal } from "../security/principals.js";
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { Invitation, InvitationSink } from "./meetings.js";
@@ -10,10 +11,10 @@ const AGENT = /^agent:[A-Za-z0-9_-]{1,80}$/;
 /** An agent's inbox keeps its newest invitations; older ones drop off the end. */
 export const INVITATION_LIMITS = { kept: 50 } as const;
 
-export interface InvitationView extends Invitation { readonly id: string }
+export type InvitationView = Invitation;
 
 /**
- * The composed controller's invitation sink (card M01c): one inbox record per agent holding its newest invitations (50), newest first. An invitation is added once per `Invitation.key` (a repeat of the key,
+ * The composed controller's invitation sink (card M01c): one inbox record per agent holding the 50 most recently sent invitations, latest first. An invitation is added once per `Invitation.key` (a repeat of the key,
  * from a delivery that is tried again, changes nothing). The agent reads its own through `meeting.invitations`; nothing wakes the agent. No lookup scans other agents' records.
  */
 export class InvitationInbox implements InvitationSink {
@@ -41,16 +42,18 @@ export class InvitationInbox implements InvitationSink {
         return;
       } catch (error) {
         if (!(error instanceof DomainError && error.code === "stale_revision") || attempt >= 5) throw error;
+        // Another writer won this round: a short, uneven pause keeps writers from meeting again at the same moment.
+        await new Promise((resolve) => setTimeout(resolve, 2 + Math.floor(Math.random() * 8 * (attempt + 1))));
       }
     }
   }
 
-  /** The newest invitations addressed to one agent, newest first (at most 50). An agent reads its own, with a task credential too; the owner reads anyone's; anyone else gets nothing. */
+  /** The most recently sent invitations addressed to one agent, latest first (at most 50; meetings already held stay until pushed out). An agent reads its own; with a task credential only those of that task's project; the owner reads anyone's; anyone else gets nothing. */
   async forAgent(by: Principal, agent: string): Promise<InvitationView[]> {
     if (!AGENT.test(agent)) throw new DomainError("invalid_command", "agent must be an agent principal ID", { field: "agent" });
     if (!(by.kind === "owner" || (by.kind === "agent" && by.id === agent))) return [];
     const found = await this.#runner.get(KIND, derivedId("mvi", agent));
     const items = (found?.body as unknown as { items?: Invitation[] } | undefined)?.items ?? [];
-    return items.map((i) => ({ ...i, id: derivedId("mvi", i.key) }));
+    return by.taskScope === undefined ? items.map((i) => ({ ...i })) : items.filter((i) => inTaskScope(by, i.projectId)).map((i) => ({ ...i }));
   }
 }
