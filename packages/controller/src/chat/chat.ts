@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { OPERATION_BY_NAME } from "../api/operations.js";
 import { API_VERSION, type StateApi } from "../api/state-api.js";
+import { normalTopic } from "../decisions/records.js";
 import { DomainError } from "../domain/errors.js";
 import { onlyKnown } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
@@ -470,6 +471,8 @@ export class ChatService {
     if (hasRefMarker(intent.args)) return refuse("invalid_command", "$ref is reserved for steps the controller builds");
     // Which conversation a topic came from is the controller's to say, never the interpreter's.
     if ((intent.op === "agenda.capture" || intent.op === "decision.record") && intent.args["sourceTurnId"] !== undefined) return refuse("invalid_command", "sourceTurnId is set by the controller");
+    // The version a decision is based on is read from the records and the session label is the controller's: neither is the interpreter's to say.
+    if (intent.op === "decision.record" && (intent.args["basedOn"] !== undefined || intent.args["session"] !== undefined)) return refuse("invalid_command", "basedOn and session are set by the controller");
     for (const key of Object.keys(intent.args)) if (!accepted.includes(key) && !(key === "repositoryId" && spec.dispatch === true)) return refuse("invalid_command", `${key} is not an argument of ${intent.op}`);
     const args: Record<string, unknown> = { ...intent.args };
     const labels: Record<string, string> = {};
@@ -660,13 +663,14 @@ export class ChatService {
         return item === undefined ? refuse("not_found", "no such agenda item") : { ok: true, name: "expectedRevision", value: (item["revision"] as number) + ahead(`agenda:${args["itemId"] as string}`) };
       }
       case "decision": {
-        // The version of the topic the owner's session sees now (0 when nothing was decided): a decision that moved meanwhile is never overwritten.
+        // The version of the topic the owner's session sees now (0 when nothing was decided): the newest live version that applies to the scope (task-level ones count for a project-wide decision), so a decision that moved meanwhile is never overwritten.
         if (typeof args["projectId"] !== "string" || typeof args["topic"] !== "string") return refuse("invalid_command", "a decision needs a project and a topic");
-        const item = await this.#get(token, "decision.authoritative", { projectId: args["projectId"], topic: args["topic"], ...(typeof args["taskId"] === "string" ? { taskId: args["taskId"] } : {}) });
-        if (item?.["status"] === "disputed") return refuse("invalid_command", "that topic is in dispute between two of your instructions; settle the dispute first");
-        const current = (item?.["decision"] as { version?: unknown } | undefined)?.version;
-        const version = item?.["status"] === "decided" && typeof current === "number" ? current : 0;
-        return { ok: true, name: "basedOn", value: version + ahead(`decision:${args["projectId"] as string}:${args["topic"] as string}`) };
+        const taskId = typeof args["taskId"] === "string" ? args["taskId"] : undefined;
+        const history = ((await this.#get(token, "decision.history", { projectId: args["projectId"], topic: args["topic"], ...(taskId === undefined ? {} : { taskId }) })) as unknown as Record<string, unknown>[] | undefined) ?? [];
+        const relevant = history.filter((e) => e["state"] !== "superseded" && (taskId === undefined || e["taskId"] === undefined || e["taskId"] === taskId));
+        if (relevant.some((e) => e["state"] === "disputed")) return refuse("invalid_command", "that topic is in dispute between two of your instructions; settle the dispute first");
+        const version = relevant.reduce((m, e) => Math.max(m, typeof e["version"] === "number" ? (e["version"] as number) : 0), 0);
+        return { ok: true, name: "basedOn", value: version + ahead(`decision:${args["projectId"] as string}:${normalTopic(args["topic"] as string)}`) };
       }
       case "grant": {
         const item = typeof args["grantId"] === "string" ? await this.#get(token, "grant.get", { grantId: args["grantId"] }) : undefined;
@@ -1080,6 +1084,7 @@ function recordOf(step: ChatStep): string | undefined {
     case "resource.bind": return a["kind"] === "repository" ? `project:${a["projectId"] as string}` : undefined;
     case "agent.update": return `agent:${a["agentId"] as string}`;
     case "contract.set": return `contract:${a["taskId"] as string}`;
+    case "decision.record": return `decision:${a["projectId"] as string}:${normalTopic(String(a["topic"] ?? ""))}`;
     case "agenda.correct": return `agenda:${a["itemId"] as string}`;
     default: return undefined;
   }

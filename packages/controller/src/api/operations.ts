@@ -173,7 +173,10 @@ export const OPERATIONS: readonly Operation[] = [
       const { sourceTurnId, ...rest } = a;
       if (sourceTurnId !== undefined && c.principal.kind !== "owner") throw new DomainError("forbidden", "only the owner's chat links a decision to a conversation");
       const source = sourceTurnId === undefined ? { channel: "direct" } : { channel: "chat", turnId: typeof sourceTurnId === "string" ? sourceTurnId : invalid("args.sourceTurnId", "must be text") };
-      return asJson(await decisionsOf(c).record(c.principal, { commandId: need(id), ...(rest as object), source } as never) as never);
+      const result = await decisionsOf(c).record(c.principal, { commandId: need(id), ...(rest as object), source } as never) as unknown as Record<string, unknown>;
+      // Said back to the owner as the record answers: what was recorded, or that nothing was and why.
+      const shown = result["recorded"] === true ? [`Recorded decision version ${String(result["version"])} on "${String(rest["topic"] ?? "the gate")}": ${String(rest["statement"])}`] : [`Nothing was recorded: ${String(result["reason"] ?? "the words are not a decision")}`];
+      return asJson({ ...result, shown } as never);
     } },
   { name: "decision.resolve-dispute", kind: "command", summary: "The owner settles a dispute between conflicting instructions on one decision; arrival order and agents never do.", args: { disputeId: "the dispute", chosen: "the decision chosen" }, result: "`{ ... }`: what was done.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["disputeId", "chosen"]); return asJson(await decisionsOf(c).resolveDispute(c.principal, { commandId: need(id), ...(a as object) } as never) as never); } },
