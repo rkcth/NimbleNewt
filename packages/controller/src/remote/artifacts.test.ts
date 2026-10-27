@@ -61,7 +61,7 @@ for (const backend of backends) {
     const { attemptId } = await c.task("t2", bob);
     const report = await c.tick();
     assert.deepEqual(report.started, []);
-    assert.equal(report.skipped[0]!.reason, "the worker did not start");
+    assert.match(report.skipped[0]!.reason, /^the worker did not start/);
     assert.equal((await c.current.get(c.owner, attemptId!))!.outcome!.status, "failed");
     assert.equal(await c.remote.placement(c.owner, attemptId!), undefined, "nothing was placed");
     unlinkSync(c.blobs.pathOf(entries.find((e) => e.path === "b.txt")!.digest));

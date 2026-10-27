@@ -52,6 +52,9 @@ for (const backend of backends) {
     await wireRefuses("fenced", () => attempt.pollControl(), 409);
     await wireRefuses("fenced", () => attempt.accept(), 409);
     assert.deepEqual(await r1.client.offers(), []);
+    // The old handle's control message names its placement and is refused in the commit that would write it; the new placement's is taken.
+    await refuses("fenced", () => c.remote.control(c.owner, attemptId, { kind: "tell", text: "late" }, placement), (e) => assert.match(e.message, new RegExp(`not ${placement}`)));
+    assert.equal(typeof (await c.remote.control(c.owner, attemptId, { kind: "tell", text: "now" }, placement + 1)), "number");
     // The store belongs to the new host in the same commit.
     assert.deepEqual([(await c.remote.store(c.owner, "agent:ann"))!.ownerHostId, (await c.remote.store(c.owner, "agent:ann"))!.moves], [r2.id, 1]);
     // Same command again: the same move, nothing twice.

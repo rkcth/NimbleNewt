@@ -922,8 +922,10 @@ export class DispatcherService {
     };
     let handle: WorkerHandle;
     try { handle = await host.start(order); } catch (error) {
-      await this.#end(b.attemptId, "failed", `the worker did not start: ${error instanceof Error ? error.message.slice(0, 200) : "failed"}`, { readmit: false });
-      return { kind: "skipped", check: "host", reason: "the worker did not start" };
+      const why = error instanceof Error ? error.message.slice(0, 200) : "failed";
+      await this.#end(b.attemptId, "failed", `the worker did not start: ${why}`, { readmit: false });
+      // The report says why too (a host that cannot meet a requirement is a visible refusal, not a silent skip).
+      return { kind: "skipped", check: "host", reason: `the worker did not start: ${why}` };
     }
     await this.#update(b.attemptId, (x) => ({ ...x, workerVersion: handle.workerVersion, recipeRevision: recipe.revision }));
     const turn = this.#run(b.attemptId, handle);
