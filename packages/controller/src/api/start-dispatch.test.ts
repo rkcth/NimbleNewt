@@ -150,14 +150,15 @@ test("start binds the controller's services to the local worker's guards, offers
   const timer = new ManualTimer();
   const built: { guards: RuntimeGuards }[] = [];
   const worker = { hostId: "host:w1" } as unknown as WorkerHost;
-  let answer = ["10.0.0.5"];
+  let answer: string[] | string[][] = ["10.0.0.5"];
+  let lookups = 0;
   let closed = 0;
   let gated = false;
   const c = await open(join(d, "c.sqlite"), {
     harnesses: [PI],
     dispatch: { timer, manual: true, local: { window: () => 8192, close: async () => { closed++; }, build: (services) => { built.push(services); const limits = services.context({ route: "x" } as never); const relay = services.attemptRelay({ attemptId: "att-r", route: "llama/local", expiresAt: "2999-01-01T00:00:00.000Z" } as never, { forAttempt: (a: { onFirstUsage?: unknown }) => ({ alias: "m0", relayBase: "x", relay: async () => { throw new Error(String(typeof a.onFirstUsage)); } }) } as never);
           assert.equal(services.attemptRelay({ attemptId: "att-r", route: "llama/local", expiresAt: "2999-01-01T00:00:00.000Z" } as never, {} as never), relay, "one relay for every call of an attempt");
-          assert.ok(limits !== undefined && (limits.toolOutputBytes ?? 0) > 0 && limits.compaction?.fallback === "extractive", "the composer gives the host the context limits of the window"); return worker; } }, mcp: { resolve: async () => answer, gate: async () => { if (gated) throw new Error("the controller is paused"); } } },
+          assert.ok(limits !== undefined && (limits.toolOutputBytes ?? 0) > 0 && limits.compaction?.fallback === "extractive", "the composer gives the host the context limits of the window"); return worker; } }, mcp: { resolve: async () => { lookups++; return Array.isArray(answer[0]) ? (answer as string[][])[Math.min(lookups, answer.length) - 1]! : (answer as string[]); }, gate: async () => { if (gated) throw new Error("the controller is paused"); } } },
   });
   try {
     assert.ok(c.dispatch !== undefined, c.dispatchProblem);
@@ -174,6 +175,19 @@ test("start binds the controller's services to the local worker's guards, offers
     await assert.rejects(mcp.connector.connect(server, async () => "connected"), /internal address/);
     answer = ["93.184.216.34"];
     assert.equal(await mcp.connector.connect(server, async (t) => t.address), "93.184.216.34");
+    // The rebinding pattern through the composed controller: public at the check, private at the second lookup. The transport is never called.
+    let used = false;
+    answer = [["93.184.216.34"], ["127.0.0.1"]]; lookups = 0;
+    await assert.rejects(mcp.connector.connect(server, async () => { used = true; }), /internal address/);
+    assert.deepEqual([lookups, used], [2, false], "the second lookup was the one refused");
+    // A rotating public name is fine and the connection uses the first, checked address.
+    answer = [["93.184.216.34"], ["93.184.216.35"]]; lookups = 0;
+    assert.equal(await mcp.connector.connect(server, async (t) => t.address), "93.184.216.34");
+    answer = ["93.184.216.34"];
+    // The owner revokes the server: no new connection.
+    await mcp.service.revoke(owner, { commandId: "m-rv", serverId: server, expectedRevision: 1 });
+    await assert.rejects(mcp.connector.connect(server, async () => { used = true; }), /revoked; no new connection/);
+    assert.equal(used, false);
     gated = true;
     await assert.rejects(mcp.connector.connect(server, async () => "connected"), /paused/, "a paused controller gives out no endpoint");
   } finally { await c.close(); assert.equal(closed, 1, "closing the controller shuts the local host down"); cleanup(d); }
