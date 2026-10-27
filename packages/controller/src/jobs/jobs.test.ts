@@ -118,6 +118,35 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.jobs.requestCancel(c.boss, { commandId: cid("cx"), jobId: id, reason: "late" }), (e) => assert.match(e.message, /nothing to stop/));
   });
 
+  suite("the time a job took, from its admission to its end, is reported once for the host to charge, whatever way it ended (card R05f)", async (c) => {
+    const seen: { commandId: string; taskId: string; background: boolean; computeMs: number }[] = [];
+    const jobs = c.reopen({ onUsage: async (u) => { seen.push({ commandId: u.commandId, taskId: u.taskId, background: u.background, computeMs: u.computeMs }); } });
+    const id = (await jobs.admit(c.worker, { commandId: cid("ad"), taskId: c.t1, kind: "tool", label: "build", operationId: "op-use-1", background: true })).id;
+    await jobs.report(c.worker, { commandId: cid("rp"), jobId: id, state: "dispatched", host: "host-1" });
+    await jobs.report(c.worker, { commandId: cid("rp"), jobId: id, state: "running" });
+    assert.equal(seen.length, 0, "nothing is charged while it runs");
+    now += 90_000;
+    await jobs.finish(c.worker, { commandId: "fin-use", jobId: id, outcome: "completed", exit: { code: 0 } });
+    assert.deepEqual(seen, [{ commandId: `job-use:${id}`, taskId: c.t1, background: true, computeMs: 90_000 }]);
+    // The same finish again is told again with the same key, so the host's charge counts it once.
+    await jobs.finish(c.worker, { commandId: "fin-use", jobId: id, outcome: "completed", exit: { code: 0 } });
+    assert.deepEqual(new Set(seen.map((u) => u.commandId)).size, 1);
+    // A job that is stopped is charged for the time it ran too; one that is not a background job is charged as well.
+    const other = (await jobs.admit(c.worker, { commandId: cid("ad"), taskId: c.t2, kind: "tool", label: "test", operationId: "op-use-2" })).id;
+    await jobs.report(c.worker, { commandId: cid("rp"), jobId: other, state: "dispatched", host: "host-1" });
+    await jobs.report(c.worker, { commandId: cid("rp"), jobId: other, state: "running" });
+    now += 30_000;
+    await jobs.finish(c.worker, { commandId: cid("fn"), jobId: other, outcome: "failed", exit: { code: 1 } });
+    assert.deepEqual(seen.at(-1), { commandId: `job-use:${other}`, taskId: c.t2, background: false, computeMs: 30_000 });
+    // A host that fails to charge does not undo the ending.
+    const failing = c.reopen({ onUsage: async () => { throw new Error("ledger down"); } });
+    const third = (await failing.admit(c.worker, { commandId: cid("ad"), taskId: c.t1, kind: "tool", label: "x", operationId: "op-use-3" })).id;
+    await failing.report(c.worker, { commandId: cid("rp"), jobId: third, state: "dispatched", host: "host-1" });
+    await failing.report(c.worker, { commandId: cid("rp"), jobId: third, state: "running" });
+    await assert.rejects(failing.finish(c.worker, { commandId: "fin-fail", jobId: third, outcome: "completed", exit: { code: 0 } }), /ledger down/);
+    assert.equal((await c.read(third)).state, "completed", "the job is recorded as ended");
+  });
+
   suite("the handle survives a restart of the controller: a new service over the same store reads the job, and a repeated command still answers once", async (c) => {
     const id = await c.admit(c.t1, { resumability: "tool_checkpoint" });
     await c.jobs.report(c.worker, { commandId: "r1", jobId: id, state: "dispatched" });

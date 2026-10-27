@@ -108,6 +108,11 @@ export interface ReviewOptions extends RunnerOptions {
    * agreement cannot carry obsolete work through review. Without it nothing is checked.
    */
   readonly decisions?: DecisionGuard;
+  /**
+   * Told when an agent reviewer has allowed or denied, with the wall-clock time from its assignment to its decision, so the host can charge the review to the task reviewed (card R05f). Keyed by `commandId`
+   * (`review-use:<review>`) so a repeat is not charged twice. A failure here is the host's to handle: it does not undo the decision. The owner's own time is not charged.
+   */
+  readonly onUsage?: (usage: { readonly commandId: string; readonly taskId: string; readonly agentId: string; readonly computeMs: number }) => Promise<void>;
 }
 
 /** Why a reviewer cannot be woken or chosen now, for the wake list. */
@@ -159,12 +164,14 @@ export class ReviewService {
   readonly #reviewerHost: ((principalId: string) => Promise<string | undefined>) | undefined;
   readonly #hostStaleAfterMs: number;
   readonly #decisions: DecisionGuard | undefined;
+  readonly #onUsage: ReviewOptions["onUsage"];
 
   private constructor(runner: CommandRunner, options: ReviewOptions) {
     this.#runner = runner;
     this.#availability = options.availability ?? (async () => "available");
     this.#reviewerHost = options.reviewerHost;
     this.#decisions = options.decisions;
+    this.#onUsage = options.onUsage;
     this.#hostStaleAfterMs = options.hostStaleAfterMs ?? DEFAULT_HOST_STALE_AFTER_MS;
     if (!Number.isSafeInteger(this.#hostStaleAfterMs) || this.#hostStaleAfterMs < 1000) throw new DomainError("invalid_command", "hostStaleAfterMs: must be a whole number of at least 1000", { field: "hostStaleAfterMs" });
   }
@@ -315,6 +322,11 @@ export class ReviewService {
         };
       },
     }));
+    if (this.#onUsage !== undefined && reviewer.kind !== "owner" && (verdict === "allow" || verdict === "deny")) {
+      const after = (await this.#runner.get("review", id))?.body as unknown as ReviewBody | undefined;
+      const latency = ((await this.#runner.get("review-route", id))?.body as unknown as ReviewRouteBody | undefined)?.latencyMs;
+      if (after !== undefined && latency !== undefined) await this.#onUsage({ commandId: `review-use:${id}`, taskId: after.binding.taskId, agentId: reviewer.id, computeMs: latency });
+    }
   }
 
   /** The reviewer who approved, the requester or the owner takes an approval (or an open request) back before it is used. */

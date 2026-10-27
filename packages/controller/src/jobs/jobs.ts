@@ -103,6 +103,11 @@ export type BackgroundRecorder = (principal: Principal, request: { readonly comm
 export interface JobOptions extends RunnerOptions {
   readonly connections?: JobConnections;
   readonly background?: BackgroundRecorder;
+  /**
+   * Told once a job has ended, with the wall-clock time from its admission to its end, so the host can charge it (card R05f). Called after the job is recorded as ended and again if the ending is repeated, so the
+   * host's charge must be keyed by `commandId` (`job-use:<job>`). A failure here is for the host to handle: it does not undo the ending.
+   */
+  readonly onUsage?: (usage: { readonly commandId: string; readonly taskId: string; readonly jobId: string; readonly background: boolean; readonly computeMs: number }) => Promise<void>;
 }
 
 export interface AdmitJob extends NoActor {
@@ -170,12 +175,14 @@ export class JobService {
   readonly #pauses: PauseService | undefined;
   readonly #connections: JobConnections | undefined;
   readonly #background: BackgroundRecorder | undefined;
+  readonly #onUsage: JobOptions["onUsage"];
 
   private constructor(runner: CommandRunner, pauses: PauseService | undefined, options: JobOptions) {
     this.#runner = runner;
     this.#pauses = pauses;
     this.#connections = options.connections;
     this.#background = options.background;
+    this.#onUsage = options.onUsage;
   }
 
   static withEpoch(storage: ConstructorParameters<typeof CommandRunner>[0], epoch: number, deps: { pauses?: PauseService } = {}, options: JobOptions = {}): JobService {
@@ -550,9 +557,13 @@ export class JobService {
 
   /** A permitted background job's result is handed to the pause service once, by a command derived from the job (repeating the call repeats nothing). */
   async #recordBackground(principal: Principal, jobId: string, commandId: string): Promise<void> {
-    if (this.#background === undefined) return;
+    if (this.#background === undefined && this.#onUsage === undefined) return;
     const job = (await this.#runner.get("job", jobId))?.body as unknown as JobBody | undefined;
-    if (job === undefined || !job.background || !TERMINAL.includes(job.state)) return;
+    if (job !== undefined && TERMINAL.includes(job.state) && this.#onUsage !== undefined && job.finishedAt !== undefined) {
+      const computeMs = Math.max(0, Date.parse(job.finishedAt) - Date.parse(job.admittedAt));
+      await this.#onUsage({ commandId: `job-use:${jobId}`, taskId: job.taskId, jobId, background: job.background, computeMs });
+    }
+    if (this.#background === undefined || job === undefined || !job.background || !TERMINAL.includes(job.state)) return;
     const outcome = job.state === "completed" ? "succeeded" : job.state === "failed" ? "failed" : "cancelled";
     await this.#background(principal, { commandId: `job-bg:${jobId}`, taskId: job.taskId, jobRef: jobId, outcome, summary: `${job.label}: ${job.state}${job.exit?.code === undefined ? "" : ` (exit ${job.exit.code})`}` });
     void commandId;

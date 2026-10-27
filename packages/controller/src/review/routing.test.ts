@@ -24,6 +24,8 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, check
   await assert.rejects(run, (error: unknown) => { assert.ok(error instanceof DomainError, String(error)); assert.equal(error.code, code, error.message); check?.(error); return true; });
 };
 
+const charged: { commandId: string; taskId: string; agentId: string; computeMs: number }[] = [];
+
 for (const backend of backends) {
   interface Ctx {
     review: ReviewService; owner: Principal; a: string; task: string; graph: WaitGraphService; contracts: ContractService;
@@ -56,7 +58,7 @@ for (const backend of backends) {
           return id;
         };
         const task = await newTask("the task");
-        const review = ReviewService.withEpoch(world.storage, projects.epoch, options);
+        const review = ReviewService.withEpoch(world.storage, projects.epoch, { ...options, onUsage: async (u) => { charged.push(u); } });
         const contracts = ContractService.withEpoch(world.storage, projects.epoch, options);
         const blockers = BlockerService.withEpoch(world.storage, projects.epoch, options);
         const graph = WaitGraphService.withEpoch(world.storage, projects.epoch, contracts, blockers, { ...options, extraEdges: (p, t) => review.waitEdges(p, t) });
@@ -331,6 +333,23 @@ for (const backend of backends) {
     const commandId = cid("same");
     const one = await c.review.request(c.ann, { commandId, taskId: c.task, operation: op({ args: { z: 1 } }), context });
     assert.deepEqual(await c.review.request(c.ann, { commandId, taskId: c.task, operation: op({ args: { z: 1 } }), context }), { id: one.id, replayed: true, cleared: false });
+  });
+
+  suite("an agent reviewer's allow or deny is reported with the time from its assignment to its decision, once per review; an escalation, a request for context and the owner's own decision are not (card R05f)", async (c) => {
+    charged.length = 0;
+    await c.policy({ reviewers: ["agent:r1"] });
+    const first = await ask(c);
+    minutes(4);
+    await decide(c, c.r1, first.id, "allow", {});
+    assert.deepEqual(charged, [{ commandId: `review-use:${first.id}`, taskId: c.task, agentId: "agent:r1", computeMs: 240_000 }]);
+    const second = await ask(c, op({ args: { n: 2 } }));
+    minutes(1);
+    await decide(c, c.r1, second.id, "request-context", {});
+    await decide(c, c.r1, (await ask(c, op({ args: { n: 3 } }))).id, "requires-owner-decision", {});
+    assert.equal(charged.length, 1, "only a final verdict by an agent is charged");
+    const third = (await ask(c, op({ args: { n: 4 } }))).id;
+    await decide(c, c.owner, third, "deny", {});
+    assert.equal(charged.length, 1, "the owner's time is not charged");
   });
 
   suite("the figures kept about reviewing: queue delay, latency, cost, escalations, false blocks and missed hazards", async (c) => {
