@@ -14,7 +14,7 @@ import type { Change, JsonObject } from "../storage/types.js";
 import { InquiryService } from "../inquiries/index.js";
 import { PauseService } from "../lifecycle/index.js";
 import { PrincipalService, type Grant, type Principal } from "../security/index.js";
-import { MEETING_LIMITS, MEETING_SETTINGS, MeetingService, ownerTimeZoneFrom, type Invitation, type OccurrenceBody } from "./index.js";
+import { MEETING_LIMITS, MEETING_SETTINGS, MeetingService, ownerTimeZoneFrom, withNudge, type Invitation, type OccurrenceBody } from "./index.js";
 
 after(stopServer);
 
@@ -36,7 +36,7 @@ for (const backend of backends) {
     a: string; b: string; agentA: string; agentB: string; agentC: string; pA: string; pB: string; pC: string;
     meetings: MeetingService; reopen(extra?: Partial<ConstructorParameters<typeof Object>[0]>): MeetingService; sink: Sink; other: Map<string, Availability>;
     pauses: PauseService; projects: ProjectService; storage: ConstructorParameters<typeof CommandRunner>[0]; epoch: number;
-    make(zone?: () => Promise<string | undefined>): MeetingService; inquiries(): { service: InquiryService; ask(): Promise<string>; ann: Principal; ben: Principal };
+    make(zone?: () => Promise<string | undefined>, lead?: () => Promise<number | undefined>): MeetingService; inquiries(): { service: InquiryService; ask(): Promise<string>; ann: Principal; ben: Principal };
     config: ConfigurationService; principals: PrincipalService;
     schedule(extra?: Record<string, unknown>): Promise<string>;
     tickAll(): Promise<Awaited<ReturnType<MeetingService["tick"]>>>;
@@ -69,14 +69,14 @@ for (const backend of backends) {
           this.sent.push(i);
         } };
         const config = ConfigurationService.withEpoch(world.storage, epoch, { ...options, settings: MEETING_SETTINGS });
-        const wiring = (zone?: () => Promise<string | undefined>) => ({ availability: pauses.availability, invitations: sink, ...(zone === undefined ? {} : { ownerTimeZone: zone }), ...options });
+        const wiring = (zone?: () => Promise<string | undefined>, lead?: () => Promise<number | undefined>) => ({ availability: pauses.availability, invitations: sink, ...(zone === undefined ? {} : { ownerTimeZone: zone }), ...(lead === undefined ? {} : { leadMinutes: lead }), ...options });
         const histories = HistoryService.withEpoch(world.storage, epoch, options);
         const desks = DeskService.withEpoch(world.storage, epoch, options);
         const retrieval = RetrievalService.withEpoch(world.storage, epoch, desks, histories, options);
         const assignments = AssignmentService.withEpoch(world.storage, epoch, projects, options);
         const waits = WaitService.withEpoch(world.storage, epoch, assignments, options);
         const inquiries = InquiryService.withEpoch(world.storage, epoch, { histories, retrieval, waits, assignments }, options);
-        const make = (zone?: () => Promise<string | undefined>) => MeetingService.withEpoch(world.storage, epoch, { inquiries }, wiring(zone));
+        const make = (zone?: () => Promise<string | undefined>, lead?: () => Promise<number | undefined>) => MeetingService.withEpoch(world.storage, epoch, { inquiries }, wiring(zone, lead));
         const meetings = make();
         const host = await enroll("host", "h1", []);
         const mgr = await enroll("agent", "mgr", [{ action: "meeting.manage", project: a }]);
@@ -111,6 +111,55 @@ for (const backend of backends) {
 
   const occurrenceOf = async (c: Ctx, id: string): Promise<OccurrenceBody> => (await c.meetings.occurrence(c.owner, id))!.occurrence as unknown as OccurrenceBody;
   const item = (extra: Record<string, unknown> = {}) => ({ commandId: cid("ag"), projectId: projectA, topic: "Move the nightly build earlier?", question: "Can we run the nightly build at 01:00 instead?", ...extra });
+
+  suite("the lead setting makes an occurrence, and so its invitations, that many minutes before the start, at least the schedule's own preparation time; 0 or an unreadable setting changes nothing (card M01d)", async (c) => {
+    at("2026-10-20T08:00:00.000Z");
+    let lead: number | undefined = 5;
+    const led = c.make(undefined, async () => { if (lead === -1) throw new Error("setting unreadable"); return lead; });
+    // A 09:00 UTC schedule with no preparation time of its own.
+    const id = (await led.createSchedule(c.mgr, { commandId: cid("sc"), projectId: c.a, title: "Stand-up", roster: [c.pA, c.pB], time: "09:00", timeZone: "UTC", recurrence: { kind: "once", date: "2026-10-20" } } as never)).id;
+    at("2026-10-20T08:54:00.000Z");
+    assert.equal((await led.tick(c.host)).created.length, 0, "six minutes ahead is before the five-minute lead");
+    at("2026-10-20T08:55:00.000Z");
+    const made = (await led.tick(c.host)).created;
+    assert.equal(made.length, 1, "five minutes ahead the occurrence exists");
+    const o = (await led.occurrence(c.owner, made[0]!.occurrenceId))!.occurrence as unknown as OccurrenceBody;
+    assert.deepEqual([o.startsAt, o.prepareFrom], ["2026-10-20T09:00:00.000Z", undefined], "the lead is not a preparation time: stand-up preparation is unchanged");
+    await led.dispatchInvitations(c.host, made[0]!.occurrenceId);
+    assert.deepEqual(c.sink.sent.map((i) => i.agent).sort(), [c.pA, c.pB].sort(), "the invitations go out with the occurrence");
+    void id;
+    // The schedule's own preparation time counts when it is longer.
+    at("2026-10-21T08:00:00.000Z");
+    const longer = (await led.createSchedule(c.mgr, { commandId: cid("sc"), projectId: c.a, title: "Long prep", roster: [c.pA], time: "10:00", timeZone: "UTC", recurrence: { kind: "once", date: "2026-10-21" }, prepareMinutes: 30 } as never)).id;
+    at("2026-10-21T09:29:00.000Z");
+    assert.equal((await led.tick(c.host)).created.length, 0);
+    at("2026-10-21T09:31:00.000Z");
+    assert.equal((await led.tick(c.host)).created.length, 1);
+    void longer;
+    // 0, nothing and a setting that cannot be read all mean the schedules' own time only.
+    for (const [day, setting] of [["22", 0], ["23", undefined], ["24", -1]] as const) {
+      lead = setting;
+      at(`2026-10-${day}T08:00:00.000Z`);
+      const l0 = c.make(undefined, async () => { if (lead === -1) throw new Error("unreadable"); return lead; });
+      await l0.createSchedule(c.mgr, { commandId: cid("sc"), projectId: c.a, title: `S${day}`, roster: [c.pA], time: "09:00", timeZone: "UTC", recurrence: { kind: "once", date: `2026-10-${day}` } } as never);
+      at(`2026-10-${day}T08:58:00.000Z`);
+      assert.equal((await l0.tick(c.host)).created.length, 0, `${String(setting)}: not before the start`);
+      at(`2026-10-${day}T09:00:00.000Z`);
+      assert.equal((await l0.tick(c.host)).created.length, 1, `${String(setting)}: at the start`);
+    }
+  });
+
+  suite("a hint to an invited agent that a meeting is coming goes out after the invitation and only for an agent that is not busy; a failing hint or busy check loses nothing (card M01d)", async (c) => {
+    const hints: string[] = [];
+    const errors: unknown[] = [];
+    const busy = new Set<string>([c.pB]);
+    const sink = withNudge(c.sink, async (n) => { if (n.agent === c.pC) throw new Error("hint failed"); hints.push(`${n.agent}:${n.key}`); }, async (agent) => { if (agent === "agent:broken") throw new Error("busy check failed"); return busy.has(agent); }, (e) => errors.push(e));
+    const inv = (agent: string) => ({ key: `occ:${agent}`, occurrenceId: "mto-aaaaaaaaaaaaaaaaaaaa", projectId: c.a, agent, startsAt: "2026-10-20T09:00:00.000Z", urgent: false, bounded: false });
+    for (const agent of [c.pA, c.pB, c.pC, "agent:broken"]) await sink.invite(inv(agent));
+    assert.deepEqual(c.sink.sent.map((i) => i.agent), [c.pA, c.pB, c.pC, "agent:broken"], "every invitation was delivered");
+    assert.deepEqual(hints, [`${c.pA}:occ:${c.pA}`], "only the agent that is not busy got the hint");
+    assert.equal(errors.length, 2, "the failing hint and the failing busy check were reported");
+  });
 
   suite("a daily schedule in Europe/Berlin makes one occurrence per day at the same wall-clock time across both daylight-saving changes, and a repeated tick makes none", async (c) => {
     at("2026-03-26T12:00:00.000Z");

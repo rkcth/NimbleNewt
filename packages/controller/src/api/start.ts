@@ -1,4 +1,4 @@
-import { InvitationInbox, MEETING_SETTINGS, MeetingService } from "../meetings/index.js";
+import { InvitationInbox, MEETING_LIMITS, MEETING_SETTINGS, MeetingService } from "../meetings/index.js";
 import { EventService } from "../events/index.js";
 import { BudgetService, holderNotice } from "../budgets/index.js";
 import { NotificationService } from "../notifications/index.js";
@@ -292,7 +292,7 @@ export async function startController(options: StartOptions): Promise<Controller
     let dispatchProblem: string | undefined;
     if (options.dispatch !== undefined) {
       try {
-        dispatch = await composeDispatch({ storage, epoch, workspaceOps, options: options.dispatch, ...(options.availability === undefined ? {} : { availability: options.availability }), recovery: { stall, reconciler }, principals, grants, taskCredentials, projects, assignments, waits, contracts, catalog, routing, inquiries, agents, histories, reviews, retrieval, ...(options.onInternalError === undefined ? {} : { onError: options.onInternalError }) });
+        dispatch = await composeDispatch({ storage, epoch, workspaceOps, leadMinutes: async () => { const v = await configuration.installationValue("meeting.leadMinutes"); return typeof v === "number" ? v : MEETING_LIMITS.leadDefault; }, options: options.dispatch, ...(options.availability === undefined ? {} : { availability: options.availability }), recovery: { stall, reconciler }, principals, grants, taskCredentials, projects, assignments, waits, contracts, catalog, routing, inquiries, agents, histories, reviews, retrieval, ...(options.onInternalError === undefined ? {} : { onError: options.onInternalError }) });
       } catch (error) {
         // A dispatcher the owner disabled, or a store that failed here, must not keep the rest of the controller from starting; the operator is told, and the reason stays on the controller.
         dispatchProblem = error instanceof Error ? error.message.slice(0, 300) : "the dispatcher could not be built";

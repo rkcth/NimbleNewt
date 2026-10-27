@@ -224,6 +224,7 @@ export class AttendanceService {
   readonly #projects: ProjectService;
   readonly #charge: AttendanceDeps["charge"];
   readonly #onChargeError: AttendanceDeps["onChargeError"];
+  readonly #leadMinutes: AttendanceDeps["leadMinutes"];
   readonly #assignments: AssignmentService;
   readonly #agents: AgentService | undefined;
   readonly #histories: HistoryService | undefined;
@@ -241,6 +242,7 @@ export class AttendanceService {
     this.#histories = deps.histories;
     this.#charge = deps.charge;
     this.#onChargeError = deps.onChargeError;
+    this.#leadMinutes = deps.leadMinutes;
     this.#availability = options.availability;
     this.#wake = options.wake;
     this.#notices = options.notices;
@@ -267,6 +269,7 @@ export class AttendanceService {
     const horizon = nowMs + expected * 60_000;
     // Only a meeting the agent will really attend holds its work back: reachable now, or paused with the owner's direct invitation.
     const live = await this.#reach(agent);
+    const lead = await this.#lead();
     let nearest: { id: string; body: OccurrenceBody; from: number } | undefined;
     const global = (await this.#runner.get("meeting-open", "all"))?.body as unknown as { projects?: string[] } | undefined;
     for (const projectId of global?.projects ?? []) {
@@ -278,15 +281,25 @@ export class AttendanceService {
         if (seat === undefined || !(live === "available" || (live === "paused" && seat.status === "owner-invited"))) continue;
         // The work would still be running when the meeting starts (or the meeting is on): that is the conflict. The occurrence exists from its preparation lead, so the lead is how far ahead this can see.
         const from = ms(body.startsAt);
-        if (from >= horizon) continue;
+        if (from >= horizon && !(lead > 0 && from - nowMs <= lead * 60_000)) continue;
         if (nearest === undefined || from < nearest.from) nearest = { id, body, from };
       }
     }
     if (nearest === undefined) return { decision: "start", reason: "no meeting this agent will attend falls within the work's expected time" };
     const meeting = { occurrenceId: nearest.id, startsAt: nearest.body.startsAt, endsAt: nearest.body.endsAt };
+    // The lead before a meeting: the agent is kept free, so even work that would end before the meeting, or could yield at a boundary, waits for it (only a safe long-running operation carries on).
+    const kept = lead > 0 && nearest.from - nowMs <= lead * 60_000;
+    if (kept && query.safeLongRunning !== true) return { decision: "defer", reason: `the agent is kept free for the meeting that starts at ${meeting.startsAt} (${lead} minutes' notice)`, until: nearest.body.endsAt, meeting };
     if (query.safeLongRunning === true) return { decision: "start", reason: "a safe long-running operation carries on while the agent attends", meeting, continuesDuringMeeting: true };
     if (query.yieldsAtBoundary === true) return { decision: "start", reason: "the work reaches a safe boundary on request, so it can yield to the meeting", meeting };
     return { decision: "defer", reason: "the work cannot yield before the meeting and would not finish first", until: nearest.body.endsAt, meeting };
+  }
+
+  async #lead(): Promise<number> {
+    try {
+      const v = await this.#leadMinutes?.();
+      return typeof v === "number" && Number.isInteger(v) && v > 0 ? Math.min(v, 720) : 0;
+    } catch { return 0; }
   }
 
   // ---- rooms -------------------------------------------------------------------------------------------------------------------------------
@@ -1487,4 +1500,9 @@ export interface AttendanceDeps {
    */
   readonly charge?: (usage: { commandId: string; projectId: string; agentId: string; computeMs: number; taskId?: string }) => Promise<void>;
   readonly onChargeError?: (error: unknown) => void;
+  /**
+   * The `meeting.leadMinutes` setting in minutes (card M01d): from this long before a meeting starts, the agents that will attend are kept free of new work (admission defers it, whatever its expected length, unless it is a safe
+   * long-running operation). Work already running is not touched. Absent, failing or 0: only work that would still be running at the start is deferred, as before.
+   */
+  readonly leadMinutes?: () => Promise<number | undefined>;
 }

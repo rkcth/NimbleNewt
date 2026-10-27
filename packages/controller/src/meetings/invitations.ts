@@ -57,3 +57,21 @@ export class InvitationInbox implements InvitationSink {
     return by.taskScope === undefined ? items.map((i) => ({ ...i })) : items.filter((i) => inTaskScope(by, i.projectId)).map((i) => ({ ...i }));
   }
 }
+
+export interface Nudge { readonly key: string; readonly agent: string; readonly occurrenceId: string; readonly projectId: string; readonly startsAt: string; readonly urgent: boolean }
+
+/**
+ * An invitation sink that, after the invitation is delivered, sends a hint that a meeting is coming (card M01d) to an agent that is not busy. A busy agent (`busy` says so) is not interrupted: its invitation is waiting
+ * and it sees it at its next stopping point. A failing hint or busy check is reported, never allowed to lose or repeat the invitation's delivery.
+ */
+export function withNudge(delivery: InvitationSink, nudge: (n: Nudge) => Promise<void>, busy: (agent: string) => Promise<boolean>, onError?: (error: unknown) => void): InvitationSink {
+  return {
+    invite: async (inv) => {
+      await delivery.invite(inv);
+      try {
+        if (await busy(inv.agent)) return;
+        await nudge({ key: inv.key, agent: inv.agent, occurrenceId: inv.occurrenceId, projectId: inv.projectId, startsAt: inv.startsAt, urgent: inv.urgent });
+      } catch (error) { onError?.(error); }
+    },
+  };
+}

@@ -53,7 +53,7 @@ for (const backend of backends) {
     occ(occurrenceId: string): Promise<OccurrenceBody>;
     gateIntent(taskId: string): Promise<string>;
     agentGate(agentId: string): Promise<string>;
-    make(extra?: { assignments?: AssignmentService; pauses?: PauseService; charge?: AttendanceDeps["charge"]; onChargeError?: (e: unknown) => void }): AttendanceService;
+    make(extra?: { assignments?: AssignmentService; pauses?: PauseService; charge?: AttendanceDeps["charge"]; onChargeError?: (e: unknown) => void; leadMinutes?: AttendanceDeps["leadMinutes"] }): AttendanceService;
   }
   const suite = (name: string, body: (c: Ctx) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
@@ -101,8 +101,8 @@ for (const backend of backends) {
         const wakes: Wake[] = [];
         const notices: Notice[] = [];
         const failNotice = { next: false };
-        const make = (extra: { assignments?: AssignmentService; pauses?: PauseService; charge?: AttendanceDeps["charge"]; onChargeError?: (e: unknown) => void } = {}): AttendanceService =>
-          AttendanceService.withEpoch(world.storage, epoch, { meetings, pauses: extra.pauses ?? pauses, projects, assignments: extra.assignments ?? assignments, agents, histories, ...(extra.charge === undefined ? {} : { charge: extra.charge }), ...(extra.onChargeError === undefined ? {} : { onChargeError: extra.onChargeError }) }, {
+        const make = (extra: { assignments?: AssignmentService; pauses?: PauseService; charge?: AttendanceDeps["charge"]; onChargeError?: (e: unknown) => void; leadMinutes?: AttendanceDeps["leadMinutes"] } = {}): AttendanceService =>
+          AttendanceService.withEpoch(world.storage, epoch, { meetings, pauses: extra.pauses ?? pauses, projects, assignments: extra.assignments ?? assignments, agents, histories, ...(extra.charge === undefined ? {} : { charge: extra.charge }), ...(extra.onChargeError === undefined ? {} : { onChargeError: extra.onChargeError }), ...(extra.leadMinutes === undefined ? {} : { leadMinutes: extra.leadMinutes }) }, {
             availability: pauses.availability, ...options,
             wake: { wake: async (w) => { wakes.push(w); } },
             notices: { notify: async (x) => { if (failNotice.next) { failNotice.next = false; throw new Error("the delivery died"); } notices.push({ ...x }); } },
@@ -143,6 +143,36 @@ for (const backend of backends) {
   const state = (s: RoomStatus, who: string) => s.participants.find((p) => p.who === who)!;
 
   // ---- admission near a meeting --------------------------------------------------------------------------------------------------------------------
+
+  suite("in the lead before a meeting its agents are kept free of new work, whatever its length, except a safe long-running operation; before the lead and for others nothing changes; a lead of 0 or an unreadable one changes nothing (card M01d)", async (c) => {
+    // A once-only meeting at 10:00 UTC, its occurrence made at 09:55 (the occurrence side of the lead has its own test in meetings.test.ts; here the schedule's own five minutes make it).
+    const led = c.make({ leadMinutes: async () => 5 });
+    await c.meetings.createSchedule(c.mgr, { commandId: cid("sc"), projectId: c.a, title: "Stand-up", roster: [c.pA, c.pB], time: "10:00", timeZone: "UTC", recurrence: { kind: "once", date: "2026-10-23" }, prepareMinutes: 5 });
+    at("2026-10-23T09:55:00.000Z");
+    const made = (await c.meetings.tick(c.host)).created;
+    assert.equal(made.length, 1);
+    const id = made[0]!.occurrenceId;
+    // Now: the meeting is 5 minutes away, so even a 10-minute task and one that could yield wait.
+    const short = await led.admission(c.owner, { agent: c.pA, expectedMinutes: 2 });
+    assert.ok(short.decision === "defer" && short.until === "2026-10-23T10:30:00.000Z" && short.meeting.occurrenceId === id, JSON.stringify(short));
+    assert.match((short as { reason: string }).reason, /kept free/);
+    assert.equal((await led.admission(c.owner, { agent: c.pA, expectedMinutes: 2, yieldsAtBoundary: true })).decision, "defer", "yielding at a boundary does not help inside the lead");
+    const safe = await led.admission(c.owner, { agent: c.pA, expectedMinutes: 600, safeLongRunning: true });
+    assert.ok(safe.decision === "start" && safe.continuesDuringMeeting === true, "a safe long-running operation carries on");
+    // Without the lead the same short work starts (it ends before 10:00), as before.
+    assert.equal((await c.attendance.admission(c.owner, { agent: c.pA, expectedMinutes: 2 })).decision, "start");
+    for (const lead of [async () => 0, async () => undefined, async (): Promise<number> => { throw new Error("unreadable"); }]) assert.equal((await c.make({ leadMinutes: lead }).admission(c.owner, { agent: c.pA, expectedMinutes: 2 })).decision, "start");
+    // Someone who is not invited is not held back.
+    assert.equal((await led.admission(c.owner, { agent: c.pC, expectedMinutes: 2 })).decision, "start");
+    // Earlier than the lead, work that ends before the meeting starts.
+    at("2026-10-23T09:49:00.000Z");
+    assert.equal((await led.admission(c.owner, { agent: c.pA, expectedMinutes: 2 })).decision, "start", "six minutes ahead is outside the five-minute lead");
+    assert.equal((await led.admission(c.owner, { agent: c.pA, expectedMinutes: 20 })).decision, "defer", "work that would still run at the start waits, as before");
+    // The meeting is held: free again.
+    await c.meetings.settle(c.owner, { commandId: cid("st"), occurrenceId: id, outcome: "held" });
+    at("2026-10-23T09:56:00.000Z");
+    assert.equal((await led.admission(c.owner, { agent: c.pA, expectedMinutes: 2 })).decision, "start");
+  });
 
   suite("near a scheduled meeting, work that cannot yield before it waits while work that can yield, short work and safe long-running operations start", async (c) => {
     // A once-only meeting at 10:00 UTC with a two-hour lead: the occurrence exists from 08:00.

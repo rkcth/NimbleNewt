@@ -196,6 +196,8 @@ export interface MeetingOptions extends RunnerOptions {
   readonly availability: (principalId: string) => Promise<Availability>;
   /** The owner's time zone setting (the `meeting.timeZone` setting, see `ownerTimeZoneFrom`); used when a schedule names no zone. */
   readonly ownerTimeZone?: () => Promise<string | undefined>;
+  /** The `meeting.leadMinutes` setting (card M01d): how long before a meeting its occurrence is made and its agents are invited, at least a schedule's own preparation time. Absent: only the schedules' own. A failing read counts as absent. */
+  readonly leadMinutes?: () => Promise<number | undefined>;
   readonly invitations?: InvitationSink;
   /** How many outcomes may wait on the list to be returned to their conversations, and how many more on the overflow list behind it (defaults 200 and 1000; mostly for tests). Beyond both the state change is still recorded, the outcome is marked unlisted and counted. */
   readonly returnsListed?: number;
@@ -203,12 +205,13 @@ export interface MeetingOptions extends RunnerOptions {
 }
 
 export const MEETING_LIMITS = {
-  title: 200, reason: 1000, topic: 200, question: 2000, context: 4000, outcome: 1000, deferral: 500, ref: 200, roster: 50, participants: 50, durationMax: 480, prepareMax: 720,
+  title: 200, reason: 1000, topic: 200, question: 2000, context: 4000, outcome: 1000, deferral: 500, ref: 200, roster: 50, participants: 50, durationMax: 480, prepareMax: 720, leadMax: 60, leadDefault: 5,
   openAgendaPerProject: 200, returnsPending: 200, returnsMore: 1000, timeboxMax: 120, corrections: 10, agendaPerMeeting: 25, openOccurrencesPerProject: 200, openOccurrences: 1000, scheduleScanDays: 400, retries: 8, page: 100, skippedListed: 10, graceMinutes: 60, tickSchedules: 50, tickMax: 200, budgetTokens: 1_000_000_000,
 } as const;
 
 /** The setting that holds the owner's time zone for meetings. Pass these as `settings` to the configuration service. */
 export const MEETING_SETTINGS: readonly SettingDefinition[] = [
+  { key: "meeting.leadMinutes", kind: "default", check: (v) => (typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= MEETING_LIMITS.leadMax ? v : (() => { throw `must be a whole number of minutes from 0 to ${MEETING_LIMITS.leadMax}`; })()), effect: "next-request", description: "How many minutes before a meeting its invited agents are invited and kept free of new work (default 5; at least the schedule's own preparation time)." },
   { key: "meeting.timeZone", kind: "default", check: (v) => knownZone(v) ?? (() => { throw "must be an IANA time zone name such as Europe/Berlin"; })(), effect: "next-request", description: "The time zone meeting schedules use when they name none." },
 ];
 
@@ -253,12 +256,16 @@ export class MeetingService {
   readonly #sink: InvitationSink | undefined;
   readonly #capListed: number;
   readonly #capMore: number;
+  readonly #leadSetting: (() => Promise<number | undefined>) | undefined;
+  /** The setting as read at the start of the tick that is running (minutes). */
+  #leadMinutes = 0;
 
   private constructor(runner: CommandRunner, deps: { inquiries?: InquiryService }, options: MeetingOptions) {
     this.#runner = runner;
     this.#inquiries = deps.inquiries;
     this.#availability = options.availability;
     this.#ownerZone = options.ownerTimeZone;
+    this.#leadSetting = options.leadMinutes;
     this.#sink = options.invitations;
     this.#capListed = options.returnsListed ?? MEETING_LIMITS.returnsPending;
     this.#capMore = options.returnsMore ?? MEETING_LIMITS.returnsMore;
@@ -298,7 +305,7 @@ export class MeetingService {
       build: async () => {
         const now = this.#runner.now();
         const base = { projectId, title, roster, timeZone, timeZoneFromOwnerSetting: fromOwner, time, recurrence, ...(startDate === undefined ? {} : { startDate }), ...(endDate === undefined ? {} : { endDate }), durationMinutes, prepareMinutes, ...(budgetTokens === undefined ? {} : { budgetTokens }), ...(window === undefined ? {} : { window }) };
-        const next = nextPrepare({ ...base, cursor: now });
+        const next = nextPrepare({ ...base, cursor: now }, await this.#readLead());
         const body: ScheduleBody = { ...base, state: next === undefined ? "ended" : "active", createdBy: by.id, createdAt: now, cursor: now, ...(next === undefined ? {} : { nextPrepareAt: next }), occurrences: 0 };
         const ref: AggregateRef = { kind: "meeting-schedule", id };
         return { ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }], detail: { projectId, timeZone } };
@@ -356,7 +363,7 @@ export class MeetingService {
         const newWindow = command.window === undefined ? body.window : checkWindow(command.window, merged.time, merged.durationMinutes);
         if (command.window === undefined && newWindow !== undefined) checkWindow(newWindow, merged.time, merged.durationMinutes);
         const editedAt = moved ? now : body.editedAt;
-        const next = state === "active" ? nextPrepare({ ...merged, ...(editedAt === undefined ? {} : { editedAt }) }) : undefined;
+        const next = state === "active" ? nextPrepare({ ...merged, ...(editedAt === undefined ? {} : { editedAt }) }, await this.#readLead()) : undefined;
         const nextState: ScheduleState = state === "active" && next === undefined ? "ended" : state;
         const out: ScheduleBody = { ...merged, ...(newWindow === undefined ? {} : { window: newWindow }), state: nextState, ...(editedAt === undefined ? {} : { editedAt }), ...(next === undefined ? {} : { nextPrepareAt: next }) };
         const ref: AggregateRef = { kind: "meeting-schedule", id };
@@ -384,6 +391,7 @@ export class MeetingService {
     if (!isService(by) || by.taskScope !== undefined) throw new DomainError("forbidden", `${by.id} may not run the meeting clock`);
     const limit = page.limit === undefined ? MEETING_LIMITS.tickSchedules : whole(page.limit, "limit", 1, MEETING_LIMITS.tickMax);
     if (page.afterId !== undefined && (typeof page.afterId !== "string" || !SCHEDULE_ID.test(page.afterId))) invalid("afterId", "is not a schedule ID");
+    this.#leadMinutes = await this.#readLead();
     const missed = page.afterId === undefined ? await this.#sweep(by) : [];
     const created: { scheduleId: string; occurrenceId: string; skipped: number; mode: OccurrenceMode }[] = [];
     let seen = 0;
@@ -411,9 +419,16 @@ export class MeetingService {
     return { created, missed, blocked, skipped: skippedSlots, ...(more && after !== undefined ? { next: after } : {}), ...(nextDue === undefined || more ? {} : { nextDueAt: new Date(nextDue).toISOString() }) };
   }
 
+  async #readLead(): Promise<number> {
+    try {
+      const v = await this.#leadSetting?.();
+      return typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= MEETING_LIMITS.leadMax ? v : 0;
+    } catch { return 0; }
+  }
+
   /** The due slots of a schedule now, split into the ones an edit or resume has overtaken (`stale`: not made, reported) and the ones that stand (`live`). */
   #plan(schedule: ScheduleBody, nowMs: number): { stale: Slot[]; live: Slot[]; truncated: boolean } {
-    const due = dueSlots(ruleOf(schedule), ms(schedule.cursor), nowMs, schedule.prepareMinutes * 60_000, MEETING_LIMITS.scheduleScanDays);
+    const due = dueSlots(ruleOf(schedule), ms(schedule.cursor), nowMs, Math.max(schedule.prepareMinutes, this.#leadMinutes) * 60_000, MEETING_LIMITS.scheduleScanDays);
     const edited = schedule.editedAt === undefined ? -Infinity : ms(schedule.editedAt);
     return { stale: due.slots.filter((s) => s.at <= edited), live: due.slots.filter((s) => s.at > edited), truncated: due.truncated };
   }
@@ -501,7 +516,7 @@ export class MeetingService {
         changes.push(...agenda.changes);
       }
     }
-    const next = nextPrepare({ ...schedule, cursor });
+    const next = nextPrepare({ ...schedule, cursor }, this.#leadMinutes);
     const updated: ScheduleBody = {
       ...schedule, cursor, ...(plan.live.length === 0 ? {} : { lastOccurrenceId: occurrenceId }), occurrences: schedule.occurrences + (created ? 1 : 0),
       ...(next === undefined ? {} : { nextPrepareAt: next }), state: next === undefined ? "ended" : "active",
@@ -1234,10 +1249,10 @@ const ruleOf = (s: Pick<ScheduleBody, "recurrence" | "time" | "timeZone" | "star
 });
 
 /** When the occurrence after the cursor is due to be made (its start minus the lead), or undefined when there is none. */
-function nextPrepare(s: Pick<ScheduleBody, "recurrence" | "time" | "timeZone" | "startDate" | "endDate" | "prepareMinutes" | "cursor" | "editedAt">): string | undefined {
+function nextPrepare(s: Pick<ScheduleBody, "recurrence" | "time" | "timeZone" | "startDate" | "endDate" | "prepareMinutes" | "cursor" | "editedAt">, leadMinutes = 0): string | undefined {
   const after = Math.max(ms(s.cursor), s.editedAt === undefined ? -Infinity : ms(s.editedAt));
   const next = nextSlot(ruleOf(s), after, MEETING_LIMITS.scheduleScanDays);
-  return next === undefined ? undefined : new Date(next.at - s.prepareMinutes * 60_000).toISOString();
+  return next === undefined ? undefined : new Date(next.at - Math.max(s.prepareMinutes, leadMinutes) * 60_000).toISOString();
 }
 
 /** The owner's meeting time zone from the configuration service, for `MeetingOptions.ownerTimeZone`. Absent or unreadable: undefined (the schedule must then name a zone). */

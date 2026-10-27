@@ -30,7 +30,7 @@ import type { HistoryService } from "../context/index.js";
 import type { InquiryService } from "../inquiries/index.js";
 import { PauseService } from "../lifecycle/index.js";
 import type { Availability } from "../conversations/index.js";
-import { AttendanceService, InvitationInbox, MeetingService, type InvitationSink } from "../meetings/index.js";
+import { AttendanceService, InvitationInbox, MeetingService, withNudge, type InvitationSink } from "../meetings/index.js";
 import { AgentMessageService } from "../messaging/index.js";
 import { NotificationService } from "../notifications/index.js";
 import type { ContractService } from "../planning/index.js";
@@ -97,6 +97,11 @@ export interface DispatchStartOptions {
   };
   /** Where the invitations of scheduled meetings go (card M01): the host delivers them to the agents it can reach. Absent: they go to the controller's own invitation inbox, which the agent reads through `meeting.invitations`. */
   readonly invitations?: InvitationSink;
+  /**
+   * A hint to an agent that a meeting it is invited to is coming (card M01d), sent once the invitation is in its inbox, and only for an agent with no attempt running: a busy agent is not interrupted and sees the invitation at its next
+   * stopping point. Idempotent by `key` on the host's side (an invitation tried again calls it again). A failure is reported, never allowed to lose the invitation. Absent: the inbox alone.
+   */
+  readonly nudge?: (nudge: { readonly key: string; readonly agent: string; readonly occurrenceId: string; readonly projectId: string; readonly startsAt: string; readonly urgent: boolean }) => Promise<void>;
   /** Remote MCP servers (cards T03, H12g): the name resolver the host uses. Given, the handle carries the MCP service and the connector that reaches an approved server only at a checked public address. */
   readonly mcp?: { readonly resolve: NameResolver; /** Refuses while the controller is paused or stopping (the lifecycle gate); default: never refuses. */ readonly gate?: () => Promise<void> };
 }
@@ -136,6 +141,8 @@ export interface ComposeInput {
   /** The stall detection and the reconciler the controller built; the dispatcher's tick runs them (card L01b). */
   readonly recovery?: { readonly stall: Pick<StallService, "scan">; readonly reconciler: { runPass(): Promise<unknown> } };
   readonly onError?: (error: unknown) => void;
+  /** The `meeting.leadMinutes` setting (card M01d), already defaulted by the caller: how long before a meeting its occurrence is made and its agents are invited and kept free. */
+  readonly leadMinutes?: () => Promise<number | undefined>;
 }
 
 /**
@@ -174,14 +181,19 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     const d = await difficulty.resolve(principal, { commandId, taskId, role: "worker", data: "local-only", paidAuthorized: false });
     return d.outcome === "chosen" ? { route: d.route!, ...(d.profile?.harness === undefined ? {} : { harness: d.profile.harness }), role: d.role, request: d.request, routing: d.routingRevision ?? 0, profiles: d.profilesRevision } : { none: true, reasons: d.reasons };
   });
-  const meetings = MeetingService.withEpoch(storage, epoch, { inquiries: i.inquiries }, { ...ro, availability: pauses.availability, invitations: i.options.invitations ?? InvitationInbox.withEpoch(storage, epoch, ro) });
+  const live: { dispatcher?: DispatcherService } = {};
+  const delivery = i.options.invitations ?? InvitationInbox.withEpoch(storage, epoch, ro);
+  const nudge = i.options.nudge;
+  // The invitation first; then, for an agent with no attempt running, a hint that a meeting is coming (card M01d). Until the dispatcher exists nobody can be told apart, so no hint goes out.
+  const invitations: InvitationSink = nudge === undefined ? delivery : withNudge(delivery, nudge, async (agent) => live.dispatcher === undefined || (await live.dispatcher.liveAttemptsOf(principal, { agentId: agent })).length > 0, i.onError);
+  const meetings = MeetingService.withEpoch(storage, epoch, { inquiries: i.inquiries }, { ...ro, availability: pauses.availability, invitations, ...(i.leadMinutes === undefined ? {} : { leadMinutes: i.leadMinutes }) });
   const messages = AgentMessageService.withEpoch(storage, epoch, {
     ...ro, availability: pauses.availability, taskPaused: (t) => pauses.isPaused(t), guard: (t) => pauses.guard(t), waits: i.waits, assignments: i.assignments, meetings, inquiries: i.inquiries, notifications,
   });
   const attendance = AttendanceService.withEpoch(storage, epoch, { meetings, pauses, projects: i.projects, assignments: i.assignments, agents: i.agents, histories: i.histories,
     // The time an agent spends in a meeting is charged as compute: to its meeting task, or to the shared-overhead rule "meeting" (card R05d).
     charge: (u) => budgets.charge(principal, { commandId: u.commandId, activity: "meeting", agentId: u.agentId, computeMs: u.computeMs, projectId: u.projectId, ...(u.taskId === undefined ? { sharedOverheadRule: "meeting" } : { taskId: u.taskId }) }).then(() => undefined),
-    ...(i.onError === undefined ? {} : { onChargeError: i.onError }) }, { ...ro, availability: pauses.availability });
+    ...(i.onError === undefined ? {} : { onChargeError: i.onError }), ...(i.leadMinutes === undefined ? {} : { leadMinutes: i.leadMinutes }) }, { ...ro, availability: pauses.availability });
   const standups = StandupService.withEpoch(storage, epoch, { meetings, assignments: i.assignments }, { ...ro, availability: pauses.availability });
   const projects = (): Promise<string[]> => projectIds(i.projects);
   let stallNotices = 0;
@@ -271,6 +283,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       ...(remote === undefined ? {} : { storeOwner: (agentId: string, attemptId: string) => remote!.storeOwner(principal, agentId, attemptId) }),
     }, { ...ro, holder: "dispatcher", ...(i.onError === undefined ? {} : { onError: i.onError }), ...(i.options.dispatcher ?? {}) });
     holder.dispatcher = dispatcher;
+    live.dispatcher = dispatcher;
     if (remote !== undefined) {
       transport = await WorkerTransport.listen({ ...(i.options.remote?.transport ?? {}), remote, principals: i.principals });
     }
