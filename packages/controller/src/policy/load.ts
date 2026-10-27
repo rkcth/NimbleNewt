@@ -273,6 +273,8 @@ export class ApprovalLoadService {
     }));
     const found = (await this.#runner.get("standing-proposal", done.id))!;
     const p = found.body as unknown as ProposalBody;
+    // A replay long after the proposal was offered again finds an open body: it was answered once, and that answer is not repeated.
+    if (p.state !== "accepted" || p.decidedAt === undefined) throw new DomainError("invalid_command", `proposal ${found.id} was offered again after this acceptance`, { field: "proposalId" });
     const grant = await this.#grants.grant(owner, {
       commandId: scopedCommandId(owner.id, `accept-grant-${found.id}-${done.revision}`), grantee: p.requester, action: p.suggestion.action, project: p.suggestion.project, source: "standing",
       basis: `accepted from standing-rule proposal ${found.id}: approved ${p.count} times; ${dayWord(p.suggestion.days)}: ${p.chosenLength?.why ?? "the usual length"}`.slice(0, 500), expiresAt: addDays(p.decidedAt!, p.suggestion.days), terms: { environments: p.suggestion.environments },
