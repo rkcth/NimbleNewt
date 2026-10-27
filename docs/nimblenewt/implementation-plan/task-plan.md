@@ -272,6 +272,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F04j — Check required tools and libraries instead of distribution names
 
 - **Parent:** N02 / AII-252.
+- **Status:** implemented; commits `cfe0d16`, `c34a2d8`; CI runs 40422950310; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** A controller with a local worker host requires the sandbox and limits tools at start.
 - **Blockers:** F04i, A03.
 - **Deliverable:** Startup check of what the controller and sandbox actually need rather than which Linux distribution runs them (owner decision 2026-10-22: there are too many distributions to list): the Node version, git, the sandbox launcher's required tools and kernel features, a systemd user session where resource limits need one, and the database client libraries, each found by probing, never by the distribution's name; the distribution is only recorded in the audit log and the startup output.
 - **Acceptance and verification:** A missing or too-old prerequisite makes the controller refuse to start (or the named feature refuse to run, where only one feature needs it) with a message that says what was found, what is required, how to install it and the exact switch that overrides it (owner decision 2026-10-22: the message always tells the owner how to override that specific error); a missing hard prerequisite (git, the sandbox tools) cannot be overridden because the feature cannot run without it, and only a too-old version can be; the Node version is checked from F04h's single list and not a second one; no behaviour depends on a distribution name or version string; tested with prerequisites present, missing, too old and overridden, on every supported operating system; the list of required prerequisites lives in one place.
@@ -280,6 +282,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### F04k — Pass workspace roots to the startup filesystem check
 
 - **Parent:** N02 / AII-252.
+- **Status:** implemented; commits `bd8a37d`, `c1a262e`; CI runs 40422950310; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The startup filesystem check covers the registered local checkouts.
 - **Blockers:** F04i, U01.
 - **Deliverable:** Split from F04i (audit 2026-10-26): the check of workspace file systems exists and is tested, but the controller checks workspaces only when StartOptions.workspaceRoots is passed and no production start passes it, so an unsupported workspace file system does not stop start-up today.
 - **Acceptance and verification:** A real start with a workspace on tmpfs, exFAT or a network file system is refused with the F04h message and its override switch; the override starts the controller and is audited; the workspace roots come from the registered projects' checkouts, not from a hand-built option.
@@ -757,6 +761,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### L01b — Run the reconciler and stall detection in the controller with the pause gates
 
 - **Parent:** N05 / AII-255.
+- **Status:** implemented; commits `c5b355f`, `e57a614`, `b03c84b`; CI runs 40422950310; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Reconciler (with the pause lookup) and stall scan run in the dispatcher tick under recovery.stall-scan; the scan reads the dispatcher principal each tick. No delivery destinations or effect bridges yet.
 - **Blockers:** L01, H12.
 - **Deliverable:** Split from L01: the controller builds the reconciler (with the pause lookup, so an inbox message for a paused task stays received) and runs it, and runs stall detection (scan) in the dispatcher's tick under a new dedicated stall-scan right (owner decision 2026-10-26: the narrower right, not recovery-read everywhere); the dispatcher principal holds no grants today and scan accepts only the owner or a recovery-read service.
 - **Acceptance and verification:** A paused task is not reported as stalled and its inbox messages are held, not admitted, across a controller restart; a task that stops making progress while not paused is reported as a suspected stall in the status view; the stall-scan right is a new action in the recovery family named `recovery.stall-scan` (service principals may hold only recovery actions), added to the action list and accepted by scan alongside the owner and the broad recovery-read; it permits only the scan, grants no read of unpublished records, adds no other action, and a service holding it can run a scan and nothing else, and a controller without it says so instead of failing every tick; reassigning a task goes through the pause service's retention check (a paused agent keeps its tasks), which nothing calls in production today; the reconciler waits on its delivery destinations and bridges, which are not built, rather than on a right.
@@ -845,6 +851,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H05b — Implement reviewer pause and hold behaviour
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `ddf8c36`, `56ddb2f`; CI runs 40422950310; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The dispatcher sweeps reviews each tick; the reviewer host is judged from its running or pinned attempt. Waking a held reviewer has no production caller.
 - **Blockers:** H05, L01.
 - **Deliverable:** Lifecycle-aware reviewer routing.
 - **Acceptance and verification:** A reviewer reaches a safe boundary and pauses its own task without reassignment (the review it was on waits for it); held, paused or stopped reviewers are never woken to review and are skipped when a reviewer is chosen; a review whose reviewer is then held keeps its place and moves on under the project policy when the deadline passes, never by implicit approval; a lost reviewer host is told apart from a slow reviewer; split from H05, whose routing, verdicts, contributors, escalation and figures do not need the lifecycle.
@@ -863,6 +871,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H06b — Expire idle event subscriptions
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `9493622`; CI runs 40422950310; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Idle event subscriptions expire and are recorded; delivering the notice in the running controller and the idle-time and cancel operations in the state API are H06c.
 - **Blockers:** H06.
 - **Deliverable:** Idle expiry for event subscriptions (owner decision 2026-10-22: the system drops an abandoned subscription itself, so the owner is not asked to cancel it): a subscription with no acknowledgement or activity for an owner-settable time is expired, its producers stop being held back, and the drop is recorded with its cursor so the subscriber can resume from the last acknowledged event.
 - **Acceptance and verification:** A host that crashes while subscribed no longer holds producers back beyond the idle time; the expiry time is a setting with a default and the owner can still cancel a subscription at any time; an expired subscription resumes from its cursor without losing or repeating events, or, if its cursor has passed retention, reconciles as H06 does; every expiry is recorded and appears in the activity record and, if work was affected, as a Notice (U11b); a live but slow subscriber is not expired while it acknowledges within the time; tested with a crashed host, a slow host and a restart.
@@ -1075,6 +1085,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### R05 — Implement cost and resource attribution and delegated budgets
 
 - **Parent:** N08 / AII-258.
+- **Status:** implemented; commits `a5eb1cf`; CI runs 40422950310; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Cost and resource attribution and delegated budgets; reserving before dispatch and settling after is R05b, reconciling uncertain holds is R05c/R05d.
 - **Blockers:** R02, H03, S10.
 - **Deliverable:** Usage ledger attributing provider spend (currency) and local compute (occupied worker-slot time) to task, agent and project, atomic budget reservation across the task tree, delegated sub-budgets and a request-more-budget flow (README 604, 638; pitfalls-and-safeguards 101; production-and-capacity 19-21).
 - **Acceptance and verification:** Spend is reserved before dispatch and reconciled to actual usage; concurrent children cannot spend the same allocation; uncertain in-flight and outstanding charges are shown; currency and compute are tracked separately; background jobs, meetings and supervision are attributed to their work or an explicit shared-overhead category; a request for more budget goes to the owner or delegated authority; provider ceiling enforceability is stated honestly.
@@ -1083,6 +1095,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### R05b — Reserve before dispatch and settle after in the dispatcher
 
 - **Parent:** N08 / AII-258.
+- **Status:** implemented; commits `ffa0e73`, `a26c2c4`, `4e6db7f`, `f4dd38c`; CI runs 40422950310; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The dispatcher reserves the attempt allowance before it starts and settles once at the end; an uncertain hold after a lost lease is marked, not reconciled (R05c).
 - **Blockers:** R05, H12.
 - **Deliverable:** Split from R05 (audit 2026-10-26): the budget service reserves and reconciles, but the dispatcher only checks accounting before a call and charges after it, so spend is not reserved before dispatch.
 - **Acceptance and verification:** A dispatch test shows a reservation before the attempt starts, settlement to actual use when it ends, an uncertain mark when the call is lost, and the three ceilings (the task contract's maximum cost, R02's cumulative budget and R05's reservation) agreeing; two attempts of sibling tasks cannot reserve the same allocation.
@@ -1137,6 +1151,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### U03 — Implement owner chat command interpretation
 
 - **Parent:** N09 / AII-259.
+- **Status:** implemented; commits `75203c4`; CI runs 40422950310; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Owner chat interpretation over the routed model (U03b) and the coordinator access (U03d).
 - **Blockers:** U01, U02, R02, U03b, U03d.
 - **Deliverable:** Intent-to-command mapping and audit links; a persistent coordinator agent (controller-managed, with its own grants, fallback list and lifecycle controls) answers from records and opens inquiries only when records are insufficient; proposal records; chat commands for agent, team and task-contract records.
 - **Acceptance and verification:** Clear authorized project/task edits apply; material ambiguity asks; quoted/untrusted text cannot grant authority; a drafted project or assignment is saved as a proposal and nothing is admitted until an explicit request applies it; per-project conversation context is retained across switches and changing focus never retargets a running task; every dispatched task carries an explicit project and checkout; the controller keeps working when the coordinator is unavailable; the coordinator decomposes an outcome into tasks with dependencies and proposes or, if granted, makes assignments.
@@ -1145,6 +1161,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### U03d — Let the owner reach the coordinator through the chat
 
 - **Parent:** N09 / AII-259.
+- **Status:** implemented; commits `f7e06bf`, `3e7b891`, `75203c4`; CI runs 40422950310; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The owner reaches the coordinator through the chat: answers with citations, drafted plans as proposals, assignment, set-up, start, pause and stop.
 - **Blockers:** U01, U02, U03b.
 - **Deliverable:** Split from U03 (audit 2026-10-26): the coordinator existed only as an in-process handle and in tests; the owner's chat now carries a coordinator intent (a question answered from the records with citations, a drafted plan as a proposal, handing out open tasks, and the coordinator's own set-up and start, pause and stop), checked as the owner's own words and applied once per turn.
 - **Acceptance and verification:** Through the composed controller: a question is answered from a cited record, a plan is a proposal that exists only after the owner applies it, assignment shows the model the active agents, set-up and start in one message work, quoted text and text the owner did not say are refused, and a pending question holds the order.
@@ -1263,6 +1281,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### V01 — Implement health and progress stall detection
 
 - **Parent:** N11 / AII-261.
+- **Status:** implemented; commits `2f431a0`; CI runs 40422950310; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Health and progress stall assessment and the stall service; the prompt-size and model-speed thresholds are V01b.
 - **Blockers:** H01, S08, C04, H11.
 - **Deliverable:** Deterministic alarms and bounded progress evidence.
 - **Acceptance and verification:** Long legitimate job differs from loop and dead worker; stale timestamps not used as sole takeover permission; signals include request duration, last step, repeated equivalent actions and errors, job status, budget and acceptance evidence; concerns route to the agent's responsible supervisor (H11); thresholds depend on difficulty; suspected stalls are shown apart from confirmed failures.

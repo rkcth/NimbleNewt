@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **78 of 203 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **88 of 203 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -106,18 +106,18 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Part | Progress | Done |
 | --- | --- | --- |
 | Scope and early proofs | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
-| Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓░░░` 81% | 13 of 16 |
+| Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓▓▓░` 93% | 15 of 16 |
 | Pi runtime and inference caching | `▓▓▓▓▓▓▓▓░░░░` 72% | 8 of 11 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
-| Pause, suspend and resume | `▓▓░░░░░░░░░░` 22% | 2 of 9 |
+| Pause, suspend and resume | `▓▓▓▓░░░░░░░░` 33% | 3 of 9 |
 | Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓░░░░` 72% | 13 of 18 |
 | Context and memory | `▓▓▓▓▓▓▓░░░░░` 60% | 6 of 10 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
-| Model routing, fallback and cost | `▓▓▓░░░░░░░░░` 25% | 2 of 8 |
-| Owner chat and web UI | `▓▓░░░░░░░░░░` 23% | 3 of 13 |
-| Workers, dispatch and teams | `▓▓▓▓░░░░░░░░` 34% | 9 of 26 |
+| Model routing, fallback and cost | `▓▓▓▓▓▓░░░░░░` 50% | 4 of 8 |
+| Owner chat and web UI | `▓▓▓▓░░░░░░░░` 38% | 5 of 13 |
+| Workers, dispatch and teams | `▓▓▓▓▓░░░░░░░` 42% | 11 of 26 |
 | Agent messaging | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
-| Health and recovery | `░░░░░░░░░░░░` 0% | 0 of 3 |
+| Health and recovery | `▓▓▓▓░░░░░░░░` 33% | 1 of 3 |
 | Meetings | `░░░░░░░░░░░░` 0% | 0 of 8 |
 | Tools and skills | `▓▓▓▓▓░░░░░░░` 44% | 4 of 9 |
 | Projects, repositories and workspaces | `░░░░░░░░░░░░` 0% | 0 of 8 |
@@ -143,7 +143,7 @@ The accepted scope and the experiments that proved the foundations (durable engi
 </details>
 
 <details>
-<summary><strong>Foundation: storage, configuration and builds</strong> — ▓▓▓▓▓▓▓▓▓░░░ 13 of 16</summary>
+<summary><strong>Foundation: storage, configuration and builds</strong> — ▓▓▓▓▓▓▓▓▓▓▓░ 15 of 16</summary>
 
 The controller's transactional storage (SQLite and PostgreSQL), versioned configuration, package boundaries, portable CI and the platform checks.
 
@@ -160,8 +160,8 @@ The controller's transactional storage (SQLite and PostgreSQL), versioned config
 - [x] **F04h** · P13 · Refuse unsupported environments unless explicitly overridden _(needs F04g)_
 - [x] **F04i** · P14 · Refuse unsupported filesystems unless explicitly overridden _(needs F04h)_
 - [x] **F09** · P21 · Implement per-OS secret store backends _(needs F02, A01)_
-- [ ] **F04j** · P22 · Check required tools and libraries instead of distribution names _(needs F04i, A03)_
-- [ ] **F04k** · P24 · Pass workspace roots to the startup filesystem check _(needs F04i, U01)_
+- [x] **F04j** · P22 · Check required tools and libraries instead of distribution names _(needs F04i, A03)_
+- [x] **F04k** · P24 · Pass workspace roots to the startup filesystem check _(needs F04i, U01)_
 - [ ] **F04e** · P33 · Implement chat-controlled controller database transfer _(needs F04, K01, F06)_
 
 </details>
@@ -205,13 +205,13 @@ Project and task records, assignments, durable delivery, the effect ledger and a
 </details>
 
 <details>
-<summary><strong>Pause, suspend and resume</strong> — ▓▓░░░░░░░░░░ 2 of 9</summary>
+<summary><strong>Pause, suspend and resume</strong> — ▓▓▓▓░░░░░░░░ 3 of 9</summary>
 
 Pause, suspend, stop, release and checked resume, interrupting a model mid-generation, the remote watchdog, and shutdown and reboot handling.
 
 - [x] **L05** · P26 · Implement generation interruption and late-result handling _(needs C05, F06, A02)_
 - [x] **L01** · P27 · Implement Pause and background settlement _(needs C04, A02, S08, L05)_
-- [ ] **L01b** · P29 · Run the reconciler and stall detection in the controller with the pause gates _(needs L01, H12)_
+- [x] **L01b** · P29 · Run the reconciler and stall detection in the controller with the pause gates _(needs L01, H12)_
 - [ ] **L05b** · P29 · Feed the model stream into revision-bound generation _(needs L05, H12)_
 - [ ] **L02** · P31 · Implement Suspend and graceful Stop _(needs L01, T07)_
 - [ ] **H08** · P32 · Implement remote disconnect watchdog and hard stop _(needs H02, L02)_
@@ -277,31 +277,31 @@ The versioned state API that every client uses, and the controller-backed MCP st
 </details>
 
 <details>
-<summary><strong>Model routing, fallback and cost</strong> — ▓▓▓░░░░░░░░░ 2 of 8</summary>
+<summary><strong>Model routing, fallback and cost</strong> — ▓▓▓▓▓▓░░░░░░ 4 of 8</summary>
 
 Routes and capability policy, provider failure fallback, difficulty profiles, drain and cutover, and cost attribution.
 
 - [x] **R01** · P22 · Implement model routing and capability policy _(needs F05, A02, F02)_
 - [x] **R02** · P25 · Implement fallback and cumulative budget accounting _(needs R01, S05, C04)_
 - [ ] **R03** · P26 · Implement difficulty profiles and escalation _(needs R02, S10, H11)_
-- [ ] **R05** · P26 · Implement cost and resource attribution and delegated budgets _(needs R02, H03, S10)_
+- [x] **R05** · P26 · Implement cost and resource attribution and delegated budgets _(needs R02, H03, S10)_
 - [ ] **R04** · P27 · Implement provider drain, cutover and failback policy _(needs R02, L05)_
 - [ ] **R05c** · P27 · Budget requests reach their addressee and budgets are exposed in the API _(needs R05, U11)_
-- [ ] **R05b** · P29 · Reserve before dispatch and settle after in the dispatcher _(needs R05, H12)_
+- [x] **R05b** · P29 · Reserve before dispatch and settle after in the dispatcher _(needs R05, H12)_
 - [ ] **R05d** · P30 · Charge meetings, supervision and background jobs to their work or a shared category _(needs R05, M01)_
 
 </details>
 
 <details>
-<summary><strong>Owner chat and web UI</strong> — ▓▓░░░░░░░░░░ 3 of 13</summary>
+<summary><strong>Owner chat and web UI</strong> — ▓▓▓▓░░░░░░░░ 5 of 13</summary>
 
 Talking to your agents: the chat interpreter, policy editing, status and blocker explanations, recovery chat, notifications and the responsive web interface.
 
 - [x] **U10** · P25 · Implement layered configuration, effective values and change history _(needs F02, R01, U01, H11)_
 - [x] **U03b** · P26 · Back the owner chat interpreter and the coordinator with a routed model _(needs U01, U02, R01, R02)_
 - [x] **U11** · P26 · Implement owner notifications _(needs U02, S08, U10)_
-- [ ] **U03d** · P27 · Let the owner reach the coordinator through the chat _(needs U01, U02, U03b)_
-- [ ] **U03** · P28 · Implement owner chat command interpretation _(needs U01, U02, R02, U03b, U03d)_
+- [x] **U03d** · P27 · Let the owner reach the coordinator through the chat _(needs U01, U02, U03b)_
+- [x] **U03** · P28 · Implement owner chat command interpretation _(needs U01, U02, R02, U03b, U03d)_
 - [ ] **U03c** · P29 · Run the coordinator as a hosted agent with its own lifecycle (optional, after the first release) _(needs U03, H11, L01)_
 - [ ] **U04** · P29 · Implement conversational policy editing _(needs U03, A02, A05, A07, U10)_
 - [ ] **U05** · P29 · Implement chat status and blocker explanations _(needs U03, S08, H01)_
@@ -314,7 +314,7 @@ Talking to your agents: the chat interpreter, policy editing, status and blocker
 </details>
 
 <details>
-<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓░░░░░░░░ 9 of 26</summary>
+<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓░░░░░░░ 11 of 26</summary>
 
 Enrolled hosts, remote workers, priority admission, the local worker runtime and dispatcher, agents, teams and roles, reviews and wait-cycle handling.
 
@@ -324,10 +324,10 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 - [x] **H05** · P24 · Implement review routing and wait-cycle prevention _(needs H04, A05)_
 - [x] **H06** · P24 · Implement event subscriptions and gap recovery _(needs S07, C03)_
 - [x] **H11** · P24 · Implement agent, team and role records _(needs A02, C01, R01, U01)_
-- [ ] **H06b** · P25 · Expire idle event subscriptions _(needs H06)_
+- [x] **H06b** · P25 · Expire idle event subscriptions _(needs H06)_
 - [ ] **H13** · P26 · Implement event source adapters and watchers _(needs H06, H01, R02)_
 - [ ] **H06c** · P27 · Deliver idle-expiry notices in the running controller _(needs H06b, U11)_
-- [ ] **H05b** · P28 · Implement reviewer pause and hold behaviour _(needs H05, L01)_
+- [x] **H05b** · P28 · Implement reviewer pause and hold behaviour _(needs H05, L01)_
 - [x] **H12** · P28 · Implement the local worker runtime and attempt dispatcher _(needs A03, A05, R01, C07b, C06b, S05, C04, F08, H03)_
 - [ ] **H02** · P29 · Implement subordinate remote work/artifact transport _(needs H01, S06, A03, H12)_
 - [ ] **H12b** · P29 · Bind the real sandbox launcher and worker process to the local runtime _(needs H12, A03, A08)_
@@ -360,11 +360,11 @@ Durable conversations between agents, delivery classes, and the MCP conversation
 </details>
 
 <details>
-<summary><strong>Health and recovery</strong> — ░░░░░░░░░░░░ 0 of 3</summary>
+<summary><strong>Health and recovery</strong> — ▓▓▓▓░░░░░░░░ 1 of 3</summary>
 
 Stall detection and bounded supervisor recovery.
 
-- [ ] **V01** · P25 · Implement health and progress stall detection _(needs H01, S08, C04, H11)_
+- [x] **V01** · P25 · Implement health and progress stall detection _(needs H01, S08, C04, H11)_
 - [ ] **V01b** · P30 · Scale stall thresholds to the prompt size and the measured speed of the model _(needs V01, H12, H12b, H12e)_
 - [ ] **V02** · P33 · Implement bounded supervisor recovery _(needs V01, V01b, L03, L04, R02, H05)_
 
