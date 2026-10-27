@@ -37,3 +37,4 @@ export * from "./dispatch/index.js";
 export * from "./remote/index.js";
 export * from "./toolbridge/index.js";
 export { CATALOG_LIMITS, CatalogService, checkHost, checkManifest, personalNamespace, runAction, type HostFacts, type Manifest } from "./catalog/index.js";
+export { COMMAND_ALIASES, COMMAND_LIMITS, CommandResolver, CommandService, catalogSource, parseInvocation, type CommandContext, type CommandSource, type Resolution as CommandResolution, type Target as CommandTarget } from "./commands/index.js";
