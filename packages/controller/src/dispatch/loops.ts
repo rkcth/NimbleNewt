@@ -1,3 +1,4 @@
+import type { WorkspaceOpService } from "../workspace-ops/index.js";
 import type { DecisionService } from "../decisions/index.js";
 import { DomainError } from "../domain/errors.js";
 import type { Principal } from "../security/principals.js";
@@ -153,4 +154,9 @@ export function eventLoops(events: Pick<EventService, "expireIdle">): Dispatcher
 /** C08: the corrections whose propagation did not finish (a step that failed, a restart) are finished for each project. */
 export function decisionLoops(decisions: Pick<DecisionService, "resume">, projects: () => Promise<readonly string[]>): DispatcherLoop[] {
   return [{ name: "decisions.resume", run: async (by) => { for (const projectId of await projects()) await drain(() => decisions.resume(by, { projectId })); } }];
+}
+
+/** H12l: a workspace operation the controller was running when it stopped is resolved as unknown and the attempts it froze are released. */
+export function workspaceLoops(workspace: Pick<WorkspaceOpService, "recover">): DispatcherLoop[] {
+  return [{ name: "workspace.recover", run: (by) => workspace.recover(by) }];
 }

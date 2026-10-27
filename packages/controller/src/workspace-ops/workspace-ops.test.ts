@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { LocalWorker, type BoundCall } from "../dispatch/local-worker.js";
-import { TERMINAL } from "../dispatch/model.js";
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import type { Principal } from "../security/principals.js";
@@ -136,7 +135,7 @@ for (const backend of backends) {
     try {
       const o = r.w.owner;
       const none = await service(r, undefined).request(o, { commandId: "h1", operation: "refresh", taskId: r.taskId, reason: "base moved" });
-      assert.deepEqual([none.state, /no host holds/.test(none.summary ?? "")], ["refused", true]);
+      assert.deepEqual([none.state, /no host that can do this/.test(none.summary ?? "")], ["refused", true]);
       const said: WorkspaceOutcome = { ok: false, reason: "the checkout has uncommitted changes" };
       const no = await service(r, { run: async () => said }).request(o, { commandId: "h2", operation: "refresh", taskId: r.taskId, reason: "base moved" });
       assert.deepEqual([no.state, /uncommitted/.test(no.summary ?? "")], ["refused", true]);
@@ -153,12 +152,105 @@ for (const backend of backends) {
       assert.deepEqual([repeat.state, repeat.replayed], ["uncertain", true]);
       finish();
       const late = await first;
-      assert.deepEqual([late.state, late.id], ["uncertain", repeat.id], "the first caller is told what the record says");
+      assert.deepEqual([late.state, late.summary, late.id], ["done", "done late", repeat.id], "the first call writes what really happened over the repeat's uncertain");
       assert.equal(asked, 1);
-      assert.equal((await slow.request(o, { commandId: "h4", operation: "quarantine", taskId: r.taskId, reason: "bad file" })).state, "uncertain", "and it stays so");
+      assert.equal((await slow.request(o, { commandId: "h4", operation: "quarantine", taskId: r.taskId, reason: "bad file" })).state, "done", "and a later repeat is told the real outcome");
       // Another command is a new request.
       assert.equal((await slow.request(o, { commandId: "h5", operation: "quarantine", taskId: r.taskId, reason: "bad file" }).then((a) => a.state)), "done");
-      assert.ok(TERMINAL.size > 0);
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: one operation runs per task at a time, and a host's text and detail are bounded and redacted (card H12l)`, async () => {
+    const r = await rig(async () => ({}));
+    try {
+      const o = r.w.owner;
+      let finish!: () => void;
+      const hold = new Promise<void>((ok) => { finish = ok; });
+      let asked = 0;
+      const svc = service(r, { run: async () => { asked++; await hold; return { ok: true, summary: "ok" }; } });
+      const first = svc.request(o, { commandId: "c1", operation: "refresh", taskId: r.taskId, reason: "base moved" });
+      while (asked === 0) await new Promise((ok) => setTimeout(ok, 5));
+      await refuses("unavailable", () => svc.request(o, { commandId: "c2", operation: "integration", taskId: r.taskId, reason: "merge" }));
+      finish();
+      assert.equal((await first).state, "done");
+      assert.equal((await svc.request(o, { commandId: "c3", operation: "integration", taskId: r.taskId, reason: "merge" }).then((a) => a.state)), "done", "after the first ended another may run");
+      const secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789ABCD";
+      const leaky = service(r, { run: async () => ({ ok: true, summary: `fatal: could not read from https://x-access-token:${secret}@github.com/x`, detail: { note: `token ${secret}` } }) });
+      const a = await leaky.request(o, { commandId: "c4", operation: "refresh", taskId: r.taskId, reason: "base moved" });
+      assert.equal(a.state, "done");
+      assert.ok(!JSON.stringify(a).includes(secret), JSON.stringify(a));
+      assert.equal(a.detail, undefined, "a detail with a credential in it is dropped");
+      const huge = service(r, { run: async () => ({ ok: true, summary: "x".repeat(5000), detail: { blob: "y".repeat(10_000) } }) });
+      const b = await huge.request(o, { commandId: "c5", operation: "refresh", taskId: r.taskId, reason: "base moved" });
+      assert.deepEqual([b.state, b.summary!.length, b.detail], ["done", 1000, undefined], "text is cut and an oversized detail is dropped; the outcome is still recorded");
+      const odd = service(r, { run: async () => ({ ok: true, summary: 5 as never }) });
+      assert.equal((await odd.request(o, { commandId: "c6", operation: "refresh", taskId: r.taskId, reason: "base moved" })).state, "done");
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: a controller that stopped while the host worked leaves the request uncertain and the attempt it froze is released; a freeze that is not this operation's is left alone (card H12l)`, async () => {
+    const r = await rig(async () => ({}));
+    try {
+      let stay!: () => void;
+      const alive = new Promise<void>((ok) => { stay = ok; });
+      r.turn.second = async () => { await alive; return "x"; };
+      await r.d.tick();
+      await r.inCall;
+      const control = { frozenReason: async (id: string) => (await r.d.get(r.w.owner, id))?.frozen?.reason, release: async (id: string) => { await r.d.release(r.w.owner, id); } };
+      let finish!: () => void;
+      const hold = new Promise<void>((ok) => { finish = ok; });
+      let asked = 0;
+      const port: WorkspacePort = { run: async () => { asked++; await hold; return { ok: true, summary: "late" }; } };
+      const make = () => WorkspaceOpService.withEpoch(r.w.storage, r.w.epoch, { quiesce: r.coordinator, portOf: async () => port, attempts: control }, { clock: r.w.clock.now });
+      const before = make();
+      const pending = before.request(r.w.owner, { commandId: "k1", operation: "integration", taskId: r.taskId, reason: "merge" });
+      while (asked === 0) await new Promise((ok) => setTimeout(ok, 5));
+      assert.ok((await r.d.get(r.w.owner, r.attemptId))!.frozen !== undefined, "the attempt is frozen while the host works");
+      // A new controller process over the same records (the first one is gone as far as the records go).
+      const after = make();
+      assert.deepEqual(await after.recover(r.w.owner), [(await r.w.storage.listAggregates("workspace-request", { limit: 5 }))[0]!.id]);
+      assert.equal((await r.d.get(r.w.owner, r.attemptId))!.frozen, undefined, "the freeze was lifted");
+      const stored = (await r.w.storage.listAggregates("workspace-request", { limit: 5 }))[0]!.body as unknown as { state: string; held?: unknown };
+      assert.equal(stored.state, "uncertain");
+      assert.deepEqual(await after.recover(r.w.owner), [], "and it is resolved once");
+      finish();
+      await pending;
+      // Somebody else's freeze is not lifted by a recovery.
+      await r.d.quiesce(r.w.owner, r.attemptId, "the owner stopped it", { strictMs: 1000 });
+      const keep = await after.recover(r.w.owner);
+      assert.deepEqual(keep, []);
+      assert.ok((await r.d.get(r.w.owner, r.attemptId))!.frozen !== undefined, "an unrelated freeze stays");
+      await r.d.release(r.w.owner, r.attemptId);
+      stay();
+      r.turn.release?.();
+      await r.d.idle();
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: a call that ignores the stop signal is not taken as settled: the host is not asked (card H12d)`, async () => {
+    const r = await rig(async () => ({}), true);
+    try {
+      r.turn.second = async () => "x";
+      await r.d.tick();
+      await r.inCall;
+      let asked = 0;
+      const quick = WorkspaceOpService.withEpoch(r.w.storage, r.w.epoch, { quiesce: new QuiesceCoordinator({ dispatcher: r.d, blockers: r.w.blockers, principal: r.w.owner, settleMs: 100 }), portOf: async () => ({ run: async () => { asked++; return { ok: true, summary: "x" }; } }) }, { clock: r.w.clock.now });
+      const answer = await quick.request(r.w.owner, { commandId: "s1", operation: "integration", taskId: r.taskId, reason: "merge" });
+      assert.equal(asked, 0);
+      assert.equal(answer.state, "refused");
+      assert.ok(answer.blocker !== undefined);
+      assert.equal((await r.d.get(r.w.owner, r.attemptId))!.frozen, undefined, "nothing stays frozen");
+      r.turn.release?.();
+      await r.d.idle();
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: a wildcard grant does not manage workspaces (card H12l)`, async () => {
+    const r = await rig(async () => ({}));
+    try {
+      const wild = await manager(r.w, "wild", [{ action: "*", project: r.w.project }]);
+      const svc = service(r, { run: async () => ({ ok: true, summary: "x" }) });
+      await refuses("not_found", () => svc.request(wild, { commandId: "wd1", operation: "refresh", taskId: r.taskId, reason: "x" }));
     } finally { await r.store.close(); }
   });
 }

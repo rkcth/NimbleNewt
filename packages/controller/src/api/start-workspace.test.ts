@@ -13,7 +13,7 @@ import { startController } from "./index.js";
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
 
-test("integration, refresh and quarantine are requested through the state API, reach the host that holds the checkout, and are refused to anyone without workspace.manage and to a task credential (cards H12l, H12d)", async () => {
+test("integration, refresh and quarantine are requested through the state API, reach the host that holds the checkout, and are refused to anyone without workspace.manage (cards H12l, H12d)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-workspace-"));
   const calls: WorkspaceCall[] = [];
   const host: WorkerHost = {
