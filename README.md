@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **107 of 225 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **115 of 225 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -111,16 +111,16 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
 | Pause, suspend and resume | `▓▓▓▓░░░░░░░░` 33% | 3 of 9 |
 | Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓░░░░` 72% | 13 of 18 |
-| Context and memory | `▓▓▓▓▓▓▓░░░░░` 61% | 8 of 13 |
+| Context and memory | `▓▓▓▓▓▓▓▓▓░░░` 76% | 10 of 13 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
-| Model routing, fallback and cost | `▓▓▓▓▓▓▓▓░░░░` 72% | 8 of 11 |
+| Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓░░░` 81% | 9 of 11 |
 | Owner chat and web UI | `▓▓▓▓▓▓░░░░░░` 53% | 8 of 15 |
-| Workers, dispatch and teams | `▓▓▓▓▓░░░░░░░` 48% | 16 of 33 |
+| Workers, dispatch and teams | `▓▓▓▓▓▓░░░░░░` 54% | 18 of 33 |
 | Agent messaging | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
 | Health and recovery | `▓▓▓░░░░░░░░░` 25% | 1 of 4 |
-| Meetings | `▓▓▓░░░░░░░░░` 27% | 3 of 11 |
-| Tools and skills | `▓▓▓▓░░░░░░░░` 40% | 4 of 10 |
-| Projects, repositories and workspaces | `▓▓░░░░░░░░░░` 20% | 2 of 10 |
+| Meetings | `▓▓▓▓░░░░░░░░` 36% | 4 of 11 |
+| Tools and skills | `▓▓▓▓▓▓░░░░░░` 50% | 5 of 10 |
+| Projects, repositories and workspaces | `▓▓▓░░░░░░░░░` 30% | 3 of 10 |
 | Quality: deliverables, QA and defects | `░░░░░░░░░░░░` 0% | 0 of 4 |
 | Balancing delivery and improvement | `░░░░░░░░░░░░` 0% | 0 of 1 |
 | Learning and improvement | `░░░░░░░░░░░░` 0% | 0 of 5 |
@@ -248,7 +248,7 @@ Authenticated principals, revisioned grants, the sandbox launchers, the protecte
 </details>
 
 <details>
-<summary><strong>Context and memory</strong> — ▓▓▓▓▓▓▓░░░░░ 8 of 13</summary>
+<summary><strong>Context and memory</strong> — ▓▓▓▓▓▓▓▓▓░░░ 10 of 13</summary>
 
 Separated task, chat and meeting context, working notes, source-backed retrieval, safe-boundary continuation, retained branches, context budgets, owner decisions and the activity record.
 
@@ -263,8 +263,8 @@ Separated task, chat and meeting context, working notes, source-backed retrieval
 - [x] **C08** · P29 · Implement owner decision records and correction propagation _(needs C03, C07, U03, H06)_
 - [x] **C08b** · P30 · Record decisions from the chat and interrupt running generation on correction _(needs C08, U03, L05)_
 - [ ] **C09** · P30 · Capture activity records and decision explanations _(needs C04, C08, T06, S05)_
-- [ ] **C08c** · P31 · Propose chat gates and strict decisions before applying them _(needs C08b)_
-- [ ] **C08d** · P31 · Turn a replayed chat turn after a topic change into a dispute _(needs C08b)_
+- [x] **C08c** · P31 · Propose chat gates and strict decisions before applying them _(needs C08b)_
+- [x] **C08d** · P31 · Turn a replayed chat turn after a topic change into a dispute _(needs C08b)_
 
 </details>
 
@@ -280,7 +280,7 @@ The versioned state API that every client uses, and the controller-backed MCP st
 </details>
 
 <details>
-<summary><strong>Model routing, fallback and cost</strong> — ▓▓▓▓▓▓▓▓░░░░ 8 of 11</summary>
+<summary><strong>Model routing, fallback and cost</strong> — ▓▓▓▓▓▓▓▓▓░░░ 9 of 11</summary>
 
 Routes and capability policy, provider failure fallback, difficulty profiles, drain and cutover, and cost attribution.
 
@@ -293,7 +293,7 @@ Routes and capability policy, provider failure fallback, difficulty profiles, dr
 - [x] **R05e** · P28 · Tell the delegated holder of a budget request _(needs R05c)_
 - [x] **R05b** · P29 · Reserve before dispatch and settle after in the dispatcher _(needs R05, H12)_
 - [x] **R05d** · P30 · Charge meeting presence to the budget ledger _(needs R05, M01)_
-- [ ] **R05f** · P31 · Charge supervision, review and background jobs and prove the charges through the state API _(needs R05d)_
+- [x] **R05f** · P31 · Charge supervision, review and background jobs and prove the charges through the state API _(needs R05d)_
 - [ ] **R05g** · P32 · Retry lost charges and prove a held meeting through budget.usage _(needs R05f)_
 
 </details>
@@ -322,7 +322,7 @@ Talking to your agents: the chat interpreter, policy editing, status and blocker
 </details>
 
 <details>
-<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓░░░░░░░ 16 of 33</summary>
+<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓▓░░░░░░ 18 of 33</summary>
 
 Enrolled hosts, remote workers, priority admission, the local worker runtime and dispatcher, agents, teams and roles, reviews and wait-cycle handling.
 
@@ -345,13 +345,13 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 - [x] **H12h** · P29 · Route owner-mode reviews only to the owner _(needs H12, A05)_
 - [x] **H12l** · P29 · Give the controller integration, checkout refresh and quarantine operations _(needs H12, A04, A06)_
 - [x] **H02b** · P30 · Fence a remote handle's controls by placement and close every failed startup _(needs H02)_
-- [ ] **H07** · P30 · Implement idle host polling and capability placement _(needs H02, H03)_
+- [x] **H07** · P30 · Implement idle host polling and capability placement _(needs H02, H03)_
 - [ ] **H12a** · P30 · Carry the dispatch contract to remote workers _(needs H12, H02)_
 - [ ] **H12d** · P30 · Quiesce attempts before integration, refresh and quarantine _(needs H12, A04, A06, H12l)_
 - [ ] **H12i** · P30 · Give tasks controlled network routes through the worker relay _(needs H12b, A07, T01, T03, A03b)_
 - [ ] **H12j** · P30 · Close the H12b worker-process gaps _(needs H12b)_
 - [ ] **H12m** · P30 · Bind the workspace operations to the local host and to remote hosts _(needs H12l, A04, H12b, H02)_
-- [ ] **H02c** · P31 · Prove partition fencing, relocation integrity and the store owner in the composed controller _(needs H02b)_
+- [x] **H02c** · P31 · Prove partition fencing, relocation integrity and the store owner in the composed controller _(needs H02b)_
 - [ ] **H02e** · P31 · Stop a poll from deleting a re-placed offer _(needs H02, H07)_
 - [ ] **H07b** · P31 · Choose hosts by candidates, fall back on refusal and run the host poller in the worker process _(needs H07, H12a)_
 - [ ] **H12f** · P31 · Wire context enforcement, pause observation and message boundaries into the runtime _(needs H12, C07b, L01, U12)_
@@ -387,7 +387,7 @@ Stall detection and bounded supervisor recovery.
 </details>
 
 <details>
-<summary><strong>Meetings</strong> — ▓▓▓░░░░░░░░░ 3 of 11</summary>
+<summary><strong>Meetings</strong> — ▓▓▓▓░░░░░░░░ 4 of 11</summary>
 
 Scheduling, votes and decisions, stand-ups, attendance and return to work, and facilitation.
 
@@ -398,7 +398,7 @@ Scheduling, votes and decisions, stand-ups, attendance and return to work, and f
 - [ ] **M02** · P30 · Implement votes, decisions and meeting summaries _(needs M01, A02, C02, C08)_
 - [ ] **M03** · P30 · Implement stand-up preparation, briefs and agenda items _(needs M01, C02, U03)_
 - [ ] **M04** · P30 · Implement meeting attendance and return to work _(needs M01, L01, L05, H04)_
-- [ ] **M01d** · P31 · Keep invited agents free for a configurable lead time before a meeting _(needs M01c)_
+- [x] **M01d** · P31 · Keep invited agents free for a configurable lead time before a meeting _(needs M01c)_
 - [ ] **M05** · P31 · Implement meeting facilitation and owner control _(needs M04, M02, U03, M00, A10, C01b)_
 - [ ] **M06** · P31 · Implement meeting procedure, roster, quorum and ballots _(needs M02, A02, C08, T06, M00)_
 - [ ] **M05b** · P32 · Prove meeting desk reads are read-only and recorded per file _(needs M05, C01b)_
@@ -406,7 +406,7 @@ Scheduling, votes and decisions, stand-ups, attendance and return to work, and f
 </details>
 
 <details>
-<summary><strong>Tools and skills</strong> — ▓▓▓▓░░░░░░░░ 4 of 10</summary>
+<summary><strong>Tools and skills</strong> — ▓▓▓▓▓▓░░░░░░ 5 of 10</summary>
 
 The immutable tool and skill catalogue, review and promotion, MCP connections, the protected agent tool bridge and background jobs.
 
@@ -415,7 +415,7 @@ The immutable tool and skill catalogue, review and promotion, MCP connections, t
 - [x] **T06** · P29 · Implement the protected agent tool bridge and execution service _(needs H12, T01)_
 - [ ] **T06b** · P30 · Wire the protected bridge into the composed worker across a process boundary _(needs T06, H12b, H12c)_
 - [x] **T07** · P30 · Implement durable job records and job control _(needs T06, S05)_
-- [ ] **T09** · P30 · Implement command namespaces and alias dispatch _(needs T06, H11, U03)_
+- [x] **T09** · P30 · Implement command namespaces and alias dispatch _(needs T06, H11, U03)_
 - [ ] **T07b** · P31 · Give agents job control through the tool bridge and bind jobs to the sandbox, the MCP client and the API _(needs T07, T06b, H12g)_
 - [ ] **T09b** · P31 · Wire command namespaces into the controller, state API and chat and execute queued commands _(needs T09)_
 - [ ] **T02** · P33 · Implement review/promotion/deprecation and retention _(needs T01, A05, L04)_
@@ -424,13 +424,13 @@ The immutable tool and skill catalogue, review and promotion, MCP connections, t
 </details>
 
 <details>
-<summary><strong>Projects, repositories and workspaces</strong> — ▓▓░░░░░░░░░░ 2 of 10</summary>
+<summary><strong>Projects, repositories and workspaces</strong> — ▓▓▓░░░░░░░░░ 3 of 10</summary>
 
 Repository-independent projects, isolated coding workspaces, non-code and sandbox operations, ongoing responsibilities and external contribution.
 
 - [x] **P01** · P29 · Implement repository-independent projects and responsibilities _(needs U03, S01)_
 - [x] **P01b** · P30 · Mend the checkout pin edge cases _(needs P01)_
-- [ ] **P01c** · P31 · Scan the pin and overlap checks per project _(needs P01b)_
+- [x] **P01c** · P31 · Scan the pin and overlap checks per project _(needs P01b)_
 - [ ] **P04** · P33 · Implement ongoing responsibility checks, incidents and coverage _(needs P01, S08, H13, V01, L03)_
 - [ ] **P06** · P34 · Implement project and agent retirement and archival _(needs P01, H11, L03, K06)_
 - [ ] **P02** · P35 · Implement isolated coding workspaces and integration _(needs P01, A04, L04, Y02, H12)_

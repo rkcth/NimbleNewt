@@ -895,6 +895,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H07 — Implement idle host polling and capability placement
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `42f98e9`, `6d4be46`, `174d9cd`, `239ae81`, `43bb581`, `b651702`; CI runs 40591614995; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Held offers polls, a host poller with jittered backoff, platform-indexed placement and a placement policy (local-only data is never placed remotely by default); choosing hosts by candidates, the worker-process poller and the leftovers are H07b and H02e.
 - **Blockers:** H02, H03.
 - **Deliverable:** One bounded poll per host, jitter/backoff and capability-indexed queue.
 - **Acceptance and verification:** 100 simulated idle hosts and reconnect burst stay within measured resource limits; unavailable platforms wait visibly; no per-agent idle polling storm; placement filters on data-location policy and repository access, and credentials are delivered per attempt only to eligible hosts.
@@ -1169,6 +1171,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### R05f — Charge supervision, review and background jobs and prove the charges through the state API
 
 - **Parent:** N08 / AII-258.
+- **Status:** implemented; commits `27ed9f9`, `ae33763`; CI runs 40591614995; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Review and job time is charged to the task; retrying a charge lost while the ledger was down and the held-meeting proof are R05g.
 - **Blockers:** R05d.
 - **Deliverable:** Split from R05d (2026-10-27): meeting presence is charged but supervisor activity, reviews and background jobs are not, the job service is not composed in the controller, a charge lost while the ledger was down is not found again, no composed test shows a held meeting in budget.usage, and meeting-turn model use must not be counted twice against the same meeting task.
 - **Acceptance and verification:** Supervisor activity, reviews and background jobs are charged to the task they serve or to a named shared-overhead category by their own services; a charge that failed is retried until it lands; a held meeting appears in budget.usage through the composed controller; nothing is charged twice (a meeting turn dispatched as an attempt is not also charged as presence); tests: Tests for each activity and a composed test through the state API.
@@ -1285,6 +1289,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### P01c — Scan the pin and overlap checks per project
 
 - **Parent:** N14 / AII-264.
+- **Status:** implemented; commits `827f228`, `12b20cd`, `b262dfa`; CI runs 40591614995; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Pin lists per binding, the overlap check from project registries and a pin limit that opens a blocker.
 - **Blockers:** P01b.
 - **Deliverable:** Split from P01b (2026-10-27): the overlap check and the lookup of live tasks pinned to a checkout still scan every project's resources; a scan limit should open a blocker instead of failing.
 - **Acceptance and verification:** The pinned-task lookup reads the binding's own pin list; the overlap check reads one registry record per project (the limit counts projects, not bindings), since an overlap is between projects; a scan limit on a pin opens a blocker with a reason; tests: Tests with many bindings and projects and a tight limit.
@@ -1313,6 +1319,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### C08c — Propose chat gates and strict decisions before applying them
 
 - **Parent:** N07 / AII-257.
+- **Status:** implemented; commits `1a05f92`, `4f223d3`; CI runs 40591614995; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Chat gates and strict-profile decisions are shown as proposals first.
 - **Blockers:** C08b.
 - **Deliverable:** Owner answers (2026-10-27): a gate set from the owner chat is shown as a proposal the owner confirms, and decision.record in the strict profile is shown as a proposal first while other profiles apply at once; Chat gates and strict-profile decisions wait for the owner's yes and change nothing before it.
 - **Acceptance and verification:** Composed tests for a chat gate proposal, a strict decision proposal, and the unchanged other profiles.
@@ -1321,6 +1329,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### C08d — Turn a replayed chat turn after a topic change into a dispute
 
 - **Parent:** N07 / AII-257.
+- **Status:** implemented; commits `6ae14e1`, `5029d3c`; CI runs 40591614995; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** A replayed decision step becomes a dispute when the topic changed meanwhile.
 - **Blockers:** C08b.
 - **Deliverable:** Owner answer (2026-10-27): a crashed chat turn resent after the topic changed reads the current version and can overwrite the change; A replayed unrecorded step whose topic changed since the turn began becomes a dispute and never overwrites.
 - **Acceptance and verification:** Crash-then-edit-then-resend test records a dispute and keeps the edit.
@@ -1329,6 +1339,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### M01d — Keep invited agents free for a configurable lead time before a meeting
 
 - **Parent:** N12 / AII-262.
+- **Status:** implemented; commits `b7a9071`, `9486936`, `dc3db42`; CI runs 40591614995; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** A configurable lead (default 5 minutes) before meetings; invited idle agents are kept free and nudged, busy agents are never interrupted.
 - **Blockers:** M01c.
 - **Deliverable:** Owner answer (2026-10-27): the invitation inbox is a pull list and nothing wakes the agent; A setting meeting.leadMinutes (default 5) keeps invited idle agents free and nudges them when the invitation is made; a busy agent is never interrupted and sees the invitation at its next stopping point.
 - **Acceptance and verification:** Composed test for an idle agent nudged within the lead time and a busy agent left alone.
@@ -1347,6 +1359,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H02c — Prove partition fencing, relocation integrity and the store owner in the composed controller
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `7a18591`, `95898f4`; CI runs 40591614995; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Fencing, relocation and the store owner are proved through the composed controller; the remote stop path, checkpoint fencing across handles and the remaining refusals are H02d.
 - **Blockers:** H02b.
 - **Deliverable:** Split from H02b (2026-10-27): partition and delayed-packet fencing, no self-promotion, relocation with integrity and policy refusals, the exclusive native-store owner, the production host stop path, closing the listener when a step fails after it opened, and no driver started when a later startup step fails are not yet proven through the composed controller.
 - **Acceptance and verification:** Each named clause holds through the composed controller and the production host; a failure injected into the driver or MCP construction after the listener opened leaves nothing listening or ticking; a new host's checkpoint can never answer an old handle's request; tests: Composed tests per clause.
@@ -1665,6 +1679,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### T09 — Implement command namespaces and alias dispatch
 
 - **Parent:** N13 / AII-263.
+- **Status:** implemented; commits `997a8da`, `61b7153`, `5008da8`; CI runs 40591614995; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Command namespaces, alias resolution and queued resolved targets; wiring into the controller, API and chat and executing queued commands are T09b.
 - **Blockers:** T06, H11, U03.
 - **Deliverable:** Command dispatcher over the F07 registry: /nimblenewt.*, /toolbox.*, canonical /a_<id>.* agent prefixes and optional context-bound /agent.* and /custom.* aliases, resolved and bound before queuing, with UI actions and tool calls mapped to the same operation (runtime-compatibility-and-namespaces 13-28, 56-58; README 269).
 - **Acceptance and verification:** The runtime-compatibility 56-58 cases pass; queued work stores the resolved canonical target; an ambiguous alias stays unresolved and asks; aliases resolve only in their bound context; renaming an agent changes no canonical command or record; operation ID, schema version, owner, revision and display name are kept separate; lowercase grammar with normalized or encoded collisions rejected and no last-installed-wins; agents cannot claim /nimblenewt.* or /toolbox.*; the provider wire-name mapping stays collision-free per provider.
