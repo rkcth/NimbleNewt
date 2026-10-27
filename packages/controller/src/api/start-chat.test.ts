@@ -209,7 +209,7 @@ test("the owner grants and revokes rights through the state API and through the 
     const elsewhere = "give service:scanner recovery.stall-scan to run stall detection. There are bugs everywhere.";
     assert.equal((await turn("c3f", elsewhere, [owner({ op: "grant.create", args }, elsewhere)]))[0]!.status, "refused");
     const limited = "give service:scanner recovery.stall-scan everywhere until Friday to run stall detection";
-    assert.equal((await turn("c3g", limited, [owner({ op: "grant.create", args }, limited)]))[0]!.status, "refused", "the time limit may not be dropped");
+    assert.equal((await turn("c3g", limited, [owner({ op: "grant.create", args }, limited)]))[0]!.status, "refused", "a time limit is not understood by the chat");
     // The list is paged without skipping a grant.
     for (const n of [1, 2, 3]) await call(boot.token, "grant.create", { ...grant, basis: `extra ${n}` }, `gp${n}`);
     const first = await call(boot.token, "grant.list", { grantee: "service:scanner", limit: 2 });

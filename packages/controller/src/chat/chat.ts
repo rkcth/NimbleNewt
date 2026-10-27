@@ -482,9 +482,9 @@ export class ChatService {
       for (const key of ["grantee", "action", "grantId"]) if (typeof args[key] === "string" && !wholeWord(words, args[key] as string)) return refuse("unsupported_value", `${key} is not in your message as written, so it was not done. Say it exactly.`);
       if (intent.op === "grant.create") {
         const scope = args["project"];
-        const said = typeof args["grantee"] === "string" ? sentenceWith(words, args["grantee"]) ?? "" : "";
-        // A time limit the owner mentioned in that sentence cannot be dropped: the right would silently become permanent.
-        if (/\b(until|expires?|expired|temporar\w*|for (the next )?\d+ (minutes?|hours?|days?|weeks?|months?)|for (an|a|one) (hour|day|week|month))\b/i.test(said) && args["expiresAt"] === undefined) return refuse("unsupported_value", "you gave a time limit, but no end time was understood, so it was not done. Say the exact end time.");
+        const said = typeof args["grantee"] === "string" ? words.split(/(?<=[.!?])\s+|\n+/).filter((part) => wholeWord(part, args["grantee"] as string)).join(" ") : "";
+        // The chat makes permanent rights only: a message that speaks of a time limit, or a command that carries one, is refused (the state API takes `expiresAt` and `notBefore`).
+        if (args["expiresAt"] !== undefined || args["notBefore"] !== undefined || /\b(until|till|through|expires?|expired|temporar\w*|only (for )?(today|tomorrow|tonight|this|next)|for (the next )?(\d+|an?|one|two|three|four|five|six|seven|eight|nine|ten|few|several) (minutes?|hours?|days?|weeks?|months?)|today|tomorrow|tonight)\b/i.test(words)) return refuse("unsupported_value", "the chat gives rights with no time limit; for a limited right use the grant.create operation with expiresAt");
         if (scope === "*") { if (!/\b(everywhere|all projects|every project)\b|\*/i.test(said)) return refuse("unsupported_value", "everywhere is not what you said, so it was not done. Name the project, or say everywhere."); }
         else if (typeof scope === "string") {
           if (!wholeWord(words, scope)) return refuse("unsupported_value", "project is not in your message as written, so it was not done. Say it exactly.");
