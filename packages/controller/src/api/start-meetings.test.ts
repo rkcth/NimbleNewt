@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
+import { InvitationInbox } from "../meetings/index.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -111,5 +112,16 @@ test("a schedule that names no zone uses the owner's meeting.timeZone setting, a
     assert.deepEqual(mine.result.items.map((i: { agent: string; occurrenceId: string; urgent: boolean }) => [i.agent, i.occurrenceId, i.urgent]), [[`agent:${ann}`, urgent.result.id, true]], "one invitation, however often the dispatcher ticked");
     assert.deepEqual((await call(annToken, "meeting.invitations", { agent: `agent:${bob}` })).result.items, [], "not Bob's");
     assert.equal((await call(boot.token, "meeting.invitations", { agent: `agent:${bob}` })).result.items.length, 1, "the owner reads Bob's");
+    // The same key delivered again (a retry after a sink fault) adds nothing, even with a changed body; a different key adds one, newest first; only the newest 50 are kept.
+    const inbox = InvitationInbox.withEpoch(c.storage, c.epoch);
+    const one = mine.result.items[0];
+    await inbox.invite({ ...one, urgent: false });
+    assert.equal((await call(annToken, "meeting.invitations", { agent: `agent:${ann}` })).result.items.length, 1);
+    for (let i = 0; i < 55; i++) await inbox.invite({ ...one, key: `${one.key}:${i}`, startsAt: new Date(Date.UTC(2030, 0, 1 + i)).toISOString() });
+    const kept = (await call(annToken, "meeting.invitations", { agent: `agent:${ann}` })).result.items;
+    assert.equal(kept.length, 50);
+    assert.equal(kept[0].key, `${one.key}:54`, "newest first");
+    // A task credential of that agent reads its own list too.
+    assert.ok(kept.every((i: { agent: string }) => i.agent === `agent:${ann}`));
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

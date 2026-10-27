@@ -2,18 +2,19 @@ import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import type { Principal } from "../security/principals.js";
-import type { ControllerStorage } from "../storage/types.js";
+import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { Invitation, InvitationSink } from "./meetings.js";
 
-const KIND = "meeting-invitation";
+const KIND = "meeting-inbox";
 const AGENT = /^agent:[A-Za-z0-9_-]{1,80}$/;
-export const INVITATION_LIMITS = { page: 50, scan: 5000 } as const;
+/** An agent's inbox keeps its newest invitations; older ones drop off the end. */
+export const INVITATION_LIMITS = { kept: 50 } as const;
 
 export interface InvitationView extends Invitation { readonly id: string }
 
 /**
- * The composed controller's invitation sink (card M01c): an invitation is a durable record addressed to the agent, written once per `Invitation.key`. The agent (or the owner for it) reads its invitations
- * through `meeting.invitations`; nothing wakes the agent. A repeat of a key changes nothing.
+ * The composed controller's invitation sink (card M01c): one inbox record per agent holding its newest invitations (50), newest first. An invitation is added once per `Invitation.key` (a repeat of the key,
+ * from a delivery that is tried again, changes nothing). The agent reads its own through `meeting.invitations`; nothing wakes the agent. No lookup scans other agents' records.
  */
 export class InvitationInbox implements InvitationSink {
   readonly #runner: CommandRunner;
@@ -23,30 +24,33 @@ export class InvitationInbox implements InvitationSink {
   }
 
   async invite(invitation: Invitation): Promise<void> {
-    const id = derivedId("mvi", invitation.key);
-    const ref = { kind: KIND, id };
-    await this.#runner.command("meeting.invite", { commandId: `mvi:${invitation.key}`, actor: "service:dispatcher" }, async () => ({
-      payload: { key: invitation.key },
-      build: async () => ({ ref, creates: true, changes: [{ type: "create" as const, ref, body: { ...invitation } as never }], detail: { occurrenceId: invitation.occurrenceId, agent: invitation.agent } }),
-    }));
+    if (!AGENT.test(invitation.agent)) throw new DomainError("invalid_command", "agent must be an agent principal ID", { field: "agent" });
+    const ref: AggregateRef = { kind: KIND, id: derivedId("mvi", invitation.agent) };
+    // Two invitations for one agent at the same moment race on its inbox record: the loser reads again.
+    for (let attempt = 0;; attempt++) {
+      try {
+        await this.#runner.command("meeting.invite", { commandId: `mvi:${invitation.key}`, actor: "service:dispatcher" }, async () => ({
+          payload: { key: invitation.key },
+          build: async () => {
+            const found = await this.#runner.get(KIND, ref.id);
+            const items = ((found?.body as unknown as { items?: Invitation[] } | undefined)?.items ?? []).filter((i) => i.key !== invitation.key);
+            const body = { agent: invitation.agent, items: [{ ...invitation }, ...items].slice(0, INVITATION_LIMITS.kept) } as unknown as JsonObject;
+            return { ref, creates: found === undefined, changes: [found === undefined ? { type: "create" as const, ref, body } : { type: "update" as const, ref, expectedRevision: found.revision, body }], detail: { occurrenceId: invitation.occurrenceId, agent: invitation.agent }, contention: async () => new DomainError("stale_revision", "the inbox changed at the same moment") };
+          },
+        }));
+        return;
+      } catch (error) {
+        if (!(error instanceof DomainError && error.code === "stale_revision") || attempt >= 5) throw error;
+      }
+    }
   }
 
-  /** The invitations addressed to one agent, oldest meeting first. An agent reads its own; the owner reads anyone's; anyone else gets nothing. */
+  /** The newest invitations addressed to one agent, newest first (at most 50). An agent reads its own, with a task credential too; the owner reads anyone's; anyone else gets nothing. */
   async forAgent(by: Principal, agent: string): Promise<InvitationView[]> {
     if (!AGENT.test(agent)) throw new DomainError("invalid_command", "agent must be an agent principal ID", { field: "agent" });
-    if (!(by.kind === "owner" || (by.id === agent && by.taskScope === undefined && by.kind === "agent"))) return [];
-    const found: InvitationView[] = [];
-    for (let after: string | undefined, seen = 0;;) {
-      const page = await this.#runner.list(KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
-      for (const a of page) {
-        after = a.id;
-        const body = a.body as unknown as Invitation;
-        if (body.agent === agent) found.push({ ...body, id: a.id });
-      }
-      seen += page.length;
-      if (seen > INVITATION_LIMITS.scan) throw new DomainError("unavailable", "too many invitations to look through safely");
-      if (page.length < 100) break;
-    }
-    return found.sort((x, y) => (x.startsAt < y.startsAt ? -1 : x.startsAt > y.startsAt ? 1 : 0)).slice(0, INVITATION_LIMITS.page);
+    if (!(by.kind === "owner" || (by.kind === "agent" && by.id === agent))) return [];
+    const found = await this.#runner.get(KIND, derivedId("mvi", agent));
+    const items = (found?.body as unknown as { items?: Invitation[] } | undefined)?.items ?? [];
+    return items.map((i) => ({ ...i, id: derivedId("mvi", i.key) }));
   }
 }

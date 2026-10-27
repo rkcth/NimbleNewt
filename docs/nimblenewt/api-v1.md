@@ -227,13 +227,13 @@ Result: `{ item }`.
 
 #### `meeting.invitations`
 
-The meeting invitations addressed to an agent (it reads its own; the owner reads anyone's; anyone else sees none). Nothing wakes the agent: it reads them when it next looks.
+The meeting invitations addressed to an agent (it reads its own, with a task credential too; the owner reads anyone's; anyone else sees none). Nothing wakes the agent: it reads them when it next looks. They go to the controller's own inbox; a host that supplies its own sink delivers them itself and this list stays empty.
 
 Arguments:
 
 - `agent`: the agent principal ID, e.g. agent:abc
 
-Result: `{ items }`, oldest meeting first, at most 50.
+Result: `{ items }`, newest first, at most 50 (older ones drop off).
 
 #### `meeting.occurrence`
 
