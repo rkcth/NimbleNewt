@@ -130,3 +130,30 @@ test("a host that cannot meet the attempt's requirements is not given it: the re
     assert.deepEqual(await client.offers(), [], "nothing was offered to that host");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+test("a failure after the listener opened (while the driver or the MCP service is built) leaves nothing listening and nothing ticking, and the local host is closed once (card H02c)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-remote-"));
+  const net = await import("node:net");
+  const freePort = async (): Promise<number> => { const s = net.createServer(); await new Promise<void>((ok) => s.listen(0, "127.0.0.1", ok)); const p = (s.address() as { port: number }).port; await new Promise<void>((ok) => s.close(() => ok())); return p; };
+  const refused = (port: number): Promise<boolean> => new Promise((ok) => { const s = net.connect(port, "127.0.0.1"); s.once("connect", () => { s.destroy(); ok(false); }); s.once("error", () => ok(true)); });
+  try {
+    let closed = 0;
+    const local = { window: () => 8192, close: async () => { closed++; }, build: () => ({ hostId: "host:w1", resources: { cpus: 1, memoryMb: 1024 } }) as never };
+    const boom = (): never => { throw new Error("injected failure"); };
+    for (const [n, inject] of [["driver", (o: Record<string, unknown>) => { Object.defineProperty(o, "intervalMs", { get: boom, enumerable: true }); }], ["mcp", (o: Record<string, unknown>) => { o["mcp"] = { resolve: async () => undefined, get gate() { return boom(); } }; }]] as const) {
+      const port = await freePort();
+      const timer = new ManualTimer();
+      const dispatch: Record<string, unknown> = { timer, local, remote: { blobDirectory: join(d, `blobs-${n}`), hosts: [], transport: { port } } };
+      inject(dispatch);
+      const c = await startController({ storage: { kind: "sqlite", path: join(d, `${n}.sqlite`) }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI], dispatch: dispatch as never });
+      try {
+        assert.equal(c.dispatch, undefined, n);
+        assert.match(c.dispatchProblem ?? "", /injected failure/, n);
+        assert.equal(await refused(port), true, `${n}: the listener that was opened is closed`);
+        assert.equal(timer.armed, false, `${n}: nothing is ticking`);
+        assert.deepEqual(timer.delays, [], `${n}: no timer was ever asked for`);
+      } finally { await c.close(); }
+    }
+    assert.equal(closed, 2, "the local host was closed once for each failed start");
+  } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});

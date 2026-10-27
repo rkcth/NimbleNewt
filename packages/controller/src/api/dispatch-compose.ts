@@ -108,6 +108,8 @@ export interface DispatchHandle {
   readonly quiesce: QuiesceCoordinator;
   /** Shuts down the local worker host the operator built, if it gave a way to. */
   readonly closeWorkers: () => Promise<void>;
+  /** The remote-worker service when `remote` was given: the owner's moves of attempts and stores, and the placement records (card H02c proves them through the composed controller). */
+  readonly remote?: RemoteWorkerService;
   /** Where remote workers connect (present when `remote` was given). */
   readonly workerUrl?: string;
   /** The host an agent's live attempt runs on, if it has one (the review service judges a reviewer's host with it, card H05b). */
@@ -284,7 +286,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     if (i.options.manual !== true) driver.start();
     return {
       dispatcher, driver, closeWorkers: async () => { await transport?.close().catch(() => undefined); await i.options.local?.close?.(); },
-      ...(transport === undefined ? {} : { workerUrl: transport.url }),
+      ...(transport === undefined ? {} : { workerUrl: transport.url }), ...(remote === undefined ? {} : { remote }),
       attemptControl: { live: (taskId) => dispatcher.liveAttemptsOf(principal, { taskId }), frozenReason: async (id) => (await dispatcher.get(principal, id))?.frozen?.reason, release: (id) => dispatcher.release(principal, id) },
       workspacePortOf: async (taskId) => {
         const capable = workers.filter((w) => w.workspace !== undefined);
