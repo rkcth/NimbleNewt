@@ -196,12 +196,20 @@ test("the owner grants and revokes rights through the state API and through the 
     assert.notEqual(foreign[0]!.status, "applied", JSON.stringify(foreign));
     assert.notEqual(foreign[0]!.status, "proposed", "text the owner did not say is not even drafted");
     // Whole words only: a prefix of the principal, and a scope the owner did not say, are refused.
-    const prefix = await turn("c3b", "give service:scanner the recovery.stall-scan right everywhere to run stall detection", [owner({ op: "grant.create", args: { ...args, grantee: "service:scan" } }, "give service:scanner")]);
+    const prefix = await turn("c3b", "give service:scanner the recovery.stall-scan right everywhere to run stall detection", [owner({ op: "grant.create", args: { ...args, grantee: "service:scan" } }, text)]);
     assert.equal(prefix[0]!.status, "refused", JSON.stringify(prefix));
-    const noScope = await turn("c3c", "give service:scanner the recovery.stall-scan right to run stall detection", [owner({ op: "grant.create", args }, "give service:scanner")]);
+    const noScope = await turn("c3c", "give service:scanner the recovery.stall-scan right to run stall detection", [owner({ op: "grant.create", args }, "give service:scanner the recovery.stall-scan right to run stall detection")]);
     assert.equal(noScope[0]!.status, "refused", "everywhere is not what the owner said");
-    const named = await turn("c3d", "give service:scanner the recovery.stall-scan right to run stall detection", [owner({ op: "grant.create", args: { ...args, projectName: "Garden" } }, "give")]);
+    const named = await turn("c3d", "give service:scanner the recovery.stall-scan right to run stall detection", [owner({ op: "grant.create", args: { ...args, projectName: "Garden" } }, "give service:scanner the recovery.stall-scan right to run stall detection")]);
     assert.equal(named[0]!.status, "refused", "the scope is `project`, not a name the chat would drop");
+    // A sentence-ending full stop is not part of the word; a scope said about something else, and a dropped time limit, are refused.
+    const stop = "give service:scanner recovery.stall-scan everywhere to run stall detection.";
+    const dotted = await turn("c3e", stop, [owner({ op: "grant.create", args }, stop)]);
+    assert.equal(dotted[0]!.status, "proposed", JSON.stringify(dotted));
+    const elsewhere = "give service:scanner recovery.stall-scan to run stall detection. There are bugs everywhere.";
+    assert.equal((await turn("c3f", elsewhere, [owner({ op: "grant.create", args }, elsewhere)]))[0]!.status, "refused");
+    const limited = "give service:scanner recovery.stall-scan everywhere until Friday to run stall detection";
+    assert.equal((await turn("c3g", limited, [owner({ op: "grant.create", args }, limited)]))[0]!.status, "refused", "the time limit may not be dropped");
     // The list is paged without skipping a grant.
     for (const n of [1, 2, 3]) await call(boot.token, "grant.create", { ...grant, basis: `extra ${n}` }, `gp${n}`);
     const first = await call(boot.token, "grant.list", { grantee: "service:scanner", limit: 2 });

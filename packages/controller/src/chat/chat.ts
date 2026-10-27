@@ -182,7 +182,9 @@ type Resolved =
  *   command ID. The stored turn links each outcome to the command IDs (and so to the audit entries) it produced.
  */
 /** True if `value` appears in `text` as a whole word: not as a part of a longer name, ID or action. */
-const wholeWord = (text: string, value: string): boolean => value.length > 0 && new RegExp(`(^|[^A-Za-z0-9:._*-])${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[^A-Za-z0-9:._*-])`, "i").test(text);
+const wholeWord = (text: string, value: string): boolean => value.length > 0 && new RegExp(`(^|[^A-Za-z0-9:._*-])${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[^A-Za-z0-9:_*-]|\\.(?![A-Za-z0-9:_*-]))`, "i").test(text);
+/** The sentence of `text` that holds `value` as a whole word (a scope or a time limit counts only when said about the same right). */
+const sentenceWith = (text: string, value: string): string | undefined => text.split(/(?<=[.!?])\s+|\n+/).find((part) => wholeWord(part, value));
 
 export class ChatService {
   readonly #runner: CommandRunner;
@@ -480,7 +482,10 @@ export class ChatService {
       for (const key of ["grantee", "action", "grantId"]) if (typeof args[key] === "string" && !wholeWord(words, args[key] as string)) return refuse("unsupported_value", `${key} is not in your message as written, so it was not done. Say it exactly.`);
       if (intent.op === "grant.create") {
         const scope = args["project"];
-        if (scope === "*") { if (!/\b(everywhere|all projects|every project)\b|\*/i.test(words)) return refuse("unsupported_value", "everywhere is not what you said, so it was not done. Name the project, or say everywhere."); }
+        const said = typeof args["grantee"] === "string" ? sentenceWith(words, args["grantee"]) ?? "" : "";
+        // A time limit the owner mentioned in that sentence cannot be dropped: the right would silently become permanent.
+        if (/\b(until|expires?|expired|temporar\w*|for (the next )?\d+ (minutes?|hours?|days?|weeks?|months?)|for (an|a|one) (hour|day|week|month))\b/i.test(said) && args["expiresAt"] === undefined) return refuse("unsupported_value", "you gave a time limit, but no end time was understood, so it was not done. Say the exact end time.");
+        if (scope === "*") { if (!/\b(everywhere|all projects|every project)\b|\*/i.test(said)) return refuse("unsupported_value", "everywhere is not what you said, so it was not done. Name the project, or say everywhere."); }
         else if (typeof scope === "string") {
           if (!wholeWord(words, scope)) return refuse("unsupported_value", "project is not in your message as written, so it was not done. Say it exactly.");
           const found = await this.#projectByIntent(token, scope, undefined);
