@@ -13,6 +13,8 @@ import { AgentService } from "../agents/index.js";
 import { HarnessCatalog, type HarnessDeclaration } from "../harness/index.js";
 import { Reconciler } from "../domain/reconcile.js";
 import { InboxService } from "../domain/inbox.js";
+import { EventService } from "../events/index.js";
+import { WatchService } from "../events/handling.js";
 import { EffectService } from "../domain/effects.js";
 import { BlockerService } from "../domain/blockers.js";
 import { ContractService, WaitGraphService } from "../planning/index.js";
@@ -243,14 +245,16 @@ export async function startController(options: StartOptions): Promise<Controller
     const notifications = NotificationService.withEpoch(storage, epoch);
     const messages = AgentMessageService.withEpoch(storage, epoch, { availability: pauses.availability, taskPaused: (t) => pauses.isPaused(t), guard: (t) => pauses.guard(t), waits, assignments, inquiries, notifications });
     const branches = ContextBranchService.withEpoch(storage, epoch, { histories, retrieval });
-    const api = new StateApi({ branches, grants, ownerQuestions: messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
+    // Event watches (card H13): an agent's watch on a stream, its handling attempts and the failed queue, which the status answers and the state API read.
+    const watchService = WatchService.withEpoch(storage, epoch, { events: EventService.withEpoch(storage, epoch), inbox: InboxService.withEpoch(storage, epoch, assignments), assignments, projects });
+    const api = new StateApi({ branches, grants, watches: watchService, ownerQuestions: messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
     let chat: ChatService | undefined;
     let coordinator: CoordinatorService | undefined;
     if (options.chat !== undefined) {
       const o = options.chat;
       // The approval profile (A07), status explanations (U05) and conversational policy edits (U04) are composed from the services built above.
       const policy = PolicyService.withEpoch(storage, epoch, grants);
-      const status = StatusService.withEpoch(storage, epoch, { assignments, waits, blockers: BlockerService.withEpoch(storage, epoch), contracts, pauses, stall });
+      const status = StatusService.withEpoch(storage, epoch, { assignments, waits, blockers: BlockerService.withEpoch(storage, epoch), contracts, pauses, stall, watch: watchService });
       const policyEdits = PolicyEditService.withEpoch(storage, epoch, { policy, reviews, grants, configuration, conversations, interpreter: o.interpreter });
       chat = ChatService.withEpoch(storage, epoch, { principals, api, interpreter: o.interpreter, policy, status, policyEdits, coordinator: () => coordinator, ...(o.coordinator === undefined ? {} : { coordinatorToken: o.coordinator.token }) });
       if (o.coordinator !== undefined) {
