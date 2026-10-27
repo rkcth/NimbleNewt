@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { OPERATION_BY_NAME } from "../api/operations.js";
 import { API_VERSION, type StateApi } from "../api/state-api.js";
-import { GATE_TOPIC, normalTopic } from "../decisions/records.js";
+import { GATE_TOPIC, normalTopic, notADecisionIn } from "../decisions/records.js";
 import { DomainError } from "../domain/errors.js";
 import { onlyKnown } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
@@ -433,6 +433,10 @@ export class ChatService {
           push({ i: items.length, kind: "apply", op: step.op, args: asJson(step.args), commandId: k === last ? `${turnId}-c${i}` : `${turnId}-c${i}-${k}`, preview: describe(step.op, step.args, resolved.labels), ...(base?.ok === true && base.value !== undefined ? { planBase: base.value } : {}) });
         }
       } else {
+        // Words that are not a decision (a question, a hypothetical) are not offered for the owner to confirm: nothing would be recorded.
+        const wordsOf = steps.find((st) => st.op === "decision.record")?.args["wording"];
+        const notDecided = typeof wordsOf === "string" ? notADecisionIn(words, wordsOf) : undefined;
+        if (notDecided !== undefined) { push({ i, kind: "ignored", reason: `Nothing was recorded: ${notDecided}` }); continue; }
         const proposalId = `prop-${hash(scopedCommandId(owner.id, `${turnId}-p${i}`))}`;
         push({ i, kind: "propose", proposalId, steps, pins: resolved.pins, preview: steps.map((st) => describe(st.op, st.args, resolved.labels)), reason: resolved.reason });
       }
@@ -982,6 +986,17 @@ export class ChatService {
       const args = substitute(step.args, results);
       const using = step.as === "coordinator" ? coordinatorToken : token;
       if (using === undefined) return { proposalId, applied: false, replayed: false, results, failure: { step: index, code: "unavailable", message: "the coordinator is not available to make this step" } };
+      if (step.op === "decision.record" && step.as === undefined) {
+        // A decision step is based on the version of its topic when it was shown, but decisions of the same message applied before it do not count as the topic having moved. A step already recorded (this apply run again) is answered from the record.
+        const done = await this.#get(token, "decision.get", { decisionId: derivedId("dec", scopedCommandId(owner.id, step.commandId)) });
+        if (done !== undefined) {
+          results.push({ op: step.op, id: done["id"] as string, shown: [`Recorded decision version ${String(done["version"])} on "${String(done["topic"] ?? "the gate")}".`], ...(step.key === undefined ? {} : { key: step.key }), accepted: true, completed: true });
+          continue;
+        }
+        const fresh = await this.#revisionFor(token, "decision", args, undefined, new Map());
+        if (!fresh.ok) return { proposalId, applied: false, replayed: false, results, failure: { step: index, code: "kind" in fresh && fresh.kind === "refuse" ? fresh.code : "invalid_command", message: "kind" in fresh && fresh.kind === "refuse" ? fresh.message : "that decision needs more from you" } };
+        args["basedOn"] = await this.#decisionBase(token, typeof args["sourceTurnId"] === "string" ? args["sourceTurnId"] : "", args, typeof args["basedOn"] === "number" ? args["basedOn"] : undefined, fresh.value as number);
+      }
       const response = await this.#deps.api.handle(using, { v: API_VERSION, op: step.op, commandId: step.commandId, args: args as Record<string, unknown> });
       if (!response.ok) return { proposalId, applied: false, replayed: false, results, failure: { step: index, code: response.error.code, message: response.error.message } };
       results.push({ op: step.op, id: response.result["id"] as string, ...(typeof response.result["revision"] === "number" ? { revision: response.result["revision"] } : {}), ...(shownOf(response.result) === undefined ? {} : { shown: shownOf(response.result) as string[] }), ...(step.key === undefined ? {} : { key: step.key }), accepted: true, completed: response.completed ?? true, ...(response.awaits === undefined ? {} : { awaits: response.awaits }) });

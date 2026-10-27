@@ -190,7 +190,7 @@ export const OPERATIONS: readonly Operation[] = [
       const source = sourceTurnId === undefined ? { channel: "direct" } : { channel: "chat", turnId: typeof sourceTurnId === "string" ? sourceTurnId : invalid("args.sourceTurnId", "must be text") };
       const result = await decisionsOf(c).record(c.principal, { commandId: need(id), ...(rest as object), source } as never) as unknown as Record<string, unknown>;
       // Said back to the owner as the record answers: what was recorded, or that nothing was and why.
-      const where = `"${String(rest["topic"] ?? "the gate")}"`;
+      const where = rest["gate"] === undefined ? `"${String(rest["topic"] ?? "the gate")}"` : `"${String(rest["topic"] ?? "the gate")}" (gate: ${String(rest["gate"]).slice(0, 40)})`;
       const shown = result["recorded"] === true && result["disputeId"] !== undefined ? [`Recorded decision version ${String(result["version"])} on ${where}, but it conflicts with a decision made after the version it was based on: nothing on ${where} is in force until you choose (decision.resolve-dispute ${String(result["disputeId"])}).`]
         : result["recorded"] === true ? [`Recorded decision version ${String(result["version"])} on ${where}: ${String(rest["statement"])}${result["propagation"] === "pending" ? " (the tasks affected are still being told)" : ""}`] : [`Nothing was recorded: ${String(result["reason"] ?? "the words are not a decision")}`];
       return asJson({ ...result, shown } as never);

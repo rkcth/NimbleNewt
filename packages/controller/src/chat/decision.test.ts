@@ -144,6 +144,48 @@ for (const backend of backends) {
     assert.ok(history.some((d) => d.state === "disputed"), "the project-wide step is a dispute");
   });
 
+  suite("two decisions on one topic in one message, shown first in the strict profile, supersede each other when applied in order and do not dispute; a change made by someone else in between still does (card C08c)", async (w, script) => {
+    const a = await w.project("A");
+    const chat = w.chat();
+    await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+    w.profile.value = "strict";
+    const dec = (statement: string, wording: string) => cmd("decision.record", { category: "decision", topic: "Store", statement, wording }, wording);
+    const text = "We will use PostgreSQL for the store. Then we will use SQLite for the store instead.";
+    script[text] = [dec("use PostgreSQL for the store", "We will use PostgreSQL for the store"), dec("use SQLite for the store", "we will use SQLite for the store instead")];
+    const r = await chat.submit(w.ownerToken, { messageId: "m-sp", text });
+    assert.deepEqual(r.outcomes.map((o) => o.status), ["proposed", "proposed"]);
+    for (const o of r.outcomes) assert.equal((await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: o.proposalId! })).applied, true);
+    const history = await w.decisions.history(w.owner, { projectId: a, topic: "store" });
+    assert.deepEqual(history.map((d) => [d.version, d.state]), [[1, "superseded"], [2, "active"]], "the second supersedes the first from the same message");
+    // Someone else decides between the showing and the yes: that is a dispute.
+    const next = "We will use MySQL for the store.";
+    script[next] = [dec("use MySQL for the store", next)];
+    const shown = (await chat.submit(w.ownerToken, { messageId: "m-sp2", text: next })).outcomes[0]!;
+    await w.decisions.record(w.owner, { commandId: cid("mid"), projectId: a, category: "decision", topic: "Store", statement: "use Oracle for the store", wording: "We will use Oracle for the store", source: { channel: "direct" }, basedOn: 2 } as never);
+    assert.equal((await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: shown.proposalId! })).applied, true);
+    assert.equal((await w.decisions.history(w.owner, { projectId: a, topic: "store" })).some((d) => d.state === "disputed"), true);
+  });
+
+  suite("the gate kind is the first thing the owner is shown, however long the other texts are; words that are only a question are not offered as a gate (card C08c)", async (w, script) => {
+    const a = await w.project("A");
+    const long = "Migrate the reporting pipeline from the legacy batch scheduler to the new streaming ingestion service with full backfill, schema versioning, consumer cutover and old cron hosts gone";
+    const t = await w.task(a, long);
+    const chat = w.chat();
+    await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+    const hold = "Hold everything on the reporting pipeline migration until the security review of the streaming ingestion service has finished and I have read it. Do not lift any hold yet.";
+    script[hold] = [cmd("decision.record", { taskId: t, category: "gate", statement: hold, wording: hold, gate: "open" }, hold)];
+    const o = only((await chat.submit(w.ownerToken, { messageId: "m-gk", text: hold })).outcomes);
+    assert.equal(o.status, "proposed", JSON.stringify(o));
+    const preview = JSON.stringify(o);
+    assert.match(preview, /gate=open/, "the kind is in what the owner is shown");
+    assert.ok(preview.indexOf("gate=open") < preview.indexOf("statement="), "and comes before the long texts");
+    const question = "Should we hold all implementation until the audit?";
+    script[question] = [cmd("decision.record", { category: "gate", gate: "implementation-hold", statement: "hold all implementation until the audit", wording: "hold all implementation until the audit" }, "hold all implementation until the audit")];
+    const q = only((await chat.submit(w.ownerToken, { messageId: "m-gq", text: question })).outcomes);
+    assert.notEqual(q.status, "proposed", "a question is not offered for confirmation");
+    assert.match(JSON.stringify(q), /Nothing was recorded/);
+  });
+
   suite("a turn sent twice at once: the copy that finds its decision recorded between the look and the send answers applied, not command_conflict (card C08b)", async (w, script) => {
     const a = await w.project("A");
     await w.chat().setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });

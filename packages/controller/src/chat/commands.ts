@@ -176,7 +176,10 @@ const short = (value: unknown): string => {
 export function describe(op: string, args: Readonly<Record<string, unknown>>, labels: Readonly<Record<string, string>>): string {
   const spec = CHAT_OPS[op];
   const parts: string[] = [];
-  for (const [key, value] of Object.entries(args)) {
+  // What a decision is (a gate and its kind above all) is said first, so a long text or label after it can never push it off the line.
+  const first = op === "decision.record" ? ["category", "gate"] : [];
+  const ordered = [...first.filter((k) => k in args).map((k): [string, unknown] => [k, args[k]]), ...Object.entries(args).filter(([k]) => !first.includes(k))];
+  for (const [key, value] of ordered) {
     if (key === "expectedRevision" || key === "expectedVersion") continue;
     const label = typeof value === "string" ? labels[value] : undefined;
     parts.push(`${key}=${label === undefined ? short(value) : `"${label}"`}`);
