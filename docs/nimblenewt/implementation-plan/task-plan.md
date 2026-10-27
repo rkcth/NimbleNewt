@@ -34,12 +34,12 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
 | N05 / AII-255 | L05, L05b, L01, L01b, L02, L03, L04, L06, H08 |
 | N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A08, A08b, A08c, A09, A10, A10b |
-| N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C08, C09, C08b |
+| N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C08, C09, C08b, C08c, C08d |
 | N08 / AII-258 | R01, R02, R03, R04, R05, R05b, R05c, R05d, R05f, R05e |
 | N09 / AII-259 | U03, U03d, U03e, U05b, U04, U05, U06, U03b, U03c, U07, U09, U08, U10, U11, U11b |
 | N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H02b, H02c |
 | N11 / AII-261 | V01, V01b, V02 |
-| N12 / AII-262 | M01b, M01c, M00, M01, M02, M03, M04, M05, M05b, M06 |
+| N12 / AII-262 | M01b, M01c, M01d, M00, M01, M02, M03, M04, M05, M05b, M06 |
 | N13 / AII-263 | T01, T02, T03, T06, T06b, T07, T07b, T08, T09 |
 | N14 / AII-264 | P01b, P01c, P01, P02, P02b, P03, P04, P05, P06, P07 |
 | N15 / AII-265 | Q01, Q02, Q03, Q04 |
@@ -993,7 +993,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Parent:** N10 / AII-260.
 - **Blockers:** H12l, A04, H12b, H02.
 - **Deliverable:** Split from H12l (2026-10-27): the controller asks a host through the WorkspacePort and the simulated hosts answer; the local host's port (GitBridge refresh and integrate with the controller's write bridge, the A03 quarantine) and a remote host's message for it are not yet built.
-- **Acceptance and verification:** The LocalWorker host answers refresh, integration and quarantine against a real checkout (real git, the shared repository untouched unless integration is requested, a dirty checkout refused for refresh); a remote host carries the same request over the authenticated transport and answers the same typed outcomes; a host that cannot do an operation says so as a typed refusal; the checkout of a task with no live attempt is found on the host that holds it (the task's last placement), not only when one host is capable, and a live attempt waiting with no pinned host does not fall through to another host; the port is reachable only through the workspace service (workspacePortOf is not public); an attempt that starts while an operation runs waits for it; the agent is told when its checkout changed and a quarantined checkout parks or stops the attempt; the request is recorded against the task's assignee; release (A06) is wrapped.
+- **Acceptance and verification:** The LocalWorker host answers refresh, integration and quarantine against a real checkout (real git, the shared repository untouched unless integration is requested, a dirty checkout refused for refresh); a remote host carries the same request over the authenticated transport and answers the same typed outcomes; a host that cannot do an operation says so as a typed refusal; the checkout of a task with no live attempt is found on the host that holds it (the task's last placement), not only when one host is capable, and a live attempt waiting with no pinned host does not fall through to another host; the port is reachable only through the workspace service (workspacePortOf is not public); an attempt that starts while an operation runs waits for it; the agent is told when its checkout changed and a quarantined checkout parks or stops the attempt; the request is recorded against the task's assignee; release (A06) is wrapped; a failed release on the quiesce error path opens a blocker and does not leave a freeze marker unseen.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### H12e — Route Pi model calls through the cache adapter
@@ -1284,6 +1284,30 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Blockers:** M01.
 - **Deliverable:** Split from M01 (2026-10-27): the API instance has no owner time zone setting and no invitation sink, so schedules must name a zone and invitations are decided only by the dispatcher instance; A schedule without a zone uses the owner meeting.timeZone setting; invitations reach agents through a host sink in the composed controller.
 - **Acceptance and verification:** Composed test for a schedule without a zone and a delivered invitation.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### C08c — Propose chat gates and strict decisions before applying them
+
+- **Parent:** N07 / AII-257.
+- **Blockers:** C08b.
+- **Deliverable:** Owner answers (2026-10-27): a gate set from the owner chat is shown as a proposal the owner confirms, and decision.record in the strict profile is shown as a proposal first while other profiles apply at once; Chat gates and strict-profile decisions wait for the owner's yes and change nothing before it.
+- **Acceptance and verification:** Composed tests for a chat gate proposal, a strict decision proposal, and the unchanged other profiles.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### C08d — Turn a replayed chat turn after a topic change into a dispute
+
+- **Parent:** N07 / AII-257.
+- **Blockers:** C08b.
+- **Deliverable:** Owner answer (2026-10-27): a crashed chat turn resent after the topic changed reads the current version and can overwrite the change; A replayed unrecorded step whose topic changed since the turn began becomes a dispute and never overwrites.
+- **Acceptance and verification:** Crash-then-edit-then-resend test records a dispute and keeps the edit.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### M01d — Keep invited agents free for a configurable lead time before a meeting
+
+- **Parent:** N12 / AII-262.
+- **Blockers:** M01c.
+- **Deliverable:** Owner answer (2026-10-27): the invitation inbox is a pull list and nothing wakes the agent; A setting meeting.leadMinutes (default 5) keeps invited idle agents free and nudges them when the invitation is made; a busy agent is never interrupted and sees the invitation at its next stopping point.
+- **Acceptance and verification:** Composed test for an idle agent nudged within the lead time and a busy agent left alone.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### H02b — Fence a remote handle's controls by placement and close every failed startup
@@ -1939,7 +1963,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D03 — Approve release readiness and publication decision
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, H02b, P01c, H02c, R05f.
+- **Blockers:** X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f.
 - **Deliverable:** Exact release manifest, known limitations and owner signoff.
 - **Acceptance and verification:** All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

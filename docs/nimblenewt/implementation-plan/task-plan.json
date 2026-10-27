@@ -2671,7 +2671,7 @@
         "H02"
       ],
       "deliverable": "Split from H12l (2026-10-27): the controller asks a host through the WorkspacePort and the simulated hosts answer; the local host's port (GitBridge refresh and integrate with the controller's write bridge, the A03 quarantine) and a remote host's message for it are not yet built",
-      "acceptance_and_verification": "The LocalWorker host answers refresh, integration and quarantine against a real checkout (real git, the shared repository untouched unless integration is requested, a dirty checkout refused for refresh); a remote host carries the same request over the authenticated transport and answers the same typed outcomes; a host that cannot do an operation says so as a typed refusal; the checkout of a task with no live attempt is found on the host that holds it (the task's last placement), not only when one host is capable, and a live attempt waiting with no pinned host does not fall through to another host; the port is reachable only through the workspace service (workspacePortOf is not public); an attempt that starts while an operation runs waits for it; the agent is told when its checkout changed and a quarantined checkout parks or stops the attempt; the request is recorded against the task's assignee; release (A06) is wrapped",
+      "acceptance_and_verification": "The LocalWorker host answers refresh, integration and quarantine against a real checkout (real git, the shared repository untouched unless integration is requested, a dirty checkout refused for refresh); a remote host carries the same request over the authenticated transport and answers the same typed outcomes; a host that cannot do an operation says so as a typed refusal; the checkout of a task with no live attempt is found on the host that holds it (the task's last placement), not only when one host is capable, and a live attempt waiting with no pinned host does not fall through to another host; the port is reachable only through the workspace service (workspacePortOf is not public); an attempt that starts while an operation runs waits for it; the agent is told when its checkout changed and a quarantined checkout parks or stops the attempt; the request is recorded against the task's assignee; release (A06) is wrapped; a failed release on the quiesce error path opens a blocker and does not leave a freeze marker unseen",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -3486,6 +3486,57 @@
         "note": "The owner time zone and a per-agent invitation inbox are wired into the composed meetings; a task credential sees only its own project.",
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
       }
+    },
+    {
+      "id": "C08c",
+      "parent": "N07",
+      "existing_issue": "AII-257",
+      "title": "Propose chat gates and strict decisions before applying them",
+      "depends_on": [
+        "C08b"
+      ],
+      "deliverable": "Owner answers (2026-10-27): a gate set from the owner chat is shown as a proposal the owner confirms, and decision.record in the strict profile is shown as a proposal first while other profiles apply at once; Chat gates and strict-profile decisions wait for the owner's yes and change nothing before it",
+      "acceptance_and_verification": "Composed tests for a chat gate proposal, a strict decision proposal, and the unchanged other profiles",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "C08d",
+      "parent": "N07",
+      "existing_issue": "AII-257",
+      "title": "Turn a replayed chat turn after a topic change into a dispute",
+      "depends_on": [
+        "C08b"
+      ],
+      "deliverable": "Owner answer (2026-10-27): a crashed chat turn resent after the topic changed reads the current version and can overwrite the change; A replayed unrecorded step whose topic changed since the turn began becomes a dispute and never overwrites",
+      "acceptance_and_verification": "Crash-then-edit-then-resend test records a dispute and keeps the edit",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "M01d",
+      "parent": "N12",
+      "existing_issue": "AII-262",
+      "title": "Keep invited agents free for a configurable lead time before a meeting",
+      "depends_on": [
+        "M01c"
+      ],
+      "deliverable": "Owner answer (2026-10-27): the invitation inbox is a pull list and nothing wakes the agent; A setting meeting.leadMinutes (default 5) keeps invited idle agents free and nudges them when the invitation is made; a busy agent is never interrupted and sees the invitation at its next stopping point",
+      "acceptance_and_verification": "Composed test for an idle agent nudged within the lead time and a busy agent left alone",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
       "id": "H02b",
@@ -5261,6 +5312,9 @@
         "P01b",
         "M01b",
         "M01c",
+        "C08c",
+        "C08d",
+        "M01d",
         "H02b",
         "P01c",
         "H02c",
