@@ -82,21 +82,21 @@ for (const backend of backends) {
     const h = await c.host("h1", { connect: false });
     const seen: Offer[] = [];
     const stop = new AbortController();
-    const poller = new HostPoller({ client: h.client, capabilities: REMOTE_CAPS, waitMs: 2000, heartbeatMs: 400, minGapMs: 0, spreadMs: 0, onOffers: async (o) => { seen.push(...o); } });
+    const poller = new HostPoller({ client: h.client, capabilities: REMOTE_CAPS, waitMs: 2000, heartbeatMs: 400, minGapMs: 100, spreadMs: 0, onOffers: async (o) => { seen.push(...o); } });
     const running = poller.run(stop.signal);
+    try {
     await sleepMs(300);
     assert.ok(h.client.session !== undefined, "connected");
     assert.equal((await c.hosts.status(c.dispatcherPrincipal, h.id))?.freshness, "fresh", "heartbeats went");
     const attemptId = await offered(c, h);
     for (let i = 0; i < 100 && seen.length === 0; i++) await sleepMs(20);
-    assert.deepEqual(seen.map((o) => o.order.attemptId), [attemptId]);
+    assert.deepEqual([...new Set(seen.map((o) => o.order.attemptId))], [attemptId], "the offer is handed over (again, until it is accepted)");
     // Accepted, the offer is not offered again; the poller keeps one poll open.
     await h.client.attempt(attemptId, seen[0]!.placement).accept();
     await sleepMs(300);
     assert.equal(seen.length >= 1 && seen.every((o) => o.order.attemptId === attemptId), true);
     assert.ok(c.remote.pollStats(c.dispatcherPrincipal).open <= 1);
-    stop.abort();
-    await running;
+    } finally { stop.abort(); await running; }
   });
 
   suite("a poller reconnects after its session is replaced, and waits the longest when the controller refuses its credential (card H07)", async (c) => {
@@ -109,6 +109,7 @@ for (const backend of backends) {
       onOffers: async () => undefined, onTrouble: (e) => { troubles.push(`${e.kind}:${e.error instanceof WorkerRequestError ? e.error.code : "other"}`); },
     });
     const running = poller.run(stop.signal);
+    try {
     await sleepMs(200);
     const before = h.client.session!.sessionId;
     // Another process connects with the same credential: the poller's session is gone.
@@ -123,8 +124,7 @@ for (const backend of backends) {
     for (let i = 0; i < 100 && delays.length === mark; i++) await sleepMs(20);
     await sleepMs(50);
     assert.ok(delays.slice(mark).every((d) => d >= 30 && d <= 40) && delays.length > mark, JSON.stringify(delays.slice(mark)));
-    stop.abort();
-    await running;
+    } finally { stop.abort(); await running; }
   });
 
   suite("placement looks only at hosts of the platform an attempt needs and says plainly why the others cannot take it, and what a platform nobody has means (card H07)", async (c) => {
@@ -176,6 +176,7 @@ for (const backend of backends) {
     suite(`a poll started ${delay} ms into the making of an offer is answered by it, not after the whole wait (card H07)`, async (c) => {
       const h = await c.host("h1");
       const made = offered(c, h);
+      made.catch(() => undefined);
       await sleepMs(delay);
       const t = Date.now();
       const got = await h.client.offers({ waitMs: 4000 });
@@ -227,6 +228,7 @@ for (const backend of backends) {
       const troubles: string[] = [];
       const waitMs = 6000;
       const runs = hosts.map((h, i) => new HostPoller({ client: h.client, capabilities: REMOTE_CAPS, waitMs, heartbeatMs: 30_000, minGapMs: 0, spreadMs: 100, random: seeded(i + 1), onOffers: async () => undefined, onTrouble: (e) => { troubles.push(String((e.error as Error).message ?? e.error)); } }).run(stop.signal));
+      try {
       // Connecting a hundred hosts is a few hundred commands on one store; wait until they all hold a poll, then look at a window.
       for (let i = 0; i < 1200 && c.remote.pollStats(c.dispatcherPrincipal).open < 95; i++) await sleepMs(50);
       const mid = c.remote.pollStats(c.dispatcherPrincipal);
@@ -253,6 +255,7 @@ for (const backend of backends) {
       assert.ok(used >= 100 * 1.5, `${used}`);
       assert.equal(end.superseded, 0, "no host ever had two polls at once");
       assert.equal((await Promise.all(hosts.slice(0, 5).map((h) => c.hosts.status(c.dispatcherPrincipal, h.id)))).every((s) => s?.freshness === "fresh"), true);
+      } finally { stop.abort(); await Promise.all(runs); }
     });
   }
 }

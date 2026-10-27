@@ -35,12 +35,12 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N05 / AII-255 | L05, L05b, L01, L01b, L02, L03, L04, L06, H08 |
 | N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A08, A08b, A08c, A09, A10, A10b |
 | N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C08, C09, C08b, C08c, C08d |
-| N08 / AII-258 | R01, R02, R03, R04, R05, R05b, R05c, R05d, R05f, R05e |
+| N08 / AII-258 | R01, R02, R03, R04, R05, R05b, R05c, R05d, R05f, R05g, R05e |
 | N09 / AII-259 | U03, U03d, U03e, U05b, U04, U05, U06, U03b, U03c, U07, U09, U08, U10, U11, U11b |
-| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H02b, H02c |
-| N11 / AII-261 | V01, V01b, V02 |
+| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H07b, H02e, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H02b, H02c, H02d |
+| N11 / AII-261 | V01, V01b, V01c, V02 |
 | N12 / AII-262 | M01b, M01c, M01d, M00, M01, M02, M03, M04, M05, M05b, M06 |
-| N13 / AII-263 | T01, T02, T03, T06, T06b, T07, T07b, T08, T09 |
+| N13 / AII-263 | T01, T02, T03, T06, T06b, T07, T07b, T08, T09, T09b |
 | N14 / AII-264 | P01b, P01c, P01, P02, P02b, P03, P04, P05, P06, P07 |
 | N15 / AII-265 | Q01, Q02, Q03, Q04 |
 | N16 / AII-266 | B01 |
@@ -900,6 +900,22 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** 100 simulated idle hosts and reconnect burst stay within measured resource limits; unavailable platforms wait visibly; no per-agent idle polling storm; placement filters on data-location policy and repository access, and credentials are delivered per attempt only to eligible hosts.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
+### H07b — Choose hosts by candidates, fall back on refusal and run the host poller in the worker process
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H07, H12a.
+- **Deliverable:** Split from H07 (2026-10-27): the dispatcher picks among hosts with the placement candidates and tries the next when a placement is refused; the worker process runs the host poller; a poll ends when its client disconnects; the placement policy is checked again at delivery; the platform index drops revoked hosts and is filled at a controller restart.
+- **Acceptance and verification:** An attempt whose first host is refused by policy starts on another eligible host and says why in the plan; a worker process polls with one held request and exits cleanly on stop; a revoked host leaves the index; a policy change before delivery withholds the offer.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### H02e — Stop a poll from deleting a re-placed offer
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H02, H07.
+- **Deliverable:** Found in review of H07 (2026-10-27): the pending-offers read deletes an offer when the stored placement number differs from the one it read before an await, so an attempt placed again while a poll iterates can lose its new offer until the lease ends.
+- **Acceptance and verification:** A test places an attempt again while a poll is reading and the new offer is still delivered; a mutation that restores the deletion fails it.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
 ### H08 — Implement remote disconnect watchdog and hard stop
 
 - **Parent:** N05 / AII-255.
@@ -1153,9 +1169,17 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### R05f — Charge supervision, review and background jobs and prove the charges through the state API
 
 - **Parent:** N08 / AII-258.
-- **Blockers:** R05d, T07b.
+- **Blockers:** R05d.
 - **Deliverable:** Split from R05d (2026-10-27): meeting presence is charged but supervisor activity, reviews and background jobs are not, the job service is not composed in the controller, a charge lost while the ledger was down is not found again, no composed test shows a held meeting in budget.usage, and meeting-turn model use must not be counted twice against the same meeting task.
 - **Acceptance and verification:** Supervisor activity, reviews and background jobs are charged to the task they serve or to a named shared-overhead category by their own services; a charge that failed is retried until it lands; a held meeting appears in budget.usage through the composed controller; nothing is charged twice (a meeting turn dispatched as an attempt is not also charged as presence); tests: Tests for each activity and a composed test through the state API.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### R05g — Retry lost charges and prove a held meeting through budget.usage
+
+- **Parent:** N08 / AII-258.
+- **Blockers:** R05f.
+- **Deliverable:** Split from R05f (2026-10-27): a charge that failed while the ledger was down is retried by the owner of the charge until it lands exactly once, and a held meeting's attendance charge is read back through the state API's budget.usage.
+- **Acceptance and verification:** A charge refused while the ledger is unavailable is retried after it returns and appears once in budget.usage with the right basis and actor; a repeat never doubles it; the held-meeting charge is proved through budget.usage in the composed controller.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### U01 — Implement versioned state query/write API
@@ -1263,7 +1287,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Parent:** N14 / AII-264.
 - **Blockers:** P01b.
 - **Deliverable:** Split from P01b (2026-10-27): the overlap check and the lookup of live tasks pinned to a checkout still scan every project's resources; a scan limit should open a blocker instead of failing.
-- **Acceptance and verification:** The overlap and pinned-task lookups read one project's records; a scan limit opens a blocker with a reason; tests: Tests with many projects and a tight limit.
+- **Acceptance and verification:** The pinned-task lookup reads the binding's own pin list; the overlap check reads one registry record per project (the limit counts projects, not bindings), since an overlap is between projects; a scan limit on a pin opens a blocker with a reason; tests: Tests with many bindings and projects and a tight limit.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### M01b — Hold meetings with real participants through the composed API
@@ -1326,6 +1350,14 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Blockers:** H02b.
 - **Deliverable:** Split from H02b (2026-10-27): partition and delayed-packet fencing, no self-promotion, relocation with integrity and policy refusals, the exclusive native-store owner, the production host stop path, closing the listener when a step fails after it opened, and no driver started when a later startup step fails are not yet proven through the composed controller.
 - **Acceptance and verification:** Each named clause holds through the composed controller and the production host; a failure injected into the driver or MCP construction after the listener opened leaves nothing listening or ticking; a new host's checkpoint can never answer an old handle's request; tests: Composed tests per clause.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### H02d — Finish the composed-controller proofs of remote stop, checkpoint fencing and relocation refusals
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H02c.
+- **Deliverable:** Split from H02c (2026-10-27): the production host's stop path reaches a remote worker's poll and ends the attempt; a new host's checkpoint never answers an old handle's request in the dispatcher's checkpoint wait; a worker has no route that admits work and unknown request fields are refused; relocation refusals by platform, workspace paths and credential policy through the composed controller.
+- **Acceptance and verification:** Each clause is proved over the real transport in a started controller with a mutation check; a stop issued by the owner ends a remote attempt through the worker's own poll; a stale handle's checkpoint request is never answered by the new host.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### U04 — Implement conversational policy editing
@@ -1456,6 +1488,14 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Blockers:** V01, H12, H12b, H12e.
 - **Deliverable:** Split from V01 on the owner's direction (2026-10-26): V01 judges an open request against a fixed time per difficulty, so a local model that needs twenty minutes to read a 120,000-token prompt at 100 tokens a second is reported as a stuck request before it has begun. The prompt size is not known from the relay at the start of a request (usage arrives after the reply), so the start of a request records an estimate: the request body's characters divided by the route's calibrated characters per token, less the share the cache adapter expects to be cached (the request_started event gains an optional prompt-size field); the controller measures the reading and writing speed per route and host from finished requests (the relay is extended to report the input and output token counts of every call, not only the first call's input as today, and the time from the request's start to its first output and to its end), and a first-output event is added to the evidence and the allowed time of a request is the larger of the difficulty's time and a margin over the time the prompt should take at the measured speed.
 - **Acceptance and verification:** A request for a large prompt on a slow local route is not reported as stuck while the expected reading time has not passed, and is reported when it passes by the margin; a hosted route with a fast reader keeps the difficulty's time; a route with no measurement yet uses a declared speed from the route settings, else a stated cautious default that is shown in the concern text; a cached prefix shortens the expected time by the cached share (without the cache adapter's expectation the whole estimate is used); the same reading allowance applies to the silence concern while a request is open and has produced no output, so a long read is neither a stuck request nor silence; the first-output event counts as progress and ends the reading allowance; while output continues the model relay (which sees the stream, and also reports the first output) reports output progress at a bounded interval (a count of tokens written so far), each report counting as progress, so a slow local model that writes for longer than the silence threshold is not reported as silent, and a stream that stops producing for the ordinary silence threshold is; the measured speed is a smoothed value that one slow request cannot collapse or one fast request inflate; a stuck-request concern states the prompt size, the speed used and the time expected so the supervisor can tell a slow model from a dead one; the thresholds and the margin are settings.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### V01c — Read the declared model speed from the routing table and the cache share from the cache adapter
+
+- **Parent:** N11 / AII-261.
+- **Blockers:** V01b.
+- **Deliverable:** Split from V01b (2026-10-27): a route's declared reading and writing speed comes from its route settings in the routing table, and request_started carries the cache adapter's expected cached share.
+- **Acceptance and verification:** A started controller with a routing table that declares a speed uses it for the first stall judgement without StartOptions.stall; a cached prompt gets a shorter reading allowance than an uncached one of the same size; a route with no declaration falls back to the default and says so.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### V02 — Implement bounded supervisor recovery
@@ -1628,6 +1668,14 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Blockers:** T06, H11, U03.
 - **Deliverable:** Command dispatcher over the F07 registry: /nimblenewt.*, /toolbox.*, canonical /a_<id>.* agent prefixes and optional context-bound /agent.* and /custom.* aliases, resolved and bound before queuing, with UI actions and tool calls mapped to the same operation (runtime-compatibility-and-namespaces 13-28, 56-58; README 269).
 - **Acceptance and verification:** The runtime-compatibility 56-58 cases pass; queued work stores the resolved canonical target; an ambiguous alias stays unresolved and asks; aliases resolve only in their bound context; renaming an agent changes no canonical command or record; operation ID, schema version, owner, revision and display name are kept separate; lowercase grammar with normalized or encoded collisions rejected and no last-installed-wins; agents cannot claim /nimblenewt.* or /toolbox.*; the provider wire-name mapping stays collision-free per provider.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### T09b — Wire command namespaces into the controller, state API and chat and execute queued commands
+
+- **Parent:** N13 / AII-263.
+- **Blockers:** T09.
+- **Deliverable:** Split from T09 (2026-10-27): the catalog becomes a controller service, aliases and queued commands are reachable from the state API and the chat, a queued command is executed under the caller's rights, scoped /toolbox. names exist, an alias's scope is tied to grants, and agents show friendly names.
+- **Acceptance and verification:** A command typed in the owner chat resolves, is queued, runs under the typist's rights and is answered once; an ambiguous or unknown name gets a plain answer; a replay never runs twice; another principal cannot run or see an alias it was not given.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### P01 — Implement repository-independent projects and responsibilities
@@ -1963,7 +2011,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D03 — Approve release readiness and publication decision
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f.
+- **Blockers:** X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, T09b, H07, H07b, H02e, T09, A07d.
 - **Deliverable:** Exact release manifest, known limitations and owner signoff.
 - **Acceptance and verification:** All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

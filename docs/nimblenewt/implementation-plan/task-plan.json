@@ -2420,6 +2420,42 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "H07b",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Choose hosts by candidates, fall back on refusal and run the host poller in the worker process",
+      "depends_on": [
+        "H07",
+        "H12a"
+      ],
+      "deliverable": "Split from H07 (2026-10-27): the dispatcher picks among hosts with the placement candidates and tries the next when a placement is refused; the worker process runs the host poller; a poll ends when its client disconnects; the placement policy is checked again at delivery; the platform index drops revoked hosts and is filled at a controller restart",
+      "acceptance_and_verification": "An attempt whose first host is refused by policy starts on another eligible host and says why in the plan; a worker process polls with one held request and exits cleanly on stop; a revoked host leaves the index; a policy change before delivery withholds the offer",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "H02e",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Stop a poll from deleting a re-placed offer",
+      "depends_on": [
+        "H02",
+        "H07"
+      ],
+      "deliverable": "Found in review of H07 (2026-10-27): the pending-offers read deletes an offer when the stored placement number differs from the one it read before an await, so an attempt placed again while a poll iterates can lose its new offer until the lease ends",
+      "acceptance_and_verification": "A test places an attempt again while a poll is reading and the new offer is still delivered; a mutation that restores the deletion fails it",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "H08",
       "parent": "N05",
       "existing_issue": "AII-255",
@@ -3106,11 +3142,27 @@
       "existing_issue": "AII-258",
       "title": "Charge supervision, review and background jobs and prove the charges through the state API",
       "depends_on": [
-        "R05d",
-        "T07b"
+        "R05d"
       ],
       "deliverable": "Split from R05d (2026-10-27): meeting presence is charged but supervisor activity, reviews and background jobs are not, the job service is not composed in the controller, a charge lost while the ledger was down is not found again, no composed test shows a held meeting in budget.usage, and meeting-turn model use must not be counted twice against the same meeting task",
       "acceptance_and_verification": "Supervisor activity, reviews and background jobs are charged to the task they serve or to a named shared-overhead category by their own services; a charge that failed is retried until it lands; a held meeting appears in budget.usage through the composed controller; nothing is charged twice (a meeting turn dispatched as an attempt is not also charged as presence); tests: Tests for each activity and a composed test through the state API",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "R05g",
+      "parent": "N08",
+      "existing_issue": "AII-258",
+      "title": "Retry lost charges and prove a held meeting through budget.usage",
+      "depends_on": [
+        "R05f"
+      ],
+      "deliverable": "Split from R05f (2026-10-27): a charge that failed while the ledger was down is retried by the owner of the charge until it lands exactly once, and a held meeting's attendance charge is read back through the state API's budget.usage",
+      "acceptance_and_verification": "A charge refused while the ledger is unavailable is retried after it returns and appears once in budget.usage with the right basis and actor; a repeat never doubles it; the held-meeting charge is proved through budget.usage in the composed controller",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -3422,7 +3474,7 @@
         "P01b"
       ],
       "deliverable": "Split from P01b (2026-10-27): the overlap check and the lookup of live tasks pinned to a checkout still scan every project's resources; a scan limit should open a blocker instead of failing",
-      "acceptance_and_verification": "The overlap and pinned-task lookups read one project's records; a scan limit opens a blocker with a reason; tests: Tests with many projects and a tight limit",
+      "acceptance_and_verification": "The pinned-task lookup reads the binding's own pin list; the overlap check reads one registry record per project (the limit counts projects, not bindings), since an overlap is between projects; a scan limit on a pin opens a blocker with a reason; tests: Tests with many bindings and projects and a tight limit",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -3576,6 +3628,23 @@
       ],
       "deliverable": "Split from H02b (2026-10-27): partition and delayed-packet fencing, no self-promotion, relocation with integrity and policy refusals, the exclusive native-store owner, the production host stop path, closing the listener when a step fails after it opened, and no driver started when a later startup step fails are not yet proven through the composed controller",
       "acceptance_and_verification": "Each named clause holds through the composed controller and the production host; a failure injected into the driver or MCP construction after the listener opened leaves nothing listening or ticking; a new host's checkpoint can never answer an old handle's request; tests: Composed tests per clause",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "H02d",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Finish the composed-controller proofs of remote stop, checkpoint fencing and relocation refusals",
+      "depends_on": [
+        "H02c"
+      ],
+      "deliverable": "Split from H02c (2026-10-27): the production host's stop path reaches a remote worker's poll and ends the attempt; a new host's checkpoint never answers an old handle's request in the dispatcher's checkpoint wait; a worker has no route that admits work and unknown request fields are refused; relocation refusals by platform, workspace paths and credential policy through the composed controller",
+      "acceptance_and_verification": "Each clause is proved over the real transport in a started controller with a mutation check; a stop issued by the owner ends a remote attempt through the worker's own poll; a stale handle's checkpoint request is never answered by the new host",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -3943,6 +4012,23 @@
       ],
       "deliverable": "Split from V01 on the owner's direction (2026-10-26): V01 judges an open request against a fixed time per difficulty, so a local model that needs twenty minutes to read a 120,000-token prompt at 100 tokens a second is reported as a stuck request before it has begun. The prompt size is not known from the relay at the start of a request (usage arrives after the reply), so the start of a request records an estimate: the request body's characters divided by the route's calibrated characters per token, less the share the cache adapter expects to be cached (the request_started event gains an optional prompt-size field); the controller measures the reading and writing speed per route and host from finished requests (the relay is extended to report the input and output token counts of every call, not only the first call's input as today, and the time from the request's start to its first output and to its end), and a first-output event is added to the evidence and the allowed time of a request is the larger of the difficulty's time and a margin over the time the prompt should take at the measured speed",
       "acceptance_and_verification": "A request for a large prompt on a slow local route is not reported as stuck while the expected reading time has not passed, and is reported when it passes by the margin; a hosted route with a fast reader keeps the difficulty's time; a route with no measurement yet uses a declared speed from the route settings, else a stated cautious default that is shown in the concern text; a cached prefix shortens the expected time by the cached share (without the cache adapter's expectation the whole estimate is used); the same reading allowance applies to the silence concern while a request is open and has produced no output, so a long read is neither a stuck request nor silence; the first-output event counts as progress and ends the reading allowance; while output continues the model relay (which sees the stream, and also reports the first output) reports output progress at a bounded interval (a count of tokens written so far), each report counting as progress, so a slow local model that writes for longer than the silence threshold is not reported as silent, and a stream that stops producing for the ordinary silence threshold is; the measured speed is a smoothed value that one slow request cannot collapse or one fast request inflate; a stuck-request concern states the prompt size, the speed used and the time expected so the supervisor can tell a slow model from a dead one; the thresholds and the margin are settings",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "V01c",
+      "parent": "N11",
+      "existing_issue": "AII-261",
+      "title": "Read the declared model speed from the routing table and the cache share from the cache adapter",
+      "depends_on": [
+        "V01b"
+      ],
+      "deliverable": "Split from V01b (2026-10-27): a route's declared reading and writing speed comes from its route settings in the routing table, and request_started carries the cache adapter's expected cached share",
+      "acceptance_and_verification": "A started controller with a routing table that declares a speed uses it for the first stall judgement without StartOptions.stall; a cached prompt gets a shorter reading allowance than an uncached one of the same size; a route with no declaration falls back to the default and says so",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -4398,6 +4484,23 @@
       ],
       "deliverable": "Command dispatcher over the F07 registry: /nimblenewt.*, /toolbox.*, canonical /a_<id>.* agent prefixes and optional context-bound /agent.* and /custom.* aliases, resolved and bound before queuing, with UI actions and tool calls mapped to the same operation (runtime-compatibility-and-namespaces 13-28, 56-58; README 269)",
       "acceptance_and_verification": "The runtime-compatibility 56-58 cases pass; queued work stores the resolved canonical target; an ambiguous alias stays unresolved and asks; aliases resolve only in their bound context; renaming an agent changes no canonical command or record; operation ID, schema version, owner, revision and display name are kept separate; lowercase grammar with normalized or encoded collisions rejected and no last-installed-wins; agents cannot claim /nimblenewt.* or /toolbox.*; the provider wire-name mapping stays collision-free per provider",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "T09b",
+      "parent": "N13",
+      "existing_issue": "AII-263",
+      "title": "Wire command namespaces into the controller, state API and chat and execute queued commands",
+      "depends_on": [
+        "T09"
+      ],
+      "deliverable": "Split from T09 (2026-10-27): the catalog becomes a controller service, aliases and queued commands are reachable from the state API and the chat, a queued command is executed under the caller's rights, scoped /toolbox. names exist, an alias's scope is tied to grants, and agents show friendly names",
+      "acceptance_and_verification": "A command typed in the owner chat resolves, is queued, runs under the typist's rights and is answered once; an ambiguous or unknown name gets a plain answer; a replay never runs twice; another principal cannot run or see an alias it was not given",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -5318,7 +5421,16 @@
         "H02b",
         "P01c",
         "H02c",
-        "R05f"
+        "R05f",
+        "R05g",
+        "H02d",
+        "V01c",
+        "T09b",
+        "H07",
+        "H07b",
+        "H02e",
+        "T09",
+        "A07d"
       ],
       "deliverable": "Exact release manifest, known limitations and owner signoff",
       "acceptance_and_verification": "All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded",
