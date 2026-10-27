@@ -13,6 +13,7 @@ for (const backend of backends) {
     test(`${backend.name}: ${name}`, async () => {
       const script: Record<string, unknown> = {};
       const w = await openWorld(backend, script);
+      w.profile.value = "derived";
       try { await body(w, script); } finally { await w.close(); }
     });
   const only = (outcomes: readonly Outcome[]): Outcome => { assert.equal(outcomes.length, 1); return outcomes[0]!; };
@@ -230,6 +231,52 @@ for (const backend of backends) {
     const hold = "Hold all implementation until I say so.";
     script[hold] = [cmd("decision.record", { category: "gate", gate: "implementation-hold", statement: "hold all implementation", wording: "Hold all implementation" }, "Hold all implementation")];
     const gated = only((await chat.submit(w.ownerToken, { messageId: "m-s5", text: hold })).outcomes);
-    assert.notEqual(gated.status, "applied", "a gate by chat needs its own word (implementation-hold) in the message");
+    assert.equal(gated.status, "proposed", "a gate by chat is shown first, whatever the profile");
+    assert.equal((await w.decisions.authoritative(w.owner, { projectId: a, topic: "implementation-gate" }))?.status, "none", "nothing binds before the owner says yes");
+  });
+
+  suite("a gate said in chat is a proposal even when the gate word is not the owner's: the owner sees the kind and confirms, and then it binds; a different wording is still refused (card C08c)", async (w, script) => {
+    const a = await w.project("A");
+    const chat = w.chat();
+    await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+    const hold = "Hold all implementation until I say so.";
+    script[hold] = [cmd("decision.record", { category: "gate", gate: "implementation-hold", statement: "hold all implementation", wording: "Hold all implementation" }, "Hold all implementation")];
+    const proposed = only((await chat.submit(w.ownerToken, { messageId: "m-g1", text: hold })).outcomes);
+    assert.equal(proposed.status, "proposed", JSON.stringify(proposed));
+    assert.match(JSON.stringify(proposed), /implementation-hold/, "the owner sees which gate");
+    const applied = await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: proposed.proposalId! });
+    assert.equal(applied.applied, true, JSON.stringify(applied));
+    const gate = await w.decisions.authoritative(w.owner, { projectId: a, topic: "implementation-gate" });
+    assert.equal(gate?.status, "decided");
+    // Words the owner did not say are still refused, as a gate.
+    const other = "Please hold things for a while.";
+    script[other] = [cmd("decision.record", { category: "gate", gate: "planning-only", statement: "planning only until further notice", wording: "planning only until further notice" }, "planning only until further notice")];
+    assert.notEqual(only((await chat.submit(w.ownerToken, { messageId: "m-g2", text: other })).outcomes).status, "proposed");
+  });
+
+  suite("in the strict profile a recorded decision is shown first and recorded when the owner says yes; the other profiles apply it at once (card C08c)", async (w, script) => {
+    const a = await w.project("A");
+    const chat = w.chat();
+    await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+    const text = "We will use PostgreSQL for the store.";
+    script[text] = [cmd("decision.record", { category: "decision", topic: "Store", statement: "use PostgreSQL for the store", wording: text }, text)];
+    w.profile.value = "strict";
+    const shown = only((await chat.submit(w.ownerToken, { messageId: "m-st1", text })).outcomes);
+    assert.equal(shown.status, "proposed", JSON.stringify(shown));
+    assert.match(JSON.stringify(shown), /strict profile/);
+    assert.equal((await w.decisions.authoritative(w.owner, { projectId: a, topic: "store" }))?.status, "none", "nothing is recorded before the owner says yes");
+    assert.equal((await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: shown.proposalId! })).applied, true);
+    assert.equal((await w.decisions.authoritative(w.owner, { projectId: a, topic: "store" }))?.status, "decided");
+    // The profile cannot be read at all: strict, so shown first.
+    w.profile.value = undefined;
+    const second = "We will use SQLite for the cache.";
+    script[second] = [cmd("decision.record", { category: "decision", topic: "Cache", statement: "use SQLite for the cache", wording: second }, second)];
+    assert.equal(only((await chat.submit(w.ownerToken, { messageId: "m-st2", text: second })).outcomes).status, "proposed");
+    for (const profile of ["derived", "autonomous"]) {
+      w.profile.value = profile;
+      const t = `We will use ${profile} for the queue.`;
+      script[t] = [cmd("decision.record", { category: "decision", topic: "queue", statement: `use ${profile} for the queue`, wording: t }, t)];
+      assert.equal(only((await chat.submit(w.ownerToken, { messageId: `m-st-${profile}`, text: t })).outcomes).status, "applied", profile);
+    }
   });
 }

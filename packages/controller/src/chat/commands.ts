@@ -127,6 +127,8 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
   if (draft) return "you asked for a draft";
   if (op === "resource.bind" && args["access"] === "write") return "it gives write access";
   if ((AUTHORITY_FIELDS[op] ?? []).some((f) => args[f] !== undefined)) return "it changes what someone may do or where work is done";
+  // A gate holds work (or lifts a hold) for the whole project until the owner decides otherwise: it is shown first whatever the profile, so the gate and its kind are seen before they bind.
+  if (op === "decision.record" && args["category"] === "gate") return "a gate holds or releases work until you say otherwise, so it is shown first";
   // The request type is authority: an instruction or a decision left to the team is shown to the owner before it is recorded, whatever the profile, so a paraphrase cannot slip one in.
   if ((op === "agenda.capture" || op === "agenda.correct") && (args["intent"] === "owner-instruction" || args["intent"] === "delegated-decision")) return "it records an instruction or a decision for the team, so it is shown first";
   if (spec.mode === "propose") return op === "project.create" ? "a new project is drafted first" : op.startsWith("grant.") ? "a right is shown first" : "a role's capabilities are shown first";
@@ -134,6 +136,8 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
   if (!context.said) return "your own words do not say this move, so it is shown first";
   const strict = context.profile === "strict";
   if (spec.mode === "profile") return strict ? "the strict profile shows this first" : undefined;
+  // A recorded decision can interrupt running generation and block dependent work, so the strict profile shows it first.
+  if (strict && op === "decision.record") return "the strict profile shows a recorded decision first";
   if (strict && op === "task.transition" && (args["to"] === "done" || args["to"] === "cancelled")) return "the strict profile shows a final state first";
   if (strict && op === "project.update" && args["state"] === "archived") return "the strict profile shows archiving first";
   return undefined;

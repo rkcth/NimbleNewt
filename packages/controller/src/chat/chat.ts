@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { OPERATION_BY_NAME } from "../api/operations.js";
 import { API_VERSION, type StateApi } from "../api/state-api.js";
-import { normalTopic } from "../decisions/records.js";
+import { GATE_TOPIC, normalTopic } from "../decisions/records.js";
 import { DomainError } from "../domain/errors.js";
 import { onlyKnown } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
@@ -414,7 +414,9 @@ export class ChatService {
       }
       // Every text in the command must be the owner's own words (or a record, or a fixed choice): a model cannot add content the owner never said.
       if (hasRefMarker(intent.args)) { push({ i, kind: "refused", code: "invalid_command", message: "$ref is reserved for steps the controller builds" }); continue; }
-      const foreign = foreignValue(intent.op === "grant.create" ? Object.fromEntries(Object.entries(intent.args).filter(([k]) => k !== "basis")) : intent.args, words); // the reason recorded with a right is the owner's message, set by the chat
+      // The reason recorded with a right is the owner's message, set by the chat. A gate is always shown to the owner first, so its kind and its (fixed) topic need not be words of the message: the wording still must be.
+      const unchecked = intent.op === "grant.create" ? ["basis"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
+      const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words);
       if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: `${foreign} is not in your message, so it was not done. Say what it should be.` }); continue; }
       const resolved = await this.#resolve(token, intent, currentFocus, pending, profile, words, quoted);
       if (!resolved.ok) { push(askOrRefuse(i, resolved, n)); continue; }
@@ -477,6 +479,7 @@ export class ChatService {
     if (intent.op === "decision.record" && (intent.args["basedOn"] !== undefined || intent.args["session"] !== undefined)) return refuse("invalid_command", "basedOn and session are set by the controller");
     for (const key of Object.keys(intent.args)) if (!accepted.includes(key) && !(key === "repositoryId" && spec.dispatch === true)) return refuse("invalid_command", `${key} is not an argument of ${intent.op}`);
     const args: Record<string, unknown> = { ...intent.args };
+    if (intent.op === "decision.record" && args["category"] === "gate") args["topic"] = GATE_TOPIC;
     const labels: Record<string, string> = {};
     const pins: ChatPin[] = [];
     const steps: ChatStep[] = [];

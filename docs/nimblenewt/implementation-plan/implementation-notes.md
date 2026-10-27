@@ -2017,3 +2017,10 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - Review fix: an earlier version added this turn's own newest version to `planBase`, which let a project-wide step overwrite a change that an earlier task-scoped step of the same turn had not seen; tested (replay with a task-scoped then a project-wide step and a change for another task meanwhile).
 - Known limit: a decision step reads the topic's history twice at plan time and twice at apply time (cost only); a change between the plan and the first run (no crash) is the same case and the same rule, with no test of its own.
 
+## C08c: chat gates and strict-profile decisions are shown first
+
+- Owner answers (2026-10-27): a gate set from the chat is shown as a proposal the owner confirms, and `decision.record` in the strict profile is shown first; the other profiles still apply a decision at once. `proposalReason` gives the reason ("a gate holds or releases work until you say otherwise, so it is shown first"; "the strict profile shows a recorded decision first"). A profile that cannot be read is strict.
+- Because a gate is always seen first, its kind and its fixed topic (`implementation-gate`, set by the controller) no longer have to be words of the owner's message; the gate's wording still has to be (the decision service checks it against the turn), so a gate whose words the owner did not say is still refused. This replaces the C08b rule that a chat gate needed the gate word and the topic name in the owner's words.
+- Applying the proposal records the decision from the same turn; its `basedOn` is the version read when the message was planned, so a topic that moved meanwhile becomes a dispute (the stale-session check).
+- Known limits: the decision suite now runs in the `derived` profile so that its tests of recording at once stay meaningful; the strict case has its own test.
+
