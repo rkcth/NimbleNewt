@@ -69,3 +69,41 @@ test("an idle event subscription with events waiting is expired by the running c
     assert.equal((await events.status(owner, other.id)).state, "cancelled");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+test("a subscription made before idle expiry existed is not expired by the first tick after a restart; its idle time counts from the start (card H06c)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-events-"));
+  let now = Date.parse("2026-10-27T10:00:00.000Z");
+  const clock = (): string => new Date(now).toISOString();
+  const file = join(d, "c.sqlite");
+  const open = () => startController({ storage: { kind: "sqlite", path: file }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], dispatch: { timer: new ManualTimer(), manual: true, clock } });
+  let c = await open();
+  let token: string;
+  let id: string;
+  let stream: string;
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    token = boot.token;
+    const owner = await c.services.principals.authenticate(boot.token);
+    const project = (await c.services.projects.createProject({ commandId: "p1", actor: owner.id, name: "Garden" })).id;
+    stream = `project:${project}`;
+    const events = EventService.withEpoch(c.storage, c.epoch, { clock });
+    id = (await events.subscribe(owner, { commandId: "sb-old", stream })).id;
+    await events.publish(owner, { commandId: "pb-old", stream, kind: "task.updated", ref: { kind: "task", id: "task-aaaaaaaaaaaaaaaaaaaa" } } as never);
+    // Make it look like a record from before idle expiry: no last activity, made long ago.
+    const rec = (await c.storage.getAggregate({ kind: "subscription", id }))!;
+    const { lastActiveAt: _drop, ...old } = rec.body as Record<string, unknown>;
+    await c.storage.applyOperation({ operationId: "op-legacy", epoch: c.epoch, actor: "test", correlationId: "cor-legacy", at: clock(), changes: [{ type: "update", ref: { kind: "subscription", id }, expectedRevision: rec.revision, body: { ...old, createdAt: "2026-01-01T00:00:00.000Z" } as never }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
+  } finally { await c.close(); }
+  try {
+    c = await open();
+    assert.ok(c.dispatch !== undefined, c.dispatchProblem);
+    const owner = await c.services.principals.authenticate(token!);
+    const events = EventService.withEpoch(c.storage, c.epoch, { clock });
+    assert.ok((await c.storage.getAggregate({ kind: "subscription", id: id! }))!.body["lastActiveAt" as never] !== undefined, "stamped at start");
+    await c.dispatch.dispatcher.tick();
+    assert.equal((await events.status(owner, id!)).state, "active", "the first tick after the restart does not expire it");
+    now += 901_000;
+    await c.dispatch.dispatcher.tick();
+    assert.equal((await events.status(owner, id!)).state, "expired", "after the default idle time from the start");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});

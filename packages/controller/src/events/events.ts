@@ -395,7 +395,7 @@ export class EventService {
             if (current === undefined || body === undefined || body.lastActiveAt !== undefined) throw new NotIdle();
             return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: { ...body, lastActiveAt: at } as unknown as JsonObject }], detail: { subscriber: body.subscriber } };
           },
-        })); stamped++; } catch (error) { if (!(error instanceof NotIdle)) throw error; }
+        })); stamped++; } catch (error) { if (error instanceof NotIdle || (error instanceof DomainError && error.code === "stale_revision")) continue; throw error; }
       }
       if (page.length < 200) return { stamped };
     }
