@@ -161,7 +161,10 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   const messages = AgentMessageService.withEpoch(storage, epoch, {
     ...ro, availability: pauses.availability, taskPaused: (t) => pauses.isPaused(t), guard: (t) => pauses.guard(t), waits: i.waits, assignments: i.assignments, meetings, inquiries: i.inquiries, notifications,
   });
-  const attendance = AttendanceService.withEpoch(storage, epoch, { meetings, pauses, projects: i.projects, assignments: i.assignments, agents: i.agents, histories: i.histories }, { ...ro, availability: pauses.availability });
+  const attendance = AttendanceService.withEpoch(storage, epoch, { meetings, pauses, projects: i.projects, assignments: i.assignments, agents: i.agents, histories: i.histories,
+    // The time an agent spends in a meeting is charged as compute: to its meeting task, or to the shared-overhead rule "meeting" (card R05d).
+    charge: (u) => budgets.charge(principal, { commandId: u.commandId, activity: "meeting", agentId: u.agentId, computeMs: u.computeMs, projectId: u.projectId, ...(u.taskId === undefined ? { sharedOverheadRule: "meeting" } : { taskId: u.taskId }) }).then(() => undefined),
+    ...(i.onError === undefined ? {} : { onChargeError: i.onError }) }, { ...ro, availability: pauses.availability });
   const standups = StandupService.withEpoch(storage, epoch, { meetings, assignments: i.assignments }, { ...ro, availability: pauses.availability });
   const projects = (): Promise<string[]> => projectIds(i.projects);
   let stallNotices = 0;

@@ -15,7 +15,7 @@ import { PauseService } from "../lifecycle/index.js";
 import { ProjectPlanService } from "../projects/index.js";
 import { PrincipalService, type Grant, type Principal } from "../security/index.js";
 import {
-  ATTENDANCE_LIMITS, AttendanceService, MeetingService, type AttendanceBody, type Invitation, type MeetingDecision, type OccurrenceBody, type RoomStatus,
+  ATTENDANCE_LIMITS, AttendanceService, MeetingService, type AttendanceBody, type AttendanceDeps, type Invitation, type MeetingDecision, type OccurrenceBody, type RoomStatus,
 } from "./index.js";
 
 after(stopServer);
@@ -53,7 +53,7 @@ for (const backend of backends) {
     occ(occurrenceId: string): Promise<OccurrenceBody>;
     gateIntent(taskId: string): Promise<string>;
     agentGate(agentId: string): Promise<string>;
-    make(extra?: { assignments?: AssignmentService; pauses?: PauseService }): AttendanceService;
+    make(extra?: { assignments?: AssignmentService; pauses?: PauseService; charge?: AttendanceDeps["charge"]; onChargeError?: (e: unknown) => void }): AttendanceService;
   }
   const suite = (name: string, body: (c: Ctx) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
@@ -101,8 +101,8 @@ for (const backend of backends) {
         const wakes: Wake[] = [];
         const notices: Notice[] = [];
         const failNotice = { next: false };
-        const make = (extra: { assignments?: AssignmentService; pauses?: PauseService } = {}): AttendanceService =>
-          AttendanceService.withEpoch(world.storage, epoch, { meetings, pauses: extra.pauses ?? pauses, projects, assignments: extra.assignments ?? assignments, agents, histories }, {
+        const make = (extra: { assignments?: AssignmentService; pauses?: PauseService; charge?: AttendanceDeps["charge"]; onChargeError?: (e: unknown) => void } = {}): AttendanceService =>
+          AttendanceService.withEpoch(world.storage, epoch, { meetings, pauses: extra.pauses ?? pauses, projects, assignments: extra.assignments ?? assignments, agents, histories, ...(extra.charge === undefined ? {} : { charge: extra.charge }), ...(extra.onChargeError === undefined ? {} : { onChargeError: extra.onChargeError }) }, {
             availability: pauses.availability, ...options,
             wake: { wake: async (w) => { wakes.push(w); } },
             notices: { notify: async (x) => { if (failNotice.next) { failNotice.next = false; throw new Error("the delivery died"); } notices.push({ ...x }); } },
@@ -403,6 +403,32 @@ for (const backend of backends) {
     await c.attendance.endMeeting(c.owner, { commandId: cid("end"), occurrenceId: id });
     assert.equal(await c.agentGate(c.agentA), "pause");
     assert.equal(await c.pauses.availability(c.pA), "paused");
+  });
+
+  suite("the time an agent spends in a meeting is charged once, to its meeting task, and a failing charge never keeps the agent in the room (card R05d)", async (c) => {
+    const charges: { commandId: string; projectId: string; agentId: string; computeMs: number; taskId?: string }[] = [];
+    let fail = true;
+    const errors: unknown[] = [];
+    const charged = c.make({ charge: async (u) => { if (fail) throw new Error("ledger down"); charges.push(u); }, onChargeError: (e) => errors.push(e) });
+    const id = await c.urgent([c.pA, c.pB]);
+    await c.room(id);
+    await c.prep(id, c.pA);
+    const joined = await charged.join(c.asA, { commandId: cid("jn"), occurrenceId: id, agent: c.pA });
+    assert.ok(joined.joined);
+    minutes(7);
+    await charged.leave(c.asA, { commandId: cid("lv"), occurrenceId: id, agent: c.pA });
+    assert.equal(errors.length, 1, "the failed charge is reported");
+    assert.equal((await c.status(id)).participants.find((p) => p.who === c.pA)?.state, "unavailable", "and the agent has left all the same");
+    // The ledger is back: the end of the meeting does not leave A again, so the same leave, asked again, charges it.
+    fail = false;
+    await charged.leave(c.asA, { commandId: cid("lv2"), occurrenceId: id, agent: c.pA });
+    await charged.leave(c.asA, { commandId: cid("lv3"), occurrenceId: id, agent: c.pA });
+    assert.equal(charges.length, 2, "asked twice, the same command ID each time");
+    assert.equal(new Set(charges.map((x) => x.commandId)).size, 1, "one attendance, one charge");
+    assert.equal(charges[0]!.computeMs, 7 * 60_000);
+    assert.equal(charges[0]!.agentId, c.pA);
+    assert.equal(charges[0]!.taskId, joined.meetingTaskId);
+    // The owner's own presence is nobody's budget.
   });
 
   suite("a bounded attendance lapses with its lease, and an owner invitation is needed for each meeting", async (c) => {

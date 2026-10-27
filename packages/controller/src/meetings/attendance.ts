@@ -222,6 +222,8 @@ export class AttendanceService {
   readonly #meetings: MeetingService;
   readonly #pauses: PauseService;
   readonly #projects: ProjectService;
+  readonly #charge: AttendanceDeps["charge"];
+  readonly #onChargeError: AttendanceDeps["onChargeError"];
   readonly #assignments: AssignmentService;
   readonly #agents: AgentService | undefined;
   readonly #histories: HistoryService | undefined;
@@ -237,6 +239,8 @@ export class AttendanceService {
     this.#assignments = deps.assignments;
     this.#agents = deps.agents;
     this.#histories = deps.histories;
+    this.#charge = deps.charge;
+    this.#onChargeError = deps.onChargeError;
     this.#availability = options.availability;
     this.#wake = options.wake;
     this.#notices = options.notices;
@@ -822,7 +826,7 @@ export class AttendanceService {
         // Never in: nothing to finish. A pending preparation just stays as it is; the return policy still looks at the pauses it made.
         return;
       }
-      if (body.leftAt !== undefined) return;
+      if (body.leftAt !== undefined) { await this.#chargePresence(attId); return; }
       const taskId = body.meetingTaskId;
       if (taskId !== undefined) {
         const task = await this.#runner.get("task", taskId);
@@ -850,10 +854,26 @@ export class AttendanceService {
             return { ref, creates: false, changes, detail: { occurrenceId: b.occurrenceId, who: b.who, kind } };
           },
         }));
+        await this.#chargePresence(attId);
         return;
       } catch (error) {
         if (!(error instanceof DomainError) || (error.code !== "stale_revision" && error.code !== "command_conflict") || attempt >= ATTENDANCE_LIMITS.retries) throw error;
       }
+    }
+  }
+
+  /** The presence of one agent, charged once (the command ID is the attendance's): a leave that is repeated, or finished by the sweep, charges the same amount again as the same command. */
+  async #chargePresence(attId: string): Promise<void> {
+    if (this.#charge === undefined) return;
+    try {
+      const body = (await this.#runner.get("meeting-attendance", attId))?.body as unknown as AttendanceBody | undefined;
+      if (body?.joinedAt === undefined || body.leftAt === undefined) return;
+      const room = await this.#roomFor(body.occurrenceId);
+      if (room === undefined || room.body.ownerAttendance === body.who) return;
+      const computeMs = Math.max(0, ms(body.leftAt) - ms(body.joinedAt));
+      await this.#charge({ commandId: `att-use:${attId}`, projectId: room.body.projectId, agentId: body.who, computeMs, ...(body.meetingTaskId === undefined ? {} : { taskId: body.meetingTaskId }) });
+    } catch (error) {
+      this.#onChargeError?.(error);
     }
   }
 
@@ -1460,4 +1480,10 @@ export interface AttendanceDeps {
   readonly agents?: AgentService;
   /** Opens the meeting conversation of a room. */
   readonly histories?: HistoryService;
+  /**
+   * Charges the time an agent spent in a meeting (card R05d). Measurement basis: wall-clock milliseconds between joining and leaving, charged as compute to the agent's meeting task
+   * (or, with none, to the shared-overhead rule "meeting"). Idempotent by `commandId`. A failure is reported, never allowed to keep an agent in the room.
+   */
+  readonly charge?: (usage: { commandId: string; projectId: string; agentId: string; computeMs: number; taskId?: string }) => Promise<void>;
+  readonly onChargeError?: (error: unknown) => void;
 }
