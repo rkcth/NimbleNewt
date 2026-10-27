@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
+import { ProjectResourceService } from "../projects/index.js";
 import { operationKind, type ToolOperationBody } from "./model.js";
 import type { ToolResult } from "./ports.js";
 import { ScriptedWorker, buildWorld, workGrants, type DispatchWorld, type WorkerScript } from "./testing/world.js";
@@ -115,6 +116,29 @@ for (const backend of backends) {
     // The scan limit goes away: the task starts.
     (c.resources as { dispatchCheckout: unknown }).dispatchCheckout = real;
     assert.ok((await c.run()).started.includes(t.attemptId!));
+  });
+
+  suite("a binding with too many pinned tasks to track blocks the next task with a reason before a place is taken, the same blocker next tick; it starts when a pinned task has finished (card P01c)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const bob = await c.agent("bob", workGrants(c.project, ["read-file"]));
+    await c.resources.bindResource(c.owner, { commandId: "b1", projectId: c.project, kind: "repository", label: "Web", locator: "/work/web", repositoryId: "web" });
+    const a = await c.task("Fix web", ann, { repositoryId: "web" });
+    const b = await c.task("Fix web too", bob, { repositoryId: "web" });
+    await c.resources.pinCheckout(c.owner, { commandId: "pin-a", taskId: a.taskId });
+    const real = c.resources.dispatchCheckout.bind(c.resources);
+    const tight = ProjectResourceService.withEpoch(c.resources.runner.storage, c.resources.runner.epoch, { scanLimit: 1 });
+    (c.resources as { dispatchCheckout: unknown }).dispatchCheckout = tight.dispatchCheckout.bind(tight);
+    const first = await c.run();
+    assert.ok(!first.started.includes(b.attemptId!));
+    const blocked = first.blocked.find((x) => x.check === "checkout");
+    assert.ok(blocked !== undefined, JSON.stringify(first));
+    assert.ok((await openBlockers(c)).some((x) => x.type === "dispatch_blocked" && /too many to track safely/.test(x.summary)));
+    assert.equal((await c.run()).blocked.find((x) => x.check === "checkout")?.blockerId, blocked.blockerId, "the same blocker, not a new one each tick");
+    assert.equal((await c.admission.snapshot()).running.length, 0, "no place stays taken");
+    // The pinned task finishes: its pin no longer counts.
+    await c.projects.transitionTask({ commandId: "cancel-a", actor: c.owner.id, taskId: a.taskId, expectedRevision: (await c.projects.getTask(a.taskId))!.revision, to: "cancelled" });
+    assert.ok((await c.run()).started.includes(b.attemptId!));
+    (c.resources as { dispatchCheckout: unknown }).dispatchCheckout = real;
   });
 
   suite("a pin that fails while the attempt is being started gives the place back, so the next tick can start it (card P01b)", async (c) => {

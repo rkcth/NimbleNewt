@@ -76,6 +76,8 @@ const REGISTRY = "resource-registry";
 const PINS = "resource-pins";
 /** A binding's pin list is pruned of finished tasks once it holds this many. */
 const PRUNE_AT = 50;
+/** The `field` of the refusal made when a binding has too many pinned tasks to track, so it is told apart from a store fault that is also `unavailable`. */
+const PIN_LIMIT_FIELD = "pins";
 
 // ---- scopes -------------------------------------------------------------------------------------------------------------------
 
@@ -322,10 +324,12 @@ export class ProjectResourceService {
           if (body.state !== "bound") invalid("resourceId", "the resource is already unbound");
           const claim = await this.#runner.get(CLAIM, id);
           if (claim !== undefined && (claim.body as unknown as ClaimBody).state === "held") invalid("resourceId", "a responsibility manages this resource; release it from the responsibility first");
-          const pinned = await this.#liveTasksPinnedTo(id);
+          const { live: pinned, list } = await this.#liveTasksPinnedTo(id);
           if (pinned.length > 0) invalid("resourceId", `tasks still work against this binding (${pinned.slice(0, 5).join(", ")}${pinned.length > 5 ? `, and ${pinned.length - 5} more` : ""}); unbind it after they finish`);
           const ref: AggregateRef = { kind: RESOURCE, id };
           const changes: Change[] = [{ type: "update", ref, expectedRevision: expected, body: { ...body, state: "unbound" } as unknown as JsonObject }];
+          // A pin that commits after the pin list was read changes the list, so this unbind is refused rather than leaving a live task pinned to an unbound binding.
+          changes.push(list === undefined ? { type: "create", ref: { kind: PINS, id }, body: { tasks: [], legacy: true } } : { type: "check", ref: { kind: PINS, id }, expectedRevision: list.revision });
           if (claim !== undefined) changes.push({ type: "check", ref: { kind: CLAIM, id }, expectedRevision: claim.revision });
           const { [id]: _gone, ...remaining } = await this.#locsOf(body.projectId, snapshot);
           changes.push(this.#bump(body.projectId, snapshot, undefined, remaining));
@@ -496,7 +500,14 @@ export class ProjectResourceService {
     if (task.repositoryId === undefined && existing === undefined) return { kind: "none" };
     let pinnedNow = false;
     if (existing === undefined && !command.pin) {
-      try { await this.#bindingFor(task); } catch (error) { if (isDomainError(error, "invalid_command")) return { kind: "unbound", reason: error.message }; throw error; }
+      try {
+        const bound = await this.#bindingFor(task);
+        // A pin the binding's list could not take would be refused when the work starts: told now, as a blocker, not found out on every tick after a place and an allowance were taken.
+        await this.#pinListChanges(taskId, bound.id);
+      } catch (error) {
+        if (isDomainError(error, "invalid_command") || (isDomainError(error, "unavailable") && error.field === PIN_LIMIT_FIELD)) return { kind: "unbound", reason: error.message };
+        throw error;
+      }
       return { kind: "none" };
     }
     if (existing === undefined) {
@@ -518,7 +529,7 @@ export class ProjectResourceService {
         },
       })); } catch (error) {
         // Too many records to check safely: the work must not start, and the reason is told as a blocker (not a failed tick).
-        if (isDomainError(error, "unavailable")) return { kind: "unbound", reason: error.message };
+        if (isDomainError(error, "unavailable") && error.field === PIN_LIMIT_FIELD) return { kind: "unbound", reason: error.message };
         throw error;
       }
       pinnedNow = !result.replayed;
@@ -581,12 +592,17 @@ export class ProjectResourceService {
     return withIds === true ? all : all.map((r) => r.body);
   }
 
-  /** Task IDs, not yet finished, whose checkout is pinned to the binding: from the binding's pin list, or (for a binding made before the list existed) by looking through the checkouts once. */
-  async #liveTasksPinnedTo(resourceId: string): Promise<string[]> {
+  /**
+   * Task IDs, not yet finished, whose checkout is pinned to the binding, and the binding's pin list as read. From the list; a binding made before the list existed, or whose list was started by a pin
+   * without a look at the older checkouts (`legacy`), is also looked through in the checkouts (one look, refused as `unavailable` past the scan limit, never answered from part).
+   */
+  async #liveTasksPinnedTo(resourceId: string): Promise<{ live: string[]; list: Aggregate | undefined }> {
     const list = await this.#runner.get(PINS, resourceId);
-    const ids = list !== undefined
-      ? (list.body as unknown as { tasks: string[] }).tasks
-      : (await scanAll(this.#runner, CHECKOUT, this.#scanLimit, (a) => (a.body as unknown as CheckoutBody).resourceId === resourceId && (a.body as unknown as CheckoutBody).released === undefined)).map((a) => a.id);
+    const body = list?.body as unknown as { tasks: string[]; legacy?: boolean } | undefined;
+    const ids = new Set(body?.tasks ?? []);
+    if (body === undefined || body.legacy === true) {
+      for (const a of await scanAll(this.#runner, CHECKOUT, this.#scanLimit, (c) => (c.body as unknown as CheckoutBody).resourceId === resourceId && (c.body as unknown as CheckoutBody).released === undefined)) ids.add(a.id);
+    }
     const live: string[] = [];
     for (const id of ids) {
       const pin = (await this.#runner.get(CHECKOUT, id))?.body as unknown as CheckoutBody | undefined;
@@ -594,28 +610,27 @@ export class ProjectResourceService {
       const task = (await this.#runner.get("task", id))?.body as unknown as TaskBody | undefined;
       if (task !== undefined && task.state !== "done" && task.state !== "cancelled") live.push(id);
     }
-    return live;
+    return { live, list };
   }
 
   /**
-   * The changes that keep binding pin lists right when a task's checkout is pinned to `add`, taken from `drop`, or both. A binding made before the list existed gets it on its first pin,
-   * filled by one look through the checkouts (refused as `unavailable` past the scan limit, never made from part). A list holding many tasks is cleared of the finished ones first.
+   * The changes that keep binding pin lists right when a task's checkout is pinned to `add`, taken from `drop`, or both. A binding made before the list existed gets a list on its first pin marked `legacy`
+   * (older checkouts may exist; ending the binding looks through them), so the pin itself never scans. A list holding many tasks is cleared of the finished ones first; past the scan limit in live pins the pin is refused as `unavailable`.
    */
   async #pinListChanges(taskId: string, add?: string, drop?: string): Promise<Change[]> {
     const changes: Change[] = [];
     if (drop !== undefined && drop !== add) {
       const old = await this.#runner.get(PINS, drop);
       if (old !== undefined) {
-        const tasks = (old.body as unknown as { tasks: string[] }).tasks;
-        if (tasks.includes(taskId)) changes.push({ type: "update", ref: { kind: PINS, id: drop }, expectedRevision: old.revision, body: { tasks: tasks.filter((t) => t !== taskId) } });
+        const body = old.body as unknown as { tasks: string[]; legacy?: boolean };
+        if (body.tasks.includes(taskId)) changes.push({ type: "update", ref: { kind: PINS, id: drop }, expectedRevision: old.revision, body: { ...body, tasks: body.tasks.filter((t) => t !== taskId) } });
       }
     }
     if (add !== undefined) {
       const list = await this.#runner.get(PINS, add);
-      let tasks: string[] = list !== undefined
-        ? [...(list.body as unknown as { tasks: string[] }).tasks]
-        : (await scanAll(this.#runner, CHECKOUT, this.#scanLimit, (a) => (a.body as unknown as CheckoutBody).resourceId === add && (a.body as unknown as CheckoutBody).released === undefined)).map((a) => a.id);
-      if (tasks.length >= PRUNE_AT) {
+      const old = list?.body as unknown as { tasks: string[]; legacy?: boolean } | undefined;
+      let tasks: string[] = old === undefined ? [] : [...old.tasks];
+      if (tasks.length >= Math.min(PRUNE_AT, this.#scanLimit)) {
         const kept: string[] = [];
         for (const id of tasks) {
           const task = (await this.#runner.get("task", id))?.body as unknown as TaskBody | undefined;
@@ -624,9 +639,9 @@ export class ProjectResourceService {
         tasks = kept;
       }
       if (!tasks.includes(taskId)) tasks.push(taskId);
-      if (tasks.length > this.#scanLimit) throw new DomainError("unavailable", `binding ${add} has more than ${this.#scanLimit} pinned tasks, too many to track safely`);
-      if (list === undefined) changes.push({ type: "create", ref: { kind: PINS, id: add }, body: { tasks } });
-      else if (JSON.stringify(tasks) !== JSON.stringify((list.body as unknown as { tasks: string[] }).tasks)) changes.push({ type: "update", ref: { kind: PINS, id: add }, expectedRevision: list.revision, body: { tasks } });
+      if (tasks.length > this.#scanLimit) throw new DomainError("unavailable", `binding ${add} has more than ${this.#scanLimit} pinned tasks, too many to track safely`, { field: PIN_LIMIT_FIELD });
+      if (list === undefined) changes.push({ type: "create", ref: { kind: PINS, id: add }, body: { tasks, legacy: true } });
+      else if (JSON.stringify(tasks) !== JSON.stringify(old!.tasks)) changes.push({ type: "update", ref: { kind: PINS, id: add }, expectedRevision: list.revision, body: { ...old!, tasks } });
       else changes.push({ type: "check", ref: { kind: PINS, id: add }, expectedRevision: list.revision });
     }
     return changes;

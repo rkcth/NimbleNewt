@@ -7,6 +7,7 @@ import { after, test } from "node:test";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
+import { StorageError } from "../storage/errors.js";
 import { PrincipalService, type Grant, type Principal } from "../security/index.js";
 import { ProjectPlanService, ProjectResourceService, ResponsibilityService, relativePath, scopeAllows } from "./index.js";
 
@@ -412,7 +413,7 @@ for (const backend of backends) {
     assert.ok(first.id);
   });
 
-  suite("ending a binding reads its own pin list: tasks that finished do not hold it, a repin or release moves the pin, and a binding without a list is filled from the checkouts once (card P01c)", async ({ owner, resources, projects, project, task }) => {
+  suite("ending a binding reads its own pin list: tasks that finished do not hold it, a repin or release moves the pin, and a binding without a list gets one marked as possibly incomplete at its first pin, and ending it still looks through the checkouts (card P01c)", async ({ owner, resources, projects, project, task }) => {
     const p = await project("P");
     const a = await resources.bindResource(owner, { commandId: cid("b"), projectId: p, kind: "repository", label: "a", locator: "/r/a", repositoryId: "a" } as never);
     const b = await resources.bindResource(owner, { commandId: cid("b"), projectId: p, kind: "repository", label: "b", locator: "/r/b", repositoryId: "b" } as never);
@@ -439,7 +440,7 @@ for (const backend of backends) {
     const pin2 = (await resources.getPin(owner, t1))!;
     await resources.releaseCheckout(owner, { commandId: cid("rel"), taskId: t1, expectedRevision: pin2.revision });
     assert.deepEqual(await pins(b.id), []);
-    // A binding made before pin lists existed (a store that neither reads nor writes them): no list; ending it looks through the checkouts, and the first pin with the list in place fills it from them.
+    // A binding made before pin lists existed (a store that neither reads nor writes them): no list; ending it looks through the checkouts, and the first pin starts a list marked `legacy` without looking.
     const storage = resources.runner.storage;
     const earlier = new Proxy(storage, { get: (target, key) => {
       if (key === "getAggregate") return (ref: { kind: string; id: string }) => (ref.kind === "resource-pins" ? Promise.resolve(undefined) : target.getAggregate(ref as never));
@@ -455,7 +456,57 @@ for (const backend of backends) {
     await refuses("invalid_command", () => resources.unbindResource(owner, { commandId: cid("ub"), resourceId: c.id, expectedRevision: c.revision } as never), (e) => assert.match(e.message, /tasks still work/));
     const t4 = await task(p, "four", { repositoryId: "c" });
     await resources.pinCheckout(owner, { commandId: cid("pin"), taskId: t4 });
-    assert.deepEqual((await pins(c.id)).sort(), [t3, t4].sort(), "filled from the checkouts at the first pin, t3 included");
+    // The pin itself does not look through the checkouts: its list starts marked as possibly incomplete, and ending the binding still finds t3.
+    assert.deepEqual(await pins(c.id), [t4]);
+    assert.equal(((await storage.getAggregate({ kind: "resource-pins", id: c.id }))!.body as { legacy?: boolean }).legacy, true);
+    await refuses("invalid_command", () => resources.unbindResource(owner, { commandId: cid("ub"), resourceId: c.id, expectedRevision: c.revision } as never), (e) => assert.match(e.message, /tasks still work/));
+  });
+
+  suite("a pin that commits while a binding is being unbound is not lost: the unbind is refused and the binding stays bound (card P01c)", async ({ owner, resources, project, task }) => {
+    const p = await project("P");
+    const a = await resources.bindResource(owner, { commandId: cid("b"), projectId: p, kind: "repository", label: "a", locator: "/r/a", repositoryId: "a" } as never);
+    const t = await task(p, "one", { repositoryId: "a" });
+    const storage = resources.runner.storage;
+    let raced = false;
+    const between = new Proxy(storage, { get: (target, key) => {
+      if (key === "applyOperation") return async (input: { changes: { type: string; ref: { kind: string }; body?: { state?: string } }[] }) => {
+        if (!raced && input.changes.some((c) => c.type === "update" && c.ref.kind === "project-resource" && c.body?.state === "unbound")) {
+          raced = true;
+          assert.equal((await resources.dispatchCheckout({ commandId: "dp:race", taskId: t, actor: "dispatcher", pin: true })).kind, "ok");
+        }
+        return target.applyOperation(input as never);
+      };
+      const value = Reflect.get(target, key) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    } });
+    const unbinder = ProjectResourceService.withEpoch(between, resources.runner.epoch, { clock: () => T, pause: async () => undefined });
+    await assert.rejects(() => unbinder.unbindResource(owner, { commandId: cid("ub"), resourceId: a.id, expectedRevision: a.revision } as never), (e: unknown) => e instanceof DomainError);
+    assert.equal(raced, true);
+    assert.equal((await resources.get(owner, a.id))!.state, "bound", "a live task is pinned to it");
+  });
+
+  suite("a store fault during a pin is a fault, not a blocker: only the pin limit is answered with a reason (card P01c)", async ({ owner, resources, project, task }) => {
+    const p = await project("P");
+    await resources.bindResource(owner, { commandId: cid("b"), projectId: p, kind: "repository", label: "a", locator: "/r/a", repositoryId: "a" } as never);
+    const t = await task(p, "one", { repositoryId: "a" });
+    const broken = new Proxy(resources.runner.storage, { get: (target, key) => {
+      if (key === "applyOperation") return async () => { throw new StorageError("unavailable", "connection refused"); };
+      const value = Reflect.get(target, key) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    } });
+    const service = ProjectResourceService.withEpoch(broken, resources.runner.epoch, { clock: () => T, pause: async () => undefined });
+    await assert.rejects(() => service.dispatchCheckout({ commandId: "dp:fault", taskId: t, actor: "dispatcher", pin: true }), (e: unknown) => e instanceof DomainError && e.code === "unavailable");
+  });
+
+  suite("finished tasks are cleared from a pin list even when the scan limit is below the usual clearing size (card P01c)", async ({ owner, resources, projects, project, task }) => {
+    const p = await project("P");
+    await resources.bindResource(owner, { commandId: cid("b"), projectId: p, kind: "repository", label: "a", locator: "/r/a", repositoryId: "a" } as never);
+    const tight = ProjectResourceService.withEpoch(resources.runner.storage, resources.runner.epoch, { scanLimit: 3, clock: () => T, pause: async () => undefined });
+    for (let i = 0; i < 6; i++) {
+      const t = await task(p, `t${i}`, { repositoryId: "a" });
+      assert.equal((await tight.dispatchCheckout({ commandId: `dp:${i}`, taskId: t, actor: "dispatcher", pin: true })).kind, "ok", `pin ${i}`);
+      await projects.transitionTask({ commandId: cid("r"), actor: owner.id, taskId: t, expectedRevision: (await projects.getTask(t))!.revision, to: "cancelled" });
+    }
   });
 
   suite("a pin the scan limit forbids is a blocker, not a failure: the dispatcher's pin is answered with the reason (card P01c)", async ({ owner, resources, project, task }) => {
