@@ -35,7 +35,7 @@ export interface RemoteWorkerClientOptions {
 
 const isLoopbackHost = (host: string): boolean => host === "localhost" || host === "[::1]" || host === "::1" || /^127(\.\d{1,3}){3}$/.test(host);
 
-interface Call { readonly body?: Json; readonly key?: string; readonly session?: boolean }
+interface Call { readonly body?: Json; readonly key?: string; readonly session?: boolean; readonly timeoutMs?: number }
 
 /**
  * The worker's side of the controller-worker protocol (card H02): plain JSON over HTTP, the dispatch contract of card H12 carried unchanged. It is given a URL and a credential and nothing else, so a
@@ -55,6 +55,9 @@ export class RemoteWorkerClient {
 
   get session(): SessionInfo | undefined { return this.#session; }
 
+  /** Drops the session the controller no longer accepts, so the next call has to connect again. */
+  forgetSession(): void { this.#session = undefined; }
+
   /** Opens a session. Throws a `WorkerRequestError` with code `protocol_unsupported` (and what the controller speaks) when no protocol version is shared. */
   async connect(capabilities: Json, key: string = randomUUID()): Promise<SessionInfo> {
     const { body } = await this.#send("POST", "/worker/connect", { body: { protocol: { ...(this.#options.protocol ?? WORKER_PROTOCOL) }, workerVersion: this.#options.workerVersion, capabilities }, key });
@@ -67,8 +70,11 @@ export class RemoteWorkerClient {
   }
 
   /** The attempts offered to this host and not yet accepted, with their work orders. */
-  async offers(): Promise<Offer[]> {
-    return ((await this.#send("GET", "/worker/session/offers", { session: true })).body as unknown as { offers: Offer[] }).offers;
+  async offers(options: { readonly waitMs?: number } = {}): Promise<Offer[]> {
+    const wait = options.waitMs ?? 0;
+    // A held poll must not be given up before the controller ends it: the request may take the whole wait and a margin.
+    const path = wait > 0 ? `/worker/session/offers?wait=${wait}` : "/worker/session/offers";
+    return ((await this.#send("GET", path, { session: true, timeoutMs: Math.max(this.#options.timeoutMs ?? 30_000, wait + 10_000) })).body as unknown as { offers: Offer[] }).offers;
   }
 
   /** One attempt as the worker sees it, under the placement number it was offered. */
@@ -126,7 +132,7 @@ export class RemoteWorkerClient {
         });
       });
       req.on("error", reject);
-      req.setTimeout(this.#options.timeoutMs ?? 30_000, () => req.destroy(new Error("the controller did not answer in time")));
+      req.setTimeout(call.timeoutMs ?? this.#options.timeoutMs ?? 30_000, () => req.destroy(new Error("the controller did not answer in time")));
       if (data !== undefined) req.write(data);
       req.end();
     });

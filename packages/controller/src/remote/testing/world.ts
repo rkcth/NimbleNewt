@@ -13,7 +13,7 @@ import type { ControllerStorage, JsonObject } from "../../storage/types.js";
 import { RemoteWorkerClient, type RemoteWorkerClientOptions } from "../client.js";
 import type { VersionRange } from "../protocol.js";
 import { WorkerTransport, type WorkerTransportOptions } from "../server.js";
-import { RemoteWorkerService, type RelocationPolicyFor, type Requirements } from "../service.js";
+import { RemoteWorkerService, type PlacementPolicyFor, type RelocationPolicyFor, type Requirements } from "../service.js";
 
 export const REMOTE_CAPS: Capabilities = { os: "linux", arch: "x64", harnesses: [{ name: "pi", version: "1.3.0" }], isolation: ["bubblewrap"], tools: [], workspaces: ["garden"] };
 
@@ -77,7 +77,7 @@ export interface RemoteWorld extends DispatchWorld {
   /** The dispatcher in use (replaced when hosts are added). */
   readonly current: DispatcherService;
   /** Enrols a host, connects it over the real transport, makes it fresh and gives it capacity; adds its worker to the dispatcher. */
-  host(name: string, o?: { caps?: Capabilities; protocol?: VersionRange; connect?: boolean; clientOptions?: Partial<RemoteWorkerClientOptions> }): Promise<RemoteHost>;
+  host(name: string, o?: { caps?: Capabilities; protocol?: VersionRange; connect?: boolean; clientOptions?: Partial<RemoteWorkerClientOptions>; dispatcher?: boolean }): Promise<RemoteHost>;
   /** Another transport over the same service (a second listener), with its own options. */
   listen(options?: Partial<WorkerTransportOptions>): Promise<WorkerTransport>;
   /** One tick, without waiting for the turns it started (a remote turn ends when the worker says so). */
@@ -87,7 +87,7 @@ export interface RemoteWorld extends DispatchWorld {
   done(): Promise<void>;
 }
 
-export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?: RelocationPolicyFor; protocol?: VersionRange; fileBytes?: number; transport?: Partial<WorkerTransportOptions> } = {}): Promise<RemoteWorld> {
+export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?: RelocationPolicyFor; placement?: PlacementPolicyFor; protocol?: VersionRange; fileBytes?: number; transport?: Partial<WorkerTransportOptions> } = {}): Promise<RemoteWorld> {
   const w = await buildWorld(storage);
   const dir = mkdtempSync(join(tmpdir(), "nn remote-"));
   const blobs = await FileBlobStore.open({ directory: join(dir, "blobs") });
@@ -97,6 +97,7 @@ export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?:
     principal: w.dispatcherPrincipal, hosts: w.hosts, artifacts,
     dispatch: { gateway: (id) => holder.dispatcher.gateway(id), get: (by, id) => holder.dispatcher.get(by, id), relocate: (by, id, m) => holder.dispatcher.relocate(by, id, m), quiesce: (by, id, r) => holder.dispatcher.quiesce(by, id, r), release: (by, id) => holder.dispatcher.release(by, id) },
     ...(o.policy === undefined ? {} : { relocationPolicy: o.policy }),
+    ...(o.placement === undefined ? {} : { placementPolicy: o.placement }),
   }, { ...w.options, ...(o.protocol === undefined ? {} : { protocol: o.protocol }), ...(o.fileBytes === undefined ? {} : { fileBytes: o.fileBytes }) });
   const transports: WorkerTransport[] = [];
   const listen = async (options: Partial<WorkerTransportOptions> = {}): Promise<WorkerTransport> => { const t = await WorkerTransport.listen({ remote, principals: w.principals, ...o.transport, ...options }); transports.push(t); return t; };
@@ -109,17 +110,20 @@ export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?:
     listen,
     prefer: (host: RemoteHost) => { const i = workers.indexOf(host.worker); if (i > 0) { workers.splice(i, 1); workers.unshift(host.worker); } },
     tick: () => holder.dispatcher.tick(),
-    host: async (name: string, hostOptions: { caps?: Capabilities; protocol?: VersionRange; connect?: boolean; clientOptions?: Partial<RemoteWorkerClientOptions> } = {}): Promise<RemoteHost> => {
+    host: async (name: string, hostOptions: { caps?: Capabilities; protocol?: VersionRange; connect?: boolean; clientOptions?: Partial<RemoteWorkerClientOptions>; dispatcher?: boolean } = {}): Promise<RemoteHost> => {
       const id = `host:${name}`;
       await w.principals.enroll(w.owner, { commandId: `rh-e-${name}-${n++}`, kind: "host", name, grants: [] });
       const token = (await w.principals.issueCredential(w.owner, id)).token;
       const principal = await w.principals.authenticate(token);
       await w.admission.setCapacity({ commandId: `rh-cap-${name}-${n++}`, actor: w.owner.id, host: id, capacity: { cpus: 8, memoryMb: 16_384 } });
       const worker = new RemoteTestHost(id, remote, w.dispatcherPrincipal);
-      workers.push(worker);
-      holder.dispatcher = w.restart({ workers, storeOwner: (agentId, attemptId) => remote.storeOwner(w.dispatcherPrincipal, agentId, attemptId) });
-      (w as { dispatcher: DispatcherService }).dispatcher = holder.dispatcher;
-      (world as { current: DispatcherService }).current = holder.dispatcher;
+      // A host the dispatcher never places on (idle hosts in a load test) is not added to it, which would rebuild the dispatcher for each one.
+      if (hostOptions.dispatcher !== false) {
+        workers.push(worker);
+        holder.dispatcher = w.restart({ workers, storeOwner: (agentId, attemptId) => remote.storeOwner(w.dispatcherPrincipal, agentId, attemptId) });
+        (w as { dispatcher: DispatcherService }).dispatcher = holder.dispatcher;
+        (world as { current: DispatcherService }).current = holder.dispatcher;
+      }
       const client = new RemoteWorkerClient({ url: transport.url, token, workerVersion: "worker-9.1.0", ...(hostOptions.protocol === undefined ? {} : { protocol: hostOptions.protocol }), ...(hostOptions.clientOptions ?? {}) });
       let seq = 0;
       const host: RemoteHost = { name, id, token, principal, client, worker, beat: async () => { await client.heartbeat(++seq); } };
@@ -131,7 +135,7 @@ export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?:
       if (hostOptions.connect !== false) { await client.connect({ ...(hostOptions.caps ?? REMOTE_CAPS) } as never); await host.beat(); }
       return host;
     },
-    done: async () => { for (const t of transports) await t.close(); await blobs.lock.exclusive(async () => undefined); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); },
+    done: async () => { remote.close(); for (const t of transports) await t.close(); await blobs.lock.exclusive(async () => undefined); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); },
   });
   return world;
 }

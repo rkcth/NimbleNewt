@@ -110,6 +110,26 @@ export interface RelocationPolicy {
   /** Hosts that may hold `local-only` data. Default: none, so an attempt with local-only data is never moved. */
   readonly dataHosts?: readonly string[];
 }
+/** What may be placed where, beyond what a host can do (card H07). Absent fields do not restrict, except that `local-only` data needs the host to be listed in `dataHosts` once a policy is in force. */
+export interface PlacementPolicy {
+  /** Hosts that may be given the attempt's task credential. Absent or empty: any enrolled host. */
+  readonly credentialHosts?: readonly string[];
+  /** Hosts that may hold `local-only` data. */
+  readonly dataHosts?: readonly string[];
+  /** Hosts that have access to the project's repository. Absent: not restricted. */
+  readonly repositoryHosts?: readonly string[];
+}
+export type PlacementPolicyFor = (attempt: { readonly attemptId?: string; readonly taskId: string; readonly projectId: string; readonly agentId: string; readonly requirements: Requirements }) => Promise<PlacementPolicy>;
+
+/** The reasons a policy keeps this host from the attempt. Pure. */
+export function policyReasons(host: string, requirements: Requirements, policy: PlacementPolicy): string[] {
+  const out: string[] = [];
+  if (policy.credentialHosts !== undefined && policy.credentialHosts.length > 0 && !policy.credentialHosts.includes(host)) out.push(`the attempt's credential may not be given to ${host}`);
+  if (requirements.data === "local-only" && !(policy.dataHosts ?? []).includes(host)) out.push(`the attempt's data is local-only and the data-location policy does not list ${host}`);
+  if (policy.repositoryHosts !== undefined && !policy.repositoryHosts.includes(host)) out.push(`${host} has no access to the project's repository`);
+  return out;
+}
+
 export type RelocationPolicyFor = (attempt: { readonly attemptId: string; readonly taskId: string; readonly projectId: string; readonly agentId: string; readonly from: string; readonly requirements: Requirements }) => Promise<RelocationPolicy>;
 
 /** The reasons a host cannot take work with these requirements, from its announced capabilities. Pure. */
@@ -138,6 +158,8 @@ export interface RemoteDeps {
   readonly dispatch: Pick<DispatcherService, "gateway" | "get" | "relocate" | "quiesce" | "release">;
   /** The policy for moving an attempt; the default is conservative (see `RelocationPolicy`). Always the controller's, never the caller's. */
   readonly relocationPolicy?: RelocationPolicyFor;
+  /** Where an attempt may be placed in the first place (data location, repository access, who may hold the credential). Absent: only what a host can do decides. */
+  readonly placementPolicy?: PlacementPolicyFor;
 }
 
 export interface RemoteOptions extends RunnerOptions {
@@ -183,6 +205,12 @@ export class RemoteWorkerService {
   readonly #fileBytes: number;
   readonly #offers = new Map<string, { readonly hostId: string; readonly placement: number; readonly order: WorkOrder }>();
   readonly #waiters = new Map<string, Set<(result: StoredResult) => void>>();
+  /** The one open offers poll of each host (card H07): a new poll ends the earlier one, an offer or a new session ends it at once. */
+  readonly #polls = new Map<string, { readonly end: () => void }>();
+  readonly #pollStats = { polls: 0, held: 0, woken: 0, superseded: 0, timedOut: 0 };
+  /** Connected hosts by platform (`os/arch`), so a placement looks only at hosts that can run it (card H07). */
+  readonly #byPlatform = new Map<string, Set<string>>();
+  readonly #platformOf = new Map<string, string>();
 
   private constructor(runner: CommandRunner, deps: RemoteDeps, protocol: VersionRange, fileBytes: number) {
     this.#runner = runner;
@@ -244,7 +272,33 @@ export class RemoteWorkerService {
         return { ref, creates: current === undefined, changes: [change], detail: { host: host.id, sessionEpoch: epoch, protocol: chosen.version } };
       },
     }));
+    this.#index(host.id, command.capabilities);
+    // An offers poll of the earlier session ends now; it is answered as fenced.
+    this.#endPoll(host.id);
     return { sessionId: `ses-${result.revision}`, sessionEpoch: result.revision, protocol: chosen.version, controller: this.#protocol };
+  }
+
+  #index(hostId: string, caps: { readonly os?: unknown; readonly arch?: unknown } | undefined): void {
+    if (caps === undefined || typeof caps.os !== "string" || typeof caps.arch !== "string") return;
+    const key = `${caps.os}/${caps.arch}`;
+    const old = this.#platformOf.get(hostId);
+    if (old === key) return;
+    if (old !== undefined) { const set = this.#byPlatform.get(old); set?.delete(hostId); if (set?.size === 0) this.#byPlatform.delete(old); }
+    this.#platformOf.set(hostId, key);
+    let set = this.#byPlatform.get(key);
+    if (set === undefined) { set = new Set(); this.#byPlatform.set(key, set); }
+    set.add(hostId);
+  }
+
+  #endPoll(hostId: string): void { this.#polls.get(hostId)?.end(); }
+
+  /** Ends every open poll (the controller is stopping). */
+  close(): void { for (const poll of [...this.#polls.values()]) poll.end(); }
+
+  /** How many polls are held open and how they ended, for the owner and for tests (card H07). */
+  pollStats(by: Principal): { readonly open: number; readonly polls: number; readonly held: number; readonly woken: number; readonly superseded: number; readonly timedOut: number } {
+    this.#staff(by);
+    return { open: this.#polls.size, ...this.#pollStats };
   }
 
   async #refuse(host: Principal, commandId: unknown, worker: VersionRange, reason: string): Promise<void> {
@@ -338,6 +392,7 @@ export class RemoteWorkerService {
     const session = await this.#connected(hostId);
     const reasons = capabilityReasons(hostId, status, requirements);
     if (session === undefined) reasons.push(`${hostId} has not connected to the controller`);
+    if (this.#deps.placementPolicy !== undefined) reasons.push(...policyReasons(hostId, requirements, await this.#deps.placementPolicy({ attemptId, taskId: order.taskId, projectId: order.projectId, agentId: order.agentId, requirements })));
     if (reasons.length > 0) throw new DomainError("invalid_command", `${hostId} cannot take attempt ${attemptId}: ${reasons.join("; ")}`, { field: "hostId" });
     for (const id of inputs) await this.#deps.artifacts.assertResumable([id]);
     const placed = { ...requirements, os: status!.capabilities!.os, arch: status!.capabilities!.arch };
@@ -374,7 +429,41 @@ export class RemoteWorkerService {
     }, "place");
     if (wasLive(result.previous)) this.#wake(attemptId, result.previous!.placement, "the attempt was placed again; the earlier run is fenced");
     this.#offers.set(attemptId, { hostId, placement: result.body.placement, order });
+    // The host's open poll, if it has one, is answered now.
+    this.#endPoll(hostId);
     return { placement: result.body.placement, state: "offered" };
+  }
+
+  /**
+   * The hosts an attempt could be placed on now, and why the others cannot take it (card H07). Only hosts of the platform it needs are looked at (the index is by platform, so a pool of many hosts of other
+   * platforms costs nothing); each of those is judged by what it announced, its freshness, its session and the placement policy. When none can, `waiting` says so in plain words, including which platforms are
+   * connected, so an attempt that needs a platform nobody has waits visibly. The less loaded host (fewer offers not yet accepted) comes first, then the host ID.
+   */
+  async candidates(by: Principal, query: { readonly attemptId?: string; readonly taskId: string; readonly projectId: string; readonly agentId: string; readonly requirements: Requirements }): Promise<{ readonly eligible: readonly string[]; readonly considered: number; readonly refused: readonly { readonly hostId: string; readonly reasons: readonly string[] }[]; readonly waiting?: string }> {
+    this.#staff(by);
+    const requirements = checkRequirements(query.requirements);
+    const keys = [...this.#byPlatform.keys()].filter((k) => { const [os, arch] = k.split("/"); return (requirements.os === undefined || os === requirements.os) && (requirements.arch === undefined || arch === requirements.arch); });
+    const pool = keys.flatMap((k) => [...this.#byPlatform.get(k)!]);
+    const policy = this.#deps.placementPolicy === undefined ? undefined : await this.#deps.placementPolicy({ ...(query.attemptId === undefined ? {} : { attemptId: query.attemptId }), taskId: query.taskId, projectId: query.projectId, agentId: query.agentId, requirements });
+    const load = new Map<string, number>();
+    for (const o of this.#offers.values()) load.set(o.hostId, (load.get(o.hostId) ?? 0) + 1);
+    const eligible: string[] = []; const refused: { hostId: string; reasons: string[] }[] = [];
+    for (const hostId of pool) {
+      const status = await this.#deps.hosts.status(this.#deps.principal, hostId);
+      const reasons = capabilityReasons(hostId, status, requirements);
+      if ((await this.#connected(hostId)) === undefined) reasons.push(`${hostId} has not connected to the controller`);
+      if (policy !== undefined) reasons.push(...policyReasons(hostId, requirements, policy));
+      if (reasons.length === 0) eligible.push(hostId); else refused.push({ hostId, reasons });
+    }
+    eligible.sort((a, b) => (load.get(a) ?? 0) - (load.get(b) ?? 0) || (a < b ? -1 : 1));
+    refused.sort((a, b) => (a.hostId < b.hostId ? -1 : 1));
+    let waiting: string | undefined;
+    if (eligible.length === 0) {
+      const have = [...this.#byPlatform].map(([k, v]) => `${k} x${v.size}`).sort().join(", ") || "no host";
+      const need = [requirements.os, requirements.arch].filter((x) => x !== undefined).join("/") || "any platform";
+      waiting = pool.length === 0 ? `no connected host runs ${need} (connected: ${have}); the attempt waits until one connects` : `${pool.length} host(s) run ${need} but none can take the attempt now (${refused.slice(0, 3).map((r) => r.reasons[0]).join("; ")}); it waits`;
+    }
+    return { eligible, considered: pool.length, refused: refused.slice(0, 20), ...(waiting === undefined ? {} : { waiting }) };
   }
 
   /** Whether an attempt's placement is still live (not ended, completed or expired). */
@@ -520,9 +609,36 @@ export class RemoteWorkerService {
 
   // ---- the worker's side ---------------------------------------------------------------------------------------------------------
 
-  /** The offers waiting for this host, in the order made. Repeating the call returns the same offers until they are accepted. */
-  async offers(host: Principal, sessionId: unknown): Promise<Offer[]> {
-    await this.#session(host, sessionId);
+  /**
+   * The offers waiting for this host, in the order made. Repeating the call returns the same offers until they are accepted. With `waitMs` (at most `REMOTE_LIMITS.pollMs`) and nothing waiting, the call is held until an
+   * offer is made to this host, its session is replaced, a newer poll of its own takes over, the controller stops or the time is up (card H07): a host asks once, not once per agent, and an idle host costs the controller
+   * one open request. A host has at most one held poll.
+   */
+  async offers(host: Principal, sessionId: unknown, asked: unknown = 0): Promise<Offer[]> {
+    if (typeof asked !== "number" || !Number.isSafeInteger(asked) || asked < 0 || asked > REMOTE_LIMITS.pollMs) invalid("wait", `must be a whole number of milliseconds from 0 to ${REMOTE_LIMITS.pollMs}`);
+    const waitMs = asked as number;
+    const session = await this.#session(host, sessionId);
+    this.#pollStats.polls++;
+    if (!this.#platformOf.has(host.id)) this.#index(host.id, (await this.#deps.hosts.status(this.#deps.principal, host.id))?.capabilities);
+    const first = await this.#pending(host);
+    if (first.length > 0 || waitMs === 0) return first;
+    const earlier = this.#polls.get(host.id);
+    if (earlier !== undefined) { this.#pollStats.superseded++; earlier.end(); }
+    this.#pollStats.held++;
+    const how = await new Promise<"woken" | "timeout">((resolve) => {
+      const timer = setTimeout(() => finish("timeout"), waitMs);
+      timer.unref?.();
+      const entry = { end: () => finish("woken") };
+      const finish = (result: "woken" | "timeout"): void => { clearTimeout(timer); if (this.#polls.get(host.id) === entry) this.#polls.delete(host.id); resolve(result); };
+      this.#polls.set(host.id, entry);
+    });
+    if (how === "timeout") this.#pollStats.timedOut++; else this.#pollStats.woken++;
+    // The session may have been replaced while the poll was held: the answer is then `fenced`, not offers for a session that no longer exists.
+    await this.#session(host, session.sessionId);
+    return this.#pending(host);
+  }
+
+  async #pending(host: Principal): Promise<Offer[]> {
     const out: Offer[] = [];
     for (const [attemptId, offer] of this.#offers) {
       if (offer.hostId !== host.id) continue;

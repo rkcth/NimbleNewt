@@ -15,13 +15,13 @@ export interface WorkerTransportLimits {
   /** Requests one authenticated host may make per minute, and one network address before it is authenticated (the connection's own address; X-Forwarded-For is never trusted). */
   readonly perPrincipalPerMinute: number;
   readonly perAddressPerMinute: number;
-  /** Open connections the listener accepts at once, and from one network address (a worker needs a few; a flood from one place cannot take them all). */
+  /** Open connections the listener accepts at once, and from one network address (a worker needs a few, and every idle host holds one poll open; a site's hosts often share one address, so this is more than one host's share; a flood from one place cannot take them all). */
   readonly connections: number;
   readonly connectionsPerAddress: number;
 }
 
 /** Provisional limits, adjustable. A busy worker makes several requests a second, so the per-host allowance is higher than a person's. */
-export const DEFAULT_WORKER_TRANSPORT_LIMITS: WorkerTransportLimits = { bodyBytes: REMOTE_LIMITS.bodyBytes, publishBytes: REMOTE_LIMITS.publishBytes, perPrincipalPerMinute: 6000, perAddressPerMinute: 1200, connections: 1000, connectionsPerAddress: 100 };
+export const DEFAULT_WORKER_TRANSPORT_LIMITS: WorkerTransportLimits = { bodyBytes: REMOTE_LIMITS.bodyBytes, publishBytes: REMOTE_LIMITS.publishBytes, perPrincipalPerMinute: 6000, perAddressPerMinute: 3000, connections: 1000, connectionsPerAddress: 250 };
 
 export interface WorkerTransportOptions {
   readonly remote: RemoteWorkerService;
@@ -232,7 +232,10 @@ export class WorkerTransport {
     }
     if (a === "session" && b === "offers" && parts.length === 3) {
       allowed("GET");
-      return { status: 200, body: { offers: await svc.offers(host, await this.#session(req, host)) } };
+      const wait = url.searchParams.get("wait");
+      for (const key of url.searchParams.keys()) if (key !== "wait") throw new HttpError(400, "invalid_command", `${key}: is not a parameter of this route`);
+      const waitMs = wait === null ? 0 : /^\d{1,6}$/.test(wait) ? Number(wait) : -1;
+      return { status: 200, body: { offers: await svc.offers(host, await this.#session(req, host), waitMs) } };
     }
     if (a !== "attempts" || b === undefined || c === undefined) throw new HttpError(404, "not_found", "no such route");
     const session = await this.#session(req, host);
