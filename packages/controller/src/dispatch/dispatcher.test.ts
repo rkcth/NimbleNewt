@@ -168,6 +168,9 @@ for (const backend of backends) {
     await c.run();
     const held = (await c.budgets.report(c.owner, t.taskId))!;
     assert.deepEqual(held.reservedInFlight, { costMicros: 0, computeMs: 0 }, "nothing stays reserved for an attempt that did not start");
+    // A second failing round holds afresh and releases afresh (a new round, a new command ID).
+    await c.run();
+    assert.deepEqual((await c.budgets.report(c.owner, t.taskId))!.reservedInFlight, { costMicros: 0, computeMs: 0 }, "and again after the second failure");
     broken = false;
     assert.ok((await c.run()).started.includes(t.attemptId!), "the next tick holds it again and starts");
     const after = (await c.budgets.report(c.owner, t.taskId))!;
