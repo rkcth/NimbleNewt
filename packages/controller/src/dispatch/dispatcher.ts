@@ -77,6 +77,8 @@ export interface DispatcherDeps {
   readonly routing?: Pick<RoutingService, "get">;
   readonly pauses: PauseGuard;
   readonly decisions?: DecisionGuard;
+  /** Pins the checkout a task is dispatched against and refuses work whose repository moved or was unbound (card P01). */
+  readonly checkouts?: { dispatchCheckout(command: { commandId: string; taskId: string; actor: string }): Promise<{ kind: "none" } | { kind: "ok" } | { kind: "unbound" | "changed"; reason: string }> };
   /** `GenerationService.guardFor` is handed to every effect that is started (it adds the generation hold to the pause and decision guards). */
   readonly generation?: Pick<GenerationService, "guardFor">;
   readonly reviews?: Pick<ReviewService, "request" | "admit" | "get">;
@@ -131,7 +133,7 @@ export interface AttemptDispatcherOptions extends RunnerOptions {
   readonly bridges?: Readonly<Record<string, EffectBridge>>;
 }
 
-export type DispatchCheck = "generation" | "pause" | "decision" | "revalidation" | "meeting" | "harness" | "route" | "budget" | "grant" | "host" | "place" | "expired";
+export type DispatchCheck = "generation" | "checkout" | "pause" | "decision" | "revalidation" | "meeting" | "harness" | "route" | "budget" | "grant" | "host" | "place" | "expired";
 
 export interface TickReport {
   readonly at: string;
@@ -682,6 +684,11 @@ export class DispatcherService {
     if (this.#deps.decisions !== undefined) {
       const g = await this.#deps.decisions.guard(taskId, "start");
       if (g.blockedBy.length > 0) return skip("decision", g.blockedBy.join("; "));
+    }
+    // 3b. The checkout: a task that names a repository is pinned to the binding and location it has now, and a moved, unbound or re-pointed one does not start until the owner confirms it (card P01).
+    if (this.#deps.checkouts !== undefined) {
+      const c = await this.#deps.checkouts.dispatchCheckout({ commandId: `dpa-pin:${taskId}`, taskId, actor: DISPATCHER_ACTOR });
+      if (c.kind === "changed" || c.kind === "unbound") return block("checkout", "dispatch_blocked", c.reason);
     }
     // 4. Meeting decisions that need the agent's acknowledgement, and a meeting about to start.
     if (this.#deps.meetings !== undefined) {

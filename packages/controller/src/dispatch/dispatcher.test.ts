@@ -65,6 +65,28 @@ for (const backend of backends) {
     assert.deepEqual([cred!.issuedVia, cred!.issuedBy, cred!.attemptId], ["dispatcher", "service:dispatcher", attemptId]);
   });
 
+  suite("a task that names a repository is pinned to its binding when first dispatched; a moved or unbound checkout blocks it and a same-named binding elsewhere does not redirect it (card P01)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    await c.resources.bindResource(c.owner, { commandId: "b1", projectId: c.project, kind: "repository", label: "Web", locator: "/work/web", repositoryId: "web" });
+    const first = await c.task("Fix web", ann, { repositoryId: "web" });
+    const report = await c.run();
+    assert.deepEqual(report.started, [first.attemptId], "bound: it starts");
+    const pin = await c.resources.getPin(c.owner, first.taskId);
+    assert.ok(pin !== undefined, "the dispatch pinned the checkout");
+    // A task that names no repository is not held up by any of this.
+    const plain = await c.task("Write notes", ann);
+    assert.ok((await c.run()).started.includes(plain.attemptId!));
+    // The location moves: the pinned task no longer resolves to the new place without the owner confirming it, so a later dispatch of it is refused.
+    const bound = (await c.resources.list(c.owner, c.project))![0]!;
+    await c.resources.moveResource(c.owner, { commandId: "mv1", resourceId: bound.id, expectedRevision: bound.revision, locator: "/work/web-new" });
+    const again = await c.resources.dispatchCheckout({ commandId: "again", taskId: first.taskId, actor: "dispatcher" });
+    assert.equal(again.kind, "changed");
+    // Another project binding the same handle at another location does not redirect the pinned task.
+    const other = (await c.projects.createProject({ commandId: "p2", actor: c.owner.id, name: "Other" })).id;
+    await c.resources.bindResource(c.owner, { commandId: "b2", projectId: other, kind: "repository", label: "Web", locator: "/work/web", repositoryId: "web" });
+    assert.equal((await c.resources.dispatchCheckout({ commandId: "again2", taskId: first.taskId, actor: "dispatcher" })).kind, "changed", "still the moved checkout, not the other project's");
+  });
+
   suite("every tool call, read-only included, is a durable operation with its tool version, invocation, state, times and resource use; payloads are redacted; a tool call alone is not progress", async (c) => {
     const ann = await c.agent("ann", workGrants(c.project, ["read-file", "write-file"]));
     const { taskId, attemptId } = await c.task("Edit", ann);

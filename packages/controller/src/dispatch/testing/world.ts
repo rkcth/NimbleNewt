@@ -1,6 +1,7 @@
 import { AdmissionService } from "../../admission/index.js";
 import { BudgetService } from "../../budgets/index.js";
 import { DecisionService } from "../../decisions/index.js";
+import { ProjectResourceService } from "../../projects/index.js";
 import { AssignmentService } from "../../domain/assignments.js";
 import { BlockerService } from "../../domain/blockers.js";
 import { EffectService } from "../../domain/effects.js";
@@ -94,6 +95,7 @@ export interface DispatchWorld {
   readonly pauses: PauseService;
   readonly generation: GenerationService;
   readonly decisions: DecisionService;
+  readonly resources: ProjectResourceService;
   readonly reviews: ReviewService;
   readonly waits: WaitService;
   readonly project: string;
@@ -105,7 +107,7 @@ export interface DispatchWorld {
   restart(overrides?: Partial<DispatcherDeps>, options?: AttemptDispatcherOptions): DispatcherService;
   agent(name: string, grants?: Grant[]): Promise<{ id: string; aid: string }>;
   /** A ready task in the project, assigned to the agent, with its attempt admitted (naming the harness) the way the inbox does it. */
-  task(title: string, agent: { aid: string }, extra?: { project?: string; admit?: boolean; harness?: string }): Promise<{ taskId: string; attemptId: string | undefined }>;
+  task(title: string, agent: { aid: string }, extra?: { project?: string; admit?: boolean; harness?: string; repositoryId?: string }): Promise<{ taskId: string; attemptId: string | undefined }>;
   heartbeatHost(hostName?: string): Promise<void>;
 }
 
@@ -139,6 +141,7 @@ export async function buildWorld(storage: ControllerStorage, o: { route?: RouteR
   const budgets = BudgetService.withEpoch(storage, epoch, options);
   const pauses = PauseService.withEpoch(storage, epoch, { waits }, options);
   const decisions = DecisionService.withEpoch(storage, epoch, { effects }, options);
+  const resources = ProjectResourceService.withEpoch(storage, epoch, options);
   const generation = GenerationService.withEpoch(storage, epoch, { assignments, effects, pauses, decisions }, options);
   const reviews = ReviewService.withEpoch(storage, epoch, { ...options, decisions });
   // The dispatcher's own service principal, and a host with a fresh heartbeat.
@@ -158,19 +161,19 @@ export async function buildWorld(storage: ControllerStorage, o: { route?: RouteR
     return d.outcome === "chosen" ? { route: d.route!, ...(d.profile?.harness === undefined ? {} : { harness: d.profile.harness }), role: d.role, request: d.request, routing: d.routingRevision ?? 0, profiles: d.profilesRevision } : { none: true, reasons: d.reasons };
   });
   const deps: DispatcherDeps = {
-    principal: dispatcherPrincipal, assignments, projects, credentials, admission, hosts, workers: [worker], contracts, harnesses, policy, effects, blockers, route, routing, pauses, decisions, generation, reviews,
+    principal: dispatcherPrincipal, assignments, projects, checkouts: resources, credentials, admission, hosts, workers: [worker], contracts, harnesses, policy, effects, blockers, route, routing, pauses, decisions, generation, reviews,
     ...(o.withBudget === false ? {} : { budgets }),
   };
   const make = (overrides: Partial<DispatcherDeps> = {}, opts: AttemptDispatcherOptions = {}): DispatcherService => DispatcherService.withEpoch(storage, epoch, { ...deps, workers: [world.worker], ...overrides }, { ...options, ...(o.options ?? {}), ...opts });
   const world: DispatchWorld = {
-    storage, epoch, clock, owner, dispatcherPrincipal, projects, assignments, inbox, effects, blockers, principals, grants, credentials, admission, hosts, contracts, harnesses, policy, routing, difficulty, budgets, pauses, generation, decisions, reviews, waits, project, deps, options,
+    storage, epoch, clock, owner, dispatcherPrincipal, resources, projects, assignments, inbox, effects, blockers, principals, grants, credentials, admission, hosts, contracts, harnesses, policy, routing, difficulty, budgets, pauses, generation, decisions, reviews, waits, project, deps, options,
     worker, dispatcher: undefined as never, restart: (overrides, opts) => make(overrides, opts), heartbeatHost,
     agent: async (name, g = []) => {
       await principals.enroll(owner, { commandId: cid("ag"), kind: "agent", name, grants: g });
       return { id: `agent:${name}`, aid: name };
     },
     task: async (title, agent, extra = {}) => {
-      const taskId = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: extra.project ?? project, title })).id;
+      const taskId = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: extra.project ?? project, title, ...(extra.repositoryId === undefined ? {} : { repositoryId: extra.repositoryId }) })).id;
       await projects.transitionTask({ commandId: cid("r"), actor: owner.id, taskId, expectedRevision: 1, to: "ready" });
       await assignments.assignTask({ commandId: cid("as"), actor: owner.id, taskId, owner: { kind: "agent", id: agent.aid } });
       if (extra.admit === false) return { taskId, attemptId: undefined };

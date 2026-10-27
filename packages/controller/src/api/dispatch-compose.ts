@@ -1,3 +1,4 @@
+import { ProjectResourceService } from "../projects/index.js";
 import type { AttemptRelay, ModelRelay } from "../dispatch/relay.js";
 import { AdmissionService } from "../admission/index.js";
 import { BudgetService } from "../budgets/index.js";
@@ -209,7 +210,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   }
   const dispatcher = DispatcherService.withEpoch(storage, epoch, {
     principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, hosts, workers,  contracts: i.contracts, harnesses: i.catalog, policy, effects, blockers, route,
-    routing: i.routing, pauses, decisions, generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
+    routing: i.routing, pauses, decisions, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
   }, { ...ro, holder: "dispatcher", ...(i.onError === undefined ? {} : { onError: i.onError }), ...(i.options.dispatcher ?? {}) });
   const driver = new DispatchDriver({
     dispatcher, storage, epoch, record: { storage, options: ro },

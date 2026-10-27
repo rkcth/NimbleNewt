@@ -1,5 +1,5 @@
 import { mergeChanges } from "../domain/changes.js";
-import { DomainError } from "../domain/errors.js";
+import { DomainError, isDomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import { LIMITS, onlyKnown, projectId as checkProjectId, revision as checkRevision, taskId as checkTaskId, text, type ProjectBody, type Repository, type TaskBody, type View } from "../domain/model.js";
 import { CommandRunner, view, type CommandResult, type RunnerOptions } from "../domain/runner.js";
@@ -414,6 +414,10 @@ export class ProjectResourceService {
     if (found === undefined) return undefined;
     const task = found.body as unknown as TaskBody;
     if (!may(by, "task.read", task.projectId, { kind: "task", id }) || !may(by, "resource.read", task.projectId)) return undefined;
+    return this.#resolve(id, task);
+  }
+
+  async #resolve(id: string, task: TaskBody): Promise<Checkout> {
     const pin = (await this.#runner.get(CHECKOUT, id))?.body as unknown as CheckoutBody | undefined;
     if (task.repositoryId === undefined) {
       if (pin !== undefined) throw new DomainError("checkout_changed", `task ${id} no longer names the repository it was dispatched against`);
@@ -428,6 +432,44 @@ export class ProjectResourceService {
     } else if (bound === undefined || bound.body.state !== "bound") return invalid("repositoryId", `repository ${task.repositoryId} is not bound to the project; bind it first`);
     const b = bound.body;
     return { taskId: id, projectId: task.projectId, resourceId: bound.id, repositoryId: task.repositoryId, label: b.label, locator: b.locator, scope: b.scope, pinned: pin !== undefined };
+  }
+
+  /**
+   * The dispatcher's step (card P01): a task that names a repository is pinned to the binding and location version it has now, the first time it is dispatched, and every later dispatch must find the
+   * same checkout. It takes no caller's rights: only code that builds the services can run it (the dispatcher acts as the controller, whose service principal holds no `assignment.manage`), and it writes
+   * only the pin. `none` for a task that names no repository (nothing to bind), `unbound` or `changed` with the reason when the work must not start.
+   */
+  async dispatchCheckout(command: { commandId: string; taskId: string; actor: string }): Promise<{ kind: "none" } | { kind: "ok"; checkout: Checkout; pinnedNow: boolean } | { kind: "unbound" | "changed"; reason: string }> {
+    const taskId = checkTaskId(command.taskId);
+    const found = await this.#runner.get("task", taskId);
+    const task = found?.body as unknown as TaskBody | undefined;
+    if (found === undefined || task === undefined) return { kind: "none" };
+    const existing = await this.#runner.get(CHECKOUT, taskId);
+    if (task.repositoryId === undefined && existing === undefined) return { kind: "none" };
+    let pinnedNow = false;
+    if (existing === undefined) {
+      let bound: { id: string; revision: number; body: ResourceBody };
+      try { bound = await this.#bindingFor(task); } catch (error) { if (isDomainError(error, "invalid_command")) return { kind: "unbound", reason: error.message }; throw error; }
+      const result = await this.#runner.command("checkout.pin", { commandId: scopedCommandId(command.actor, command.commandId), actor: command.actor }, async () => ({
+        payload: { taskId },
+        build: async () => {
+          const ref: AggregateRef = { kind: CHECKOUT, id: taskId };
+          const body: CheckoutBody = { taskId, projectId: task.projectId, resourceId: bound.id, repositoryId: task.repositoryId!, locatorEpoch: bound.body.locatorEpoch, pinnedBy: command.actor };
+          const changes: Change[] = [
+            { type: "create", ref, body: body as unknown as JsonObject },
+            { type: "check", ref: { kind: "task", id: taskId }, expectedRevision: found.revision },
+            { type: "check", ref: { kind: RESOURCE, id: bound.id }, expectedRevision: bound.revision },
+          ];
+          return { ref, creates: true, changes, detail: { taskId, resourceId: bound.id, locatorEpoch: body.locatorEpoch }, contention: async () => raced() };
+        },
+      }));
+      pinnedNow = !result.replayed;
+    }
+    try { return { kind: "ok", checkout: await this.#resolve(taskId, task), pinnedNow }; } catch (error) {
+      if (isDomainError(error, "checkout_changed")) return { kind: "changed", reason: error.message };
+      if (isDomainError(error, "invalid_command")) return { kind: "unbound", reason: error.message };
+      throw error;
+    }
   }
 
   /** The pin of a task, for the one who must confirm a changed checkout. Needs `assignment.read` for the task. */
