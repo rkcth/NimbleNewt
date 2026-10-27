@@ -3,6 +3,7 @@ import type { AssignmentService } from "../domain/assignments.js";
 import type { ProjectService } from "../domain/service.js";
 import type { AgentService } from "../agents/index.js";
 import type { BudgetService } from "../budgets/index.js";
+import type { StatusService } from "../status/index.js";
 import type { DecisionService } from "../decisions/index.js";
 import type { WatchService } from "../events/handling.js";
 import type { EventService } from "../events/index.js";
@@ -38,6 +39,8 @@ export interface Context {
   readonly responsibilities?: ResponsibilityService;
   /** Absent when the controller runs without meetings (cards M01 and M03). */
   readonly meetings?: MeetingService;
+  /** Absent when the controller runs without the status service (card U05b). */
+  readonly status?: Pick<StatusService, "ask">;
   /** Absent when the controller runs without context branches (card C05). */
   readonly branches?: ContextBranchService;
   /** Absent when the controller runs without grants (card U03e). */
@@ -103,6 +106,7 @@ const ownerQuestionsOf = (c: Context): NonNullable<Context["ownerQuestions"]> =>
 const branchesOf = (c: Context): ContextBranchService => c.branches ?? unavailable("context branches");
 const grantsOf = (c: Context): NonNullable<Context["grants"]> => c.grants ?? unavailable("rights");
 const eventsOf = (c: Context): NonNullable<Context["events"]> => c.events ?? unavailable("events");
+const statusOf = (c: Context): NonNullable<Context["status"]> => c.status ?? unavailable("status");
 const budgetsOf = (c: Context): NonNullable<Context["budgets"]> => c.budgets ?? unavailable("budgets");
 /** A task credential acts for its one task: an operation on another task reads as missing. */
 const ownTask = (c: Context, taskId: string): string => { if (c.principal.taskScope !== undefined && c.principal.taskScope.taskId !== taskId) throw new DomainError("not_found", "no such task"); return taskId; };
@@ -137,6 +141,8 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, ["taskId"]); return found("budget", await budgetsOf(c).report(c.principal, str(a, "taskId"))); } },
   { name: "budget.usage", kind: "query", summary: "What has been spent, by project, task or agent, with work and shared overhead apart and the cache figures.", args: { "projectId?": "only this project", "taskId?": "only this task", "agentId?": "only this agent", "category?": "`work` or `shared-overhead`" }, result: "`{ item }`: the summary.",
     run: async (c, a) => { only(a, ["projectId", "taskId", "agentId", "category"]); notFromTask(c, "total budgets across tasks"); const category = optStr(a, "category"); if (category !== undefined && category !== "work" && category !== "shared-overhead") invalid("args.category", "must be work or shared-overhead"); return found("usage", await budgetsOf(c).usage(c.principal, { ...(optStr(a, "projectId") === undefined ? {} : { projectId: optStr(a, "projectId")! }), ...(optStr(a, "taskId") === undefined ? {} : { taskId: optStr(a, "taskId")! }), ...(optStr(a, "agentId") === undefined ? {} : { agentId: optStr(a, "agentId")! }), ...(category === undefined ? {} : { category: category as "work" | "shared-overhead" }) })); } },
+  { name: "status.ask", kind: "query", summary: "A status view from the records, each line citing its records: `task`, `overview`, `noticeboard`, `changes`, `tools`, `delivered` (artifacts are checked against their files when the controller keeps them), `failed_events` and `failed_event`. What the caller may not read reads as missing.", args: { request: "`{ kind, ... }` as the view needs (for example `{ kind: \"delivered\", projectId }`, `{ kind: \"failed_event\", handlingId }`)" }, result: "`{ item }`: `{ observedAt, lines, ... }`, or `not_found` when the subject is missing or unreadable.",
+    run: async (c, a) => { only(a, ["request"]); notFromTask(c, "ask for a status view"); return found("status", await statusOf(c).ask(c.principal, a["request"] as never)); } },
   { name: "budget.pending", kind: "query", summary: "The open requests for more budget addressed to you (the owner: those that went to the owner), with whether the list may be partial.", args: {}, result: "`{ requests, truncated }`; when `truncated` is true some older open requests may be missing (read each task's `budget.report`).",
     run: async (c, a) => { only(a, []); notFromTask(c, "list requests for budget across tasks"); return asJson(await budgetsOf(c).pending(c.principal)); } },
   { name: "budget.get-request", kind: "query", summary: "One request for more budget (its requester, its addressee and the owner may read it).", args: { requestId: "the request's ID" }, result: "`{ item }`: the request.",

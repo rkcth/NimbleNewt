@@ -93,7 +93,7 @@ export interface StartOptions {
   readonly dispatch?: DispatchStartOptions;
   /**
    * Where the artifact files are kept (card U05b). Given, the status answers check each delivered artifact against its files and say whether they match, are damaged, or were not checked; absent: they are shown as not checked and never as verified.
-   * Opened for reading only here: this controller publishes nothing through it.
+   * This controller only reads through it (it publishes nothing here), but opening creates the folder if it is missing, so a mistyped path shows every artifact as not matching until it is corrected. Not defaulted from the remote hosts' blob folder: name it explicitly.
    */
   readonly artifacts?: { readonly directory: string };
   /**
@@ -261,15 +261,15 @@ export async function startController(options: StartOptions): Promise<Controller
     // Event watches (card H13): an agent's watch on a stream, its handling attempts and the failed queue, which the status answers and the state API read.
     const watchService = WatchService.withEpoch(storage, epoch, { events: EventService.withEpoch(storage, epoch), inbox: InboxService.withEpoch(storage, epoch, assignments), assignments, projects });
     const meetings = MeetingService.withEpoch(storage, epoch, { inquiries }, { availability: pauses.availability });
-    const api = new StateApi({ branches, meetings, grants, watches: watchService, events: EventService.withEpoch(storage, epoch), budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
+    const checked = options.artifacts === undefined ? undefined : ArtifactService.withEpoch(storage, epoch, await FileBlobStore.open({ directory: options.artifacts.directory }));
+    const status = StatusService.withEpoch(storage, epoch, { assignments, waits, blockers: BlockerService.withEpoch(storage, epoch), contracts, pauses, stall, watch: watchService, ...(checked === undefined ? {} : { verifyArtifact: async (id: string) => ({ ok: (await checked.verify(id)).ok }) }) });
+    const api = new StateApi({ status, branches, meetings, grants, watches: watchService, events: EventService.withEpoch(storage, epoch), budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
     let chat: ChatService | undefined;
     let coordinator: CoordinatorService | undefined;
     if (options.chat !== undefined) {
       const o = options.chat;
       // The approval profile (A07), status explanations (U05) and conversational policy edits (U04) are composed from the services built above.
       const policy = PolicyService.withEpoch(storage, epoch, grants);
-      const checked = options.artifacts === undefined ? undefined : ArtifactService.withEpoch(storage, epoch, await FileBlobStore.open({ directory: options.artifacts.directory }));
-      const status = StatusService.withEpoch(storage, epoch, { assignments, waits, blockers: BlockerService.withEpoch(storage, epoch), contracts, pauses, stall, watch: watchService, ...(checked === undefined ? {} : { verifyArtifact: async (id: string) => ({ ok: (await checked.verify(id)).ok }) }) });
       const policyEdits = PolicyEditService.withEpoch(storage, epoch, { policy, reviews, grants, configuration, conversations, interpreter: o.interpreter });
       chat = ChatService.withEpoch(storage, epoch, { principals, api, interpreter: o.interpreter, policy, status, policyEdits, coordinator: () => coordinator, ...(o.coordinator === undefined ? {} : { coordinatorToken: o.coordinator.token }) });
       if (o.coordinator !== undefined) {
