@@ -75,7 +75,6 @@ test("a request for more budget tells the owner once, budgets are read, asked fo
     assert.equal((await call(ann, "budget.pending", {})).result.requests.length, 0);
     assert.equal((await call(ann, "budget.report", { taskId: grandchild })).result.item.limit.costMicros, 55_000);
     // A repeat of the request after it was decided tells nobody to decide a closed request.
-    await c.storage.listAggregates("agent-message", { limit: 100 });
     assert.equal((await noticesTo("agent:ann")).length, 1);
     assert.equal((await call(ann, "budget.request-more", { taskId: grandchild, costMicros: 10_000, reason: "more water" }, "bq2")).result.replayed, true);
     assert.equal((await noticesTo("agent:ann")).length, 1, "no new notice for a decided request");
@@ -117,6 +116,15 @@ test("a request addressed to a holder whose notice was lost (a crash after the c
     assert.equal(await told(), 1, "the holder was told");
     await c.dispatch!.dispatcher.tick();
     assert.equal(await told(), 1, "and only once");
+    // A request whose notice never got filed, then decided, is not announced when the requester repeats the command.
+    const grand2 = await mk("grand2");
+    await silent.delegate(rob, { commandId: "b-del3", parentTaskId: child, childTaskId: grand2, costMicros: 20_000, computeMs: 1_000 });
+    const quiet = await silent.requestMore(ann, { commandId: "bq-late", taskId: grand2, costMicros: 1_000, reason: "a little more" });
+    await silent.decide(ann, { commandId: "bd-late", requestId: quiet.id, approve: false });
+    const before = await told();
+    const repeat = await c.api.handle((await c.services.principals.issueCredential(rob, "agent:ann")).token, { v: 1, op: "budget.request-more", commandId: "bq-late", args: { taskId: grand2, costMicros: 1_000, reason: "a little more" } } as never) as { ok: boolean; result?: { replayed: boolean } };
+    assert.equal(repeat.result?.replayed, true);
+    assert.equal(await told(), before, "a decided request is not announced");
     // Decided, the request is no longer owed.
     await silent.decide(ann, { commandId: "bd", requestId: asked.id, approve: true });
     assert.deepEqual(await silent.openForHolders(), []);

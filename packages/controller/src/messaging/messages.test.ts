@@ -691,7 +691,7 @@ for (const backend of backends) {
   });
 
   suite("a notice from the controller (R05e) is filed once as advice, never wakes anyone, keeps while the recipient is paused, and is refused for a full inbox or a recipient who cannot see the task", async (c) => {
-    const note = (id: string, to = c.ann.pid, taskId = c.tAnn) => c.msgs.noticeFromController({ commandId: id, taskId, to, purpose: "budget request", text: `Request ${id} is addressed to you.` });
+    const note = (id: string, to = c.ann.pid, taskId = c.tAnn, admit?: "budget.manage") => c.msgs.noticeFromController({ commandId: id, taskId, to, purpose: "budget request", text: `Request ${id} is addressed to you.`, ...(admit === undefined ? {} : { admit }) });
     const first = await note("n-1");
     assert.equal(first.replayed, false);
     assert.equal((await note("n-1")).replayed, true, "the same command files it once");
@@ -705,9 +705,10 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.msgs.noticeFromController({ commandId: "n-3", taskId: c.tAnn, to: c.ann.pid, purpose: "p", text: "t", class: "urgent-control" } as never));
     // A holder who may decide budget requests but cannot read the task is told; and the controller cannot fill an inbox with notices.
     const decider = await c.agent("decider", [{ action: "budget.manage", project: c.a }]);
-    assert.equal((await note("n-5", decider.pid)).replayed, false);
-    for (let i = 1; i < MESSAGE_LIMITS.perSenderQueue; i++) await note(`cap-${i}`, decider.pid);
-    await refuses("unavailable", () => note("cap-over", decider.pid), (e) => assert.match(e.message, /crowd out/));
+    await refuses("forbidden", () => note("n-5x", decider.pid), (e) => assert.match(e.message, /cannot be told/));
+    assert.equal((await note("n-5", decider.pid, c.tAnn, "budget.manage")).replayed, false);
+    for (let i = 1; i < MESSAGE_LIMITS.perSenderQueue; i++) await note(`cap-${i}`, decider.pid, c.tAnn, "budget.manage");
+    await refuses("unavailable", () => note("cap-over", decider.pid, c.tAnn, "budget.manage"), (e) => assert.match(e.message, /crowd out/));
     // A paused recipient keeps the notice queued and nothing resumes it.
     await c.pauses.pause(c.owner, { commandId: cid("pz"), scope: { kind: "agent", id: c.cat.aid }, reason: "hold" });
     const held = await note("n-4", c.cat.pid);

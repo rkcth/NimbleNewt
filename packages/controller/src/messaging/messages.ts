@@ -800,8 +800,9 @@ export class AgentMessageService {
    * so no agent or conversation can use it and the dispatcher's service principal is not widened; it is called only by code that builds the services. It never wakes anyone: the recipient reads it at a boundary, and a
    * paused, suspended or stopped recipient keeps it queued. The same `commandId` files it once. A full inbox is `unavailable` (the caller retries later); a recipient who can no longer see the task is `forbidden`.
    */
-  async noticeFromController(command: { commandId: string; taskId: string; to: string; purpose: string; text: string }): Promise<{ id: string; replayed: boolean }> {
-    onlyKnown(command, ["commandId", "taskId", "to", "purpose", "text"]);
+  async noticeFromController(command: { commandId: string; taskId: string; to: string; purpose: string; text: string; /** A right that admits a recipient who cannot read the task (the budget holder who may decide). */ admit?: "budget.manage" }): Promise<{ id: string; replayed: boolean }> {
+    onlyKnown(command, ["commandId", "taskId", "to", "purpose", "text", "admit"]);
+    if (command.admit !== undefined && command.admit !== "budget.manage") invalid("admit", "must be budget.manage when given");
     const purpose = plain(command.purpose, "purpose", MESSAGE_LIMITS.purpose);
     const text = plain(command.text, "text", MESSAGE_LIMITS.text);
     const taskId = checkTaskId(command.taskId);
@@ -815,7 +816,7 @@ export class AgentMessageService {
         const projectId = ((await this.#runner.get("task", taskId))?.body as unknown as TaskBody | undefined)?.projectId;
         const holder = projectId === undefined ? undefined : await this.#fresh(to);
         // A holder who may decide a request (`budget.manage`) is told even when it holds no right to read the task.
-        if (projectId === undefined || holder === undefined || ((await this.#reachable(to, projectId, taskId)) === undefined && !allows(holder, "budget.manage", projectId, { resource: { kind: "task", id: taskId }, now }))) throw new DomainError("forbidden", `${to} cannot be told about that task`);
+        if (projectId === undefined || holder === undefined || holder.kind !== "agent" || ((await this.#reachable(to, projectId, taskId)) === undefined && !(command.admit === "budget.manage" && allows(holder, "budget.manage", projectId, { resource: { kind: "task", id: taskId }, now })))) throw new DomainError("forbidden", `${to} cannot be told about that task`);
         const inboxAgg = await this.#runner.get("agent-inbox", inboxIdOf(to));
         const inbox = inboxAgg === undefined ? this.#emptyInbox(now) : inboxAgg.body as unknown as InboxBody;
         if (inbox.pending.length >= MESSAGE_LIMITS.queue) throw new DomainError("unavailable", `${to} already has ${inbox.pending.length} messages waiting; the notice is retried once some are read`);
