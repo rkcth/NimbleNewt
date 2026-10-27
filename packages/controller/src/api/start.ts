@@ -41,6 +41,7 @@ import { JobService } from "../jobs/index.js";
 import { PauseService } from "../lifecycle/index.js";
 import { ReviewService } from "../review/index.js";
 import { DifficultyService, RoutingService } from "../routing/index.js";
+import { ArtifactService, FileBlobStore } from "../artifacts/index.js";
 import { composeDispatch, type DispatchHandle, type DispatchStartOptions } from "./dispatch-compose.js";
 import { ConversationTransport, type TransportOptions } from "../transport/index.js";
 
@@ -90,6 +91,11 @@ export interface StartOptions {
    * holds the primary epoch; a newer controller instance stops them here. See `DispatchStartOptions`.
    */
   readonly dispatch?: DispatchStartOptions;
+  /**
+   * Where the artifact files are kept (card U05b). Given, the status answers check each delivered artifact against its files and say whether they match, are damaged, or were not checked; absent: they are shown as not checked and never as verified.
+   * Opened for reading only here: this controller publishes nothing through it.
+   */
+  readonly artifacts?: { readonly directory: string };
   /**
    * Owner chat (card U03): the interpreter that reads the owner's messages (a model behind the routed client in production; a scripted one in tests) and, optionally, the persistent coordinator's model and credential. Absent: no chat service is built.
    * The approval profile (A07), status explanations (U05) and conversational policy edits (U04) are composed in. The coordinator is controller-managed and nothing depends on it: when it is paused, stopped or its routes fail, the chat and the rest of the controller carry on.
@@ -262,7 +268,8 @@ export async function startController(options: StartOptions): Promise<Controller
       const o = options.chat;
       // The approval profile (A07), status explanations (U05) and conversational policy edits (U04) are composed from the services built above.
       const policy = PolicyService.withEpoch(storage, epoch, grants);
-      const status = StatusService.withEpoch(storage, epoch, { assignments, waits, blockers: BlockerService.withEpoch(storage, epoch), contracts, pauses, stall, watch: watchService });
+      const checked = options.artifacts === undefined ? undefined : ArtifactService.withEpoch(storage, epoch, await FileBlobStore.open({ directory: options.artifacts.directory }));
+      const status = StatusService.withEpoch(storage, epoch, { assignments, waits, blockers: BlockerService.withEpoch(storage, epoch), contracts, pauses, stall, watch: watchService, ...(checked === undefined ? {} : { verifyArtifact: async (id: string) => ({ ok: (await checked.verify(id)).ok }) }) });
       const policyEdits = PolicyEditService.withEpoch(storage, epoch, { policy, reviews, grants, configuration, conversations, interpreter: o.interpreter });
       chat = ChatService.withEpoch(storage, epoch, { principals, api, interpreter: o.interpreter, policy, status, policyEdits, coordinator: () => coordinator, ...(o.coordinator === undefined ? {} : { coordinatorToken: o.coordinator.token }) });
       if (o.coordinator !== undefined) {
