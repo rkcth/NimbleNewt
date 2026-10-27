@@ -103,8 +103,6 @@ const ownerQuestionsOf = (c: Context): NonNullable<Context["ownerQuestions"]> =>
 const branchesOf = (c: Context): ContextBranchService => c.branches ?? unavailable("context branches");
 const grantsOf = (c: Context): NonNullable<Context["grants"]> => c.grants ?? unavailable("rights");
 const eventsOf = (c: Context): NonNullable<Context["events"]> => c.events ?? unavailable("events");
-/** A task credential acts for its one task: it may not list or total budgets across tasks. */
-const notFromTask = (c: Context, what: string): void => { if (c.principal.taskScope !== undefined) throw new DomainError("forbidden", `a task credential may not ${what}`); };
 const budgetsOf = (c: Context): NonNullable<Context["budgets"]> => c.budgets ?? unavailable("budgets");
 /** A task credential acts for its one task: an operation on another task reads as missing. */
 const ownTask = (c: Context, taskId: string): string => { if (c.principal.taskScope !== undefined && c.principal.taskScope.taskId !== taskId) throw new DomainError("not_found", "no such task"); return taskId; };

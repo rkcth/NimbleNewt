@@ -53,6 +53,7 @@ Arguments:
 - `grantId`: the grant's ID
 
 Result: `{ item }`: the grant, with its revision.
+
 #### `budget.report`
 
 A task's budget: limit, delegated to children, in flight, uncertain, spent, overrun and available, for money and for compute, with the reservations and open requests behind them. A task you may not read reads like a missing one.
@@ -79,9 +80,6 @@ Result: `{ item }`: the summary.
 #### `budget.pending`
 
 The open requests for more budget addressed to you (the owner: those that went to the owner), with whether the list may be partial.
-#### `difficulty.profiles`
-
-The difficulty profiles and the mapping from difficulty to profile (owner, or someone with `routing.write`).
 
 Arguments:
 
@@ -98,6 +96,15 @@ Arguments:
 - `requestId`: the request's ID
 
 Result: `{ item }`: the request.
+
+#### `difficulty.profiles`
+
+The difficulty profiles and the mapping from difficulty to profile (owner, or someone with `routing.write`).
+
+Arguments:
+
+- none
+
 Result: `{ item }`: the profiles, with the revision to quote when replacing them.
 
 #### `difficulty.delegation`
@@ -579,6 +586,80 @@ Arguments:
 - `basis`: the reason, in the owner's words
 - `notBefore` (optional): ISO time the grant starts
 - `expiresAt` (optional): ISO time the grant ends
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `grant.revoke`
+
+The owner takes a grant back (owner only; the revision you read must still be current). It stops counting at the next check.
+
+Arguments:
+
+- `grantId`: the grant's ID
+- `expectedRevision`: the revision you read
+- `reason`: why, in the owner's words
+
+Result: `{ ok: true }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `events.configure-idle`
+
+Sets how long an event subscription may sit without acknowledging before it expires (owner only). A subscription that was made before this existed, or without its own time, uses this one.
+
+Arguments:
+
+- `idleSeconds`: whole seconds, 10 to 604800
+
+Result: `{ ok: true }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `events.cancel`
+
+Cancels an event subscription (its subscriber or the owner). Its events stay in the stream.
+
+Arguments:
+
+- `subscriptionId`: the subscription's ID
+
+Result: `{ ok: true }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `budget.request-more`
+
+A task asks for more budget. It goes to the holder of the parent node, or to the owner, who is told.
+
+Arguments:
+
+- `taskId`: the task
+- `costMicros` (optional): money wanted, in millionths
+- `computeMs` (optional): compute wanted, in milliseconds
+- `reason`: why
+
+Result: `{ id, to, replayed }`: the request and who it was addressed to.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `budget.decide`
+
+Approves (possibly less than asked) or denies a request. The owner may add new money; the holder it was addressed to may only move allowance from its own node.
+
+Arguments:
+
+- `requestId`: the request
+- `approve`: true or false
+- `costMicros` (optional): money to grant, at most what was asked
+- `computeMs` (optional): compute to grant, at most what was asked
+- `note` (optional): a note
+
+Result: `{ ok: true }`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `difficulty.set-profiles`
 
 Replaces the profiles and the mapping in one validated step (owner, or someone with `routing.write`). It applies to the next dispatch only.
@@ -606,37 +687,6 @@ Result: `{ id, revision, replayed }`.
 
 Completion: finished when accepted (`completed: true`).
 
-#### `grant.revoke`
-
-The owner takes a grant back (owner only; the revision you read must still be current). It stops counting at the next check.
-
-Arguments:
-
-- `grantId`: the grant's ID
-- `expectedRevision`: the revision you read
-- `reason`: why, in the owner's words
-#### `events.configure-idle`
-
-Sets how long an event subscription may sit without acknowledging before it expires (owner only). A subscription that was made before this existed, or without its own time, uses this one.
-
-Arguments:
-
-- `idleSeconds`: whole seconds, 10 to 604800
-
-Result: `{ ok: true }`.
-
-Completion: finished when accepted (`completed: true`).
-
-#### `events.cancel`
-
-Cancels an event subscription (its subscriber or the owner). Its events stay in the stream.
-
-Arguments:
-
-- `subscriptionId`: the subscription's ID
-#### `budget.request-more`
-
-A task asks for more budget. It goes to the holder of the parent node, or to the owner, who is told.
 #### `difficulty.delegate`
 
 The caller (the parent) delegates a task to a child agent with a difficulty ceiling and retry and total budgets for escalation.
@@ -669,6 +719,34 @@ Completion: finished when accepted (`completed: true`).
 #### `escalation.request`
 
 A blocked or repeatedly failing child asks for a harder profile, within its ceiling or by asking its parent.
+
+Arguments:
+
+- `taskId`: the task
+- `kind`: `blocked` or `failing`
+- `reason`: why
+- `blockerId` (optional): the blocker, for `blocked`
+- `to` (optional): the difficulty asked for
+
+Result: `{ item }`: the escalation and how it was decided or who decides.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `escalation.decide`
+
+The parent approves or denies a child's escalation.
+
+Arguments:
+
+- `taskId`: the child task
+- `escalationId`: the escalation
+- `approve`: true or false
+- `reason`: why
+
+Result: `{ item }`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `decision.record`
 
 The owner records a decision, correction or gate in their own words (direct channel; a chat decision is recorded from the chat turn). A correction supersedes only the conflicting decisions in its scope and takes effect at once; dependent work is marked and blocked until revalidated. Anything but `stance: decided` records nothing.
@@ -710,48 +788,6 @@ A task asks the owner a question on a topic; a decided topic answers itself and 
 Arguments:
 
 - `taskId`: the task
-- `costMicros` (optional): money wanted, in millionths
-- `computeMs` (optional): compute wanted, in milliseconds
-- `reason`: why
-
-Result: `{ id, to, replayed }`: the request and who it was addressed to.
-
-Completion: finished when accepted (`completed: true`).
-
-#### `budget.decide`
-
-Approves (possibly less than asked) or denies a request. The owner may add new money; the holder it was addressed to may only move allowance from its own node.
-
-Arguments:
-
-- `requestId`: the request
-- `approve`: true or false
-- `costMicros` (optional): money to grant, at most what was asked
-- `computeMs` (optional): compute to grant, at most what was asked
-- `note` (optional): a note
-
-Result: `{ ok: true }`.
-- `kind`: `blocked` or `failing`
-- `reason`: why
-- `blockerId` (optional): the blocker, for `blocked`
-- `to` (optional): the difficulty asked for
-
-Result: `{ item }`: the escalation and how it was decided or who decides.
-
-Completion: finished when accepted (`completed: true`).
-
-#### `escalation.decide`
-
-The parent approves or denies a child's escalation.
-
-Arguments:
-
-- `taskId`: the child task
-- `escalationId`: the escalation
-- `approve`: true or false
-- `reason`: why
-
-Result: `{ item }`.
 - `topic`: the topic
 - `question`: the question
 
