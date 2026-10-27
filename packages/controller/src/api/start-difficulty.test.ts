@@ -78,3 +78,9 @@ test("difficulty profiles, delegation, escalation and routing decisions work thr
     assert.equal((await call(oz, "routing.decision", { taskId: childTask, decisionId: "dec-aaaaaaaaaaaaaaaaaaaa" })).ok, false);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+test("a task credential reaches only its own task through the difficulty and routing operations (card R03)", async () => {
+  const { OPERATION_BY_NAME } = await import("./operations.js");
+  const ctx = { principal: { id: "agent:ann", kind: "agent", name: "ann", grants: [], taskScope: { taskId: "task-aaaaaaaaaaaaaaaaaaaa", projectId: "proj-aaaaaaaaaaaaaaaaaaaa" } }, difficulty: {} } as never;
+  for (const op of ["difficulty.set", "difficulty.delegate", "difficulty.reassign-parent", "difficulty.delegation", "escalation.request", "escalation.decide", "escalation.list", "routing.decisions", "routing.decision"]) await assert.rejects(() => OPERATION_BY_NAME.get(op)!.run(ctx, { taskId: "task-bbbbbbbbbbbbbbbbbbbb" }, "c1"), (e: { code?: string }) => e.code === "not_found" || e.code === "invalid_command", op);
+});
