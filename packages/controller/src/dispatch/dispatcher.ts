@@ -915,6 +915,8 @@ export class DispatcherService {
     }
     const budgets = this.#deps.budgets;
     if (budgets?.release === undefined) return;
+    // An attempt that already ran keeps its hold: the hold carries what it used (settled when the attempt ends), and `release` is for a hold that was never dispatched.
+    if (fresh.releasingId === undefined && ((fresh.used?.costMicros ?? 0) > 0 || (fresh.used?.computeMs ?? 0) > 0)) return;
     // The hold is first moved to `releasingId` (and the round counted) in one write, then released under a command ID that derives from the round, then the mark is cleared: a process that stops in between finds the mark and finishes the release,
     // so an attempt is never started on a hold that was already released.
     let marked = fresh;
@@ -1083,6 +1085,12 @@ export class DispatcherService {
   /** Settles the attempt's hold to what it used, or holds it as uncertain when the worker was lost (its last calls are not known). Settling is by command ID derived from the attempt, so an end done again settles once. */
   async #settleReservation(b: DispatchBody, lost: boolean): Promise<void> {
     const budgets = this.#deps.budgets;
+    // A release that was begun and not finished (the process stopped, or the ledger failed) is finished here, so an attempt that ends first does not leave its hold open for good.
+    if (b.releasingId !== undefined && budgets?.release !== undefined) {
+      try { await budgets.release(this.#deps.principal, { commandId: `dpa-rrel:${b.attemptId}:${(b.reserveRound ?? 1) - 1}`, reservationId: b.releasingId }); } catch (error) {
+        if (!isDomainError(error, "invalid_transition") && !isDomainError(error, "not_found")) this.#options.onError?.(error);
+      }
+    }
     if (b.reservationId === undefined || budgets?.settle === undefined) return;
     try {
       if (lost && budgets.markUncertain !== undefined) await budgets.markUncertain(this.#deps.principal, { commandId: `dpa-unc:${b.attemptId}`, reservationId: b.reservationId, reason: "the worker was lost; what its last calls cost is not known" });
