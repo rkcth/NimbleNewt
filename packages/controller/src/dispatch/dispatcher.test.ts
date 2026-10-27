@@ -100,6 +100,127 @@ for (const backend of backends) {
     assert.equal(second.blocked[0]?.blockerId, first.blocked[0]!.blockerId, "the same blocker, not a new one each tick");
   });
 
+  suite("a checkout lookup that is refused as unavailable blocks the task with a reason, the same blocker next tick; a pin that cannot be written gives the place back (card P01b)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    await c.resources.bindResource(c.owner, { commandId: "b1", projectId: c.project, kind: "repository", label: "Web", locator: "/work/web", repositoryId: "web" });
+    const t = await c.task("Fix web", ann, { repositoryId: "web" });
+    assert.equal((await c.resources.dispatchCheckout({ commandId: "pre", taskId: t.taskId, actor: "owner", pin: true })).kind, "ok");
+    const real = c.resources.dispatchCheckout.bind(c.resources);
+    (c.resources as { dispatchCheckout: unknown }).dispatchCheckout = async () => { throw new DomainError("unavailable", "there are more than 3 project-resource records, too many to check safely"); };
+    const first = await c.run();
+    assert.ok(!first.started.includes(t.attemptId!));
+    assert.equal(first.blocked.length, 1);
+    assert.equal(first.blocked[0]!.check, "checkout");
+    assert.equal((await c.run()).blocked[0]?.blockerId, first.blocked[0]!.blockerId, "the same blocker");
+    // The scan limit goes away: the task starts.
+    (c.resources as { dispatchCheckout: unknown }).dispatchCheckout = real;
+    assert.ok((await c.run()).started.includes(t.attemptId!));
+  });
+
+  suite("a pin that fails while the attempt is being started gives the place back, so the next tick can start it (card P01b)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    await c.resources.bindResource(c.owner, { commandId: "b1", projectId: c.project, kind: "repository", label: "Web", locator: "/work/web", repositoryId: "web" });
+    const t = await c.task("Fix web", ann, { repositoryId: "web" });
+    const real = c.resources.dispatchCheckout.bind(c.resources);
+    let broken = true;
+    (c.resources as { dispatchCheckout: unknown }).dispatchCheckout = async (cmd: Parameters<typeof real>[0]) => { if (cmd.pin && broken) throw new Error("store fault"); return real(cmd); };
+    const first = await c.run();
+    assert.ok(!first.started.includes(t.attemptId!));
+    assert.equal((await c.admission.snapshot()).running.length, 0, "no place is held by an attempt that never started");
+    broken = false;
+    assert.ok((await c.run()).started.includes(t.attemptId!), "the next tick starts it");
+  });
+
+  suite("a blocked task does not keep its allowance: a pin that fails gives the hold back with the place (also when the process stops half way), and the next tick holds it afresh, once, and the end charges what was used (card P01b)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    await c.resources.bindResource(c.owner, { commandId: "b1", projectId: c.project, kind: "repository", label: "Web", locator: "/work/web", repositoryId: "web" });
+    const t = await c.task("Fix web", ann, { repositoryId: "web" });
+    await c.budgets.open(c.owner, { commandId: "bo", taskId: t.taskId, currency: "USD", costMicros: 10_000, computeMs: 3_600_000 });
+    let during: Awaited<ReturnType<Ctx["budgets"]["report"]>>;
+    c.worker.script = async ({ gateway }) => { during = await c.budgets.report(c.owner, t.taskId); await gateway.usage({ turnSeq: 1, costMicros: 7, computeMs: 40 }); return { status: "completed", text: "x" }; };
+    c.dispatcher = c.restart({}, { reserveCostMicros: 1000 });
+    const realCheckout = c.resources.dispatchCheckout.bind(c.resources);
+    let broken = true;
+    (c.resources as { dispatchCheckout: unknown }).dispatchCheckout = async (cmd: Parameters<typeof realCheckout>[0]) => { if (cmd.pin && broken) throw new Error("store fault"); return realCheckout(cmd); };
+    // The first give-back stops after the hold was marked for release but before the budget released it.
+    const realRelease = c.budgets.release.bind(c.budgets);
+    let crash = true;
+    (c.budgets as { release: unknown }).release = async (...a: Parameters<typeof realRelease>) => { if (crash) { crash = false; throw new Error("the process stopped"); } return realRelease(...a); };
+    await c.run();
+    assert.equal((await c.budgets.report(c.owner, t.taskId))!.reservedInFlight.costMicros, 1000, "the release did not happen yet");
+    broken = false;
+    const second = await c.run();
+    assert.ok(second.started.includes(t.attemptId!), JSON.stringify({ s: second.skipped, f: second.failures, w: second.waiting, b: second.blocked }));
+    assert.deepEqual([during!.reservedInFlight.costMicros, during!.reservedInFlight.computeMs], [1000, 3_600_000], "one hold while it runs, not two and not none");
+    const after = (await c.budgets.report(c.owner, t.taskId))!;
+    assert.deepEqual([after.reservedInFlight.costMicros, after.spent.costMicros], [0, 7], "settled at the end, and what it used was charged");
+  });
+
+  suite("a blocked task does not keep its allowance: a pin that fails gives the hold back with the place, and the next tick holds it afresh (card P01b)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    await c.resources.bindResource(c.owner, { commandId: "b1", projectId: c.project, kind: "repository", label: "Web", locator: "/work/web", repositoryId: "web" });
+    const t = await c.task("Fix web", ann, { repositoryId: "web" });
+    await c.budgets.open(c.owner, { commandId: "bo", taskId: t.taskId, currency: "USD", costMicros: 10_000, computeMs: 3_600_000 });
+    c.dispatcher = c.restart({}, { reserveCostMicros: 1000 });
+    const real = c.resources.dispatchCheckout.bind(c.resources);
+    let broken = true;
+    (c.resources as { dispatchCheckout: unknown }).dispatchCheckout = async (cmd: Parameters<typeof real>[0]) => { if (cmd.pin && broken) throw new Error("store fault"); return real(cmd); };
+    await c.run();
+    const held = (await c.budgets.report(c.owner, t.taskId))!;
+    assert.deepEqual(held.reservedInFlight, { costMicros: 0, computeMs: 0 }, "nothing stays reserved for an attempt that did not start");
+    // A second failing round holds afresh and releases afresh (a new round, a new command ID).
+    await c.run();
+    assert.deepEqual((await c.budgets.report(c.owner, t.taskId))!.reservedInFlight, { costMicros: 0, computeMs: 0 }, "and again after the second failure");
+    broken = false;
+    assert.ok((await c.run()).started.includes(t.attemptId!), "the next tick holds it again and starts");
+    const after = (await c.budgets.report(c.owner, t.taskId))!;
+    assert.deepEqual(after.reservedInFlight, { costMicros: 0, computeMs: 0 }, "and settles it at the end");
+  });
+
+  suite("an attempt that already ran keeps its hold when it is sent back and then skipped, so its use is still charged and a sibling cannot take the allowance (card P01b)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, []));
+    const t = await c.task("long job", ann);
+    await c.budgets.open(c.owner, { commandId: "bo", taskId: t.taskId, currency: "USD", costMicros: 10_000, computeMs: 3_600_000 });
+    c.dispatcher = c.restart({}, { reserveCostMicros: 1000 });
+    const g = deferred<void>();
+    const ready = deferred<void>();
+    c.worker.script = async ({ gateway }) => { await gateway.usage({ turnSeq: 1, costMicros: 7, computeMs: 40 }); ready.resolve(); await g.promise; return { status: "completed", text: "late" }; };
+    assert.ok((await c.dispatcher.tick()).started.includes(t.attemptId!));
+    await ready.promise;
+    assert.deepEqual(await c.dispatcher.shutdown(), { closed: 1, errors: [] });
+    g.resolve();
+    await c.dispatcher.idle();
+    c.dispatcher = c.restart({}, { reserveCostMicros: 1000 });
+    // Back to waiting with its hold; a pause makes the next tick skip it.
+    await c.pauses.pause(c.owner, { commandId: "pz", scope: { kind: "task", id: t.taskId }, reason: "hold" });
+    await c.run();
+    assert.equal((await c.budgets.report(c.owner, t.taskId))!.reservedInFlight.costMicros, 1000, "the hold stays: it carries what the attempt used");
+    await c.pauses.resume(c.owner, { commandId: "pr", scope: { kind: "task", id: t.taskId }, reason: "go" });
+    c.worker.script = async () => ({ status: "completed", text: "done" });
+    await c.run();
+    const after = (await c.budgets.report(c.owner, t.taskId))!;
+    assert.deepEqual([after.reservedInFlight.costMicros, after.spent.costMicros], [0, 7], "and what it used was charged in the end");
+  });
+
+  suite("an attempt that ends while a hold release is still unfinished finishes the release (card P01b)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    await c.resources.bindResource(c.owner, { commandId: "b1", projectId: c.project, kind: "repository", label: "Web", locator: "/work/web", repositoryId: "web" });
+    const t = await c.task("Fix web", ann, { repositoryId: "web" });
+    await c.budgets.open(c.owner, { commandId: "bo", taskId: t.taskId, currency: "USD", costMicros: 10_000, computeMs: 3_600_000 });
+    c.dispatcher = c.restart({}, { reserveCostMicros: 1000 });
+    const real = c.resources.dispatchCheckout.bind(c.resources);
+    (c.resources as { dispatchCheckout: unknown }).dispatchCheckout = async (cmd: Parameters<typeof real>[0]) => { if (cmd.pin) throw new Error("store fault"); return real(cmd); };
+    // The pin fails after the hold was made; the ledger is down, so the release does not happen and the mark stays.
+    const releaseReal = c.budgets.release.bind(c.budgets);
+    let down = true;
+    (c.budgets as { release: unknown }).release = async (...a: Parameters<typeof releaseReal>) => { if (down) throw new Error("ledger down"); return releaseReal(...a); };
+    await c.run().catch(() => undefined);
+    assert.equal((await c.budgets.report(c.owner, t.taskId))!.reservedInFlight.costMicros, 1000, "the release failed: the hold is still open");
+    down = false;
+    await c.dispatcher.stop(c.owner, t.attemptId!, { reason: "owner stop" }).catch(() => undefined);
+    assert.equal((await c.budgets.report(c.owner, t.taskId))!.reservedInFlight.costMicros, 0, "ending the attempt finished the release");
+  });
+
   suite("a task that waits does not hold a pin (card P01)", async (c) => {
     const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
     await c.resources.bindResource(c.owner, { commandId: "b1", projectId: c.project, kind: "repository", label: "Web", locator: "/work/web", repositoryId: "web" });

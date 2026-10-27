@@ -51,6 +51,8 @@ export interface CheckoutBody {
   readonly repositoryId: string;
   readonly locatorEpoch: number;
   readonly pinnedBy: string;
+  /** Set when the pin was given up because its task no longer names a repository; a released pin holds nothing and the task is pinned afresh if it names one again. */
+  readonly released?: { readonly by: string; readonly at: string };
 }
 
 /** What a task resolves to: the binding it works in, as it is now, checked against what it was pinned to. */
@@ -200,7 +202,8 @@ export class ProjectResourceService {
         payload: { projectId, kind, label, locator, ...(explicit === undefined ? {} : { repositoryId: explicit }), scope: scope as unknown as JsonObject, ...(acknowledged ? { acknowledgeOverlap: true } : {}) },
         build: async () => {
           // The registry is read first (the S10 pattern): a concurrent change to the project's bindings after this read makes our write of it fail, so the checks below cannot be raced.
-          const registry = await this.#touch(projectId);
+          const snapshot = await this.#runner.get(REGISTRY, projectId);
+          const known = await this.#idsOf(projectId, snapshot);
           const project = await this.#project(by, projectId, "resource.write", "bind resources");
           const owner = project.body as unknown as ProjectBody;
           if (owner.state === "archived") invalid("projectId", `project ${projectId} is archived; reactivate it to bind resources`);
@@ -229,7 +232,8 @@ export class ProjectResourceService {
           const ref: AggregateRef = { kind: RESOURCE, id };
           const body: ResourceBody = { projectId, kind, label, locator, ...(handle === undefined ? {} : { repositoryId: handle }), scope, state: "bound", locatorEpoch: 1, createdBy: by.id };
           changes.unshift({ type: "create", ref, body: body as unknown as JsonObject });
-          changes.push(registry);
+          if (known.length >= this.#scanLimit) invalid("projectId", `a project has at most ${this.#scanLimit} bindings (unbound ones count)`);
+          changes.push(this.#bump(projectId, snapshot, [...known, id]));
           return { ref, creates: true, changes: mergeChanges(changes), detail: { projectId, kind, label, access: scope.mode }, contention: async () => raced() };
         },
       };
@@ -335,17 +339,17 @@ export class ProjectResourceService {
         payload: { taskId },
         build: async () => {
           const { task, revision } = await this.#taskFor(by, taskId);
-          const existing = await this.#runner.get(CHECKOUT, taskId);
-          if (existing !== undefined) invalid("taskId", `task ${taskId} already has a checkout; confirm a changed one with checkout.repin`);
+          const record = await this.#runner.get(CHECKOUT, taskId);
+          if (record !== undefined && (record.body as unknown as CheckoutBody).released === undefined) invalid("taskId", `task ${taskId} already has a checkout; confirm a changed one with checkout.repin`);
           const resource = await this.#bindingFor(task);
           const ref: AggregateRef = { kind: CHECKOUT, id: taskId };
           const body: CheckoutBody = { taskId, projectId: task.projectId, resourceId: resource.id, repositoryId: task.repositoryId!, locatorEpoch: resource.body.locatorEpoch, pinnedBy: by.id };
           const changes: Change[] = [
-            { type: "create", ref, body: body as unknown as JsonObject },
+            record === undefined ? { type: "create", ref, body: body as unknown as JsonObject } : { type: "update", ref, expectedRevision: record.revision, body: body as unknown as JsonObject },
             { type: "check", ref: { kind: "task", id: taskId }, expectedRevision: revision },
             { type: "check", ref: { kind: RESOURCE, id: resource.id }, expectedRevision: resource.revision },
           ];
-          return { ref, creates: true, changes, detail: { taskId, resourceId: resource.id, locatorEpoch: body.locatorEpoch }, contention: async () => raced() };
+          return { ref, creates: record === undefined, changes, detail: { taskId, resourceId: resource.id, locatorEpoch: body.locatorEpoch }, contention: async () => raced() };
         },
       };
     });
@@ -362,7 +366,7 @@ export class ProjectResourceService {
         build: async () => {
           const { task, revision } = await this.#taskFor(by, taskId);
           const existing = await this.#runner.get(CHECKOUT, taskId);
-          if (existing === undefined) invalid("taskId", `task ${taskId} has no checkout to confirm; pin one first`);
+          if (existing === undefined || (existing.body as unknown as CheckoutBody).released !== undefined) invalid("taskId", `task ${taskId} has no checkout to confirm; pin one first`);
           if (existing!.revision !== expected) throw new DomainError("stale_revision", `the checkout of ${taskId} is at revision ${existing!.revision}, not ${expected}`, { currentRevision: existing!.revision });
           const resource = await this.#bindingFor(task);
           const ref: AggregateRef = { kind: CHECKOUT, id: taskId };
@@ -373,6 +377,34 @@ export class ProjectResourceService {
             { type: "check", ref: { kind: RESOURCE, id: resource.id }, expectedRevision: resource.revision },
           ];
           return { ref, creates: false, changes, detail: { taskId, resourceId: resource.id, locatorEpoch: body.locatorEpoch }, contention: async () => raced() };
+        },
+      };
+    });
+  }
+
+  /**
+   * Gives up the pin of a task that no longer names a repository (its repository was cleared after it was dispatched): the task holds no checkout, and is pinned afresh if it names a repository again. Refused while
+   * the task still names one (confirm it with `checkout.repin`). `expectedRevision` is the pin's revision.
+   */
+  async releaseCheckout(by: Principal, command: NoActor & { taskId: string; expectedRevision: number }): Promise<CommandResult> {
+    return this.#runner.command("checkout.release", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => {
+      onlyKnown(command, ["commandId", "taskId", "expectedRevision"]);
+      const taskId = checkTaskId(command.taskId);
+      const expected = checkRevision(command.expectedRevision);
+      return {
+        payload: { taskId, expectedRevision: expected },
+        build: async () => {
+          const found = await this.#runner.get("task", taskId);
+          const task = found?.body as unknown as TaskBody | undefined;
+          if (found === undefined || task === undefined || !may(by, "assignment.manage", task.projectId, { kind: "task", id: taskId }) || !may(by, "resource.read", task.projectId)) throw hidden(by, "release that checkout");
+          const existing = await this.#runner.get(CHECKOUT, taskId);
+          const pin = existing?.body as unknown as CheckoutBody | undefined;
+          if (existing === undefined || pin === undefined || pin.released !== undefined) invalid("taskId", `task ${taskId} has no checkout to release`);
+          if (existing!.revision !== expected) throw new DomainError("stale_revision", `the checkout of ${taskId} is at revision ${existing!.revision}, not ${expected}`, { currentRevision: existing!.revision });
+          if (task.repositoryId !== undefined) invalid("taskId", `task ${taskId} still names repository ${task.repositoryId}; confirm the checkout with checkout.repin instead`);
+          const ref: AggregateRef = { kind: CHECKOUT, id: taskId };
+          const body: CheckoutBody = { ...pin!, released: { by: by.id, at: this.#runner.now() } };
+          return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: expected, body: body as unknown as JsonObject }, { type: "check", ref: { kind: "task", id: taskId }, expectedRevision: found.revision }], detail: { taskId }, contention: async () => raced() };
         },
       };
     });
@@ -392,7 +424,9 @@ export class ProjectResourceService {
   async list(by: Principal, projectId: string, filter: { state?: "bound" | "unbound" } = {}): Promise<View<ResourceBody>[] | undefined> {
     const id = checkProjectId(projectId);
     if (!may(by, "resource.read", id) || (await this.#runner.get("project", id)) === undefined) return undefined;
-    return (await scanAll(this.#runner, RESOURCE, this.#scanLimit, (a) => (a.body as unknown as ResourceBody).projectId === id && (filter.state === undefined || (a.body as unknown as ResourceBody).state === filter.state))).map((a) => view<ResourceBody>(a));
+    const mine = await this.#resourcesOf(id, true) as { id: string; revision: number; body: ResourceBody }[];
+    mine.sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+    return mine.filter((a) => filter.state === undefined || a.body.state === filter.state).map((a) => view<ResourceBody>({ id: a.id, revision: a.revision, body: a.body as never } as never));
   }
 
   /** Whether a project may use a bound resource in this way, and why not. A use of an unbound or foreign resource is refused. Needs `resource.read`; hidden like a missing resource otherwise. */
@@ -418,7 +452,8 @@ export class ProjectResourceService {
   }
 
   async #resolve(id: string, task: TaskBody): Promise<Checkout> {
-    const pin = (await this.#runner.get(CHECKOUT, id))?.body as unknown as CheckoutBody | undefined;
+    const stored = (await this.#runner.get(CHECKOUT, id))?.body as unknown as CheckoutBody | undefined;
+    const pin = stored?.released === undefined ? stored : undefined;
     if (task.repositoryId === undefined) {
       if (pin !== undefined) throw new DomainError("checkout_changed", `task ${id} no longer names the repository it was dispatched against`);
       return invalid("repositoryId", `task ${id} names no repository, so it has no checkout`);
@@ -444,7 +479,9 @@ export class ProjectResourceService {
     const found = await this.#runner.get("task", taskId);
     const task = found?.body as unknown as TaskBody | undefined;
     if (found === undefined || task === undefined) return { kind: "none" };
-    const existing = await this.#runner.get(CHECKOUT, taskId);
+    const record = await this.#runner.get(CHECKOUT, taskId);
+    // A pin given up (its repository was cleared) holds nothing: the task is as if it had none.
+    const existing = record !== undefined && (record.body as unknown as CheckoutBody).released !== undefined ? undefined : record;
     if (task.repositoryId === undefined && existing === undefined) return { kind: "none" };
     let pinnedNow = false;
     if (existing === undefined && !command.pin) {
@@ -454,17 +491,17 @@ export class ProjectResourceService {
     if (existing === undefined) {
       let bound: { id: string; revision: number; body: ResourceBody };
       try { bound = await this.#bindingFor(task); } catch (error) { if (isDomainError(error, "invalid_command")) return { kind: "unbound", reason: error.message }; throw error; }
-      const result = await this.#runner.command("checkout.pin", { commandId: scopedCommandId(command.actor, command.commandId), actor: command.actor }, async () => ({
+      const result = await this.#runner.command("checkout.pin", { commandId: scopedCommandId(command.actor, record === undefined ? command.commandId : `${command.commandId}:r${record.revision}`), actor: command.actor }, async () => ({
         payload: { taskId },
         build: async () => {
           const ref: AggregateRef = { kind: CHECKOUT, id: taskId };
           const body: CheckoutBody = { taskId, projectId: task.projectId, resourceId: bound.id, repositoryId: task.repositoryId!, locatorEpoch: bound.body.locatorEpoch, pinnedBy: command.actor };
           const changes: Change[] = [
-            { type: "create", ref, body: body as unknown as JsonObject },
+            record === undefined ? { type: "create", ref, body: body as unknown as JsonObject } : { type: "update", ref, expectedRevision: record.revision, body: body as unknown as JsonObject },
             { type: "check", ref: { kind: "task", id: taskId }, expectedRevision: found.revision },
             { type: "check", ref: { kind: RESOURCE, id: bound.id }, expectedRevision: bound.revision },
           ];
-          return { ref, creates: true, changes, detail: { taskId, resourceId: bound.id, locatorEpoch: body.locatorEpoch }, contention: async () => raced() };
+          return { ref, creates: record === undefined, changes, detail: { taskId, resourceId: bound.id, locatorEpoch: body.locatorEpoch }, contention: async () => raced() };
         },
       }));
       pinnedNow = !result.replayed;
@@ -519,13 +556,17 @@ export class ProjectResourceService {
   async #resourcesOf(projectId: string): Promise<ResourceBody[]>;
   async #resourcesOf(projectId: string, withIds: true): Promise<{ id: string; revision: number; body: ResourceBody }[]>;
   async #resourcesOf(projectId: string, withIds?: true): Promise<ResourceBody[] | { id: string; revision: number; body: ResourceBody }[]> {
-    const all = await scanAll(this.#runner, RESOURCE, this.#scanLimit, (a) => (a.body as unknown as ResourceBody).projectId === projectId);
-    return withIds === true ? all.map((a) => ({ id: a.id, revision: a.revision, body: a.body as unknown as ResourceBody })) : all.map((a) => a.body as unknown as ResourceBody);
+    const all: { id: string; revision: number; body: ResourceBody }[] = [];
+    for (const id of await this.#idsOf(projectId)) {
+      const found = await this.#runner.get(RESOURCE, id);
+      if (found !== undefined && (found.body as unknown as ResourceBody).projectId === projectId) all.push({ id: found.id, revision: found.revision, body: found.body as unknown as ResourceBody });
+    }
+    return withIds === true ? all : all.map((r) => r.body);
   }
 
   /** Task IDs, not yet finished, whose checkout is pinned to the binding. */
   async #liveTasksPinnedTo(resourceId: string): Promise<string[]> {
-    const pins = await scanAll(this.#runner, CHECKOUT, this.#scanLimit, (a) => (a.body as unknown as CheckoutBody).resourceId === resourceId);
+    const pins = await scanAll(this.#runner, CHECKOUT, this.#scanLimit, (a) => (a.body as unknown as CheckoutBody).resourceId === resourceId && (a.body as unknown as CheckoutBody).released === undefined);
     const live: string[] = [];
     for (const pin of pins) {
       const task = (await this.#runner.get("task", pin.id))?.body as unknown as TaskBody | undefined;
@@ -542,12 +583,33 @@ export class ProjectResourceService {
     if (!may(by, "resource.scope.write", projectId)) throw hidden(by, "bind overlapping locations");
   }
 
-  /** The per-project record every change to the project's bindings updates at the revision it read first (so uniqueness checks cannot be raced). */
-  async #touch(projectId: string): Promise<Change> {
+  /**
+   * The per-project record every change to the project's bindings updates at the revision it read first (so uniqueness checks cannot be raced). It also lists the project's binding IDs (`ids`), so a lookup reads that
+   * project's bindings and not every binding of every project; `ids` given replaces the list (bind), absent keeps it.
+   */
+  async #touch(projectId: string, ids?: readonly string[]): Promise<Change> {
+    return this.#bump(projectId, await this.#runner.get(REGISTRY, projectId), ids);
+  }
+
+  #bump(projectId: string, registry: Aggregate | undefined, ids?: readonly string[]): Change {
     const ref: AggregateRef = { kind: REGISTRY, id: projectId };
-    const registry = await this.#runner.get(ref.kind, ref.id);
-    const n = registry === undefined ? 0 : (registry.body as unknown as { n: number }).n;
-    return registry === undefined ? { type: "create", ref, body: { n: 1 } } : { type: "update", ref, expectedRevision: registry.revision, body: { n: n + 1 } };
+    const old = registry?.body as unknown as { n: number; ids?: readonly string[] } | undefined;
+    const kept = ids ?? old?.ids;
+    const body = { n: (old?.n ?? 0) + 1, ...(kept === undefined ? {} : { ids: kept }) };
+    return registry === undefined ? { type: "create", ref, body } : { type: "update", ref, expectedRevision: registry.revision, body };
+  }
+
+  /** The IDs of a project's bindings: from its registry, or (for a registry made before the list existed) by looking through the bindings once. */
+  async #idsOf(projectId: string, snapshot?: Aggregate): Promise<string[]> {
+    const registry = snapshot ?? await this.#runner.get(REGISTRY, projectId);
+    // Every bind writes the registry, so a project without one has no bindings.
+    if (registry === undefined) return [];
+    const listed = (registry.body as unknown as { ids?: readonly string[] }).ids;
+    if (listed !== undefined) {
+      if (listed.length > this.#scanLimit) throw new DomainError("unavailable", `project ${projectId} has more than ${this.#scanLimit} bindings, too many to check safely`);
+      return [...listed];
+    }
+    return (await scanAll(this.#runner, RESOURCE, this.#scanLimit, (a) => (a.body as unknown as ResourceBody).projectId === projectId)).map((a) => a.id);
   }
 }
 

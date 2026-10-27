@@ -326,6 +326,46 @@ for (const backend of backends) {
     assert.equal(await resources.resolveCheckout(owner, "task-aaaaaaaaaaaaaaaaaaaa"), undefined);
   });
 
+  suite("a pin whose repository was cleared is released (not while the task names one), holds nothing afterwards, and the task is pinned afresh if it names a repository again (card P01b)", async ({ owner, projects, resources, project, task }) => {
+    const p = await project("P");
+    const bound = await resources.bindResource(owner, { commandId: cid("b"), projectId: p, kind: "repository", label: "one", locator: "/r/one", repositoryId: "one" } as never);
+    const t = await task(p, "T", { repositoryId: "one" });
+    await resources.dispatchCheckout({ commandId: "dpa-pin:fixed", taskId: t, actor: "dispatcher", pin: true });
+    const pin = { revision: (await resources.getPin(owner, t) as unknown as { revision: number }).revision };
+    await refuses("invalid_command", () => resources.releaseCheckout(owner, { commandId: cid("rel"), taskId: t, expectedRevision: pin.revision }), (e) => assert.match(e.message, /still names/));
+    await projects.updateTask({ commandId: cid("u"), actor: owner.id, taskId: t, expectedRevision: 1, repositoryId: null });
+    await refuses("stale_revision", () => resources.releaseCheckout(owner, { commandId: cid("rel"), taskId: t, expectedRevision: pin.revision + 5 }));
+    const released = await resources.releaseCheckout(owner, { commandId: cid("rel"), taskId: t, expectedRevision: pin.revision });
+    assert.equal(released.revision, pin.revision + 1);
+    await refuses("invalid_command", () => resources.releaseCheckout(owner, { commandId: cid("rel2"), taskId: t, expectedRevision: released.revision }), (e) => assert.match(e.message, /no checkout/));
+    // Released: the binding is no longer held by it, and the task needs no repository.
+    assert.equal((await resources.dispatchCheckout({ commandId: cid("d"), taskId: t, actor: "dispatcher", pin: false })).kind, "none");
+    await resources.unbindResource(owner, { commandId: cid("ub"), resourceId: bound.id, expectedRevision: (await resources.list(owner, p))![0]!.revision } as never);
+    await resources.bindResource(owner, { commandId: cid("b2"), projectId: p, kind: "repository", label: "two", locator: "/r/one2", repositoryId: "two" } as never);
+    await projects.updateTask({ commandId: cid("u"), actor: owner.id, taskId: t, expectedRevision: 2, repositoryId: "two" });
+    // The dispatcher uses one fixed command ID per task: pinning again after a release must not be answered with the first pin's result.
+    const again = await resources.dispatchCheckout({ commandId: "dpa-pin:fixed", taskId: t, actor: "dispatcher", pin: true });
+    assert.equal(again.kind, "ok");
+    assert.equal((await resources.getPin(owner, t))!.pinnedBy, "dispatcher", "pinned afresh, not answered from the first pin's command");
+    assert.equal((await resources.getPin(owner, t) as unknown as { released?: unknown }).released, undefined);
+    assert.equal((await resources.resolveCheckout(owner, t))!.locator, "/r/one2");
+  });
+
+  suite("a project's lookups read its own bindings: the read of one project does not look through another's, and past the limit it is refused as unavailable, not answered from part (card P01b)", async ({ owner, resources, project }) => {
+    const p = await project("P");
+    const q = await project("Q");
+    for (let i = 0; i < 4; i++) await resources.bindResource(owner, { commandId: cid("b"), projectId: q, kind: "output", label: `q${i}`, locator: `/q/${i}` } as never);
+    await resources.bindResource(owner, { commandId: cid("b"), projectId: p, kind: "output", label: "p0", locator: "/p/0" } as never);
+    const tight = ProjectResourceService.withEpoch(resources.runner.storage, resources.runner.epoch, { scanLimit: 2, clock: () => "2026-10-22T10:00:00.000Z", pause: async () => undefined });
+    // Q has four bindings, more than the limit; P's own lookups are not held up by them (the overlap check on a new binding still looks across projects, and says so when it cannot).
+    assert.equal((await tight.list(owner, p))!.length, 1);
+    await refuses("unavailable", () => tight.list(owner, q));
+    await resources.bindResource(owner, { commandId: cid("b"), projectId: p, kind: "output", label: "p1", locator: "/p/1" } as never);
+    await resources.bindResource(owner, { commandId: cid("b"), projectId: p, kind: "output", label: "p2", locator: "/p/2" } as never);
+    await refuses("unavailable", () => tight.list(owner, p));
+    assert.equal((await resources.list(owner, p))!.length, 3);
+  });
+
   suite("dispatching needs assignment.manage on the task; reading a checkout needs the task and resource read rights and an outsider sees nothing", async ({ owner, resources, project, task, agent }) => {
     const p = await project("P");
     const q = await project("Q");
