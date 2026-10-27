@@ -11,6 +11,7 @@ import type { ProjectPlanService, ProjectResourceService, ResponsibilityService 
 import type { ContextBranchService } from "../branches/index.js";
 import type { MeetingService } from "../meetings/index.js";
 import type { AgentMessageService } from "../messaging/index.js";
+import type { DecisionService } from "../decisions/index.js";
 import { SecureApi } from "../security/secured.js";
 import type { GrantService } from "../security/grants.js";
 import type { PrincipalService } from "../security/principals.js";
@@ -63,6 +64,8 @@ export interface StateApiDeps {
   readonly ownerQuestions?: Pick<AgentMessageService, "askOwner" | "ownerQuestions" | "answerOwner">;
   /** When present, the owner can grant and revoke rights through the API (card U03e). */
   readonly grants?: Pick<GrantService, "grant" | "revoke" | "getGrant" | "list">;
+  /** When present, owner decisions can be recorded, read and corrected through the API (card C08). */
+  readonly decisions?: Pick<DecisionService, "record" | "resolveDispute" | "ask" | "dismissQuestion" | "link" | "revalidate" | "closeFollowUp" | "get" | "history" | "authoritative" | "context" | "reliance" | "propagation">;
   /** When present, a task credential (`tcr-…`) is accepted too and acts for its one task (card A10b). */
   readonly taskCredentials?: TaskCredentialService;
   /** Called with errors that are not part of the contract (so they are not shown to the client). */
@@ -109,6 +112,7 @@ export class StateApi {
         ...(this.#deps.meetings === undefined ? {} : { meetings: this.#deps.meetings }),
         ...(this.#deps.branches === undefined ? {} : { branches: this.#deps.branches }),
         ...(this.#deps.ownerQuestions === undefined ? {} : { ownerQuestions: this.#deps.ownerQuestions }),
+        ...(this.#deps.decisions === undefined ? {} : { decisions: this.#deps.decisions }),
         ...(this.#deps.grants === undefined ? {} : { grants: this.#deps.grants }),
       };
       const result = await operation.run(context, args, request.commandId);

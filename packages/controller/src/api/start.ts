@@ -14,6 +14,8 @@ import { HarnessCatalog, type HarnessDeclaration } from "../harness/index.js";
 import { Reconciler } from "../domain/reconcile.js";
 import { InboxService } from "../domain/inbox.js";
 import { EffectService } from "../domain/effects.js";
+import { DecisionService } from "../decisions/index.js";
+import { EventService } from "../events/index.js";
 import { BlockerService } from "../domain/blockers.js";
 import { ContractService, WaitGraphService } from "../planning/index.js";
 import { ProjectPlanService, ProjectResourceService, ResponsibilityService } from "../projects/index.js";
@@ -243,7 +245,9 @@ export async function startController(options: StartOptions): Promise<Controller
     const notifications = NotificationService.withEpoch(storage, epoch);
     const messages = AgentMessageService.withEpoch(storage, epoch, { availability: pauses.availability, taskPaused: (t) => pauses.isPaused(t), guard: (t) => pauses.guard(t), waits, assignments, inquiries, notifications });
     const branches = ContextBranchService.withEpoch(storage, epoch, { histories, retrieval });
-    const api = new StateApi({ branches, grants, ownerQuestions: messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
+    // Decisions recorded here block the next action of affected tasks through the stored guard; interrupting a generation already running is the dispatcher's own instance of the service (card C08b).
+    const decisions = DecisionService.withEpoch(storage, epoch, { events: EventService.withEpoch(storage, epoch), effects: EffectService.withEpoch(storage, epoch, assignments) });
+    const api = new StateApi({ branches, decisions, grants, ownerQuestions: messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
     let chat: ChatService | undefined;
     let coordinator: CoordinatorService | undefined;
     if (options.chat !== undefined) {

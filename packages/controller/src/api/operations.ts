@@ -2,6 +2,7 @@ import { DomainError } from "../domain/errors.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import type { ProjectService } from "../domain/service.js";
 import type { AgentService } from "../agents/index.js";
+import type { DecisionService } from "../decisions/index.js";
 import type { WatchService } from "../events/handling.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
@@ -38,6 +39,8 @@ export interface Context {
   readonly branches?: ContextBranchService;
   /** Absent when the controller runs without grants (card U03e). */
   readonly grants?: Pick<GrantService, "grant" | "revoke" | "getGrant" | "list">;
+  /** Absent when the controller runs without owner decision records (card C08). */
+  readonly decisions?: Pick<DecisionService, "record" | "resolveDispute" | "ask" | "dismissQuestion" | "link" | "revalidate" | "closeFollowUp" | "get" | "history" | "authoritative" | "context" | "reliance" | "propagation">;
   /** Absent when the controller runs without agent messages (card U12): questions to the owner. */
   readonly ownerQuestions?: Pick<AgentMessageService, "askOwner" | "ownerQuestions" | "answerOwner">;
 }
@@ -88,6 +91,7 @@ const plans = (c: Context): ProjectPlanService => c.plans ?? unavailable("projec
 const ownerQuestionsOf = (c: Context): NonNullable<Context["ownerQuestions"]> => c.ownerQuestions ?? unavailable("questions to the owner");
 const branchesOf = (c: Context): ContextBranchService => c.branches ?? unavailable("context branches");
 const grantsOf = (c: Context): NonNullable<Context["grants"]> => c.grants ?? unavailable("rights");
+const decisionsOf = (c: Context): NonNullable<Context["decisions"]> => c.decisions ?? unavailable("owner decision records");
 const meetingsOf = (c: Context): MeetingService => c.meetings ?? unavailable("meetings");
 const duties = (c: Context): ResponsibilityService => c.responsibilities ?? unavailable("responsibilities");
 const optNum = (args: Args, key: string): number | undefined => { const v = args[key]; return v === undefined ? undefined : (typeof v === "number" ? v : invalid(`args.${key}`, "must be a number")); };
@@ -109,6 +113,32 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => { only(a, ["grantee", "action", "project", "basis", "notBefore", "expiresAt"]); return written(await grantsOf(c).grant(c.principal, { commandId: need(id), ...(a as object), source: "direct" } as never)); } },
   { name: "grant.revoke", kind: "command", summary: "The owner takes a grant back (owner only; the revision you read must still be current). It stops counting at the next check.", args: { grantId: "the grant's ID", expectedRevision: "the revision you read", reason: "why, in the owner's words" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["grantId", "expectedRevision", "reason"]); await grantsOf(c).revoke(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
+  { name: "decision.record", kind: "command", summary: "The owner records a decision, correction or gate in their own words (direct channel; a chat decision is recorded from the chat turn). A correction supersedes only the conflicting decisions in its scope and takes effect at once; dependent work is marked and blocked until revalidated. Anything but `stance: decided` records nothing.", args: { projectId: "the project", "taskId?": "narrow to one task", category: "the kind of decision", topic: "what it is about", statement: "the decided choice", wording: "the owner's own words", "gate?": "for a gate, which", basedOn: "the version of this topic you saw (0 for none)", "session?": "a label for the session or device", "stance?": "how the words were read" }, result: "`{ recorded, ... }`: the decision, or why none was made.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["projectId", "taskId", "category", "topic", "statement", "wording", "gate", "basedOn", "session", "stance"]); return asJson(await decisionsOf(c).record(c.principal, { commandId: need(id), ...(a as object), source: { channel: "direct" } } as never) as never); } },
+  { name: "decision.resolve-dispute", kind: "command", summary: "The owner settles a dispute between conflicting instructions on one decision; arrival order and agents never do.", args: { disputeId: "the dispute", chosen: "the decision chosen" }, result: "`{ ... }`: what was done.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["disputeId", "chosen"]); return asJson(await decisionsOf(c).resolveDispute(c.principal, { commandId: need(id), ...(a as object) } as never) as never); } },
+  { name: "decision.ask", kind: "command", summary: "A task asks the owner a question on a topic; a decided topic answers itself and a disputed one is surfaced instead.", args: { taskId: "the task", topic: "the topic", question: "the question" }, result: "`{ ... }`: what was done.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["taskId", "topic", "question"]); return asJson(await decisionsOf(c).ask(c.principal, { commandId: need(id), ...(a as object) } as never) as never); } },
+  { name: "decision.dismiss-question", kind: "command", summary: "Drops a pending question.", args: { questionId: "the question", reason: "why" }, result: "`{ ... }`: what was done.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["questionId", "reason"]); return asJson(await decisionsOf(c).dismissQuestion(c.principal, { commandId: need(id), ...(a as object) } as never) as never); } },
+  { name: "decision.link", kind: "command", summary: "Records that a plan, contract, review or pending action relies on decisions.", args: { taskId: "the task", subject: "`{ kind, id }` of what relies on them", decisions: "the decision IDs" }, result: "`{ ... }`: what was done.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["taskId", "subject", "decisions"]); return asJson(await decisionsOf(c).link(c.principal, { commandId: need(id), ...(a as object) } as never) as never); } },
+  { name: "decision.revalidate", kind: "command", summary: "Confirms that work still stands after decisions changed, which unblocks its next action.", args: { taskId: "the task", decisions: "the decision IDs now current", note: "what was checked", "subjects?": "which linked things" }, result: "`{ ... }`: what was done.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["taskId", "decisions", "note", "subjects"]); return asJson(await decisionsOf(c).revalidate(c.principal, { commandId: need(id), ...(a as object) } as never) as never); } },
+  { name: "decision.close-follow-up", kind: "command", summary: "Closes a corrective follow-up recorded for an effect that already happened (it is never claimed undone).", args: { followUpId: "the follow-up", state: "`addressed` or `accepted`", note: "what was done", "correctiveEffectId?": "the effect that corrected it" }, result: "`{ ... }`: what was done.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["followUpId", "state", "note", "correctiveEffectId"]); return asJson(await decisionsOf(c).closeFollowUp(c.principal, { commandId: need(id), ...(a as object) } as never) as never); } },
+  { name: "decision.get", kind: "query", summary: "One decision (superseded ones stay visible, marked non-authoritative).", args: { decisionId: "the decision" }, result: "`{ item }`.",
+    run: async (c, a) => { only(a, ["decisionId"]); return found("get", await decisionsOf(c).get(c.principal, str(a, "decisionId"))); } },
+  { name: "decision.history", kind: "query", summary: "Every version of a topic, oldest first, superseded ones marked.", args: { projectId: "the project", topic: "the topic", "taskId?": "narrow to a task" }, result: "`{ item }`.",
+    run: async (c, a) => { only(a, ["projectId", "topic", "taskId"]); return found("history", await decisionsOf(c).history(c.principal, { projectId: str(a, "projectId"), topic: str(a, "topic"), ...(optStr(a, "taskId") === undefined ? {} : { taskId: optStr(a, "taskId")! }) })); } },
+  { name: "decision.authoritative", kind: "query", summary: "What is decided on a topic now, or that it is open or disputed.", args: { projectId: "the project", topic: "the topic", "taskId?": "narrow to a task" }, result: "`{ item }`.",
+    run: async (c, a) => { only(a, ["projectId", "topic", "taskId"]); return found("authoritative", await decisionsOf(c).authoritative(c.principal, { projectId: str(a, "projectId"), topic: str(a, "topic"), ...(optStr(a, "taskId") === undefined ? {} : { taskId: optStr(a, "taskId")! }) })); } },
+  { name: "decision.context", kind: "query", summary: "The versioned record of current decisions, permissions, pending questions and goals.", args: { projectId: "the project", "taskId?": "narrow to a task" }, result: "`{ item }`.",
+    run: async (c, a) => { only(a, ["projectId", "taskId"]); return found("context", await decisionsOf(c).context(c.principal, { projectId: str(a, "projectId"), ...(optStr(a, "taskId") === undefined ? {} : { taskId: optStr(a, "taskId")! }) })); } },
+  { name: "decision.reliance", kind: "query", summary: "The decisions a task relies on, which are stale, its follow-ups and revalidations.", args: { taskId: "the task" }, result: "`{ item }`.",
+    run: async (c, a) => { only(a, ["taskId"]); return found("reliance", await decisionsOf(c).reliance(c.principal, str(a, "taskId"))); } },
+  { name: "decision.propagation", kind: "query", summary: "The progress of a correction reaching the affected tasks.", args: { propagationId: "the propagation" }, result: "`{ item }`.",
+    run: async (c, a) => { only(a, ["propagationId"]); return found("propagation", await decisionsOf(c).propagation(c.principal, str(a, "propagationId"))); } },
   { name: "project.get", kind: "query", summary: "One project.", args: { projectId: "the project's ID" }, result: "`{ item }`: the project, with its ID, revision and timestamps.",
     run: async (c, a) => { only(a, ["projectId"]); return found("project", await c.secure.getProject(str(a, "projectId"))); } },
   { name: "project.list", kind: "query", summary: "The projects the caller may read.", args: { "limit?": `1 to ${PAGE.max}, default ${PAGE.default}`, "after?": "the `next` of the previous page" }, result: "`{ items, next? }`.",
