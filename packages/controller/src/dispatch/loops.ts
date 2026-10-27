@@ -1,4 +1,5 @@
 import type { BudgetService, RequestNotice } from "../budgets/index.js";
+import type { WorkspaceOpService } from "../workspace-ops/index.js";
 import type { DecisionService } from "../decisions/index.js";
 import { DomainError } from "../domain/errors.js";
 import type { Principal } from "../security/principals.js";
@@ -168,4 +169,9 @@ export function budgetNoticeLoops(budgets: Pick<BudgetService, "openForHolders">
     }
     if (fault !== undefined) throw fault;
   } }];
+}
+
+/** H12l: a workspace operation the controller was running when it stopped is resolved as unknown and the attempts it froze are released. */
+export function workspaceLoops(workspace: Pick<WorkspaceOpService, "recover">): DispatcherLoop[] {
+  return [{ name: "workspace.recover", run: (by) => workspace.recover(by) }];
 }

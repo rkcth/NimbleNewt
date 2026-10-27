@@ -8,7 +8,8 @@ import { DecisionService } from "../decisions/index.js";
 import { ContextEnforcementService } from "../context/index.js";
 import { CachePolicies, type AttemptCache, type CachePolicyDeps } from "../dispatch/cache.js";
 import { MarkerService } from "../inference-cache/index.js";
-import { DispatchDriver, DispatcherService, QuiesceCoordinator, controllerGuards, type RuntimeGuards, type WorkOrder, activeAgents, attendanceLoops, budgetNoticeLoops, decisionLoops, meetingLoops, eventLoops, recoveryLoops, reviewLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLoop, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
+import type { WorkspaceOpService, WorkspacePort } from "../workspace-ops/index.js";
+import { DispatchDriver, DispatcherService, QuiesceCoordinator, controllerGuards, type RuntimeGuards, type WorkOrder, activeAgents, attendanceLoops, budgetNoticeLoops, workspaceLoops, decisionLoops, meetingLoops, eventLoops, recoveryLoops, reviewLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLoop, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
 import { DomainError } from "../domain/errors.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import { BlockerService } from "../domain/blockers.js";
@@ -110,6 +111,10 @@ export interface DispatchHandle {
   readonly workerUrl?: string;
   /** The host an agent's live attempt runs on, if it has one (the review service judges a reviewer's host with it, card H05b). */
   readonly hostOfAgent: (agentId: string) => Promise<string | undefined>;
+  /** The host side of workspace operations for a task's checkout (card H12l): the host of its live attempt, else the only host that has one; `undefined` when none can be named. */
+  readonly workspacePortOf: (taskId: string) => Promise<WorkspacePort | undefined>;
+  /** What an attempt's freeze says and lifting it, for the workspace service's recovery (card H12l). */
+  readonly attemptControl: { live(taskId: string): Promise<string[]>; frozenReason(attemptId: string): Promise<string | undefined>; release(attemptId: string): Promise<void> };
   /** The MCP service and the only way the host reaches a remote server (cards T03, H12g); present when `mcp` was given. */
   readonly mcp?: { readonly service: McpService; readonly connector: RemoteMcpConnector };
 }
@@ -119,6 +124,8 @@ export interface ComposeInput {
   readonly principals: PrincipalService; readonly grants: GrantService; readonly taskCredentials: TaskCredentialService; readonly projects: ProjectService; readonly assignments: AssignmentService; readonly waits: WaitService;
   readonly contracts: ContractService; readonly catalog: HarnessCatalog; readonly routing: RoutingService; readonly inquiries: InquiryService; readonly agents: AgentService; readonly histories: HistoryService; readonly reviews: ReviewService;
   readonly retrieval: RetrievalService;
+  /** The workspace operations service; the tick resolves the ones a stopped controller left unfinished (card H12l). */
+  readonly workspaceOps?: Pick<WorkspaceOpService, "recover">;
   /** The stall detection and the reconciler the controller built; the dispatcher's tick runs them (card L01b). */
   readonly recovery?: { readonly stall: Pick<StallService, "scan">; readonly reconciler: { runPass(): Promise<unknown> } };
   readonly onError?: (error: unknown) => void;
@@ -166,7 +173,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   const projects = (): Promise<string[]> => projectIds(i.projects);
   let stallNotices = 0;
   const loops: DispatcherLoop[] = [
-    ...messageLoops(messages, () => activeAgents(storage)), ...budgetNoticeLoops(budgets, (n) => { const { purpose, text } = holderNotice(n); return messages.noticeFromController({ commandId: `bgt-hold-${n.requestId}`, taskId: n.parentTaskId ?? n.taskId, to: n.to, purpose, text, admit: "budget.manage" }); }), ...attendanceLoops(attendance), ...meetingLoops(meetings, projects), ...standupLoops(standups, meetings, projects), ...eventLoops(events), ...reviewLoops(i.reviews, projects), ...decisionLoops(decisions, projects),
+    ...messageLoops(messages, () => activeAgents(storage)), ...(i.workspaceOps === undefined ? [] : workspaceLoops(i.workspaceOps)), ...budgetNoticeLoops(budgets, (n) => { const { purpose, text } = holderNotice(n); return messages.noticeFromController({ commandId: `bgt-hold-${n.requestId}`, taskId: n.parentTaskId ?? n.taskId, to: n.to, purpose, text, admit: "budget.manage" }); }), ...attendanceLoops(attendance), ...meetingLoops(meetings, projects), ...standupLoops(standups, meetings, projects), ...eventLoops(events), ...reviewLoops(i.reviews, projects), ...decisionLoops(decisions, projects),
     ...(i.recovery === undefined ? [] : recoveryLoops(i.recovery.stall, i.recovery.reconciler, () => notifications.emitFromController({ commandId: `stall-off:${epoch}:${++stallNotices}`, kind: "maintenance", ref: { kind: "principal", id: "dispatcher" }, detail: "Stall detection is not running: the dispatcher does not hold the recovery.stall-scan right. Grant it that right to turn stall detection on." }), () => i.principals.authenticate(issued.token))),
   ];
   // The local worker host gets its guards here, bound to the services built above (card H12k); the dispatcher then has it among its workers.
@@ -264,6 +271,17 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   return {
     dispatcher, driver, closeWorkers: async () => { await transport?.close().catch(() => undefined); await i.options.local?.close?.(); },
     ...(transport === undefined ? {} : { workerUrl: transport.url }),
+    attemptControl: { live: (taskId) => dispatcher.liveAttemptsOf(principal, { taskId }), frozenReason: async (id) => (await dispatcher.get(principal, id))?.frozen?.reason, release: (id) => dispatcher.release(principal, id) },
+    workspacePortOf: async (taskId) => {
+      const capable = workers.filter((w) => w.workspace !== undefined);
+      for (const attemptId of await dispatcher.liveAttemptsOf(principal, { taskId })) {
+        const d = await dispatcher.get(principal, attemptId);
+        const host = d?.state === "running" ? d.hostId : d?.pinnedHost;
+        if (host !== undefined) return workers.find((w) => w.hostId === host)?.workspace;
+      }
+      // No live attempt names a host: the checkout is on the only host that can do this, if there is exactly one.
+      return capable.length === 1 ? capable[0]!.workspace : undefined;
+    },
     hostOfAgent: async (agentId) => { for (const attemptId of await dispatcher.liveAttemptsOf(principal, { agentId })) { const d = await dispatcher.get(principal, attemptId); const host = d?.state === "running" ? d.hostId : d?.pinnedHost; if (host !== undefined) return host; } return undefined; }, quiesce: new QuiesceCoordinator({ dispatcher, blockers, principal }),
     ...(mcpService === undefined || i.options.mcp === undefined ? {} : { mcp: { service: mcpService, connector: new RemoteMcpConnector({ mcp: mcpService, resolve: i.options.mcp.resolve, principal }) } }),
   };

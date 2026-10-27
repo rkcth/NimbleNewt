@@ -44,12 +44,12 @@ export class QuiesceCoordinator {
 
   /**
    * Runs `run` with the scope's attempts quiet. `after` runs once the attempts are released and the operation did not throw, for each attempt (to tell the agent its checkout changed); a failure in it is the caller's to see
-   * but never leaves an attempt frozen.
+   * but never leaves an attempt frozen. `tag` is written into the freeze's reason, so whoever must lift it later can tell it from any other.
    */
-  async around<T>(scope: { readonly taskId?: string; readonly agentId?: string }, operation: QuiesceOperation, run: (quiet: Quiet) => Promise<T>, after?: (attemptId: string) => Promise<void>): Promise<T> {
+  async around<T>(scope: { readonly taskId?: string; readonly agentId?: string }, operation: QuiesceOperation, run: (quiet: Quiet) => Promise<T>, after?: (attemptId: string) => Promise<void>, tag?: string): Promise<T> {
     const { dispatcher, principal } = this.#deps;
     const ids = await dispatcher.liveAttemptsOf(principal, scope);
-    const reason = `${operation}: the agent's work is being changed`;
+    const reason = `${operation}: the agent's work is being changed${tag === undefined ? "" : ` (${tag})`}`;
     const quiet: { attemptId: string; checkpoint?: JsonObject }[] = [];
     // A freeze somebody else set (the owner, a recipe change that failed, a stop) is theirs: it is not lifted here.
     const theirs = new Set<string>();

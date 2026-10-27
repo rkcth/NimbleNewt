@@ -77,6 +77,16 @@ Arguments:
 
 Result: `{ item }`: the summary.
 
+#### `workspace.get`
+
+One workspace request and what came of it.
+
+Arguments:
+
+- `requestId`: the request
+
+Result: `{ item }`.
+
 #### `budget.pending`
 
 The open requests for more budget addressed to you (the owner: those that went to the owner), with whether the list may be partial.
@@ -658,6 +668,20 @@ Arguments:
 - `subscriptionId`: the subscription's ID
 
 Result: `{ ok: true }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `workspace.request`
+
+Integrates, refreshes or quarantines a task's checkout on the host that holds it. The task's running attempts are made quiet first (new calls refused, calls in flight settled, a checkpoint taken) and go on afterwards; if one cannot be made quiet nothing runs and a blocker says why.
+
+Arguments:
+
+- `operation`: `integration`, `refresh` or `quarantine`
+- `taskId`: the task
+- `reason`: why
+
+Result: `{ id, state, operation, taskId, summary?, blocker?, quietAttempts?, replayed }`; `state` is `done`, `refused`, `failed` or `uncertain` (a repeat while the host was still working: check the checkout before asking again).
 
 Completion: finished when accepted (`completed: true`).
 
