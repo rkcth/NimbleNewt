@@ -30,6 +30,21 @@ export interface ModelRelayOptions {
   readonly onError?: (route: string, message: string) => void;
 }
 
+/**
+ * What the relay tells about every model call it makes for an attempt (card V01b), so stall detection can tell a model that is reading a big prompt or writing slowly from one that has stopped. Every function must return at once and
+ * must not throw (a throw is ignored, and the call is not affected).
+ */
+export interface RelayMonitor {
+  /** The call is about to be sent. `requestChars` is the size of the body. */
+  started(call: { readonly requestChars: number }): void;
+  /** The first bytes of the reply arrived. */
+  firstOutput(): void;
+  /** At most once in `progressMs` while the reply streams: the bytes of reply received so far. */
+  progress(bytes: number): void;
+  /** The call ended: with `ok` false it failed, was refused or was cancelled. The counts are what the provider reported, when it did. */
+  finished(call: { readonly ok: boolean; readonly inputTokens?: number; readonly cachedTokens?: number; readonly outputTokens?: number }): void;
+}
+
 export interface AttemptRelay {
   /** The alias the process addresses the route by (`<relayBase>/<alias>/...`). */
   readonly alias: string;
@@ -58,6 +73,10 @@ export class ModelRelay {
     /** The model the route names; a body that asks for another is refused. */ readonly model?: string;
     /** Told once, after the attempt's first model call has been answered, what the provider reported as its input size and how long the request was (card C07b: the first call is checked against the provider's own count). A failure of this function never reaches the call. */
     readonly onFirstUsage?: (usage: { readonly inputTokens: number; readonly requestChars: number }) => void;
+    /** Told how each call goes (card V01b). */
+    readonly monitor?: RelayMonitor;
+    /** The least time between two progress reports of one reply (default 15 seconds). */
+    readonly progressMs?: number;
   }, cache?: Pick<PiCachePolicy, "payload" | "fetch">): AttemptRelay {
     const route = attempt.route;
     const maxBody = this.#options.maxBodyBytes ?? 8 * 1024 * 1024;
@@ -102,40 +121,73 @@ export class ModelRelay {
         }
         const inner = this.#options.fetch ?? globalThis.fetch;
         const wrapped = cache?.fetch === undefined ? inner : cache.fetch(inner);
+        const monitor = rest === "messages/count_tokens" ? undefined : attempt.monitor;
+        const tell = (f: () => void): void => { try { f(); } catch { /* the call is not affected */ } };
+        if (monitor !== undefined) tell(() => monitor.started({ requestChars: body?.length ?? 0 }));
         let response: Response;
         try {
           response = await wrapped(target, { method: request.method, headers, ...(body === undefined || request.method === "GET" ? {} : { body: Buffer.from(body) }), signal: request.signal, redirect: "error" });
         } catch (error) {
           const text = redactText(error instanceof Error ? error.message : String(error)).slice(0, 300);
           this.#options.onError?.(route, text);
+          if (monitor !== undefined) tell(() => monitor.finished({ ok: false }));
           throw new Error(`the model endpoint could not be reached: ${text}`);
         }
+        if (monitor !== undefined && (!response.ok || response.body === null)) tell(() => monitor.finished({ ok: response.ok }));
         const watch = firstCall && response.ok && response.body !== null && rest !== "messages/count_tokens";
         if (watch) firstCall = false;
         const requestChars = body?.length ?? 0;
         const out: [string, string][] = [];
         response.headers.forEach((value, name) => { if (KEEP.has(name.toLowerCase())) out.push([name, value]); });
-        return { status: response.status, statusText: response.statusText, headers: out, body: response.body === null ? null : watch ? reporting(response.body as unknown as AsyncIterable<Uint8Array>, (tokens) => { try { attempt.onFirstUsage?.({ inputTokens: tokens, requestChars }); } catch { /* the call is not affected */ } }) : (response.body as unknown as AsyncIterable<Uint8Array>) };
+        const watching = monitor !== undefined && response.ok && response.body !== null;
+        if (!watch && !watching) return { status: response.status, statusText: response.statusText, headers: out, body: response.body === null ? null : (response.body as unknown as AsyncIterable<Uint8Array>) };
+        const hooks: ReplyHooks = {
+          ...(watch ? { inputTokens: (tokens) => { try { attempt.onFirstUsage?.({ inputTokens: tokens, requestChars }); } catch { /* the call is not affected */ } } } : {}),
+          ...(watching ? { monitor: { first: () => tell(() => monitor!.firstOutput()), progress: (bytes) => tell(() => monitor!.progress(bytes)), finished: (call) => tell(() => monitor!.finished(call)) }, progressMs: attempt.progressMs ?? 15_000 } : {}),
+        };
+        return { status: response.status, statusText: response.statusText, headers: out, body: reporting(response.body as unknown as AsyncIterable<Uint8Array>, hooks) };
       },
     };
   }
 }
 
 const SCAN = 16 * 1024;
+interface ReplyHooks {
+  /** The provider's input size, once the reply has ended normally. */
+  readonly inputTokens?: (tokens: number) => void;
+  readonly monitor?: { first(): void; progress(bytes: number): void; finished(call: { ok: boolean; inputTokens?: number; cachedTokens?: number; outputTokens?: number }): void };
+  readonly progressMs?: number;
+}
 /**
- * Passes the reply on unchanged and, when it has ended normally, tells `done` the input size the provider reported in it, read from the first and the last bytes of the reply (a plain reply is small; a stream reports at its start
+ * Passes the reply on unchanged and, when it has ended normally, tells the hooks the input size the provider reported in it, read from the first and the last bytes of the reply (a plain reply is small; a stream reports at its start
  * or its end). OpenAI-style `prompt_tokens` already includes cached tokens; Anthropic-style `input_tokens` leaves them out, so the cache read and creation counts are added. A reply that is cancelled part way, a number cut by the
- * edge of what is read, or no count at all, tells nothing.
+ * edge of what is read, or no count at all, tells nothing about the size. The monitor (card V01b) is told when the first bytes arrive, at a bounded interval how many bytes have, and at the end (normal, failed or cancelled) the counts.
  */
-async function* reporting(body: AsyncIterable<Uint8Array>, done: (inputTokens: number) => void): AsyncGenerator<Uint8Array> {
+async function* reporting(body: AsyncIterable<Uint8Array>, hooks: ReplyHooks): AsyncGenerator<Uint8Array> {
   const head: Buffer[] = []; let headBytes = 0; let tail = Buffer.alloc(0);
-  for await (const piece of body) {
-    if (headBytes < SCAN) { head.push(Buffer.from(piece.subarray(0, SCAN - headBytes))); headBytes += Math.min(piece.length, SCAN - headBytes); }
-    tail = Buffer.concat([tail, piece.length > SCAN ? piece.subarray(-SCAN) : piece]).subarray(-SCAN);
-    yield piece;
+  let bytes = 0; let lastProgress = Date.now(); let first = true; let ended = false;
+  try {
+    for await (const piece of body) {
+      if (headBytes < SCAN) { head.push(Buffer.from(piece.subarray(0, SCAN - headBytes))); headBytes += Math.min(piece.length, SCAN - headBytes); }
+      tail = Buffer.concat([tail, piece.length > SCAN ? piece.subarray(-SCAN) : piece]).subarray(-SCAN);
+      bytes += piece.length;
+      if (hooks.monitor !== undefined && piece.length > 0) {
+        if (first) { first = false; hooks.monitor.first(); lastProgress = Date.now(); }
+        else if (Date.now() - lastProgress >= (hooks.progressMs ?? 15_000)) { lastProgress = Date.now(); hooks.monitor.progress(bytes); }
+      }
+      yield piece;
+    }
+    ended = true;
+  } finally {
+    // Cancelled or failed part way: the monitor is told it did not end well.
+    if (!ended) hooks.monitor?.finished({ ok: false });
   }
   const text = `${Buffer.concat(head).toString("utf8")}\u0001${tail.toString("utf8")}`;
   const most = (name: string): number => { let best = 0; for (const m of text.matchAll(new RegExp(`"${name}"\\s*:\\s*(\\d{1,9})(?=[,}\\s])`, "g"))) best = Math.max(best, Number(m[1])); return best; };
-  const total = most("prompt_tokens") || most("input_tokens") + most("cache_read_input_tokens") + most("cache_creation_input_tokens");
-  if (total >= 1) done(total);
+  const cached = most("cache_read_input_tokens") + most("cache_creation_input_tokens");
+  const total = most("prompt_tokens") || most("input_tokens") + cached;
+  const output = most("completion_tokens") || most("output_tokens");
+  const cachedOpenAi = most("cached_tokens");
+  if (total >= 1) hooks.inputTokens?.(total);
+  hooks.monitor?.finished({ ok: true, ...(total >= 1 ? { inputTokens: total } : {}), ...(cached + cachedOpenAi >= 1 ? { cachedTokens: cached + cachedOpenAi } : {}), ...(output >= 1 ? { outputTokens: output } : {}) });
 }

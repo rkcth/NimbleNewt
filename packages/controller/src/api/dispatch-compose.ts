@@ -1,5 +1,5 @@
 import { ProjectResourceService } from "../projects/index.js";
-import type { AttemptRelay, ModelRelay } from "../dispatch/relay.js";
+import type { AttemptRelay, ModelRelay, RelayMonitor } from "../dispatch/relay.js";
 import { AdmissionService } from "../admission/index.js";
 import { BudgetService, holderNotice } from "../budgets/index.js";
 import { ArtifactService, FileBlobStore } from "../artifacts/index.js";
@@ -13,7 +13,10 @@ import { DispatchDriver, DispatcherService, QuiesceCoordinator, controllerGuards
 import { DomainError } from "../domain/errors.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import { BlockerService } from "../domain/blockers.js";
-import type { StallService } from "../health/index.js";
+import type { StallEvent, StallService } from "../health/index.js";
+
+/** The characters per token the relay assumes when it sizes a prompt for stall detection: low on purpose, so the estimate errs on the large side (card V01b). */
+const RELAY_CHARS_PER_TOKEN = 3;
 import { EffectService } from "../domain/effects.js";
 import type { RunnerOptions } from "../domain/runner.js";
 import type { ProjectService } from "../domain/service.js";
@@ -139,7 +142,7 @@ export interface ComposeInput {
   /** The workspace operations service; the tick resolves the ones a stopped controller left unfinished (card H12l). */
   readonly workspaceOps?: Pick<WorkspaceOpService, "recover">;
   /** The stall detection and the reconciler the controller built; the dispatcher's tick runs them (card L01b). */
-  readonly recovery?: { readonly stall: Pick<StallService, "scan">; readonly reconciler: { runPass(): Promise<unknown> } };
+  readonly recovery?: { readonly stall: Pick<StallService, "scan"> & Partial<Pick<StallService, "reportFromRelay">>; readonly reconciler: { runPass(): Promise<unknown> } };
   readonly onError?: (error: unknown) => void;
   /** The `meeting.leadMinutes` setting (card M01d), already defaulted by the caller: how long before a meeting its occurrence is made and its agents are invited and kept free. */
   readonly leadMinutes?: () => Promise<number | undefined>;
@@ -250,6 +253,22 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     const confirmFirstCall = async (order: WorkOrder, usage: { readonly inputTokens: number; readonly requestChars: number }): Promise<void> => {
       try { await guards.context?.confirm?.(order, { reportedInputTokens: usage.inputTokens, promptChars: Math.max(1, usage.requestChars) }); } catch (error) { i.onError?.(error); }
     };
+    // What the relay tells stall detection about every model call of an attempt (card V01b): reports are sent one after another so they arrive in order, and a failure of the report never reaches the call.
+    const reporter = i.recovery?.stall.reportFromRelay?.bind(i.recovery.stall);
+    const monitorOf = reporter === undefined ? undefined : (order: WorkOrder): RelayMonitor => {
+      let queue: Promise<unknown> = Promise.resolve(); let calls = 0; let current = ""; let seq = 0;
+      const send = (event: StallEvent): void => {
+        const commandId = `relay:${order.attemptId}:${++seq}`;
+        queue = queue.then(() => reporter({ commandId, taskId: order.taskId, generation: order.generation, event })).catch((error) => { if (!(error instanceof DomainError && (error.code === "fenced" || error.code === "not_found"))) i.onError?.(error); });
+      };
+      const tokensOf = (chars: number): number => Math.ceil(chars / RELAY_CHARS_PER_TOKEN);
+      return {
+        started: ({ requestChars }) => { current = `${order.attemptId}:${++calls}`; send({ type: "request_started", requestId: current, promptTokens: tokensOf(requestChars), route: order.route }); },
+        firstOutput: () => { send({ type: "first_output", requestId: current }); },
+        progress: (bytes) => { send({ type: "output_progress", requestId: current, tokens: tokensOf(bytes) }); },
+        finished: (call) => { send({ type: "request_finished", requestId: current, outcome: call.ok ? "ok" : "error", ...(call.inputTokens === undefined ? {} : { inputTokens: call.inputTokens }), ...(call.cachedTokens === undefined ? {} : { cachedTokens: call.cachedTokens }), ...(call.outputTokens === undefined ? {} : { outputTokens: call.outputTokens }) }); },
+      };
+    };
     // One relay per attempt, kept until the attempt\'s own expiry.
     const relays = new Map<string, { readonly relay: AttemptRelay; readonly until: number }>();
     const attemptRelay = (order: WorkOrder, relay: ModelRelay, options: { readonly model?: string; readonly cache?: Parameters<ModelRelay["forAttempt"]>[1] } = {}): AttemptRelay => {
@@ -257,7 +276,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       for (const [id, entry] of relays) if (entry.until < clock()) relays.delete(id);
       let found = relays.get(order.attemptId);
       if (found === undefined) {
-        found = { relay: relay.forAttempt({ route: order.route, ...(options.model === undefined ? {} : { model: options.model }), onFirstUsage: (usage) => { void confirmFirstCall(order, usage); } }, options.cache), until: (Number.isFinite(Date.parse(order.expiresAt)) ? Date.parse(order.expiresAt) : clock() + 4 * 60 * 60_000) + 60_000 };
+        found = { relay: relay.forAttempt({ route: order.route, ...(options.model === undefined ? {} : { model: options.model }), onFirstUsage: (usage) => { void confirmFirstCall(order, usage); }, ...(monitorOf === undefined ? {} : { monitor: monitorOf(order) }) }, options.cache), until: (Number.isFinite(Date.parse(order.expiresAt)) ? Date.parse(order.expiresAt) : clock() + 4 * 60 * 60_000) + 60_000 };
         relays.set(order.attemptId, found);
       }
       return found.relay;

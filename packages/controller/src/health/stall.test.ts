@@ -683,6 +683,145 @@ for (const backend of backends) {
     assert.equal((await c.stall.get(c.owner, open2.id))!.clearedBecause, "archived: the task is done");
   });
 
+  const slowRoute = (route: string): { readTokensPerSecond?: number } | undefined => (route === "local/slow" ? { readTokensPerSecond: 100 } : route === "hosted/fast" ? { readTokensPerSecond: 10_000 } : undefined);
+  const started = (extra: Record<string, unknown> = {}): StallEvent => ({ type: "request_started", requestId: "r1", promptTokens: 120_000, route: "local/slow", ...extra } as StallEvent);
+
+  suite("a big prompt on a slow route is not a stuck request or silence while its reading should still take, and is when it passes by the margin; a fast route keeps the difficulty's time; the cached share shortens it; the concern says what was expected (card V01b)", async (c) => {
+    const h = await c.host("h1");
+    // 120,000 tokens at the declared 100 a second is 20 minutes; with the 150% margin it is allowed 30 (the difficulty's own 5 minutes is less).
+    const slow = await c.work({ difficulty: "easy" });
+    await c.send(h, slow, started());
+    now += 6 * MIN;
+    let a = (await c.stall.assess(c.owner, slow))!;
+    assert.deepEqual([a.status, a.concerns], ["long_running", []], "past the difficulty's 5 minutes but still reading");
+    assert.deepEqual([a.signals.reading!.promptTokens, a.signals.reading!.tokensPerSecond, a.signals.reading!.source, a.signals.reading!.expectedMs, a.signals.reading!.allowedMs], [120_000, 100, "declared", 20 * MIN, 30 * MIN]);
+    now += 5 * MIN;
+    assert.deepEqual(await kinds(c, slow), [], "11 minutes of quiet is past the easy silence time of 10, but the reading is allowed");
+    now += 18 * MIN;
+    assert.deepEqual(await kinds(c, slow), [], "29 minutes");
+    now += 2 * MIN;
+    a = (await c.stall.assess(c.owner, slow))!;
+    assert.deepEqual(a.concerns.map((x) => x.kind).sort(), ["silent", "stuck_request"]);
+    const stuck = a.concerns.find((x) => x.kind === "stuck_request")!.detail;
+    assert.match(stuck, /about 120000 tokens, read at 100 tokens a second \(declared\), which should take about 20 min; it was allowed 30 min/);
+    // A hosted route that reads fast keeps the difficulty's time.
+    const fast = await c.work({ difficulty: "easy" });
+    await c.send(h, fast, started({ route: "hosted/fast" }));
+    now += 6 * MIN;
+    assert.deepEqual(await kinds(c, fast), ["stuck_request"]);
+    // A route nothing is known about is read at the cautious default of 50 a second, and the text says it is a default.
+    const unknown = await c.work({ difficulty: "easy" });
+    await c.send(h, unknown, started({ route: "local/new" }));
+    now += 6 * MIN;
+    assert.deepEqual(await kinds(c, unknown), []);
+    assert.equal((await c.stall.assess(c.owner, unknown))!.signals.reading!.source, "default");
+    assert.equal((await c.stall.assess(c.owner, unknown))!.signals.reading!.expectedMs, 40 * MIN);
+    // A request with no size estimate is judged as before.
+    const plain = await c.work({ difficulty: "easy" });
+    await c.send(h, plain, { type: "request_started", requestId: "r1" });
+    now += 6 * MIN;
+    assert.deepEqual(await kinds(c, plain), ["stuck_request"]);
+    assert.equal((await c.stall.assess(c.owner, plain))!.signals.reading, undefined);
+  }, { declaredSpeed: (route: string) => slowRoute(route) });
+
+  suite("a cached prefix shortens the expected reading time by its share; without the expectation the whole estimate counts (card V01b)", async (c) => {
+    const h = await c.host("h1");
+    const cached = await c.work({ difficulty: "easy" });
+    await c.send(h, cached, started({ cachedShare: 0.75 }));
+    now += 6 * MIN;
+    assert.deepEqual(await kinds(c, cached), [], "5 minutes expected, 7.5 allowed");
+    assert.equal((await c.stall.assess(c.owner, cached))!.signals.reading!.expectedMs, 5 * MIN);
+    now += 2 * MIN;
+    assert.deepEqual(await kinds(c, cached), ["stuck_request"]);
+    const whole = await c.work({ difficulty: "easy" });
+    await c.send(h, whole, started());
+    now += 8 * MIN;
+    assert.deepEqual(await kinds(c, whole), []);
+    // The margin and the default speed are settings, and are checked.
+    assert.throws(() => c.service({ readMarginPercent: 50 }), /readMarginPercent/);
+    assert.throws(() => c.service({ defaultReadTokensPerSecond: 0 }), /defaultReadTokensPerSecond/);
+    const strict = c.service({ readMarginPercent: 100, defaultReadTokensPerSecond: 200, declaredSpeed: () => undefined });
+    const none = await c.work({ difficulty: "easy" });
+    await c.send(h, none, started({ route: "local/other" }));
+    now += 6 * MIN;
+    const r = (await strict.assess(c.owner, none))!;
+    assert.deepEqual([r.signals.reading!.source, r.signals.reading!.tokensPerSecond, r.signals.reading!.allowedMs, r.concerns.map((x) => x.kind)], ["default", 200, 10 * MIN, []]);
+  }, { declaredSpeed: (route: string) => slowRoute(route) });
+
+  suite("the first output ends the reading allowance and counts as progress; output progress keeps a slow writer from being silent, and a stream that stops is silent after the ordinary time (card V01b)", async (c) => {
+    const h = await c.host("h1");
+    const t = await c.work({ difficulty: "easy" });
+    await c.send(h, t, started());
+    now += 20 * MIN;
+    await c.send(h, t, { type: "first_output", requestId: "r1" });
+    await c.send(h, t, { type: "first_output", requestId: "r1" });
+    const ev = (await c.stall.evidence(c.owner, t))!;
+    assert.equal(ev.request!.firstOutputAt, new Date(now).toISOString(), "a repeat does not move it");
+    assert.equal(ev.lastProgressAt, new Date(now).toISOString());
+    assert.equal((await c.stall.assess(c.owner, t))!.signals.reading, undefined, "the allowance is over");
+    // Writing slowly for much longer than the silence time is fine while the relay reports tokens written.
+    for (let i = 1; i <= 8; i++) { now += 4 * MIN; await c.send(h, t, { type: "output_progress", requestId: "r1", tokens: i * 100 }); }
+    assert.deepEqual(await kinds(c, t), [], "32 minutes of output, a report every 4");
+    assert.equal((await c.stall.evidence(c.owner, t))!.request!.outputTokens, 800);
+    // A count that goes down does not lower it.
+    await c.send(h, t, { type: "output_progress", requestId: "r1", tokens: 50 });
+    assert.equal((await c.stall.evidence(c.owner, t))!.request!.outputTokens, 800);
+    // The stream stops: the ordinary silence time applies from the last report.
+    now += 11 * MIN;
+    assert.deepEqual(await kinds(c, t), ["silent"]);
+    await refuses("invalid_command", () => c.send(h, t, { type: "first_output", requestId: "other" }));
+    await refuses("invalid_command", () => c.send(h, t, { type: "output_progress", requestId: "other", tokens: 5 }));
+    await refuses("invalid_command", () => c.send(h, t, { type: "request_started", requestId: "x", cachedShare: 1.5 } as StallEvent));
+    await refuses("invalid_command", () => c.send(h, t, { type: "request_started", requestId: "x", promptTokens: -1 } as StallEvent));
+  }, { declaredSpeed: (route: string) => slowRoute(route) });
+
+  suite("the controller measures a route's reading and writing speed from finished requests, smoothed so one slow request cannot collapse it nor one fast request inflate it, and a measurement replaces the declared speed (card V01b)", async (c) => {
+    const h = await c.host("h1");
+    const t = await c.work({ difficulty: "easy" });
+    const finish = async (readSeconds: number, input: number, writeSeconds: number, output: number, cached = 0): Promise<void> => {
+      await c.send(h, t, started({ promptTokens: input }));
+      now += readSeconds * 1000;
+      await c.send(h, t, { type: "first_output", requestId: "r1" });
+      now += writeSeconds * 1000;
+      await c.send(h, t, { type: "request_finished", requestId: "r1", outcome: "ok", inputTokens: input, cachedTokens: cached, outputTokens: output });
+    };
+    assert.equal(await c.stall.speed(c.owner, "local/slow", h.id), undefined);
+    // 6,000 tokens read in 60 s is 100 a second; 300 written in 30 s is 10 a second.
+    await finish(60, 6000, 30, 300);
+    let sp = (await c.stall.speed(c.owner, "local/slow", h.id))!;
+    assert.deepEqual([Math.round(sp.readTps!), Math.round(sp.writeTps!), sp.readSamples, sp.writeSamples], [100, 10, 1, 1]);
+    // Cached tokens are not read: 9,000 in of which 6,000 cached is 3,000 read, in 30 s is 100 a second (counted whole it would be 300, and bounded to 200).
+    await finish(30, 9000, 30, 300, 6000);
+    sp = (await c.stall.speed(c.owner, "local/slow", h.id))!;
+    assert.equal(Math.round(sp.readTps!), 100);
+    // One very slow request (600 tokens in 600 s: 1 a second) is bounded at half before it is averaged: 130 * 0.7 + 65 * 0.3.
+    const before = sp.readTps!;
+    await finish(600, 600, 30, 300);
+    sp = (await c.stall.speed(c.owner, "local/slow", h.id))!;
+    assert.equal(Math.round(sp.readTps!), Math.round(before * 0.7 + (before / 2) * 0.3));
+    // One very fast request is bounded at double.
+    const mid = sp.readTps!;
+    await finish(1, 100_000, 30, 300);
+    sp = (await c.stall.speed(c.owner, "local/slow", h.id))!;
+    assert.equal(Math.round(sp.readTps!), Math.round(mid * 0.7 + (mid * 2) * 0.3));
+    // A small request, a failed one and one with no first output tell nothing.
+    const samples = sp.readSamples;
+    await finish(2, 50, 30, 300);
+    await c.send(h, t, started({ promptTokens: 9000 })); now += 60_000;
+    await c.send(h, t, { type: "request_finished", requestId: "r1", outcome: "ok", inputTokens: 9000, outputTokens: 300 });
+    await c.send(h, t, started({ promptTokens: 9000 })); now += 60_000; await c.send(h, t, { type: "first_output", requestId: "r1" }); now += 30_000;
+    await c.send(h, t, { type: "request_finished", requestId: "r1", outcome: "error", inputTokens: 9000, outputTokens: 300 });
+    assert.equal((await c.stall.speed(c.owner, "local/slow", h.id))!.readSamples, samples);
+    // Another host is another measurement; only the controller's side reads them.
+    assert.equal(await c.stall.speed(c.owner, "local/slow", "host:other"), undefined);
+    await refuses("forbidden", () => c.stall.speed(h, "local/slow", h.id));
+    // The measured speed (about 100) is what the next big prompt is judged by, in place of the declared 100 of another route.
+    await c.send(h, t, started({ promptTokens: 120_000 }));
+    const r = (await c.stall.assess(c.owner, t))!.signals.reading!;
+    assert.equal(r.source, "measured");
+    assert.ok(Math.abs(r.tokensPerSecond - sp.readTps!) < 0.001);
+  }, { declaredSpeed: () => ({ readTokensPerSecond: 7 }) });
+
   test("assessStall is a pure function of its inputs", () => {
     const base = { now: T0 + 60 * MIN, running: true, waiting: false, difficulty: "medium" as const, thresholds: DEFAULT_THRESHOLDS.medium, attemptStart: T0, budget: {}, requiredEvidence: 0 };
     const a = assessStall(base);

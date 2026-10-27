@@ -1,4 +1,5 @@
 import { DomainError } from "../domain/errors.js";
+import { derivedId } from "../domain/ids.js";
 import type { ActivityBody, AssignmentBody, AttemptBody, Owner } from "../domain/assignment-model.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import { onlyKnown, taskId as checkTaskId, text, type TaskBody, type View } from "../domain/model.js";
@@ -49,8 +50,14 @@ export interface ConcernBody {
 }
 
 export type StallEvent =
-  | { readonly type: "request_started"; readonly requestId: string }
-  | { readonly type: "request_finished"; readonly requestId: string; readonly outcome: "ok" | "error" }
+  /** `promptTokens` is the estimate made at the start (card V01b), `cachedShare` the share of it the cache adapter expects to be cached, `route` and `hostId` whose speed the request measures. */
+  | { readonly type: "request_started"; readonly requestId: string; readonly promptTokens?: number; readonly cachedShare?: number; readonly route?: string; readonly hostId?: string }
+  /** The first output of the open request arrived: the reading allowance ends and the event counts as progress. */
+  | { readonly type: "first_output"; readonly requestId: string }
+  /** The model relay's count of tokens written so far by the open request, at a bounded interval; each report counts as progress. */
+  | { readonly type: "output_progress"; readonly requestId: string; readonly tokens: number }
+  /** `inputTokens`, `cachedTokens` and `outputTokens` are what the provider reported for the call (card V01b); with them and the first output the controller measures the route's reading and writing speed. */
+  | { readonly type: "request_finished"; readonly requestId: string; readonly outcome: "ok" | "error"; readonly inputTokens?: number; readonly cachedTokens?: number; readonly outputTokens?: number }
   | { readonly type: "step"; readonly label: string; readonly actionKey?: string }
   | { readonly type: "error"; readonly errorClass: string; readonly actionKey?: string }
   | { readonly type: "job"; readonly status: JobStatus }
@@ -58,6 +65,14 @@ export type StallEvent =
   | { readonly type: "evidence"; readonly item: string };
 
 export interface StallOptions extends RunnerOptions {
+  /**
+   * A speed declared for a route in its settings (tokens read a second), used until the controller has measured the route (card V01b). Without one, or a measurement, `defaultReadTokensPerSecond` is used and the concern text says so.
+   */
+  readonly declaredSpeed?: (route: string, hostId: string | undefined) => { readonly readTokensPerSecond?: number } | undefined;
+  /** The cautious speed assumed for a route with no measurement and no declared speed. Provisional default 50 tokens a second. */
+  readonly defaultReadTokensPerSecond?: number;
+  /** How much longer than the expected reading time, in percent, a request may take before it is suspect. Provisional default 150. */
+  readonly readMarginPercent?: number;
   /** Per difficulty, over the provisional defaults. A task with no stated difficulty is assessed as `medium`. */
   readonly thresholds?: Partial<Record<Difficulty, Partial<StallThresholds>>>;
   /** How long a host counts as fresh (default: the one constant `HostService` uses). */
@@ -77,9 +92,23 @@ const safe = (value: unknown, field: string, max: number): string => {
   return out;
 };
 const amount = (value: unknown, field: string): number | undefined => (value === undefined ? undefined : typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1e12 ? value : invalid(field, "must be a number from 0"));
+const tokens = (value: unknown, field: string): number | undefined => (value === undefined ? undefined : typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= 1e9 ? value : invalid(field, "must be a whole number of tokens from 0 to 1000000000"));
 const pad = (n: number): string => String(n).padStart(10, "0");
 const concernId = (taskId: string, generation: number, kind: StallKind): string => `stl-${taskId.slice(5)}-${pad(generation)}-${kind.replace("_", "-")}`;
 const prefixOf = (taskId: string): string => `stl-${taskId.slice(5)}-`;
+
+/** What a model route has shown about its own speed (kind `stall-speed`, one per route and host; card V01b): smoothed tokens a second for reading a prompt and for writing. */
+export interface SpeedBody { readonly route: string; readonly hostId: string; readonly readTps?: number; readonly writeTps?: number; readonly readSamples: number; readonly writeSamples: number; readonly updatedAt: string }
+/** A request counts toward a route's speed only when it was big and long enough for the speed to dominate its fixed costs. */
+export const SPEED_SAMPLE = { minReadTokens: 200, minReadMs: 1000, minWriteTokens: 20, minWriteMs: 1000, keep: 0.7, spread: 2, floor: 0.1, ceiling: 1e6 } as const;
+const smooth = (old: number | undefined, sample: number): number => {
+  const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
+  if (old === undefined) return clamp(sample, SPEED_SAMPLE.floor, SPEED_SAMPLE.ceiling);
+  // One slow request cannot pull the figure below half of what it was, nor one fast request above double, before it is averaged in.
+  const bounded = clamp(sample, old / SPEED_SAMPLE.spread, old * SPEED_SAMPLE.spread);
+  return clamp(old * SPEED_SAMPLE.keep + bounded * (1 - SPEED_SAMPLE.keep), SPEED_SAMPLE.floor, SPEED_SAMPLE.ceiling);
+};
+const speedId = (route: string, hostId: string): string => derivedId("sps", `${route}\0${hostId}`);
 
 /** Whether the identity that reported is the task's owner (an agent owner `ann` reports as `agent:ann`). */
 const isOwner = (owner: Owner | undefined, principalId: string): boolean => owner !== undefined && (owner.id === principalId || `${owner.kind}:${owner.id}` === principalId);
@@ -104,11 +133,25 @@ function checkEvent(value: unknown): StallEvent {
   const only = (known: readonly string[]): void => { for (const key of Object.keys(e)) if (!known.includes(key)) invalid(`event.${key}`, "is not a field of this event"); };
   const key = (field: string): string | undefined => (e[field] === undefined ? undefined : safe(e[field], `event.${field}`, STALL_LIMITS.key));
   switch (e["type"]) {
-    case "request_started": only(["type", "requestId"]); return { type: "request_started", requestId: safe(e["requestId"], "event.requestId", STALL_LIMITS.requestId) };
+    case "request_started": {
+      only(["type", "requestId", "promptTokens", "cachedShare", "route", "hostId"]);
+      const promptTokens = tokens(e["promptTokens"], "event.promptTokens");
+      const cachedShare = e["cachedShare"] === undefined ? undefined : typeof e["cachedShare"] === "number" && Number.isFinite(e["cachedShare"]) && e["cachedShare"] >= 0 && e["cachedShare"] <= 1 ? e["cachedShare"] : invalid("event.cachedShare", "must be a number from 0 to 1");
+      const route = key("route"); const hostId = key("hostId");
+      return { type: "request_started", requestId: safe(e["requestId"], "event.requestId", STALL_LIMITS.requestId), ...(promptTokens === undefined ? {} : { promptTokens }), ...(cachedShare === undefined ? {} : { cachedShare }), ...(route === undefined ? {} : { route }), ...(hostId === undefined ? {} : { hostId }) };
+    }
+    case "first_output": only(["type", "requestId"]); return { type: "first_output", requestId: safe(e["requestId"], "event.requestId", STALL_LIMITS.requestId) };
+    case "output_progress": {
+      only(["type", "requestId", "tokens"]);
+      const t = tokens(e["tokens"], "event.tokens");
+      if (t === undefined) invalid("event.tokens", "is required");
+      return { type: "output_progress", requestId: safe(e["requestId"], "event.requestId", STALL_LIMITS.requestId), tokens: t! };
+    }
     case "request_finished": {
-      only(["type", "requestId", "outcome"]);
+      only(["type", "requestId", "outcome", "inputTokens", "cachedTokens", "outputTokens"]);
       if (e["outcome"] !== "ok" && e["outcome"] !== "error") invalid("event.outcome", "must be ok or error");
-      return { type: "request_finished", requestId: safe(e["requestId"], "event.requestId", STALL_LIMITS.requestId), outcome: e["outcome"] as "ok" | "error" };
+      const inputTokens = tokens(e["inputTokens"], "event.inputTokens"); const cachedTokens = tokens(e["cachedTokens"], "event.cachedTokens"); const outputTokens = tokens(e["outputTokens"], "event.outputTokens");
+      return { type: "request_finished", requestId: safe(e["requestId"], "event.requestId", STALL_LIMITS.requestId), outcome: e["outcome"] as "ok" | "error", ...(inputTokens === undefined ? {} : { inputTokens }), ...(cachedTokens === undefined ? {} : { cachedTokens }), ...(outputTokens === undefined ? {} : { outputTokens }) };
     }
     case "step": { only(["type", "label", "actionKey"]); const k = key("actionKey"); return { type: "step", label: safe(e["label"], "event.label", STALL_LIMITS.label), ...(k === undefined ? {} : { actionKey: k }) }; }
     case "error": { only(["type", "errorClass", "actionKey"]); const k = key("actionKey"); return { type: "error", errorClass: safe(e["errorClass"], "event.errorClass", STALL_LIMITS.key), ...(k === undefined ? {} : { actionKey: k }) }; }
@@ -147,8 +190,23 @@ function applyEvent(before: EvidenceBody, event: StallEvent, by: string, at: str
   switch (event.type) {
     case "request_started":
       // Repeating the start of the open request does not make it younger.
-      if (before.request?.id !== event.requestId) { next = { ...next, request: { id: event.requestId, startedAt: at } }; progress(); }
+      if (before.request?.id !== event.requestId) {
+        next = { ...next, request: { id: event.requestId, startedAt: at, ...(event.promptTokens === undefined ? {} : { promptTokens: event.promptTokens }), ...(event.cachedShare === undefined ? {} : { cachedShare: event.cachedShare }), ...(event.route === undefined ? {} : { route: event.route }), ...(event.hostId === undefined ? {} : { hostId: event.hostId }) } };
+        progress();
+      }
       break;
+    case "first_output":
+      if (before.request === undefined || before.request.id !== event.requestId) return invalid("event.requestId", "is not the open request");
+      // Repeating it does not move the time the first output arrived.
+      if (before.request.firstOutputAt === undefined) { next = { ...next, request: { ...before.request, firstOutputAt: at } }; progress(); }
+      break;
+    case "output_progress": {
+      if (before.request === undefined || before.request.id !== event.requestId) return invalid("event.requestId", "is not the open request");
+      // Output has started even if the first-output event was lost; the count only grows.
+      next = { ...next, request: { ...before.request, firstOutputAt: before.request.firstOutputAt ?? at, outputTokens: Math.max(before.request.outputTokens ?? 0, event.tokens) } };
+      progress();
+      break;
+    }
     case "request_finished": {
       if (before.request === undefined || before.request.id !== event.requestId) return invalid("event.requestId", "is not the open request");
       const { request: _r, ...rest } = next;
@@ -192,6 +250,9 @@ export class StallService {
   readonly #hostStaleAfterMs: number;
   readonly #dismissForMs: number;
   readonly #isPaused: ((taskId: string) => Promise<boolean>) | undefined;
+  readonly #declared: StallOptions["declaredSpeed"];
+  readonly #defaultTps: number;
+  readonly #marginPercent: number;
 
   private constructor(runner: CommandRunner, assignments: AssignmentService, waits: WaitService, options: StallOptions) {
     this.#runner = runner;
@@ -202,6 +263,11 @@ export class StallService {
     this.#dismissForMs = options.dismissForMs ?? 6 * 3_600_000;
     this.#isPaused = options.isPaused;
     if (!Number.isSafeInteger(this.#hostStaleAfterMs) || this.#hostStaleAfterMs < 1000) throw new DomainError("invalid_command", "hostStaleAfterMs: must be a whole number of at least 1000", { field: "hostStaleAfterMs" });
+    this.#declared = options.declaredSpeed;
+    this.#defaultTps = options.defaultReadTokensPerSecond ?? 50;
+    this.#marginPercent = options.readMarginPercent ?? 150;
+    if (!(this.#defaultTps >= 1 && this.#defaultTps <= 1e6)) throw new DomainError("invalid_command", "defaultReadTokensPerSecond: must be a number from 1 to 1000000", { field: "defaultReadTokensPerSecond" });
+    if (!Number.isSafeInteger(this.#marginPercent) || this.#marginPercent < 100 || this.#marginPercent > 10_000) throw new DomainError("invalid_command", "readMarginPercent: must be a whole number from 100 to 10000", { field: "readMarginPercent" });
     if (!Number.isSafeInteger(this.#dismissForMs) || this.#dismissForMs < 1000) throw new DomainError("invalid_command", "dismissForMs: must be a whole number of at least 1000", { field: "dismissForMs" });
   }
 
@@ -226,13 +292,32 @@ export class StallService {
     // An agent reports only for itself: it must be the assignment's owner.
     if (by.kind === "agent" && !isOwner(assignment?.owner, by.id)) throw new DomainError("forbidden", `${by.id} may not report on that task`);
     if (!Number.isSafeInteger(command.generation) || command.generation < 1) invalid("generation", "must be a whole number of at least 1");
+    return this.#record(by.id, by.kind === "host" ? by.id : undefined, command, task);
+  }
+
+  /**
+   * The controller's own report of a model call it relayed (card V01b): the request started, its first output, progress, its end. It has no principal; the evidence keeps the worker's own `reportedBy` (the relay is
+   * not a second reporter), and a task that is not assigned at that generation is refused (`fenced`) like any report. Never call it with an event the caller did not see happen.
+   */
+  async reportFromRelay(command: NoActor & { taskId: string; generation: number; event: StallEvent }): Promise<{ id: string; revision: number; replayed: boolean }> {
+    onlyKnown(command, ["commandId", "taskId", "generation", "event"]);
+    const taskId = checkTaskId(command.taskId);
+    const task = (await this.#runner.get("task", taskId))?.body as unknown as TaskBody | undefined;
+    if (task === undefined) throw new DomainError("not_found", "no such task");
+    return this.#record("controller", undefined, command, task, true);
+  }
+
+  async #record(actorId: string, reporterHost: string | undefined, command: NoActor & { taskId: string; generation: number; event: StallEvent }, task: TaskBody, relayed = false): Promise<{ id: string; revision: number; replayed: boolean }> {
+    const taskId = command.taskId;
+    const assignment = await this.#assignments.getAssignment(taskId);
+    if (!Number.isSafeInteger(command.generation) || command.generation < 1) invalid("generation", "must be a whole number of at least 1");
     const event = checkEvent(command.event);
     if (assignment === undefined || assignment.state !== "assigned") throw new DomainError("fenced", "the task is not assigned, so there is no one to report for");
     if (assignment.generation !== command.generation) throw new DomainError("fenced", `generation ${command.generation} is not the current one (${assignment.generation}); read the assignment`);
     const ref: AggregateRef = { kind: "stall-evidence", id: taskId };
     for (let attempt = 1; ; attempt++) {
       try {
-        return await this.#runner.command("stall.report", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
+        return await this.#runner.command("stall.report", { commandId: scopedCommandId(actorId, command.commandId), actor: actorId }, async () => ({
           payload: { taskId, generation: command.generation, event: event as unknown as JsonObject },
           build: async () => {
             const current = await this.#runner.get(ref.kind, ref.id);
@@ -243,12 +328,34 @@ export class StallService {
             // A new generation starts its evidence again: what the previous owner did says nothing about this one.
             const base: EvidenceBody = stored !== undefined && stored.generation === command.generation
               ? stored
-              : { taskId, projectId: task.projectId, generation: command.generation, since: at, reportedBy: by.id, lastReportAt: at, lastProgressAt: at, reports: 0, steps: 0, window: [], counts: {}, evidence: [], evidenceTotal: 0 };
-            const next = applyEvent(base, event, by.id, at);
+              : { taskId, projectId: task.projectId, generation: command.generation, since: at, reportedBy: actorId, lastReportAt: at, lastProgressAt: at, reports: 0, steps: 0, window: [], counts: {}, evidence: [], evidenceTotal: 0 };
+            const next = applyEvent(base, event, relayed && stored !== undefined && stored.generation === command.generation ? stored.reportedBy : actorId, at);
             const change: Change = current === undefined
               ? { type: "create", ref, body: next as unknown as JsonObject }
               : { type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject };
-            return { ref, creates: current === undefined, changes: [change], detail: { taskId, generation: command.generation, event: event.type } };
+            const changes: Change[] = [change];
+            // A finished request that read a big prompt or wrote a long reply tells the route's speed (card V01b).
+            if (event.type === "request_finished" && event.outcome === "ok" && base.request?.id === event.requestId && base.request.route !== undefined) {
+              const request = base.request;
+              const hostId = request.hostId ?? reporterHost ?? "-";
+              const readMs = request.firstOutputAt === undefined ? 0 : Date.parse(request.firstOutputAt) - Date.parse(request.startedAt);
+              const writeMs = request.firstOutputAt === undefined ? 0 : Date.parse(at) - Date.parse(request.firstOutputAt);
+              const readTokens = Math.max(0, (event.inputTokens ?? 0) - (event.cachedTokens ?? 0));
+              const readSample = readMs >= SPEED_SAMPLE.minReadMs && readTokens >= SPEED_SAMPLE.minReadTokens ? readTokens / (readMs / 1000) : undefined;
+              const writeSample = writeMs >= SPEED_SAMPLE.minWriteMs && (event.outputTokens ?? 0) >= SPEED_SAMPLE.minWriteTokens ? event.outputTokens! / (writeMs / 1000) : undefined;
+              if (readSample !== undefined || writeSample !== undefined) {
+                const sref: AggregateRef = { kind: "stall-speed", id: speedId(request.route!, hostId) };
+                const old = await this.#runner.get(sref.kind, sref.id);
+                const was = old?.body as unknown as SpeedBody | undefined;
+                const speed: SpeedBody = {
+                  route: request.route!, hostId, readSamples: (was?.readSamples ?? 0) + (readSample === undefined ? 0 : 1), writeSamples: (was?.writeSamples ?? 0) + (writeSample === undefined ? 0 : 1), updatedAt: at,
+                  ...(readSample === undefined ? (was?.readTps === undefined ? {} : { readTps: was.readTps }) : { readTps: smooth(was?.readTps, readSample) }),
+                  ...(writeSample === undefined ? (was?.writeTps === undefined ? {} : { writeTps: was.writeTps }) : { writeTps: smooth(was?.writeTps, writeSample) }),
+                };
+                changes.push(old === undefined ? { type: "create", ref: sref, body: speed as unknown as JsonObject } : { type: "update", ref: sref, expectedRevision: old.revision, body: speed as unknown as JsonObject });
+              }
+            }
+            return { ref, creates: current === undefined, changes, detail: { taskId, generation: command.generation, event: event.type } };
           },
         }));
       } catch (error) {
@@ -488,6 +595,24 @@ export class StallService {
     return { hostId: reporter, identity, freshness: hostFreshness(record?.lastSeenAt, this.#runner.now(), this.#hostStaleAfterMs) };
   }
 
+  /** The speed to judge a reading request by: what the route has been measured at, else what its settings declare, else the cautious default (card V01b). */
+  async #readingSpeed(route: string | undefined, hostId: string): Promise<{ tokensPerSecond: number; source: "measured" | "declared" | "default"; marginPercent: number }> {
+    if (route !== undefined) {
+      const measured = ((await this.#runner.get("stall-speed", speedId(route, hostId)))?.body as unknown as SpeedBody | undefined)?.readTps;
+      if (measured !== undefined && measured > 0) return { tokensPerSecond: measured, source: "measured", marginPercent: this.#marginPercent };
+      const declared = this.#declared?.(route, hostId === "-" ? undefined : hostId)?.readTokensPerSecond;
+      if (declared !== undefined && declared > 0) return { tokensPerSecond: declared, source: "declared", marginPercent: this.#marginPercent };
+    }
+    return { tokensPerSecond: this.#defaultTps, source: "default", marginPercent: this.#marginPercent };
+  }
+
+  /** What a route has shown about its speed on a host (owner or staff only through the caller's right to read concerns is not needed: it carries no task data). */
+  async speed(by: Principal, route: string, hostId: string): Promise<View<SpeedBody> | undefined> {
+    if (by.kind !== "owner" && by.kind !== "service") throw new DomainError("forbidden", `${by.id} may not read route speeds`);
+    const found = await this.#runner.get("stall-speed", speedId(route, hostId));
+    return found === undefined ? undefined : view<SpeedBody>(found);
+  }
+
   async #facts(taskId: string, task: TaskBody): Promise<{ assessment: Assessment; difficulty: Difficulty; generation?: number; route?: Route }> {
     const assignment = await this.#assignments.getAssignment(taskId);
     const contract = (await this.#runner.get("task-contract", taskId))?.body as unknown as ContractBody | undefined;
@@ -507,12 +632,13 @@ export class StallService {
       if (activity !== undefined && activity.current && activity.generation === assignment.generation && (isOwner(assignment.owner, activity.observedBy) || activity.observedBy === evidence?.reportedBy)) activityAt = Date.parse(activity.observedAt);
     }
     const host = evidence === undefined ? undefined : await this.#host(evidence.reportedBy);
+    const reading = evidence?.request?.promptTokens === undefined ? undefined : await this.#readingSpeed(evidence.request.route, evidence.request.hostId ?? (host === undefined ? "-" : host.hostId));
     const fields = { ...DEFAULT_CONTRACT, ...(contract ?? {}) };
     const assessment = assessStall({
       now: Date.parse(this.#runner.now()), running, waiting, paused, difficulty, thresholds: this.#thresholds[difficulty],
       attemptStart: attempt === undefined ? 0 : Date.parse(attempt.createdAt), ...(activityAt === undefined ? {} : { activityAt }),
       ...(evidence === undefined ? {} : { evidence }), budget: { ...(fields.budget.maxMinutes === undefined ? {} : { maxMinutes: fields.budget.maxMinutes }), ...(fields.budget.maxCost === undefined ? {} : { maxCost: fields.budget.maxCost }) },
-      requiredEvidence: fields.requiredEvidence.length, ...(host === undefined ? {} : { host }),
+      requiredEvidence: fields.requiredEvidence.length, ...(host === undefined ? {} : { host }), ...(reading === undefined ? {} : { reading }),
     });
     const route = assigned ? await this.#route(assignment.owner) : undefined;
     return { assessment, difficulty, ...(assigned ? { generation: assignment.generation } : {}), ...(route === undefined ? {} : { route }) };

@@ -20,7 +20,11 @@ export interface EvidenceBody {
   /** The last *progress* event (a step, an error, evidence, a finished request, a change of job status, a request start). A repeated `job: running` ping or a spend report is a report but not progress: a hung worker can send those for ever. */
   readonly lastProgressAt: string;
   readonly reports: number;
-  readonly request?: { readonly id: string; readonly startedAt: string };
+  /**
+   * The open request. `promptTokens` is the estimate made when it started (card V01b: the body's characters over the route's characters per token, less the share the cache is expected to hold, `cachedShare`); `route` and
+   * `hostId` say whose speed it measures; `firstOutputAt` is when the first output arrived (it ends the reading allowance) and `outputTokens` how much has been written so far.
+   */
+  readonly request?: { readonly id: string; readonly startedAt: string; readonly promptTokens?: number; readonly cachedShare?: number; readonly route?: string; readonly hostId?: string; readonly firstOutputAt?: string; readonly outputTokens?: number };
   /** Controller-measured length of the last request that finished. */
   readonly lastRequestMs?: number;
   readonly lastStep?: { readonly label: string; readonly at: string };
@@ -80,6 +84,8 @@ export interface AssessInput {
   readonly budget: { readonly maxMinutes?: number; readonly maxCost?: number };
   readonly requiredEvidence: number;
   readonly host?: HostEvidence;
+  /** How fast the request's route reads a prompt, and how much longer than the expected reading time a request may take before it is suspect (card V01b). Without it the difficulty's times alone apply. */
+  readonly reading?: { readonly tokensPerSecond: number; readonly source: "measured" | "declared" | "default"; readonly marginPercent: number };
 }
 
 export interface Concern { readonly kind: StallKind; readonly detail: string }
@@ -101,6 +107,8 @@ export interface Assessment {
     readonly evidenceCount: number;
     readonly requiredEvidence: number;
     readonly host?: HostEvidence;
+    /** While a request reads its prompt (card V01b): the prompt size, the speed used and where it came from, the time that reading should take and the time the request is allowed. */
+    readonly reading?: { readonly promptTokens: number; readonly tokensPerSecond: number; readonly source: "measured" | "declared" | "default"; readonly expectedMs: number; readonly allowedMs: number };
   };
   readonly takeover: {
     /** Always false: the controller never reassigns because of this assessment. Reassignment is the owner's explicit command (card S02). */
@@ -151,6 +159,13 @@ export function assessStall(input: AssessInput): Assessment {
     requiredEvidence: input.requiredEvidence,
     ...(input.host === undefined ? {} : { host: input.host }),
   };
+  // A request still reading its prompt (no output yet) is given the time the prompt should take at the route's speed, with a margin, when that is longer than the difficulty's time.
+  let reading: NonNullable<Assessment["signals"]["reading"]> | undefined;
+  if (request?.promptTokens !== undefined && request.firstOutputAt === undefined && input.reading !== undefined) {
+    const expectedMs = Math.ceil((request.promptTokens * (1 - (request.cachedShare ?? 0)) / input.reading.tokensPerSecond) * 1000);
+    reading = { promptTokens: request.promptTokens, tokensPerSecond: input.reading.tokensPerSecond, source: input.reading.source, expectedMs, allowedMs: Math.max(th.requestMs, Math.ceil(expectedMs * input.reading.marginPercent / 100)) };
+  }
+  if (reading !== undefined) Object.assign(signals, { reading });
   const takeover = (basis: "insufficient" | "may_be_proposed"): Assessment["takeover"] => ({ permitted: false, basis, note: TAKEOVER_NOTE });
   if (input.paused === true) return { status: "paused", concerns: [], signals, takeover: takeover("insufficient") };
   if (!input.running) return { status: input.waiting ? "waiting" : "not_running", concerns: [], signals, takeover: takeover("insufficient") };
@@ -162,13 +177,17 @@ export function assessStall(input: AssessInput): Assessment {
   if (topError !== undefined && topError.count >= th.repeatedErrors)
     concerns.push({ kind: "repeated_errors", detail: `the same error ("${topError.key}") repeated at least ${th.repeatedErrors} times since the last acceptance evidence` });
   const finished = ev?.job?.status === "finished";
-  if (!finished && silenceMs >= th.silenceMs)
-    concerns.push({ kind: "silent", detail: `no progress for at least ${minutes(th.silenceMs)}` });
+  // While a request reads a large prompt the quiet is expected for as long as the reading is allowed (card V01b).
+  const silenceLimit = reading === undefined ? th.silenceMs : Math.max(th.silenceMs, reading.allowedMs);
+  if (!finished && silenceMs >= silenceLimit)
+    concerns.push({ kind: "silent", detail: `no progress for at least ${minutes(silenceLimit)}${reading === undefined || silenceLimit === th.silenceMs ? "" : ` (the prompt of about ${reading.promptTokens} tokens was allowed ${minutes(reading.allowedMs)} to read)`}` });
   // A request that has been open a long time is suspect only when nothing else has arrived since it began: a worker still reporting is simply on a long job.
   let longRequest = false;
+  const requestLimit = reading === undefined ? th.requestMs : reading.allowedMs;
   if (request !== undefined && requestOpenMs !== undefined && requestOpenMs >= th.requestMs) {
     const sinceStart = Math.max(progress ?? 0, input.activityAt ?? 0) > Date.parse(request.startedAt);
-    if (sinceStart) longRequest = true;
+    if (sinceStart || requestOpenMs < requestLimit) longRequest = true;
+    else if (reading !== undefined) concerns.push({ kind: "stuck_request", detail: `a request open for ${minutes(requestOpenMs)} with no output; its prompt is about ${reading.promptTokens} tokens, read at ${Math.round(reading.tokensPerSecond)} tokens a second (${reading.source}), which should take about ${minutes(reading.expectedMs)}; it was allowed ${minutes(reading.allowedMs)}` });
     else concerns.push({ kind: "stuck_request", detail: `a request open for at least ${minutes(th.requestMs)} with no progress reported since it began` });
   }
   const spend = ev?.spend;

@@ -2,7 +2,7 @@ import { InvitationInbox, MEETING_LIMITS, MEETING_SETTINGS, MeetingService } fro
 import { EventService } from "../events/index.js";
 import { BudgetService, holderNotice } from "../budgets/index.js";
 import { NotificationService } from "../notifications/index.js";
-import { StallService } from "../health/index.js";
+import { StallService, type StallOptions } from "../health/index.js";
 import { DomainError } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { AssignmentService } from "../domain/assignments.js";
@@ -87,6 +87,8 @@ export interface StartOptions {
   readonly conversationTransport?: Omit<TransportOptions, "conversations" | "principals">;
   /** What the lifecycle says about a principal (cards L01 and L02 supply it). Default: everyone is available. */
   readonly availability?: (principalId: string) => Promise<Availability>;
+  /** Stall detection's thresholds, the margin and the speeds a route is read at before it has been measured (card V01b); the controller's own pause check is not replaceable. */
+  readonly stall?: Pick<StallOptions, "thresholds" | "declaredSpeed" | "defaultReadTokensPerSecond" | "readMarginPercent">;
   /**
    * Builds the attempt dispatcher and runs its loops (card H12c): the tick, the messages, attendance, stand-up, event and decision loops. Off unless given. The loops run only while this controller
    * holds the primary epoch; a newer controller instance stops them here. See `DispatchStartOptions`.
@@ -238,7 +240,7 @@ export async function startController(options: StartOptions): Promise<Controller
     // Card L01: the pause gates supply the availability the conversations and the reviews consult, so a paused agent's messages are queued and a paused reviewer is skipped; whatever else the lifecycle reports (suspended, stopped) comes through `options.availability`.
     const pauses = PauseService.withEpoch(storage, epoch, { waits }, options.availability === undefined ? {} : { otherAvailability: options.availability });
     // Suspected stalls: a task under a pause is assessed as paused, never as stalled (card L01).
-    const stall = StallService.withEpoch(storage, epoch, assignments, waits, { isPaused: (taskId) => pauses.isPaused(taskId) });
+    const stall = StallService.withEpoch(storage, epoch, assignments, waits, { ...(options.stall ?? {}), isPaused: (taskId) => pauses.isPaused(taskId) });
     // Durable job records (card T07): a permitted background job's result goes to the pause service; no MCP connection check is bound until an MCP client exists, so no MCP operation is admitted.
     // The time a job or a review took is charged to its task by the dispatcher's budget service once that is built; a charge that fails is reported, and the job or review stands (card R05f).
     const charged = async (usage: { commandId: string; activity: "review" | "background-job"; taskId: string; agentId?: string; computeMs: number }): Promise<void> => { try { await dispatch?.chargeUse(usage); } catch (error) { options.onInternalError?.(error); } };

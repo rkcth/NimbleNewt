@@ -133,3 +133,44 @@ test("the count is not taken from a token-count probe, a cancelled reply or a nu
   assert.deepEqual(await run(() => sse(["data: a\n\n", "data: b\n\n", "data: {\"prompt_tokens\":777}\n\n"]), "chat/completions", 1), [], "cancelled before the end");
   assert.deepEqual(await run(() => new Response("{\"usage\":{\"prompt_tokens\":12", { status: 200 })), [], "a number cut off is not a number");
 });
+
+test("the monitor is told when a call starts, when its first bytes arrive, at a bounded interval how much has come, and how it ended with the counts; probes, failures and a cancelled reply are told apart (card V01b)", async () => {
+  const sse = (chunks: string[]): Response => new Response(new ReadableStream({ async start(c) { for (const x of chunks) { c.enqueue(new TextEncoder().encode(x)); await new Promise((r) => setTimeout(r, 15)); } c.close(); } }), { status: 200 });
+  const watch = async (respond: () => Response, path = "chat/completions", opts: { progressMs?: number; cancelAfter?: number } = {}): Promise<string[]> => {
+    const { relay } = setup({ respond });
+    const told: string[] = [];
+    const attempt = relay.forAttempt({ route: "llama/local", progressMs: opts.progressMs ?? 1_000_000, monitor: {
+      started: (c) => { told.push(`started:${c.requestChars > 0}`); }, firstOutput: () => { told.push("first"); }, progress: (b) => { told.push(`progress:${b > 0}`); },
+      finished: (c) => { told.push(`finished:${c.ok}:${c.inputTokens ?? "-"}:${c.cachedTokens ?? "-"}:${c.outputTokens ?? "-"}`); },
+    } });
+    const res = await attempt.relay(req(`http://relay.invalid/m0/${path}`));
+    let n = 0;
+    for await (const _ of res.body ?? []) { if (opts.cancelAfter !== undefined && ++n >= opts.cancelAfter) break; }
+    return told;
+  };
+  const usage = "data: {\"usage\":{\"prompt_tokens\":900,\"completion_tokens\":40,\"prompt_tokens_details\":{\"cached_tokens\":300}}}\n\n";
+  // A normal stream: start, first bytes once, no progress inside the interval, the end with what the provider reported.
+  assert.deepEqual(await watch(() => sse(["data: a\n\n", "data: b\n\n", usage])), ["started:true", "first", "finished:true:900:300:40"]);
+  // With a short interval progress is told, not more often than the interval allows.
+  const slow = await watch(() => sse(["data: a\n\n", "data: b\n\n", "data: c\n\n", "data: d\n\n", usage]), "chat/completions", { progressMs: 20 });
+  assert.equal(slow[0], "started:true"); assert.equal(slow[1], "first");
+  const progress = slow.filter((x) => x === "progress:true").length;
+  assert.ok(progress >= 1 && progress <= 3, `${progress} progress reports for about 60 ms at 20 ms`);
+  assert.equal(slow.at(-1), "finished:true:900:300:40");
+  // Anthropic-style counts: input and the two cache counts.
+  assert.equal((await watch(() => sse(["event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":100,\"cache_read_input_tokens\":700,\"cache_creation_input_tokens\":50}}}\n\n", "data: {\"usage\":{\"output_tokens\":12}}\n\n"], )))[2], "finished:true:850:750:12");
+  // A reply with no counts still ends well.
+  assert.equal((await watch(() => sse(["data: a\n\n"])))[2], "finished:true:-:-:-");
+  // A refused call (500) is told started then failed, with no first output; so is a call that cannot reach the endpoint.
+  assert.deepEqual(await watch(() => new Response("no", { status: 500 })), ["started:true", "finished:false:-:-:-"]);
+  // A reply the reader leaves part way is told as failed, once.
+  const cancelled = await watch(() => sse(["data: a\n\n", "data: b\n\n", "data: c\n\n"]), "chat/completions", { cancelAfter: 1 });
+  assert.deepEqual(cancelled, ["started:true", "first", "finished:false:-:-:-"]);
+  // A token-count probe is not a model call.
+  assert.deepEqual(await watch(() => new Response("{\"input_tokens\":5}", { status: 200 }), "messages/count_tokens"), []);
+  // A monitor that throws leaves the call alone.
+  const { relay } = setup({ respond: () => sse(["data: a\n\n", usage]) });
+  const boom = (): never => { throw new Error("boom"); };
+  const attempt = relay.forAttempt({ route: "llama/local", monitor: { started: boom, firstOutput: boom, progress: boom, finished: boom }, progressMs: 1 });
+  assert.equal(await text((await attempt.relay(req("http://relay.invalid/m0/chat/completions"))).body), `data: a\n\n${usage}`);
+});
