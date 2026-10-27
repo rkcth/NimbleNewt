@@ -60,6 +60,10 @@ export interface UsageEntry {
 }
 export interface BudgetRequestBody { readonly taskId: string; readonly treeId: string; readonly requestedBy: string; readonly costMicros: number; readonly computeMs: number; readonly reason: string; readonly to: string; state: "open" | "approved" | "denied"; decidedBy?: string; decidedAt?: string; grantedCostMicros?: number; grantedComputeMs?: number; note?: string; readonly at: string }
 
+/** What the addressee of a request for more budget is told: who asked, for which task, how much, and where it was addressed (`to` is `owner` or the delegated holder's principal). */
+export interface RequestNotice { readonly requestId: string; readonly taskId: string; readonly parentTaskId?: string; readonly to: string; readonly requestedBy: string; readonly costMicros: number; readonly computeMs: number }
+export type NotifyRequest = (notice: RequestNotice) => Promise<void>;
+
 export interface BudgetReport {
   readonly taskId: string;
   readonly currency: string;
@@ -176,10 +180,13 @@ export class BudgetService {
   readonly #runner: CommandRunner;
   readonly #pause: (attempt: number) => Promise<void>;
 
-  private constructor(runner: CommandRunner, pause: (attempt: number) => Promise<void>) { this.#runner = runner; this.#pause = pause; }
+  readonly #notify: NotifyRequest | undefined;
 
-  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions = {}): BudgetService {
-    return new BudgetService(new CommandRunner(storage, epoch, options), options.pause ?? ((attempt) => new Promise((resolve) => setTimeout(resolve, Math.random() * Math.min(25, attempt * 2)))));
+  private constructor(runner: CommandRunner, pause: (attempt: number) => Promise<void>, notify: NotifyRequest | undefined) { this.#runner = runner; this.#pause = pause; this.#notify = notify; }
+
+  /** `notify` tells the addressee of a new request for more budget (the owner, or the delegated holder); a failing notice never fails the request, which is stored and shown by `pending` whatever happens. */
+  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions & { notify?: NotifyRequest } = {}): BudgetService {
+    return new BudgetService(new CommandRunner(storage, epoch, options), options.pause ?? ((attempt) => new Promise((resolve) => setTimeout(resolve, Math.random() * Math.min(25, attempt * 2)))), options.notify);
   }
 
   /** The owner gives a task a root allowance of its own (new money). The task must exist and not already be in a budget tree. */
@@ -471,6 +478,11 @@ export class BudgetService {
       },
     })));
     if (result.replayed) to = ((await this.#runner.get(REQUEST, id))?.body as unknown as BudgetRequestBody).to;
+    // A repeat of the command tells again (the notice has its own command ID, so it is filed once): a call that crashed between the commit and the notice is mended by the caller's retry.
+    if (this.#notify !== undefined) {
+      const tree = (await this.#tree(treeId)).body;
+      try { await this.#notify({ requestId: id, taskId, ...(tree.nodes[taskId]?.parentId === undefined ? {} : { parentTaskId: tree.nodes[taskId]!.parentId! }), to, requestedBy: by.id, costMicros: want.costMicros, computeMs: want.computeMs }); } catch { /* the request is stored; `pending` shows it */ }
+    }
     return { id, to, replayed: result.replayed };
   }
 

@@ -53,6 +53,48 @@ Arguments:
 - `grantId`: the grant's ID
 
 Result: `{ item }`: the grant, with its revision.
+#### `budget.report`
+
+A task's budget: limit, delegated to children, in flight, uncertain, spent, overrun and available, for money and for compute, with the reservations and open requests behind them. A task you may not read reads like a missing one.
+
+Arguments:
+
+- `taskId`: the task
+
+Result: `{ item }`: the report.
+
+#### `budget.usage`
+
+What has been spent, by project, task or agent, with work and shared overhead apart and the cache figures.
+
+Arguments:
+
+- `projectId` (optional): only this project
+- `taskId` (optional): only this task
+- `agentId` (optional): only this agent
+- `category` (optional): `work` or `shared-overhead`
+
+Result: `{ item }`: the summary.
+
+#### `budget.pending`
+
+The open requests for more budget addressed to you (the owner: those that went to the owner), with whether the list may be partial.
+
+Arguments:
+
+- none
+
+Result: `{ requests, truncated }`; when `truncated` is true some older open requests may be missing (read each task's `budget.report`).
+
+#### `budget.get-request`
+
+One request for more budget (its requester, its addressee and the owner may read it).
+
+Arguments:
+
+- `requestId`: the request's ID
+
+Result: `{ item }`: the request.
 
 #### `project.get`
 
@@ -458,6 +500,32 @@ Cancels an event subscription (its subscriber or the owner). Its events stay in 
 Arguments:
 
 - `subscriptionId`: the subscription's ID
+#### `budget.request-more`
+
+A task asks for more budget. It goes to the holder of the parent node, or to the owner, who is told.
+
+Arguments:
+
+- `taskId`: the task
+- `costMicros` (optional): money wanted, in millionths
+- `computeMs` (optional): compute wanted, in milliseconds
+- `reason`: why
+
+Result: `{ id, to, replayed }`: the request and who it was addressed to.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `budget.decide`
+
+Approves (possibly less than asked) or denies a request. The owner may add new money; the holder it was addressed to may only move allowance from its own node.
+
+Arguments:
+
+- `requestId`: the request
+- `approve`: true or false
+- `costMicros` (optional): money to grant, at most what was asked
+- `computeMs` (optional): compute to grant, at most what was asked
+- `note` (optional): a note
 
 Result: `{ ok: true }`.
 
