@@ -15,6 +15,7 @@ import type { EventService } from "../events/index.js";
 import type { BudgetService } from "../budgets/index.js";
 import type { DifficultyService } from "../routing/difficulty.js";
 import type { WorkspaceOpService } from "../workspace-ops/index.js";
+import type { StatusService } from "../status/index.js";
 import type { DecisionService } from "../decisions/index.js";
 import { SecureApi } from "../security/secured.js";
 import type { GrantService } from "../security/grants.js";
@@ -64,6 +65,8 @@ export interface StateApiDeps {
   readonly meetings?: MeetingService;
   /** When present, integration, checkout refresh and quarantine of a task's work can be requested (cards H12l, H12d). */
   readonly workspaceOps?: Pick<WorkspaceOpService, "request" | "get">;
+  /** When present, the status views (task, overview, noticeboard, changes, tools, delivered, failed events) can be asked through the API (card U05b). */
+  readonly status?: Pick<StatusService, "ask">;
   /** When present, context branches can be opened, switched, resumed and delegated through the API (card C05). */
   readonly branches?: ContextBranchService;
   /** When present, an agent can ask the owner a question and the owner can see and answer the questions (card U12). */
@@ -123,6 +126,7 @@ export class StateApi {
         ...(this.#deps.responsibilities === undefined ? {} : { responsibilities: this.#deps.responsibilities }),
         ...(this.#deps.meetings === undefined ? {} : { meetings: this.#deps.meetings }),
         ...(this.#deps.workspaceOps === undefined ? {} : { workspaceOps: this.#deps.workspaceOps }),
+        ...(this.#deps.status === undefined ? {} : { status: this.#deps.status }),
         ...(this.#deps.branches === undefined ? {} : { branches: this.#deps.branches }),
         ...(this.#deps.ownerQuestions === undefined ? {} : { ownerQuestions: this.#deps.ownerQuestions }),
         ...(this.#deps.decisions === undefined ? {} : { decisions: this.#deps.decisions }),

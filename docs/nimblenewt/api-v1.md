@@ -87,6 +87,16 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `status.ask`
+
+A status view from the records, each line citing its records: `task`, `overview`, `noticeboard`, `changes`, `tools`, `delivered` (artifacts are checked against their files when the controller keeps them), `failed_events` and `failed_event`. What the caller may not read reads as missing.
+
+Arguments:
+
+- `request`: `{ kind, ... }` as the view needs (for example `{ kind: "delivered", projectId }`, `{ kind: "failed_event", handlingId }`)
+
+Result: `{ item }`: `{ observedAt, lines, ... }`, or `not_found` when the subject (a task, a failed handling) is missing or unreadable; a view of a project the caller may not read is empty.
+
 #### `budget.pending`
 
 The open requests for more budget addressed to you (the owner: those that went to the owner), with whether the list may be partial.
