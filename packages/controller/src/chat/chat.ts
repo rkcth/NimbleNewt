@@ -157,6 +157,12 @@ export interface ChatDeps {
   readonly coordinator?: () => CoordinatorService | undefined;
 }
 
+/**
+ * Typed orders that work without the assistant and run as typed (card U06): pause and resume, suspend, stop and Force Stop, and taking a right back. The owner typing the exact command is the order, so they are not shown first;
+ * every other command that changes things still is. They need nothing from the model, so a provider outage does not stand between the owner and a stop.
+ */
+const RECOVERY_OPS: ReadonlySet<string> = new Set(["lifecycle.pause", "lifecycle.resume", "lifecycle.stop", "lifecycle.force", "lifecycle.choose", "lifecycle.advance", "grant.revoke"]);
+
 const MESSAGE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const PROJECT_ID = /^proj-[a-z2-7]{20}$/;
 const PROPOSAL_ID = /^prop-[0-9a-f]{32}$/;
@@ -823,7 +829,7 @@ export class ChatService {
   async #runTyped(token: string, turnId: string, item: Extract<PlanItem, { kind: "command" }>): Promise<Outcome> {
     const inv = parseInvocation(item.typed);
     const op = inv?.namespace === "nimblenewt" ? BUILTIN_COMMANDS.operationOf(`nimblenewt.${inv.name}`) : undefined;
-    if (op !== undefined && op.kind !== "query") {
+    if (op !== undefined && op.kind !== "query" && !RECOVERY_OPS.has(op.name)) {
       return { i: item.i, status: "refused", code: "needs_confirmation", message: `/nimblenewt.${inv!.name} changes things, so it is not run from a typed line: say what you want in words and it is shown to you first (or send command.run through the API).` };
     }
     const response = await this.#deps.api.handle(token, { v: API_VERSION, op: "command.run", commandId: `${turnId}-c${item.i}`, args: { typed: item.typed } });
@@ -832,7 +838,16 @@ export class ChatService {
     const status = String(r["status"]);
     if (status === "done") {
       const text = JSON.stringify(r["answer"] ?? {}, null, 1).slice(0, 1500);
-      return { i: item.i, status: "applied", op: String(r["command"]), commandId: `${turnId}-c${item.i}`, shown: [`Ran ${String(r["command"])}:`, ...text.split("\n").slice(0, 40)] } as Outcome;
+      // A recovery order says what stage it reached: received, accepted, and whether it took effect or waits (card U06). It never says more than the record does.
+      const recovery = op !== undefined && RECOVERY_OPS.has(op.name);
+      const answer = (r["answer"] ?? {}) as { phase?: string; outcome?: { state?: string; graceful?: boolean }; blocked?: { reason?: string } };
+      const stages = !recovery ? [] : [
+        "Received: yes", "Accepted: yes",
+        answer.blocked !== undefined ? `Effected: not yet; it is blocked (${String(answer.blocked.reason)}). Choices: wait, restart-earlier-boundary, force-stop.`
+          : answer.outcome !== undefined ? `Effected: ${String(answer.outcome.state)}${answer.outcome.graceful === false ? " (not graceful)" : ""}.`
+            : answer.phase !== undefined ? `Effected: not yet (${answer.phase}).` : "Effected: recorded.",
+      ];
+      return { i: item.i, status: "applied", op: String(r["command"]), commandId: `${turnId}-c${item.i}`, shown: [`Ran ${String(r["command"])}:`, ...stages, ...text.split("\n").slice(0, 40)] } as Outcome;
     }
     const why = status === "failed" || status === "unsupported" ? (r["error"] as { message?: string } | undefined)?.message : (r["reason"] ?? r["asks"]);
     const options = Array.isArray(r["candidates"]) ? ` (${(r["candidates"] as string[]).join(", ")})` : "";

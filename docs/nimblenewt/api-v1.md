@@ -154,6 +154,18 @@ Result: `{ items, next? }`.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `lifecycle.status`
+
+What a scope's pause gate says: whether it is paused, who paused it, why, and what the runtime has actually reached (pausing, paused, suspended, stopped, recovery-required), apart from what was asked.
+
+Arguments:
+
+- `scope`: `{ kind, id }`
+
+Result: `{ item }`: `intent`, `owner`, `reason`, `observed`, or `{ intent: "active" }` for a scope never paused.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `lifecycle.get`
 
 A suspension or stop request: its phase, mode, inventory, what blocks it, its outcome (graceful or forced) and history.
@@ -900,6 +912,33 @@ Arguments:
 - `visibility`: `shared` or `private`
 
 Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `lifecycle.pause`
+
+Pauses a task, an agent, a team or the installation: ordinary foreground work stops from now on; background work may go on unless `background` is `deny`. Nothing is resumed by time, a message or a meeting; only `lifecycle.resume` lifts it.
+
+Arguments:
+
+- `scope`: `{ kind: task|agent|team|installation, id }`
+- `reason`: why, in words
+- `background` (optional): `permit` (default) or `deny`
+
+Result: `{ gateId, requestId, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `lifecycle.resume`
+
+Lifts the pause on this scope only; the answer lists the gates that still hold it.
+
+Arguments:
+
+- `scope`: `{ kind, id }`
+- `reason`: why, in words
+
+Result: `{ gateId, requestId, stillPausedBy, replayed }`.
 
 Completion: finished when accepted (`completed: true`).
 

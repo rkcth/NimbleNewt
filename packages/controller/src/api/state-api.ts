@@ -22,6 +22,7 @@ import type { GrantService } from "../security/grants.js";
 import type { PlacementSettingsService } from "../remote/placement-settings.js";
 import type { ProtectedBranchService } from "../policy/protected-branches.js";
 import type { WorkingNoteService } from "../context/notes.js";
+import type { PauseService } from "../lifecycle/pause.js";
 import type { StopService } from "../lifecycle/stop.js";
 import type { IntegrationPolicyService } from "../policy/integration-policy.js";
 
@@ -87,6 +88,7 @@ export interface StateApiDeps {
   readonly notes?: Pick<WorkingNoteService, "write" | "revise" | "setVisibility" | "read" | "versions" | "list">;
   readonly integration?: Pick<IntegrationPolicyService, "get" | "set" | "getDefault" | "setDefault" | "ensure" | "precheck">;
 
+  readonly pauses?: Pick<PauseService, "pause" | "resume" | "gate">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep">;
   readonly integration?: Pick<IntegrationPolicyService, "get" | "set" | "getDefault" | "setDefault" | "ensure">;
 
@@ -173,6 +175,7 @@ export class StateApi {
         ...(this.#deps.integration === undefined ? {} : { integration: this.#deps.integration }),
         ...(this.#deps.notes === undefined ? {} : { notes: this.#deps.notes }),
         ...(this.#deps.stops === undefined ? {} : { stops: this.#deps.stops }),
+        ...(this.#deps.pauses === undefined ? {} : { pauses: this.#deps.pauses }),
 
         ...(this.#deps.spill === undefined ? {} : { spill: this.#deps.spill }),
         ...(this.#deps.events === undefined ? {} : { events: this.#deps.events }),

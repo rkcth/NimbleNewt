@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
+import { ScriptedInterpreter } from "../chat/index.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -40,5 +41,45 @@ test("suspend and stop through the state API: whoever may pause may ask, nothing
     assert.equal((await call(boot.token, "lifecycle.stop", { scope: { kind: "installation", id: "nope" }, mode: "stop", reason: "x" }, "s4")).error.code, "invalid_command");
     assert.equal((await call(boot.token, "lifecycle.sweep", {}, "sw")).result.advanced.length, 0);
     assert.equal((await call(ann, "lifecycle.sweep", {}, "sw2")).error.code, "forbidden");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("recovery orders typed in the owner chat work with the assistant down: pause, stop, force stop and revoke run as typed, say what stage they reached, and are audited (card U06)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-recovery-"));
+  let asked = 0;
+  const c = await startController({
+    storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [],
+    chat: { interpreter: new ScriptedInterpreter(() => { asked++; throw new Error("provider is down"); }) },
+  });
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const call = async (op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    const project = (await call("project.create", { name: "Garden" }, "p1")).result.id as string;
+    const task = (await call("task.create", { projectId: project, title: "weed" }, "t1")).result.id as string;
+    const say = async (id: string, text: string) => (await c.chat!.submit(boot.token, { messageId: id, text })) as any;
+    const scope = JSON.stringify({ kind: "task", id: task });
+    // Pause, then read its status: nothing needed the assistant.
+    const paused = await say("m1", `/nimblenewt.lifecycle-pause {"scope": ${scope}, "reason": "lunch"}`);
+    assert.equal(paused.outcomes[0].status, "applied", JSON.stringify(paused.outcomes));
+    const status = await say("m2", `/nimblenewt.lifecycle-status {"scope": ${scope}}`);
+    assert.match(status.outcomes[0].shown.join("\n"), /"intent": "pause"/);
+    // Stop says which stage it reached.
+    const stopped = await say("m3", `/nimblenewt.lifecycle-stop {"scope": ${scope}, "mode": "stop", "reason": "night"}`);
+    const text = stopped.outcomes[0].shown.join("\n");
+    assert.match(text, /Received: yes/);
+    assert.match(text, /Accepted: yes/);
+    assert.match(text, /Effected: stopped/);
+    // Force stop runs as typed and is not graceful.
+    await call("lifecycle.resume", { scope: { kind: "task", id: task }, reason: "again" }, "r1");
+    const forced = await say("m4", `/nimblenewt.lifecycle-force {"scope": ${scope}, "reason": "on fire"}`);
+    assert.match(forced.outcomes[0].shown.join("\n"), /Effected: (stopped|recovery-required)/);
+    // Other changing commands are still not run from a typed line.
+    assert.equal((await say("m5", '/nimblenewt.placement-set {"allow": ["host:pc"]}')).outcomes[0].code, "needs_confirmation");
+    // A bad scope is answered, not run.
+    assert.equal((await say("m6", '/nimblenewt.lifecycle-stop {"scope": {"kind": "task", "id": "nope"}, "mode": "stop", "reason": "x"}')).outcomes[0].status, "refused");
+    assert.equal(asked, 0, "the assistant was never asked");
+    // The orders are on record: the queued command and the run, and the lifecycle request with its actor.
+    const record = (await call("lifecycle.get", { intentId: (await call("lifecycle.stop", { scope: { kind: "task", id: task }, mode: "stop", reason: "night" }, "m3-again")).result.intentId })).result.item;
+    assert.equal(record.requestedBy, "owner:rob");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
