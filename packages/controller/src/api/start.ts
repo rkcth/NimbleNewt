@@ -259,8 +259,6 @@ export async function startController(options: StartOptions): Promise<Controller
     const reviews = ReviewService.withEpoch(storage, epoch, { onUsage: (u) => charged({ commandId: u.commandId, activity: "review", taskId: u.taskId, agentId: u.agentId, computeMs: u.computeMs }), availability: pauses.availability, reviewerHost: async (principalId) => { try { return await dispatch?.hostOfAgent(principalId); } catch { return undefined; } } });
     const graph = WaitGraphService.withEpoch(storage, epoch, contracts, BlockerService.withEpoch(storage, epoch), { extraEdges: (projectId, tasks) => reviews.waitEdges(projectId, tasks) });
 
-    // The routing table is refused unless the coordinator, the safety supervisor and every other role in it have a valid fallback list (card R04).
-    const routing = RoutingService.withEpoch(storage, epoch, {}, {});
     // Where local-only data may go: the owner's setting over the approval profile's default, consulted at every placement on a remote host unless the operator gave a placement policy of their own (card H07c).
     const placement = PlacementSettingsService.withEpoch(storage, epoch);
     const withPlacement = <T extends NonNullable<StartOptions["dispatch"]>>(dispatch: T): T => (dispatch?.remote === undefined || dispatch.remote.placementPolicy !== undefined ? dispatch : { ...dispatch, remote: { ...dispatch.remote, placementPolicy: placement.policy() } });
