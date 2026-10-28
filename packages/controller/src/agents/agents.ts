@@ -154,7 +154,7 @@ export class AgentService {
     return this.#command(by, "role.label", command, async () => {
       onlyKnown(command, ["commandId", "name", "label", "expectedRevision"]);
       const name = roleName(command.name, "name");
-      if (typeof command.label === "string" && /[\p{Cf}\p{Cc}\p{Zl}\p{Zp}]/u.test(command.label)) throw new DomainError("invalid_command", "label: may not contain invisible or direction-changing characters", { field: "label" });
+      if (typeof command.label === "string" && /[\p{Cf}\p{Cc}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}\u3164\u115F\u1160\uFFA0\u2800]/u.test(command.label)) throw new DomainError("invalid_command", "label: may not contain invisible or direction-changing characters", { field: "label" });
       const label = command.label === null ? null : text(command.label, "label", { min: 1, max: AGENT_LIMITS.label });
       return {
         payload: { name, label, expectedRevision: command.expectedRevision ?? null },
