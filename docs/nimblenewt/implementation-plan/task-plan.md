@@ -40,7 +40,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H07b, H07c, H07d, H07e, H02e, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H02b, H02c, H02d, H11b, H12n, H12p, H12o |
 | N11 / AII-261 | V01, V01b, V01c, V02 |
 | N12 / AII-262 | M01b, M01c, M01d, M00, M01, M02, M03, M04, M05, M05b, M06 |
-| N13 / AII-263 | T01, T02, T03, T06, T06b, T07, T07b, T08, T09, T09b |
+| N13 / AII-263 | T01, T02, T03, T06, T06b, T07, T07b, T08, T09, T09b, T09c, T09d |
 | N14 / AII-264 | P01b, P01c, P01, P02, P02b, P03, P04, P05, P06, P07, P08, P08b, P09, P10, P10b, P10c |
 | N15 / AII-265 | Q01, Q02, Q03, Q04, Q01b |
 | N16 / AII-266 | B01 |
@@ -1750,12 +1750,12 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** The runtime-compatibility 56-58 cases pass; queued work stores the resolved canonical target; an ambiguous alias stays unresolved and asks; aliases resolve only in their bound context; renaming an agent changes no canonical command or record; operation ID, schema version, owner, revision and display name are kept separate; lowercase grammar with normalized or encoded collisions rejected and no last-installed-wins; agents cannot claim /nimblenewt.* or /toolbox.*; the provider wire-name mapping stays collision-free per provider.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
-### T09b — Wire command namespaces into the controller, state API and chat and execute queued commands
+### T09b — Wire command namespaces into the controller, state API and chat and run built-in commands
 
 - **Parent:** N13 / AII-263.
 - **Blockers:** T09.
-- **Deliverable:** Split from T09 (2026-10-27): the catalog becomes a controller service, aliases and queued commands are reachable from the state API and the chat, a queued command is executed under the caller's rights, scoped /toolbox. names exist, an alias's scope is tied to grants, and agents show friendly names.
-- **Acceptance and verification:** A command typed in the owner chat resolves, is queued, runs under the typist's rights and is answered once; an ambiguous or unknown name gets a plain answer; a replay never runs twice; another principal cannot run or see an alias it was not given.
+- **Deliverable:** Split from T09 (2026-10-27): the catalog becomes a controller service, aliases and queued commands are reachable from the state API and the chat, a queued command is executed under the caller's rights, scoped /toolbox. names exist, an alias's scope is tied to grants, and agents show friendly names; owner decision 2026-10-28: queued commands run for the built-in namespace only (/nimblenewt.<name> runs the state operation of that name under the typist's own rights); toolbox and agent commands are T09c and T09d.
+- **Acceptance and verification:** A command typed in the owner chat resolves, is queued, runs under the typist's rights and is answered once; an ambiguous or unknown name gets a plain answer; a replay never runs twice; another principal cannot run or see an alias it was not given; a /toolbox. or /a_ command is queued and answered once with a plain "cannot run yet" until T09c and T09d.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### P01 — Implement repository-independent projects and responsibilities
@@ -2184,10 +2184,26 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** A project set to main-automatic reaches main with no human step once the required checks pass; an installation lock blocks it; waiting for a human in human-promotes does not stop landing; an upstream pull request is never treated as a main promotion.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
+### T09c — Run queued toolbox commands through the approval gates
+
+- **Parent:** N13 / AII-263.
+- **Blockers:** T09b.
+- **Deliverable:** Owner decision 2026-10-28 (follow-on of T09b): /toolbox.<name> runs as a tool call for the typist, going through the normal grants and approval gates, answered once.
+- **Acceptance and verification:** A toolbox command runs only with the typist's grants and approvals; a replay never runs twice; a refused or unknown tool gets a plain answer.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### T09d — Run queued agent commands
+
+- **Parent:** N13 / AII-263.
+- **Blockers:** T09b.
+- **Deliverable:** Owner decision 2026-10-28 (follow-on of T09b): /a_<id>.<name> acts on that agent (a task or a message; the exact behaviour is agreed with the owner when the card is started), under the typist's rights.
+- **Acceptance and verification:** The chosen behaviour is built once and tested; an agent that does not offer the command gets a plain answer; a replay never runs twice.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
 ### D03 — Approve release readiness and publication decision
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, C07e, H07e, T09b, H07, H07b, H02e, T09, A07d, A07e, H07c, H07d, H11b, Q01b, A07f, P08, P08b, H12n, H12p, H12o, P09, P10, P10b, P10c.
+- **Blockers:** X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, C07e, H07e, T09b, H07, H07b, H02e, T09, A07d, A07e, H07c, H07d, H11b, Q01b, A07f, P08, P08b, H12n, H12p, H12o, P09, P10, P10b, P10c, T09c, T09d.
 - **Deliverable:** Exact release manifest, known limitations and owner signoff.
 - **Acceptance and verification:** All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

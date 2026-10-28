@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **127 of 242 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **127 of 244 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -119,7 +119,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Agent messaging | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
 | Health and recovery | `▓▓▓▓▓▓▓▓▓░░░` 75% | 3 of 4 |
 | Meetings | `▓▓▓▓░░░░░░░░` 36% | 4 of 11 |
-| Tools and skills | `▓▓▓▓▓▓░░░░░░` 50% | 5 of 10 |
+| Tools and skills | `▓▓▓▓▓░░░░░░░` 41% | 5 of 12 |
 | Projects, repositories and workspaces | `▓▓░░░░░░░░░░` 18% | 3 of 16 |
 | Quality: deliverables, QA and defects | `░░░░░░░░░░░░` 0% | 0 of 5 |
 | Balancing delivery and improvement | `░░░░░░░░░░░░` 0% | 0 of 1 |
@@ -416,7 +416,7 @@ Scheduling, votes and decisions, stand-ups, attendance and return to work, and f
 </details>
 
 <details>
-<summary><strong>Tools and skills</strong> — ▓▓▓▓▓▓░░░░░░ 5 of 10</summary>
+<summary><strong>Tools and skills</strong> — ▓▓▓▓▓░░░░░░░ 5 of 12</summary>
 
 The immutable tool and skill catalogue, review and promotion, MCP connections, the protected agent tool bridge and background jobs.
 
@@ -427,7 +427,9 @@ The immutable tool and skill catalogue, review and promotion, MCP connections, t
 - [x] **T07** · P30 · Implement durable job records and job control _(needs T06, S05)_
 - [x] **T09** · P30 · Implement command namespaces and alias dispatch _(needs T06, H11, U03)_
 - [ ] **T07b** · P31 · Give agents job control through the tool bridge and bind jobs to the sandbox, the MCP client and the API _(needs T07, T06b, H12g)_
-- [ ] **T09b** · P31 · Wire command namespaces into the controller, state API and chat and execute queued commands _(needs T09)_
+- [ ] **T09b** · P31 · Wire command namespaces into the controller, state API and chat and run built-in commands _(needs T09)_
+- [ ] **T09c** · P32 · Run queued toolbox commands through the approval gates _(needs T09b)_
+- [ ] **T09d** · P32 · Run queued agent commands _(needs T09b)_
 - [ ] **T02** · P33 · Implement review/promotion/deprecation and retention _(needs T01, A05, L04)_
 - [ ] **T08** · P35 · Implement shared toolbox audiences, personal copies and patch proposals _(needs T02, T06, M02, U08)_
 
@@ -541,7 +543,7 @@ Installation, documentation, QA on real machines, the release decision and closi
 
 - [ ] **D02** · P36 · Finish developer/API/security and license guidance _(needs T05, K03, F03)_
 - [ ] **D01** · P45 · Finish installation and chat-first user guidance _(needs X03, Q03, U11b)_
-- [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, C07e, H07e, T09b, H07, H07b, H02e, T09, A07d, A07e, H07c, H07d, H11b, Q01b, A07f, P08, P08b, H12n, H12p, H12o, P09, P10, P10b, P10c)_
+- [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, C07e, H07e, T09b, H07, H07b, H02e, T09, A07d, A07e, H07c, H07d, H11b, Q01b, A07f, P08, P08b, H12n, H12p, H12o, P09, P10, P10b, P10c, T09c, T09d)_
 - [ ] **D04** · P50 · Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
 - [ ] **D04b** · P51 · Measure code-navigation aids on real coding tasks (optional, after the first release) _(needs D04)_
 - [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, U03c, K06b, K01d, P02b, A08c)_

@@ -4832,12 +4832,12 @@
       "id": "T09b",
       "parent": "N13",
       "existing_issue": "AII-263",
-      "title": "Wire command namespaces into the controller, state API and chat and execute queued commands",
+      "title": "Wire command namespaces into the controller, state API and chat and run built-in commands",
       "depends_on": [
         "T09"
       ],
-      "deliverable": "Split from T09 (2026-10-27): the catalog becomes a controller service, aliases and queued commands are reachable from the state API and the chat, a queued command is executed under the caller's rights, scoped /toolbox. names exist, an alias's scope is tied to grants, and agents show friendly names",
-      "acceptance_and_verification": "A command typed in the owner chat resolves, is queued, runs under the typist's rights and is answered once; an ambiguous or unknown name gets a plain answer; a replay never runs twice; another principal cannot run or see an alias it was not given",
+      "deliverable": "Split from T09 (2026-10-27): the catalog becomes a controller service, aliases and queued commands are reachable from the state API and the chat, a queued command is executed under the caller's rights, scoped /toolbox. names exist, an alias's scope is tied to grants, and agents show friendly names; owner decision 2026-10-28: queued commands run for the built-in namespace only (/nimblenewt.<name> runs the state operation of that name under the typist's own rights); toolbox and agent commands are T09c and T09d",
+      "acceptance_and_verification": "A command typed in the owner chat resolves, is queued, runs under the typist's rights and is answered once; an ambiguous or unknown name gets a plain answer; a replay never runs twice; another principal cannot run or see an alias it was not given; a /toolbox. or /a_ command is queued and answered once with a plain \"cannot run yet\" until T09c and T09d",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -5947,6 +5947,40 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "T09c",
+      "parent": "N13",
+      "existing_issue": "AII-263",
+      "title": "Run queued toolbox commands through the approval gates",
+      "depends_on": [
+        "T09b"
+      ],
+      "deliverable": "Owner decision 2026-10-28 (follow-on of T09b): /toolbox.<name> runs as a tool call for the typist, going through the normal grants and approval gates, answered once",
+      "acceptance_and_verification": "A toolbox command runs only with the typist's grants and approvals; a replay never runs twice; a refused or unknown tool gets a plain answer",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "T09d",
+      "parent": "N13",
+      "existing_issue": "AII-263",
+      "title": "Run queued agent commands",
+      "depends_on": [
+        "T09b"
+      ],
+      "deliverable": "Owner decision 2026-10-28 (follow-on of T09b): /a_<id>.<name> acts on that agent (a task or a message; the exact behaviour is agreed with the owner when the card is started), under the typist's rights",
+      "acceptance_and_verification": "The chosen behaviour is built once and tested; an agent that does not offer the command gets a plain answer; a replay never runs twice",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "D03",
       "parent": "N19",
       "existing_issue": "AII-269",
@@ -6020,7 +6054,9 @@
         "P09",
         "P10",
         "P10b",
-        "P10c"
+        "P10c",
+        "T09c",
+        "T09d"
       ],
       "deliverable": "Exact release manifest, known limitations and owner signoff",
       "acceptance_and_verification": "All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded",
