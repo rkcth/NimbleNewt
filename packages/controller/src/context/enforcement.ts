@@ -206,9 +206,10 @@ export class ContextEnforcementService {
    * Falling back to a route with a smaller window: the startup context is built again for that window and that route's fixed part; if what must stay whole does not fit, a blocker is opened and nothing
    * is to be sent. The cut text is returned for archiving. Repeating it answers with the recorded decision (the view is rebuilt from the same items).
    */
-  async changeRoute(principal: Principal, command: { taskId: string; attemptId: string; round?: number; window: number; fixedTokens: number; items: readonly StartupItem[] }): Promise<{ rebuilt: boolean; startup: StartupResult; reason?: string; blockerId?: string; id: string; replayed: boolean }> {
-    onlyKnown(command, ["taskId", "attemptId", "round", "window", "fixedTokens", "items"]);
+  async changeRoute(principal: Principal, command: { taskId: string; attemptId: string; round?: number; window: number; route?: string; fixedTokens: number; items: readonly StartupItem[] }): Promise<{ rebuilt: boolean; startup: StartupResult; reason?: string; blockerId?: string; id: string; replayed: boolean }> {
+    onlyKnown(command, ["taskId", "attemptId", "round", "window", "route", "fixedTokens", "items"]);
     const taskId = checkTaskId(command.taskId); const attemptId = key("attemptId", command.attemptId); const r = round(command.round); const w = window(command.window);
+    const route = command.route === undefined ? `window-${w}` : key("route", command.route);
     const projectId = (await this.#dispatch(principal, taskId))!;
     if (!Array.isArray(command.items) || command.items.length > 1000) invalid("items", "must be a list of at most 1000 items");
     let review: ReturnType<typeof reviewRouteChange>;
@@ -216,13 +217,32 @@ export class ContextEnforcementService {
     const id = derivedId("adm", `${taskId}\0${attemptId}\0route\0${r}`);
     const ref: AggregateRef = { kind: "ctx-admission", id };
     const reasons = review.kind === "blocked" ? [review.reason] : [];
-    const body: AdmissionBody = { type: "route-change", taskId, projectId, attemptId, round: r, window: w, route: `window-${w}`, admit: review.kind === "rebuilt", startupTokens: review.startup.tokens + command.fixedTokens, estimatedTokens: review.startup.tokens + command.fixedTokens, rawEstimatedTokens: review.startup.tokens + command.fixedTokens, workingTokens: 0, basis: "estimated", reasons, decidedBy: principal.id };
+    const body: AdmissionBody = { type: "route-change", taskId, projectId, attemptId, round: r, window: w, route, admit: review.kind === "rebuilt", startupTokens: review.startup.tokens + command.fixedTokens, estimatedTokens: review.startup.tokens + command.fixedTokens, rawEstimatedTokens: review.startup.tokens + command.fixedTokens, workingTokens: 0, basis: "estimated", reasons, decidedBy: principal.id };
     const run = await this.#runner.command("context.route", { commandId: `ctx-rte-${id.slice(4)}`, actor: principal.id }, async () => ({
-      payload: { taskId, attemptId, round: r, window: w, fixedTokens: command.fixedTokens, items: sha256(JSON.stringify(command.items)) },
-      build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { rebuilt: review.kind === "rebuilt" } }),
+      payload: { taskId, attemptId, round: r, window: w, route, fixedTokens: command.fixedTokens, items: sha256(JSON.stringify(command.items)) },
+      build: async () => {
+        // The text that was cut is kept with the decision (once per task and content), so it is archived even if the caller never stores what is returned.
+        const changes: Change[] = [{ type: "create", ref, body: body as unknown as JsonObject }];
+        for (const a of review.startup.archive) {
+          const aref: AggregateRef = { kind: "ctx-route-archive", id: derivedId("ctx", `${taskId}\0archive\0${a.digest}`) };
+          if ((await this.#runner.get(aref.kind, aref.id)) === undefined && !changes.some((c) => c.ref.id === aref.id)) changes.push({ type: "create", ref: aref, body: { taskId, projectId, itemId: a.id, digest: a.digest, text: redactText(a.text), routeDecision: id } as unknown as JsonObject });
+        }
+        return { ref, creates: true, changes, detail: { rebuilt: review.kind === "rebuilt" } };
+      },
     }));
     const blockerId = review.kind === "blocked" ? await this.#block(principal, taskId, `Attempt ${attemptId} cannot move to the ${w}-token route: ${review.reason}.`) : undefined;
     return { rebuilt: review.kind === "rebuilt", startup: review.startup, ...(review.kind === "blocked" ? { reason: review.reason } : {}), ...(blockerId === undefined ? {} : { blockerId }), id, replayed: run.replayed };
+  }
+
+  /** The full text of an item cut or left out when a smaller route was chosen, by the digest the cut names. Readable by whoever may work on the task. */
+  async routeArchive(principal: Principal, command: { taskId: string; digest: string }): Promise<{ itemId: string; text: string; digest: string } | undefined> {
+    onlyKnown(command, ["taskId", "digest"]);
+    const taskId = checkTaskId(command.taskId);
+    if ((await this.#task(principal, taskId, true)) === undefined) return undefined;
+    const found = typeof command.digest === "string" ? await this.#runner.get("ctx-route-archive", derivedId("ctx", `${taskId}\0archive\0${command.digest}`)) : undefined;
+    if (found === undefined) return undefined;
+    const b = found.body as unknown as { itemId: string; text: string; digest: string };
+    return { itemId: b.itemId, text: b.text, digest: b.digest };
   }
 
   // ---- one compressor per context ----------------------------------------------------------------------------------------

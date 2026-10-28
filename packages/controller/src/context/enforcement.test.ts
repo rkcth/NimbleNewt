@@ -107,6 +107,14 @@ for (const backend of backends) {
     assert.equal(ok.rebuilt, true);
     assert.ok(ok.startup.cuts.length > 0 && ok.startup.archive.length === ok.startup.cuts.length, "rebuilt, with the cut text returned for archiving");
     assert.ok(ok.startup.tokens + 3_000 <= contextBudget(32_768).startupTokens);
+    // The cut text is archived with the decision, readable by digest, and the route is named in the record.
+    const cut = ok.startup.cuts[0]!;
+    const kept = await enf.routeArchive(owner, { taskId: t, digest: cut.digest });
+    assert.deepEqual([kept?.digest, kept?.text.length], [cut.digest, cut.originalChars]);
+    assert.equal(await enf.routeArchive(owner, { taskId: t, digest: "sha256:" + "0".repeat(64) }), undefined);
+    assert.equal(await enf.routeArchive(owner, { taskId: t2, digest: cut.digest }), undefined, "archived per task");
+    const named = await enf.changeRoute(owner, { taskId: t, attemptId: "att-2", window: 32_768, route: "local-small", fixedTokens: 3_000, items });
+    assert.equal(named.rebuilt, true);
     const blocked = await enf.changeRoute(owner, { taskId: t2, attemptId: "att-1", window: 8_192, fixedTokens: 2_000, items });
     assert.equal(blocked.rebuilt, false);
     assert.match(blocked.reason!, /essential constraints do not fit the 8192-token route/);
