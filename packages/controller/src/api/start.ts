@@ -238,6 +238,7 @@ export async function startController(options: StartOptions): Promise<Controller
     const retrieval = RetrievalService.withEpoch(storage, epoch, desks, histories);
     const inquiries = InquiryService.withEpoch(storage, epoch, { histories, retrieval, waits, assignments });
     const agents = AgentService.withEpoch(storage, epoch);
+    await agents.seedStandardRoles(); // the standard role templates exist on a new installation (card H11b)
     // Card L01: the pause gates supply the availability the conversations and the reviews consult, so a paused agent's messages are queued and a paused reviewer is skipped; whatever else the lifecycle reports (suspended, stopped) comes through `options.availability`.
     const pauses = PauseService.withEpoch(storage, epoch, { waits }, options.availability === undefined ? {} : { otherAvailability: options.availability });
     // Suspected stalls: a task under a pause is assessed as paused, never as stalled (card L01).

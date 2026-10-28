@@ -18,6 +18,8 @@ export interface RoleBody {
   /** Roles that may not be held together with this one. The rule is symmetric: either side naming the other is enough. */
   readonly excludes: readonly string[];
   readonly description?: string;
+  /** What the owner calls the role in screens and chat (for example "CTO" for director). Display only: it decides no grant, check or history, and only the owner sets it (card H11b). */
+  readonly label?: string;
 }
 
 export interface TeamBody {
@@ -54,7 +56,21 @@ export interface AgentOptions extends RunnerOptions {
   readonly scanLimit?: number;
 }
 
-export const AGENT_LIMITS = { name: 80, persona: 2000, roles: 20, overrides: 20, capabilities: 100, excludes: 20, word: 60, description: 400, chain: 64, scan: 5000 } as const;
+/**
+ * The standard role templates (card H11b). Ids are fixed; an owner label is display only. Each bundle is what the owner would grant for the role, never a grant. The integrator holds no `workspace.manage`: it asks the controller to
+ * integrate under the project's policy (card P10), and it holds no write to the shared workspace. No role excludes another here: that an author may not review their own work is decided per piece of work (card H05), not per agent,
+ * so a one-agent project still works.
+ */
+export const STANDARD_ROLES: readonly { readonly name: string; readonly capabilities: readonly string[]; readonly description: string }[] = [
+  { name: "author", capabilities: ["project.read", "task.read", "attempt.work", "desk.read", "desk.write", "history.append", "artifact.read", "artifact.publish"], description: "Does the work of a task and submits it." },
+  { name: "reviewer", capabilities: ["project.read", "task.read", "desk.read", "history.read", "artifact.read", "review.decide"], description: "Reads submitted work and gives an independent verdict." },
+  { name: "integrator", capabilities: ["project.read", "task.read", "desk.read", "history.read", "artifact.read"], description: "Orders submitted work and asks the controller to land it; writes no content." },
+  { name: "qa", capabilities: ["project.read", "task.read", "desk.read", "desk.write", "history.read", "artifact.read", "artifact.publish"], description: "Tests submitted work and reports what it finds." },
+  { name: "docs", capabilities: ["project.read", "task.read", "desk.read", "desk.write", "history.read", "artifact.read", "artifact.publish"], description: "Writes and updates documents for the work." },
+  { name: "director", capabilities: ["project.read", "task.read", "desk.read", "history.read", "artifact.read", "review.decide", "meeting.read", "budget.read", "responsibility.read"], description: "Signs off for the project as a whole; one agent may also be another agent's supervisor." },
+];
+
+export const AGENT_LIMITS = { name: 80, persona: 2000, roles: 20, overrides: 20, capabilities: 100, excludes: 20, word: 60, description: 400, chain: 64, scan: 5000, label: 40 } as const;
 const ROLE_NAME = /^[a-z][a-z0-9-]{0,39}$/;
 const ACTION = /^(?:\*|[a-z][a-z0-9-]*(?:\.[a-z0-9-]+)*(?:\.\*)?)$/;
 const AGENT_ID = /^agt-[a-z2-7]{20}$/;
@@ -123,10 +139,55 @@ export class AgentService {
           if (revision === undefined) return { ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { role: name }, contention: async () => ((await this.#runner.get("role", name)) === undefined ? raced() : new DomainError("command_conflict", `role ${name} is already defined; send the revision to replace it`)) };
           const current = await this.#runner.existing("role", name, revision);
           await this.#checkRoleChange(name, body);
-          return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: body as unknown as JsonObject }], detail: { role: name } };
+          const label = (current.body as unknown as RoleBody).label;
+          const next: RoleBody = label === undefined ? body : { ...body, label };
+          return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject }], detail: { role: name } };
         },
       };
     });
+  }
+
+  /** Sets or clears the owner's label for a role (card H11b). Owner only; the label is display only and changes nothing else about the role. */
+  async setRoleLabel(by: Principal, command: NoActor & { name: string; label: string | null; expectedRevision?: number }): Promise<CommandResult> {
+    if (by.kind !== "owner") throw new DomainError("forbidden", "only the owner sets a role label");
+    return this.#command(by, "role.label", command, async () => {
+      onlyKnown(command, ["commandId", "name", "label", "expectedRevision"]);
+      const name = roleName(command.name, "name");
+      const label = command.label === null ? null : text(command.label, "label", { min: 1, max: AGENT_LIMITS.label });
+      return {
+        payload: { name, label, expectedRevision: command.expectedRevision ?? null },
+        build: async () => {
+          const found = await this.#runner.get("role", name);
+          if (found === undefined) throw new DomainError("not_found", `role ${name} is not defined`);
+          const { label: _old, ...rest } = found.body as unknown as RoleBody;
+          const ref: AggregateRef = { kind: "role", id: name };
+          return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: command.expectedRevision ?? found.revision, body: (label === null ? rest : { ...rest, label }) as unknown as JsonObject }], detail: { role: name } };
+        },
+      };
+    });
+  }
+
+  /**
+   * Defines the standard role templates that are not defined yet (card H11b). Run by the controller when it starts, so a new installation has them; a role the owner defined under the same name first is left as it is, and a later start does
+   * nothing. It is not an act of any principal and grants nothing.
+   */
+  async seedStandardRoles(): Promise<void> {
+    await this.#runner.command("role.seed", { commandId: "role-seed-1", actor: "system" }, async () => ({
+      payload: { roles: STANDARD_ROLES.map((r) => r.name) },
+      build: async () => {
+        const changes: Change[] = [];
+        for (const r of STANDARD_ROLES) {
+          if ((await this.#runner.get("role", r.name)) !== undefined) continue;
+          const body: RoleBody = { name: r.name, capabilities: [...r.capabilities], excludes: [], description: r.description };
+          changes.push({ type: "create", ref: { kind: "role", id: r.name }, body: body as unknown as JsonObject });
+        }
+        const registry = await this.#runner.get("org-registry", "org");
+        const ref: AggregateRef = { kind: "org-registry", id: "org" };
+        const n = registry === undefined ? 0 : (registry.body as unknown as { n: number }).n;
+        changes.push(registry === undefined ? { type: "create", ref, body: { n: 1 } } : { type: "update", ref, expectedRevision: registry.revision, body: { n: n + 1 } });
+        return { ref, creates: false, changes, detail: { seeded: changes.length - 1 }, contention: async () => raced() };
+      },
+    }));
   }
 
   /** No active agent may end up holding two roles that conflict because of this role's new definition. */

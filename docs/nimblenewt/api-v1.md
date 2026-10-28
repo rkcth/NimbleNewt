@@ -1139,6 +1139,20 @@ Result: `{ id, revision, replayed }`.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `role.label`
+
+Sets or clears the owner's display label for a role, for example "CTO" for `director`. Owner only. The label is shown in screens and chat and changes no grant, check or history.
+
+Arguments:
+
+- `name`: the role's name
+- `label`: the label, or null to clear it
+- `expectedRevision` (optional): the revision you read
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `contract.set`
 
 Changes fields of a task's contract; each change stores a new version. Priority, difficulty and the P or PC class each need their own authority.

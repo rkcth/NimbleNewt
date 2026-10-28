@@ -5,7 +5,7 @@ import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { GrantService, PrincipalService, type Grant, type Principal } from "../security/index.js";
-import { AgentService } from "./index.js";
+import { AgentService, STANDARD_ROLES } from "./index.js";
 
 after(stopServer);
 
@@ -296,4 +296,38 @@ for (const backend of backends) {
     assert.equal(second.items.length, 2);
     assert.equal(new Set([...first.items, ...second.items].map((a) => a.id)).size, 4);
   });
+  suite("the standard role templates are seeded once and left alone if the owner defined one first; a label is the owner's, display only, and survives a redefinition (card H11b)", async (c) => {
+    await c.agents.defineRole(c.owner, { commandId: cid("r"), name: "qa", capabilities: ["project.read"], description: "the owner's own qa" });
+    await c.agents.seedStandardRoles();
+    await c.agents.seedStandardRoles();
+    const listed = (await c.agents.listRoles(c.owner, { limit: 50 })).items;
+    assert.deepEqual(listed.map((r) => r.name).sort(), ["author", "director", "docs", "integrator", "qa", "reviewer"]);
+    assert.deepEqual(listed.find((r) => r.name === "qa")!.capabilities, ["project.read"], "the owner's definition was kept");
+    assert.ok(STANDARD_ROLES.every((r) => !r.capabilities.includes("workspace.manage")), "no standard role may manage the shared workspace");
+    assert.deepEqual(listed.find((r) => r.name === "integrator")!.excludes, []);
+    // A label changes nothing but the label.
+    const ann = await c.make("Ann", { roles: ["director", "docs", "qa"] });
+    await c.agents.update(c.owner, { commandId: cid("u"), agentId: ann.id, expectedRevision: ann.revision, supervisorId: ann.id } as never).catch(() => undefined);
+    const before = JSON.stringify((await c.agents.getRole(c.owner, "director"))!);
+    const directorRev = (await c.agents.getRole(c.owner, "director"))!.revision;
+    await c.agents.setRoleLabel(c.owner, { commandId: cid("l"), name: "director", label: "CTO" });
+    const labelled = (await c.agents.getRole(c.owner, "director"))!;
+    assert.equal(labelled.label, "CTO");
+    assert.equal(JSON.stringify({ ...labelled, label: undefined, revision: 0, id: "" }), JSON.stringify({ ...JSON.parse(before), label: undefined, revision: 0, id: "" }), "nothing but the label changed");
+    assert.equal(labelled.revision, directorRev + 1);
+    assert.deepEqual((await c.agents.get(c.owner, ann.id))!.roles, ["director", "docs", "qa"], "one agent holds director with qa and docs");
+    // Only the owner sets it; the id rules still hold; the label is bounded.
+    const manager = await c.plain("mgr", [{ action: "agent.manage", project: "*" }]);
+    await refuses("forbidden", () => c.agents.setRoleLabel(manager, { commandId: cid("l"), name: "director", label: "Boss" }));
+    await refuses("forbidden", () => c.agents.setRoleLabel(ann.principal, { commandId: cid("l"), name: "director", label: "Boss" }));
+    await refuses("invalid_command", () => c.agents.setRoleLabel(c.owner, { commandId: cid("l"), name: "CTO", label: "x" }));
+    await refuses("invalid_command", () => c.agents.setRoleLabel(c.owner, { commandId: cid("l"), name: "director", label: "x".repeat(41) }));
+    await refuses("not_found", () => c.agents.setRoleLabel(c.owner, { commandId: cid("l"), name: "nobody", label: "x" }));
+    // Redefining the role (by a manager) keeps the owner's label; clearing it works.
+    await c.agents.defineRole(manager, { commandId: cid("r"), name: "director", capabilities: ["project.read"], expectedRevision: labelled.revision });
+    assert.equal((await c.agents.getRole(c.owner, "director"))!.label, "CTO");
+    await c.agents.setRoleLabel(c.owner, { commandId: cid("l"), name: "director", label: null });
+    assert.equal((await c.agents.getRole(c.owner, "director"))!.label, undefined);
+  });
+
 }
