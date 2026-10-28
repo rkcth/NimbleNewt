@@ -16,6 +16,9 @@ export interface RouteEntry {
   readonly contextTokens: number;
   /** What it supports, such as `tools`, `vision`, `reasoning`. A request needing something it lacks skips it. */
   readonly capabilities: readonly string[];
+  /** How fast the route reads a prompt and writes a reply, in tokens a second, when the owner knows (card V01c). Stall detection uses the reading speed until it has measured the route. */
+  readonly readTokensPerSecond?: number;
+  readonly writeTokensPerSecond?: number;
 }
 
 export interface Exclusion {
@@ -107,7 +110,7 @@ export function checkTable(value: unknown): Omit<RoutingTable, "exclusions"> {
     routeName(name, `table.routes.${name}`);
     const provider = name.slice(0, name.indexOf("/"));
     if (own(providers, provider) === undefined) invalid(`table.routes.${name}`, `names unknown provider ${provider}`);
-    const e = exact(raw, `table.routes.${name}`, ["contextTokens", "capabilities"]);
+    const e = exact(raw, `table.routes.${name}`, ["contextTokens", "capabilities", "readTokensPerSecond", "writeTokensPerSecond"]);
     const ct = e["contextTokens"];
     if (typeof ct !== "number" || !Number.isSafeInteger(ct) || ct < 1 || ct > ROUTING_LIMITS.contextTokens) invalid(`table.routes.${name}.contextTokens`, `must be a whole number from 1 to ${ROUTING_LIMITS.contextTokens}`);
     const caps = e["capabilities"];
@@ -115,7 +118,13 @@ export function checkTable(value: unknown): Omit<RoutingTable, "exclusions"> {
     const list = caps.map((c, i) => (typeof c === "string" && CAPABILITY.test(c) ? c : invalid(`table.routes.${name}.capabilities[${i}]`, "must be lower-case words joined by hyphens")));
     if (new Set(list).size !== list.length) invalid(`table.routes.${name}.capabilities`, "lists a capability twice");
     if (Object.keys(routes).some((other) => other.toLowerCase() === name.toLowerCase())) invalid(`table.routes.${name}`, "differs only by case from another route");
-    routes[name] = { contextTokens: ct as number, capabilities: list };
+    const speed = (field: "readTokensPerSecond" | "writeTokensPerSecond"): { [K in typeof field]?: number } => {
+      const v = e[field];
+      if (v === undefined) return {};
+      if (typeof v !== "number" || !Number.isFinite(v) || v <= 0 || v > 1_000_000) return invalid(`table.routes.${name}.${field}`, "must be a number of tokens a second above 0 and at most 1000000");
+      return { [field]: v };
+    };
+    routes[name] = { contextTokens: ct as number, capabilities: list, ...speed("readTokensPerSecond"), ...speed("writeTokensPerSecond") };
   }
   const profiles: Record<string, string[]> = Object.create(null) as Record<string, string[]>;
   for (const [name, raw] of record(top["profiles"], "table.profiles", ROUTING_LIMITS.profiles)) {

@@ -68,7 +68,7 @@ export interface StallOptions extends RunnerOptions {
   /**
    * A speed declared for a route in its settings (tokens read a second), used until the controller has measured the route (card V01b). Without one, or a measurement, `defaultReadTokensPerSecond` is used and the concern text says so.
    */
-  readonly declaredSpeed?: (route: string, hostId: string | undefined) => { readonly readTokensPerSecond?: number } | undefined;
+  readonly declaredSpeed?: (route: string, hostId: string | undefined) => { readonly readTokensPerSecond?: number } | undefined | Promise<{ readonly readTokensPerSecond?: number } | undefined>;
   /** The cautious speed assumed for a route with no measurement and no declared speed. Provisional default 50 tokens a second. */
   readonly defaultReadTokensPerSecond?: number;
   /** How much longer than the expected reading time, in percent, a request may take before it is suspect. Provisional default 150. */
@@ -604,7 +604,7 @@ export class StallService {
     if (route !== undefined) {
       const measured = ((await this.#runner.get("stall-speed", speedId(route, hostId)))?.body as unknown as SpeedBody | undefined)?.readTps;
       if (measured !== undefined && measured > 0) return { tokensPerSecond: measured, source: "measured", marginPercent: this.#marginPercent };
-      const declared = this.#declared?.(route, hostId === "-" ? undefined : hostId)?.readTokensPerSecond;
+      const declared = (await this.#declared?.(route, hostId === "-" ? undefined : hostId))?.readTokensPerSecond;
       if (declared !== undefined && declared > 0) return { tokensPerSecond: declared, source: "declared", marginPercent: this.#marginPercent };
     }
     return { tokensPerSecond: this.#defaultTps, source: "default", marginPercent: this.#marginPercent };

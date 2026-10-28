@@ -267,6 +267,8 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     const monitorOf = reporter === undefined ? undefined : (order: WorkOrder): RelayMonitor => {
       // Reports are sent one after another so they arrive in order; each call has its own request ID, and every report names the attempt, so a leftover process of an earlier attempt is fenced.
       let queue: Promise<unknown> = Promise.resolve(); let calls = 0; let seq = 0;
+      // The share of the prompt the cache served on the attempt's latest finished call: the next call, which repeats most of that prompt, is expected to be served about as much (card V01c).
+      let expectedShare: number | undefined;
       const send = (event: StallEvent): void => {
         const commandId = `relay:${order.attemptId}:${++seq}`;
         queue = queue.then(() => reporter({ commandId, taskId: order.taskId, generation: order.generation, attemptId: order.attemptId, event })).catch((error) => { if (!(error instanceof DomainError && (error.code === "fenced" || error.code === "not_found" || (error.code === "invalid_command" && /is not the open request/.test(error.message))))) i.onError?.(error); });
@@ -275,12 +277,12 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       return {
         started: ({ requestChars }) => {
           const requestId = `${order.attemptId}:${++calls}`;
-          send({ type: "request_started", requestId, promptTokens: tokensOf(requestChars), route: order.route });
+          send({ type: "request_started", requestId, promptTokens: tokensOf(requestChars), route: order.route, ...(expectedShare === undefined ? {} : { cachedShare: expectedShare }) });
           return {
             firstOutput: () => { send({ type: "first_output", requestId }); },
             // A rough count: the bytes of the stream over the same characters per token. The provider's own count arrives with the end of the call.
             progress: (bytes) => { send({ type: "output_progress", requestId, tokens: tokensOf(bytes) }); },
-            finished: (call) => { send({ type: "request_finished", requestId, outcome: call.ok ? "ok" : "error", ...(call.inputTokens === undefined ? {} : { inputTokens: call.inputTokens }), ...(call.cachedTokens === undefined ? {} : { cachedTokens: call.cachedTokens }), ...(call.outputTokens === undefined ? {} : { outputTokens: call.outputTokens }) }); },
+            finished: (call) => { if (call.ok && call.inputTokens !== undefined && call.inputTokens > 0 && call.cachedTokens !== undefined) expectedShare = Math.min(1, Math.max(0, call.cachedTokens / call.inputTokens)); send({ type: "request_finished", requestId, outcome: call.ok ? "ok" : "error", ...(call.inputTokens === undefined ? {} : { inputTokens: call.inputTokens }), ...(call.cachedTokens === undefined ? {} : { cachedTokens: call.cachedTokens }), ...(call.outputTokens === undefined ? {} : { outputTokens: call.outputTokens }) }); },
           };
         },
       };

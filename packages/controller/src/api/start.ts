@@ -240,7 +240,16 @@ export async function startController(options: StartOptions): Promise<Controller
     // Card L01: the pause gates supply the availability the conversations and the reviews consult, so a paused agent's messages are queued and a paused reviewer is skipped; whatever else the lifecycle reports (suspended, stopped) comes through `options.availability`.
     const pauses = PauseService.withEpoch(storage, epoch, { waits }, options.availability === undefined ? {} : { otherAvailability: options.availability });
     // Suspected stalls: a task under a pause is assessed as paused, never as stalled (card L01).
-    const stall = StallService.withEpoch(storage, epoch, assignments, waits, { ...(options.stall ?? {}), isPaused: (taskId) => pauses.isPaused(taskId) });
+    // The routing table is refused unless the coordinator, the safety supervisor and every other role in it have a valid fallback list (card R04).
+    const routing = RoutingService.withEpoch(storage, epoch, {}, {});
+    // A speed given in the start options wins; otherwise the reading speed a route declares in the routing table is used until the route has been measured (card V01c).
+    const declaredSpeed: NonNullable<StartOptions["stall"]>["declaredSpeed"] = async (route, hostId) => {
+      const given = options.stall?.declaredSpeed === undefined ? undefined : await options.stall.declaredSpeed(route, hostId);
+      if (given?.readTokensPerSecond !== undefined) return given;
+      const entry = (await routing.get())?.routes[route];
+      return entry?.readTokensPerSecond === undefined ? undefined : { readTokensPerSecond: entry.readTokensPerSecond };
+    };
+    const stall = StallService.withEpoch(storage, epoch, assignments, waits, { ...(options.stall ?? {}), declaredSpeed, isPaused: (taskId) => pauses.isPaused(taskId) });
     // Durable job records (card T07): a permitted background job's result goes to the pause service; no MCP connection check is bound until an MCP client exists, so no MCP operation is admitted.
     // The time a job or a review took is charged to its task by the dispatcher's budget service once that is built; a charge that fails is reported, and the job or review stands (card R05f).
     const charged = async (usage: { commandId: string; activity: "review" | "background-job"; taskId: string; agentId?: string; computeMs: number }): Promise<void> => { try { await dispatch?.chargeUse(usage); } catch (error) { options.onInternalError?.(error); } };
@@ -248,8 +257,6 @@ export async function startController(options: StartOptions): Promise<Controller
     // The reviewer's host is the one its running attempt is on, or the host a moved attempt is pinned to (known once the dispatcher is built); without one, or when the lookup fails, the host is not judged.
     const reviews = ReviewService.withEpoch(storage, epoch, { onUsage: (u) => charged({ commandId: u.commandId, activity: "review", taskId: u.taskId, agentId: u.agentId, computeMs: u.computeMs }), availability: pauses.availability, reviewerHost: async (principalId) => { try { return await dispatch?.hostOfAgent(principalId); } catch { return undefined; } } });
     const graph = WaitGraphService.withEpoch(storage, epoch, contracts, BlockerService.withEpoch(storage, epoch), { extraEdges: (projectId, tasks) => reviews.waitEdges(projectId, tasks) });
-    // The routing table is refused unless the coordinator, the safety supervisor and every other role in it have a valid fallback list (card R04).
-    const routing = RoutingService.withEpoch(storage, epoch, {}, {});
     const configuration = ConfigurationService.withEpoch(storage, epoch, { routing, settings: MEETING_SETTINGS });
     const conversations = ConversationService.withEpoch(storage, epoch, { availability: pauses.availability });
     const resources = ProjectResourceService.withEpoch(storage, epoch);
