@@ -1,3 +1,4 @@
+export { CHECKS, INTEGRATORS, IntegrationPolicyService, LANDINGS, profileDefaults, type Check, type IntegrationBody, type IntegrationDefaultBody, type IntegrationSettings, type Integrator, type Landing } from "./integration-policy.js";
 export { DEFAULT_PROTECTED, ProtectedBranchService, isProtectedBy, type BranchSettingsBody } from "./protected-branches.js";
 export { ACTION_CLASSES, ActionCatalog, DEFAULT_TOOL_CLASSES, ENVIRONMENTS, EXECUTION_TOOLS, TIERS, tierOf, type ActionClass, type Environment, type Tier } from "./catalog.js";
 export { CELL_KEYS, MODES, PROFILES, PROFILE_TABLES, termsMet, tightness, type CellKey, type Decision, type GrantView, type Mode, type PolicyRequest, type PolicyView, type Profile } from "./engine.js";

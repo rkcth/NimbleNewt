@@ -39,6 +39,8 @@ import { PolicyService, ProtectedBranchService } from "../policy/index.js";
 import { CatalogService } from "../catalog/index.js";
 import { CommandService, catalogSource } from "../commands/index.js";
 import { BUILTIN_COMMANDS } from "./operations.js";
+
+import { IntegrationPolicyService, PolicyService, ProtectedBranchService } from "../policy/index.js";
 import { StatusService } from "../status/index.js";
 import { ChatService, CoordinatorService, type ChatInterpreter, type CoordinatorModel } from "../chat/index.js";
 import { ContextBranchService } from "../branches/index.js";
@@ -293,6 +295,9 @@ export async function startController(options: StartOptions): Promise<Controller
     // Typed commands (card T09b): the `nimblenewt.` names are the state-API operations, `toolbox.` and `a_<id>.` names come from the catalog.
     const commands = CommandService.withEpoch(storage, epoch, BUILTIN_COMMANDS.source(catalogSource(CatalogService.withEpoch(storage, epoch, desks))));
     const api = new StateApi({ status, branchSettings, commands, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size) }, watches: watchService, events: EventService.withEpoch(storage, epoch), budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
+
+    const integration = IntegrationPolicyService.withEpoch(storage, epoch);
+    const api = new StateApi({ status, branchSettings, integration, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size) }, watches: watchService, events: EventService.withEpoch(storage, epoch), budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
     let chat: ChatService | undefined;
     let coordinator: CoordinatorService | undefined;
     if (options.chat !== undefined) {

@@ -22,6 +22,8 @@ import type { PlacementSettingsService } from "../remote/placement-settings.js";
 import type { ProtectedBranchService } from "../policy/protected-branches.js";
 
 import { BuiltinCommands, type CommandService } from "../commands/index.js";
+
+import type { IntegrationPolicyService } from "../policy/integration-policy.js";
 import type { Principal } from "../security/principals.js";
 import type { SecureApi } from "../security/secured.js";
 import type { JsonObject } from "../storage/types.js";
@@ -54,6 +56,7 @@ export interface Context {
   /** Absent when the controller runs without remote workers (card H07c). */
   readonly placement?: Pick<PlacementSettingsService, "get" | "set" | "change">;
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set">;
+  readonly integration?: Pick<IntegrationPolicyService, "get" | "set" | "getDefault" | "setDefault" | "ensure">;
 
   readonly commands?: CommandService;
   /** Runs another operation as the same principal (card T09b); its answer, success or not, comes back whole. */
@@ -122,6 +125,7 @@ const resources = (c: Context): ProjectResourceService => c.resources ?? unavail
 const plans = (c: Context): ProjectPlanService => c.plans ?? unavailable("project plans");
 const ownerQuestionsOf = (c: Context): NonNullable<Context["ownerQuestions"]> => c.ownerQuestions ?? unavailable("questions to the owner");
 const branchesOf = (c: Context): ContextBranchService => c.branches ?? unavailable("context branches");
+const integrationOf = (c: Context): NonNullable<Context["integration"]> => c.integration ?? unavailable("integration policy");
 const branchSettingsOf = (c: Context): NonNullable<Context["branchSettings"]> => c.branchSettings ?? unavailable("branch settings");
 
 const commandsOf = (c: Context): CommandService => c.commands ?? unavailable("typed commands");
@@ -176,6 +180,15 @@ export const OPERATIONS: readonly Operation[] = [
       const ran = await commands.run(c.principal, { commandId: need(id), id: queued.id }, { operationOf: (name) => BUILTIN_COMMANDS.operationOf(name)?.name, invoke: c.invoke });
       return asJson({ status: ran.state, command: queued.target.operationId, queued: queued.id, replayed: queued.replayed, ...(ran.answer === undefined ? {} : { answer: ran.answer }), ...(ran.truncated === undefined ? {} : { truncated: true }), ...(ran.error === undefined ? {} : { error: ran.error }) });
     } },
+
+  { name: "integration.get", kind: "query", summary: "How finished work lands in a project (owner only): `landing` (`integration-branch`, `main-automatic` or `human-promotes`), who integrates, the checks required, and how many times an author refreshes before the integrator takes over. A project made without a setting gets the installation default, else the approval profile's.", args: { project: "the project ID" }, result: "`{ item }`: the settings, `revision`, `source` (`owner`, `installation-default` or `profile`) and `lockedMainAutomatic`.", completion: { kind: "completed" },
+    run: async (c, a) => { only(a, ["project"]); return asJson({ item: await integrationOf(c).get(c.principal, a["project"] as string) as never }); } },
+  { name: "integration.set", kind: "command", summary: "The owner changes how finished work lands in a project (owner only); fields left out stay. `main-automatic` is refused while the installation forbids it.", args: { project: "the project ID", "landing?": "`integration-branch`, `main-automatic` or `human-promotes`", "integrator?": "`agent` or `human`", "requiredChecks?": "list of `tests`, `review`, `qa`, `docs`, `director`", "refreshRounds?": "0 to 10", "expectedRevision?": "the revision you read" }, result: "`{ revision }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["project", "landing", "integrator", "requiredChecks", "refreshRounds", "expectedRevision"]); const { project, ...rest } = a as { project: string }; return asJson({ ...(await integrationOf(c).set(c.principal, { commandId: need(id), projectId: project, ...rest } as never)) }); } },
+  { name: "integration.default.get", kind: "query", summary: "What new projects start with, and the installation lock on `main-automatic` (owner only).", args: {}, result: "`{ item }`: the default settings that are set, `revision` (0 when never set) and `forbidMainAutomatic`.", completion: { kind: "completed" },
+    run: async (c, a) => { only(a, []); return asJson({ item: await integrationOf(c).getDefault(c.principal) as never }); } },
+  { name: "integration.default.set", kind: "command", summary: "The owner sets what new projects start with (existing projects keep theirs) and may forbid `main-automatic` installation-wide (owner only).", args: { "landing?": "`integration-branch`, `main-automatic` or `human-promotes`", "integrator?": "`agent` or `human`", "requiredChecks?": "list of checks", "refreshRounds?": "0 to 10", "forbidMainAutomatic?": "true to forbid landing on main automatically everywhere", "expectedRevision?": "the revision you read" }, result: "`{ revision }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["landing", "integrator", "requiredChecks", "refreshRounds", "forbidMainAutomatic", "expectedRevision"]); return asJson({ ...(await integrationOf(c).setDefault(c.principal, { commandId: need(id), ...a } as never)) }); } },
   { name: "grant.revoke", kind: "command", summary: "The owner takes a grant back (owner only; the revision you read must still be current). It stops counting at the next check.", args: { grantId: "the grant's ID", expectedRevision: "the revision you read", reason: "why, in the owner's words" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["grantId", "expectedRevision", "reason"]); await grantsOf(c).revoke(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
   { name: "events.configure-idle", kind: "command", summary: "Sets how long an event subscription may sit without acknowledging before it expires (owner only). A subscription that was made before this existed, or without its own time, uses this one.", args: { idleSeconds: "whole seconds, 10 to 604800" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
@@ -365,7 +378,7 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, ["limit", "after"]); return page(await c.inquiries.pendingFor(c.principal, { limit: limitOf(a), ...(optStr(a, "after") === undefined ? {} : { afterId: optStr(a, "after")! }) })); } },
 
   { name: "project.create", kind: "command", summary: "Creates a project.", args: { name: "the name", "goal?": "what it is for", "repositories?": "list of `{ id, location, label? }`" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
-    run: async (c, a, id) => written(await c.secure.createProject({ commandId: need(id), ...(a as object) } as never)) },
+    run: async (c, a, id) => { const made = written(await c.secure.createProject({ commandId: need(id), ...(a as object) } as never)); if (c.integration !== undefined) await c.integration.ensure(made["id"] as string); return made; } },
   { name: "project.update", kind: "command", summary: "Changes a project (the revision you read must still be current).", args: { projectId: "the project's ID", expectedRevision: "the revision you read", "name?": "new name", "goal?": "new goal", "state?": "`active` or `archived`", "addRepositories?": "repositories to add" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
     run: async (c, a, id) => written(await c.secure.updateProject({ commandId: need(id), ...(a as object) } as never)) },
   { name: "task.create", kind: "command", summary: "Creates a task in a project (it starts `proposed`).", args: { projectId: "the project", title: "the title", "description?": "details", "repositoryId?": "one of the project's repositories" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },

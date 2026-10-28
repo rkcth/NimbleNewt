@@ -88,6 +88,30 @@ Result: `{ item }`: `revision`, `protected` (branch names, or prefixes such as `
 
 Completion: finished when accepted (`completed: true`).
 
+#### `integration.get`
+
+How finished work lands in a project (owner only): `landing` (`integration-branch`, `main-automatic` or `human-promotes`), who integrates, the checks required, and how many times an author refreshes before the integrator takes over. A project made without a setting gets the installation default, else the approval profile's.
+
+Arguments:
+
+- `project`: the project ID
+
+Result: `{ item }`: the settings, `revision`, `source` (`owner`, `installation-default` or `profile`) and `lockedMainAutomatic`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `integration.default.get`
+
+What new projects start with, and the installation lock on `main-automatic` (owner only).
+
+Arguments:
+
+- none
+
+Result: `{ item }`: the default settings that are set, `revision` (0 when never set) and `forbidMainAutomatic`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `budget.report`
 
 A task's budget: limit, delegated to children, in flight, uncertain, spent, overrun and available, for money and for compute, with the reservations and open requests behind them. A task you may not read reads like a missing one.
@@ -731,16 +755,37 @@ Result: `{ revision }`.
 
 Completion: finished when accepted (`completed: true`).
 
-#### `command.run`
+#### `integration.set`
 
-Runs a typed command as the caller (card T09b). `/nimblenewt.<operation>` names a state-API operation with its dots written as hyphens, for example `/nimblenewt.grant-list {"grantee": "service:dispatcher"}`: the arguments are a JSON object after the name, and the operation runs under the caller's own rights, so it refuses what the caller may not do. The command is queued with what it resolved to and runs once; sending the same command ID again answers from the record. A name that is unknown, ambiguous or needs a context is answered in words and nothing runs. Toolbox and agent commands are queued and answered as not runnable yet.
+The owner changes how finished work lands in a project (owner only); fields left out stay. `main-automatic` is refused while the installation forbids it.
 
 Arguments:
 
-- `typed`: the command text, starting with `/`
-- `context` (optional): `{ agent?, scope?, version? }` for `/agent.` and `/custom.` shortcuts
+- `project`: the project ID
+- `landing` (optional): `integration-branch`, `main-automatic` or `human-promotes`
+- `integrator` (optional): `agent` or `human`
+- `requiredChecks` (optional): list of `tests`, `review`, `qa`, `docs`, `director`
+- `refreshRounds` (optional): 0 to 10
+- `expectedRevision` (optional): the revision you read
 
-Result: `{ status }`: `done` (with `answer`), `failed` (with `error`), `unsupported`, or, when nothing was queued, `ambiguous`, `needs_context`, `unknown` or `refused` with the reason. `command` names the operation and `queued` the record.
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `integration.default.set`
+
+The owner sets what new projects start with (existing projects keep theirs) and may forbid `main-automatic` installation-wide (owner only).
+
+Arguments:
+
+- `landing` (optional): `integration-branch`, `main-automatic` or `human-promotes`
+- `integrator` (optional): `agent` or `human`
+- `requiredChecks` (optional): list of checks
+- `refreshRounds` (optional): 0 to 10
+- `forbidMainAutomatic` (optional): true to forbid landing on main automatically everywhere
+- `expectedRevision` (optional): the revision you read
+
+Result: `{ revision }`.
 
 Completion: finished when accepted (`completed: true`).
 
