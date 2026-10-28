@@ -90,7 +90,6 @@ export interface StateApiDeps {
 
   readonly pauses?: Pick<PauseService, "pause" | "resume" | "gate">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep">;
-  readonly integration?: Pick<IntegrationPolicyService, "get" | "set" | "getDefault" | "setDefault" | "ensure">;
 
   /** Typed commands (card T09b). Absent: `command.run` answers as unavailable. */
   readonly commands?: CommandService;

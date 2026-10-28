@@ -64,7 +64,6 @@ export interface Context {
 
   readonly pauses?: Pick<PauseService, "pause" | "resume" | "gate">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep">;
-  readonly integration?: Pick<IntegrationPolicyService, "get" | "set" | "getDefault" | "setDefault" | "ensure">;
 
   readonly commands?: CommandService;
   /** Runs another operation as the same principal (card T09b); its answer, success or not, comes back whole. */
