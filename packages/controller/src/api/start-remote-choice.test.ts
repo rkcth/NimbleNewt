@@ -82,3 +82,39 @@ test("the dispatcher passes over a host that would refuse the attempt and starts
     assert.equal((await c.dispatch!.remote!.placement(rob, second))!.hostId, "host:r1");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+test("a host that is only not connected yet is waited for: the attempt is skipped with the reason and the owner is never told, however many ticks pass (card H07e)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-choice-"));
+  const c = await startController({
+    storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+    dispatch: {
+      timer: new ManualTimer(), manual: true,
+      route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: false } }),
+      remote: { blobDirectory: join(d, "blobs"), hosts: [{ hostId: "host:r1", checkpointWaitMs: 300, pollMs: 20, resources: { cpus: 1, memoryMb: 1024 }, requirements: () => ({ data: "cloud-allowed" as const, harness: "pi" }) }] },
+    },
+  });
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const project = (await c.services.projects.createProject({ commandId: "p1", actor: rob.id, name: "Garden" })).id;
+    await c.services.principals.enroll(rob, { commandId: "e-ann", kind: "agent", name: AGENT, grants: workGrants(project, ["read-file"]) });
+    await c.services.principals.enroll(rob, { commandId: "e-r1", kind: "host", name: "r1", grants: [] });
+    const token = (await c.services.principals.issueCredential(rob, "host:r1")).token;
+    await AdmissionService.withEpoch(c.storage, c.epoch).setCapacity({ commandId: "cap", actor: rob.id, host: "host:r1", capacity: { cpus: 8, memoryMb: 16_384 } });
+    const taskId = (await c.services.projects.createTask({ commandId: "t1", actor: rob.id, projectId: project, title: "Order seeds" })).id;
+    await c.services.projects.transitionTask({ commandId: "r1", actor: rob.id, taskId, expectedRevision: 1, to: "ready" });
+    await c.services.assignments.assignTask({ commandId: "as1", actor: rob.id, taskId, owner: { kind: "agent", id: AGENT } });
+    const a = (await c.services.assignments.getAssignment(taskId))!;
+    const attemptId = (await c.services.assignments.admitAttempt({ commandId: "ad1", actor: "inbox", taskId, expectedRevision: a.revision, generation: a.generation, owner: { kind: "agent", id: AGENT }, harness: "pi" })).id;
+    const client = new RemoteWorkerClient({ url: c.dispatch!.workerUrl!, token, workerVersion: "worker-9.1.0" });
+    // The host is enrolled but has not connected: a skip with the reason for many ticks, never a blocker.
+    for (let i = 0; i < 8; i++) {
+      const r = await c.dispatch!.dispatcher.tick();
+      assert.deepEqual([r.started, r.blocked], [[], []], `tick ${i}`);
+      assert.match(r.skipped.find((x) => x.attemptId === attemptId)?.reason ?? "", /not connected|heard from|not announced/);
+    }
+    await client.connect(CAPS as never); await client.heartbeat(1);
+    const fresh = await c.dispatch!.dispatcher.tick();
+    assert.deepEqual(fresh.started, [attemptId], "connected: it starts");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});

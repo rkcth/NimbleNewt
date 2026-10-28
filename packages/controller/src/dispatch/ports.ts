@@ -82,7 +82,7 @@ export interface WorkerHost {
    * Why this host would refuse the attempt (policy, capabilities, connection), asked before a place is requested so that the dispatcher can pass over a host that would refuse and pick the next one. Empty: it would take it. A host
    * that does not say leaves it out and is judged only when the worker starts (card H07e).
    */
-  refuses?(probe: HostProbe): Promise<readonly string[]>;
+  refuses?(probe: HostProbe): Promise<{ readonly reasons: readonly string[]; /** False when every reason is a passing condition (not connected, not heard from lately): the attempt just waits and the owner is not told. */ readonly lasting: boolean }>;
   /** The host's side of integration, checkout refresh and quarantine for the checkouts it holds (cards H12l, H12m). A host with none leaves it out and those requests are refused for it. */
   readonly workspace?: WorkspacePort;
 }

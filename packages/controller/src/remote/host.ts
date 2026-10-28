@@ -27,7 +27,7 @@ export class RemoteWorkerHost implements WorkerHost {
   constructor(readonly hostId: string, private readonly remote: RemoteWorkerService, private readonly by: Principal, private readonly options: RemoteWorkerHostOptions) { this.resources = options.resources; }
 
   /** Why this host would refuse the attempt (card H07e), judged by the same rules as the placement. The order is not built yet, so the requirements are asked of a preview of it that carries no credential. */
-  async refuses(probe: HostProbe): Promise<readonly string[]> {
+  async refuses(probe: HostProbe): Promise<{ readonly reasons: readonly string[]; readonly lasting: boolean }> {
     const preview: WorkOrder = { attemptId: probe.attemptId, taskId: probe.taskId, projectId: probe.projectId, agentId: probe.agentId, generation: probe.generation, ...(probe.harness === undefined ? {} : { harness: probe.harness }), route: probe.route, credential: "", recipe: { revision: "preview", reach: [] }, content: "", requestId: "", expiresAt: probe.expiresAt };
     return this.remote.refusals(this.by, { hostId: this.hostId, attemptId: probe.attemptId, taskId: probe.taskId, projectId: probe.projectId, agentId: probe.agentId, requirements: this.options.requirements(preview) });
   }

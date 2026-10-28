@@ -190,6 +190,8 @@ export class DispatcherService {
   readonly #endingBy = new Map<string, Promise<{ readmitted?: string }>>();
   /** Consecutive ticks an attempt pinned to a host has waited for it (in memory: a restart starts the count again). */
   readonly #pinnedWaits = new Map<string, number>();
+  /** Consecutive ticks an attempt was refused by every host that could run it (card H07e). */
+  readonly #refusedWaits = new Map<string, number>();
   #ticking: Promise<TickReport> | undefined;
   #scanStartedAt = 0;
   #cursorSavedAt: number | undefined;
@@ -746,10 +748,10 @@ export class DispatcherService {
     if (hostPick.kind !== "ok") {
       if (hostPick.blocked) return block("host", "dispatch_blocked", hostPick.reason);
       if (pinned === undefined) {
-        if (hostPick.refused !== true) return skip("host", hostPick.reason);
+        if (hostPick.refused !== true) { this.#refusedWaits.delete(attemptId); return skip("host", hostPick.reason); }
         // Every host that could run it refuses it (the placement policy, what the hosts can do): it waits in the plan with the reasons, and the owner is told when it stays so, since only a change of the setting or a new host helps.
-        const refusedFor = (this.#pinnedWaits.get(attemptId) ?? 0) + 1;
-        this.#pinnedWaits.set(attemptId, refusedFor);
+        const refusedFor = (this.#refusedWaits.get(attemptId) ?? 0) + 1;
+        this.#refusedWaits.set(attemptId, refusedFor);
         if (refusedFor >= (this.#options.pinnedStaleTicks ?? 5)) return block("host", "dispatch_blocked", `no worker host will take the attempt: ${hostPick.reason}`.slice(0, 800));
         return skip("host", hostPick.reason);
       }
@@ -760,6 +762,7 @@ export class DispatcherService {
       return skip("host", hostPick.reason);
     }
     this.#pinnedWaits.delete(attemptId);
+    this.#refusedWaits.delete(attemptId);
     return { kind: "ok", agentId, harness: chosen.harness, route: chosen, host: hostPick.host };
   }
 
@@ -794,9 +797,10 @@ export class DispatcherService {
       if (harness !== undefined && status.capabilities !== undefined && !status.capabilities.harnesses.some((h) => h.name === harness)) { reasons.push(`${worker.hostId} does not have the ${harness} harness`); continue; }
       // A host that would refuse the attempt (policy, what it can do, no connection) is passed over: the next one is tried, and the plan says why this one was not.
       if (worker.refuses !== undefined) {
-        let why: readonly string[];
-        try { why = await worker.refuses(probe); } catch (error) { why = [`${worker.hostId} could not be asked: ${errorText(error)}`]; }
-        if (why.length > 0) { refused++; reasons.push(why.join('; ')); continue; }
+        // A host that cannot say is tried, and the placement judges it as before; only a clear answer passes it over.
+        let why: { readonly reasons: readonly string[]; readonly lasting: boolean } = { reasons: [], lasting: false };
+        try { why = await worker.refuses(probe); } catch (error) { this.#options.onError?.(error); }
+        if (why.reasons.length > 0) { if (why.lasting) refused++; reasons.push(why.reasons.join('; ')); continue; }
       }
       return { kind: "ok", host: worker };
     }
