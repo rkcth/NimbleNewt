@@ -78,3 +78,49 @@ test("an agent reviewer's allow is charged to the task reviewed as review use, w
     assert.deepEqual(problems, []);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+test("the time an agent spends in a held meeting is charged to its meeting task once and shows in budget.usage through the state API (card R05g)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-usage-"));
+  const problems: unknown[] = [];
+  let now = Date.now();
+  const c = await startController({
+    storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+    dispatch: { timer: new ManualTimer(), intervalMs: 1000, clock: () => new Date(now).toISOString() }, onInternalError: (e) => { problems.push(e); },
+  });
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const project = (await c.services.projects.createProject({ commandId: "p1", actor: rob.id, name: "Garden" })).id;
+    const who = async (name: string): Promise<string> => {
+      const id = (await c.services.agents.create(rob, { commandId: `ag-${name}`, friendlyName: name })).id;
+      const principalId = `agent:${id}`;
+      const found = await c.storage.getAggregate({ kind: "principal", id: principalId });
+      await c.services.principals.setGrants(rob, { commandId: `sg-${name}`, principalId, expectedRevision: found!.revision, grants: [{ action: "history.*", project }, { action: "task.read", project }] });
+      return principalId;
+    };
+    const [annId, bobId] = [await who("ann"), await who("bob")];
+    const ann = await c.services.principals.authenticate((await c.services.principals.issueCredential(rob, annId)).token);
+    const project0 = await c.storage.getAggregate({ kind: "project", id: project });
+    await c.services.plans.setPlan(rob, { commandId: "plan1", projectId: project, expectedRevision: project0!.revision, participants: [{ principalId: annId }, { principalId: bobId }] } as never);
+    const urgent = await c.api.handle(boot.token, { v: 1, op: "meeting.call-urgent", commandId: "mu1", args: { projectId: project, title: "Hotfix", reason: "prod is down", roster: [annId, bobId] } } as never) as unknown as { ok: boolean; result: { id: string } };
+    assert.ok(urgent.ok, JSON.stringify(urgent));
+    const attendance = c.dispatch!.attendance;
+    await attendance.openRoom(rob, { commandId: "or1", occurrenceId: urgent.result.id } as never);
+    await attendance.prepare(rob, { commandId: "pp1", occurrenceId: urgent.result.id, agent: annId, interrupted: [] });
+    const joined = await attendance.join(ann, { commandId: "jn1", occurrenceId: urgent.result.id, agent: annId });
+    assert.ok(joined.joined, JSON.stringify(joined));
+    now += 7 * 60_000;
+    await attendance.leave(ann, { commandId: "lv1", occurrenceId: urgent.result.id, agent: annId });
+    await attendance.leave(ann, { commandId: "lv1", occurrenceId: urgent.result.id, agent: annId });
+    const entries = (await c.storage.listAggregates("budget-entry", { limit: 50 })).map((e) => e.body as unknown as { activity: string; taskId?: string; agentId?: string; computeMs: number });
+    const mine = entries.filter((e) => e.activity === "meeting");
+    assert.equal(mine.length, 1, "leaving twice charges once");
+    assert.deepEqual([mine[0]!.agentId, mine[0]!.taskId, mine[0]!.computeMs], [annId, joined.meetingTaskId, 7 * 60_000]);
+    const usage = await c.api.handle(boot.token, { v: 1, op: "budget.usage", args: { projectId: project } } as never) as { ok: boolean; result: unknown };
+    assert.ok(usage.ok, JSON.stringify(usage));
+    assert.match(JSON.stringify(usage.result), /meeting/);
+    assert.deepEqual(await c.dispatch!.unsettledCharges(rob), []);
+    assert.ok((await c.dispatch!.dispatcher.tick()).loops.some((l) => l.name === "charge-retry" && l.ok), "the retry sweep runs in the dispatcher's tick");
+    assert.deepEqual(problems, []);
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});

@@ -1,7 +1,7 @@
 import { ProjectResourceService } from "../projects/index.js";
 import type { AttemptRelay, ModelRelay, RelayMonitor } from "../dispatch/relay.js";
 import { AdmissionService } from "../admission/index.js";
-import { BudgetService, holderNotice } from "../budgets/index.js";
+import { BudgetService, ChargeRetryService, holderNotice } from "../budgets/index.js";
 import { ArtifactService, FileBlobStore } from "../artifacts/index.js";
 import { RemoteWorkerHost, RemoteWorkerService, WorkerTransport, type RemoteDeps, type RemoteOptions, type RemoteWorkerHostOptions, type WorkerTransportOptions } from "../remote/index.js";
 import { DecisionService, type DecisionDeps } from "../decisions/index.js";
@@ -40,7 +40,7 @@ import type { ContractService } from "../planning/index.js";
 import { PolicyService } from "../policy/index.js";
 import type { ReviewService } from "../review/index.js";
 import { DifficultyService, type RoutingService } from "../routing/index.js";
-import { DISPATCHER_PRINCIPAL, type GrantService, type PrincipalService, type TaskCredentialService } from "../security/index.js";
+import { DISPATCHER_PRINCIPAL, type GrantService, type Principal, type PrincipalService, type TaskCredentialService } from "../security/index.js";
 import { StandupService } from "../standups/index.js";
 import type { ControllerStorage } from "../storage/types.js";
 
@@ -125,6 +125,10 @@ export interface DispatchHandle {
   /** The host an agent's live attempt runs on, if it has one (the review service judges a reviewer's host with it, card H05b). */
   readonly hostOfAgent: (agentId: string) => Promise<string | undefined>;
   /** Charges time that is not a model call (a review, a job) to a task, as the dispatcher does; the commandId makes a repeat count once (card R05f). */
+  /** Charges that could not be booked and are waiting for a retry, or were given up on (owner or dispatcher). */
+  /** The attendance service, composed with the meetings and the budget (card R05g proves a held meeting reaches budget.usage through it). */
+  readonly attendance: AttendanceService;
+  readonly unsettledCharges: (by: Principal) => ReturnType<ChargeRetryService["unsettled"]>;
   readonly chargeUse: (usage: { commandId: string; activity: "review" | "background-job"; taskId: string; agentId?: string; computeMs: number }) => Promise<void>;
   /** The host side of workspace operations for a task's checkout (card H12l): the host of its live attempt, else the only host that has one; `undefined` when none can be named. */
   readonly workspacePortOf: (taskId: string) => Promise<WorkspacePort | undefined>;
@@ -196,18 +200,21 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     for (const id of await live.dispatcher.liveAttemptsOf(principal, { agentId: agent })) if ((await live.dispatcher.get(principal, id))?.state === "running") return true;
     return false;
   }, i.onError);
+  // A charge the ledger could not take is kept and tried again by a loop (card R05g); one given up on is reported.
+  const chargeRetry = ChargeRetryService.withEpoch(storage, epoch, { budgets }, { ...ro, onDropped: (e) => i.onError?.(new Error(`charge ${e.commandId} was given up on: ${e.reason}`)) });
   const meetings = MeetingService.withEpoch(storage, epoch, { inquiries: i.inquiries }, { ...ro, availability: pauses.availability, invitations, ...(i.leadMinutes === undefined ? {} : { leadMinutes: i.leadMinutes }) });
   const messages = AgentMessageService.withEpoch(storage, epoch, {
     ...ro, availability: pauses.availability, taskPaused: (t) => pauses.isPaused(t), guard: (t) => pauses.guard(t), waits: i.waits, assignments: i.assignments, meetings, inquiries: i.inquiries, notifications,
   });
   const attendance = AttendanceService.withEpoch(storage, epoch, { meetings, pauses, projects: i.projects, assignments: i.assignments, agents: i.agents, histories: i.histories,
     // The time an agent spends in a meeting is charged as compute: to its meeting task, or to the shared-overhead rule "meeting" (card R05d).
-    charge: (u) => budgets.charge(principal, { commandId: u.commandId, activity: "meeting", agentId: u.agentId, computeMs: u.computeMs, projectId: u.projectId, ...(u.taskId === undefined ? { sharedOverheadRule: "meeting" } : { taskId: u.taskId }) }).then(() => undefined),
+    charge: (u) => chargeRetry.submit(principal, { commandId: u.commandId, activity: "meeting", agentId: u.agentId, computeMs: u.computeMs, projectId: u.projectId, ...(u.taskId === undefined ? { sharedOverheadRule: "meeting" } : { taskId: u.taskId }) }).then(() => undefined),
     ...(i.onError === undefined ? {} : { onChargeError: i.onError }), ...(i.leadMinutes === undefined ? {} : { leadMinutes: i.leadMinutes }) }, { ...ro, availability: pauses.availability });
   const standups = StandupService.withEpoch(storage, epoch, { meetings, assignments: i.assignments }, { ...ro, availability: pauses.availability });
   const projects = (): Promise<string[]> => projectIds(i.projects);
   let stallNotices = 0;
   const loops: DispatcherLoop[] = [
+    { name: "charge-retry", run: (by) => chargeRetry.sweep(by) },
     ...messageLoops(messages, () => activeAgents(storage)), ...(i.workspaceOps === undefined ? [] : workspaceLoops(i.workspaceOps)), ...budgetNoticeLoops(budgets, (n) => { const { purpose, text } = holderNotice(n); return messages.noticeFromController({ commandId: `bgt-hold-${n.requestId}`, taskId: n.parentTaskId ?? n.taskId, to: n.to, purpose, text, admit: "budget.manage" }); }), ...attendanceLoops(attendance), ...meetingLoops(meetings, projects), ...standupLoops(standups, meetings, projects), ...eventLoops(events), ...reviewLoops(i.reviews, projects), ...decisionLoops(decisions, projects),
     ...(i.recovery === undefined ? [] : recoveryLoops(i.recovery.stall, i.recovery.reconciler, () => notifications.emitFromController({ commandId: `stall-off:${epoch}:${++stallNotices}`, kind: "maintenance", ref: { kind: "principal", id: "dispatcher" }, detail: "Stall detection is not running: the dispatcher does not hold the recovery.stall-scan right. Grant it that right to turn stall detection on." }), () => i.principals.authenticate(issued.token))),
   ];
@@ -345,7 +352,9 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         // No live attempt names a host: the checkout is on the only host that can do this, if there is exactly one.
         return capable.length === 1 ? capable[0]!.workspace : undefined;
       },
-      chargeUse: (u) => budgets.charge(principal, { commandId: u.commandId, activity: u.activity, taskId: u.taskId, computeMs: u.computeMs, ...(u.agentId === undefined ? {} : { agentId: u.agentId }) }).then(() => undefined),
+      attendance,
+      unsettledCharges: (by) => chargeRetry.unsettled(by),
+      chargeUse: (u) => chargeRetry.submit(principal, { commandId: u.commandId, activity: u.activity, taskId: u.taskId, computeMs: u.computeMs, ...(u.agentId === undefined ? {} : { agentId: u.agentId }) }).then(() => undefined),
       hostOfAgent: async (agentId) => { for (const attemptId of await dispatcher.liveAttemptsOf(principal, { agentId })) { const d = await dispatcher.get(principal, attemptId); const host = d?.state === "running" ? d.hostId : d?.pinnedHost; if (host !== undefined) return host; } return undefined; }, quiesce: new QuiesceCoordinator({ dispatcher, blockers, principal }),
       ...(mcpService === undefined || i.options.mcp === undefined ? {} : { mcp: { service: mcpService, connector: new RemoteMcpConnector({ mcp: mcpService, resolve: i.options.mcp.resolve, principal }) } }),
     };
