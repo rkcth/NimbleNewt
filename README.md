@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **127 of 230 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **127 of 242 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -110,18 +110,18 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Pi runtime and inference caching | `▓▓▓▓▓▓▓▓░░░░` 72% | 8 of 11 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
 | Pause, suspend and resume | `▓▓▓▓░░░░░░░░` 33% | 3 of 9 |
-| Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓░░░` 78% | 15 of 19 |
+| Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓░░░` 75% | 15 of 20 |
 | Context and memory | `▓▓▓▓▓▓▓▓▓░░░` 78% | 11 of 14 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
 | Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓░░` 90% | 10 of 11 |
 | Owner chat and web UI | `▓▓▓▓▓▓░░░░░░` 53% | 8 of 15 |
-| Workers, dispatch and teams | `▓▓▓▓▓▓▓░░░░░` 63% | 23 of 36 |
+| Workers, dispatch and teams | `▓▓▓▓▓▓░░░░░░` 57% | 23 of 40 |
 | Agent messaging | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
 | Health and recovery | `▓▓▓▓▓▓▓▓▓░░░` 75% | 3 of 4 |
 | Meetings | `▓▓▓▓░░░░░░░░` 36% | 4 of 11 |
 | Tools and skills | `▓▓▓▓▓▓░░░░░░` 50% | 5 of 10 |
-| Projects, repositories and workspaces | `▓▓▓░░░░░░░░░` 30% | 3 of 10 |
-| Quality: deliverables, QA and defects | `░░░░░░░░░░░░` 0% | 0 of 4 |
+| Projects, repositories and workspaces | `▓▓░░░░░░░░░░` 18% | 3 of 16 |
+| Quality: deliverables, QA and defects | `░░░░░░░░░░░░` 0% | 0 of 5 |
 | Balancing delivery and improvement | `░░░░░░░░░░░░` 0% | 0 of 1 |
 | Learning and improvement | `░░░░░░░░░░░░` 0% | 0 of 5 |
 | Backup, updates and operations | `░░░░░░░░░░░░` 0% | 0 of 11 |
@@ -222,7 +222,7 @@ Pause, suspend, stop, release and checked resume, interrupting a model mid-gener
 </details>
 
 <details>
-<summary><strong>Security: identity, approvals and sandboxing</strong> — ▓▓▓▓▓▓▓▓▓░░░ 15 of 19</summary>
+<summary><strong>Security: identity, approvals and sandboxing</strong> — ▓▓▓▓▓▓▓▓▓░░░ 15 of 20</summary>
 
 Authenticated principals, revisioned grants, the sandbox launchers, the protected filesystem and Git bridge, approval policy and resource limits.
 
@@ -244,6 +244,7 @@ Authenticated principals, revisioned grants, the sandbox launchers, the protecte
 - [x] **A07d** · P27 · Offer a choice of standing-grant lengths with a system-chosen default _(needs A07b, A07c)_
 - [ ] **A08c** · P27 · Enforce per-agent resource limits on macOS and Windows (after the first release) _(needs A08b, A03b)_
 - [x] **A07e** · P28 · Suggest at least seven days for a standing grant _(needs A07d)_
+- [ ] **A07f** · P30 · Derive protected branches in the controller and scope approval grants to branches _(needs A07, P01)_
 - [ ] **A09** · P32 · Implement reviewed environment changes and maintenance requests _(needs A08, A05, H05, L02, T06)_
 
 </details>
@@ -324,7 +325,7 @@ Talking to your agents: the chat interpreter, policy editing, status and blocker
 </details>
 
 <details>
-<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓▓▓░░░░░ 23 of 36</summary>
+<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓▓░░░░░░ 23 of 40</summary>
 
 Enrolled hosts, remote workers, priority admission, the local worker runtime and dispatcher, agents, teams and roles, reviews and wait-cycle handling.
 
@@ -335,6 +336,7 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 - [x] **H06** · P24 · Implement event subscriptions and gap recovery _(needs S07, C03)_
 - [x] **H11** · P24 · Implement agent, team and role records _(needs A02, C01, R01, U01)_
 - [x] **H06b** · P25 · Expire idle event subscriptions _(needs H06)_
+- [ ] **H11b** · P25 · Standard role templates with display labels _(needs H11)_
 - [ ] **H13** · P26 · Implement event source adapters and watchers _(needs H06, H01, R02)_
 - [x] **H06c** · P27 · Deliver idle-expiry notices in the running controller _(needs H06b, U11)_
 - [x] **H05b** · P28 · Implement reviewer pause and hold behaviour _(needs H05, L01)_
@@ -364,6 +366,9 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 - [x] **H07e** · P33 · Pass over remote hosts that would refuse the attempt _(needs H07, H07c)_
 - [ ] **H09** · P33 · Implement reconnect reconciliation and primary epochs _(needs H08, L04, S05)_
 - [ ] **H10** · P34 · Implement distributed agent capacity and fan-in limits _(needs H07, H09, H03, R05)_
+- [ ] **H12n** · P38 · End agent work with work.end _(needs H12, H12l, Q01b, P08)_
+- [ ] **H12o** · P39 · Commit an approved submission exactly once _(needs H12n, A06)_
+- [ ] **H12p** · P39 · Let the author refresh its own checkout before submitting _(needs H12n, H12m)_
 
 </details>
 
@@ -429,13 +434,15 @@ The immutable tool and skill catalogue, review and promotion, MCP connections, t
 </details>
 
 <details>
-<summary><strong>Projects, repositories and workspaces</strong> — ▓▓▓░░░░░░░░░ 3 of 10</summary>
+<summary><strong>Projects, repositories and workspaces</strong> — ▓▓░░░░░░░░░░ 3 of 16</summary>
 
 Repository-independent projects, isolated coding workspaces, non-code and sandbox operations, ongoing responsibilities and external contribution.
 
 - [x] **P01** · P29 · Implement repository-independent projects and responsibilities _(needs U03, S01)_
 - [x] **P01b** · P30 · Mend the checkout pin edge cases _(needs P01)_
 - [x] **P01c** · P31 · Scan the pin and overlap checks per project _(needs P01b)_
+- [ ] **P08** · P31 · Store the integration policy per project with an installation default _(needs P01, A07f, U10, H11b, A06)_
+- [ ] **P08b** · P32 · Change integration settings and create projects with them in chat _(needs P08, C08c, U03)_
 - [ ] **P04** · P33 · Implement ongoing responsibility checks, incidents and coverage _(needs P01, S08, H13, V01, L03)_
 - [ ] **P06** · P34 · Implement project and agent retirement and archival _(needs P01, H11, L03, K06)_
 - [ ] **P02** · P35 · Implement isolated coding workspaces and integration _(needs P01, A04, L04, Y02, H12)_
@@ -443,15 +450,20 @@ Repository-independent projects, isolated coding workspaces, non-code and sandbo
 - [ ] **P02b** · P36 · Implement optional work-in-progress branch backup (after the first release) _(needs P02, A06, A07, F09)_
 - [ ] **P05** · P36 · Implement external contribution and pull-request workflow _(needs P02, A06, A07, T03, F09)_
 - [ ] **P07** · P36 · Implement simulation mode _(needs P03, R02, T03)_
+- [ ] **P09** · P38 · Gate landing on required checks for the exact integrated tree _(needs P08, Q01b, Q02)_
+- [ ] **P10** · P40 · Land submissions with one leased integrator per project _(needs P08, P09, H12o, H12d, Q01b, A07f, Q04)_
+- [ ] **P10b** · P41 · Share integrators across projects as a pool _(needs P10, H03, A10b, R05)_
+- [ ] **P10c** · P41 · Promote to main automatically or by a human _(needs P10, A07f, P05)_
 
 </details>
 
 <details>
-<summary><strong>Quality: deliverables, QA and defects</strong> — ░░░░░░░░░░░░ 0 of 4</summary>
+<summary><strong>Quality: deliverables, QA and defects</strong> — ░░░░░░░░░░░░ 0 of 5</summary>
 
 Deliverable submission and acceptance, independent QA, documentation impact and defect tracking.
 
 - [ ] **Q01** · P36 · Implement deliverable submission and acceptance _(needs S06, U01, P02, P03, S10)_
+- [ ] **Q01b** · P37 · Record submission kinds by role _(needs Q01, H11b)_
 - [ ] **Q02** · P37 · Implement independent QA and dependency-bound evidence _(needs Q01, A06, C03, H05, C08)_
 - [ ] **Q03** · P38 · Implement documentation impact and release evidence links _(needs Q02, C02)_
 - [ ] **Q04** · P38 · Implement defect tracking, review cycles and overrides _(needs Q02, C08)_
@@ -513,7 +525,7 @@ Crash, policy, isolation and partition campaigns, QA checkpoints, Windows and ma
 - [ ] **Y03** · P38 · QA checkpoint 3: first complete chat-driven workflow _(needs U07, M02, P02, P03, Q02, K03, A07d)_
 - [ ] **X10** · P42 · Run partition and remote-worker safety campaign _(needs X09, H10, K05, G08)_
 - [ ] **X03** · P44 · Run chat-only complete product workflow _(needs U05, U06, U07, M02, P03, Q03, B05, K03, C06, L05, G09, C07, U09, U11, U12, U13, M03, M05, M06, R03, R04, P04, P06, P07, Q04, U08, H13, L06)_
-- [ ] **X02** · P45 · Run policy, isolation and adversarial campaign _(needs A06, U04, T05, Q02, G05, A07, A09, A10, T08, T09, P05, H05b, A10b, M05b, B06, H12i)_
+- [ ] **X02** · P45 · Run policy, isolation and adversarial campaign _(needs A06, U04, H12n, H12p, P08, P10, P10b, A07f, T05, Q02, G05, A07, A09, A10, T08, T09, P05, H05b, A10b, M05b, B06, H12i)_
 - [ ] **X04** · P46 · Qualify fresh macOS release candidate _(needs X01, X02, X03, X09, F03)_
 - [ ] **X05** · P46 · Qualify fresh Linux release candidate _(needs X01, X02, X03, X09, F03)_
 - [ ] **X06** · P46 · Qualify fresh Windows release candidate _(needs X01, X02, X03, X09, F03, G06)_
@@ -529,7 +541,7 @@ Installation, documentation, QA on real machines, the release decision and closi
 
 - [ ] **D02** · P36 · Finish developer/API/security and license guidance _(needs T05, K03, F03)_
 - [ ] **D01** · P45 · Finish installation and chat-first user guidance _(needs X03, Q03, U11b)_
-- [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, C07e, H07e, T09b, H07, H07b, H02e, T09, A07d, A07e, H07c, H07d)_
+- [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, C07e, H07e, T09b, H07, H07b, H02e, T09, A07d, A07e, H07c, H07d, H11b, Q01b, A07f, P08, P08b, H12n, H12p, H12o, P09, P10, P10b, P10c)_
 - [ ] **D04** · P50 · Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
 - [ ] **D04b** · P51 · Measure code-navigation aids on real coding tasks (optional, after the first release) _(needs D04)_
 - [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, U03c, K06b, K01d, P02b, A08c)_

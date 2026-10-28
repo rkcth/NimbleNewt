@@ -1294,7 +1294,7 @@
         "A05"
       ],
       "deliverable": "Staged-tree/base review and actor provenance",
-      "acceptance_and_verification": "Reviewed tree commits; changed staged content/base requires new review; developer, agent, executor and reviewer identities retained; attribution also records grant source, commit identity and later integration history; externally verified review references are accepted; no forged authorship; a reviewer who commits to the version under review is recorded as a contributor automatically (H05 contributors are self-reported until then)",
+      "acceptance_and_verification": "Reviewed tree commits; changed staged content/base requires new review; developer, agent, executor and reviewer identities retained; attribution also records grant source, commit identity and later integration history; externally verified review references are accepted; no forged authorship; a reviewer who commits to the version under review is recorded as a contributor automatically (H05 contributors are self-reported until then); amended 2026-10-28: the humanOnly gate setting moves into the P08 integration policy so there is one human decision point per policy",
       "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -1324,7 +1324,7 @@
         "F02"
       ],
       "deliverable": "Action-class catalogue (inspect, mutate, external send, publish, spend, install executable, access change, commit, push, merge, deploy), the derived profile (authorization flows from the instruction and its scope; its starter preset leans toward less asking), the strict profile a new installation starts in, presets (direct approval, delegated agent review, automatic) and the autonomous profile, an optional all-command human gate, approval grants (a separate family from capability grants) with fields for spend limit, environment, maintenance window, audiences, delegation allowance and conditions, and an effective-policy and preview query (authorization-and-delegation 3-19, 37; operational-contracts 87; README 106)",
-      "acceptance_and_verification": "A fresh install starts strict and the owner's own installation starts derived (private deployment configuration); the derived profile works so: an explicit instruction (build, fix what fails, integrate) authorizes the reasonably necessary steps inside its scope, including fixing and retrying, merging into the integration branch and deploying to development and test environments, without asking again; the scope is recorded and shown with the work; a project whose environment is testing flows freely, within its own repositories, the integration branch and its development and test environments, with sandbox, protected-filesystem and Git-bridge rules unchanged and never a protected branch, the main release branch or another project; a customer-live environment, access changes, new external access, publishing to a new audience, spend beyond the estimate and destructive irreversible actions still need a decision unless the instruction named them; the strict profile asks at every consequential step; an unknown action goes to review, never auto-allowed; enabling the all-command gate gates every execution; drafting never publishes, and publish, external send and spend are granted separately per account and audience; relaxation scoped by environment, window or budget changes only that scope; a preset change keeps narrower human-review rules; a permissive project cannot weaken a locked installation restriction; effective policy shows source grants, inherited restrictions and effect time, and preview reports the practical effect before apply; a materially broader action, likely danger or unexpected spend needs a new decision while a standing grant survives handoff and restart without a prompt; a conversation action request (U02 stores it with needsAuthorization) is evaluated as a request under the effective policy, and nothing is executed because a message asked; approval load (authorization-and-delegation, 'Approval load is a design target'): the chosen preset says which classes reach the owner (where it places them, low-risk runs without asking, middle goes to delegated agent review with the owner shown a sample afterwards, only consequential or irreversible asks the owner); a change of profile keeps the cells, locks and reserved tools the owner set (tested); the owner's own installation starts derived from its private configuration, applied at first run by the setup card (U08); only an approval grant waives asking, never a capability grant, and for what stays a decision it must name the tool or class exactly (a customer-live deployment also the environment); the instruction's scope (ceiling, who set it, estimate) is read from the task's stored contract and a ceiling the acting agent wrote itself is ignored (tested)",
+      "acceptance_and_verification": "A fresh install starts strict and the owner's own installation starts derived (private deployment configuration); the derived profile works so: an explicit instruction (build, fix what fails, integrate) authorizes the reasonably necessary steps inside its scope, including fixing and retrying, merging into the integration branch and deploying to development and test environments, without asking again; the scope is recorded and shown with the work; a project whose environment is testing flows freely, within its own repositories, the integration branch and its development and test environments, with sandbox, protected-filesystem and Git-bridge rules unchanged and never a protected branch, the main release branch or another project; a customer-live environment, access changes, new external access, publishing to a new audience, spend beyond the estimate and destructive irreversible actions still need a decision unless the instruction named them; the strict profile asks at every consequential step; an unknown action goes to review, never auto-allowed; enabling the all-command gate gates every execution; drafting never publishes, and publish, external send and spend are granted separately per account and audience; relaxation scoped by environment, window or budget changes only that scope; a preset change keeps narrower human-review rules; a permissive project cannot weaken a locked installation restriction; effective policy shows source grants, inherited restrictions and effect time, and preview reports the practical effect before apply; a materially broader action, likely danger or unexpected spend needs a new decision while a standing grant survives handoff and restart without a prompt; a conversation action request (U02 stores it with needsAuthorization) is evaluated as a request under the effective policy, and nothing is executed because a message asked; approval load (authorization-and-delegation, 'Approval load is a design target'): the chosen preset says which classes reach the owner (where it places them, low-risk runs without asking, middle goes to delegated agent review with the owner shown a sample afterwards, only consequential or irreversible asks the owner); a change of profile keeps the cells, locks and reserved tools the owner set (tested); the owner's own installation starts derived from its private configuration, applied at first run by the setup card (U08); only an approval grant waives asking, never a capability grant, and for what stays a decision it must name the tool or class exactly (a customer-live deployment also the environment); the instruction's scope (ceiling, who set it, estimate) is read from the task's stored contract and a ceiling the acting agent wrote itself is ignored (tested); amended 2026-10-28: the controller derives protected branches (A07f) and main-automatic (P08) is the only owner-configured exception, granted exactly and limited to one branch",
       "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -2849,7 +2849,7 @@
         "A06",
         "H12l"
       ],
-      "deliverable": "Call the H12 quiesce (freeze, settle, checkpoint) from the A04 integration, A06 release and refresh paths and from quarantine",
+      "deliverable": "Call the H12 quiesce (freeze, settle, checkpoint) from the A06 release path and landing; integration, refresh and quarantine are already wrapped by H12l, and the agent-side ending is H12n",
       "acceptance_and_verification": "Integration, refresh or quarantine never runs while an attempt has an unsettled tool call; the attempt checkpoints and resumes after; a failed settle blocks the operation with a typed blocker; tested with a call in flight",
       "status": "planned",
       "research_evidence": null,
@@ -4890,7 +4890,7 @@
         "H12"
       ],
       "deliverable": "Worktree/workspace adapter and integration contract",
-      "acceptance_and_verification": "Dirty/untracked work survives interruption; conflicting integration revalidates evidence; no metadata pollution of target checkout; the task workspace admits only repositories in the task's access scope and records the initial working state; an accepted proposal (a suggestion, not an instruction) never authorizes a downstream push, merge or deploy",
+      "acceptance_and_verification": "Dirty/untracked work survives interruption; conflicting integration revalidates evidence; no metadata pollution of target checkout; the task workspace admits only repositories in the task's access scope and records the initial working state; an accepted proposal (a suggestion, not an instruction) never authorizes a downstream push, merge or deploy; amended 2026-10-28: the integration contract means submission plus landing by the project integrator (P10)",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -4973,7 +4973,7 @@
         "F09"
       ],
       "deliverable": "Contribution adapter (push, open and revise PR or MR, read review and CI status) behind separate action scopes, repository-instruction discovery, pre-submission diff check and linked multi-repository change sets (README 229-233, 645, 668; organization-and-workers 27-29, 64; pitfalls-and-safeguards 149)",
-      "acceptance_and_verification": "Existing contribution guides and instruction files are discovered and applied without adding NimbleNewt conventions; the checkout's starting state is recorded; an automated diff check blocks unrelated files, NimbleNewt state, ignore-rule edits and secrets before commit or PR; the requested PR contains only intended files and keeps unrelated local work; a local edit grant does not permit push, PR or merge, and owner approval does not bypass branch protection or CI; revision after review comments works; attribution is accurate; each push and PR is an effect-ledger operation; a multi-repository change set records review order, shows partial completion and is resumable, never treated as atomic",
+      "acceptance_and_verification": "Existing contribution guides and instruction files are discovered and applied without adding NimbleNewt conventions; the checkout's starting state is recorded; an automated diff check blocks unrelated files, NimbleNewt state, ignore-rule edits and secrets before commit or PR; the requested PR contains only intended files and keeps unrelated local work; a local edit grant does not permit push, PR or merge, and owner approval does not bypass branch protection or CI; revision after review comments works; attribution is accurate; each push and PR is an effect-ledger operation; a multi-repository change set records review order, shows partial completion and is resumable, never treated as atomic; amended 2026-10-28: landing on main never pushes upstream (P10c)",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -5033,7 +5033,7 @@
         "S10"
       ],
       "deliverable": "Versioned output records and review state",
-      "acceptance_and_verification": "Tool completion alone cannot accept task; missing/changed artifact invalidates review; rejected version history retained; draft, submitted, under-review, accepted, rejected and superseded are distinct versioned events; the deliverable records type, responsible agent, audience and access scope; an operational outcome can be a deliverable with verifiable reference, system version and observation time; source and exported artifacts can be grouped under one version; submission is checked against the task contract revision in force (S10)",
+      "acceptance_and_verification": "Tool completion alone cannot accept task; missing/changed artifact invalidates review; rejected version history retained; draft, submitted, under-review, accepted, rejected and superseded are distinct versioned events; the deliverable records type, responsible agent, audience and access scope; an operational outcome can be a deliverable with verifiable reference, system version and observation time; source and exported artifacts can be grouped under one version; submission is checked against the task contract revision in force (S10); amended 2026-10-28: submission kinds by role are Q01b",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -5054,7 +5054,7 @@
         "C08"
       ],
       "deliverable": "Self-check/QA records and stale-evidence propagation; review policy (scope, triggers including periodic and incident, required checks, whether independent review gates completion) and a project QA view",
-      "acceptance_and_verification": "Reviewer inspects actual version; changed dependency invalidates affected test/review; role title grants no access; a verdict cites the current acceptance-criteria and decision revisions and a rejection must cite an unmet owner requirement; a team vote cannot override an owner decision and work bound to a superseded decision fails review (C08); findings record environment, criteria revision and time; passed, failed, blocked and not-run are distinct and absent evidence fails the gate; invalidation schedules revalidation; independent evidence is counted by original source (DeskService.independence): a copy and the original are one source",
+      "acceptance_and_verification": "Reviewer inspects actual version; changed dependency invalidates affected test/review; role title grants no access; a verdict cites the current acceptance-criteria and decision revisions and a rejection must cite an unmet owner requirement; a team vote cannot override an owner decision and work bound to a superseded decision fails review (C08); findings record environment, criteria revision and time; passed, failed, blocked and not-run are distinct and absent evidence fails the gate; invalidation schedules revalidation; independent evidence is counted by original source (DeskService.independence): a copy and the original are one source; amended 2026-10-28: evidence is bound to a tree id and a reviewer verdict carries over only by unchanged patch-id (P09)",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -5072,7 +5072,7 @@
         "C02"
       ],
       "deliverable": "User/developer documentation obligations and traceability",
-      "acceptance_and_verification": "Behavior change links required doc updates to tested artifact; no unsupported marketing capability claims; doc obligations record owner, applicable version, implementation references and validation status and stale or unverified docs are flagged; the impact check creates assigned update tasks; a release change flags linked docs, support guidance and promotional assets",
+      "acceptance_and_verification": "Behavior change links required doc updates to tested artifact; no unsupported marketing capability claims; doc obligations record owner, applicable version, implementation references and validation status and stale or unverified docs are flagged; the impact check creates assigned update tasks; a release change flags linked docs, support guidance and promotional assets; amended 2026-10-28: the docs role submits a document change (Q01b)",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -5090,7 +5090,7 @@
         "C08"
       ],
       "deliverable": "Defect records (severity, evidence, responsible agent, resolution), bounded repair and review cycles, escalation of unresolved disagreements and explicit owner override records (README 122-136)",
-      "acceptance_and_verification": "A defect links to the version and finding; after the configured number of repair and review cycles it escalates to the owner; an owner override records the decision and the remaining findings and a failed check is never rewritten as passed; a QA agent that commits a fix becomes a contributor and cannot approve it; periodic and incident-triggered reviews run without interrupting contributors; chat answers what has been checked, what waits for QA and team-wide risks with evidence links",
+      "acceptance_and_verification": "A defect links to the version and finding; after the configured number of repair and review cycles it escalates to the owner; an owner override records the decision and the remaining findings and a failed check is never rewritten as passed; a QA agent that commits a fix becomes a contributor and cannot approve it; periodic and incident-triggered reviews run without interrupting contributors; chat answers what has been checked, what waits for QA and team-wide risks with evidence links; amended 2026-10-28: a conflict returned to its author counts as a repair cycle (P10)",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -5499,6 +5499,12 @@
       "depends_on": [
         "A06",
         "U04",
+        "H12n",
+        "H12p",
+        "P08",
+        "P10",
+        "P10b",
+        "A07f",
         "T05",
         "Q02",
         "G05",
@@ -5514,7 +5520,7 @@
         "B06",
         "H12i"
       ],
-      "deliverable": "Scope/revocation/escape/injection and review-race evidence",
+      "deliverable": "Scope/revocation/escape/injection (also: an agent omitting branchProtected, an integrator writing content, two integrators racing for one branch, data leaking between projects through a pooled integrator, an agent approving its own submission or sign-off, quoted text setting main-automatic, injection from submitted content reaching reviewers) and review-race evidence",
       "acceptance_and_verification": "Alternate shell/tool/MCP/API paths cannot bypass grants or human gate; reviewer outage cannot authorize work; a project named NimbleNewt gains no authority over the installation or updater; no outbound telemetry, issue, PR or report leaves without explicit scoped authorization (network capture); agent B cannot reach suspended agent A's scratch through file paths, search or artifact links, repeated after restart and harness change; an agent in the NimbleNewt project cannot launch, install or activate a candidate by any path (shell, MCP, API, updater) without an owner-approved proposal for that exact revision",
       "status": "planned",
       "research_evidence": null,
@@ -5711,6 +5717,236 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "H11b",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Standard role templates with display labels",
+      "depends_on": [
+        "H11"
+      ],
+      "deliverable": "Owner decision 2026-10-28: role ids author, reviewer, integrator, qa, docs and director with capability bundles; an owner label per role (for example \"CTO\" for director), display only; supervisor stays the agent's supervisorId link",
+      "acceptance_and_verification": "Seeded templates exist on a new installation; a label change alters no grant, check or history; ids still match ROLE_NAME; the director and the supervisor link may be the same agent; one agent may hold qa and docs together; labels are owner-only edits",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "Q01b",
+      "parent": "N15",
+      "existing_issue": "AII-265",
+      "title": "Record submission kinds by role",
+      "depends_on": [
+        "Q01",
+        "H11b"
+      ],
+      "deliverable": "Submission record per attempt: kind (code tree with base, tree, patch-id and refresh round; review verdict; QA report; document change; director sign-off), the submitting role, and the check evidence bound to the exact tree or artifact version",
+      "acceptance_and_verification": "A role may submit only its own kinds; a code submission names base and tree; a non-code submission makes no commit; a director sign-off cannot be given on the director's own work; evidence for a different tree is rejected",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "A07f",
+      "parent": "N06",
+      "existing_issue": "AII-256",
+      "title": "Derive protected branches in the controller and scope approval grants to branches",
+      "depends_on": [
+        "A07",
+        "P01"
+      ],
+      "deliverable": "The project's branch settings (landing branch, main, protected list) decide branchProtected for push and merge; the worker's own flag is ignored; approval grants gain a branches term",
+      "acceptance_and_verification": "An agent that omits or falsifies branchProtected is still sent to the owner (test); a grant that does not name the branch cannot waive it; a standing grant still never waives a protected branch",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "P08",
+      "parent": "N14",
+      "existing_issue": "AII-264",
+      "title": "Store the integration policy per project with an installation default",
+      "depends_on": [
+        "P01",
+        "A07f",
+        "U10",
+        "H11b",
+        "A06"
+      ],
+      "deliverable": "Owner decision 2026-10-28: owner-only integration.set with the landing mode (integration-branch, main-automatic, human-promotes; all three supported and main-automatic must be possible in every profile when the owner sets it, with no human step per landing), who integrates, required checks, review need and the refresh-round cap; an installation default for new projects; profile defaults (strict human-promotes; derived and autonomous integration-branch); the effective mode and its source saved at project creation; the A06 gate-policy humanOnly folded into this policy",
+      "acceptance_and_verification": "Precedence is installation lock > project > installation default > profile, tested; a non-owner or an agent holding project.update cannot change it; main-automatic records a C08 decision, an audit entry and an exact branch-scoped grant held only by the landing service, and switching it off revokes that grant at once; a project set to main-automatic lands on main with no human step; a profile switch changes no existing project and its preview lists the projects affected; an API create without settings takes the default",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "P08b",
+      "parent": "N14",
+      "existing_issue": "AII-264",
+      "title": "Change integration settings and create projects with them in chat",
+      "depends_on": [
+        "P08",
+        "C08c",
+        "U03"
+      ],
+      "deliverable": "Chat integration.set always shown as a proposal; the project.create proposal carries an integration section filled from the defaults and lists the four questions (who integrates, landing mode, required checks, review); the owner's answers re-draft the proposal",
+      "acceptance_and_verification": "Nothing applies before the owner says yes; quoted or foreign text cannot set main-automatic; the chat and the API produce the same records",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "H12n",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "End agent work with work.end",
+      "depends_on": [
+        "H12",
+        "H12l",
+        "Q01b",
+        "P08"
+      ],
+      "deliverable": "The agent tool work.end {submit, result, note, message}: checked at once, a durable ending intent and freeze, the controller completes the ending (settle, kill hung calls with a reason, stage, open a submission, finish the attempt); submit is refused when the base is stale and overlapping files changed",
+      "acceptance_and_verification": "Owner stop wins; an emergency stop drops the intent; a restart resumes the ending once; a repeated finish gives one ending; a killed write call turns submit into end with a typed release_failed blocker; a stale overlapping submit is refused with the head commit and the overlapping files; plain end is never refused",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "H12p",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Let the author refresh its own checkout before submitting",
+      "depends_on": [
+        "H12n",
+        "H12m"
+      ],
+      "deliverable": "Worker three-way re-apply of the agent's work onto the current landing-branch head (conflict markers plus a list), exposed as the agent's work.refresh tool with no quiesce and recorded in the workspace record",
+      "acceptance_and_verification": "Changed and new files survive; conflicts are listed and never resolved automatically; refresh rounds are counted on the submission; tested on a branch that moved in overlapping and in unrelated files",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "H12o",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Commit an approved submission exactly once",
+      "depends_on": [
+        "H12n",
+        "A06"
+      ],
+      "deliverable": "Commit of the approved tree tied to the submission; recovery recognises a commit that was already made",
+      "acceptance_and_verification": "A restart or a retry between commit and record makes one commit; a changed tree or base needs a new approval",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "P09",
+      "parent": "N14",
+      "existing_issue": "AII-264",
+      "title": "Gate landing on required checks for the exact integrated tree",
+      "depends_on": [
+        "P08",
+        "Q01b",
+        "Q02"
+      ],
+      "deliverable": "Required checks of the policy run on the integrated tree; the author's evidence is checked against the submitted tree; a reviewer verdict carries over only when the patch-id is unchanged",
+      "acceptance_and_verification": "A different tree never passes on old evidence; a failure goes back to the author with the results; not-run counts as failed",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "P10",
+      "parent": "N14",
+      "existing_issue": "AII-264",
+      "title": "Land submissions with one leased integrator per project",
+      "depends_on": [
+        "P08",
+        "P09",
+        "H12o",
+        "H12d",
+        "Q01b",
+        "A07f",
+        "Q04"
+      ],
+      "deliverable": "A fenced, expiring lease per landing branch; an oldest-first queue with reservations; a base==head check; mechanical re-apply only when files are disjoint; overlap returns the work to the author; after the refresh-round cap a reservation, then escalation to the director",
+      "acceptance_and_verification": "Never two integrators on one branch (race test); a lost integrator frees the lease; the integrator writes no content (any diff beyond the submissions is refused); a retired author's task is reassigned; the Q04 cycle limit escalates; no submission waits forever under steady load (test)",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "P10b",
+      "parent": "N14",
+      "existing_issue": "AII-264",
+      "title": "Share integrators across projects as a pool",
+      "depends_on": [
+        "P10",
+        "H03",
+        "A10b",
+        "R05"
+      ],
+      "deliverable": "Free integrators take the next project with queued work; another is woken through admission and budget, with reserved capacity",
+      "acceptance_and_verification": "Credentials and context are fresh per project (no data crosses between projects, test); a full queue of author attempts does not starve landing; when no capacity is left, work waits with a visible reason",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "P10c",
+      "parent": "N14",
+      "existing_issue": "AII-264",
+      "title": "Promote to main automatically or by a human",
+      "depends_on": [
+        "P10",
+        "A07f",
+        "P05"
+      ],
+      "deliverable": "main-automatic promotes after checks pass using the landing service's branch-scoped grant, with no human step; human-promotes asks a human for a snapshot without holding the lease; external remotes still go through P05",
+      "acceptance_and_verification": "A project set to main-automatic reaches main with no human step once the required checks pass; an installation lock blocks it; waiting for a human in human-promotes does not stop landing; an upstream pull request is never treated as a main promotion",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "D03",
       "parent": "N19",
       "existing_issue": "AII-269",
@@ -5772,7 +6008,19 @@
         "A07d",
         "A07e",
         "H07c",
-        "H07d"
+        "H07d",
+        "H11b",
+        "Q01b",
+        "A07f",
+        "P08",
+        "P08b",
+        "H12n",
+        "H12p",
+        "H12o",
+        "P09",
+        "P10",
+        "P10b",
+        "P10c"
       ],
       "deliverable": "Exact release manifest, known limitations and owner signoff",
       "acceptance_and_verification": "All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded",

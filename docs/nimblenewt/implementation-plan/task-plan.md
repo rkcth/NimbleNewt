@@ -33,16 +33,16 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06, C06b |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
 | N05 / AII-255 | L05, L05b, L01, L01b, L02, L03, L04, L06, H08 |
-| N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A07e, A08, A08b, A08c, A09, A10, A10b |
+| N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A07e, A08, A08b, A08c, A09, A10, A10b, A07f |
 | N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C07e, C08, C09, C08b, C08c, C08d |
 | N08 / AII-258 | R01, R02, R03, R04, R05, R05b, R05c, R05d, R05f, R05g, R05e |
 | N09 / AII-259 | U03, U03d, U03e, U05b, U04, U05, U06, U03b, U03c, U07, U09, U08, U10, U11, U11b |
-| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H07b, H07c, H07d, H07e, H02e, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H02b, H02c, H02d |
+| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H07b, H07c, H07d, H07e, H02e, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H02b, H02c, H02d, H11b, H12n, H12p, H12o |
 | N11 / AII-261 | V01, V01b, V01c, V02 |
 | N12 / AII-262 | M01b, M01c, M01d, M00, M01, M02, M03, M04, M05, M05b, M06 |
 | N13 / AII-263 | T01, T02, T03, T06, T06b, T07, T07b, T08, T09, T09b |
-| N14 / AII-264 | P01b, P01c, P01, P02, P02b, P03, P04, P05, P06, P07 |
-| N15 / AII-265 | Q01, Q02, Q03, Q04 |
+| N14 / AII-264 | P01b, P01c, P01, P02, P02b, P03, P04, P05, P06, P07, P08, P08b, P09, P10, P10b, P10c |
+| N15 / AII-265 | Q01, Q02, Q03, Q04, Q01b |
 | N16 / AII-266 | B01 |
 | N17 / AII-267 | K01, K01b, K01c, K01d, K02, K03, K04, K05, K06, K06b, K07 |
 | N18 / AII-268 | G06, X11, X09, X10, X01, X02, X03, X04, X05, X06, X07, X08, Y01, Y02, Y03 |
@@ -511,7 +511,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Progress note:** Human pre-commit gate: a commit permit bound to the staged tree, base and the file list; actor provenance and trailers the agent cannot forge; review-before-commit and external-review acceptance; integration recorded. Reviewed and approved by an AI review session (Claude Opus); full six-cell CI green.
 - **Blockers:** A04, A05.
 - **Deliverable:** Staged-tree/base review and actor provenance.
-- **Acceptance and verification:** Reviewed tree commits; changed staged content/base requires new review; developer, agent, executor and reviewer identities retained; attribution also records grant source, commit identity and later integration history; externally verified review references are accepted; no forged authorship; a reviewer who commits to the version under review is recorded as a contributor automatically (H05 contributors are self-reported until then).
+- **Acceptance and verification:** Reviewed tree commits; changed staged content/base requires new review; developer, agent, executor and reviewer identities retained; attribution also records grant source, commit identity and later integration history; externally verified review references are accepted; no forged authorship; a reviewer who commits to the version under review is recorded as a contributor automatically (H05 contributors are self-reported until then); amended 2026-10-28: the humanOnly gate setting moves into the P08 integration policy so there is one human decision point per policy.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### A07 — Implement action classes, default policy and effective-policy view
@@ -521,7 +521,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Progress note:** Twelve action classes in four environments (development and testing free, staging guarded, customer-live live) and three profiles (strict, derived, autonomous) decide whether an action runs, goes to an independent agent review or asks the owner; the owner sets the installation profile and per-project environment, overrides and locks, previews a change in plain words, and can switch on an all-command gate. Things that stay the owner's decision (changing access, a customer-live deployment, a protected branch, spend beyond the estimate, irreversible actions, an audience nobody named) are waived only by an approval grant that names the tool or class exactly; capability grants never waive asking; the instruction's scope (ceiling, who set it, estimate) is read from the task's stored contract. Limits stated: the dispatcher (H12) does not call it yet. Reviewed and approved by an AI review session (Claude Opus) after two rounds; six-cell CI green.
 - **Blockers:** A02, A05, F02.
 - **Deliverable:** Action-class catalogue (inspect, mutate, external send, publish, spend, install executable, access change, commit, push, merge, deploy), the derived profile (authorization flows from the instruction and its scope; its starter preset leans toward less asking), the strict profile a new installation starts in, presets (direct approval, delegated agent review, automatic) and the autonomous profile, an optional all-command human gate, approval grants (a separate family from capability grants) with fields for spend limit, environment, maintenance window, audiences, delegation allowance and conditions, and an effective-policy and preview query (authorization-and-delegation 3-19, 37; operational-contracts 87; README 106).
-- **Acceptance and verification:** A fresh install starts strict and the owner's own installation starts derived (private deployment configuration); the derived profile works so: an explicit instruction (build, fix what fails, integrate) authorizes the reasonably necessary steps inside its scope, including fixing and retrying, merging into the integration branch and deploying to development and test environments, without asking again; the scope is recorded and shown with the work; a project whose environment is testing flows freely, within its own repositories, the integration branch and its development and test environments, with sandbox, protected-filesystem and Git-bridge rules unchanged and never a protected branch, the main release branch or another project; a customer-live environment, access changes, new external access, publishing to a new audience, spend beyond the estimate and destructive irreversible actions still need a decision unless the instruction named them; the strict profile asks at every consequential step; an unknown action goes to review, never auto-allowed; enabling the all-command gate gates every execution; drafting never publishes, and publish, external send and spend are granted separately per account and audience; relaxation scoped by environment, window or budget changes only that scope; a preset change keeps narrower human-review rules; a permissive project cannot weaken a locked installation restriction; effective policy shows source grants, inherited restrictions and effect time, and preview reports the practical effect before apply; a materially broader action, likely danger or unexpected spend needs a new decision while a standing grant survives handoff and restart without a prompt; a conversation action request (U02 stores it with needsAuthorization) is evaluated as a request under the effective policy, and nothing is executed because a message asked; approval load (authorization-and-delegation, 'Approval load is a design target'): the chosen preset says which classes reach the owner (where it places them, low-risk runs without asking, middle goes to delegated agent review with the owner shown a sample afterwards, only consequential or irreversible asks the owner); a change of profile keeps the cells, locks and reserved tools the owner set (tested); the owner's own installation starts derived from its private configuration, applied at first run by the setup card (U08); only an approval grant waives asking, never a capability grant, and for what stays a decision it must name the tool or class exactly (a customer-live deployment also the environment); the instruction's scope (ceiling, who set it, estimate) is read from the task's stored contract and a ceiling the acting agent wrote itself is ignored (tested).
+- **Acceptance and verification:** A fresh install starts strict and the owner's own installation starts derived (private deployment configuration); the derived profile works so: an explicit instruction (build, fix what fails, integrate) authorizes the reasonably necessary steps inside its scope, including fixing and retrying, merging into the integration branch and deploying to development and test environments, without asking again; the scope is recorded and shown with the work; a project whose environment is testing flows freely, within its own repositories, the integration branch and its development and test environments, with sandbox, protected-filesystem and Git-bridge rules unchanged and never a protected branch, the main release branch or another project; a customer-live environment, access changes, new external access, publishing to a new audience, spend beyond the estimate and destructive irreversible actions still need a decision unless the instruction named them; the strict profile asks at every consequential step; an unknown action goes to review, never auto-allowed; enabling the all-command gate gates every execution; drafting never publishes, and publish, external send and spend are granted separately per account and audience; relaxation scoped by environment, window or budget changes only that scope; a preset change keeps narrower human-review rules; a permissive project cannot weaken a locked installation restriction; effective policy shows source grants, inherited restrictions and effect time, and preview reports the practical effect before apply; a materially broader action, likely danger or unexpected spend needs a new decision while a standing grant survives handoff and restart without a prompt; a conversation action request (U02 stores it with needsAuthorization) is evaluated as a request under the effective policy, and nothing is executed because a message asked; approval load (authorization-and-delegation, 'Approval load is a design target'): the chosen preset says which classes reach the owner (where it places them, low-risk runs without asking, middle goes to delegated agent review with the owner shown a sample afterwards, only consequential or irreversible asks the owner); a change of profile keeps the cells, locks and reserved tools the owner set (tested); the owner's own installation starts derived from its private configuration, applied at first run by the setup card (U08); only an approval grant waives asking, never a capability grant, and for what stays a decision it must name the tool or class exactly (a customer-live deployment also the environment); the instruction's scope (ceiling, who set it, estimate) is read from the task's stored contract and a ceiling the acting agent wrote itself is ignored (tested); amended 2026-10-28: the controller derives protected branches (A07f) and main-automatic (P08) is the only owner-configured exception, granted exactly and limited to one branch.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### A07b — Implement standing-rule proposals and approval-load measurement
@@ -1046,7 +1046,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 
 - **Parent:** N10 / AII-260.
 - **Blockers:** H12, A04, A06, H12l.
-- **Deliverable:** Call the H12 quiesce (freeze, settle, checkpoint) from the A04 integration, A06 release and refresh paths and from quarantine.
+- **Deliverable:** Call the H12 quiesce (freeze, settle, checkpoint) from the A06 release path and landing; integration, refresh and quarantine are already wrapped by H12l, and the agent-side ending is H12n.
 - **Acceptance and verification:** Integration, refresh or quarantine never runs while an attempt has an unsettled tool call; the attempt checkpoints and resumes after; a failed settle blocks the operation with a typed blocker; tested with a call in flight.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
@@ -1773,7 +1773,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Parent:** N14 / AII-264.
 - **Blockers:** P01, A04, L04, Y02, H12.
 - **Deliverable:** Worktree/workspace adapter and integration contract.
-- **Acceptance and verification:** Dirty/untracked work survives interruption; conflicting integration revalidates evidence; no metadata pollution of target checkout; the task workspace admits only repositories in the task's access scope and records the initial working state; an accepted proposal (a suggestion, not an instruction) never authorizes a downstream push, merge or deploy.
+- **Acceptance and verification:** Dirty/untracked work survives interruption; conflicting integration revalidates evidence; no metadata pollution of target checkout; the task workspace admits only repositories in the task's access scope and records the initial working state; an accepted proposal (a suggestion, not an instruction) never authorizes a downstream push, merge or deploy; amended 2026-10-28: the integration contract means submission plus landing by the project integrator (P10).
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### P02b — Implement optional work-in-progress branch backup (after the first release)
@@ -1805,7 +1805,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Parent:** N14 / AII-264.
 - **Blockers:** P02, A06, A07, T03, F09.
 - **Deliverable:** Contribution adapter (push, open and revise PR or MR, read review and CI status) behind separate action scopes, repository-instruction discovery, pre-submission diff check and linked multi-repository change sets (README 229-233, 645, 668; organization-and-workers 27-29, 64; pitfalls-and-safeguards 149).
-- **Acceptance and verification:** Existing contribution guides and instruction files are discovered and applied without adding NimbleNewt conventions; the checkout's starting state is recorded; an automated diff check blocks unrelated files, NimbleNewt state, ignore-rule edits and secrets before commit or PR; the requested PR contains only intended files and keeps unrelated local work; a local edit grant does not permit push, PR or merge, and owner approval does not bypass branch protection or CI; revision after review comments works; attribution is accurate; each push and PR is an effect-ledger operation; a multi-repository change set records review order, shows partial completion and is resumable, never treated as atomic.
+- **Acceptance and verification:** Existing contribution guides and instruction files are discovered and applied without adding NimbleNewt conventions; the checkout's starting state is recorded; an automated diff check blocks unrelated files, NimbleNewt state, ignore-rule edits and secrets before commit or PR; the requested PR contains only intended files and keeps unrelated local work; a local edit grant does not permit push, PR or merge, and owner approval does not bypass branch protection or CI; revision after review comments works; attribution is accurate; each push and PR is an effect-ledger operation; a multi-repository change set records review order, shows partial completion and is resumable, never treated as atomic; amended 2026-10-28: landing on main never pushes upstream (P10c).
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### P06 — Implement project and agent retirement and archival
@@ -1829,7 +1829,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Parent:** N15 / AII-265.
 - **Blockers:** S06, U01, P02, P03, S10.
 - **Deliverable:** Versioned output records and review state.
-- **Acceptance and verification:** Tool completion alone cannot accept task; missing/changed artifact invalidates review; rejected version history retained; draft, submitted, under-review, accepted, rejected and superseded are distinct versioned events; the deliverable records type, responsible agent, audience and access scope; an operational outcome can be a deliverable with verifiable reference, system version and observation time; source and exported artifacts can be grouped under one version; submission is checked against the task contract revision in force (S10).
+- **Acceptance and verification:** Tool completion alone cannot accept task; missing/changed artifact invalidates review; rejected version history retained; draft, submitted, under-review, accepted, rejected and superseded are distinct versioned events; the deliverable records type, responsible agent, audience and access scope; an operational outcome can be a deliverable with verifiable reference, system version and observation time; source and exported artifacts can be grouped under one version; submission is checked against the task contract revision in force (S10); amended 2026-10-28: submission kinds by role are Q01b.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### Q02 — Implement independent QA and dependency-bound evidence
@@ -1837,7 +1837,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Parent:** N15 / AII-265.
 - **Blockers:** Q01, A06, C03, H05, C08.
 - **Deliverable:** Self-check/QA records and stale-evidence propagation; review policy (scope, triggers including periodic and incident, required checks, whether independent review gates completion) and a project QA view.
-- **Acceptance and verification:** Reviewer inspects actual version; changed dependency invalidates affected test/review; role title grants no access; a verdict cites the current acceptance-criteria and decision revisions and a rejection must cite an unmet owner requirement; a team vote cannot override an owner decision and work bound to a superseded decision fails review (C08); findings record environment, criteria revision and time; passed, failed, blocked and not-run are distinct and absent evidence fails the gate; invalidation schedules revalidation; independent evidence is counted by original source (DeskService.independence): a copy and the original are one source.
+- **Acceptance and verification:** Reviewer inspects actual version; changed dependency invalidates affected test/review; role title grants no access; a verdict cites the current acceptance-criteria and decision revisions and a rejection must cite an unmet owner requirement; a team vote cannot override an owner decision and work bound to a superseded decision fails review (C08); findings record environment, criteria revision and time; passed, failed, blocked and not-run are distinct and absent evidence fails the gate; invalidation schedules revalidation; independent evidence is counted by original source (DeskService.independence): a copy and the original are one source; amended 2026-10-28: evidence is bound to a tree id and a reviewer verdict carries over only by unchanged patch-id (P09).
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### Q03 — Implement documentation impact and release evidence links
@@ -1845,7 +1845,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Parent:** N15 / AII-265.
 - **Blockers:** Q02, C02.
 - **Deliverable:** User/developer documentation obligations and traceability.
-- **Acceptance and verification:** Behavior change links required doc updates to tested artifact; no unsupported marketing capability claims; doc obligations record owner, applicable version, implementation references and validation status and stale or unverified docs are flagged; the impact check creates assigned update tasks; a release change flags linked docs, support guidance and promotional assets.
+- **Acceptance and verification:** Behavior change links required doc updates to tested artifact; no unsupported marketing capability claims; doc obligations record owner, applicable version, implementation references and validation status and stale or unverified docs are flagged; the impact check creates assigned update tasks; a release change flags linked docs, support guidance and promotional assets; amended 2026-10-28: the docs role submits a document change (Q01b).
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### Q04 — Implement defect tracking, review cycles and overrides
@@ -1853,7 +1853,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Parent:** N15 / AII-265.
 - **Blockers:** Q02, C08.
 - **Deliverable:** Defect records (severity, evidence, responsible agent, resolution), bounded repair and review cycles, escalation of unresolved disagreements and explicit owner override records (README 122-136).
-- **Acceptance and verification:** A defect links to the version and finding; after the configured number of repair and review cycles it escalates to the owner; an owner override records the decision and the remaining findings and a failed check is never rewritten as passed; a QA agent that commits a fix becomes a contributor and cannot approve it; periodic and incident-triggered reviews run without interrupting contributors; chat answers what has been checked, what waits for QA and team-wide risks with evidence links.
+- **Acceptance and verification:** A defect links to the version and finding; after the configured number of repair and review cycles it escalates to the owner; an owner override records the decision and the remaining findings and a failed check is never rewritten as passed; a QA agent that commits a fix becomes a contributor and cannot approve it; periodic and incident-triggered reviews run without interrupting contributors; chat answers what has been checked, what waits for QA and team-wide risks with evidence links; amended 2026-10-28: a conflict returned to its author counts as a repair cycle (P10).
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### B01 — Implement production/improvement budget admission
@@ -2019,8 +2019,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### X02 — Run policy, isolation and adversarial campaign
 
 - **Parent:** N18 / AII-268.
-- **Blockers:** A06, U04, T05, Q02, G05, A07, A09, A10, T08, T09, P05, H05b, A10b, M05b, B06, H12i.
-- **Deliverable:** Scope/revocation/escape/injection and review-race evidence.
+- **Blockers:** A06, U04, H12n, H12p, P08, P10, P10b, A07f, T05, Q02, G05, A07, A09, A10, T08, T09, P05, H05b, A10b, M05b, B06, H12i.
+- **Deliverable:** Scope/revocation/escape/injection (also: an agent omitting branchProtected, an integrator writing content, two integrators racing for one branch, data leaking between projects through a pooled integrator, an agent approving its own submission or sign-off, quoted text setting main-automatic, injection from submitted content reaching reviewers) and review-race evidence.
 - **Acceptance and verification:** Alternate shell/tool/MCP/API paths cannot bypass grants or human gate; reviewer outage cannot authorize work; a project named NimbleNewt gains no authority over the installation or updater; no outbound telemetry, issue, PR or report leaves without explicit scoped authorization (network capture); agent B cannot reach suspended agent A's scratch through file paths, search or artifact links, repeated after restart and harness change; an agent in the NimbleNewt project cannot launch, install or activate a candidate by any path (shell, MCP, API, updater) without an owner-approved proposal for that exact revision.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
@@ -2088,10 +2088,106 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** Examples match current API; dependencies/licenses inventoried; security reporting and compatibility support documented; documents flush guarantees for process crash, orderly shutdown and power loss, and the rule that a non-TypeScript component needs a recorded justification, bounded interface and maintenance plan.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
+### H11b — Standard role templates with display labels
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H11.
+- **Deliverable:** Owner decision 2026-10-28: role ids author, reviewer, integrator, qa, docs and director with capability bundles; an owner label per role (for example "CTO" for director), display only; supervisor stays the agent's supervisorId link.
+- **Acceptance and verification:** Seeded templates exist on a new installation; a label change alters no grant, check or history; ids still match ROLE_NAME; the director and the supervisor link may be the same agent; one agent may hold qa and docs together; labels are owner-only edits.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### Q01b — Record submission kinds by role
+
+- **Parent:** N15 / AII-265.
+- **Blockers:** Q01, H11b.
+- **Deliverable:** Submission record per attempt: kind (code tree with base, tree, patch-id and refresh round; review verdict; QA report; document change; director sign-off), the submitting role, and the check evidence bound to the exact tree or artifact version.
+- **Acceptance and verification:** A role may submit only its own kinds; a code submission names base and tree; a non-code submission makes no commit; a director sign-off cannot be given on the director's own work; evidence for a different tree is rejected.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### A07f — Derive protected branches in the controller and scope approval grants to branches
+
+- **Parent:** N06 / AII-256.
+- **Blockers:** A07, P01.
+- **Deliverable:** The project's branch settings (landing branch, main, protected list) decide branchProtected for push and merge; the worker's own flag is ignored; approval grants gain a branches term.
+- **Acceptance and verification:** An agent that omits or falsifies branchProtected is still sent to the owner (test); a grant that does not name the branch cannot waive it; a standing grant still never waives a protected branch.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### P08 — Store the integration policy per project with an installation default
+
+- **Parent:** N14 / AII-264.
+- **Blockers:** P01, A07f, U10, H11b, A06.
+- **Deliverable:** Owner decision 2026-10-28: owner-only integration.set with the landing mode (integration-branch, main-automatic, human-promotes; all three supported and main-automatic must be possible in every profile when the owner sets it, with no human step per landing), who integrates, required checks, review need and the refresh-round cap; an installation default for new projects; profile defaults (strict human-promotes; derived and autonomous integration-branch); the effective mode and its source saved at project creation; the A06 gate-policy humanOnly folded into this policy.
+- **Acceptance and verification:** Precedence is installation lock > project > installation default > profile, tested; a non-owner or an agent holding project.update cannot change it; main-automatic records a C08 decision, an audit entry and an exact branch-scoped grant held only by the landing service, and switching it off revokes that grant at once; a project set to main-automatic lands on main with no human step; a profile switch changes no existing project and its preview lists the projects affected; an API create without settings takes the default.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### P08b — Change integration settings and create projects with them in chat
+
+- **Parent:** N14 / AII-264.
+- **Blockers:** P08, C08c, U03.
+- **Deliverable:** Chat integration.set always shown as a proposal; the project.create proposal carries an integration section filled from the defaults and lists the four questions (who integrates, landing mode, required checks, review); the owner's answers re-draft the proposal.
+- **Acceptance and verification:** Nothing applies before the owner says yes; quoted or foreign text cannot set main-automatic; the chat and the API produce the same records.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### H12n — End agent work with work.end
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H12, H12l, Q01b, P08.
+- **Deliverable:** The agent tool work.end {submit, result, note, message}: checked at once, a durable ending intent and freeze, the controller completes the ending (settle, kill hung calls with a reason, stage, open a submission, finish the attempt); submit is refused when the base is stale and overlapping files changed.
+- **Acceptance and verification:** Owner stop wins; an emergency stop drops the intent; a restart resumes the ending once; a repeated finish gives one ending; a killed write call turns submit into end with a typed release_failed blocker; a stale overlapping submit is refused with the head commit and the overlapping files; plain end is never refused.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### H12p — Let the author refresh its own checkout before submitting
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H12n, H12m.
+- **Deliverable:** Worker three-way re-apply of the agent's work onto the current landing-branch head (conflict markers plus a list), exposed as the agent's work.refresh tool with no quiesce and recorded in the workspace record.
+- **Acceptance and verification:** Changed and new files survive; conflicts are listed and never resolved automatically; refresh rounds are counted on the submission; tested on a branch that moved in overlapping and in unrelated files.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### H12o — Commit an approved submission exactly once
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H12n, A06.
+- **Deliverable:** Commit of the approved tree tied to the submission; recovery recognises a commit that was already made.
+- **Acceptance and verification:** A restart or a retry between commit and record makes one commit; a changed tree or base needs a new approval.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### P09 — Gate landing on required checks for the exact integrated tree
+
+- **Parent:** N14 / AII-264.
+- **Blockers:** P08, Q01b, Q02.
+- **Deliverable:** Required checks of the policy run on the integrated tree; the author's evidence is checked against the submitted tree; a reviewer verdict carries over only when the patch-id is unchanged.
+- **Acceptance and verification:** A different tree never passes on old evidence; a failure goes back to the author with the results; not-run counts as failed.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### P10 — Land submissions with one leased integrator per project
+
+- **Parent:** N14 / AII-264.
+- **Blockers:** P08, P09, H12o, H12d, Q01b, A07f, Q04.
+- **Deliverable:** A fenced, expiring lease per landing branch; an oldest-first queue with reservations; a base==head check; mechanical re-apply only when files are disjoint; overlap returns the work to the author; after the refresh-round cap a reservation, then escalation to the director.
+- **Acceptance and verification:** Never two integrators on one branch (race test); a lost integrator frees the lease; the integrator writes no content (any diff beyond the submissions is refused); a retired author's task is reassigned; the Q04 cycle limit escalates; no submission waits forever under steady load (test).
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### P10b — Share integrators across projects as a pool
+
+- **Parent:** N14 / AII-264.
+- **Blockers:** P10, H03, A10b, R05.
+- **Deliverable:** Free integrators take the next project with queued work; another is woken through admission and budget, with reserved capacity.
+- **Acceptance and verification:** Credentials and context are fresh per project (no data crosses between projects, test); a full queue of author attempts does not starve landing; when no capacity is left, work waits with a visible reason.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### P10c — Promote to main automatically or by a human
+
+- **Parent:** N14 / AII-264.
+- **Blockers:** P10, A07f, P05.
+- **Deliverable:** main-automatic promotes after checks pass using the landing service's branch-scoped grant, with no human step; human-promotes asks a human for a snapshot without holding the lease; external remotes still go through P05.
+- **Acceptance and verification:** A project set to main-automatic reaches main with no human step once the required checks pass; an installation lock blocks it; waiting for a human in human-promotes does not stop landing; an upstream pull request is never treated as a main promotion.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
 ### D03 — Approve release readiness and publication decision
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, C07e, H07e, T09b, H07, H07b, H02e, T09, A07d, A07e, H07c, H07d.
+- **Blockers:** X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, C07e, H07e, T09b, H07, H07b, H02e, T09, A07d, A07e, H07c, H07d, H11b, Q01b, A07f, P08, P08b, H12n, H12p, H12o, P09, P10, P10b, P10c.
 - **Deliverable:** Exact release manifest, known limitations and owner signoff.
 - **Acceptance and verification:** All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
