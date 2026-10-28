@@ -47,7 +47,8 @@ test("integration policy: a project gets the installation default or the profile
       assert.equal((await call(ann, op, args as never, op.endsWith("set") ? "ann-1" : undefined)).error.code, "forbidden", op);
     // The lock: no project may be set to main-automatic, one already so is held back, and the default cannot be main-automatic under it.
     assert.ok((await call(boot.token, "integration.default.set", { forbidMainAutomatic: true }, "d2")).ok, "the lock always applies, even over a default of main-automatic");
-    assert.deepEqual([(await call(boot.token, "integration.default.get", {})).result.item.landing, (await call(boot.token, "integration.default.get", {})).result.item.forbidMainAutomatic], ["integration-branch", true]);
+    const heldDefault = (await call(boot.token, "integration.default.get", {})).result.item;
+    assert.deepEqual([heldDefault.landing, heldDefault.heldFrom, heldDefault.forbidMainAutomatic], ["integration-branch", "main-automatic", true], "held back where it is read, the owner's choice kept");
     assert.equal((await call(boot.token, "integration.default.set", { landing: "main-automatic" }, "d2b")).error.code, "invalid_command", "no default of main-automatic under the lock");
     assert.ok((await call(boot.token, "integration.default.set", { landing: "human-promotes" }, "d3")).ok);
     assert.equal((await call(boot.token, "integration.set", { project: a, landing: "main-automatic" }, "s3")).error.code, "forbidden");
@@ -92,6 +93,17 @@ test("in chat, how finished work lands is shown first and applies on the owner's
     const ok = await turn("m4", plain, [{ kind: "command", op: "integration.set", args: { project, landing: "main-automatic" }, evidence: plain, basis: "owner" }]);
     assert.equal(ok[0].status, "proposed", JSON.stringify(ok));
     // A new project can be drafted with the section; an agent cannot send it.
+    // The words check: negations and look-alikes do not count; the clause must be affirmative.
+    for (const [i, no] of ["never land Garden's work on main automatically", "do not make it main-automatic", "Garden's landing should remain automatic", "the domain automatically renews"].entries()) {
+      const out = await turn(`neg${i}`, no, [{ kind: "command", op: "integration.set", args: { project, landing: "main-automatic" }, evidence: no, basis: "owner" }]);
+      assert.notEqual(out[0].status, "proposed", no);
+    }
+    // A project is not made when its integration section cannot be set; and the section takes only its own four fields.
+    const before = (await call("project.list", {})).result.items.length;
+    assert.equal((await call("project.create", { name: "Bad", integration: { landing: "yolo" } }, "bad1")).error.code, "invalid_command");
+    assert.equal((await call("project.create", { name: "Bad", integration: null }, "bad2")).error.code, "invalid_command");
+    assert.equal((await call("project.create", { name: "Bad", integration: { projectId: project, landing: "human-promotes" } }, "bad3")).error.code, "invalid_command");
+    assert.equal((await call("project.list", {})).result.items.length, before, "nothing was created");
     const make = "create a project Orchard where a human promotes finished work";
     const draft = await turn("m5", make, [{ kind: "command", op: "project.create", args: { name: "Orchard", integration: { landing: "human-promotes", integrator: "human" } }, evidence: make, basis: "owner" }]);
     assert.equal(draft[0].status, "proposed", JSON.stringify(draft));

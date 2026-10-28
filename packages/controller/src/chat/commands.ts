@@ -58,7 +58,12 @@ export const TITLE_KEYS: Readonly<Record<string, string>> = { taskTitle: "taskId
 
 /** The argument names the operation takes (from the API's own table, so they cannot drift), plus the chat-only names and the revision the chat fills in. */
 /** The owner's own words say that finished work goes to main with no human step (card P08b). Quoted or forwarded text is never part of `words`. */
-export const SAYS_MAIN_AUTOMATIC = /main[\s-]*automatic|automatic(?:ally)?\s+(?:to|into|onto|on)\s+(?:the\s+)?main|(?:straight|directly)\s+(?:to|into|onto)\s+(?:the\s+)?main/i;
+const MAIN_AUTOMATIC = /\bmain[\s-]*automatic(?:ally)?\b|\bautomatic(?:ally)?\s+(?:to|into|onto|on)\s+(?:the\s+)?main\b|\b(?:straight|directly)\s+(?:to|into|onto)\s+(?:the\s+)?main\b/i;
+/** A negation in the same sentence as the phrase (not, never, don't, without, no, stop): then it is not an order to turn it on. */
+const NEGATED = /\b(?:not|never|no|without|don'?t|do\s+not|won'?t|shouldn'?t|stop|disable|turn\s+off)\b/i;
+export function saysMainAutomatic(words: string): boolean {
+  return words.split(/(?<=[.!?\n])\s+/).some((sentence) => MAIN_AUTOMATIC.test(sentence) && !NEGATED.test(sentence));
+}
 
 export function acceptedArgs(op: string): readonly string[] | undefined {
   const operation = OPERATION_BY_NAME.get(op);

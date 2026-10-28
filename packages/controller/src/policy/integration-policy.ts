@@ -82,6 +82,16 @@ export class IntegrationPolicyService {
     return new IntegrationPolicyService(new CommandRunner(storage, epoch, options));
   }
 
+  /** Whether these settings could be set now (right fields only, valid values, not against the installation lock), without writing anything. Refuses with the reason; used before a project is created with them. */
+  async precheck(owner: Principal, fields: unknown): Promise<void> {
+    this.#owner(owner, "change");
+    if (fields === null || typeof fields !== "object" || Array.isArray(fields)) invalid("integration", "must be an object");
+    const given = fields as Record<string, unknown>;
+    for (const key of Object.keys(given)) if (!["landing", "integrator", "requiredChecks", "refreshRounds"].includes(key)) invalid(`integration.${key}`, "is not a field of the integration section");
+    const parsed = parse(given, ["landing", "integrator", "requiredChecks", "refreshRounds"]);
+    if (parsed.landing === "main-automatic" && (await this.#locked())) throw new DomainError("forbidden", "the installation forbids landing on main automatically; the owner lifts that lock first");
+  }
+
   /** Makes the project's record if it has none (a no-op otherwise), from the installation default or the profile. Called when a project is created and when the policy is first read. */
   async ensure(projectId: string): Promise<void> {
     const id = this.#id(projectId);
@@ -141,13 +151,14 @@ export class IntegrationPolicyService {
   }
 
   /** The installation default for new projects, and the lock (owner only). */
-  async getDefault(owner: Principal): Promise<Partial<IntegrationSettings> & { revision: number; forbidMainAutomatic: boolean }> {
+  async getDefault(owner: Principal): Promise<Partial<IntegrationSettings> & { revision: number; forbidMainAutomatic: boolean; heldFrom?: Landing }> {
     this.#owner(owner, "read");
     const found = await this.#runner.get(DEFAULT_REF.kind, DEFAULT_REF.id);
     const body = found?.body as unknown as IntegrationDefaultBody | undefined;
     const { updatedBy: _by, updatedAt: _at, forbidMainAutomatic, ...settings } = body ?? ({} as IntegrationDefaultBody);
     void _by; void _at;
-    return { ...settings, revision: found?.revision ?? 0, forbidMainAutomatic: forbidMainAutomatic === true };
+    const held = forbidMainAutomatic === true && settings.landing === "main-automatic";
+    return { ...settings, ...(held ? { landing: "integration-branch" as const, heldFrom: "main-automatic" as const } : {}), revision: found?.revision ?? 0, forbidMainAutomatic: forbidMainAutomatic === true };
   }
 
   /** The owner sets what new projects start with, and may set the lock. Existing projects are not touched. */
@@ -163,9 +174,9 @@ export class IntegrationPolicyService {
         const before = current?.body as unknown as IntegrationDefaultBody | undefined;
         const forbid = changes.forbidMainAutomatic ?? before?.forbidMainAutomatic;
         const landing = changes.landing ?? before?.landing;
-        // An installation lock always applies: a default of main-automatic is held at the integration branch instead of refusing the lock.
+        // An installation lock always applies and never rewrites the owner's choice: the stored default stays, and is held at the integration branch where it is read, like a project's.
         if (changes.landing === "main-automatic" && forbid === true) throw new DomainError("invalid_command", "landing: the default cannot be main-automatic while main-automatic is forbidden", { field: "landing" });
-        const heldLanding = landing === "main-automatic" && forbid === true ? "integration-branch" : landing;
+        const heldLanding = landing;
         const checks = changes.requiredChecks ?? before?.requiredChecks;
         if (heldLanding === "main-automatic" && checks !== undefined && checks.length === 0) invalid("requiredChecks", "main-automatic needs at least one check");
         const next: IntegrationDefaultBody = { ...(heldLanding === undefined ? {} : { landing: heldLanding }), ...((changes.integrator ?? before?.integrator) === undefined ? {} : { integrator: changes.integrator ?? before!.integrator! }), ...((changes.requiredChecks ?? before?.requiredChecks) === undefined ? {} : { requiredChecks: changes.requiredChecks ?? before!.requiredChecks! }), ...((changes.refreshRounds ?? before?.refreshRounds) === undefined ? {} : { refreshRounds: changes.refreshRounds ?? before!.refreshRounds! }), ...(forbid === undefined ? {} : { forbidMainAutomatic: forbid }), updatedBy: owner.id, updatedAt: this.#runner.now() };

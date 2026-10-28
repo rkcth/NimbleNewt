@@ -58,7 +58,7 @@ export interface Context {
   readonly placement?: Pick<PlacementSettingsService, "get" | "set" | "change">;
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set">;
   readonly notes?: Pick<WorkingNoteService, "write" | "revise" | "setVisibility" | "read" | "versions" | "list">;
-  readonly integration?: Pick<IntegrationPolicyService, "get" | "set" | "getDefault" | "setDefault" | "ensure">;
+  readonly integration?: Pick<IntegrationPolicyService, "get" | "set" | "getDefault" | "setDefault" | "ensure" | "precheck">;
 
   readonly commands?: CommandService;
   /** Runs another operation as the same principal (card T09b); its answer, success or not, comes back whole. */
@@ -203,7 +203,7 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, ["noteId", "viaProject"]); return asJson({ item: await notesOf(c).read(c.principal, a["noteId"] as string, a["viaProject"] === undefined ? {} : { viaProject: a["viaProject"] as string }) }); } },
   { name: "note.versions", kind: "query", summary: "The kept versions of a working note the caller may read.", args: { noteId: "the note", "viaProject?": "one of the caller's own projects, when reading across an opened path" }, result: "`{ items }`.", completion: { kind: "completed" },
     run: async (c, a) => { only(a, ["noteId", "viaProject"]); return asJson({ items: await notesOf(c).versions(c.principal, a["noteId"] as string, a["viaProject"] === undefined ? {} : { viaProject: a["viaProject"] as string }) }); } },
-  { name: "note.list", kind: "query", summary: "Working notes the caller may read, newest first by ID.", args: { "projectId?": "only this project's", "ownerId?": "only this agent's", "viaProject?": "one of the caller's own projects, when reading across an opened path", "limit?": `1 to ${PAGE.max}`, "after?": "the `next` of the previous page" }, result: "`{ items, next? }`.", completion: { kind: "completed" },
+  { name: "note.list", kind: "query", summary: "Working notes the caller may read, in ID order.", args: { "projectId?": "only this project's", "ownerId?": "only this agent's", "viaProject?": "one of the caller's own projects, when reading across an opened path", "limit?": `1 to ${PAGE.max}`, "after?": "the `next` of the previous page" }, result: "`{ items, next? }`.", completion: { kind: "completed" },
     run: async (c, a) => { only(a, ["projectId", "ownerId", "viaProject", "limit", "after"]); const { limit: _l, after, ...rest } = a as Record<string, unknown>; return page(await notesOf(c).list(c.principal, { ...rest, limit: limitOf(a), ...(after === undefined ? {} : { afterId: after as string }) } as never)); } },
   { name: "grant.revoke", kind: "command", summary: "The owner takes a grant back (owner only; the revision you read must still be current). It stops counting at the next check.", args: { grantId: "the grant's ID", expectedRevision: "the revision you read", reason: "why, in the owner's words" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["grantId", "expectedRevision", "reason"]); await grantsOf(c).revoke(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
@@ -397,6 +397,8 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => {
       const { integration, ...rest } = a as { integration?: Record<string, unknown> };
       if (integration !== undefined && c.principal.kind !== "owner") throw new DomainError("forbidden", "only the owner sets how finished work lands");
+      // Checked before anything is created, so a refusal leaves no half-made project behind.
+      if (integration !== undefined && c.integration !== undefined) await c.integration.precheck(c.principal, integration);
       const made = written(await c.secure.createProject({ commandId: need(id), ...rest } as never));
       if (c.integration !== undefined) {
         await c.integration.ensure(made["id"] as string);

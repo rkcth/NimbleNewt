@@ -12,7 +12,7 @@ import type { Principal, PrincipalService } from "../security/principals.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { Cite, StatusRequest } from "../status/index.js";
 import type { CoordinatorService } from "./coordinator.js";
-import { SAYS_MAIN_AUTOMATIC, CHAT_OPS, TITLE_KEYS, acceptedArgs, describe, foreignValue, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { saysMainAutomatic, CHAT_OPS, TITLE_KEYS, acceptedArgs, describe, foreignValue, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { lengthInWords, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
 
@@ -427,7 +427,7 @@ export class ChatService {
       const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words);
       if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: `${foreign} is not in your message, so it was not done. Say what it should be.` }); continue; }
       const landing = intent.op === "project.create" ? (intent.args["integration"] as { landing?: unknown } | undefined)?.landing : intent.args["landing"];
-      if (landing === "main-automatic" && !SAYS_MAIN_AUTOMATIC.test(words)) { push({ i, kind: "refused", code: "unsupported_value", message: "Landing on main with no human step is only set when your own message says so (for example \"land finished work on main automatically\")." }); continue; }
+      if (landing === "main-automatic" && !saysMainAutomatic(words)) { push({ i, kind: "refused", code: "unsupported_value", message: "Landing on main with no human step is only set when your own message says so (for example \"land finished work on main automatically\")." }); continue; }
       const resolved = await this.#resolve(token, intent, currentFocus, pending, profile, words, quoted);
       if (!resolved.ok) { push(askOrRefuse(i, resolved, n)); continue; }
       projectId = resolved.projectId ?? projectId;

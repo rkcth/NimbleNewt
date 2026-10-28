@@ -140,7 +140,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `note.list`
 
-Working notes the caller may read, newest first by ID.
+Working notes the caller may read, in ID order.
 
 Arguments:
 

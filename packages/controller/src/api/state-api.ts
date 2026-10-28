@@ -84,7 +84,7 @@ export interface StateApiDeps {
   readonly placement?: Pick<PlacementSettingsService, "get" | "set" | "change">;
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set">;
   readonly notes?: Pick<WorkingNoteService, "write" | "revise" | "setVisibility" | "read" | "versions" | "list">;
-  readonly integration?: Pick<IntegrationPolicyService, "get" | "set" | "getDefault" | "setDefault" | "ensure">;
+  readonly integration?: Pick<IntegrationPolicyService, "get" | "set" | "getDefault" | "setDefault" | "ensure" | "precheck">;
 
   /** Typed commands (card T09b). Absent: `command.run` answers as unavailable. */
   readonly commands?: CommandService;
