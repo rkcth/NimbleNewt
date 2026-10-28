@@ -235,6 +235,11 @@ for (const backend of backends) {
     assert.deepEqual([second.state, second.at, second.answer], ["done", first.at, { paused: true }], "the second run is the record of the first, with the answer fetched again");
     assert.deepEqual(calls, [["task.pause", { task: "t1" }, `cmd-${id}`], ["task.pause", { task: "t1" }, `cmd-${id}`]], "the operation is asked again with the same command ID, so it answers from its own record and checks rights now");
     calls.length = 0;
+    // A replay the operation now refuses says so, and does not change the record.
+    const revoked = await c.cmd.run(c.ann, { commandId: cid("r"), id }, { ...how, invoke: async () => ({ ok: false as const, code: "forbidden", message: "no longer yours" }) });
+    assert.deepEqual([revoked.state, revoked.error?.code], ["failed", "forbidden"]);
+    assert.equal((await c.cmd.run(c.ann, { commandId: cid("r"), id }, how)).state, "done");
+    calls.length = 0;
     // Another principal, even the owner, cannot run what ann typed.
     await refuses("not_found", () => c.cmd.run(c.owner, { commandId: cid("r"), id }, how));
     await refuses("not_found", () => c.cmd.run(c.ben, { commandId: cid("r"), id }, how));

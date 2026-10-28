@@ -40,7 +40,7 @@ export interface RunBody {
 /** How a queued command is run: the operation a built-in name stands for, and a call to it as the typist (the state API, so the operation's own checks decide). */
 /** What running a command gives back: the record, and for a success the operation's answer, cut to a bound (`truncated` says so). The answer is not kept. */
 export type RunResult = RunBody & { readonly answer?: JsonObject; readonly truncated?: true };
-const TRANSIENT = new Set(["unavailable", "stale_revision", "internal", "rate_limited", "timeout", "lease_lost"]);
+const TRANSIENT = new Set(["unavailable", "stale_revision", "stale_epoch", "effect_busy"]);
 /** Cuts at a character count without splitting a surrogate pair. */
 const cutAt = (text: string, n: number): string => { const cut = text.slice(0, n); const last = cut.charCodeAt(cut.length - 1); return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut; };
 
@@ -187,6 +187,7 @@ export class CommandService {
     const operation = queued.target.layer === "protected" ? how.operationOf(queued.target.operationId) : undefined;
     let outcome: Omit<RunBody, "queuedId" | "by" | "at">;
     let answer: { answer?: JsonObject; truncated?: true } = {};
+    let refusedNow: { code: string; message: string } | undefined;
     if (queued.target.layer !== "protected") outcome = { state: "unsupported", error: { code: "unsupported", message: `${queued.target.layer === "toolbox" ? "toolbox" : "agent"} commands cannot be run from here yet` } };
     else if (operation === undefined) outcome = { state: "failed", error: { code: "not_found", message: `${queued.target.operationId} is no longer a command of this controller` } };
     else {
@@ -196,14 +197,15 @@ export class CommandService {
       if (raw !== "") {
         try { const parsed: unknown = JSON.parse(raw); if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) bad = "the arguments must be a JSON object, for example {\"project\": \"proj-…\"}"; else args = parsed as JsonObject; } catch { bad = "the arguments must be a JSON object, for example {\"project\": \"proj-…\"}"; }
       }
-      if (queued.redacted === true) bad = "the arguments held something that looks like a secret, so they were not kept and the command is not run from them; send the operation through the API instead";
+      if (queued.redacted === true) bad = "the arguments were too long or held something that looks like a secret, so they were not kept whole and the command is not run from them; send the operation through the API instead";
       if (bad !== undefined) outcome = { state: "failed", error: { code: "invalid_command", message: bad } };
       else {
         const answered = await how.invoke(operation, args, `cmd-${queued.id}`);
         if (!answered.ok) {
           const now = this.#runner.now();
           // A refusal that may pass (the controller busy, a revision that moved) is told but not recorded as final.
-          if (TRANSIENT.has(answered.code)) return { queuedId: queued.id, by: by.id, state: "failed", error: { code: answered.code, message: redactText(answered.message).slice(0, 500) }, at: now };
+          if (before !== undefined) refusedNow = { code: answered.code, message: redactText(answered.message).slice(0, 500) };
+          if (before === undefined && TRANSIENT.has(answered.code)) return { queuedId: queued.id, by: by.id, state: "failed", error: { code: answered.code, message: redactText(answered.message).slice(0, 500) }, at: now };
           outcome = { state: "failed", error: { code: answered.code, message: redactText(answered.message).slice(0, 500) } };
         } else {
           const text = JSON.stringify(answered.result);
@@ -212,7 +214,8 @@ export class CommandService {
         }
       }
     }
-    if (before !== undefined) return { ...before, ...answer };
+    // A replay of a success that the operation now refuses says so (the refusal is not recorded over the success).
+    if (before !== undefined) return refusedNow === undefined ? { ...before, ...answer } : { ...before, state: "failed", error: refusedNow };
     const ref: AggregateRef = { kind: "command-run", id: runId };
     const body: RunBody = { queuedId: queued.id, by: by.id, ...outcome, at: this.#runner.now() };
     try {
