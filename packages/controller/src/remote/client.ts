@@ -78,7 +78,7 @@ export class RemoteWorkerClient {
   }
 
   /** One attempt as the worker sees it, under the placement number it was offered. */
-  attempt(attemptId: string, placement: number): RemoteAttempt { return new RemoteAttempt(this, attemptId, placement); }
+  attempt(attemptId: string, placement: number, watchdog?: AttemptWatchdog): RemoteAttempt { return new RemoteAttempt(this, attemptId, placement, watchdog); }
 
   /** @internal */
   async send(method: string, path: string, call: Call = {}): Promise<{ status: number; body: unknown; raw: Buffer; headers: IncomingMessage["headers"] }> { return this.#send(method, path, call); }
@@ -139,23 +139,45 @@ export class RemoteWorkerClient {
   }
 }
 
+/** The worker's own check that its authority is alive (card H08, `LeaseWatchdog` in the worker package). Kept structural so this package does not depend on the worker's. */
+export interface AttemptWatchdog {
+  /** Throws once productive work has stopped (lease ended, fenced, machine slept, supervisor gone). */
+  assertProductive(): Promise<void>;
+  /** The time to put on a renewal before sending it. */
+  sending(): number;
+  renewed(sentAt: number, leaseMs: number): void;
+  lost(): Promise<void>;
+}
+
 /** One attempt on this worker. It is a `ToolGateway`, so a worker written for the dispatch contract runs unchanged over the wire; a call that needs the controller's ledger cannot be split and is refused (`call` runs local executors only). */
 export class RemoteAttempt implements ToolGateway {
-  constructor(private readonly client: RemoteWorkerClient, readonly attemptId: string, readonly placement: number) {}
+  constructor(private readonly client: RemoteWorkerClient, readonly attemptId: string, readonly placement: number, private readonly watchdog?: AttemptWatchdog) {}
 
   #path(action: string): string { return `/worker/attempts/${this.attemptId}/${action}`; }
   async #post(action: string, body: Record<string, Json>, key?: string): Promise<unknown> {
-    return (await this.client.send("POST", this.#path(action), { body: { placement: this.placement, ...body }, session: true, ...(key === undefined ? {} : { key }) })).body;
+    try {
+      return (await this.client.send("POST", this.#path(action), { body: { placement: this.placement, ...body }, session: true, ...(key === undefined ? {} : { key }) })).body;
+    } catch (error) {
+      // The controller says the attempt is no longer this worker's: productive work stops at once, whatever the lease says.
+      if (error instanceof WorkerRequestError && error.fenced) await this.watchdog?.lost();
+      throw error;
+    }
   }
 
   /** Takes the offer (or takes the attempt up again after a reconnect). `fenced` means the attempt was moved or ended: drop it. */
   async accept(): Promise<{ placement: number; expiresAt: string; controlSeq: number; checkpoint?: { artifactId: string; sequence: number } }> {
     return await this.#post("accept", {}) as never;
   }
-  async begin(request: ToolCallRequest): ReturnType<ToolGateway["begin"]> { return await this.#post("begin", { request: request as unknown as Json }) as never; }
+  async begin(request: ToolCallRequest): ReturnType<ToolGateway["begin"]> { await this.watchdog?.assertProductive(); return await this.#post("begin", { request: request as unknown as Json }) as never; }
   async report(operationId: string, outcome: Parameters<ToolGateway["report"]>[1]): Promise<ToolResult> { return await this.#post("report", { operationId, outcome: outcome as unknown as Json }) as never; }
   async usage(usage: TurnUsage): Promise<void> { await this.#post("usage", { usage: usage as unknown as Json }); }
-  async heartbeat(): Promise<{ readonly until: string }> { return await this.#post("heartbeat", {}) as never; }
+  async heartbeat(): Promise<{ readonly until: string }> {
+    const sentAt = this.watchdog?.sending();
+    const answer = await this.#post("heartbeat", {}) as { readonly until: string };
+    // The lease counts from the moment the renewal was sent, so a reply that took long does not stretch it. The controller's `until` is read against this machine's clock; skew only shortens or lengthens by the skew, and the cap in the watchdog bounds it.
+    if (sentAt !== undefined) this.watchdog?.renewed(sentAt, Math.max(0, Date.parse(answer.until) - Date.now()));
+    return answer;
+  }
   async acknowledgeDecisions(): Promise<void> { await this.#post("acknowledge", {}); }
 
   /** The split form run for a local executor: the controller decides and records, this runs it, the controller records how it ended. */

@@ -87,6 +87,33 @@ for (const backend of backends) {
     assert.equal((await c.remote.placement(c.owner, attemptId))!.hostId, r1.id);
   });
 
+  suite("the worker's watchdog guards the attempt: nothing begins once it says stop, a renewal counts from its send, and a fenced answer stops it (card H08)", async (c) => {
+    const r1 = await c.host("r1");
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const { attemptId } = await c.task("t", ann);
+    assert.deepEqual((await c.tick()).started, [attemptId]);
+    const offer = (await r1.client.offers())[0]!;
+    const log: string[] = [];
+    let productive = true;
+    const dog = {
+      assertProductive: async () => { log.push("assert"); if (!productive) throw new Error("lease lost"); },
+      sending: () => { log.push("sending"); return 4242; },
+      renewed: (sentAt: number, leaseMs: number) => { log.push(`renewed ${sentAt} ${typeof leaseMs === "number"}`); },
+      lost: async () => { log.push("lost"); productive = false; },
+    };
+    const mine = r1.client.attempt(attemptId!, offer.placement, dog);
+    await mine.accept();
+    assert.ok((await mine.heartbeat()).until);
+    assert.deepEqual(log, ["sending", "renewed 4242 true"], "the renewal is stamped when it is sent");
+    log.length = 0;
+    await mine.begin(READ("c1"));
+    assert.deepEqual(log.slice(0, 1), ["assert"], "the watchdog is asked before a call begins");
+    // The controller fences the attempt: the watchdog is told, and then nothing begins.
+    await wireRefuses("fenced", () => r1.client.attempt(attemptId!, offer.placement + 1, dog).heartbeat(), 409);
+    assert.ok(log.includes("lost"));
+    await assert.rejects(mine.begin(READ("c2")), /lease lost/);
+  });
+
   suite("a remote worker cannot take work it was not given: not another host's offer, not a higher placement number, not an attempt before it accepts, not an admission of its own", async (c) => {
     const r1 = await c.host("r1");
     const r2 = await c.host("r2");
