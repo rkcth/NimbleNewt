@@ -261,7 +261,7 @@ export async function startController(options: StartOptions): Promise<Controller
 
     // Where local-only data may go: the owner's setting over the approval profile's default, consulted at every placement on a remote host unless the operator gave a placement policy of their own (card H07c).
     const placement = PlacementSettingsService.withEpoch(storage, epoch);
-    const withPlacement = <T extends NonNullable<StartOptions["dispatch"]>>(dispatch: T): T => (dispatch?.remote === undefined || dispatch.remote.placementPolicy !== undefined ? dispatch : { ...dispatch, remote: { ...dispatch.remote, placementPolicy: placement.policy() } });
+    const withPlacement = <T extends NonNullable<StartOptions["dispatch"]>>(dispatch: T): T => (dispatch?.remote === undefined || dispatch.remote.placementPolicy !== undefined ? dispatch : Object.create(dispatch, { remote: { value: { ...dispatch.remote, placementPolicy: placement.policy() }, enumerable: true } }) as T); // not a spread: the options are read when the dispatcher is built, not here
     const configuration = ConfigurationService.withEpoch(storage, epoch, { routing, settings: MEETING_SETTINGS });
     const conversations = ConversationService.withEpoch(storage, epoch, { availability: pauses.availability });
     const resources = ProjectResourceService.withEpoch(storage, epoch);
