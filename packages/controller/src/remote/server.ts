@@ -1,6 +1,6 @@
 import { createServer as createHttp, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createServer as createHttps } from "node:https";
-import { isIP } from "node:net";
+import { isIP, type Socket } from "node:net";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import type { Principal, PrincipalService } from "../security/index.js";
 import { redactText } from "../security/redact.js";
@@ -15,13 +15,18 @@ export interface WorkerTransportLimits {
   /** Requests one authenticated host may make per minute, and one network address before it is authenticated (the connection's own address; X-Forwarded-For is never trusted). */
   readonly perPrincipalPerMinute: number;
   readonly perAddressPerMinute: number;
-  /** Open connections the listener accepts at once, and from one network address (a worker needs a few, and every idle host holds one poll open; a site's hosts often share one address, so this is more than one host's share; a flood from one place cannot take them all). */
-  readonly connections: number;
+  /**
+   * Connections that have not yet made an authenticated request (card H07d): at once from one network address, and in all. A connection that is refused here has not logged in, so a flood of slow or silent
+   * connections from a few addresses can fill only this pool and never the room of enrolled hosts. An address shared by a whole site is not limited once its hosts have logged in.
+   */
   readonly connectionsPerAddress: number;
+  readonly connections: number;
+  /** Open connections one enrolled host may hold (a worker needs a few and holds one poll open). The listener's room for logged-in hosts is this times the hosts enrolled, so it grows with them. */
+  readonly connectionsPerHost: number;
 }
 
 /** Provisional limits, adjustable. A busy worker makes several requests a second, so the per-host allowance is higher than a person's. */
-export const DEFAULT_WORKER_TRANSPORT_LIMITS: WorkerTransportLimits = { bodyBytes: REMOTE_LIMITS.bodyBytes, publishBytes: REMOTE_LIMITS.publishBytes, perPrincipalPerMinute: 6000, perAddressPerMinute: 3000, connections: 1000, connectionsPerAddress: 250 };
+export const DEFAULT_WORKER_TRANSPORT_LIMITS: WorkerTransportLimits = { bodyBytes: REMOTE_LIMITS.bodyBytes, publishBytes: REMOTE_LIMITS.publishBytes, perPrincipalPerMinute: 6000, perAddressPerMinute: 3000, connections: 400, connectionsPerAddress: 100, connectionsPerHost: 8 };
 
 export interface WorkerTransportOptions {
   readonly remote: RemoteWorkerService;
@@ -68,13 +73,14 @@ export class WorkerTransport {
   readonly #options: WorkerTransportOptions;
   readonly #limits: WorkerTransportLimits;
   readonly #hosts: Set<string>;
+  readonly #conns: ConnectionBook;
   readonly #windows = new Map<string, { start: number; count: number }>();
   readonly #now: () => number;
   readonly url: string;
   readonly port: number;
 
-  private constructor(server: Server, options: WorkerTransportOptions, limits: WorkerTransportLimits, hosts: Set<string>, url: string, port: number) {
-    this.#server = server; this.#options = options; this.#limits = limits; this.#hosts = hosts; this.url = url; this.port = port; this.#now = options.clock ?? Date.now;
+  private constructor(server: Server, options: WorkerTransportOptions, limits: WorkerTransportLimits, hosts: Set<string>, url: string, port: number, conns: ConnectionBook) {
+    this.#conns = conns; this.#server = server; this.#options = options; this.#limits = limits; this.#hosts = hosts; this.url = url; this.port = port; this.#now = options.clock ?? Date.now;
   }
 
   static async listen(options: WorkerTransportOptions): Promise<WorkerTransport> {
@@ -90,24 +96,20 @@ export class WorkerTransport {
     const handler = (req: IncomingMessage, res: ServerResponse): void => { void transport!.#handle(req, res); };
     const common = { maxHeaderSize: 16 * 1024 };
     const server = options.tls === undefined ? createHttp(common, handler) : createHttps({ ...common, cert: options.tls.cert, key: options.tls.key, minVersion: "TLSv1.2" }, handler);
-    server.maxConnections = limits.connections;
-    const open = new Map<string, number>();
-    server.on("connection", (socket) => {
-      const addr = socket.remoteAddress ?? "?";
-      const n = (open.get(addr) ?? 0) + 1;
-      if (n > limits.connectionsPerAddress) { socket.destroy(); return; }
-      open.set(addr, n);
-      socket.once("close", () => { const left = (open.get(addr) ?? 1) - 1; if (left <= 0) open.delete(addr); else open.set(addr, left); });
-    });
+    const conns = new ConnectionBook(limits);
+    server.on("connection", (socket) => { conns.accept(socket); });
     server.requestTimeout = 60_000; server.headersTimeout = 10_000; server.keepAliveTimeout = 5_000;
     await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(options.port ?? 0, host, () => { server.off("error", reject); resolve(); }); });
     const port = (server.address() as { port: number }).port;
     if (!remote) for (const h of ["127.0.0.1", "localhost", "[::1]"]) hosts.add(`${h}:${port}`);
     for (const h of options.publicHosts ?? []) { hosts.add(`${h.toLowerCase()}:${port}`); if (port === (options.tls === undefined ? 80 : 443)) hosts.add(h.toLowerCase()); }
     const url = `${options.tls === undefined ? "http" : "https"}://${isIP(host) === 6 ? `[${host}]` : host}:${port}`;
-    transport = new WorkerTransport(server, options, limits, hosts, url, port);
+    transport = new WorkerTransport(server, options, limits, hosts, url, port, conns);
     return transport;
   }
+
+  /** Connections open now, before and after login (for the owner's checks and tests). */
+  connectionCounts(): { readonly beforeLogin: number; readonly loggedIn: number } { return this.#conns.counts(); }
 
   async close(): Promise<void> {
     await new Promise<void>((resolve) => { this.#server.close(() => resolve()); this.#server.closeAllConnections(); });
@@ -121,6 +123,7 @@ export class WorkerTransport {
       this.#limit(`addr:${req.socket.remoteAddress ?? "?"}`, this.#limits.perAddressPerMinute);
       const host = await this.#authenticate(req);
       this.#limit(`principal:${host.id}`, this.#limits.perPrincipalPerMinute);
+      this.#conns.login(req.socket, host.id);
       this.#send(res, await this.#route(req, host));
     } catch (error) {
       this.#fail(res, error);
@@ -332,4 +335,48 @@ function decodeFiles(value: unknown, max: number): { path: string; content: Uint
     if (total > max) throw new HttpError(413, "too_large", `the files total more than ${max} bytes`);
     return { path: o["path"], content: bytes };
   });
+}
+
+/**
+ * Which connections are still unauthenticated and which belong to which enrolled host (card H07d). A connection counts against the per-address and total pre-login pools until its first authenticated request, then against
+ * its host's own allowance; so many logged-in hosts behind one address are not limited as strangers are, and strangers cannot take the logged-in hosts' room.
+ */
+class ConnectionBook {
+  readonly #byAddress = new Map<string, number>();
+  readonly #byHost = new Map<string, number>();
+  readonly #state = new WeakMap<Socket, { addr: string; host?: string }>();
+  #pre = 0;
+  constructor(private readonly limits: WorkerTransportLimits) {}
+
+  accept(socket: Socket): void {
+    const addr = socket.remoteAddress ?? "?";
+    const n = (this.#byAddress.get(addr) ?? 0) + 1;
+    if (n > this.limits.connectionsPerAddress || this.#pre + 1 > this.limits.connections) { socket.destroy(); return; }
+    this.#byAddress.set(addr, n); this.#pre++;
+    this.#state.set(socket, { addr });
+    socket.once("close", () => this.#close(socket));
+  }
+
+  /** The connection has made an authenticated request as this host. A host past its allowance is told so and the connection is closed after the answer. */
+  login(socket: Socket, host: string): void {
+    const state = this.#state.get(socket);
+    if (state === undefined || state.host === host) return;
+    if (state.host === undefined) this.#leavePre(state.addr); else this.#leaveHost(state.host);
+    state.host = host;
+    const n = (this.#byHost.get(host) ?? 0) + 1;
+    this.#byHost.set(host, n);
+    if (n > this.limits.connectionsPerHost) throw new HttpError(429, "rate_limited", "too many connections for this host", { "retry-after": "1", connection: "close" });
+  }
+
+  #leavePre(addr: string): void { this.#pre--; const left = (this.#byAddress.get(addr) ?? 1) - 1; if (left <= 0) this.#byAddress.delete(addr); else this.#byAddress.set(addr, left); }
+  #leaveHost(host: string): void { const left = (this.#byHost.get(host) ?? 1) - 1; if (left <= 0) this.#byHost.delete(host); else this.#byHost.set(host, left); }
+  #close(socket: Socket): void {
+    const state = this.#state.get(socket);
+    if (state === undefined) return;
+    this.#state.delete(socket);
+    if (state.host === undefined) this.#leavePre(state.addr); else this.#leaveHost(state.host);
+  }
+
+  /** For tests: connections in each pool. */
+  counts(): { readonly beforeLogin: number; readonly loggedIn: number } { let loggedIn = 0; for (const n of this.#byHost.values()) loggedIn += n; return { beforeLogin: this.#pre, loggedIn }; }
 }

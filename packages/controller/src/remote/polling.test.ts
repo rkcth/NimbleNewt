@@ -374,7 +374,7 @@ test("at the default poll and heartbeat intervals a hundred idle hosts behind on
   assert.equal(perHostPerMinute, 7);
   assert.ok(100 * perHostPerMinute * 2 <= DEFAULT_WORKER_TRANSPORT_LIMITS.perAddressPerMinute, "twice the idle rate of 100 hosts fits the per-address allowance");
   assert.ok(perHostPerMinute * 10 <= DEFAULT_WORKER_TRANSPORT_LIMITS.perPrincipalPerMinute);
-  assert.ok(100 + 10 <= DEFAULT_WORKER_TRANSPORT_LIMITS.connectionsPerAddress, "one held poll each plus a few other connections");
+  assert.ok(DEFAULT_WORKER_TRANSPORT_LIMITS.connectionsPerHost >= 4, "one held poll plus a few other connections per host");
 });
 
 test("when handing over offers keeps failing the poller backs off instead of polling again at once (card H07)", async () => {
