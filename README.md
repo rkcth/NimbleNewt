@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **127 of 244 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **137 of 249 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -109,18 +109,18 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓▓▓░` 93% | 15 of 16 |
 | Pi runtime and inference caching | `▓▓▓▓▓▓▓▓░░░░` 72% | 8 of 11 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
-| Pause, suspend and resume | `▓▓▓▓░░░░░░░░` 33% | 3 of 9 |
-| Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓░░░` 75% | 15 of 20 |
-| Context and memory | `▓▓▓▓▓▓▓▓▓░░░` 78% | 11 of 14 |
+| Pause, suspend and resume | `▓▓▓▓▓░░░░░░░` 45% | 5 of 11 |
+| Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓░░░` 80% | 16 of 20 |
+| Context and memory | `▓▓▓▓▓▓▓▓▓▓░░` 86% | 13 of 15 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
 | Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓░░` 90% | 10 of 11 |
-| Owner chat and web UI | `▓▓▓▓▓▓░░░░░░` 53% | 8 of 15 |
-| Workers, dispatch and teams | `▓▓▓▓▓▓░░░░░░` 57% | 23 of 40 |
+| Owner chat and web UI | `▓▓▓▓▓▓░░░░░░` 56% | 9 of 16 |
+| Workers, dispatch and teams | `▓▓▓▓▓▓▓░░░░░` 60% | 24 of 40 |
 | Agent messaging | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
 | Health and recovery | `▓▓▓▓▓▓▓▓▓░░░` 75% | 3 of 4 |
 | Meetings | `▓▓▓▓░░░░░░░░` 36% | 4 of 11 |
-| Tools and skills | `▓▓▓▓▓░░░░░░░` 41% | 5 of 12 |
-| Projects, repositories and workspaces | `▓▓░░░░░░░░░░` 18% | 3 of 16 |
+| Tools and skills | `▓▓▓▓▓▓░░░░░░` 50% | 6 of 12 |
+| Projects, repositories and workspaces | `▓▓▓░░░░░░░░░` 29% | 5 of 17 |
 | Quality: deliverables, QA and defects | `░░░░░░░░░░░░` 0% | 0 of 5 |
 | Balancing delivery and improvement | `░░░░░░░░░░░░` 0% | 0 of 1 |
 | Learning and improvement | `░░░░░░░░░░░░` 0% | 0 of 5 |
@@ -205,7 +205,7 @@ Project and task records, assignments, durable delivery, the effect ledger and a
 </details>
 
 <details>
-<summary><strong>Pause, suspend and resume</strong> — ▓▓▓▓░░░░░░░░ 3 of 9</summary>
+<summary><strong>Pause, suspend and resume</strong> — ▓▓▓▓▓░░░░░░░ 5 of 11</summary>
 
 Pause, suspend, stop, release and checked resume, interrupting a model mid-generation, the remote watchdog, and shutdown and reboot handling.
 
@@ -213,16 +213,18 @@ Pause, suspend, stop, release and checked resume, interrupting a model mid-gener
 - [x] **L01** · P27 · Implement Pause and background settlement _(needs C04, A02, S08, L05)_
 - [x] **L01b** · P29 · Run the reconciler and stall detection in the controller with the pause gates _(needs L01, H12)_
 - [ ] **L05b** · P29 · Feed the model stream into revision-bound generation _(needs L05, H12)_
-- [ ] **L02** · P31 · Implement Suspend and graceful Stop _(needs L01, T07)_
-- [ ] **H08** · P32 · Implement remote disconnect watchdog and hard stop _(needs H02, L02)_
+- [x] **L02** · P31 · Implement Suspend and graceful Stop _(needs L01, T07)_
+- [x] **H08** · P32 · Implement remote disconnect watchdog and hard stop _(needs H02, L02)_
 - [ ] **L03** · P32 · Implement prepared release and reassignment _(needs L02, S02, S05)_
 - [ ] **L04** · P32 · Implement checked resume and evidence invalidation _(needs C03, L02, A02)_
+- [ ] **H08b** · P33 · Run the lease watchdog in the real worker process _(needs H08, H12b)_
+- [ ] **L02b** · P33 · Resume stops after a restart and cover every scope _(needs L02, L03)_
 - [ ] **L06** · P33 · Implement team and system shutdown, reboot and resume policy _(needs L02, L03, H08, U06, H11)_
 
 </details>
 
 <details>
-<summary><strong>Security: identity, approvals and sandboxing</strong> — ▓▓▓▓▓▓▓▓▓░░░ 15 of 20</summary>
+<summary><strong>Security: identity, approvals and sandboxing</strong> — ▓▓▓▓▓▓▓▓▓░░░ 16 of 20</summary>
 
 Authenticated principals, revisioned grants, the sandbox launchers, the protected filesystem and Git bridge, approval policy and resource limits.
 
@@ -244,13 +246,13 @@ Authenticated principals, revisioned grants, the sandbox launchers, the protecte
 - [x] **A07d** · P27 · Offer a choice of standing-grant lengths with a system-chosen default _(needs A07b, A07c)_
 - [ ] **A08c** · P27 · Enforce per-agent resource limits on macOS and Windows (after the first release) _(needs A08b, A03b)_
 - [x] **A07e** · P28 · Suggest at least seven days for a standing grant _(needs A07d)_
-- [ ] **A07f** · P30 · Derive protected branches in the controller and scope approval grants to branches _(needs A07, P01)_
+- [x] **A07f** · P30 · Derive protected branches in the controller and scope approval grants to branches _(needs A07, P01)_
 - [ ] **A09** · P32 · Implement reviewed environment changes and maintenance requests _(needs A08, A05, H05, L02, T06)_
 
 </details>
 
 <details>
-<summary><strong>Context and memory</strong> — ▓▓▓▓▓▓▓▓▓░░░ 11 of 14</summary>
+<summary><strong>Context and memory</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 13 of 15</summary>
 
 Separated task, chat and meeting context, working notes, source-backed retrieval, safe-boundary continuation, retained branches, context budgets, owner decisions and the activity record.
 
@@ -259,11 +261,12 @@ Separated task, chat and meeting context, working notes, source-backed retrieval
 - [x] **C04** · P24 · Implement safe-boundary continuation capture _(needs C02, C03, F06)_
 - [x] **C05** · P25 · Implement retained context branches and selective updates _(needs C04, H04)_
 - [x] **C07** · P25 · Implement context budgets, the startup builder and stall-proof helpers _(needs C04, R01)_
-- [ ] **C01b** · P26 · Implement the shared working-notes tier _(needs C01, A02, A10)_
+- [x] **C01b** · P26 · Implement the shared working-notes tier _(needs C01, A02, A10)_
 - [x] **C07b** · P26 · Wire context budgets into dispatch and bound compaction _(needs C07, C04, R01)_
 - [x] **C07d** · P27 · Scale MCP result limits to the window and let the rest be read in pages _(needs C07b, R02)_
-- [ ] **C07e** · P29 · Rebuild the context view when a model route changes to a smaller window _(needs C07d, H12)_
+- [x] **C07e** · P29 · Rebuild the context view when a model route changes to a smaller window _(needs C07d, H12)_
 - [x] **C08** · P29 · Implement owner decision records and correction propagation _(needs C03, C07, U03, H06)_
+- [ ] **C07f** · P30 · Measure the route's fixed part and scale remote MCP limits _(needs C07e, H12)_
 - [x] **C08b** · P30 · Record decisions from the chat and interrupt running generation on correction _(needs C08, U03, L05)_
 - [ ] **C09** · P30 · Capture activity records and decision explanations _(needs C04, C08, T06, S05)_
 - [x] **C08c** · P31 · Propose chat gates and strict decisions before applying them _(needs C08b)_
@@ -302,7 +305,7 @@ Routes and capability policy, provider failure fallback, difficulty profiles, dr
 </details>
 
 <details>
-<summary><strong>Owner chat and web UI</strong> — ▓▓▓▓▓▓░░░░░░ 8 of 15</summary>
+<summary><strong>Owner chat and web UI</strong> — ▓▓▓▓▓▓░░░░░░ 9 of 16</summary>
 
 Talking to your agents: the chat interpreter, policy editing, status and blocker explanations, recovery chat, notifications and the responsive web interface.
 
@@ -317,7 +320,8 @@ Talking to your agents: the chat interpreter, policy editing, status and blocker
 - [x] **U03e** · P30 · Let the owner grant and revoke rights through the state API and the chat _(needs U03, L01b)_
 - [x] **U05b** · P30 · Verify artifacts and inspect failed handlings in the composed status _(needs U05, H06c)_
 - [ ] **U09** · P31 · Implement read-only activity timeline and replay views _(needs C09, U05, A10, C06b)_
-- [ ] **U06** · P32 · Implement deterministic recovery chat controls _(needs U01, L02, A02)_
+- [x] **U06** · P32 · Implement deterministic recovery chat controls _(needs U01, L02, A02)_
+- [ ] **U06b** · P33 · Recovery chat controls for routes and providers, and shorthand _(needs U06, R04)_
 - [ ] **U07** · P33 · Qualify responsive web chat over private networking _(needs U03, U06, A01, R05)_
 - [ ] **U08** · P34 · Implement settings and administration views _(needs U07, U10, A07, F09, H11, R03, T03, A07b, A07c)_
 - [ ] **U11b** · P34 · Implement notification levels, the Needs you view and escalation to Urgent _(needs U11, A07b, H05, M03, H12, K01, H01, H09, A08)_
@@ -325,7 +329,7 @@ Talking to your agents: the chat interpreter, policy editing, status and blocker
 </details>
 
 <details>
-<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓▓░░░░░░ 23 of 40</summary>
+<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓▓▓░░░░░ 24 of 40</summary>
 
 Enrolled hosts, remote workers, priority admission, the local worker runtime and dispatcher, agents, teams and roles, reviews and wait-cycle handling.
 
@@ -336,7 +340,7 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 - [x] **H06** · P24 · Implement event subscriptions and gap recovery _(needs S07, C03)_
 - [x] **H11** · P24 · Implement agent, team and role records _(needs A02, C01, R01, U01)_
 - [x] **H06b** · P25 · Expire idle event subscriptions _(needs H06)_
-- [ ] **H11b** · P25 · Standard role templates with display labels _(needs H11)_
+- [x] **H11b** · P25 · Standard role templates with display labels _(needs H11)_
 - [ ] **H13** · P26 · Implement event source adapters and watchers _(needs H06, H01, R02)_
 - [x] **H06c** · P27 · Deliver idle-expiry notices in the running controller _(needs H06b, U11)_
 - [x] **H05b** · P28 · Implement reviewer pause and hold behaviour _(needs H05, L01)_
@@ -416,7 +420,7 @@ Scheduling, votes and decisions, stand-ups, attendance and return to work, and f
 </details>
 
 <details>
-<summary><strong>Tools and skills</strong> — ▓▓▓▓▓░░░░░░░ 5 of 12</summary>
+<summary><strong>Tools and skills</strong> — ▓▓▓▓▓▓░░░░░░ 6 of 12</summary>
 
 The immutable tool and skill catalogue, review and promotion, MCP connections, the protected agent tool bridge and background jobs.
 
@@ -427,7 +431,7 @@ The immutable tool and skill catalogue, review and promotion, MCP connections, t
 - [x] **T07** · P30 · Implement durable job records and job control _(needs T06, S05)_
 - [x] **T09** · P30 · Implement command namespaces and alias dispatch _(needs T06, H11, U03)_
 - [ ] **T07b** · P31 · Give agents job control through the tool bridge and bind jobs to the sandbox, the MCP client and the API _(needs T07, T06b, H12g)_
-- [ ] **T09b** · P31 · Wire command namespaces into the controller, state API and chat and run built-in commands _(needs T09)_
+- [x] **T09b** · P31 · Wire command namespaces into the controller, state API and chat and run built-in commands _(needs T09)_
 - [ ] **T09c** · P32 · Run queued toolbox commands through the approval gates _(needs T09b)_
 - [ ] **T09d** · P32 · Run queued agent commands _(needs T09b)_
 - [ ] **T02** · P33 · Implement review/promotion/deprecation and retention _(needs T01, A05, L04)_
@@ -436,16 +440,17 @@ The immutable tool and skill catalogue, review and promotion, MCP connections, t
 </details>
 
 <details>
-<summary><strong>Projects, repositories and workspaces</strong> — ▓▓░░░░░░░░░░ 3 of 16</summary>
+<summary><strong>Projects, repositories and workspaces</strong> — ▓▓▓░░░░░░░░░ 5 of 17</summary>
 
 Repository-independent projects, isolated coding workspaces, non-code and sandbox operations, ongoing responsibilities and external contribution.
 
 - [x] **P01** · P29 · Implement repository-independent projects and responsibilities _(needs U03, S01)_
 - [x] **P01b** · P30 · Mend the checkout pin edge cases _(needs P01)_
 - [x] **P01c** · P31 · Scan the pin and overlap checks per project _(needs P01b)_
-- [ ] **P08** · P31 · Store the integration policy per project with an installation default _(needs P01, A07f, U10, H11b, A06)_
-- [ ] **P08b** · P32 · Change integration settings and create projects with them in chat _(needs P08, C08c, U03)_
+- [x] **P08** · P31 · Store the integration policy per project with an installation default _(needs P01, A07f, U10, H11b, A06)_
+- [x] **P08b** · P32 · Change integration settings and create projects with them in chat _(needs P08, C08c, U03)_
 - [ ] **P04** · P33 · Implement ongoing responsibility checks, incidents and coverage _(needs P01, S08, H13, V01, L03)_
+- [ ] **P08c** · P33 · Guide project creation in chat and list integration defaults _(needs P08b)_
 - [ ] **P06** · P34 · Implement project and agent retirement and archival _(needs P01, H11, L03, K06)_
 - [ ] **P02** · P35 · Implement isolated coding workspaces and integration _(needs P01, A04, L04, Y02, H12)_
 - [ ] **P03** · P35 · Implement non-code and sandbox operations adapters _(needs P01, T01, S05, Y02, H12)_
@@ -546,7 +551,7 @@ Installation, documentation, QA on real machines, the release decision and closi
 - [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, C07e, H07e, T09b, H07, H07b, H02e, T09, A07d, A07e, H07c, H07d, H11b, Q01b, A07f, P08, P08b, H12n, H12p, H12o, P09, P10, P10b, P10c, T09c, T09d)_
 - [ ] **D04** · P50 · Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
 - [ ] **D04b** · P51 · Measure code-navigation aids on real coding tasks (optional, after the first release) _(needs D04)_
-- [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, U03c, K06b, K01d, P02b, A08c)_
+- [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c)_
 
 </details>
 

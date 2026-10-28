@@ -32,16 +32,16 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N02 / AII-252 | F01, F02, F03, F04a, F04b, F04c, F04d, F04, F04f, F04g, F04h, F04i, F04j, F04k, F04e, F09 |
 | N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06, C06b |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
-| N05 / AII-255 | L05, L05b, L01, L01b, L02, L03, L04, L06, H08 |
+| N05 / AII-255 | L05, L05b, L01, L01b, L02, L02b, L03, L04, L06, H08, H08b |
 | N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A07e, A08, A08b, A08c, A09, A10, A10b, A07f |
-| N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C07e, C08, C09, C08b, C08c, C08d |
+| N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C07e, C07f, C08, C09, C08b, C08c, C08d |
 | N08 / AII-258 | R01, R02, R03, R04, R05, R05b, R05c, R05d, R05f, R05g, R05e |
-| N09 / AII-259 | U03, U03d, U03e, U05b, U04, U05, U06, U03b, U03c, U07, U09, U08, U10, U11, U11b |
+| N09 / AII-259 | U03, U03d, U03e, U05b, U04, U05, U06, U06b, U03b, U03c, U07, U09, U08, U10, U11, U11b |
 | N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H07b, H07c, H07d, H07e, H02e, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H02b, H02c, H02d, H11b, H12n, H12p, H12o |
 | N11 / AII-261 | V01, V01b, V01c, V02 |
 | N12 / AII-262 | M01b, M01c, M01d, M00, M01, M02, M03, M04, M05, M05b, M06 |
 | N13 / AII-263 | T01, T02, T03, T06, T06b, T07, T07b, T08, T09, T09b, T09c, T09d |
-| N14 / AII-264 | P01b, P01c, P01, P02, P02b, P03, P04, P05, P06, P07, P08, P08b, P09, P10, P10b, P10c |
+| N14 / AII-264 | P01b, P01c, P01, P02, P02b, P03, P04, P05, P06, P07, P08, P08b, P08c, P09, P10, P10b, P10c |
 | N15 / AII-265 | Q01, Q02, Q03, Q04, Q01b |
 | N16 / AII-266 | B01 |
 | N17 / AII-267 | K01, K01b, K01c, K01d, K02, K03, K04, K05, K06, K06b, K07 |
@@ -633,6 +633,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### C01b — Implement the shared working-notes tier
 
 - **Parent:** N07 / AII-257.
+- **Status:** implemented; commits `a51dc2a`; CI runs 40768256488; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Working notes are reachable through the state API.
 - **Blockers:** C01, A02, A10.
 - **Deliverable:** A second desk tier beside private scratch (owner idea 2026-10-22): shared working notes, entries an agent writes on purpose for others in its project to read while work is still in progress and not yet in the codebase (what it is doing, decisions with their reasons, measurements, hand-off state), readable by default by the project's members, the chair of a meeting in the project and the owner, and by other projects only through an open A10 path.
 - **Acceptance and verification:** A member of the project can read an agent's shared notes but cannot write them and cannot read its private scratch or drafts; shared notes are versioned (each entry has a revision and author) and bounded in size; an entry that matches the credential-pattern list is refused at write time (this card defines the list; a later card may reuse it); an agent can mark a note private again and promote a note into the codebase or documents through the normal review path; a note read by a peer or the chair carries its record and revision; an agent in a long-running command keeps its shared notes readable without being woken or interrupted; a project's shared notes are not visible to another project without an A10 path; the owner can read, correct and delete shared notes and the deletion is recorded.
@@ -731,9 +733,19 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### C07e — Rebuild the context view when a model route changes to a smaller window
 
 - **Parent:** N07 / AII-257.
+- **Status:** implemented; commits `96d71a3`, `51c46c1`; CI runs 40768256488; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** A route change archives the text it cut and names its route. Dispatcher wiring and remote MCP scaling are C07f.
 - **Blockers:** C07d, H12.
 - **Deliverable:** Split from C07d (2026-10-28): when the route of a running task changes to a model with a smaller window (a fallback, a cutover or a re-admitted attempt), the startup context is built again for that window and that route's fixed part (system prompt and tool schemas); also the window of a remote host's route reaches the tool limit.
 - **Acceptance and verification:** Falling back to a smaller-window route rebuilds the context view and blocks with a visible reason if essential constraints do not fit; the cut text is archived; repeating the change gives the recorded decision; a controller with only remote hosts also scales MCP limits to the window.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### C07f — Measure the route's fixed part and scale remote MCP limits
+
+- **Parent:** N07 / AII-257.
+- **Blockers:** C07e, H12.
+- **Deliverable:** Split from C07e (2026-10-28): the dispatcher calls the route change when a fallback or cutover moves a running task, using the measured system prompt and tool schemas of that route, and a controller with only remote hosts scales MCP limits to the window.
+- **Acceptance and verification:** A fallback to a smaller window rebuilds the view with the route's real fixed part; the cut text can be read back; repeating the change gives the recorded decision; remote-only MCP limits follow the window.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### C08 — Implement owner decision records and correction propagation
@@ -795,9 +807,19 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### L02 — Implement Suspend and graceful Stop
 
 - **Parent:** N05 / AII-255.
+- **Status:** implemented; commits `f24efb9`, `063725c`, `51c46c1`; CI runs 40768256488; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Suspend and graceful Stop with durable intent, blocked choices and Force Stop. Restart sweep, other scopes and a fuller inventory are L02b.
 - **Blockers:** L01, T07.
 - **Deliverable:** Bounded preparation, checkpoint and process shutdown.
 - **Acceptance and verification:** Kill during preparation resumes shutdown intent; uncooperative tool classified; force stop explicit and auditable; Stop leaves assignments unchanged and never cancels the task goal; task cancellation needs task-scoped authority and settles or reports pending and uncertain effects and children while keeping history; stopping, stopped and recovery-required are separate from task completion, completed preparation is reused and Stop never resumes execution to shut down; cleanup has a configured deadline and spend budget and may use an eligible backup model; an unsettleable operation offers wait, restart from an earlier boundary or Force Stop and is never labelled safely suspended to meet a deadline; only scoped cleanup runs during preparation; the inventory covers foreground operations, local processes, T07 jobs and delegated child work; Suspended is reported only after checkpoint and artifact durability checks pass; agent-originated lifecycle requests without the grant are refused; Stop during preparation, model loss during cleanup and deadline expiry are tested and restart reports graceful versus forced.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### L02b — Resume stops after a restart and cover every scope
+
+- **Parent:** N05 / AII-255.
+- **Blockers:** L02, L03.
+- **Deliverable:** Split from L02 (2026-10-28): the controller advances unfinished suspensions and stops at startup and on a timer, resolves team and installation scopes to their attempts, counts T07 jobs, local processes and child work in the inventory (uncooperative ones named), and takes the cleanup spend from the runtime.
+- **Acceptance and verification:** Kill during preparation resumes the shutdown intent without any call; a team or installation Stop reaches every attempt under it; a job that ignores the request is listed as uncooperative and offered Force Stop; the cleanup budget counts real spend.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### L03 — Implement prepared release and reassignment
@@ -975,9 +997,19 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H08 — Implement remote disconnect watchdog and hard stop
 
 - **Parent:** N05 / AII-255.
+- **Status:** implemented; commits `c120a0d`, `51c46c1`; CI runs 40768256488; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Worker lease watchdog and contained termination, with a guard on remote attempts. Wiring into the worker process is H08b.
 - **Blockers:** H02, L02.
 - **Deliverable:** Independent lease watchdog and contained process termination.
 - **Acceptance and verification:** Explicit and silent loss stop productive actions within bound; supervisor death and sleep/wake fail closed; no delayed renewal extends stale authority.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### H08b — Run the lease watchdog in the real worker process
+
+- **Parent:** N05 / AII-255.
+- **Blockers:** H08, H12b.
+- **Deliverable:** Split from H08 (2026-10-28): the worker entry point creates and runs the watchdog, the controller sends the lease as a duration (not a deadline against the worker clock), and every call that touches the controller reacts to a fenced answer and checks that work is still allowed.
+- **Acceptance and verification:** A worker whose clock is wrong gets the lease the controller meant; a fenced poll, checkpoint or publish stops the attempt; the process is ended inside the grace time.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### H09 — Implement reconnect reconciliation and primary epochs
@@ -1455,9 +1487,19 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### U06 — Implement deterministic recovery chat controls
 
 - **Parent:** N09 / AII-259.
+- **Status:** implemented; commits `cd83138`, `409022f`, `51c46c1`; CI runs 40768256488; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Pause, resume, stop and revoke typed in chat run without the assistant and report received, accepted and effected. Routes, providers and shorthand are U06b.
 - **Blockers:** U01, L02, A02.
 - **Deliverable:** Model-independent status/pause/stop/revoke/recovery actions.
 - **Acceptance and verification:** Provider loss still permits authenticated recovery through chat; unavailable host boundary reported; command audit retained; Force Stop and provider or route exclusion work without a model; replies distinguish received, accepted, activated and effected.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### U06b — Recovery chat controls for routes and providers, and shorthand
+
+- **Parent:** N09 / AII-259.
+- **Blockers:** U06, R04.
+- **Deliverable:** Split from U06 (2026-10-28): typed orders exclude or restore a route or provider, and short forms of the typed orders are accepted.
+- **Acceptance and verification:** A typed exclusion takes effect without the assistant and reports received, accepted and effected; a short form is expanded and shown before it runs when it changes anything.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### U03b — Back the owner chat interpreter and the coordinator with a routed model
@@ -1753,6 +1795,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### T09b — Wire command namespaces into the controller, state API and chat and run built-in commands
 
 - **Parent:** N13 / AII-263.
+- **Status:** implemented; commits `ce0cf57`, `c819a9e`, `0478fd5`; CI runs 40768256488; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Built-in commands run through command.run and typed chat lines, as the typist, once; no run from redacted arguments.
 - **Blockers:** T09.
 - **Deliverable:** Split from T09 (2026-10-27): the catalog becomes a controller service, aliases and queued commands are reachable from the state API and the chat, a queued command is executed under the caller's rights, scoped /toolbox. names exist, an alias's scope is tied to grants, and agents show friendly names; owner decision 2026-10-28: queued commands run for the built-in namespace only (/nimblenewt.<name> runs the state operation of that name under the typist's own rights); toolbox and agent commands are T09c and T09d.
 - **Acceptance and verification:** A command typed in the owner chat resolves, is queued, runs under the typist's rights and is answered once; an ambiguous or unknown name gets a plain answer; a replay never runs twice; another principal cannot run or see an alias it was not given; a /toolbox. or /a_ command is queued and answered once with a plain "cannot run yet" until T09c and T09d.
@@ -2091,6 +2135,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H11b — Standard role templates with display labels
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `66b1f87`, `ea80c9e`, `8d35757`; CI runs 40768256488; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Standard roles (director, author, reviewer, integrator, qa, docs) are seeded and the owner can set a display label; labels refuse invisible characters.
 - **Blockers:** H11.
 - **Deliverable:** Owner decision 2026-10-28: role ids author, reviewer, integrator, qa, docs and director with capability bundles; an owner label per role (for example "CTO" for director), display only; supervisor stays the agent's supervisorId link.
 - **Acceptance and verification:** Seeded templates exist on a new installation; a label change alters no grant, check or history; ids still match ROLE_NAME; the director and the supervisor link may be the same agent; one agent may hold qa and docs together; labels are owner-only edits.
@@ -2107,6 +2153,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### A07f — Derive protected branches in the controller and scope approval grants to branches
 
 - **Parent:** N06 / AII-256.
+- **Status:** implemented; commits `87368e3`, `523cd97`, `086145a`; CI runs 40768256488; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The controller decides protected branches; an approval waives one only by naming it; names are read as git reads them. Open question: a contract-named permission still covers a protected branch.
 - **Blockers:** A07, P01.
 - **Deliverable:** The project's branch settings (landing branch, main, protected list) decide branchProtected for push and merge; the worker's own flag is ignored; approval grants gain a branches term.
 - **Acceptance and verification:** An agent that omits or falsifies branchProtected is still sent to the owner (test); a grant that does not name the branch cannot waive it; a standing grant still never waives a protected branch.
@@ -2115,6 +2163,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### P08 — Store the integration policy per project with an installation default
 
 - **Parent:** N14 / AII-264.
+- **Status:** implemented; commits `c40d564`, `fb62dd6`; CI runs 40768256488; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Per-project integration policy with an installation default and a lock on main-automatic.
 - **Blockers:** P01, A07f, U10, H11b, A06.
 - **Deliverable:** Owner decision 2026-10-28: owner-only integration.set with the landing mode (integration-branch, main-automatic, human-promotes; all three supported and main-automatic must be possible in every profile when the owner sets it, with no human step per landing), who integrates, required checks, review need and the refresh-round cap; an installation default for new projects; profile defaults (strict human-promotes; derived and autonomous integration-branch); the effective mode and its source saved at project creation; the A06 gate-policy humanOnly folded into this policy.
 - **Acceptance and verification:** Precedence is installation lock > project > installation default > profile, tested; a non-owner or an agent holding project.update cannot change it; main-automatic records a C08 decision, an audit entry and an exact branch-scoped grant held only by the landing service, and switching it off revokes that grant at once; a project set to main-automatic lands on main with no human step; a profile switch changes no existing project and its preview lists the projects affected; an API create without settings takes the default.
@@ -2123,9 +2173,19 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### P08b — Change integration settings and create projects with them in chat
 
 - **Parent:** N14 / AII-264.
+- **Status:** implemented; commits `06812ab`, `660563d`, `51c46c1`; CI runs 40768256488; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Chat integration settings are proposals; project.create takes an owner-only integration section checked before anything is made. Guided questions are P08c.
 - **Blockers:** P08, C08c, U03.
 - **Deliverable:** Chat integration.set always shown as a proposal; the project.create proposal carries an integration section filled from the defaults and lists the four questions (who integrates, landing mode, required checks, review); the owner's answers re-draft the proposal.
 - **Acceptance and verification:** Nothing applies before the owner says yes; quoted or foreign text cannot set main-automatic; the chat and the API produce the same records.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### P08c — Guide project creation in chat and list integration defaults
+
+- **Parent:** N14 / AII-264.
+- **Blockers:** P08b.
+- **Deliverable:** Split from P08b (2026-10-28): creating a project in chat walks through the owner's questions (how finished work lands, who integrates, required checks, refresh rounds) with a recommendation for each, and the owner can list the installation default and every project's setting in chat.
+- **Acceptance and verification:** Each question is asked one at a time with a plain explanation and the profile's recommendation; skipping uses the installation default; main-automatic is offered only when the lock is off and a check exists; the listing shows held-back settings with the reason.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### H12n — End agent work with work.end
@@ -2227,7 +2287,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c.
+- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c.
 - **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
 - **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
