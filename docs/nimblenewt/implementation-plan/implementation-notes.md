@@ -2093,5 +2093,5 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 
 ## Batch closing (2026-10-27): P01c, C08d, C08c, M01d, R05f, H02c, T09, H07 flipped
 - Flipped on exhaustive CI run 40591614995 (commit b651702, green on all 18 jobs). Earlier exhaustive runs failed only on timing assumptions in the H07 polling tests (fixed sleeps on slow Windows runners) and on generated plan docs that had not been regenerated; both fixed, tests now wait on conditions.
-- **Not flipped:** A07d (blocker C09 is planned) and V01b (blockers H12b and H12e are planned). Both are built, reviewed and merged; the status waits on the owner's decision on those edges (drop the dependency or build the blocker first).
+- A07d and V01b were flipped afterwards, once the owner decided to drop their C09 and H12b/H12e edges.
 - New cards: R05g, H02d, V01c, T09b, H07b, H02e (all in D03's dependencies).

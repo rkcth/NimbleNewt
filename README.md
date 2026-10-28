@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **115 of 225 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **117 of 225 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -110,14 +110,14 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Pi runtime and inference caching | `▓▓▓▓▓▓▓▓░░░░` 72% | 8 of 11 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
 | Pause, suspend and resume | `▓▓▓▓░░░░░░░░` 33% | 3 of 9 |
-| Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓░░░░` 72% | 13 of 18 |
+| Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓░░░` 77% | 14 of 18 |
 | Context and memory | `▓▓▓▓▓▓▓▓▓░░░` 76% | 10 of 13 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
 | Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓░░░` 81% | 9 of 11 |
 | Owner chat and web UI | `▓▓▓▓▓▓░░░░░░` 53% | 8 of 15 |
 | Workers, dispatch and teams | `▓▓▓▓▓▓░░░░░░` 54% | 18 of 33 |
 | Agent messaging | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
-| Health and recovery | `▓▓▓░░░░░░░░░` 25% | 1 of 4 |
+| Health and recovery | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
 | Meetings | `▓▓▓▓░░░░░░░░` 36% | 4 of 11 |
 | Tools and skills | `▓▓▓▓▓▓░░░░░░` 50% | 5 of 10 |
 | Projects, repositories and workspaces | `▓▓▓░░░░░░░░░` 30% | 3 of 10 |
@@ -222,7 +222,7 @@ Pause, suspend, stop, release and checked resume, interrupting a model mid-gener
 </details>
 
 <details>
-<summary><strong>Security: identity, approvals and sandboxing</strong> — ▓▓▓▓▓▓▓▓░░░░ 13 of 18</summary>
+<summary><strong>Security: identity, approvals and sandboxing</strong> — ▓▓▓▓▓▓▓▓▓░░░ 14 of 18</summary>
 
 Authenticated principals, revisioned grants, the sandbox launchers, the protected filesystem and Git bridge, approval policy and resource limits.
 
@@ -241,8 +241,8 @@ Authenticated principals, revisioned grants, the sandbox launchers, the protecte
 - [x] **A07c** · P26 · Implement the strict-to-derived profile suggestion _(needs A07, A07b)_
 - [x] **A08b** · P26 · Enforce per-agent resource limits in the sandbox _(needs A08, A03)_
 - [x] **A10b** · P26 · Implement per-task credentials for agents serving several projects _(needs A10, A01)_
+- [x] **A07d** · P27 · Offer a choice of standing-grant lengths with a system-chosen default _(needs A07b, A07c)_
 - [ ] **A08c** · P27 · Enforce per-agent resource limits on macOS and Windows (after the first release) _(needs A08b, A03b)_
-- [ ] **A07d** · P31 · Offer a choice of standing-grant lengths with a system-chosen default _(needs A07b, A07c, C09)_
 - [ ] **A09** · P32 · Implement reviewed environment changes and maintenance requests _(needs A08, A05, H05, L02, T06)_
 
 </details>
@@ -375,13 +375,13 @@ Durable conversations between agents, delivery classes, and the MCP conversation
 </details>
 
 <details>
-<summary><strong>Health and recovery</strong> — ▓▓▓░░░░░░░░░ 1 of 4</summary>
+<summary><strong>Health and recovery</strong> — ▓▓▓▓▓▓░░░░░░ 2 of 4</summary>
 
 Stall detection and bounded supervisor recovery.
 
 - [x] **V01** · P25 · Implement health and progress stall detection _(needs H01, S08, C04, H11)_
-- [ ] **V01b** · P30 · Scale stall thresholds to the prompt size and the measured speed of the model _(needs V01, H12, H12b, H12e)_
-- [ ] **V01c** · P31 · Read the declared model speed from the routing table and the cache share from the cache adapter _(needs V01b)_
+- [x] **V01b** · P29 · Scale stall thresholds to the prompt size and the measured speed of the model _(needs V01, H12)_
+- [ ] **V01c** · P30 · Read the declared model speed from the routing table and the cache share from the cache adapter _(needs V01b)_
 - [ ] **V02** · P33 · Implement bounded supervisor recovery _(needs V01, V01b, L03, L04, R02, H05)_
 
 </details>
