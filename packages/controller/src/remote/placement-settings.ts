@@ -6,7 +6,7 @@ import type { ControllerStorage, JsonObject } from "../storage/types.js";
 import type { PlacementPolicy } from "./service.js";
 
 const REF = { kind: "placement-settings", id: "main" } as const;
-const HOST = /^host:[A-Za-z0-9._-]{1,64}$/;
+const HOST = /^host:[a-z0-9][a-z0-9-]{0,39}$/;
 const MAX_HOSTS = 200;
 
 export interface PlacementSettingsBody {
@@ -92,6 +92,12 @@ export class PlacementSettingsService {
       if (!Array.isArray(value) || value.length > MAX_HOSTS) throw new DomainError("invalid_command", `${f}: must be a list of at most ${MAX_HOSTS} hosts`, { field: f });
       for (const h of value) if (typeof h !== "string" || !HOST.test(h)) throw new DomainError("invalid_command", `${f}: ${String(h)} is not a host (host:name)`, { field: f });
       lists[f] = [...new Set(value as string[])];
+    }
+    const seen = new Map<string, string>();
+    for (const f of fields) for (const h of lists[f]!) {
+      const earlier = seen.get(h);
+      if (earlier !== undefined && earlier !== f) throw new DomainError("invalid_command", `${f}: ${h} is also named in ${earlier}; a host is named once`, { field: f });
+      seen.set(h, f);
     }
     if (fields.every((f) => lists[f]!.length === 0)) throw new DomainError("invalid_command", "allowAdd: name at least one host to allow, exclude or take off a list", { field: "allowAdd" });
     const result = await this.#runner.command("placement.change", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({

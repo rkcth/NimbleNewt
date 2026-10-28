@@ -110,6 +110,8 @@ test("local-only data goes to the hosts the approval profile and the owner's set
     assert.ok((await call(boot.token, "placement.change", { excludeRemove: ["host:pc"], allowAdd: ["host:rented"] }, "pl8")).ok);
     assert.deepEqual(await eligible(), ["host:pc", "host:rented"]);
     assert.equal((await call(boot.token, "placement.change", {}, "pl9")).error?.code, "invalid_command");
+    assert.equal((await call(boot.token, "placement.change", { excludeAdd: ["host:Laptop"] }, "pl11")).error?.code, "invalid_command", "a name that is not a host ID would exclude nothing");
+    assert.equal((await call(boot.token, "placement.change", { allowAdd: ["host:pc"], excludeAdd: ["host:pc"] }, "pl12")).error?.code, "invalid_command", "a host is named once");
     assert.equal((await call(ann, "placement.change", { allowAdd: ["host:rented"] }, "pl10")).error?.code, "forbidden");
     // Cloud-allowed data is not affected by any of this.
     const cloud = await c.dispatch.remote.candidates(rob, { taskId: "task-aaaaaaaaaaaaaaaaaaaa", projectId: project, agentId: "agent:ann", requirements: { data: "cloud-allowed", harness: "pi" } });
