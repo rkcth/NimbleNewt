@@ -76,6 +76,18 @@ Arguments:
 
 Result: `{ item }`: `allow`, `exclude`, `profile`, `dataHosts` and the revision.
 
+#### `project.branches.get`
+
+Which branches of a project are protected (owner only). A push or merge that changes one stays a decision for the owner whatever the worker says; a project the owner has not set protects `main` and `master`.
+
+Arguments:
+
+- `project`: the project ID
+
+Result: `{ item }`: `revision`, `protected` (branch names, or prefixes such as `release/*`), `landing` when set, and `isDefault`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `budget.report`
 
 A task's budget: limit, delegated to children, in flight, uncertain, spent, overrun and available, for money and for compute, with the reservations and open requests behind them. A task you may not read reads like a missing one.
@@ -699,6 +711,21 @@ Arguments:
 - `allowRemove` (optional): hosts to take off the allowed list
 - `excludeAdd` (optional): hosts to exclude
 - `excludeRemove` (optional): hosts to take off the excluded list
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `project.branches.set`
+
+The owner says which branches of a project are protected and, optionally, which branch finished work lands on (owner only). The list replaces the earlier one; the controller, not the worker, decides from it whether a push or merge touches a protected branch.
+
+Arguments:
+
+- `project`: the project ID
+- `protected` (optional): branch names or prefixes such as `release/*`
+- `landing` (optional): the landing branch, or null to clear it
+- `expectedRevision` (optional): the revision you read
 
 Result: `{ revision }`.
 

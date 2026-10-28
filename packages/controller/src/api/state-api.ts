@@ -20,6 +20,7 @@ import type { DecisionService } from "../decisions/index.js";
 import { SecureApi } from "../security/secured.js";
 import type { GrantService } from "../security/grants.js";
 import type { PlacementSettingsService } from "../remote/placement-settings.js";
+import type { ProtectedBranchService } from "../policy/protected-branches.js";
 
 import type { Principal, PrincipalService } from "../security/principals.js";
 import type { TaskCredentialService } from "../security/task-credentials.js";
@@ -78,6 +79,7 @@ export interface StateApiDeps {
   readonly grants?: Pick<GrantService, "grant" | "revoke" | "getGrant" | "list">;
   /** When present, the owner can say which hosts may hold local-only data through the API (card H07c). */
   readonly placement?: Pick<PlacementSettingsService, "get" | "set" | "change">;
+  readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set">;
 
   /** When present, the rest of a tool result cut to the window can be read in pages through the API (card C07d). */
   readonly spill?: { readonly readSpill: (by: Principal, spillId: string, index: number, size?: number) => Promise<{ text: string; next?: number } | undefined> };
@@ -141,6 +143,7 @@ export class StateApi {
         ...(this.#deps.decisions === undefined ? {} : { decisions: this.#deps.decisions }),
         ...(this.#deps.grants === undefined ? {} : { grants: this.#deps.grants }),
         ...(this.#deps.placement === undefined ? {} : { placement: this.#deps.placement }),
+        ...(this.#deps.branchSettings === undefined ? {} : { branchSettings: this.#deps.branchSettings }),
 
         ...(this.#deps.spill === undefined ? {} : { spill: this.#deps.spill }),
         ...(this.#deps.events === undefined ? {} : { events: this.#deps.events }),

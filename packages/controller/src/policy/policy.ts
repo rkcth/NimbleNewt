@@ -86,6 +86,8 @@ export interface EvaluateInput {
   readonly environment?: Environment;
   readonly estimatedSpend?: number;
   readonly branchProtected?: boolean;
+  /** The branch a push or merge changes (card A07f). */
+  readonly branch?: string;
   readonly audience?: string;
   readonly irreversible?: boolean;
   /** The task the action is for. Its stored contract gives the instruction's scope (the permission ceiling, who set it, and the estimate); the caller cannot supply those. */
@@ -276,7 +278,7 @@ export class PolicyService {
     const scopeFields = scope === undefined ? {} : { scope };
     const request: PolicyRequest = {
       tool: input.tool, cls, environment, now,
-      ...(input.estimatedSpend === undefined ? {} : { estimatedSpend: input.estimatedSpend }), ...(input.branchProtected === undefined ? {} : { branchProtected: input.branchProtected }),
+      ...(input.estimatedSpend === undefined ? {} : { estimatedSpend: input.estimatedSpend }), ...(input.branchProtected === undefined ? {} : { branchProtected: input.branchProtected }), ...(input.branch === undefined ? {} : { branch: input.branch }),
       ...(input.audience === undefined ? {} : { audience: input.audience }), ...(input.irreversible === undefined ? {} : { irreversible: input.irreversible }),
       ...scopeFields,
     };
@@ -400,7 +402,7 @@ function grantView(id: string, body: GrantRecordBody): GrantView {
   return {
     id, action: body.action, source: body.rootSource ?? body.source,
     ...(t?.environments === undefined ? {} : { environments: t.environments }), ...(t?.spendLimit === undefined ? {} : { spendLimit: t.spendLimit }),
-    ...(t?.window === undefined ? {} : { window: t.window }), ...(t?.audiences === undefined ? {} : { audiences: t.audiences }),
+    ...(t?.window === undefined ? {} : { window: t.window }), ...(t?.audiences === undefined ? {} : { audiences: t.audiences }), ...(t?.branches === undefined ? {} : { branches: t.branches }),
   };
 }
 

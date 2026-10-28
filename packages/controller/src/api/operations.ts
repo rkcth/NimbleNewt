@@ -19,6 +19,7 @@ import type { AgentMessageService } from "../messaging/index.js";
 import { shownLines } from "../standups/standups.js";
 import type { GrantService } from "../security/grants.js";
 import type { PlacementSettingsService } from "../remote/placement-settings.js";
+import type { ProtectedBranchService } from "../policy/protected-branches.js";
 import type { Principal } from "../security/principals.js";
 import type { SecureApi } from "../security/secured.js";
 import type { JsonObject } from "../storage/types.js";
@@ -50,6 +51,7 @@ export interface Context {
   readonly branches?: ContextBranchService;
   /** Absent when the controller runs without remote workers (card H07c). */
   readonly placement?: Pick<PlacementSettingsService, "get" | "set" | "change">;
+  readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set">;
 
   /** Absent when the controller runs without a dispatcher (card C07d). */
   readonly spill?: { readonly readSpill: (by: Principal, spillId: string, index: number, size?: number) => Promise<{ text: string; next?: number } | undefined> };
@@ -114,6 +116,7 @@ const resources = (c: Context): ProjectResourceService => c.resources ?? unavail
 const plans = (c: Context): ProjectPlanService => c.plans ?? unavailable("project plans");
 const ownerQuestionsOf = (c: Context): NonNullable<Context["ownerQuestions"]> => c.ownerQuestions ?? unavailable("questions to the owner");
 const branchesOf = (c: Context): ContextBranchService => c.branches ?? unavailable("context branches");
+const branchSettingsOf = (c: Context): NonNullable<Context["branchSettings"]> => c.branchSettings ?? unavailable("branch settings");
 const placementOf = (c: Context): NonNullable<Context["placement"]> => c.placement ?? unavailable("placement settings");
 const grantsOf = (c: Context): NonNullable<Context["grants"]> => c.grants ?? unavailable("rights");
 const eventsOf = (c: Context): NonNullable<Context["events"]> => c.events ?? unavailable("events");
@@ -151,6 +154,10 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => { only(a, ["allow", "exclude", "expectedRevision"]); return asJson({ ...(await placementOf(c).set(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
   { name: "placement.change", kind: "command", summary: "The owner adds hosts to or takes them off the lists of where local-only data may go (owner only), leaving the rest of the lists as they are. Allowing a host takes it off the excluded list and excluding it takes it off the allowed list. This is the form the chat uses, so a request that waits to be accepted does only what it says.", args: { "allowAdd?": "hosts (`host:name`) to allow", "allowRemove?": "hosts to take off the allowed list", "excludeAdd?": "hosts to exclude", "excludeRemove?": "hosts to take off the excluded list" }, result: "`{ revision }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["allowAdd", "allowRemove", "excludeAdd", "excludeRemove"]); return asJson({ ...(await placementOf(c).change(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
+  { name: "project.branches.get", kind: "query", summary: "Which branches of a project are protected (owner only). A push or merge that changes one stays a decision for the owner whatever the worker says; a project the owner has not set protects `main` and `master`.", args: { project: "the project ID" }, result: "`{ item }`: `revision`, `protected` (branch names, or prefixes such as `release/*`), `landing` when set, and `isDefault`.", completion: { kind: "completed" },
+    run: async (c, a) => { only(a, ["project"]); return asJson({ item: await branchSettingsOf(c).get(c.principal, a["project"] as string) }); } },
+  { name: "project.branches.set", kind: "command", summary: "The owner says which branches of a project are protected and, optionally, which branch finished work lands on (owner only). The list replaces the earlier one; the controller, not the worker, decides from it whether a push or merge touches a protected branch.", args: { project: "the project ID", "protected?": "branch names or prefixes such as `release/*`", "landing?": "the landing branch, or null to clear it", "expectedRevision?": "the revision you read" }, result: "`{ revision }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["project", "protected", "landing", "expectedRevision"]); const { project, ...rest } = a as { project: string }; return asJson({ ...(await branchSettingsOf(c).set(c.principal, { commandId: need(id), projectId: project, ...rest } as never)) }); } },
   { name: "grant.revoke", kind: "command", summary: "The owner takes a grant back (owner only; the revision you read must still be current). It stops counting at the next check.", args: { grantId: "the grant's ID", expectedRevision: "the revision you read", reason: "why, in the owner's words" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["grantId", "expectedRevision", "reason"]); await grantsOf(c).revoke(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
   { name: "events.configure-idle", kind: "command", summary: "Sets how long an event subscription may sit without acknowledging before it expires (owner only). A subscription that was made before this existed, or without its own time, uses this one.", args: { idleSeconds: "whole seconds, 10 to 604800" }, result: "`{ ok: true }`.", completion: { kind: "completed" },

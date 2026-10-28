@@ -419,6 +419,31 @@ for (const backend of backends) {
     assert.equal(r["push"]!.state, "awaiting-approval", "inside the ceiling but reserved for the owner: still asks");
   });
 
+  suite("whether a push or merge changes a protected branch is the controller's to say: the worker's own flag, true or false or missing, decides nothing (card A07f)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["git-push", "git-merge"]));
+    const { taskId } = await c.task("t", ann);
+    await c.policy.set(c.owner, { scope: "installation", commandId: "pol", profile: "derived" });
+    void taskId; // no contract names the tools: an instruction that names a tool by name would itself cover a protected branch
+    const asked: Array<[string, string | undefined]> = [];
+    c.dispatcher = c.restart({ protectedBranch: async (_project: string, branch: string | undefined) => { asked.push(["q", branch]); return branch === undefined || branch === "main"; } } as never);
+    const r: Record<string, ToolResult> = {};
+    const push = (label: string, tool: string, extra: Record<string, unknown>) => async (gateway: { call: Function }) => { await gateway.call({ callId: label, tool: { name: tool, version: "1" }, args: { x: label }, ...extra }, { kind: "effect", effectKind: "git-push", target: "repo", input: {}, bridge: { idempotent: true, execute: async () => ({}) } }).then((v: ToolResult) => { r[label] = v; }); };
+    const steps = [
+      push("falsified", "git-push", { target: { kind: "branch", id: "main" }, branchProtected: false }),
+      push("omitted", "git-push", { target: { kind: "branch", id: "main" } }),
+      push("unnamed", "git-merge", { branchProtected: false }),
+      push("claimed", "git-push", { target: { kind: "branch", id: "feature-x" }, branchProtected: true }),
+    ];
+    c.worker.script = async ({ gateway }) => { for (const step of steps) await step(gateway); return { status: "completed", text: "x" }; };
+    await c.run();
+    assert.equal(r["falsified"]!.state, "awaiting-approval", "a false flag on main still asks the owner");
+    assert.equal(r["omitted"]!.state, "awaiting-approval", "a missing flag on main still asks the owner");
+    assert.equal(r["unnamed"]!.state, "awaiting-approval", "a merge that names no branch is treated as protected");
+    assert.match((r["falsified"] as { reason: string }).reason, /protected branch/);
+    assert.equal(r["claimed"]!.state, "confirmed", "a true flag on an unprotected branch decides nothing either");
+    assert.deepEqual(asked.map((a) => a[1]).sort(), [undefined, "feature-x", "main", "main"].sort());
+  });
+
   const deferred = <T = void>() => { let resolve!: (v: T) => void; const promise = new Promise<T>((r) => { resolve = r; }); return { promise, resolve }; };
   const pushBridge = (log: { applied: number; reconciled: number }, hang?: { started: () => void; never: Promise<never> }) => ({
     idempotent: false,

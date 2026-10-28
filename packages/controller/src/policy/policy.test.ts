@@ -146,12 +146,22 @@ for (const backend of backends) {
     await c.grants.revoke(c.owner, { commandId: cid("r"), grantId: spend.id, expectedRevision: spend.revision, reason: "done" });
     assert.equal((await ask(c, "pay", { estimatedSpend: 8 })).mode, "owner", "revoked");
     // Terms are checked when the grant is made.
-    for (const terms of [{ spendLimit: -1 }, { environments: ["Mars!"] }, { window: { start: "9am", end: "17:00" } }, { window: { start: "09:00", end: "17:00", days: [9] } }, { surprise: 1 }, { audiences: "blog" }, { delegation: "yes" }]) {
+    for (const terms of [{ spendLimit: -1 }, { environments: ["Mars!"] }, { window: { start: "9am", end: "17:00" } }, { window: { start: "09:00", end: "17:00", days: [9] } }, { surprise: 1 }, { audiences: "blog" }, { delegation: "yes" }, { branches: "main" }, { branches: ["*"] }, { branches: ["release/*"] }, { branches: ["a..b"] }]) {
       await refuses("invalid_command", () => c.grants.grant(c.owner, { commandId: cid("g"), grantee: "agent:ann", action: "tool.pay", project: c.a, source: "direct", basis: "x", terms: terms as never }));
     }
     const view = (await c.policy.effective(c.owner, c.a, "agent:ann"))!;
     assert.deepEqual(view.grants!.map((g) => [g.action, g.project]), [["approve.tool.publish-post", c.a]]);
     assert.deepEqual((view.grants![0]!.terms as { audiences: string[] }).audiences, ["blog"]);
+  });
+
+  suite("an approval waives a change to a protected branch only by naming that branch (card A07f)", async (c) => {
+    await c.grants.grant(c.owner, { commandId: cid("g"), grantee: "agent:ann", action: "approve.tool.git-push", project: c.a, source: "direct", basis: "ann may push to main in this project", terms: { branches: ["main"] } });
+    assert.equal((await ask(c, "git-push", { branchProtected: true, branch: "main" })).via, "grant", "the named branch");
+    assert.equal((await ask(c, "git-push", { branchProtected: true, branch: "master" })).mode, "owner", "another protected branch");
+    assert.equal((await ask(c, "git-push", { branchProtected: true })).mode, "owner", "a protected change that names no branch");
+    assert.equal((await ask(c, "git-push", { branchProtected: true, branch: "main" }, c.b)).mode, "owner", "another project");
+    const view = (await c.policy.effective(c.owner, c.a, "agent:ann"))!;
+    assert.deepEqual((view.grants![0]!.terms as { branches: string[] }).branches, ["main"]);
   });
 
   suite("a restriction denies, a tool the review policy reserves for the owner is the owner's in every profile, and the owner decides for itself", async (c) => {

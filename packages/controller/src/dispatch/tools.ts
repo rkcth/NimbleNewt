@@ -213,10 +213,13 @@ export class ToolPath {
     void agent;
     if (!options.policy) return { kind: "allow", decision: { mode: "approved", via: "review", reasons: ["an exact-operation approval covers it"] }, guards };
     // The approval policy, only through `PolicyService.evaluate`, with the spend so far from accounting.
+    // Which branch a push or merge changes, and whether it is protected, is the controller's to say: the worker's own flag is used only where no controller question was wired (card A07f).
+    const branch = c.target?.kind === "branch" ? c.target.id : undefined;
+    const branchProtected = this.#deps.protectedBranch !== undefined && (cls === "push" || cls === "merge") ? await this.#deps.protectedBranch(d.projectId, branch) : this.#deps.protectedBranch !== undefined ? false : c.branchProtected;
     const decision = await this.#deps.policy.evaluate({
       principalId: d.agentId, projectId: d.projectId, tool: c.tool.name, taskId: d.taskId,
       ...(c.target === undefined ? {} : { targetKind: c.target.kind }), ...(c.environment === undefined ? {} : { environment: c.environment }), ...(c.estimatedSpend === undefined ? {} : { estimatedSpend: c.estimatedSpend }),
-      ...(c.branchProtected === undefined ? {} : { branchProtected: c.branchProtected }), ...(c.audience === undefined ? {} : { audience: c.audience }), ...(c.irreversible === undefined ? {} : { irreversible: c.irreversible }),
+      ...(branchProtected === undefined ? {} : { branchProtected }), ...(branch === undefined ? {} : { branch }), ...(c.audience === undefined ? {} : { audience: c.audience }), ...(c.irreversible === undefined ? {} : { irreversible: c.irreversible }),
       ...(spent === undefined ? {} : { spentSoFar: spent }),
     });
     const info = { mode: decision.mode, via: decision.via, reasons: decision.reasons.slice(0, 5).map((r) => clip(redactText(r), DISPATCH_LIMITS.diagnostic)) };

@@ -70,6 +70,10 @@ export interface DispatcherDeps {
   readonly contracts: Pick<ContractService, "priorityOf" | "recoveryOf">;
   readonly harnesses: HarnessCatalog;
   readonly policy: Pick<PolicyService, "evaluate">;
+  /**
+   * Whether a push or a merge changes a protected branch of the project, decided here and not by the worker (card A07f). Without it the worker's own `branchProtected` flag is used as before, so a controller always passes it.
+   */
+  readonly protectedBranch?: (projectId: string, branch: string | undefined) => Promise<boolean>;
   readonly effects: Pick<EffectService, "intend" | "run" | "get">;
   readonly blockers: Pick<BlockerService, "openBlocker">;
   readonly route: RouteResolver;

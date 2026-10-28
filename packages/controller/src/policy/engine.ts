@@ -50,6 +50,8 @@ export interface GrantView {
   readonly spendLimit?: number;
   readonly window?: { readonly start: string; readonly end: string; readonly days?: readonly number[] };
   readonly audiences?: readonly string[];
+  /** The protected branches the grant waives, by exact name (card A07f). */
+  readonly branches?: readonly string[];
   /** How the grant came about (`standing` for one made from a proposal or a standing rule). A standing grant never waives what stays a decision, however exactly it names it. */
   readonly source?: string;
 }
@@ -60,6 +62,8 @@ export interface PolicyRequest {
   readonly environment: Environment;
   readonly estimatedSpend?: number;
   readonly branchProtected?: boolean;
+  /** The branch a push or merge changes, when it is known (card A07f). */
+  readonly branch?: string;
   /** A send or publication to an audience that no grant names. */
   readonly audience?: string;
   /** The action cannot be undone outside a sandbox. */
@@ -161,6 +165,7 @@ export function evaluate(policy: PolicyView, request: PolicyRequest, held: reado
     if (decisions.length > 0 && grant.source === "standing") { reasons.push(`grant ${grant.id} is a standing grant and cannot waive what stays a decision (${decisions.join("; ")})`); continue; }
     if (decisions.length > 0 && !match.exact) { reasons.push(`grant ${grant.id} is a wildcard and cannot waive what stays a decision (${decisions.join("; ")})`); continue; }
     if (request.cls === "deploy" && tier === "live" && !(grant.environments ?? []).includes("customer-live")) { reasons.push(`grant ${grant.id} does not name customer-live, which a live deployment needs`); continue; }
+    if ((request.cls === "push" || request.cls === "merge") && request.branchProtected === true && (request.branch === undefined || !(grant.branches ?? []).includes(request.branch))) { reasons.push(`grant ${grant.id} does not name the protected branch${request.branch === undefined ? "" : ` ${request.branch}`}`); continue; }
     const terms = termsMet(grant, request);
     if (terms.ok) return { ...base, mode: "allow", via: "grant", grantId: grant.id, reasons: [`approval grant ${grant.id} covers it`] };
     reasons.push(`grant ${grant.id} does not apply: ${terms.why}`);

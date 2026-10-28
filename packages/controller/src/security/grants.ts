@@ -29,6 +29,8 @@ export interface GrantTerms {
   /** Hours of the day, UTC, in which the grant applies, and optionally the days of the week (0 is Sunday). */
   readonly window?: { readonly start: string; readonly end: string; readonly days?: readonly number[] };
   readonly audiences?: readonly string[];
+  /** The protected branches this approval may waive, by exact name (card A07f). Without it an approval never waives a change to a protected branch. */
+  readonly branches?: readonly string[];
   readonly delegation?: boolean;
   readonly conditions?: readonly string[];
 }
@@ -66,7 +68,7 @@ export function checkTerms(value: unknown): GrantTerms | undefined {
   if (value === undefined) return undefined;
   if (value === null || typeof value !== "object" || Array.isArray(value)) return invalid("terms", "must be an object");
   const e = value as Record<string, unknown>;
-  for (const key of Object.keys(e)) if (!["environments", "spendLimit", "window", "audiences", "delegation", "conditions"].includes(key)) invalid(`terms.${key}`, "is not a grant term");
+  for (const key of Object.keys(e)) if (!["environments", "spendLimit", "window", "audiences", "branches", "delegation", "conditions"].includes(key)) invalid(`terms.${key}`, "is not a grant term");
   const list = (v: unknown, field: string, one: (x: unknown, f: string) => string, max: number): string[] => {
     if (!Array.isArray(v) || v.length > max) return invalid(field, `must be a list of at most ${max} entries`);
     return [...new Set(v.map((x, i) => one(x, `${field}[${i}]`)))].sort();
@@ -87,6 +89,7 @@ export function checkTerms(value: unknown): GrantTerms | undefined {
     out.window = { start, end, ...(days === undefined ? {} : { days }) };
   }
   if (e["audiences"] !== undefined) out.audiences = list(e["audiences"], "terms.audiences", (x, f) => (typeof x === "string" && /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,99}$/.test(x) ? x : invalid(f, "must be an account or audience name")), 50);
+  if (e["branches"] !== undefined) out.branches = list(e["branches"], "terms.branches", (x, f) => (typeof x === "string" && /^[A-Za-z0-9][A-Za-z0-9._\/-]{0,99}$/.test(x) && !x.includes("..") ? x : invalid(f, "must be one branch name, without wildcards")), 20);
   if (e["delegation"] !== undefined) out.delegation = typeof e["delegation"] === "boolean" ? e["delegation"] : invalid("terms.delegation", "must be true or false");
   if (e["conditions"] !== undefined) out.conditions = list(e["conditions"], "terms.conditions", (x, f) => plain(x, f, 300), 20);
   return Object.keys(out).length === 0 ? undefined : out;

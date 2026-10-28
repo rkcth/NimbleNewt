@@ -117,7 +117,13 @@ test("what stays a decision is waived only by a grant that names the tool or cla
     }
   }
   assert.equal(ask("strict", "grant-access", "development", {}, [{ id: "x", action: "approve.class.access-change" }]).via, "grant");
-  assert.equal(ask("strict", "git-push", "development", { branchProtected: true }, [{ id: "x", action: "approve.tool.git-push" }]).via, "grant");
+  // An approval waives a change to a protected branch only if it names that branch (card A07f): one that names none, or another, does not.
+  const onMain = { branchProtected: true, branch: "main" };
+  assert.equal(ask("strict", "git-push", "development", onMain, [{ id: "x", action: "approve.tool.git-push" }]).via, "must-decide", "an approval that names no branch cannot waive a protected one");
+  assert.equal(ask("strict", "git-push", "development", onMain, [{ id: "x", action: "approve.tool.git-push", branches: ["release/1"] }]).via, "must-decide", "nor one that names another branch");
+  assert.equal(ask("strict", "git-push", "development", { branchProtected: true }, [{ id: "x", action: "approve.tool.git-push", branches: ["main"] }]).via, "must-decide", "nor when the branch is not known");
+  assert.equal(ask("strict", "git-push", "development", onMain, [{ id: "x", action: "approve.tool.git-push", branches: ["main"] }]).via, "grant", "one that names it does");
+  assert.equal(ask("strict", "git-push", "development", onMain, [{ id: "x", action: "approve.tool.git-push", branches: ["main"], source: "standing" }]).via, "must-decide", "a standing grant still never does");
   assert.equal(ask("strict", "update-database", "development", { irreversible: true }, [{ id: "x", action: "approve.class.mutate" }]).via, "grant");
   // A live deployment: the exact grant has to name customer-live.
   const bare = ask("strict", "deploy", "customer-live", {}, [{ id: "x", action: "approve.tool.deploy" }]);

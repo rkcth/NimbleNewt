@@ -38,7 +38,7 @@ import { AttendanceService, InvitationInbox, MeetingService, withNudge, type Inv
 import { AgentMessageService } from "../messaging/index.js";
 import { NotificationService } from "../notifications/index.js";
 import type { ContractService } from "../planning/index.js";
-import { PolicyService } from "../policy/index.js";
+import { PolicyService, ProtectedBranchService } from "../policy/index.js";
 import type { ReviewService } from "../review/index.js";
 import { DifficultyService, type RoutingService } from "../routing/index.js";
 import { DISPATCHER_PRINCIPAL, type GrantService, type Principal, type PrincipalService, type TaskCredentialService } from "../security/index.js";
@@ -178,6 +178,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   const effects = EffectService.withEpoch(storage, epoch, i.assignments, { ...ro, holder: "dispatcher" });
   const blockers = BlockerService.withEpoch(storage, epoch, ro);
   const policy = PolicyService.withEpoch(storage, epoch, i.grants, ro);
+  const branchSettings = ProtectedBranchService.withEpoch(storage, epoch, ro);
   const budgets = BudgetService.withEpoch(storage, epoch, ro);
   const pauses = PauseService.withEpoch(storage, epoch, { waits: i.waits }, { ...ro, ...(i.availability === undefined ? {} : { otherAvailability: i.availability }) });
   const events = EventService.withEpoch(storage, epoch, { ...ro, notify: noticeThroughNotifications(notifications) });
@@ -324,7 +325,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       for (const h of i.options.remote.hosts) workers.push(new RemoteWorkerHost(h.hostId, remote, principal, h));
     }
     const dispatcher = DispatcherService.withEpoch(storage, epoch, {
-      principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, hosts, workers,  contracts: i.contracts, harnesses: i.catalog, policy, effects, blockers, route,
+      principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, hosts, workers,  contracts: i.contracts, harnesses: i.catalog, policy, protectedBranch: (projectId, branch) => branchSettings.isProtected(projectId, branch), effects, blockers, route,
       routing: i.routing, pauses, decisions, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
       ...(i.options.local === undefined ? {} : { toolWindow: (route: string) => { try { return i.options.local!.window({ route } as WorkOrder); } catch { return undefined; } } }),
       ...(remote === undefined ? {} : { storeOwner: (agentId: string, attemptId: string) => remote!.storeOwner(principal, agentId, attemptId) }),
