@@ -76,6 +76,18 @@ Arguments:
 
 Result: `{ item }`: `allow`, `exclude`, `profile`, `dataHosts` and the revision.
 
+#### `project.branches.get`
+
+Which branches of a project are protected (owner only). A push or merge that changes one stays a decision for the owner whatever the worker says; a project the owner has not set protects `main` and `master`.
+
+Arguments:
+
+- `project`: the project ID
+
+Result: `{ item }`: `revision`, `protected` (branch names, or prefixes such as `release/*`), `landing` when set, and `isDefault`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `budget.report`
 
 A task's budget: limit, delegated to children, in flight, uncertain, spent, overrun and available, for money and for compute, with the reservations and open requests behind them. A task you may not read reads like a missing one.
@@ -704,6 +716,21 @@ Result: `{ revision }`.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `project.branches.set`
+
+The owner says which branches of a project are protected and, optionally, which branch finished work lands on (owner only). The list replaces the earlier one; the controller, not the worker, decides from it whether a push or merge touches a protected branch.
+
+Arguments:
+
+- `project`: the project ID
+- `protected` (optional): branch names or prefixes such as `release/*`
+- `landing` (optional): the landing branch, or null to clear it
+- `expectedRevision` (optional): the revision you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `command.run`
 
 Runs a typed command as the caller (card T09b). `/nimblenewt.<operation>` names a state-API operation with its dots written as hyphens, for example `/nimblenewt.grant-list {"grantee": "service:dispatcher"}`: the arguments are a JSON object after the name, and the operation runs under the caller's own rights, so it refuses what the caller may not do. The command is queued with what it resolved to and runs once; sending the same command ID again answers from the record. A name that is unknown, ambiguous or needs a context is answered in words and nothing runs. Toolbox and agent commands are queued and answered as not runnable yet.
@@ -1147,6 +1174,20 @@ Arguments:
 - `excludes` (optional): roles that may not be combined with it
 - `description` (optional): what it is for
 - `expectedRevision` (optional): the revision you read, to replace an existing role
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `role.label`
+
+Sets or clears the owner's display label for a role, for example "CTO" for `director`. Owner only. The label is shown in screens and chat and changes no grant, check or history.
+
+Arguments:
+
+- `name`: the role's name
+- `label`: the label, or null to clear it
+- `expectedRevision` (optional): the revision you read
 
 Result: `{ id, revision, replayed }`.
 

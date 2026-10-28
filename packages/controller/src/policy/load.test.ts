@@ -369,7 +369,9 @@ for (const backend of backends) {
     assert.deepEqual([protectedPush.mode, protectedPush.via], ["owner", "must-decide"]);
     assert.equal((await c.policy.evaluate({ principalId: "agent:ann", projectId: c.a, tool: "update-database", irreversible: true })).via, "must-decide");
     await c.grants.grant(c.owner, { commandId: cid("g"), grantee: "agent:ann", action: "approve.class.push", project: c.a, source: "direct", basis: "owner says so" });
-    assert.equal((await c.policy.evaluate({ principalId: "agent:ann", projectId: c.a, tool: "git-push", branchProtected: true })).via, "grant", "an owner-made exact grant still can");
+    assert.equal((await c.policy.evaluate({ principalId: "agent:ann", projectId: c.a, tool: "git-push", branchProtected: true })).via, "must-decide", "an owner-made grant that does not name the branch does not waive it (card A07f)");
+    await c.grants.grant(c.owner, { commandId: cid("g"), grantee: "agent:ann", action: "approve.class.push", project: c.a, source: "direct", basis: "owner says so", terms: { branches: ["main"] } });
+    assert.equal((await c.policy.evaluate({ principalId: "agent:ann", projectId: c.a, tool: "git-push", branchProtected: true, branch: "main" })).via, "grant", "an owner-made exact grant that names the branch still can");
   });
 
   suite("accepting twice, or retrying after a failure part-way, makes one grant; accept and dismiss at the same revision cannot both stick", async (c) => {
