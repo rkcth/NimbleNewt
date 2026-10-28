@@ -30,10 +30,15 @@ class Runtime implements StopPorts {
   unresolved: string[] = [];
   ended = true;
   crashOnTerminate = false;
+  throwOnTerminate = false;
+  throwOnCheckpoint = false;
+  /** Runs inside cleanup, so a test can make something else happen while preparation is in progress. */
+  duringCleanup: (() => Promise<void>) | undefined;
+  async release(): Promise<void> { this.calls.push("release"); }
   async inventory(): Promise<InventoryItem[]> { this.calls.push("inventory"); return this.items; }
-  async cleanup(_s: unknown, o: { backup: boolean }) { this.calls.push("cleanup"); this.backups.push(o.backup); return this.cleanups.length > 1 ? this.cleanups.shift()! : this.cleanups[0]!; }
-  async checkpoint() { this.calls.push("checkpoint"); return { checkpointId: "cp-1", durable: this.checkpointDurable, artifactsDurable: this.artifactsDurable }; }
-  async terminate(_s: unknown, o: { force: boolean }) { this.calls.push(o.force ? "terminate-force" : "terminate"); if (this.crashOnTerminate) throw new Error("process died"); return { ended: this.ended, unresolved: this.unresolved }; }
+  async cleanup(_s: unknown, o: { backup: boolean }) { this.calls.push("cleanup"); const hook = this.duringCleanup; this.duringCleanup = undefined; if (hook !== undefined) await hook(); this.backups.push(o.backup); return this.cleanups.length > 1 ? this.cleanups.shift()! : this.cleanups[0]!; }
+  async checkpoint() { this.calls.push("checkpoint"); if (this.throwOnCheckpoint) throw new Error("no runtime to checkpoint"); return { checkpointId: "cp-1", durable: this.checkpointDurable, artifactsDurable: this.artifactsDurable }; }
+  async terminate(_s: unknown, o: { force: boolean }) { this.calls.push(o.force ? "terminate-force" : "terminate"); if (this.crashOnTerminate) await new Promise(() => undefined); if (this.throwOnTerminate) throw new Error("cannot reach the host"); return { ended: this.ended, unresolved: this.unresolved }; }
   count(call: string): number { return this.calls.filter((c) => c === call).length; }
 }
 
@@ -98,7 +103,8 @@ for (const backend of backends) {
   suite("a kill in the middle resumes the intent after a restart and reuses the finished preparation", async (c) => {
     c.rt.crashOnTerminate = true;
     const { intentId } = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "stop" });
-    await assert.rejects(c.stops.advance(c.owner, { intentId }), /process died/);
+    // The process dies inside terminate: the call never returns (the test walks away from it).
+    await Promise.race([c.stops.advance(c.owner, { intentId }), new Promise((r) => setTimeout(r, 150))]);
     assert.equal((await c.stops.get(c.owner, intentId))?.phase, "terminating", "the intent survives the crash in the phase it reached");
     c.rt.crashOnTerminate = false;
     const reopened = c.reopen();
@@ -205,7 +211,7 @@ for (const backend of backends) {
   suite("a scope resumed before the request finished cancels it, and nothing more is done for it; an agent without the grant cannot move it along", async (c) => {
     c.rt.cleanups = [{ remaining: [{ kind: "job", ref: "j", state: "running" }] }];
     const a = await c.stops.request(c.mgr, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "r" });
-    await refuses("forbidden", () => c.stops.advance(c.ann, { intentId: a.intentId }));
+    await refuses("not_found", () => c.stops.advance(c.ann, { intentId: a.intentId }));
     await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "never mind" });
     const gone = await c.stops.advance(c.mgr, { intentId: a.intentId });
     assert.equal(gone.phase, "cancelled");
@@ -215,5 +221,71 @@ for (const backend of backends) {
     c.rt.cleanups = [{ remaining: [] }];
     const b = await c.stops.request(c.mgr, { commandId: cid("s"), scope: scopeOf(c.task), mode: "suspend", reason: "later" });
     assert.equal((await c.stops.advance(c.mgr, { intentId: b.intentId })).outcome?.state, "suspended");
+  });
+  suite("a force sent again after the owner resumed does not end running work a second time", async (c) => {
+    const id = cid("f");
+    const first = await c.stops.force(c.mgr, { commandId: id, scope: scopeOf(c.task), reason: "on fire" });
+    await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "fixed" });
+    const again = await c.stops.force(c.mgr, { commandId: id, scope: scopeOf(c.task), reason: "on fire" });
+    assert.deepEqual(again, first, "the recorded outcome");
+    assert.equal(c.rt.count("terminate-force"), 1);
+    assert.notEqual((await c.pauses.gate(c.owner, scopeOf(c.task)))?.intent, "pause", "the retry did not pause it again");
+  });
+
+  suite("a force that lands while preparation is running wins, and the preparation that finishes afterwards does not bring the request back to life", async (c) => {
+    const a = await c.stops.request(c.mgr, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "r" });
+    c.rt.duringCleanup = async () => { await c.stops.force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "now" }); };
+    const done = await c.stops.advance(c.mgr, { intentId: a.intentId });
+    assert.equal(done.phase, "done");
+    assert.deepEqual([done.outcome?.graceful, done.mode], [false, "force-stop"], "the force is not lost or overwritten");
+    assert.equal(c.rt.count("terminate-force"), 1);
+    assert.equal(c.rt.count("terminate"), 0, "no graceful end afterwards");
+    assert.equal(c.rt.count("checkpoint"), 0);
+  });
+
+  suite("a stop after a suspension that was resumed in between prepares again; a retried upgrade names the request it upgraded", async (c) => {
+    const a = await c.stops.request(c.mgr, { commandId: cid("s"), scope: scopeOf(c.task), mode: "suspend", reason: "r" });
+    await c.stops.advance(c.mgr, { intentId: a.intentId });
+    await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "back to work" });
+    const b = await c.stops.request(c.mgr, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "night" });
+    await c.stops.advance(c.mgr, { intentId: b.intentId });
+    assert.equal(c.rt.count("checkpoint"), 2, "the old checkpoint is not reused after the hold was lifted");
+    // An upgrade of a suspend that is still preparing, sent twice.
+    await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "again" });
+    c.rt.cleanups = [{ remaining: [{ kind: "job", ref: "j", state: "running" }] }];
+    const first = await c.stops.request(c.mgr, { commandId: cid("s"), scope: scopeOf(c.task), mode: "suspend", reason: "r" });
+    const upId = cid("up");
+    const up = await c.stops.request(c.mgr, { commandId: upId, scope: scopeOf(c.task), mode: "stop", reason: "stop instead" });
+    const retried = await c.stops.request(c.mgr, { commandId: upId, scope: scopeOf(c.task), mode: "stop", reason: "stop instead" });
+    assert.deepEqual([up.intentId, retried.intentId, retried.replayed], [first.intentId, first.intentId, true]);
+    assert.equal((await c.stops.get(c.mgr, retried.intentId))?.mode, "stop");
+  });
+
+  suite("a runtime that cannot be reached blocks the request instead of killing it, and a sweep goes on past a request it cannot move", async (c) => {
+    c.rt.throwOnCheckpoint = true;
+    const a = await c.stops.request(c.mgr, { commandId: cid("s"), scope: scopeOf(c.task), mode: "suspend", reason: "r" });
+    const blocked = await c.stops.advance(c.mgr, { intentId: a.intentId });
+    assert.deepEqual([blocked.phase, /could not be taken/.test(blocked.blocked?.reason ?? "")], ["blocked", true]);
+    c.rt.throwOnCheckpoint = false;
+    await c.stops.choose(c.mgr, { commandId: cid("c"), intentId: a.intentId, choice: "wait" });
+    assert.equal((await c.stops.advance(c.mgr, { intentId: a.intentId })).outcome?.state, "suspended");
+    await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "back" });
+    c.rt.throwOnTerminate = true;
+    const b = await c.stops.request(c.mgr, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "r" });
+    const stuck = await c.stops.advance(c.mgr, { intentId: b.intentId });
+    assert.deepEqual([stuck.phase, stuck.blocked?.resume], ["blocked", "terminating"]);
+    c.rt.throwOnTerminate = false;
+    assert.equal((await c.stops.choose(c.mgr, { commandId: cid("c"), intentId: b.intentId, choice: "wait" })).phase, "terminating");
+    assert.equal((await c.stops.advance(c.mgr, { intentId: b.intentId })).outcome?.state, "stopped");
+    assert.deepEqual((await c.stops.sweep(c.owner)).failed, []);
+  });
+
+  suite("a request cancelled by a resume lets go of what preparation froze", async (c) => {
+    c.rt.cleanups = [{ remaining: [{ kind: "job", ref: "j", state: "running" }] }];
+    const a = await c.stops.request(c.mgr, { commandId: cid("s"), scope: scopeOf(c.task), mode: "suspend", reason: "r" });
+    await c.stops.advance(c.mgr, { intentId: a.intentId });
+    await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "never mind" });
+    await c.stops.advance(c.mgr, { intentId: a.intentId });
+    assert.equal(c.rt.count("release"), 1);
   });
 }

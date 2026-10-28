@@ -4,7 +4,7 @@ import type { Principal } from "../security/principals.js";
 import type { PauseScope } from "./pause.js";
 import type { InventoryItem, StopPorts } from "./stop.js";
 
-type Dispatcher = Pick<DispatcherService, "liveAttemptsOf" | "quiesce" | "stop" | "operations">;
+type Dispatcher = Pick<DispatcherService, "liveAttemptsOf" | "quiesce" | "stop" | "operations" | "release">;
 
 /**
  * The runtime side of Suspend and Stop for the attempt dispatcher (card L02). Task and agent scopes are the attempts the dispatcher has live for them; a team or installation scope would need the agents under it, which
@@ -12,10 +12,11 @@ type Dispatcher = Pick<DispatcherService, "liveAttemptsOf" | "quiesce" | "stop" 
  * ledger call is never cut), and a checkpoint is taken; the checkpoint counts as durable when the checkpoint hook returned one. Whether the artifacts a checkpoint names are durable is not known here, so it is
  * taken from the hook's answer when it says (`artifactsDurable`), and otherwise assumed durable only when the checkpoint came back.
  */
-export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; principal: Principal } | undefined): StopPorts {
+export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; principal: Principal } | undefined, runtime: () => "none" | "pending" = () => "pending"): StopPorts {
   const attemptsOf = async (scope: PauseScope): Promise<string[]> => {
     const h = dispatch();
-    if (h === undefined) return [];
+    // No dispatcher exists in this controller: nothing can be running. A dispatcher that should exist but is not up (a restart in progress, a failed start) is not the same, and nothing is claimed about it.
+    if (h === undefined) { if (runtime() === "none") return []; throw new Error("the dispatcher is not running, so what is running cannot be known"); }
     if (scope.kind === "task") return h.dispatcher.liveAttemptsOf(h.principal, { taskId: scope.id });
     if (scope.kind === "agent") return h.dispatcher.liveAttemptsOf(h.principal, { agentId: scope.id });
     throw new Error(`a ${scope.kind} scope is not resolved to attempts by this runtime yet`);
@@ -30,16 +31,20 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
   };
   return {
     inventory: async (scope) => inFlight(await attemptsOf(scope)),
+    release: async (scope) => { const h = dispatch(); if (h === undefined) return; for (const id of await attemptsOf(scope)) await h.dispatcher.release(h.principal, id).catch(() => undefined); },
     cleanup: async (scope, options) => {
       const h = dispatch();
       const attempts = await attemptsOf(scope);
-      const strictMs = Math.max(1, Math.min(60_000, Date.parse(options.deadlineAt) - Date.now()));
-      for (const id of attempts) await h!.dispatcher.quiesce(h!.principal, id, "suspend or stop preparation", { strictMs });
+      for (const id of attempts) {
+        const strictMs = Math.max(1, Math.min(60_000, Date.parse(options.deadlineAt) - Date.now()));
+        await h!.dispatcher.quiesce(h!.principal, id, "suspend or stop preparation", { strictMs });
+      }
       return { remaining: await inFlight(attempts) };
     },
     checkpoint: async (scope) => {
       const h = dispatch();
       const attempts = await attemptsOf(scope);
+      if (h === undefined || attempts.length === 0) return { checkpointId: `${scope.kind}:${scope.id}`.slice(0, 120), durable: true, artifactsDurable: true }; // nothing runs here, so there is nothing to save
       let checkpointed = true;
       let artifacts = true;
       for (const id of attempts) {

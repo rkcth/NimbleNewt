@@ -12,6 +12,7 @@ test("the dispatcher ports: live attempts of a task, calls in flight as inventor
   const dispatcher = {
     liveAttemptsOf: async (_by: Principal, s: { taskId?: string; agentId?: string }) => { log.push(`live ${s.taskId ?? s.agentId}`); return ["att-1"]; },
     quiesce: async (by: Principal, id: string) => { log.push(`quiesce ${id} as ${by.id}`); inflight = [{ callId: "c1", state: "cancelled" }, { callId: "c0", state: "confirmed" }]; return checkpoint === undefined ? {} : { checkpoint }; },
+    release: async (_by: Principal, id: string) => { log.push(`release ${id}`); },
     stop: async (_by: Principal, id: string, o: { emergency?: boolean }) => { log.push(`stop ${id}${o.emergency ? " emergency" : ""}`); },
     operations: async () => inflight.map((o) => ({ ...o })) as never,
   };
@@ -28,10 +29,18 @@ test("the dispatcher ports: live attempts of a task, calls in flight as inventor
   inflight = [{ callId: "c9", state: "uncertain" }];
   assert.deepEqual(await ports.terminate(task, { force: true }), { ended: true, unresolved: ["att-1/c9"] });
   assert.ok(log.includes("stop att-1 emergency"));
+  await ports.release!(task);
+  assert.ok(log.includes("release att-1"), "what preparation froze can be let go");
   assert.ok(log.every((l) => !l.includes("quiesce") || l.endsWith("as service:dispatcher")), "the runtime acts as the dispatcher, not as the asker");
   // A scope the runtime does not resolve is said so; with no dispatcher there is nothing to do.
   await assert.rejects(ports.inventory({ kind: "team", id: "team-x" }), /not resolved to attempts/);
-  const none = dispatchStopPorts(() => undefined);
+  // No dispatcher in this controller: nothing can be running. One that should exist but is not up: nothing is claimed.
+  const none = dispatchStopPorts(() => undefined, () => "none");
   assert.deepEqual(await none.inventory(task), []);
   assert.deepEqual(await none.terminate(task, { force: false }), { ended: true, unresolved: [] });
+  assert.equal((await none.checkpoint(task)).durable, true);
+  const pending = dispatchStopPorts(() => undefined, () => "pending");
+  await assert.rejects(pending.inventory(task), /cannot be known/);
+  await assert.rejects(pending.checkpoint(task), /cannot be known/);
+  await assert.rejects(pending.terminate(task, { force: true }), /cannot be known/);
 });

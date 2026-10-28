@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import { onlyKnown, text, type View } from "../domain/model.js";
@@ -20,6 +21,8 @@ export interface InventoryItem { readonly kind: "foreground" | "process" | "job"
 /** What the controller asks of the runtime. Every call must be safe to repeat: a restart makes the same call again. */
 export interface StopPorts {
   inventory(scope: PauseScope): Promise<readonly InventoryItem[]>;
+  /** Lets go of what preparation froze, when the request is cancelled because the scope was resumed. Best effort. */
+  release?(scope: PauseScope): Promise<void>;
   /** Scoped cleanup only (finish or checkpoint what is running, nothing new). `backup` asks for an eligible backup model after the first one was lost. */
   cleanup(scope: PauseScope, options: { deadlineAt: string; spendBudget?: number; backup: boolean }): Promise<{ remaining: readonly InventoryItem[]; spent?: number; modelLost?: boolean }>;
   /** The checkpoint of the scope's state, and whether it and the artifacts it names are durable. */
@@ -44,7 +47,9 @@ export interface StopIntentBody {
   readonly backupUsed: boolean;
   readonly prepared?: { readonly at: string; readonly checkpointId: string };
   readonly inventory: readonly InventoryItem[];
-  readonly blocked?: { readonly reason: string; readonly choices: readonly StopChoice[] } | undefined;
+  readonly blocked?: { readonly reason: string; readonly choices: readonly StopChoice[]; /** The phase `wait` goes back to. */ readonly resume?: StopPhase } | undefined;
+  /** The pause request that held the scope when this request was made: a later stop reuses this request's checkpoint only if the same hold is still in place. */
+  readonly gateRequestId?: string;
   readonly outcome?: StopOutcome;
   readonly forced?: { readonly by: string; readonly reason: string; readonly at: string };
   readonly history: readonly { readonly phase: StopPhase; readonly at: string; readonly by: string; readonly note: string }[];
@@ -98,6 +103,7 @@ export class StopService {
     const scope = { kind: command.scope.kind, id: command.scope.id } as PauseScope;
     await this.#abandonIfResumed(by, scope);
     if ((await this.#pauses.gate(by, scope))?.intent !== "pause") await this.#pauses.pause(by, { commandId: `${String(command.commandId)}-pause`, scope, reason: `${command.mode}: ${reason}`.slice(0, 500) });
+    const gateRequestId = (await this.#pauses.gate(by, scope))?.requestId;
     const intentId = derivedId("stp", scopedCommandId(by.id, command.commandId));
     const activeRef: AggregateRef = { kind: ACTIVE, id: derivedId("stp", scopeKey(scope)) };
     const run = await this.#runner.command("stop.request", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
@@ -111,13 +117,13 @@ export class StopService {
         if (found !== undefined && intent !== undefined && !TERMINAL.includes(intent.phase)) {
           if (!(intent.mode === "suspend" && command.mode === "stop")) throw new DomainError("invalid_command", `${scope.kind} ${scope.id} already has a ${intent.mode} in progress (${intent.phase})`, { field: "scope" });
           const next: StopIntentBody = { ...intent, mode: "stop", history: [...intent.history, { phase: intent.phase, at, by: by.id, note: "stop requested after suspend; preparation is reused" }].slice(-STOP_LIMITS.history) };
-          return { ref: { kind: KIND, id: intent.requestedBy === by.id ? current! : current! }, creates: false, changes: [{ type: "update", ref: { kind: KIND, id: current! }, expectedRevision: found.revision, body: clean(next) }], detail: { scope: scope as unknown as JsonObject, upgraded: true } };
+          return { ref: { kind: KIND, id: current! }, creates: false, changes: [{ type: "update", ref: { kind: KIND, id: current! }, expectedRevision: found.revision, body: clean(next) }], detail: { scope: scope as unknown as JsonObject, upgraded: true } };
         }
         const ref: AggregateRef = { kind: KIND, id: intentId };
         // A stop after a finished suspension, while the scope is still held, goes on from the durable checkpoint instead of preparing again.
-        const reuse = command.mode === "stop" && intent?.phase === "done" && intent.outcome?.state === "suspended" && intent.prepared !== undefined ? intent.prepared : undefined;
+        const reuse = command.mode === "stop" && intent?.phase === "done" && intent.outcome?.state === "suspended" && intent.prepared !== undefined && gateRequestId !== undefined && intent.gateRequestId === gateRequestId ? intent.prepared : undefined;
         const body: StopIntentBody = {
-          scope, ...(target.projectId === undefined ? {} : { projectId: target.projectId }), mode: command.mode, phase: reuse === undefined ? "preparing" : "prepared", ...(reuse === undefined ? {} : { prepared: reuse }), requestedBy: by.id, requestedAt: at, reason,
+          scope, ...(target.projectId === undefined ? {} : { projectId: target.projectId }), mode: command.mode, phase: reuse === undefined ? "preparing" : "prepared", ...(reuse === undefined ? {} : { prepared: reuse }), ...(gateRequestId === undefined ? {} : { gateRequestId }), requestedBy: by.id, requestedAt: at, reason,
           deadlineAt: new Date(Date.parse(at) + deadlineMs).toISOString(), ...(command.spendBudget === undefined ? {} : { spendBudget: command.spendBudget }), spent: 0, backupUsed: false, inventory: [],
           history: [{ phase: reuse === undefined ? "preparing" : "prepared", at, by: by.id, note: reuse === undefined ? `${command.mode} requested` : `stop requested after suspend; checkpoint ${reuse.checkpointId} is reused` }],
         };
@@ -129,7 +135,9 @@ export class StopService {
         };
       },
     }));
-    return { intentId: run.replayed ? intentId : (await this.#activeId(scope)) ?? intentId, replayed: run.replayed };
+    // A replay of a request that upgraded an earlier one has no intent of its own: it answers with the one it upgraded.
+    const own = await this.#runner.get(KIND, intentId);
+    return { intentId: own !== undefined ? intentId : (await this.#activeId(scope)) ?? intentId, replayed: run.replayed };
   }
 
   /** Force Stop: explicit, audited, and never reached by waiting. Skips preparation and ends execution at once; anything unresolved is reported and the result is `recovery-required` rather than clean. */
@@ -138,6 +146,14 @@ export class StopService {
     const reason = plain(command.reason, "reason");
     const target = await this.#pauses.authorizeControl(by, command.scope);
     const scope = { kind: command.scope.kind, id: command.scope.id } as PauseScope;
+    // The same force sent again answers with what it did; it never ends running work a second time (the owner may have resumed the scope since).
+    const mine = derivedId("stp", scopedCommandId(by.id, command.commandId));
+    const prior = await this.#runner.get(KIND, mine);
+    if (prior !== undefined) {
+      const done = (prior.body as unknown as StopIntentBody);
+      if (!TERMINAL.includes(done.phase)) await this.advance(by, { intentId: mine });
+      return { intentId: mine, outcome: ((await this.#runner.get(KIND, mine))!.body as unknown as StopIntentBody).outcome! };
+    }
     if ((await this.#pauses.gate(by, scope))?.intent !== "pause") await this.#pauses.pause(by, { commandId: `${String(command.commandId)}-pause`, scope, reason: `force stop: ${reason}`.slice(0, 500) });
     let id = await this.#activeId(scope);
     const existing = id === undefined ? undefined : await this.#runner.get(KIND, id);
@@ -145,7 +161,7 @@ export class StopService {
       id = derivedId("stp", scopedCommandId(by.id, command.commandId));
       await this.#create(by, command.commandId, id, scope, target.projectId, "force-stop", reason);
     }
-    await this.#update(id!, (b) => ({ ...b, mode: "force-stop", phase: "terminating", forced: { by: by.id, reason, at: this.#runner.now() }, blocked: undefined, history: this.#push(b, "terminating", by.id, `force stop: ${reason}`) }));
+    await this.#update(id!, (b) => ({ ...b, mode: "force-stop", phase: "terminating", forced: { by: by.id, reason, at: this.#runner.now() }, blocked: undefined, history: this.#push(b, "terminating", by.id, `force stop: ${reason}`) }), ["preparing", "blocked", "prepared", "terminating"]);
     await this.advance(by, { intentId: id! });
     const done = (await this.#runner.get(KIND, id!))!.body as unknown as StopIntentBody;
     return { intentId: id!, outcome: done.outcome! };
@@ -158,17 +174,18 @@ export class StopService {
     const found = await this.#runner.get(KIND, String(command.intentId));
     if (found === undefined) throw new DomainError("not_found", "no such stop request");
     const body = found.body as unknown as StopIntentBody;
-    await this.#pauses.authorizeControl(by, body.scope);
+    await this.#mayControl(by, body.scope);
     if (body.phase !== "blocked") throw new DomainError("invalid_command", `the request is ${body.phase}; there is nothing to choose`, { field: "intentId" });
     if (command.choice === "force-stop") { const r = await this.force(by, { commandId: command.commandId, scope: body.scope, reason: command.reason ?? "chosen after a blocked preparation" }); return { phase: (r.outcome.state === "recovery-required" ? "recovery-required" : "done") }; }
     const at = this.#runner.now();
     if (command.choice === "wait") {
       const extend = command.extendMs ?? STOP_LIMITS.deadlineMs.default;
       if (!Number.isSafeInteger(extend) || extend < 1 || extend > STOP_LIMITS.deadlineMs.max) invalid("extendMs", `must be a whole number from 1 to ${STOP_LIMITS.deadlineMs.max}`);
-      await this.#update(String(command.intentId), (b) => ({ ...b, phase: "preparing", blocked: undefined, deadlineAt: new Date(Date.parse(at) + extend).toISOString(), history: this.#push(b, "preparing", by.id, `waiting ${extend} ms more`) }));
-      return { phase: "preparing" };
+      await this.#update(String(command.intentId), (b) => ({ ...b, phase: b.blocked?.resume ?? "preparing", blocked: undefined, deadlineAt: new Date(Date.parse(at) + extend).toISOString(), spent: 0, history: this.#push(b, b.blocked?.resume ?? "preparing", by.id, `waiting ${extend} ms more`) }), ["blocked"]);
+      return { phase: body.blocked?.resume ?? "preparing" };
     }
-    await this.#settle(String(command.intentId), by.id, { state: "recovery-required", graceful: false, unresolved: body.inventory.filter((i) => i.state !== "settled").map((i) => i.ref), at }, "recovery-required", "restart from an earlier boundary chosen");
+    await this.#observe(by, body.scope, String(command.intentId), "recovery-required", "restart from an earlier boundary chosen; the scope is not suspended");
+    await this.#settle(String(command.intentId), by.id, { state: "recovery-required", graceful: false, unresolved: body.inventory.filter((i) => i.state !== "settled").map((i) => i.ref), at }, "recovery-required", "restart from an earlier boundary chosen", ["blocked"]);
     return { phase: "recovery-required" };
   }
 
@@ -176,16 +193,19 @@ export class StopService {
 
   /** Takes the intent as far as it can go now. Safe to call again at any time (the controller's loop does, and so does a restart). Returns where it stands. */
   async advance(by: Principal, command: { intentId: string }): Promise<View<StopIntentBody>> {
+    const id = String(command.intentId);
+    const first = await this.#runner.get(KIND, id);
+    if (first === undefined) throw new DomainError("not_found", "no such stop request");
+    await this.#mayControl(by, (first.body as unknown as StopIntentBody).scope);
+    const LIVE: readonly StopPhase[] = ["preparing", "blocked", "prepared", "terminating"];
     for (let step = 0; step < STOP_LIMITS.advances; step++) {
-      const found = await this.#runner.get(KIND, String(command.intentId));
-      if (found === undefined) throw new DomainError("not_found", "no such stop request");
+      const found = (await this.#runner.get(KIND, id))!;
       const b = found.body as unknown as StopIntentBody;
       if (TERMINAL.includes(b.phase) || b.phase === "blocked") return view<StopIntentBody>(found);
-      const id = String(command.intentId);
-      await this.#pauses.authorizeControl(by, b.scope);
       if (b.forced === undefined && (await this.#pauses.gate(by, b.scope))?.intent !== "pause") {
-        // Somebody resumed the scope before the request finished: the request is over and nothing more is done for it.
-        await this.#update(id, (x) => ({ ...x, phase: "cancelled", blocked: undefined, history: this.#push(x, "cancelled", by.id, "the scope was resumed before the request finished") }));
+        // Somebody resumed the scope before the request finished: the request is over and nothing more is done for it; what preparation froze is let go.
+        await this.#update(id, (x) => ({ ...x, phase: "cancelled", blocked: undefined, history: this.#push(x, "cancelled", by.id, "the scope was resumed before the request finished") }), LIVE);
+        await this.#ports.release?.(b.scope).catch(() => undefined);
         continue;
       }
       const now = this.#runner.now();
@@ -197,65 +217,75 @@ export class StopService {
           if (inventory.length === 0) inventory = (await this.#ports.inventory(b.scope)).slice(0, STOP_LIMITS.inventory);
           result = await this.#ports.cleanup(b.scope, { deadlineAt: b.deadlineAt, ...(b.spendBudget === undefined ? {} : { spendBudget: b.spendBudget }), backup: b.backupUsed });
         } catch (error) {
-          await this.#block(id, by.id, `cleanup could not run: ${redactText(error instanceof Error ? error.message : String(error)).slice(0, 200)}`);
+          await this.#block(id, by.id, `cleanup could not run: ${redactText(error instanceof Error ? error.message : String(error)).slice(0, 200)}`, ["preparing"]);
           continue;
         }
+        // Something else (a Force Stop, a choice, a resume) may have moved the request while the cleanup ran: then this pass is stale and does nothing more.
+        if (((await this.#runner.get(KIND, id))?.body as unknown as StopIntentBody | undefined)?.phase !== "preparing") continue;
         const spent = b.spent + (result.spent ?? 0);
-        if (result.modelLost === true && !b.backupUsed) { await this.#update(id, (x) => ({ ...x, backupUsed: true, spent, inventory, history: this.#push(x, "preparing", by.id, "the cleanup model was lost; an eligible backup model is used") })); continue; }
-        if (result.modelLost === true) { await this.#block(id, by.id, "the cleanup model was lost and the backup model could not finish the cleanup"); continue; }
-        if (b.spendBudget !== undefined && spent > b.spendBudget && result.remaining.length > 0) { await this.#update(id, (x) => ({ ...x, spent })); await this.#block(id, by.id, "the cleanup budget is used up with work still running"); continue; }
+        if (result.modelLost === true && !b.backupUsed) { await this.#update(id, (x) => ({ ...x, backupUsed: true, spent, inventory, history: this.#push(x, "preparing", by.id, "the cleanup model was lost; an eligible backup model is used") }), ["preparing"]); continue; }
+        if (result.modelLost === true) { await this.#block(id, by.id, "the cleanup model was lost and the backup model could not finish the cleanup", ["preparing"]); continue; }
+        if (b.spendBudget !== undefined && spent > b.spendBudget && result.remaining.length > 0) { await this.#update(id, (x) => ({ ...x, spent }), ["preparing"]); await this.#block(id, by.id, "the cleanup budget is used up with work still running", ["preparing"]); continue; }
         if (result.remaining.length > 0) {
           const stuck = result.remaining.filter((i) => i.state !== "settled");
-          await this.#update(id, (x) => ({ ...x, spent, inventory: result.remaining.slice(0, STOP_LIMITS.inventory) }));
-          if (Date.parse(now) >= Date.parse(b.deadlineAt) || stuck.some((i) => i.state === "uncooperative")) { await this.#block(id, by.id, stuck.some((i) => i.state === "uncooperative") ? "an uncooperative operation will not settle" : "the deadline passed with work still running"); continue; }
+          await this.#update(id, (x) => ({ ...x, spent, inventory: result.remaining.slice(0, STOP_LIMITS.inventory) }), ["preparing"]);
+          if (Date.parse(now) >= Date.parse(b.deadlineAt) || stuck.some((i) => i.state === "uncooperative")) { await this.#block(id, by.id, stuck.some((i) => i.state === "uncooperative") ? "an uncooperative operation will not settle" : "the deadline passed with work still running", ["preparing"]); continue; }
           return view<StopIntentBody>((await this.#runner.get(KIND, id))!); // still settling: the next call looks again
         }
-        const cp = await this.#ports.checkpoint(b.scope);
-        if (!cp.durable || !cp.artifactsDurable) { await this.#update(id, (x) => ({ ...x, spent, inventory: [] })); await this.#block(id, by.id, !cp.durable ? "the checkpoint is not durable" : "the artifacts the checkpoint names are not durable"); continue; }
-        await this.#update(id, (x) => ({ ...x, phase: "prepared", spent, inventory: [], prepared: { at: now, checkpointId: cp.checkpointId }, history: this.#push(x, "prepared", by.id, `checkpoint ${cp.checkpointId} is durable`) }));
+        let cp: Awaited<ReturnType<StopPorts["checkpoint"]>>;
+        try { cp = await this.#ports.checkpoint(b.scope); } catch (error) {
+          await this.#block(id, by.id, `the checkpoint could not be taken: ${redactText(error instanceof Error ? error.message : String(error)).slice(0, 200)}`, ["preparing"]);
+          continue;
+        }
+        if (!cp.durable || !cp.artifactsDurable) { await this.#update(id, (x) => ({ ...x, spent, inventory: [] }), ["preparing"]); await this.#block(id, by.id, !cp.durable ? "the checkpoint is not durable" : "the artifacts the checkpoint names are not durable", ["preparing"]); continue; }
+        await this.#update(id, (x) => ({ ...x, phase: "prepared", spent, inventory: [], prepared: { at: now, checkpointId: cp.checkpointId }, history: this.#push(x, "prepared", by.id, `checkpoint ${cp.checkpointId} is durable`) }), ["preparing"]);
         continue;
       }
       if (b.phase === "prepared") {
         if (b.mode === "suspend") {
           await this.#observe(by, b.scope, id, "suspended", `checkpoint ${b.prepared?.checkpointId ?? "?"} is durable`);
-          await this.#settle(id, by.id, { state: "suspended", graceful: true, unresolved: [], at: now }, "done", "suspended");
+          await this.#settle(id, by.id, { state: "suspended", graceful: true, unresolved: [], at: now }, "done", "suspended", ["prepared"]);
           continue;
         }
-        await this.#update(id, (x) => ({ ...x, phase: "terminating", history: this.#push(x, "terminating", by.id, "ending execution") }));
+        await this.#update(id, (x) => ({ ...x, phase: "terminating", history: this.#push(x, "terminating", by.id, "ending execution") }), ["prepared"]);
         continue;
       }
       if (b.phase === "terminating") {
         await this.#observe(by, b.scope, id, "stopping", b.forced === undefined ? "ending execution after preparation" : "force stop: ending execution without cleanup");
-        const ended = await this.#ports.terminate(b.scope, { force: b.forced !== undefined });
+        let ended: Awaited<ReturnType<StopPorts["terminate"]>>;
+        try { ended = await this.#ports.terminate(b.scope, { force: b.forced !== undefined }); } catch (error) {
+          await this.#block(id, by.id, `execution could not be ended: ${redactText(error instanceof Error ? error.message : String(error)).slice(0, 200)}`, ["terminating"], "terminating");
+          continue;
+        }
         const graceful = b.forced === undefined;
         if (ended.ended && ended.unresolved.length === 0) {
           await this.#observe(by, b.scope, id, "stopped", graceful ? "ended after preparation" : "force stopped; incomplete state may need reconciling");
-          await this.#settle(id, by.id, { state: "stopped", graceful, unresolved: [], at: now }, "done", graceful ? "stopped" : "force stopped");
+          await this.#settle(id, by.id, { state: "stopped", graceful, unresolved: [], at: now }, "done", graceful ? "stopped" : "force stopped", ["terminating"]);
         } else {
           await this.#observe(by, b.scope, id, "recovery-required", `unresolved: ${ended.unresolved.join(", ").slice(0, 300) || "execution did not end"}`);
-          await this.#settle(id, by.id, { state: "recovery-required", graceful: false, unresolved: ended.unresolved.slice(0, 50), at: now }, "recovery-required", "unresolved work remains");
+          await this.#settle(id, by.id, { state: "recovery-required", graceful: false, unresolved: ended.unresolved.slice(0, 50), at: now }, "recovery-required", "unresolved work remains", ["terminating"]);
         }
         continue;
       }
     }
-    return view<StopIntentBody>((await this.#runner.get(KIND, String(command.intentId)))!);
+    return view<StopIntentBody>((await this.#runner.get(KIND, id))!);
   }
 
   /** Carries every unfinished intent on after a restart. */
-  async sweep(by: Principal): Promise<{ advanced: string[] }> {
+  async sweep(by: Principal): Promise<{ advanced: string[]; failed: string[] }> {
     const advanced: string[] = [];
+    const failed: string[] = [];
     for (let after: string | undefined; ;) {
       const page = await this.#runner.list(KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
       for (const rec of page) {
         after = rec.id;
         const b = rec.body as unknown as StopIntentBody;
         if (TERMINAL.includes(b.phase) || b.phase === "blocked") continue;
-        await this.advance(by, { intentId: rec.id });
-        advanced.push(rec.id);
+        try { await this.advance(by, { intentId: rec.id }); advanced.push(rec.id); } catch { failed.push(rec.id); }
       }
       if (page.length < 100) break;
     }
-    return { advanced };
+    return { advanced, failed };
   }
 
   async get(viewer: Principal, intentId: string): Promise<View<StopIntentBody> | undefined> {
@@ -274,7 +304,8 @@ export class StopService {
     if (id === undefined || found === undefined) return;
     const b = found.body as unknown as StopIntentBody;
     if (TERMINAL.includes(b.phase) || (await this.#pauses.gate(by, scope))?.intent === "pause") return;
-    await this.#update(id, (x) => ({ ...x, phase: "cancelled", blocked: undefined, history: this.#push(x, "cancelled", by.id, "the scope was resumed before the request finished") }));
+    await this.#update(id, (x) => ({ ...x, phase: "cancelled", blocked: undefined, history: this.#push(x, "cancelled", by.id, "the scope was resumed before the request finished") }), ["preparing", "blocked", "prepared", "terminating"]);
+    await this.#ports.release?.(scope).catch(() => undefined);
   }
 
   async #activeId(scope: PauseScope): Promise<string | undefined> {
@@ -300,29 +331,40 @@ export class StopService {
     }));
   }
 
-  async #update(id: string, change: (b: StopIntentBody) => StopIntentBody): Promise<void> {
+  /** Whether the principal may control the scope; anyone who may not learns nothing, not even that the request exists. */
+  async #mayControl(by: Principal, scope: PauseScope): Promise<void> {
+    try { await this.#pauses.authorizeControl(by, scope); } catch (error) { if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) throw new DomainError("not_found", "no such stop request"); throw error; }
+  }
+
+  /**
+   * Changes the record only if it is still in one of the phases the decision was made in (`from`); otherwise someone else got there first and nothing is written (false). The command ID carries the new body's digest, so two
+   * different writes at the same revision are never mistaken for one replayed command.
+   */
+  async #update(id: string, change: (b: StopIntentBody) => StopIntentBody, from?: readonly StopPhase[]): Promise<boolean> {
     for (let attempt = 1; ; attempt++) {
       const found = await this.#runner.get(KIND, id);
       if (found === undefined) throw new DomainError("not_found", "no such stop request");
+      if (from !== undefined && !from.includes((found.body as unknown as StopIntentBody).phase)) return false;
       const next = change(found.body as unknown as StopIntentBody);
+      const digest = createHash("sha256").update(JSON.stringify(clean(next))).digest("hex").slice(0, 16);
       try {
-        await this.#runner.command("stop.advance", { commandId: `stop-adv-${id.slice(4)}-${found.revision}`, actor: "system" }, async () => ({
+        await this.#runner.command("stop.advance", { commandId: `stop-adv-${id.slice(4)}-${found.revision}-${digest}`, actor: "system" }, async () => ({
           payload: { phase: next.phase, revision: found.revision },
           build: async () => ({ ref: { kind: KIND, id }, creates: false, changes: [{ type: "update", ref: { kind: KIND, id }, expectedRevision: found.revision, body: clean(next) }], detail: { phase: next.phase } }),
         }));
-        return;
+        return true;
       } catch (error) {
         if (!(error instanceof DomainError) || (error.code !== "stale_revision" && error.code !== "command_conflict") || attempt >= 6) throw error;
       }
     }
   }
 
-  async #block(id: string, by: string, reason: string): Promise<void> {
-    await this.#update(id, (x) => ({ ...x, phase: "blocked", blocked: { reason, choices: STOP_CHOICES }, history: this.#push(x, "blocked", by, reason) }));
+  async #block(id: string, by: string, reason: string, from: readonly StopPhase[], resume?: StopPhase): Promise<void> {
+    await this.#update(id, (x) => ({ ...x, phase: "blocked", blocked: { reason, choices: STOP_CHOICES, ...(resume === undefined ? {} : { resume }) }, history: this.#push(x, "blocked", by, reason) }), from);
   }
 
-  async #settle(id: string, by: string, outcome: StopOutcome, phase: "done" | "recovery-required", note: string): Promise<void> {
-    await this.#update(id, (x) => ({ ...x, phase, blocked: undefined, outcome, history: this.#push(x, phase, by, note) }));
+  async #settle(id: string, by: string, outcome: StopOutcome, phase: "done" | "recovery-required", note: string, from: readonly StopPhase[]): Promise<void> {
+    await this.#update(id, (x) => ({ ...x, phase, blocked: undefined, outcome, history: this.#push(x, phase, by, note) }), from);
   }
 
   /** Tells the pause gate what was reached. The intent's own record is the durable source; a refusal here (the gate was resumed meanwhile) does not undo it. */
