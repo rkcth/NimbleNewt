@@ -221,30 +221,71 @@ for (const backend of backends) {
     for (const s of sockets) s.destroy();
   });
 
-  suite("connections are limited per address only before login: many logged-in hosts behind one address hold their polls, strangers cannot take their room, and a host has its own allowance (card H07d)", async (c) => {
-    const capped = await c.listen({ limits: { connectionsPerAddress: 2, connections: 3, connectionsPerHost: 2 } });
-    const hosts = [await c.host("a1"), await c.host("a2"), await c.host("a3"), await c.host("a4"), await c.host("a5")];
-    const clients = hosts.map((h) => { const x = new RemoteWorkerClient({ url: capped.url, token: h.token, workerVersion: "worker-9.1.0" }); return x; });
-    for (const x of clients) await x.connect({ ...REMOTE_CAPS } as never);
-    // Five logged-in hosts from one address hold a poll each, though the address may have only two connections before login.
-    // (One at a time: a connection is a stranger's until its first request is authenticated, and the address allows two of those at once.)
-    const polls: Promise<unknown>[] = [];
-    for (const x of clients) { polls.push(x.offers({ waitMs: 3000 })); const want = polls.length; for (let i = 0; i < 300 && capped.connectionCounts().loggedIn < want; i++) await new Promise((r) => setTimeout(r, 20)); }
-    assert.deepEqual(capped.connectionCounts(), { beforeLogin: 0, loggedIn: 5 });
-    // Strangers fill only the pool before login: two from the address, then the address is full, and the held polls are untouched.
+  for (const secure of [false, true]) {
+    suite(`connections are limited per address only before login${secure ? ", over TLS" : ""}: many logged-in hosts behind one address hold their polls, strangers cannot take their room, and a host has its own allowance (card H07d)`, async (c) => {
+      const tls = secure ? selfSigned() : undefined;
+      const capped = await c.listen({ limits: { connectionsPerAddress: 2, connections: 3, connectionsPerHost: 2 }, ...(tls === undefined ? {} : { tls }) });
+      const hosts = [await c.host("a1"), await c.host("a2"), await c.host("a3"), await c.host("a4"), await c.host("a5")];
+      const clients = hosts.map((h) => new RemoteWorkerClient({ url: capped.url, token: h.token, workerVersion: "worker-9.1.0", ...(tls === undefined ? {} : { ca: tls.cert }) }));
+      for (const x of clients) await x.connect({ ...REMOTE_CAPS } as never);
+      // Five logged-in hosts from one address hold a poll each, though the address may have only two connections before login.
+      // (One at a time: a connection is a stranger's until its first request is authenticated, and the address allows two of those at once.)
+      const polls: Promise<unknown>[] = [];
+      for (const x of clients) { polls.push(x.offers({ waitMs: 3000 })); const want = polls.length; for (let i = 0; i < 300 && capped.connectionCounts().loggedIn < want; i++) await new Promise((r) => setTimeout(r, 20)); }
+      assert.deepEqual(capped.connectionCounts(), { beforeLogin: 0, loggedIn: 5 });
+      // Strangers fill only the pool before login: two from the address, then the address is full, and the held polls are untouched.
+      const { connect } = await import("node:net");
+      const open = (): Promise<import("node:net").Socket> => new Promise((resolve) => { const s = connect(capped.port, "127.0.0.1"); s.once("connect", () => resolve(s)); });
+      const strangers = [await open(), await open()];
+      const dropped = await open();
+      await new Promise<void>((resolve) => dropped.once("close", () => resolve()));
+      assert.equal(capped.connectionCounts().beforeLogin, 2);
+      assert.equal(capped.connectionCounts().loggedIn, 5);
+      for (const s of strangers) s.destroy();
+      for (const p of polls) assert.deepEqual(await p, []);
+      for (let i = 0; i < 300 && capped.connectionCounts().beforeLogin + capped.connectionCounts().loggedIn > 0; i++) await new Promise((r) => setTimeout(r, 20));
+      // A host has its own allowance: exactly connectionsPerHost kept-alive connections work and the next is answered rate_limited.
+      const { connect: netConnect } = await import("node:net");
+      const { connect: tlsConnect } = await import("node:tls");
+      const session = await clients[0]!.connect({ ...REMOTE_CAPS } as never);
+      const status = (): Promise<{ code: number; close: () => void }> => new Promise((resolve, reject) => {
+        const socket = tls === undefined ? netConnect(capped.port, "127.0.0.1") : tlsConnect({ port: capped.port, host: "127.0.0.1", ca: tls.cert });
+        socket.once(tls === undefined ? "connect" : "secureConnect", () => socket.write(`GET /worker/session/offers HTTP/1.1\r\nHost: 127.0.0.1:${capped.port}\r\nAuthorization: Bearer ${hosts[0]!.token}\r\n${SESSION_HEADER}: ${session.sessionId}\r\n${PROTOCOL_HEADER}: ${session.protocol}\r\n\r\n`));
+        socket.once("data", (d) => resolve({ code: Number(/^HTTP\/1\.1 (\d+)/.exec(d.toString())?.[1] ?? 0), close: () => socket.destroy() }));
+        socket.once("error", reject);
+      });
+      // The client's own kept-alive connection (if it still holds one) counts too, so the room left is what the count shows.
+      for (let i = 0; i < 100; i++) await new Promise((r) => setTimeout(r, 20));
+      const room = 2 - capped.connectionCounts().loggedIn;
+      assert.ok(room >= 1, "at least one connection is free to test");
+      const kept: { code: number; close: () => void }[] = [];
+      for (let i = 0; i < room; i++) kept.push(await status());
+      assert.deepEqual(kept.map((k) => k.code), new Array(room).fill(200));
+      assert.equal((await status()).code, 429);
+      kept[0]!.close();
+      for (let i = 0; i < 300 && capped.connectionCounts().loggedIn > 2 - 1; i++) await new Promise((r) => setTimeout(r, 20));
+      assert.equal((await status()).code, 200, "a closed connection frees its place");
+      for (const k of kept) k.close();
+    });
+  }
+
+  suite("a host's connections are released when they close: reconnecting many more times than its allowance never locks it out (card H07d)", async (c) => {
+    const capped = await c.listen({ limits: { connectionsPerHost: 2 } });
+    const host = await c.host("a1");
+    const session = await new RemoteWorkerClient({ url: capped.url, token: host.token, workerVersion: "worker-9.1.0" }).connect({ ...REMOTE_CAPS } as never);
     const { connect } = await import("node:net");
-    const open = (): Promise<import("node:net").Socket> => new Promise((resolve) => { const s = connect(capped.port, "127.0.0.1"); s.once("connect", () => resolve(s)); });
-    const strangers = [await open(), await open()];
-    const dropped = await open();
-    await new Promise<void>((resolve) => dropped.once("close", () => resolve()));
-    assert.equal(capped.connectionCounts().beforeLogin, 2);
-    assert.equal(capped.connectionCounts().loggedIn, 5);
-    for (const s of strangers) s.destroy();
-    for (const p of polls) assert.deepEqual(await p, []);
-    // A host has its own allowance: past two open connections the third is answered rate_limited.
-    const host = hosts[0]!;
-    const many = await Promise.allSettled([1, 2, 3, 4].map(() => new RemoteWorkerClient({ url: capped.url, token: host.token, workerVersion: "worker-9.1.0" }).connect({ ...REMOTE_CAPS } as never)));
-    assert.ok(many.some((r) => r.status === "rejected" && r.reason instanceof WorkerRequestError && r.reason.code === "rate_limited"), JSON.stringify(many.map((r) => r.status)));
+    const once = (): Promise<number> => new Promise((resolve, reject) => {
+      const socket = connect(capped.port, "127.0.0.1", () => socket.write(`GET /worker/session/offers HTTP/1.1\r\nHost: 127.0.0.1:${capped.port}\r\nAuthorization: Bearer ${host.token}\r\n${SESSION_HEADER}: ${session.sessionId}\r\n${PROTOCOL_HEADER}: ${session.protocol}\r\nConnection: close\r\n\r\n`));
+      let data = "";
+      socket.on("data", (d) => { data += d.toString(); });
+      socket.on("close", () => resolve(Number(/^HTTP\/1\.1 (\d+)/.exec(data)?.[1] ?? 0)));
+      socket.on("error", reject);
+    });
+    const statuses: number[] = [];
+    for (let i = 0; i < 12; i++) statuses.push(await once());
+    assert.deepEqual(statuses, new Array(12).fill(200));
+    for (let i = 0; i < 300 && capped.connectionCounts().loggedIn > 0; i++) await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(capped.connectionCounts(), { beforeLogin: 0, loggedIn: 0 });
   });
 
   suite("a worker's whole surface is its own session, offers and attempts: there is no route that admits work, creates an attempt, reads the controller's records or opens its storage", async (c) => {

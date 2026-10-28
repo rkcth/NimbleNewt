@@ -359,8 +359,10 @@ class ConnectionBook {
 
   /** The connection has made an authenticated request as this host. A host past its allowance is told so and the connection is closed after the answer. */
   login(socket: Socket, host: string): void {
-    const state = this.#state.get(socket);
-    if (state === undefined || state.host === host) return;
+    // Over TLS the request's socket wraps the one the listener accepted; the accepted one is what was counted.
+    const state = this.#state.get((socket as Socket & { _parent?: Socket })._parent ?? socket);
+    if (state === undefined) throw new HttpError(500, "internal", "the connection was not counted");
+    if (state.host === host) return;
     if (state.host === undefined) this.#leavePre(state.addr); else this.#leaveHost(state.host);
     state.host = host;
     const n = (this.#byHost.get(host) ?? 0) + 1;
