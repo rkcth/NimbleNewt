@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
@@ -153,6 +154,7 @@ export class AgentService {
     return this.#command(by, "role.label", command, async () => {
       onlyKnown(command, ["commandId", "name", "label", "expectedRevision"]);
       const name = roleName(command.name, "name");
+      if (typeof command.label === "string" && /[\p{Cf}\p{Cc}\p{Zl}\p{Zp}]/u.test(command.label)) throw new DomainError("invalid_command", "label: may not contain invisible or direction-changing characters", { field: "label" });
       const label = command.label === null ? null : text(command.label, "label", { min: 1, max: AGENT_LIMITS.label });
       return {
         payload: { name, label, expectedRevision: command.expectedRevision ?? null },
@@ -172,8 +174,10 @@ export class AgentService {
    * nothing. It is not an act of any principal and grants nothing.
    */
   async seedStandardRoles(): Promise<void> {
-    await this.#runner.command("role.seed", { commandId: "role-seed-1", actor: "system" }, async () => ({
-      payload: { roles: STANDARD_ROLES.map((r) => r.name) },
+    // The command ID follows the list of standard roles, so a release that adds one seeds it instead of meeting the old digest.
+    const listed = STANDARD_ROLES.map((r) => r.name).join(",");
+    await this.#runner.command("role.seed", { commandId: `role-seed-${createHash("sha256").update(listed).digest("hex").slice(0, 16)}`, actor: "system" }, async () => ({
+      payload: { roles: listed },
       build: async () => {
         const changes: Change[] = [];
         for (const r of STANDARD_ROLES) {

@@ -300,8 +300,13 @@ for (const backend of backends) {
     await c.agents.defineRole(c.owner, { commandId: cid("r"), name: "qa", capabilities: ["project.read"], description: "the owner's own qa" });
     await c.agents.seedStandardRoles();
     await c.agents.seedStandardRoles();
+    // A later release with one more standard role seeds it and does not meet the earlier seeding.
+    const extra = { name: "ops", capabilities: ["project.read"], description: "a role a later release adds" };
+    (STANDARD_ROLES as unknown as Array<typeof extra>).push(extra);
+    try { await c.agents.seedStandardRoles(); assert.ok((await c.agents.getRole(c.owner, "ops")) !== undefined); } finally { (STANDARD_ROLES as unknown as unknown[]).pop(); }
+    await refuses("invalid_command", () => c.agents.setRoleLabel(c.owner, { commandId: cid("l"), name: "qa", label: "Chief\u202Eevil" }));
     const listed = (await c.agents.listRoles(c.owner, { limit: 50 })).items;
-    assert.deepEqual(listed.map((r) => r.name).sort(), ["author", "director", "docs", "integrator", "qa", "reviewer"]);
+    assert.deepEqual(listed.map((r) => r.name).sort(), ["author", "director", "docs", "integrator", "ops", "qa", "reviewer"]);
     assert.deepEqual(listed.find((r) => r.name === "qa")!.capabilities, ["project.read"], "the owner's definition was kept");
     assert.ok(STANDARD_ROLES.every((r) => !r.capabilities.includes("workspace.manage")), "no standard role may manage the shared workspace");
     assert.deepEqual(listed.find((r) => r.name === "integrator")!.excludes, []);
