@@ -59,6 +59,7 @@ function parse(command: Record<string, unknown>, fields: readonly string[]): Par
     if (!Array.isArray(list) || list.length > CHECKS.length || list.some((c) => !(CHECKS as readonly unknown[]).includes(c))) invalid("requiredChecks", `must be a list of ${CHECKS.join(", ")}`);
     out.requiredChecks = [...new Set(list as Check[])].sort((a, b) => CHECKS.indexOf(a) - CHECKS.indexOf(b));
   }
+  if (out.landing === "main-automatic" && out.requiredChecks !== undefined && out.requiredChecks.length === 0) invalid("requiredChecks", "main-automatic needs at least one check");
   if (command["refreshRounds"] !== undefined) {
     const n = command["refreshRounds"];
     if (typeof n !== "number" || !Number.isInteger(n) || n < 0 || n > 10) invalid("refreshRounds", "must be a whole number from 0 to 10");
@@ -106,14 +107,14 @@ export class IntegrationPolicyService {
   }
 
   /** The project's policy as it stands (owner only). It makes the record first if the project has none. */
-  async get(owner: Principal, projectId: string): Promise<IntegrationSettings & { revision: number; source: string; lockedMainAutomatic: boolean }> {
+  async get(owner: Principal, projectId: string): Promise<IntegrationSettings & { revision: number; source: string; lockedMainAutomatic: boolean; heldFrom?: Landing }> {
     this.#owner(owner, "read");
     await this.ensure(projectId);
     const found = (await this.#runner.get(KIND, this.#id(projectId)))!;
     const body = found.body as unknown as IntegrationBody;
     const locked = await this.#locked();
     const settings = this.#coerce(body, locked);
-    return { ...settings, revision: found.revision, source: body.source, lockedMainAutomatic: locked };
+    return { ...settings, revision: found.revision, source: body.source, lockedMainAutomatic: locked, ...(settings.landing !== body.landing ? { heldFrom: body.landing } : {}) };
   }
 
   /** The owner changes the project's policy; fields left out stay. A landing of `main-automatic` is refused while the installation lock is set. */
@@ -131,6 +132,7 @@ export class IntegrationPolicyService {
         if (command.expectedRevision !== undefined && current.revision !== command.expectedRevision) throw new DomainError("stale_revision", `the integration policy is at revision ${current.revision}, not ${command.expectedRevision}`);
         const before = current.body as unknown as IntegrationBody;
         const next: IntegrationBody = { landing: changes.landing ?? before.landing, integrator: changes.integrator ?? before.integrator, requiredChecks: changes.requiredChecks ?? before.requiredChecks, refreshRounds: changes.refreshRounds ?? before.refreshRounds, source: "owner", updatedBy: owner.id, updatedAt: this.#runner.now() };
+        if (next.landing === "main-automatic" && next.requiredChecks.length === 0) invalid("requiredChecks", "main-automatic needs at least one check");
         const ref: AggregateRef = { kind: KIND, id };
         return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject }], detail: { projectId: id, landing: next.landing, from: before.landing } };
       },
@@ -161,8 +163,12 @@ export class IntegrationPolicyService {
         const before = current?.body as unknown as IntegrationDefaultBody | undefined;
         const forbid = changes.forbidMainAutomatic ?? before?.forbidMainAutomatic;
         const landing = changes.landing ?? before?.landing;
-        if (landing === "main-automatic" && forbid === true) throw new DomainError("invalid_command", "landing: the default cannot be main-automatic while main-automatic is forbidden", { field: "landing" });
-        const next: IntegrationDefaultBody = { ...(landing === undefined ? {} : { landing }), ...((changes.integrator ?? before?.integrator) === undefined ? {} : { integrator: changes.integrator ?? before!.integrator! }), ...((changes.requiredChecks ?? before?.requiredChecks) === undefined ? {} : { requiredChecks: changes.requiredChecks ?? before!.requiredChecks! }), ...((changes.refreshRounds ?? before?.refreshRounds) === undefined ? {} : { refreshRounds: changes.refreshRounds ?? before!.refreshRounds! }), ...(forbid === undefined ? {} : { forbidMainAutomatic: forbid }), updatedBy: owner.id, updatedAt: this.#runner.now() };
+        // An installation lock always applies: a default of main-automatic is held at the integration branch instead of refusing the lock.
+        if (changes.landing === "main-automatic" && forbid === true) throw new DomainError("invalid_command", "landing: the default cannot be main-automatic while main-automatic is forbidden", { field: "landing" });
+        const heldLanding = landing === "main-automatic" && forbid === true ? "integration-branch" : landing;
+        const checks = changes.requiredChecks ?? before?.requiredChecks;
+        if (heldLanding === "main-automatic" && checks !== undefined && checks.length === 0) invalid("requiredChecks", "main-automatic needs at least one check");
+        const next: IntegrationDefaultBody = { ...(heldLanding === undefined ? {} : { landing: heldLanding }), ...((changes.integrator ?? before?.integrator) === undefined ? {} : { integrator: changes.integrator ?? before!.integrator! }), ...((changes.requiredChecks ?? before?.requiredChecks) === undefined ? {} : { requiredChecks: changes.requiredChecks ?? before!.requiredChecks! }), ...((changes.refreshRounds ?? before?.refreshRounds) === undefined ? {} : { refreshRounds: changes.refreshRounds ?? before!.refreshRounds! }), ...(forbid === undefined ? {} : { forbidMainAutomatic: forbid }), updatedBy: owner.id, updatedAt: this.#runner.now() };
         const change = current === undefined ? { type: "create" as const, ref: DEFAULT_REF, body: next as unknown as JsonObject } : { type: "update" as const, ref: DEFAULT_REF, expectedRevision: current.revision, body: next as unknown as JsonObject };
         return { ref: DEFAULT_REF, creates: current === undefined, changes: [change], detail: { landing: next.landing ?? null, forbidMainAutomatic: next.forbidMainAutomatic === true } };
       },

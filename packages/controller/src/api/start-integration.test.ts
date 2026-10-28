@@ -36,6 +36,8 @@ test("integration policy: a project gets the installation default or the profile
     const third = (await call(boot.token, "integration.get", { project: a })).result.item;
     assert.deepEqual([third.landing, third.source, third.requiredChecks, third.integrator], ["integration-branch", "owner", ["tests", "review"], "agent"]);
     assert.equal((await call(boot.token, "integration.set", { project: a, landing: "human-promotes", expectedRevision: first.revision }, "s2")).error.code, "stale_revision");
+    // Promotion to main with no check at all is refused.
+    assert.equal((await call(boot.token, "integration.set", { project: a, landing: "main-automatic", requiredChecks: [] }, "nochk")).error.code, "invalid_command");
     // Bad values are refused.
     for (const args of [{ landing: "yolo" }, { refreshRounds: 11 }, { requiredChecks: ["magic"] }, { integrator: "bot" }, { surprise: 1 }, {}])
       assert.equal((await call(boot.token, "integration.set", { project: a, ...args }, `bad-${JSON.stringify(args)}`)).error.code, "invalid_command", JSON.stringify(args));
@@ -43,16 +45,20 @@ test("integration policy: a project gets the installation default or the profile
     for (const [op, args] of [["integration.get", { project: a }], ["integration.set", { project: a, landing: "main-automatic" }], ["integration.default.get", {}], ["integration.default.set", { landing: "human-promotes" }]] as const)
       assert.equal((await call(ann, op, args as never, op.endsWith("set") ? "ann-1" : undefined)).error.code, "forbidden", op);
     // The lock: no project may be set to main-automatic, one already so is held back, and the default cannot be main-automatic under it.
-    assert.equal((await call(boot.token, "integration.default.set", { forbidMainAutomatic: true }, "d2")).error.code, "invalid_command", "the default is main-automatic");
-    assert.ok((await call(boot.token, "integration.default.set", { landing: "human-promotes", forbidMainAutomatic: true }, "d3")).ok);
+    assert.ok((await call(boot.token, "integration.default.set", { forbidMainAutomatic: true }, "d2")).ok, "the lock always applies, even over a default of main-automatic");
+    assert.deepEqual([(await call(boot.token, "integration.default.get", {})).result.item.landing, (await call(boot.token, "integration.default.get", {})).result.item.forbidMainAutomatic], ["integration-branch", true]);
+    assert.equal((await call(boot.token, "integration.default.set", { landing: "main-automatic" }, "d2b")).error.code, "invalid_command", "no default of main-automatic under the lock");
+    assert.ok((await call(boot.token, "integration.default.set", { landing: "human-promotes" }, "d3")).ok);
     assert.equal((await call(boot.token, "integration.set", { project: a, landing: "main-automatic" }, "s3")).error.code, "forbidden");
     const held = (await call(boot.token, "integration.get", { project: b })).result.item;
-    assert.deepEqual([held.landing, held.lockedMainAutomatic], ["integration-branch", true]);
+    assert.deepEqual([held.landing, held.lockedMainAutomatic, held.heldFrom], ["integration-branch", true, "main-automatic"], "the owner can see what is held back");
+    assert.equal((await call(boot.token, "integration.set", { project: a, landing: "integration-branch", requiredChecks: [] }, "s4")).ok, true, "no checks are fine short of main");
     assert.ok((await call(boot.token, "integration.default.set", { forbidMainAutomatic: false }, "d4")).ok);
     assert.equal((await call(boot.token, "integration.get", { project: b })).result.item.landing, "main-automatic", "lifting the lock restores what the owner chose");
     // Replay: the same command ID is the same answer.
+    const beforeReplay = (await call(boot.token, "integration.get", { project: a })).result.item.revision;
     const again = await call(boot.token, "integration.set", { project: a, landing: "integration-branch", requiredChecks: ["review", "tests", "tests"], expectedRevision: first.revision }, "s1");
     assert.ok(again.ok);
-    assert.equal((await call(boot.token, "integration.get", { project: a })).result.item.revision, third.revision);
+    assert.equal((await call(boot.token, "integration.get", { project: a })).result.item.revision, beforeReplay, "a replay changes nothing");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

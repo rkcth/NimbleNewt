@@ -755,6 +755,19 @@ Result: `{ revision }`.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `command.run`
+
+Runs a typed command as the caller (card T09b). `/nimblenewt.<operation>` names a state-API operation with its dots written as hyphens, for example `/nimblenewt.grant-list {"grantee": "service:dispatcher"}`: the arguments are a JSON object after the name, and the operation runs under the caller's own rights, so it refuses what the caller may not do. The command is queued with what it resolved to and runs once; sending the same command ID again answers from the record. A name that is unknown, ambiguous or needs a context is answered in words and nothing runs. Toolbox and agent commands are queued and answered as not runnable yet.
+
+Arguments:
+
+- `typed`: the command text, starting with `/`
+- `context` (optional): `{ agent?, scope?, version? }` for `/agent.` and `/custom.` shortcuts
+
+Result: `{ status }`: `done` (with `answer`), `failed` (with `error`), `unsupported`, or, when nothing was queued, `ambiguous`, `needs_context`, `unknown` or `refused` with the reason. `command` names the operation and `queued` the record.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `integration.set`
 
 The owner changes how finished work lands in a project (owner only); fields left out stay. `main-automatic` is refused while the installation forbids it.
