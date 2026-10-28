@@ -652,6 +652,10 @@ export class RemoteWorkerService {
     for (const [attemptId, offer] of this.#offers) {
       if (offer.hostId !== host.id) continue;
       const b = (await this.#runner.get(PLACEMENT_KIND, attemptId))?.body as unknown as PlacementBody | undefined;
+      // The attempt may have been placed again while the read was under way: the offer now held is the newer one, and is neither deleted nor judged by the older read.
+      const live = this.#offers.get(attemptId);
+      if (live === undefined) continue;
+      if (live !== offer) { if (b !== undefined && b.hostId === host.id && b.placement === live.placement && b.state === "offered") out.push({ placement: live.placement, order: live.order }); continue; }
       if (b === undefined || b.hostId !== host.id || b.placement !== offer.placement || b.state !== "offered") { this.#offers.delete(attemptId); continue; }
       out.push({ placement: offer.placement, order: offer.order });
     }

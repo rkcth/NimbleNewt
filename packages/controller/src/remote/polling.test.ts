@@ -193,6 +193,31 @@ for (const backend of backends) {
     });
   }
 
+  suite("an attempt placed again while a poll is reading keeps its new offer, and the poll returns it (card H02e)", async (c) => {
+    const h = await c.host("h1");
+    await offered(c, h);
+    const first = (await h.client.offers())[0]!;
+    const order = first.order;
+    // The next read of a placement stalls until the attempt has been placed again.
+    const storage = c.storage as unknown as { getAggregate: (ref: { kind: string; id: string }) => Promise<unknown> };
+    const original = storage.getAggregate.bind(storage);
+    let release!: () => void; const gate = new Promise<void>((r) => { release = r; });
+    let stalled = false; let reading!: () => void; const started = new Promise<void>((r) => { reading = r; });
+    storage.getAggregate = async (ref) => { if (!stalled && ref.kind === "remote-placement") { stalled = true; reading(); await gate; } return original(ref); };
+    try {
+      const poll = h.client.offers();
+      await started;
+      const placed = await h.worker.start(order);
+      assert.ok((placed as unknown) !== undefined);
+      release();
+      const got = await poll;
+      const again = await h.client.offers();
+      assert.deepEqual(again.map((o) => o.order.attemptId), [order.attemptId], "the new offer is still there");
+      assert.ok(again[0]!.placement > first.placement);
+      assert.deepEqual(got.map((o) => o.placement).filter((p) => p !== again[0]!.placement), [], "the stalled poll returned nothing stale");
+    } finally { storage.getAggregate = original; release(); }
+  });
+
   suite("a stopped service answers polls at once and holds none (card H07)", async (c) => {
     const h = await c.host("h1");
     const held = h.client.offers({ waitMs: 20_000 });

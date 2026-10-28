@@ -2099,3 +2099,6 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 
 ## A07e — at least seven days suggested
 - After a burst of approvals the suggested standing-grant length is `max(option that covers the span, 7 days)`, worded "N days is the least suggested, so you are not asked again within a week". The shorter options stay listed, the lengths after a revoked or full-term grant are unchanged, and a stated number of days is still the exact length. Mutation: removing the floor fails the new assertions.
+
+## H02e — a poll no longer deletes a re-placed offer
+- `#pending` judged the offer it read before an await against the placement stored after it, and deleted on a mismatch, so an attempt placed again meanwhile lost its new offer until the lease ended. It now compares with the offer held after the read: a newer offer is returned if its placement is stored as offered, and only the offer that was read is ever deleted. The test stalls the poll's read of the placement, places the attempt again, and checks the new offer survives; restoring the old logic fails it.
