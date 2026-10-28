@@ -25,7 +25,26 @@ export interface QueuedBody {
   readonly context: { readonly agent?: string; readonly scope?: string };
 }
 
-export const COMMAND_LIMITS = { args: 4000, aliases: 200 } as const;
+/** What came of running a queued command, kept so that running it again answers from the record and never runs it twice (card T09b). */
+export interface RunBody {
+  readonly queuedId: string;
+  readonly by: string;
+  readonly state: "done" | "failed" | "unsupported";
+  /** For `done`: what the operation answered, cut to a bound (`truncated` says so). */
+  readonly answer?: JsonObject;
+  readonly truncated?: true;
+  /** For `failed` and `unsupported`: the reason, in plain words. */
+  readonly error?: { readonly code: string; readonly message: string };
+  readonly at: string;
+}
+
+/** How a queued command is run: the operation a built-in name stands for, and a call to it as the typist (the state API, so the operation's own checks decide). */
+export interface CommandInvoker {
+  operationOf(canonical: string): string | undefined;
+  invoke(operation: string, args: JsonObject, commandId: string): Promise<{ readonly ok: true; readonly result: JsonObject } | { readonly ok: false; readonly code: string; readonly message: string }>;
+}
+
+export const COMMAND_LIMITS = { args: 4000, aliases: 200, answer: 8000 } as const;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 
 export class CommandService {
@@ -144,6 +163,53 @@ export class CommandService {
     }));
     const found = (await this.#runner.get("queued-command", done.id))!;
     return { status: "queued", id: done.id, revision: done.revision, replayed: done.replayed, target: (found.body as unknown as QueuedBody).target };
+  }
+
+  /**
+   * Runs a queued command as the one who typed it (card T09b). Only the requester runs it. A built-in command (`/nimblenewt.…`) calls the state-API operation of that name with the typed arguments (a JSON object, or none) under the
+   * requester's own rights, so the operation decides whether they may; its command ID comes from the queued command, so the operation itself answers a second run from its own record. The outcome is kept: running the
+   * same queued command again returns it without calling the operation. A toolbox or agent command is answered once as not runnable yet (cards T09c and T09d).
+   */
+  async run(by: Principal, command: NoActor & { id: string }, how: CommandInvoker): Promise<View<RunBody>> {
+    onlyKnown(command, ["commandId", "id"]);
+    const queued = await this.queued(by, command.id);
+    if (queued === undefined || queued.requestedBy !== by.id) throw new DomainError("not_found", "no such queued command");
+    const runId = derivedId("crn", queued.id);
+    const prior = await this.#runner.get("command-run", runId);
+    if (prior !== undefined) return view<RunBody>(prior);
+    const operation = queued.target.layer === "protected" ? how.operationOf(queued.target.operationId) : undefined;
+    let outcome: Omit<RunBody, "queuedId" | "by" | "at">;
+    if (queued.target.layer !== "protected") outcome = { state: "unsupported", error: { code: "unsupported", message: `${queued.target.layer === "toolbox" ? "toolbox" : "agent"} commands cannot be run from here yet` } };
+    else if (operation === undefined) outcome = { state: "failed", error: { code: "not_found", message: `${queued.target.operationId} is no longer a command of this controller` } };
+    else {
+      let args: JsonObject = {};
+      const raw = queued.args.trim();
+      let bad: string | undefined;
+      if (raw !== "") {
+        try { const parsed: unknown = JSON.parse(raw); if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) bad = "the arguments must be a JSON object, for example {\"project\": \"proj-…\"}"; else args = parsed as JsonObject; } catch { bad = "the arguments must be a JSON object, for example {\"project\": \"proj-…\"}"; }
+      }
+      if (bad !== undefined) outcome = { state: "failed", error: { code: "invalid_command", message: bad } };
+      else {
+        const answered = await how.invoke(operation, args, `cmd-${queued.id}`);
+        if (!answered.ok) outcome = { state: "failed", error: { code: answered.code, message: redactText(answered.message).slice(0, 500) } };
+        else {
+          const text = JSON.stringify(answered.result);
+          outcome = text.length <= COMMAND_LIMITS.answer ? { state: "done", answer: answered.result } : { state: "done", answer: { cut: text.slice(0, COMMAND_LIMITS.answer) }, truncated: true };
+        }
+      }
+    }
+    const ref: AggregateRef = { kind: "command-run", id: runId };
+    const body: RunBody = { queuedId: queued.id, by: by.id, ...outcome, at: this.#runner.now() };
+    try {
+      await this.#runner.command("command.run", { commandId: scopedCommandId(by.id, `run-${queued.id}`), actor: by.id }, async () => ({
+        payload: { queuedId: queued.id, state: body.state },
+        build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { operation: queued.target.operationId, state: body.state } }),
+      }));
+    } catch (error) {
+      // Two runs at the same moment: the first record stands, and this one answers with it.
+      if (!(error instanceof DomainError) || (error.code !== "command_conflict" && error.code !== "stale_revision")) throw error;
+    }
+    return view<RunBody>((await this.#runner.get("command-run", runId))!);
   }
 
   /** A queued command: its requester or the owner. Anyone else reads it like a missing one. */

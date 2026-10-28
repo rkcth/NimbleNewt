@@ -22,6 +22,7 @@ import type { GrantService } from "../security/grants.js";
 import type { PlacementSettingsService } from "../remote/placement-settings.js";
 import type { ProtectedBranchService } from "../policy/protected-branches.js";
 
+import type { CommandService } from "../commands/index.js";
 import type { Principal, PrincipalService } from "../security/principals.js";
 import type { TaskCredentialService } from "../security/task-credentials.js";
 import type { JsonObject } from "../storage/types.js";
@@ -81,6 +82,9 @@ export interface StateApiDeps {
   readonly placement?: Pick<PlacementSettingsService, "get" | "set" | "change">;
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set">;
 
+  /** Typed commands (card T09b). Absent: `command.run` answers as unavailable. */
+  readonly commands?: CommandService;
+
   /** When present, the rest of a tool result cut to the window can be read in pages through the API (card C07d). */
   readonly spill?: { readonly readSpill: (by: Principal, spillId: string, index: number, size?: number) => Promise<{ text: string; next?: number } | undefined> };
   /** When present, the owner can set the idle time of event subscriptions and cancel one through the API (card H06c). */
@@ -121,6 +125,20 @@ export class StateApi {
     const op = typeof raw === "object" && raw !== null && typeof (raw as { op?: unknown }).op === "string" ? (raw as { op: string }).op.slice(0, 60) : "";
     try {
       const principal = this.#deps.taskCredentials !== undefined && typeof token === "string" && token.startsWith("tcr-") ? await this.#deps.taskCredentials.authenticate(token) : await this.#deps.principals.authenticate(token);
+      return await this.#perform(principal, raw, op);
+    } catch (error) {
+      return { v: API_VERSION, op, ok: false, error: this.#error(error) };
+    }
+  }
+
+  /** The same request as an already authenticated principal (card T09b: a typed command runs the operation as the one who typed it). Never throws; an error is the answer. */
+  async handleAs(principal: Principal, raw: unknown): Promise<ApiResponse> {
+    const op = typeof raw === "object" && raw !== null && typeof (raw as { op?: unknown }).op === "string" ? (raw as { op: string }).op.slice(0, 60) : "";
+    try { return await this.#perform(principal, raw, op); } catch (error) { return { v: API_VERSION, op, ok: false, error: this.#error(error) }; }
+  }
+
+  async #perform(principal: Principal, raw: unknown, _op: string): Promise<ApiResponse> {
+    {
       const request = this.#parse(raw);
       const operation = OPERATION_BY_NAME.get(request.op);
       if (operation === undefined) throw new DomainError("invalid_command", `op: ${request.op.slice(0, 60)} is not an operation of API version ${API_VERSION}`, { field: "op" });
@@ -149,13 +167,16 @@ export class StateApi {
         ...(this.#deps.events === undefined ? {} : { events: this.#deps.events }),
         ...(this.#deps.budgets === undefined ? {} : { budgets: this.#deps.budgets }),
         ...(this.#deps.difficulty === undefined ? {} : { difficulty: this.#deps.difficulty }),
+        ...(this.#deps.commands === undefined ? {} : { commands: this.#deps.commands }),
+        invoke: async (invokedOp, invokedArgs, invokedId) => {
+          const answered = await this.handleAs(principal, { v: API_VERSION, op: invokedOp, ...(invokedId === undefined || OPERATION_BY_NAME.get(invokedOp)?.kind === "query" ? {} : { commandId: invokedId }), args: invokedArgs });
+          return answered.ok ? { ok: true as const, result: answered.result } : { ok: false as const, code: answered.error.code, message: answered.error.message };
+        },
       };
       const result = await operation.run(context, args, request.commandId);
       if (operation.kind === "query") return { v: API_VERSION, op: request.op, ok: true, result };
       const deferred = operation.completion?.kind === "deferred";
       return { v: API_VERSION, op: request.op, ok: true, result, accepted: true, completed: !deferred, ...(operation.completion?.kind === "deferred" ? { awaits: operation.completion.awaits } : {}) };
-    } catch (error) {
-      return { v: API_VERSION, op, ok: false, error: this.#error(error) };
     }
   }
 

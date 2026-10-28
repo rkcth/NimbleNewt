@@ -218,4 +218,48 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.cmd.enqueue(c.owner, { commandId: cid("qx"), typed: "x".repeat(5000) }));
     await refuses("invalid_command", () => c.cmd.enqueue(c.owner, { commandId: cid("qx"), typed: "/nimblenewt.pause", context: { agent: "abcdef1", extra: 1 } as never }));
   });
+  suite("running a queued command: only its typist runs it, a built-in calls its operation once and the outcome is kept, a toolbox or agent command is answered once as not runnable yet, and a bad argument text is a recorded failure (card T09b)", async (c) => {
+    await c.tool(c.owner, "nimblenewt.pause"); await c.tool(c.owner, "toolbox.lint");
+    const mine = await c.tool(c.ann, "run-tests");
+    const calls: Array<[string, unknown, string]> = [];
+    const how = {
+      operationOf: (name: string) => (name === "nimblenewt.pause" ? "task.pause" : undefined),
+      invoke: async (op: string, args: Record<string, unknown>, commandId: string) => { calls.push([op, args, commandId]); return args["fail"] === true ? { ok: false as const, code: "forbidden", message: "not yours to pause" } : { ok: true as const, result: { paused: true } as never }; },
+    };
+    const queue = async (by: Principal, typed: string): Promise<string> => { const q = await c.cmd.enqueue(by, { commandId: cid("q"), typed }); assert.equal(q.status, "queued", JSON.stringify(q)); return (q as { id: string }).id; };
+    // A built-in command calls its operation with the typed arguments and the queued command's own ID, and runs once.
+    const id = await queue(c.ann, '/nimblenewt.pause {"task": "t1"}');
+    const first = await c.cmd.run(c.ann, { commandId: cid("r"), id }, how);
+    assert.deepEqual([first.state, first.answer], ["done", { paused: true }]);
+    const second = await c.cmd.run(c.ann, { commandId: cid("r"), id }, how);
+    assert.deepEqual([second.state, second.at], ["done", first.at], "the second run is the record of the first");
+    assert.deepEqual(calls, [["task.pause", { task: "t1" }, `cmd-${id}`]], "the operation was called once");
+    // Another principal, even the owner, cannot run what ann typed.
+    await refuses("not_found", () => c.cmd.run(c.owner, { commandId: cid("r"), id }, how));
+    await refuses("not_found", () => c.cmd.run(c.ben, { commandId: cid("r"), id }, how));
+    // An operation that refuses is a recorded failure, once.
+    const failing = await queue(c.ann, '/nimblenewt.pause {"fail": true}');
+    const failed = await c.cmd.run(c.ann, { commandId: cid("r"), id: failing }, how);
+    assert.deepEqual([failed.state, failed.error], ["failed", { code: "forbidden", message: "not yours to pause" }]);
+    await c.cmd.run(c.ann, { commandId: cid("r"), id: failing }, how);
+    assert.equal(calls.length, 2, "not called again");
+    // Arguments that are not a JSON object never reach the operation.
+    for (const text of ["/nimblenewt.pause [1]", "/nimblenewt.pause when it suits"]) {
+      const bad = await c.cmd.run(c.ann, { commandId: cid("r"), id: await queue(c.ann, text) }, how);
+      assert.deepEqual([bad.state, bad.error?.code], ["failed", "invalid_command"]);
+    }
+    assert.equal(calls.length, 2);
+    // A name that is no longer an operation of the controller fails plainly; toolbox and agent commands are not runnable yet.
+    const gone = await c.cmd.run(c.ann, { commandId: cid("r"), id: await queue(c.ann, "/nimblenewt.pause") }, { ...how, operationOf: () => undefined });
+    assert.deepEqual([gone.state, gone.error?.code], ["failed", "not_found"]);
+    for (const typed of ["/toolbox.lint", `/${c.annNs}.${mine.name.split(".")[1]}`]) {
+      const unsupported = await c.cmd.run(c.ann, { commandId: cid("r"), id: await queue(c.ann, typed) }, how);
+      assert.deepEqual([unsupported.state, unsupported.error?.code], ["unsupported", "unsupported"]);
+    }
+    assert.equal(calls.length, 2, "nothing ran for them");
+    // A big answer is cut and says so.
+    const big = await c.cmd.run(c.ann, { commandId: cid("r"), id: await queue(c.ann, "/nimblenewt.pause") }, { ...how, invoke: async () => ({ ok: true as const, result: { text: "x".repeat(20_000) } as never }) });
+    assert.equal(big.truncated, true);
+  });
+
 }

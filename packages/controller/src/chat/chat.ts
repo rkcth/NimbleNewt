@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { OPERATION_BY_NAME } from "../api/operations.js";
+import { BUILTIN_COMMANDS, OPERATION_BY_NAME } from "../api/operations.js";
+import { parseInvocation } from "../commands/resolve.js";
 import { API_VERSION, type StateApi } from "../api/state-api.js";
 import { GATE_TOPIC, normalTopic, notADecisionIn } from "../decisions/records.js";
 import { DomainError } from "../domain/errors.js";
@@ -62,6 +63,8 @@ type PlanItem =
   | { readonly i: number; readonly kind: "apply"; readonly op: string; readonly args: JsonObject; readonly commandId: string; readonly preview: string; /** For a decision: the version of its topic when the message was planned, before any step of the message. A decision applied later (a turn run again) is based on it when someone else changed the topic since, so the change becomes a dispute and is not overwritten. */ readonly planBase?: number }
   | { readonly i: number; readonly kind: "propose"; readonly proposalId: string; readonly steps: readonly ChatStep[]; readonly pins: readonly ChatPin[]; readonly preview: readonly string[]; readonly reason: string }
   | { readonly i: number; readonly kind: "focus"; readonly projectId: string; readonly preview: string }
+  /** A command the owner typed (`/nimblenewt.…`, card T09b): it runs as typed, not through the interpreter. */
+  | { readonly i: number; readonly kind: "command"; readonly typed: string }
   | { readonly i: number; readonly kind: "apply_proposal" | "discard_proposal"; readonly proposalId: string; readonly lengthDays?: number }
   | { readonly i: number; readonly kind: "status"; readonly request: JsonObject }
   | { readonly i: number; readonly kind: "coordinator"; readonly action: "answer" | "decompose" | "assign" | "configure" | "start" | "pause" | "stop"; readonly projectId?: string; readonly question?: string; readonly outcome?: string; readonly principalId?: string; readonly routes?: readonly string[]; /** The revision of the coordinator record the order expects, read once when the message was planned, so a retry of the turn sends the same thing. */ readonly expectedRevision?: number }
@@ -225,9 +228,14 @@ export class ChatService {
       if (split.text.length === 0) invalid("text", "has no words of the owner's own outside quoted material");
       const context = await this.#context(owner.id);
       const focus = await this.#focus(tok, context.focusProjectId);
-      const interpreted = await this.#interpret({ text: split.text, quoted: safeQuoted, focus, now: this.#runner.now(), proposals: [...(await this.#openProposals(owner.id)), ...(await this.#openEdits(owner))].slice(0, 10), ...(context.awaiting === undefined ? {} : { awaiting: context.awaiting }) });
+      // A message that is a typed command (`/nimblenewt.grant-list`) is not read by the assistant: it is the command, as the owner typed it.
+      const typed = split.text.trim();
+      const isCommand = quoted.length === 0 && parseInvocation(typed) !== undefined;
+      const interpreted = isCommand ? { intents: [] as never[], problem: "" } : await this.#interpret({ text: split.text, quoted: safeQuoted, focus, now: this.#runner.now(), proposals: [...(await this.#openProposals(owner.id)), ...(await this.#openEdits(owner))].slice(0, 10), ...(context.awaiting === undefined ? {} : { awaiting: context.awaiting }) });
       if ("unavailable" in interpreted) return { turnId, replayed: false, outcomes: [], reply: ["The assistant that reads free-form messages is unavailable right now. Nothing was done; the commands of the API and the proposals you already have work as usual."] };
-      const planned = interpreted.intents === undefined
+      const planned = isCommand
+        ? { items: [{ i: 0, kind: "command", typed } as PlanItem], projectId: context.focusProjectId, held: undefined, resumes: undefined }
+        : interpreted.intents === undefined
         ? { items: [{ i: 0, kind: "refused", code: "interpreter_invalid", message: interpreted.problem } as PlanItem], projectId: context.focusProjectId, held: undefined, resumes: undefined }
         : await this.#plan(owner, tok, turnId, split.text, interpreted.intents, focus, context.focusProjectId, safeQuoted.length > 0);
       const body: TurnBody = { ownerId: owner.id, messageId, text: split.text, quotedCount: quoted.length, ...(planned.projectId === undefined ? {} : { projectId: planned.projectId }), ...(planned.held === undefined ? {} : { held: planned.held }), ...(planned.resumes === undefined ? {} : { resumes: planned.resumes }), status: "planned", plan: planned.items, createdAt: this.#runner.now() };
@@ -806,6 +814,29 @@ export class ChatService {
     return done;
   }
 
+  /**
+   * A typed command (card T09b), run as the owner through the state API's `command.run`. A command that changes things is not run from here: the chat shows those first (a proposal), so the owner says it in words; a
+   * query, and a name that does not resolve, are answered at once.
+   */
+  async #runTyped(token: string, turnId: string, item: Extract<PlanItem, { kind: "command" }>): Promise<Outcome> {
+    const inv = parseInvocation(item.typed);
+    const op = inv?.namespace === "nimblenewt" ? BUILTIN_COMMANDS.operationOf(`nimblenewt.${inv.name}`) : undefined;
+    if (op !== undefined && op.kind !== "query") {
+      return { i: item.i, status: "refused", code: "needs_confirmation", message: `/nimblenewt.${inv!.name} changes things, so it is not run from a typed line: say what you want in words and it is shown to you first (or send command.run through the API).` };
+    }
+    const response = await this.#deps.api.handle(token, { v: API_VERSION, op: "command.run", commandId: `${turnId}-c${item.i}`, args: { typed: item.typed } });
+    if (!response.ok) return { i: item.i, status: "refused", code: response.error.code, message: response.error.message };
+    const r = response.result as Record<string, unknown>;
+    const status = String(r["status"]);
+    if (status === "done") {
+      const text = JSON.stringify(r["answer"] ?? {}, null, 1).slice(0, 1500);
+      return { i: item.i, status: "applied", op: String(r["command"]), commandId: `${turnId}-c${item.i}`, shown: [`Ran ${String(r["command"])}:`, ...text.split("\n").slice(0, 40)] } as Outcome;
+    }
+    const why = status === "failed" || status === "unsupported" ? (r["error"] as { message?: string } | undefined)?.message : (r["reason"] ?? r["asks"]);
+    const options = Array.isArray(r["candidates"]) ? ` (${(r["candidates"] as string[]).join(", ")})` : "";
+    return { i: item.i, status: "refused", code: status === "failed" ? String((r["error"] as { code?: string } | undefined)?.code ?? "failed") : status, message: `${String(why ?? "that command could not be run")}${options}` };
+  }
+
   async #do(owner: Principal, token: string, turnId: string, item: PlanItem, words: string): Promise<Outcome> {
     switch (item.kind) {
       case "asked": return { i: item.i, status: "asked", question: item.question, options: item.options };
@@ -822,6 +853,7 @@ export class ChatService {
         } catch (error) { return refusal(item.i, error); }
       }
       case "coordinator": return this.#coordinate(owner, turnId, item);
+      case "command": return this.#runTyped(token, turnId, item);
       case "focus": {
         try { await this.setFocus(token, { commandId: `${turnId}-f${item.i}`, projectId: item.projectId }); } catch (error) { return refusal(item.i, error); }
         return { i: item.i, status: "focused", projectId: item.projectId };
