@@ -1,3 +1,4 @@
+import { framedMcp } from "../dispatch/tools.js";
 import { ProjectResourceService } from "../projects/index.js";
 import type { AttemptRelay, ModelRelay, RelayMonitor } from "../dispatch/relay.js";
 import { AdmissionService } from "../admission/index.js";
@@ -362,7 +363,12 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       chargeUse: (u) => chargeRetry.submit(principal, { commandId: u.commandId, activity: u.activity, taskId: u.taskId, computeMs: u.computeMs, ...(u.agentId === undefined ? {} : { agentId: u.agentId }) }).then(() => undefined),
 
       chargeUse: (u) => budgets.charge(principal, { commandId: u.commandId, activity: u.activity, taskId: u.taskId, computeMs: u.computeMs, ...(u.agentId === undefined ? {} : { agentId: u.agentId }) }).then(() => undefined),
-      readSpill: (by, spillId, index, size) => context.readSpill(by, spillId, index, size),
+      // An outside server's text is framed as data on every page, with the injection check over the page itself (the visible head was checked when it was cut).
+      readSpill: async (by, spillId, index, size) => {
+        const found = await context.readSpill(by, spillId, index, size);
+        if (found === undefined) return undefined;
+        return { text: found.untrusted === true ? framedMcp(found.tool ?? "mcp", found.text, undefined, true) : found.text, ...(found.next === undefined ? {} : { next: found.next }) };
+      },
       hostOfAgent: async (agentId) => { for (const attemptId of await dispatcher.liveAttemptsOf(principal, { agentId })) { const d = await dispatcher.get(principal, attemptId); const host = d?.state === "running" ? d.hostId : d?.pinnedHost; if (host !== undefined) return host; } return undefined; }, quiesce: new QuiesceCoordinator({ dispatcher, blockers, principal }),
       ...(mcpService === undefined || i.options.mcp === undefined ? {} : { mcp: { service: mcpService, connector: new RemoteMcpConnector({ mcp: mcpService, resolve: i.options.mcp.resolve, principal }) } }),
     };

@@ -51,7 +51,7 @@ export interface OverflowBody { readonly taskId: string; readonly count: number;
 export interface HandoffBody { readonly taskId: string; readonly projectId: string; readonly attemptId: string; readonly source: "attempt" | "controller"; readonly text: string; readonly endedBecause: string; readonly writtenBy: string }
 interface CalibrationBody { readonly taskId: string; readonly route: string; readonly ratio: number; readonly charsPerToken: number; readonly reportedTokens: number; readonly attemptId: string }
 interface ChainBody { readonly taskId: string; readonly head?: string; readonly count: number }
-interface SpillBody { readonly taskId: string; readonly projectId: string; readonly tool: string; readonly callId: string; readonly remainder: string; readonly remainderChars: number; readonly lostChars: number }
+interface SpillBody { /** An outside server's text: read only by those who may use MCP in the project, and framed as data when paged out. */ readonly untrusted?: boolean; readonly taskId: string; readonly projectId: string; readonly tool: string; readonly callId: string; readonly remainder: string; readonly remainderChars: number; readonly lostChars: number }
 
 export interface EnforcementOptions extends RunnerOptions {
   /** Context-window overrides for the budgets (shares, characters per token); validated by `contextBudget`. */
@@ -507,8 +507,8 @@ export class ContextEnforcementService {
    * The one gate for tool results, Pi's and MCP tools': cut to the window's per-tool limit (non-text results counted), the remainder kept (up to a bound) under a spill ID the model can page through.
    * Repeating it for the same call answers with the same spill.
    */
-  async limitTool(principal: Principal, command: { taskId: string; callId: string; tool: string; window: number; output: ToolOutput; pageSize?: number }): Promise<{ text: string; truncated: boolean; spillId?: string; remainderChars: number; lostChars: number; nonTextDropped: number }> {
-    onlyKnown(command, ["taskId", "callId", "tool", "window", "output", "pageSize"]);
+  async limitTool(principal: Principal, command: { taskId: string; callId: string; tool: string; window: number; output: ToolOutput; pageSize?: number; untrusted?: boolean }): Promise<{ text: string; truncated: boolean; spillId?: string; remainderChars: number; lostChars: number; nonTextDropped: number }> {
+    onlyKnown(command, ["taskId", "callId", "tool", "window", "output", "pageSize", "untrusted"]);
     const taskId = checkTaskId(command.taskId); const callId = key("callId", command.callId); const tool = text(command.tool, "tool", { min: 1, max: 120 });
     const projectId = (await this.#dispatch(principal, taskId))!;
     const budget = this.budget(window(command.window));
@@ -520,7 +520,7 @@ export class ContextEnforcementService {
     const lost = redacted.length - kept.length;
     const id = derivedId("spl", `${taskId}\0${callId}`);
     const ref: AggregateRef = { kind: "ctx-spill", id };
-    const body: SpillBody = { taskId, projectId, tool, callId, remainder: kept, remainderChars: out.remainderChars, lostChars: lost };
+    const body: SpillBody = { ...(command.untrusted === true ? { untrusted: true } : {}), taskId, projectId, tool, callId, remainder: kept, remainderChars: out.remainderChars, lostChars: lost };
     await this.#runner.command("context.spill", { commandId: `ctx-spl-${id.slice(4)}`, actor: principal.id }, async () => ({
       payload: { taskId, callId, tool, remainderDigest: sha256(out.remainder), lostChars: lost },
       build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { remainderChars: out.remainderChars } }),
@@ -529,12 +529,14 @@ export class ContextEnforcementService {
     return { text: out.text + note, truncated: true, spillId: id, remainderChars: out.remainderChars, lostChars: lost, nonTextDropped: out.nonTextDropped };
   }
   /** One page of a kept remainder, for someone who may work on the task; otherwise it reads like a missing spill. */
-  async readSpill(principal: Principal, spillId: string, index: number, size = 12_000): Promise<{ text: string; next?: number } | undefined> {
+  async readSpill(principal: Principal, spillId: string, index: number, size = 12_000): Promise<{ text: string; next?: number; tool?: string; untrusted?: true } | undefined> {
     const found = typeof spillId === "string" && /^spl-[a-z2-7]{20}$/.test(spillId) ? await this.#runner.get("ctx-spill", spillId) : undefined;
     if (found === undefined) return undefined;
     const b = found.body as unknown as SpillBody;
     if ((await this.#task(principal, b.taskId, true)) === undefined) return undefined;
-    try { return page(b.remainder, index, size); } catch (error) { if (error instanceof RangeError) return invalid("index", error.message); throw error; }
+    // An outside server's answer is read only by those who could have been given it: the owner and those who may use MCP in the project.
+    if (b.untrusted === true && principal.kind !== "owner" && !allows(principal, "mcp.use", b.projectId)) return undefined;
+    try { return { ...page(b.remainder, index, size), tool: b.tool, ...(b.untrusted === true ? { untrusted: true as const } : {}) }; } catch (error) { if (error instanceof RangeError) return invalid("index", error.message); throw error; }
   }
 
   // ---- hand-off ----------------------------------------------------------------------------------------------------------

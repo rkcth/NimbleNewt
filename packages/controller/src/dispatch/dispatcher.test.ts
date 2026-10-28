@@ -881,14 +881,20 @@ for (const backend of backends) {
     const big = "abcdefghij".repeat(Math.ceil((budget.toolOutputChars * 3) / 10));
     const annP = await c.principals.authenticate((await c.principals.issueCredential(c.owner, "agent:ann")).token);
     const out: ToolResult[] = [];
+    let windowNow = 16_384;
     c.worker.script = async ({ gateway }) => {
-      for (const [id, text] of [["m1", "short answer"], ["m2", big], ["m3", "z".repeat(25_000)]] as const) out.push(await gateway.call({ callId: id, tool: { name: "read-file", version: "0.4.2", kind: "mcp", server }, args: { path: `/work/${id}` } }, local(text)));
+      const secrets = "y".repeat(20) + " ghp_abcdefghijklmnopqrstuvwxyz0123456789 ";
+      const split = secrets.repeat(Math.ceil((budget.toolOutputChars * 2) / secrets.length));
+      for (const [id, text, restricted, window] of [["m1", "short answer", false, 16_384], ["m2", big, false, 16_384], ["m3", "z".repeat(25_000), false, 16_384], ["m4", big, true, 16_384], ["m5", split, false, 16_384], ["m6", "q".repeat(30_000), false, 400_000]] as const) {
+        windowNow = window;
+        out.push(await gateway.call({ callId: id, tool: { name: "read-file", version: "0.4.2", kind: "mcp", server }, args: { path: `/work/${id}` }, ...(restricted ? { restricted: true } : {}) }, local(text)));
+      }
       return { status: "completed", text: "x" };
     };
     const limiter = { ensureHandoff: context.ensureHandoff.bind(context), reportOverflow: context.reportOverflow.bind(context), resetOverflow: context.resetOverflow.bind(context), limitTool: async (p: never, cmd: { output: { text: string } }) => { if (cmd.output.text.startsWith("zzz")) throw new Error("the limiter is down"); return context.limitTool(p, cmd as never); } };
-    c.dispatcher = c.restart({ mcp, context: limiter as never, toolWindow: () => 16_384 });
+    c.dispatcher = c.restart({ mcp, context: limiter as never, toolWindow: () => windowNow });
     await c.run();
-    assert.deepEqual(out.map((r) => r.state), ["confirmed", "confirmed", "confirmed"]);
+    assert.deepEqual(out.map((r) => r.state), ["confirmed", "confirmed", "confirmed", "confirmed", "confirmed", "confirmed"]);
     assert.match((out[2] as { text: string }).text, /Output cut: it was longer than the limit for an MCP result/, "a failing limiter falls back to the fixed bound");
     assert.match((out[0] as { text: string }).text, /short answer/);
     assert.doesNotMatch((out[0] as { text: string }).text, /spill/);
@@ -902,6 +908,26 @@ for (const backend of backends) {
     while (index !== undefined) { const page = await context.readSpill(annP, spillId, index, 12_000); assert.ok(page !== undefined); rest += page.text; index = page.next; }
     assert.ok(cut.replace(/\n\[… [\s\S]*$/, "").length + rest.length >= big.length - 200, "nothing is lost between what was shown and the pages");
     assert.ok(attemptId !== undefined);
+    // Every page of an outside server's answer is framed as data, not instructions.
+    const firstPage = (await context.readSpill(annP, spillId, 0, 12_000))!;
+    assert.equal(firstPage.untrusted, true);
+    // A restricted result is never kept for paging: it is cut at the fixed bound or left as is, with no spill.
+    assert.doesNotMatch((out[3] as { text: string }).text, /spill spl-/, "a restricted result leaves no spill");
+    // A secret anywhere in the answer, also across the cut, is redacted from what is shown and from the pages.
+    const splitText = (out[4] as { text: string }).text;
+    const spill5 = /spill (spl-[a-z2-7]{20})/.exec(splitText)?.[1];
+    assert.ok(spill5 !== undefined);
+    let all = splitText; let at: number | undefined = 0;
+    while (at !== undefined) { const pg = await context.readSpill(annP, spill5, at, 12_000); assert.ok(pg !== undefined); all += pg.text; at = pg.next; }
+    assert.doesNotMatch(all, /ghp_abcdefghijklmnopqrstuvwxyz0123456789/, "the secret is in neither the visible text nor the pages");
+    // A window of 400k tokens is not cut at the fixed bound.
+    assert.doesNotMatch((out[5] as { text: string }).text, /Output cut/);
+    assert.ok((out[5] as { text: string }).text.length >= 30_000, "the whole 30k answer is shown");
+    // Someone who may work on the task but may not use MCP in the project cannot page an outside server's answer.
+    const bob = await c.agent("bob", workGrants(c.project, ["read-file"]));
+    const bobP = await c.principals.authenticate((await c.principals.issueCredential(c.owner, "agent:bob")).token);
+    assert.ok(bob !== undefined);
+    assert.equal(await context.readSpill(bobP, spillId, 0, 12_000), undefined, "without mcp.use it reads like a missing spill");
   });
 
   suite("the attempt pins the agent's active environment revision and records it; an agent with no environment runs without one", async (c) => {
