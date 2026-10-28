@@ -93,7 +93,9 @@ export interface DispatcherDeps {
    * Context enforcement (card C07b) at the end of an attempt: an attempt that failed for want of context is counted (repeated overflow opens a visible blocker), and an attempt that ended without a hand-off gets
    * one written by the controller from `handoffFacts` (default: the task's title, how the attempt ended and the last checkpoint position).
    */
-  readonly context?: Pick<ContextEnforcementService, "ensureHandoff" | "reportOverflow" | "resetOverflow">;
+  readonly context?: Pick<ContextEnforcementService, "ensureHandoff" | "reportOverflow" | "resetOverflow"> & Partial<Pick<ContextEnforcementService, "limitTool">>;
+  /** The context window of a route, in tokens, or `undefined` when the route does not say (card C07d): an MCP result is cut to that window's share of tool output and the rest is kept to be read in pages. */
+  readonly toolWindow?: (route: string) => number | undefined;
   readonly handoffFacts?: (info: { taskId: string; attemptId: string; endedBecause: string }) => Promise<Omit<HandoffFacts, "endedBecause">>;
   /** Called when a checkpoint is taken for an attempt (the composer connects C04's `ContinuationService.capture` here). */
   readonly checkpoints?: (info: { attemptId: string; taskId: string; agentId: string; reason: string; checkpoint: JsonObject }) => Promise<void>;

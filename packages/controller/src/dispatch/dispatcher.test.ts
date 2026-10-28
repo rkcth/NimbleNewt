@@ -857,6 +857,53 @@ for (const backend of backends) {
     assert.deepEqual(calls.map((a) => (a.body as unknown as { outcome?: string }).outcome).sort(), ["ok", "ok"], "the outcome is recorded with the MCP service too");
   });
 
+  suite("an MCP answer longer than the route's tool limit is cut to the window's share and the rest is kept to be read in pages; a small answer is not touched; a limiter that fails falls back to the fixed bound (card C07d)", async (c) => {
+    const { McpService } = await import("../mcp/index.js");
+    const { ContextEnforcementService, DeskService, HistoryService, RetrievalService } = await import("../context/index.js");
+    const { createHash } = await import("node:crypto");
+    const H = (t: string): string => createHash("sha256").update(t).digest("hex");
+    const item = (name: string) => ({ name, descriptionDigest: H(`${name} does a thing`), schemaDigest: H("{}") });
+    const mcp = McpService.withEpoch(c.storage, c.epoch, c.options);
+    await c.principals.enroll(c.owner, { commandId: "mh", kind: "host", name: "mcp-host", grants: [] });
+    const mhost = await c.principals.authenticate((await c.principals.issueCredential(c.owner, "host:mcp-host")).token);
+    const server = (await mcp.register(c.owner, { commandId: "rg", name: "files", mode: "local", transport: "stdio", protocolRevision: "2025-06-18", sdk: { name: "@modelcontextprotocol/sdk", version: "1.12.0" }, launch: { command: "/opt/mcp/files-server", args: [], env: {}, secretRefs: [] }, audience: [c.project], allowed: { tools: ["read-file"] } } as never)).id;
+    await mcp.recordCatalog(mhost, { commandId: "sn", serverId: server, protocolRevision: "2025-06-18", tools: [item("read-file")] });
+    await mcp.acceptCatalog(c.owner, { commandId: "ac", serverId: server, revision: 1, expectedRevision: 2 });
+    const histories = HistoryService.withEpoch(c.storage, c.epoch, c.options);
+    const desks = DeskService.withEpoch(c.storage, c.epoch, c.options);
+    const retrieval = RetrievalService.withEpoch(c.storage, c.epoch, desks, histories, c.options);
+    const { BlockerService } = await import("../domain/index.js");
+    const blockers = BlockerService.withEpoch(c.storage, c.epoch, c.options);
+    const context = ContextEnforcementService.withEpoch(c.storage, c.epoch, { blockers, retrieval }, c.options);
+    const ann = await c.agent("ann", [...workGrants(c.project, ["read-file"]), { action: "mcp.use", project: c.project }, { action: "desk.read", project: c.project }]);
+    const { attemptId } = await c.task("t", ann);
+    const budget = context.budget(16_384);
+    const big = "abcdefghij".repeat(Math.ceil((budget.toolOutputChars * 3) / 10));
+    const annP = await c.principals.authenticate((await c.principals.issueCredential(c.owner, "agent:ann")).token);
+    const out: ToolResult[] = [];
+    c.worker.script = async ({ gateway }) => {
+      for (const [id, text] of [["m1", "short answer"], ["m2", big], ["m3", "z".repeat(25_000)]] as const) out.push(await gateway.call({ callId: id, tool: { name: "read-file", version: "0.4.2", kind: "mcp", server }, args: { path: `/work/${id}` } }, local(text)));
+      return { status: "completed", text: "x" };
+    };
+    const limiter = { ensureHandoff: context.ensureHandoff.bind(context), reportOverflow: context.reportOverflow.bind(context), resetOverflow: context.resetOverflow.bind(context), limitTool: async (p: never, cmd: { output: { text: string } }) => { if (cmd.output.text.startsWith("zzz")) throw new Error("the limiter is down"); return context.limitTool(p, cmd as never); } };
+    c.dispatcher = c.restart({ mcp, context: limiter as never, toolWindow: () => 16_384 });
+    await c.run();
+    assert.deepEqual(out.map((r) => r.state), ["confirmed", "confirmed", "confirmed"]);
+    assert.match((out[2] as { text: string }).text, /Output cut: it was longer than the limit for an MCP result/, "a failing limiter falls back to the fixed bound");
+    assert.match((out[0] as { text: string }).text, /short answer/);
+    assert.doesNotMatch((out[0] as { text: string }).text, /spill/);
+    const cut = (out[1] as { text: string }).text;
+    assert.ok(cut.length < big.length && cut.length <= budget.toolOutputChars + 2000, `the answer is cut to the window's share (${cut.length} of ${big.length}; limit ${budget.toolOutputChars})`);
+    const spillId = /spill (spl-[a-z2-7]{20})/.exec(cut)?.[1];
+    assert.ok(spillId !== undefined, cut.slice(-300));
+    assert.doesNotMatch(cut, /Output cut: it was longer than the limit for an MCP result/, "the window's cut is the one reported, not the fixed bound");
+    // The rest can be read in pages by someone who may work on the task, and is all there.
+    let rest = ""; let index: number | undefined = 0;
+    while (index !== undefined) { const page = await context.readSpill(annP, spillId, index, 12_000); assert.ok(page !== undefined); rest += page.text; index = page.next; }
+    assert.ok(cut.replace(/\n\[… [\s\S]*$/, "").length + rest.length >= big.length - 200, "nothing is lost between what was shown and the pages");
+    assert.ok(attemptId !== undefined);
+  });
+
   suite("the attempt pins the agent's active environment revision and records it; an agent with no environment runs without one", async (c) => {
     const { EnvironmentService } = await import("../environments/index.js");
     const D = (ch: string): string => `sha256:${ch.repeat(64)}`;

@@ -50,6 +50,9 @@ export interface Context {
   readonly branches?: ContextBranchService;
   /** Absent when the controller runs without remote workers (card H07c). */
   readonly placement?: Pick<PlacementSettingsService, "get" | "set" | "change">;
+
+  /** Absent when the controller runs without a dispatcher (card C07d). */
+  readonly spill?: { readonly readSpill: (by: Principal, spillId: string, index: number, size?: number) => Promise<{ text: string; next?: number } | undefined> };
   /** Absent when the controller runs without grants (card U03e). */
   readonly grants?: Pick<GrantService, "grant" | "revoke" | "getGrant" | "list">;
   /** Absent when the controller runs without events (card H06c). */
@@ -134,6 +137,8 @@ const rest = (args: Args, ...skip: string[]): Args => Object.fromEntries(Object.
 
 /** The version-1 operations. The documentation (`renderApiDocs`) is generated from this table, so it cannot drift. */
 export const OPERATIONS: readonly Operation[] = [
+  { name: "context.spill.read", kind: "query", summary: "One page of the rest of a tool result that was cut to the model's window (the cut result names its spill ID). Needs the right to work on the task the result belongs to; anyone else gets not found.", args: { spillId: "the spill ID named in the cut result (`spl-…`)", "index?": "the page, from 0", "size?": "page size in characters (at most 50,000)" }, result: "`{ item: { text, next? } }`; `next` is the index of the following page when there is one.",
+    run: async (c, a) => { only(a, ["spillId", "index", "size"]); const size = optNum(a, "size"); return found("spill", await (c.spill ?? unavailable("tool result spills")).readSpill(c.principal, str(a, "spillId"), optNum(a, "index") ?? 0, size === undefined ? undefined : Math.min(Math.max(1, Math.floor(size)), 50_000))); } },
   { name: "grant.list", kind: "query", summary: "The rights the owner has granted, with their IDs and revisions (owner only).", args: { "grantee?": "only this principal's grants", "limit?": `1 to ${PAGE.max}, default ${PAGE.default}`, "after?": "the `next` of the previous page" }, result: "`{ items, next? }`: each grant with its grantee, action, project, state (`active` or `revoked`), basis and revision.",
     run: async (c, a) => { only(a, ["grantee", "limit", "after"]); return page(await grantsOf(c).list(c.principal, { limit: limitOf(a), ...(optStr(a, "grantee") === undefined ? {} : { grantee: optStr(a, "grantee")! }), ...(optStr(a, "after") === undefined ? {} : { afterId: optStr(a, "after")! }) })); } },
   { name: "grant.get", kind: "query", summary: "One grant record (owner only).", args: { grantId: "the grant's ID" }, result: "`{ item }`: the grant, with its revision.",

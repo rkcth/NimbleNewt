@@ -32,6 +32,18 @@ One door to the controller's state for chat, command-line and HTTP clients. A cl
 
 ### Queries
 
+#### `context.spill.read`
+
+One page of the rest of a tool result that was cut to the model's window (the cut result names its spill ID). Needs the right to work on the task the result belongs to; anyone else gets not found.
+
+Arguments:
+
+- `spillId`: the spill ID named in the cut result (`spl-…`)
+- `index` (optional): the page, from 0
+- `size` (optional): page size in characters (at most 50,000)
+
+Result: `{ item: { text, next? } }`; `next` is the index of the following page when there is one.
+
 #### `grant.list`
 
 The rights the owner has granted, with their IDs and revisions (owner only).

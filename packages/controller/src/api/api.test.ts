@@ -229,6 +229,20 @@ for (const backend of backends) {
     assert.equal(internal.length, 1);
     assert.match(String(internal[0]), /disk detail leaked: \/srv\/secret/);
   }, (deps) => ({ ...deps, retrieval: { search: async () => { throw new Error("disk detail leaked: /srv/secret"); } } as never }));
+
+  const spillCalls: { by: string; id: string; index: number; size: number | undefined }[] = [];
+  suite("the rest of a cut tool result is read in pages through the API by the caller's own principal, and a missing or unreadable spill reads as not found (card C07d)", async ({ ownerToken, agent, ok, fails }) => {
+    spillCalls.length = 0;
+    const read = (args: Record<string, unknown>) => ({ v: 1, op: "context.spill.read", args });
+    assert.deepEqual((await ok(ownerToken, read({ spillId: "spl-aaaaaaaaaaaaaaaaaaaa", index: 1, size: 999_999 }))).result, { item: { text: "page 1", next: 2 } });
+    assert.deepEqual(spillCalls.at(-1), { by: "owner:rob", id: "spl-aaaaaaaaaaaaaaaaaaaa", index: 1, size: 50_000 }, "the page size is bounded");
+    assert.deepEqual((await ok(ownerToken, read({ spillId: "spl-aaaaaaaaaaaaaaaaaaaa" }))).result, { item: { text: "page 0", next: 1 } });
+    assert.equal((await fails(ownerToken, read({ spillId: "spl-bbbbbbbbbbbbbbbbbbbb" }))).code, "not_found");
+    const ann = await agent("ann", []);
+    assert.equal((await fails(ann, read({ spillId: "spl-aaaaaaaaaaaaaaaaaaaa" }))).code, "not_found", "the service decides who may read; the API passes the caller on");
+    assert.equal(spillCalls.at(-1)!.by, "agent:ann");
+    assert.equal((await fails(ownerToken, read({ spillId: "spl-aaaaaaaaaaaaaaaaaaaa", extra: 1 }))).code, "invalid_command");
+  }, (deps) => ({ ...deps, spill: { readSpill: async (by, id, index, size) => { spillCalls.push({ by: by.id, id, index, size }); return id === "spl-aaaaaaaaaaaaaaaaaaaa" && by.kind === "owner" ? { text: `page ${index}`, ...(index < 2 ? { next: index + 1 } : {}) } : undefined; } } }));
 }
 
 test("the documentation is generated from the operation table and is up to date", () => {

@@ -124,6 +124,8 @@ export interface DispatchHandle {
   readonly workerUrl?: string;
   /** The host an agent's live attempt runs on, if it has one (the review service judges a reviewer's host with it, card H05b). */
   readonly hostOfAgent: (agentId: string) => Promise<string | undefined>;
+  /** One page of the rest of a tool result that was cut to the window (card C07d), for someone who may work on the task; otherwise it reads like a missing spill. */
+  readonly readSpill: (by: Principal, spillId: string, index: number, size?: number) => Promise<{ text: string; next?: number } | undefined>;
   /** Charges time that is not a model call (a review, a job) to a task, as the dispatcher does; the commandId makes a repeat count once (card R05f). */
   /** Charges that could not be booked and are waiting for a retry, or were given up on (owner or dispatcher). */
   /** The attendance service, composed with the meetings and the budget (card R05g proves a held meeting reaches budget.usage through it). */
@@ -323,6 +325,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     const dispatcher = DispatcherService.withEpoch(storage, epoch, {
       principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, hosts, workers,  contracts: i.contracts, harnesses: i.catalog, policy, effects, blockers, route,
       routing: i.routing, pauses, decisions, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
+      ...(i.options.local === undefined ? {} : { toolWindow: (route: string) => { try { return i.options.local!.window({ route } as WorkOrder); } catch { return undefined; } } }),
       ...(remote === undefined ? {} : { storeOwner: (agentId: string, attemptId: string) => remote!.storeOwner(principal, agentId, attemptId) }),
     }, { ...ro, holder: "dispatcher", ...(i.onError === undefined ? {} : { onError: i.onError }), ...(i.options.dispatcher ?? {}) });
     holder.dispatcher = dispatcher;
@@ -357,6 +360,9 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       attendance,
       unsettledCharges: (by) => chargeRetry.unsettled(by),
       chargeUse: (u) => chargeRetry.submit(principal, { commandId: u.commandId, activity: u.activity, taskId: u.taskId, computeMs: u.computeMs, ...(u.agentId === undefined ? {} : { agentId: u.agentId }) }).then(() => undefined),
+
+      chargeUse: (u) => budgets.charge(principal, { commandId: u.commandId, activity: u.activity, taskId: u.taskId, computeMs: u.computeMs, ...(u.agentId === undefined ? {} : { agentId: u.agentId }) }).then(() => undefined),
+      readSpill: (by, spillId, index, size) => context.readSpill(by, spillId, index, size),
       hostOfAgent: async (agentId) => { for (const attemptId of await dispatcher.liveAttemptsOf(principal, { agentId })) { const d = await dispatcher.get(principal, attemptId); const host = d?.state === "running" ? d.hostId : d?.pinnedHost; if (host !== undefined) return host; } return undefined; }, quiesce: new QuiesceCoordinator({ dispatcher, blockers, principal }),
       ...(mcpService === undefined || i.options.mcp === undefined ? {} : { mcp: { service: mcpService, connector: new RemoteMcpConnector({ mcp: mcpService, resolve: i.options.mcp.resolve, principal }) } }),
     };
