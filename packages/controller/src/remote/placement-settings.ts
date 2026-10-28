@@ -76,6 +76,43 @@ export class PlacementSettingsService {
     return { revision: result.revision };
   }
 
+  /**
+   * The owner adds hosts to or removes them from the lists, leaving the rest as it is (card H07c). This is what the chat proposes, so a proposal that waits while the setting changes still does only what it says.
+   * Allowing a host takes it out of the excluded list and excluding it takes it out of the allowed list.
+   */
+  async change(owner: Principal, command: NoActor & { allowAdd?: readonly string[]; allowRemove?: readonly string[]; excludeAdd?: readonly string[]; excludeRemove?: readonly string[] }): Promise<{ revision: number }> {
+    if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} may not change where local-only data may go`);
+    const fields = ["allowAdd", "allowRemove", "excludeAdd", "excludeRemove"] as const;
+    const unknown = Object.keys(command).filter((k) => k !== "commandId" && !(fields as readonly string[]).includes(k));
+    if (unknown.length > 0) throw new DomainError("invalid_command", `${unknown[0]}: is not a field of this command`, { field: unknown[0]! });
+    const lists: Record<string, string[]> = {};
+    for (const f of fields) {
+      const value = command[f];
+      if (value === undefined) { lists[f] = []; continue; }
+      if (!Array.isArray(value) || value.length > MAX_HOSTS) throw new DomainError("invalid_command", `${f}: must be a list of at most ${MAX_HOSTS} hosts`, { field: f });
+      for (const h of value) if (typeof h !== "string" || !HOST.test(h)) throw new DomainError("invalid_command", `${f}: ${String(h)} is not a host (host:name)`, { field: f });
+      lists[f] = [...new Set(value as string[])];
+    }
+    if (fields.every((f) => lists[f]!.length === 0)) throw new DomainError("invalid_command", "allowAdd: name at least one host to allow, exclude or take off a list", { field: "allowAdd" });
+    const result = await this.#runner.command("placement.change", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
+      payload: { lists: lists as unknown as JsonObject },
+      build: async () => {
+        const current = await this.#runner.get(REF.kind, REF.id);
+        const before = current?.body as unknown as PlacementSettingsBody | undefined;
+        const allow = new Set(before?.allow ?? []), exclude = new Set(before?.exclude ?? []);
+        for (const h of lists["allowRemove"]!) allow.delete(h);
+        for (const h of lists["excludeRemove"]!) exclude.delete(h);
+        for (const h of lists["allowAdd"]!) { allow.add(h); exclude.delete(h); }
+        for (const h of lists["excludeAdd"]!) { exclude.add(h); allow.delete(h); }
+        if (allow.size > MAX_HOSTS || exclude.size > MAX_HOSTS) throw new DomainError("invalid_command", `at most ${MAX_HOSTS} hosts may be on each list`, { field: "allowAdd" });
+        const next: PlacementSettingsBody = { allow: [...allow].sort(), exclude: [...exclude].sort(), updatedBy: owner.id, updatedAt: this.#runner.now() };
+        const change = current === undefined ? { type: "create" as const, ref: REF, body: next as unknown as JsonObject } : { type: "update" as const, ref: REF, expectedRevision: current.revision, body: next as unknown as JsonObject };
+        return { ref: REF, creates: current === undefined, changes: [change], detail: { allow: next.allow.length, exclude: next.exclude.length } };
+      },
+    }));
+    return { revision: result.revision };
+  }
+
   /** The placement policy for the remote service: who may hold local-only data now. Credentials and repositories are not restricted by this setting. */
   policy(): () => Promise<PlacementPolicy> {
     return async () => {

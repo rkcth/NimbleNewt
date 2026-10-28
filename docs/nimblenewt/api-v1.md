@@ -677,6 +677,21 @@ Result: `{ revision }`.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `placement.change`
+
+The owner adds hosts to or takes them off the lists of where local-only data may go (owner only), leaving the rest of the lists as they are. Allowing a host takes it off the excluded list and excluding it takes it off the allowed list. This is the form the chat uses, so a request that waits to be accepted does only what it says.
+
+Arguments:
+
+- `allowAdd` (optional): hosts (`host:name`) to allow
+- `allowRemove` (optional): hosts to take off the allowed list
+- `excludeAdd` (optional): hosts to exclude
+- `excludeRemove` (optional): hosts to take off the excluded list
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `grant.revoke`
 
 The owner takes a grant back (owner only; the revision you read must still be current). It stops counting at the next check.

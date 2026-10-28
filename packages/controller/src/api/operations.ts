@@ -49,7 +49,7 @@ export interface Context {
   /** Absent when the controller runs without context branches (card C05). */
   readonly branches?: ContextBranchService;
   /** Absent when the controller runs without remote workers (card H07c). */
-  readonly placement?: Pick<PlacementSettingsService, "get" | "set">;
+  readonly placement?: Pick<PlacementSettingsService, "get" | "set" | "change">;
   /** Absent when the controller runs without grants (card U03e). */
   readonly grants?: Pick<GrantService, "grant" | "revoke" | "getGrant" | "list">;
   /** Absent when the controller runs without events (card H06c). */
@@ -144,6 +144,8 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, []); return asJson({ item: await placementOf(c).get(c.principal) }); } },
   { name: "placement.set", kind: "command", summary: "The owner says which hosts may hold local-only data (owner only). `allow` and `exclude` are lists of host IDs (`host:name`); each replaces the earlier list, and one left out stays as it was. A task whose data is local-only is placed only on a host this allows; the change counts from the next placement.", args: { "allow?": "hosts that may hold local-only data, for example `[\"host:laptop\"]`", "exclude?": "hosts that may not, even when the profile would allow them", "expectedRevision?": "the revision you read (0 when none is set)" }, result: "`{ revision }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["allow", "exclude", "expectedRevision"]); return asJson({ ...(await placementOf(c).set(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
+  { name: "placement.change", kind: "command", summary: "The owner adds hosts to or takes them off the lists of where local-only data may go (owner only), leaving the rest of the lists as they are. Allowing a host takes it off the excluded list and excluding it takes it off the allowed list. This is the form the chat uses, so a request that waits to be accepted does only what it says.", args: { "allowAdd?": "hosts (`host:name`) to allow", "allowRemove?": "hosts to take off the allowed list", "excludeAdd?": "hosts to exclude", "excludeRemove?": "hosts to take off the excluded list" }, result: "`{ revision }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["allowAdd", "allowRemove", "excludeAdd", "excludeRemove"]); return asJson({ ...(await placementOf(c).change(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
   { name: "grant.revoke", kind: "command", summary: "The owner takes a grant back (owner only; the revision you read must still be current). It stops counting at the next check.", args: { grantId: "the grant's ID", expectedRevision: "the revision you read", reason: "why, in the owner's words" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["grantId", "expectedRevision", "reason"]); await grantsOf(c).revoke(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
   { name: "events.configure-idle", kind: "command", summary: "Sets how long an event subscription may sit without acknowledging before it expires (owner only). A subscription that was made before this existed, or without its own time, uses this one.", args: { idleSeconds: "whole seconds, 10 to 604800" }, result: "`{ ok: true }`.", completion: { kind: "completed" },

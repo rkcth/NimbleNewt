@@ -76,7 +76,7 @@ export interface StateApiDeps {
   /** When present, the owner can grant and revoke rights through the API (card U03e). */
   readonly grants?: Pick<GrantService, "grant" | "revoke" | "getGrant" | "list">;
   /** When present, the owner can say which hosts may hold local-only data through the API (card H07c). */
-  readonly placement?: Pick<PlacementSettingsService, "get" | "set">;
+  readonly placement?: Pick<PlacementSettingsService, "get" | "set" | "change">;
   /** When present, the owner can set the idle time of event subscriptions and cancel one through the API (card H06c). */
   readonly events?: Pick<EventService, "configureIdle" | "cancel">;
   /** When present, budgets can be read, asked for and decided through the API (card R05c). */

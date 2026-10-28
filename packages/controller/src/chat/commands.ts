@@ -38,7 +38,7 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "grant.create": { verb: "Grant right", mode: "propose" },
   "grant.revoke": { verb: "Revoke grant", mode: "propose", revision: "grant" },
   // Where local-only data may go is where work is done: shown to the owner first in every profile (card H07c).
-  "placement.set": { verb: "Change where local-only data may go", mode: "propose" },
+  "placement.change": { verb: "Change where local-only data may go", mode: "propose" },
   // Project resources, plan and responsibilities (card P01). A read-only bind of a location the owner typed in their own words follows the profile like other explicit orders; write access, an acknowledged overlap and anything quoted are shown first.
   "resource.bind": { verb: "Bind resource", mode: "profile", needsProject: true },
   "project.plan": { verb: "Plan project", mode: "apply", revision: "project", needsProject: true },
@@ -133,7 +133,7 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
   if (op === "decision.record" && args["category"] === "gate") return "a gate holds or releases work until you say otherwise, so it is shown first";
   // The request type is authority: an instruction or a decision left to the team is shown to the owner before it is recorded, whatever the profile, so a paraphrase cannot slip one in.
   if ((op === "agenda.capture" || op === "agenda.correct") && (args["intent"] === "owner-instruction" || args["intent"] === "delegated-decision")) return "it records an instruction or a decision for the team, so it is shown first";
-  if (spec.mode === "propose") return op === "project.create" ? "a new project is drafted first" : op.startsWith("grant.") ? "a right is shown first" : "a role's capabilities are shown first";
+  if (spec.mode === "propose") return op === "project.create" ? "a new project is drafted first" : op.startsWith("grant.") ? "a right is shown first" : op.startsWith("placement.") ? "where your local-only data may go is shown first" : "a role's capabilities are shown first";
   if (context.quoted && (!PLAIN_EDITS.has(op) || (op === "project.update" && args["state"] !== undefined))) return "your message carried quoted text, so this is shown first";
   if (!context.said) return "your own words do not say this move, so it is shown first";
   const strict = context.profile === "strict";
