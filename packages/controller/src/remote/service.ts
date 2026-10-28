@@ -377,6 +377,21 @@ export class RemoteWorkerService {
    * isolation, workspace bindings); when the agent's native store belongs to another host; or when an artifact it is given is missing or altered. The offer holds the order (and so the task credential) in
    * memory until the worker accepts it. A second placement of an attempt that is already on this host raises the placement number: the earlier run is fenced.
    */
+  /**
+   * Why a host would refuse an attempt now, before any place is asked for it (card H07e): what it announced, its connection and the placement policy; empty when it would take it. `place` judges the same things again at the start.
+   * The agent's native store is not judged here: the dispatcher handles it by pinning the attempt to the store's host.
+   */
+  async refusals(by: Principal, query: { readonly hostId: string; readonly attemptId: string; readonly taskId: string; readonly projectId: string; readonly agentId: string; readonly requirements: Requirements }): Promise<string[]> {
+    this.#staff(by);
+    const hostId = hostIdOf(query.hostId);
+    const attemptId = attemptIdOf(query.attemptId);
+    const requirements = checkRequirements(query.requirements);
+    const reasons = capabilityReasons(hostId, await this.#deps.hosts.status(this.#deps.principal, hostId), requirements);
+    if ((await this.#connected(hostId)) === undefined) reasons.push(`${hostId} has not connected to the controller`);
+    reasons.push(...policyReasons(hostId, requirements, this.#deps.placementPolicy === undefined ? {} : await this.#deps.placementPolicy({ attemptId, taskId: query.taskId, projectId: query.projectId, agentId: query.agentId, requirements })));
+    return reasons;
+  }
+
   async place(by: Principal, command: { readonly hostId: string; readonly order: WorkOrder; readonly requirements: Requirements; readonly inputs?: readonly string[] }): Promise<Placed> {
     this.#staff(by);
     const hostId = hostIdOf(command.hostId);

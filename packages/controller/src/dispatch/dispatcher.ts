@@ -34,7 +34,7 @@ import { DISPATCHER_PRINCIPAL, type TaskCredentialService } from "../security/ta
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
 import { DISPATCHER_ACTOR, DISPATCH_KIND, DISPATCH_LIMITS, type DispatchBody, type DispatchRevisions, type Frozen, type ToolIdentity, type ToolOperationBody } from "./model.js";
 import { ToolPath, type Loaded } from "./tools.js";
-import type { RecipeSummary, ToolGateway, WorkerTurnResult, TurnUsage, WorkOrder, WorkerHandle, WorkerHost } from "./ports.js";
+import type { HostProbe, RecipeSummary, ToolGateway, WorkerTurnResult, TurnUsage, WorkOrder, WorkerHandle, WorkerHost } from "./ports.js";
 
 /** The record of live dispatches: the attempts that have a claim and have not finished. Ticks read it instead of scanning every dispatch ever made. */
 const LIVE: AggregateRef = { kind: "dispatch-live", id: "live" };
@@ -741,10 +741,18 @@ export class DispatcherService {
         pinned ??= store.hostId;
       }
     }
-    const hostPick = await this.#pickHost(chosen.harness, pinned);
+    const probe: HostProbe = { attemptId, taskId, projectId: task.projectId, agentId, generation: (await this.#load(attemptId))?.body.generation ?? 0, ...(chosen.harness === undefined ? {} : { harness: chosen.harness }), route: chosen.route, expiresAt: (await this.#load(attemptId))?.body.expiresAt ?? this.#runner.now() };
+    const hostPick = await this.#pickHost(chosen.harness, pinned, probe);
     if (hostPick.kind !== "ok") {
       if (hostPick.blocked) return block("host", "dispatch_blocked", hostPick.reason);
-      if (pinned === undefined) return skip("host", hostPick.reason);
+      if (pinned === undefined) {
+        if (hostPick.refused !== true) return skip("host", hostPick.reason);
+        // Every host that could run it refuses it (the placement policy, what the hosts can do): it waits in the plan with the reasons, and the owner is told when it stays so, since only a change of the setting or a new host helps.
+        const refusedFor = (this.#pinnedWaits.get(attemptId) ?? 0) + 1;
+        this.#pinnedWaits.set(attemptId, refusedFor);
+        if (refusedFor >= (this.#options.pinnedStaleTicks ?? 5)) return block("host", "dispatch_blocked", `no worker host will take the attempt: ${hostPick.reason}`.slice(0, 800));
+        return skip("host", hostPick.reason);
+      }
       // An attempt that may run only on one host waits for it; if the host stays unavailable the owner is told, since only the owner can move the attempt.
       const waited = (this.#pinnedWaits.get(attemptId) ?? 0) + 1;
       this.#pinnedWaits.set(attemptId, waited);
@@ -772,9 +780,9 @@ export class DispatcherService {
     return (action, projectId, taskId) => allows(principal, action, projectId, { resource: { kind: "task", id: taskId }, now });
   }
 
-  async #pickHost(harness: string | undefined, pinned?: string): Promise<{ kind: "ok"; host: WorkerHost & { hostId: string } } | { kind: "none"; reason: string; blocked: boolean }> {
+  async #pickHost(harness: string | undefined, pinned: string | undefined, probe: HostProbe): Promise<{ kind: "ok"; host: WorkerHost & { hostId: string } } | { kind: "none"; reason: string; blocked: boolean; refused?: true }> {
     const reasons: string[] = [];
-    let revoked = 0;
+    let revoked = 0; let refused = 0;
     // An attempt pinned to a host (it was relocated there, or it parked on it and the host owns its store) goes nowhere else: it waits for that host, and the owner can move it.
     const candidates = pinned === undefined ? this.#deps.workers : this.#deps.workers.filter((w) => w.hostId === pinned);
     if (pinned !== undefined && candidates.length === 0) return { kind: "none", reason: `${pinned} is not a worker host of this dispatcher, and the attempt may run only there`, blocked: false };
@@ -784,9 +792,15 @@ export class DispatcherService {
       if (status.identity !== "active") { revoked++; reasons.push(`${worker.hostId} is revoked`); continue; }
       if (status.freshness !== "fresh") { reasons.push(`${worker.hostId} has not been heard from recently (${status.freshness})`); continue; }
       if (harness !== undefined && status.capabilities !== undefined && !status.capabilities.harnesses.some((h) => h.name === harness)) { reasons.push(`${worker.hostId} does not have the ${harness} harness`); continue; }
+      // A host that would refuse the attempt (policy, what it can do, no connection) is passed over: the next one is tried, and the plan says why this one was not.
+      if (worker.refuses !== undefined) {
+        let why: readonly string[];
+        try { why = await worker.refuses(probe); } catch (error) { why = [`${worker.hostId} could not be asked: ${errorText(error)}`]; }
+        if (why.length > 0) { refused++; reasons.push(why.join('; ')); continue; }
+      }
       return { kind: "ok", host: worker };
     }
-    return { kind: "none", reason: reasons.length === 0 ? "no worker host is configured" : reasons.join("; "), blocked: candidates.length === 0 || revoked === candidates.length };
+    return { kind: "none", reason: reasons.length === 0 ? "no worker host is configured" : reasons.join("; "), blocked: candidates.length === 0 || revoked === candidates.length, ...(refused > 0 && refused + revoked === candidates.length ? { refused: true as const } : {}) };
   }
 
   async #revisions(projectId: string, taskId: string, contract: number, route: Extract<RouteChoice, { route: string }>): Promise<DispatchRevisions> {

@@ -1,7 +1,7 @@
 import { DomainError } from "../domain/errors.js";
 import type { JsonObject } from "../storage/types.js";
 import type { Principal } from "../security/index.js";
-import type { RecipeSummary, ToolGateway, WorkOrder, WorkerHandle, WorkerHost, WorkerTurnResult } from "../dispatch/ports.js";
+import type { HostProbe, RecipeSummary, ToolGateway, WorkOrder, WorkerHandle, WorkerHost, WorkerTurnResult } from "../dispatch/ports.js";
 import type { RemoteWorkerService, Requirements } from "./service.js";
 
 export interface RemoteWorkerHostOptions {
@@ -25,6 +25,12 @@ export interface RemoteWorkerHostOptions {
 export class RemoteWorkerHost implements WorkerHost {
   readonly resources: { readonly cpus: number; readonly memoryMb: number };
   constructor(readonly hostId: string, private readonly remote: RemoteWorkerService, private readonly by: Principal, private readonly options: RemoteWorkerHostOptions) { this.resources = options.resources; }
+
+  /** Why this host would refuse the attempt (card H07e), judged by the same rules as the placement. The order is not built yet, so the requirements are asked of a preview of it that carries no credential. */
+  async refuses(probe: HostProbe): Promise<readonly string[]> {
+    const preview: WorkOrder = { attemptId: probe.attemptId, taskId: probe.taskId, projectId: probe.projectId, agentId: probe.agentId, generation: probe.generation, ...(probe.harness === undefined ? {} : { harness: probe.harness }), route: probe.route, credential: "", recipe: { revision: "preview", reach: [] }, content: "", requestId: "", expiresAt: probe.expiresAt };
+    return this.remote.refusals(this.by, { hostId: this.hostId, attemptId: probe.attemptId, taskId: probe.taskId, projectId: probe.projectId, agentId: probe.agentId, requirements: this.options.requirements(preview) });
+  }
 
   async start(order: WorkOrder): Promise<WorkerHandle> {
     const placed = await this.remote.place(this.by, { hostId: this.hostId, order, requirements: this.options.requirements(order), inputs: this.options.inputs?.(order) ?? [] });

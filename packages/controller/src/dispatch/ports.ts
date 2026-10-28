@@ -69,12 +69,20 @@ export interface WorkerHandle {
   stop(): Promise<void>;
 }
 
+/** What the dispatcher knows of an attempt before its order exists: enough for a host to say whether it would take it (card H07e). */
+export interface HostProbe { readonly attemptId: string; readonly taskId: string; readonly projectId: string; readonly agentId: string; readonly generation: number; readonly harness?: string; readonly route: string; readonly expiresAt: string }
+
 export interface WorkerHost {
   /** The host principal (`host:<name>`) this worker runs on: its place is asked of admission under this name. */
   readonly hostId: string;
   /** What one attempt asks of the host, for admission (H03). */
   readonly resources: { readonly cpus: number; readonly memoryMb: number };
   start(order: WorkOrder): Promise<WorkerHandle>;
+  /**
+   * Why this host would refuse the attempt (policy, capabilities, connection), asked before a place is requested so that the dispatcher can pass over a host that would refuse and pick the next one. Empty: it would take it. A host
+   * that does not say leaves it out and is judged only when the worker starts (card H07e).
+   */
+  refuses?(probe: HostProbe): Promise<readonly string[]>;
   /** The host's side of integration, checkout refresh and quarantine for the checkouts it holds (cards H12l, H12m). A host with none leaves it out and those requests are refused for it. */
   readonly workspace?: WorkspacePort;
 }
