@@ -361,8 +361,6 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       attendance,
       unsettledCharges: (by) => chargeRetry.unsettled(by),
       chargeUse: (u) => chargeRetry.submit(principal, { commandId: u.commandId, activity: u.activity, taskId: u.taskId, computeMs: u.computeMs, ...(u.agentId === undefined ? {} : { agentId: u.agentId }) }).then(() => undefined),
-
-      chargeUse: (u) => budgets.charge(principal, { commandId: u.commandId, activity: u.activity, taskId: u.taskId, computeMs: u.computeMs, ...(u.agentId === undefined ? {} : { agentId: u.agentId }) }).then(() => undefined),
       // An outside server's text is framed as data on every page, with the injection check over the page itself (the visible head was checked when it was cut).
       readSpill: async (by, spillId, index, size) => {
         const found = await context.readSpill(by, spillId, index, size);

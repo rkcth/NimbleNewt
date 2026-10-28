@@ -20,7 +20,6 @@ import type { DecisionService } from "../decisions/index.js";
 import { SecureApi } from "../security/secured.js";
 import type { GrantService } from "../security/grants.js";
 import type { PlacementSettingsService } from "../remote/placement-settings.js";
-import type { PrincipalService } from "../security/principals.js";
 
 import type { Principal, PrincipalService } from "../security/principals.js";
 import type { TaskCredentialService } from "../security/task-credentials.js";
