@@ -71,7 +71,7 @@ const optionAtLeast = (days: number): number => GRANT_LENGTHS.find((o) => o >= d
 /**
  * The length the system chooses for a standing grant, with the reason in plain words (card A07d). In order: a length the owner stated in words (used as stated, at most the longest option) or a one-off piece of
  * work (the shortest option), both with source `owner`; what the last earlier grant of the same requester, project, class and environment showed (taken back early: the next shorter option than its length; ran to its end: the
- * next longer one); the span of the approvals themselves (the shortest option that covers it); when none of these says anything, 30 days.
+ * next longer one); the span of the approvals themselves (the shortest option that covers it, but at least 7 days, card A07e; an earlier grant taken back early outranks this and can suggest less); when none of these says anything, 30 days.
  */
 export function chooseStandingLength(input: LengthInputs): { days: number; why: string; source: "owner" | "default" } {
   const longest = GRANT_LENGTHS[GRANT_LENGTHS.length - 1]!;
