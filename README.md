@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **117 of 225 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **118 of 228 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -110,12 +110,12 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Pi runtime and inference caching | `▓▓▓▓▓▓▓▓░░░░` 72% | 8 of 11 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
 | Pause, suspend and resume | `▓▓▓▓░░░░░░░░` 33% | 3 of 9 |
-| Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓░░░` 77% | 14 of 18 |
+| Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓░░░░` 73% | 14 of 19 |
 | Context and memory | `▓▓▓▓▓▓▓▓▓░░░` 76% | 10 of 13 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
 | Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓░░░` 81% | 9 of 11 |
 | Owner chat and web UI | `▓▓▓▓▓▓░░░░░░` 53% | 8 of 15 |
-| Workers, dispatch and teams | `▓▓▓▓▓▓░░░░░░` 54% | 18 of 33 |
+| Workers, dispatch and teams | `▓▓▓▓▓▓░░░░░░` 51% | 18 of 35 |
 | Agent messaging | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
 | Health and recovery | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
 | Meetings | `▓▓▓▓░░░░░░░░` 36% | 4 of 11 |
@@ -125,7 +125,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Balancing delivery and improvement | `░░░░░░░░░░░░` 0% | 0 of 1 |
 | Learning and improvement | `░░░░░░░░░░░░` 0% | 0 of 5 |
 | Backup, updates and operations | `░░░░░░░░░░░░` 0% | 0 of 11 |
-| Test campaigns and platforms | `▓░░░░░░░░░░░` 6% | 1 of 15 |
+| Test campaigns and platforms | `▓░░░░░░░░░░░` 13% | 2 of 15 |
 | Release | `░░░░░░░░░░░░` 0% | 0 of 6 |
 
 ### The parts in detail
@@ -222,7 +222,7 @@ Pause, suspend, stop, release and checked resume, interrupting a model mid-gener
 </details>
 
 <details>
-<summary><strong>Security: identity, approvals and sandboxing</strong> — ▓▓▓▓▓▓▓▓▓░░░ 14 of 18</summary>
+<summary><strong>Security: identity, approvals and sandboxing</strong> — ▓▓▓▓▓▓▓▓░░░░ 14 of 19</summary>
 
 Authenticated principals, revisioned grants, the sandbox launchers, the protected filesystem and Git bridge, approval policy and resource limits.
 
@@ -243,6 +243,7 @@ Authenticated principals, revisioned grants, the sandbox launchers, the protecte
 - [x] **A10b** · P26 · Implement per-task credentials for agents serving several projects _(needs A10, A01)_
 - [x] **A07d** · P27 · Offer a choice of standing-grant lengths with a system-chosen default _(needs A07b, A07c)_
 - [ ] **A08c** · P27 · Enforce per-agent resource limits on macOS and Windows (after the first release) _(needs A08b, A03b)_
+- [ ] **A07e** · P28 · Suggest at least seven days for a standing grant _(needs A07d)_
 - [ ] **A09** · P32 · Implement reviewed environment changes and maintenance requests _(needs A08, A05, H05, L02, T06)_
 
 </details>
@@ -322,7 +323,7 @@ Talking to your agents: the chat interpreter, policy editing, status and blocker
 </details>
 
 <details>
-<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓▓░░░░░░ 18 of 33</summary>
+<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓▓░░░░░░ 18 of 35</summary>
 
 Enrolled hosts, remote workers, priority admission, the local worker runtime and dispatcher, agents, teams and roles, reviews and wait-cycle handling.
 
@@ -354,8 +355,10 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 - [x] **H02c** · P31 · Prove partition fencing, relocation integrity and the store owner in the composed controller _(needs H02b)_
 - [ ] **H02e** · P31 · Stop a poll from deleting a re-placed offer _(needs H02, H07)_
 - [ ] **H07b** · P31 · Choose hosts by candidates, fall back on refusal and run the host poller in the worker process _(needs H07, H12a)_
+- [ ] **H07d** · P31 · Limit connections per address only before login _(needs H07)_
 - [ ] **H12f** · P31 · Wire context enforcement, pause observation and message boundaries into the runtime _(needs H12, C07b, L01, U12)_
 - [ ] **H02d** · P32 · Finish the composed-controller proofs of remote stop, checkpoint fencing and relocation refusals _(needs H02c)_
+- [ ] **H07c** · P32 · Decide local-only placement by profile and let chat override it _(needs H07, C08c)_
 - [ ] **H12k** · P32 · Compose the local worker host in the controller _(needs H12b, H12c, H12d, H12f, H12g)_
 - [ ] **H09** · P33 · Implement reconnect reconciliation and primary epochs _(needs H08, L04, S05)_
 - [ ] **H10** · P34 · Implement distributed agent capacity and fan-in limits _(needs H07, H09, H03, R05)_
@@ -495,13 +498,13 @@ Backup and restore, release staging, migration recovery, maintenance windows and
 </details>
 
 <details>
-<summary><strong>Test campaigns and platforms</strong> — ▓░░░░░░░░░░░ 1 of 15</summary>
+<summary><strong>Test campaigns and platforms</strong> — ▓░░░░░░░░░░░ 2 of 15</summary>
 
 Crash, policy, isolation and partition campaigns, QA checkpoints, Windows and macOS qualification, and the typical and exhaustive test tiers.
 
+- [x] **X11** · P2 · Split the test suite into a typical and an exhaustive tier _(needs G01)_
 - [x] **Y01** · P19 · QA checkpoint 1: durable core _(needs S09, F04h)_
 - [ ] **G06** · P24 · Qualify actual Windows implementation _(needs G02, G03, G05, F03)_
-- [ ] **X11** · P32 · Split the test suite into a typical and an exhaustive tier _(needs G04)_
 - [ ] **X09** · P34 · Implement external release-test job protocol _(needs H07, H09, F03, S06)_
 - [ ] **Y02** · P34 · QA checkpoint 2: isolation, stop and recovery _(needs G05, G06, A06, L04, H09, A03b, A08b, F04i, F04j, H06b)_
 - [ ] **X01** · P38 · Run integrated crash and handoff campaign _(needs S09, V02, H02, Q02, K03, G04, H12, T07, K06, L06)_
@@ -524,7 +527,7 @@ Installation, documentation, QA on real machines, the release decision and closi
 
 - [ ] **D02** · P36 · Finish developer/API/security and license guidance _(needs T05, K03, F03)_
 - [ ] **D01** · P45 · Finish installation and chat-first user guidance _(needs X03, Q03, U11b)_
-- [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, T09b, H07, H07b, H02e, T09, A07d)_
+- [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, T09b, H07, H07b, H02e, T09, A07d, A07e, H07c, H07d)_
 - [ ] **D04** · P50 · Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
 - [ ] **D04b** · P51 · Measure code-navigation aids on real coding tasks (optional, after the first release) _(needs D04)_
 - [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, U03c, K06b, K01d, P02b, A08c)_

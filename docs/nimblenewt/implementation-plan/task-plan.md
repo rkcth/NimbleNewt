@@ -33,11 +33,11 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06, C06b |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
 | N05 / AII-255 | L05, L05b, L01, L01b, L02, L03, L04, L06, H08 |
-| N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A08, A08b, A08c, A09, A10, A10b |
+| N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A07e, A08, A08b, A08c, A09, A10, A10b |
 | N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C08, C09, C08b, C08c, C08d |
 | N08 / AII-258 | R01, R02, R03, R04, R05, R05b, R05c, R05d, R05f, R05g, R05e |
 | N09 / AII-259 | U03, U03d, U03e, U05b, U04, U05, U06, U03b, U03c, U07, U09, U08, U10, U11, U11b |
-| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H07b, H02e, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H02b, H02c, H02d |
+| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H07b, H07c, H07d, H02e, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H02b, H02c, H02d |
 | N11 / AII-261 | V01, V01b, V01c, V02 |
 | N12 / AII-262 | M01b, M01c, M01d, M00, M01, M02, M03, M04, M05, M05b, M06 |
 | N13 / AII-263 | T01, T02, T03, T06, T06b, T07, T07b, T08, T09, T09b |
@@ -554,6 +554,14 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** A standing-rule proposal shows the length options and a system-chosen default; choosing the default sets a length derived from the pattern of earlier approvals, any limit the owner stated in words (which always wins over the pattern) and the nature of the work, and the explanation of the choice is recorded (C09) and shown with the grant, shown beside the profile-switch answer of A07c because both are answers to the same proposal; an owner-chosen length is used exactly; the grant stays expiring and revocable and a class the policy reserves for the owner or one that needs an exact-operation review is still never proposed; when nothing can be derived the 30-day length of A07b is the fallback (owner decision 2026-10-22); tested with a scripted model: derived from approvals, wording overriding the pattern, a derived length capped at the longest option, an explicit length, the fallback, and a reserved class never offered.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
+### A07e — Suggest at least seven days for a standing grant
+
+- **Parent:** N06 / AII-256.
+- **Blockers:** A07d.
+- **Deliverable:** Owner decision 2026-10-27: after a short burst of approvals the suggested standing-grant length is no shorter than seven days; every shorter option is still listed and any length can be typed.
+- **Acceptance and verification:** The pre-selected length after three approvals within a day is seven days; the shorter options remain; an exact stated number of days is still taken as the length.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
 ### A08 — Implement per-agent environments
 
 - **Parent:** N06 / AII-256.
@@ -912,6 +920,22 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** An attempt whose first host is refused by policy starts on another eligible host and says why in the plan; a worker process polls with one held request and exits cleanly on stop; a revoked host leaves the index; a policy change before delivery withholds the offer.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
+### H07c — Decide local-only placement by profile and let chat override it
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H07, C08c.
+- **Deliverable:** Owner decision 2026-10-27: in the strict profile local-only data goes only to listed hosts (today's behaviour); in the other profiles every enrolled host of the owner may hold it unless excluded; the owner can ask in chat for a different setting, shown as a proposal first.
+- **Acceptance and verification:** Placement of a local-only task follows the profile in a started controller; a chat request to allow or exclude a host is a proposal and, once accepted, changes the placement; a host not listed under strict still receives nothing.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### H07d — Limit connections per address only before login
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H07.
+- **Deliverable:** Owner decision 2026-10-27: the strict per-address connection cap applies to connections that have not yet authenticated; logged-in hosts are limited by their own principal and a total that grows with the enrolled hosts.
+- **Acceptance and verification:** Many slow unauthenticated connections from a few addresses cannot fill the listener or lock out enrolled hosts; a hundred logged-in hosts behind one address keep their held polls.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
 ### H02e — Stop a poll from deleting a re-placed offer
 
 - **Parent:** N10 / AII-260.
@@ -1079,7 +1103,9 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### X11 — Split the test suite into a typical and an exhaustive tier
 
 - **Parent:** N18 / AII-268.
-- **Blockers:** G04.
+- **Status:** implemented; commits `6fdbb10`; CI runs 40591614995; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Typical and exhaustive test tiers, changed-package selection and sharding; the exhaustive tier ran green on run 40591614995. The G04 dependency was dropped on the owner decision of 2026-10-27.
+- **Blockers:** G01.
 - **Deliverable:** Every push runs a small tier on the packages that changed and the packages that depend on them; milestones and releases run the exhaustive tier.
 - **Acceptance and verification:** The typical tier (Linux, Node 22, reference store and SQLite, changed packages and their dependents) finishes in about 10 minutes; the exhaustive tier (six OS and Node cells, every backend, sharded) finishes within 30 minutes per cell; both are one command locally; the exhaustive run is the evidence for status changes and releases (owner decision 2026-10-26).
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
@@ -2031,7 +2057,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D03 — Approve release readiness and publication decision
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, T09b, H07, H07b, H02e, T09, A07d.
+- **Blockers:** X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, T09b, H07, H07b, H02e, T09, A07d, A07e, H07c, H07d.
 - **Deliverable:** Exact release manifest, known limitations and owner signoff.
 - **Acceptance and verification:** All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

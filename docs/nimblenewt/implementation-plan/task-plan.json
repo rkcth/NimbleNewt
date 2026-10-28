@@ -1434,6 +1434,23 @@
       }
     },
     {
+      "id": "A07e",
+      "parent": "N06",
+      "existing_issue": "AII-256",
+      "title": "Suggest at least seven days for a standing grant",
+      "depends_on": [
+        "A07d"
+      ],
+      "deliverable": "Owner decision 2026-10-27: after a short burst of approvals the suggested standing-grant length is no shorter than seven days; every shorter option is still listed and any length can be typed",
+      "acceptance_and_verification": "The pre-selected length after three approvals within a day is seven days; the shorter options remain; an exact stated number of days is still taken as the length",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "A08",
       "parent": "N06",
       "existing_issue": "AII-256",
@@ -2466,6 +2483,41 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "H07c",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Decide local-only placement by profile and let chat override it",
+      "depends_on": [
+        "H07",
+        "C08c"
+      ],
+      "deliverable": "Owner decision 2026-10-27: in the strict profile local-only data goes only to listed hosts (today's behaviour); in the other profiles every enrolled host of the owner may hold it unless excluded; the owner can ask in chat for a different setting, shown as a proposal first",
+      "acceptance_and_verification": "Placement of a local-only task follows the profile in a started controller; a chat request to allow or exclude a host is a proposal and, once accepted, changes the placement; a host not listed under strict still receives nothing",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "H07d",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Limit connections per address only before login",
+      "depends_on": [
+        "H07"
+      ],
+      "deliverable": "Owner decision 2026-10-27: the strict per-address connection cap applies to connections that have not yet authenticated; logged-in hosts are limited by their own principal and a total that grows with the enrolled hosts",
+      "acceptance_and_verification": "Many slow unauthenticated connections from a few addresses cannot fill the listener or lock out enrolled hosts; a hundred logged-in hosts behind one address keep their held polls",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "H02e",
       "parent": "N10",
       "existing_issue": "AII-260",
@@ -2904,16 +2956,27 @@
       "existing_issue": "AII-268",
       "title": "Split the test suite into a typical and an exhaustive tier",
       "depends_on": [
-        "G04"
+        "G01"
       ],
       "deliverable": "Every push runs a small tier on the packages that changed and the packages that depend on them; milestones and releases run the exhaustive tier",
       "acceptance_and_verification": "The typical tier (Linux, Node 22, reference store and SQLite, changed packages and their dependents) finishes in about 10 minutes; the exhaustive tier (six OS and Node cells, every backend, sharded) finishes within 30 minutes per cell; both are one command locally; the exhaustive run is the evidence for status changes and releases (owner decision 2026-10-26)",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "6fdbb10"
+        ],
+        "ci_runs": [
+          "40591614995"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Typical and exhaustive test tiers, changed-package selection and sharding; the exhaustive tier ran green on run 40591614995. The G04 dependency was dropped on the owner decision of 2026-10-27.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "H13",
@@ -5556,7 +5619,10 @@
         "H07b",
         "H02e",
         "T09",
-        "A07d"
+        "A07d",
+        "A07e",
+        "H07c",
+        "H07d"
       ],
       "deliverable": "Exact release manifest, known limitations and owner signoff",
       "acceptance_and_verification": "All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded",
