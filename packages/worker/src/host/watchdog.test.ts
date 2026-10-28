@@ -75,7 +75,7 @@ test("after the stop the process is ended once the grace runs out, unless the wo
   assert.deepEqual(b.log, ["stop:explicit"], "a clean wind-down needs no termination");
 });
 
-test("contained termination ends the process and what it started, TERM then KILL, and refuses pids that are not its to end", async () => {
+test("contained termination ends the process and what it started, TERM then KILL, and refuses pids that are not its to end", { skip: process.platform === "win32" ? "process groups are POSIX; the Windows launcher is A03b" : false }, async () => {
   // A child that is its own group leader, starts a grandchild, and ignores TERM.
   const child = spawn(process.execPath, ["-e", `process.on("SIGTERM", () => {}); require("node:child_process").spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" }); setInterval(() => {}, 1000);`], { detached: true, stdio: "ignore" });
   const pid = child.pid!;
@@ -98,7 +98,7 @@ test("a short sleep, too small to count as a wake, still uses up that much of th
   assert.equal(dog.productive, true);
 });
 
-test("a process that is not its own group leader is refused, not reported gone", async () => {
+test("a process that is not its own group leader is refused, not reported gone", { skip: process.platform === "win32" ? "process groups are POSIX; the Windows launcher is A03b" : false }, async () => {
   const child = spawn("sleep", ["30"], { stdio: "ignore" }); // same group as ours
   try {
     await assert.rejects(killContained(child.pid!), /not its own group leader/);

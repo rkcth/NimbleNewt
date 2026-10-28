@@ -104,7 +104,8 @@ for (const backend of backends) {
     c.rt.crashOnTerminate = true;
     const { intentId } = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "stop" });
     // The process dies inside terminate: the call never returns (the test walks away from it).
-    await Promise.race([c.stops.advance(c.owner, { intentId }), new Promise((r) => setTimeout(r, 150))]);
+    void c.stops.advance(c.owner, { intentId }).catch(() => undefined);
+    for (let i = 0; i < 400 && c.rt.count("terminate") === 0; i++) await new Promise((r) => setTimeout(r, 25)); // until the call is inside terminate
     assert.equal((await c.stops.get(c.owner, intentId))?.phase, "terminating", "the intent survives the crash in the phase it reached");
     c.rt.crashOnTerminate = false;
     const reopened = c.reopen();
