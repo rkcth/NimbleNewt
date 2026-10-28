@@ -37,6 +37,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // Rights (card U03e): giving or taking back a right is always shown first and applies only when the owner says so; every text of it must be in the owner's own words.
   "grant.create": { verb: "Grant right", mode: "propose" },
   "grant.revoke": { verb: "Revoke grant", mode: "propose", revision: "grant" },
+  // Where local-only data may go is where work is done: shown to the owner first in every profile (card H07c).
+  "placement.set": { verb: "Change where local-only data may go", mode: "propose" },
   // Project resources, plan and responsibilities (card P01). A read-only bind of a location the owner typed in their own words follows the profile like other explicit orders; write access, an acknowledged overlap and anything quoted are shown first.
   "resource.bind": { verb: "Bind resource", mode: "profile", needsProject: true },
   "project.plan": { verb: "Plan project", mode: "apply", revision: "project", needsProject: true },

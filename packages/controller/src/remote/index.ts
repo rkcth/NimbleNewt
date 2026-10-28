@@ -4,3 +4,4 @@ export { DEFAULT_WORKER_TRANSPORT_LIMITS, WorkerTransport, type WorkerTransportL
 export { RemoteAttempt, RemoteWorkerClient, WorkerRequestError, type RemoteWorkerClientOptions } from "./client.js";
 export { RemoteWorkerHandle, RemoteWorkerHost, type RemoteWorkerHostOptions } from "./host.js";
 export { HostPoller, type PollerOptions } from "./poller.js";
+export { PlacementSettingsService, dataHostsFor, type PlacementSettingsBody } from "./placement-settings.js";

@@ -54,6 +54,16 @@ Arguments:
 
 Result: `{ item }`: the grant, with its revision.
 
+#### `placement.get`
+
+Where local-only data may go (owner only): the hosts the owner allowed and excluded, the approval profile that gives the default, and the hosts that may hold local-only data now. The strict profile allows only listed hosts; the derived and autonomous profiles allow every enrolled host of the owner that is not excluded.
+
+Arguments:
+
+- none
+
+Result: `{ item }`: `allow`, `exclude`, `profile`, `dataHosts` and the revision.
+
 #### `budget.report`
 
 A task's budget: limit, delegated to children, in flight, uncertain, spent, overrun and available, for money and for compute, with the reservations and open requests behind them. A task you may not read reads like a missing one.
@@ -650,6 +660,20 @@ Arguments:
 - `expiresAt` (optional): ISO time the grant ends
 
 Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `placement.set`
+
+The owner says which hosts may hold local-only data (owner only). `allow` and `exclude` are lists of host IDs (`host:name`); each replaces the earlier list, and one left out stays as it was. A task whose data is local-only is placed only on a host this allows; the change counts from the next placement.
+
+Arguments:
+
+- `allow` (optional): hosts that may hold local-only data, for example `["host:laptop"]`
+- `exclude` (optional): hosts that may not, even when the profile would allow them
+- `expectedRevision` (optional): the revision you read (0 when none is set)
+
+Result: `{ revision }`.
 
 Completion: finished when accepted (`completed: true`).
 
