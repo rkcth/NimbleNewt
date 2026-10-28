@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
+import { ScriptedInterpreter } from "../chat/index.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -60,5 +61,50 @@ test("integration policy: a project gets the installation default or the profile
     const again = await call(boot.token, "integration.set", { project: a, landing: "integration-branch", requiredChecks: ["review", "tests", "tests"], expectedRevision: first.revision }, "s1");
     assert.ok(again.ok);
     assert.equal((await call(boot.token, "integration.get", { project: a })).result.item.revision, beforeReplay, "a replay changes nothing");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("in chat, how finished work lands is shown first and applies on the owner's word; main-automatic only on the owner's own words; project.create carries the section (card P08b)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-integration-chat-"));
+  const say: Record<string, unknown[]> = {};
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], chat: { interpreter: new ScriptedInterpreter((input) => say[input.text] ?? []) } });
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const call = async (op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    const turn = async (id: string, text: string, intents: unknown[]) => { say[text] = intents; return (await c.chat!.submit(boot.token, { messageId: id, text })).outcomes as any[]; };
+    const project = (await call("project.create", { name: "Garden" }, "c1")).result.id as string;
+    const landing = async () => (await call("integration.get", { project })).result.item.landing as string;
+    assert.equal(await landing(), "human-promotes");
+    // Shown first, even in the autonomous sense of an explicit order; nothing changes until accepted.
+    const text = "let finished work in Garden land on the integration branch";
+    const shown = await turn("m1", text, [{ kind: "command", op: "integration.set", args: { project, landing: "integration-branch" }, evidence: text, basis: "owner" }]);
+    assert.equal(shown[0].status, "proposed", JSON.stringify(shown));
+    assert.equal(await landing(), "human-promotes");
+    const applied = await turn("m2", "yes, do that", [{ kind: "apply_proposal", proposalId: shown[0].proposalId, evidence: "do that", basis: "owner" }]);
+    assert.equal(applied[0].status, "applied", JSON.stringify(applied));
+    assert.equal(await landing(), "integration-branch");
+    // main-automatic is only set when the owner's own words say it.
+    const vague = "make Garden's landing as fast as it can be";
+    const refused = await turn("m3", vague, [{ kind: "command", op: "integration.set", args: { project, landing: "main-automatic" }, evidence: vague, basis: "owner" }]);
+    assert.notEqual(refused[0].status, "proposed", JSON.stringify(refused));
+    assert.equal(await landing(), "integration-branch");
+    const plain = "land Garden's finished work on main-automatic from now on";
+    const ok = await turn("m4", plain, [{ kind: "command", op: "integration.set", args: { project, landing: "main-automatic" }, evidence: plain, basis: "owner" }]);
+    assert.equal(ok[0].status, "proposed", JSON.stringify(ok));
+    // A new project can be drafted with the section; an agent cannot send it.
+    const make = "create a project Orchard where a human promotes finished work";
+    const draft = await turn("m5", make, [{ kind: "command", op: "project.create", args: { name: "Orchard", integration: { landing: "human-promotes", integrator: "human" } }, evidence: make, basis: "owner" }]);
+    assert.equal(draft[0].status, "proposed", JSON.stringify(draft));
+    const made = await turn("m6", "yes, go ahead with that", [{ kind: "apply_proposal", proposalId: draft[0].proposalId, evidence: "go ahead with that", basis: "owner" }]);
+    assert.equal(made[0].status, "applied", JSON.stringify(made));
+    const orchard = (await call("project.list", {})).result.items.find((p: { name: string }) => p.name === "Orchard").id as string;
+    const section = (await call("integration.get", { project: orchard })).result.item;
+    assert.deepEqual([section.landing, section.integrator, section.source], ["human-promotes", "human", "owner"]);
+    await c.services.principals.enroll(await c.services.principals.authenticate(boot.token), { commandId: "e-ann", kind: "agent", name: "ann", grants: [{ action: "project.create", project: "*" }] });
+    const ann = (await c.services.principals.issueCredential(await c.services.principals.authenticate(boot.token), "agent:ann")).token;
+    const sent = (await c.api.handle(ann, { v: 1, op: "project.create", commandId: "a1", args: { name: "Sneaky", integration: { landing: "main-automatic" } } } as never)) as any;
+    assert.equal(sent.ok, false);
+    assert.equal(sent.error.code, "forbidden");
+    assert.equal((await call("project.list", {})).result.items.some((p: { name: string }) => p.name === "Sneaky"), false, "nothing was created");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

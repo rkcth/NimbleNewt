@@ -393,8 +393,17 @@ export const OPERATIONS: readonly Operation[] = [
   { name: "inquiry.pending", kind: "query", summary: "Open inquiries waiting for the caller to answer.", args: { "limit?": `1 to ${PAGE.max}, default ${PAGE.default}`, "after?": "the `next` of the previous page" }, result: "`{ items, next? }`.",
     run: async (c, a) => { only(a, ["limit", "after"]); return page(await c.inquiries.pendingFor(c.principal, { limit: limitOf(a), ...(optStr(a, "after") === undefined ? {} : { afterId: optStr(a, "after")! }) })); } },
 
-  { name: "project.create", kind: "command", summary: "Creates a project.", args: { name: "the name", "goal?": "what it is for", "repositories?": "list of `{ id, location, label? }`" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
-    run: async (c, a, id) => { const made = written(await c.secure.createProject({ commandId: need(id), ...(a as object) } as never)); if (c.integration !== undefined) await c.integration.ensure(made["id"] as string); return made; } },
+  { name: "project.create", kind: "command", summary: "Creates a project.", args: { name: "the name", "goal?": "what it is for", "repositories?": "list of `{ id, location, label? }`", "integration?": "how finished work lands, `{ landing?, integrator?, requiredChecks?, refreshRounds? }` (owner only; otherwise the installation default or the profile's)" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => {
+      const { integration, ...rest } = a as { integration?: Record<string, unknown> };
+      if (integration !== undefined && c.principal.kind !== "owner") throw new DomainError("forbidden", "only the owner sets how finished work lands");
+      const made = written(await c.secure.createProject({ commandId: need(id), ...rest } as never));
+      if (c.integration !== undefined) {
+        await c.integration.ensure(made["id"] as string);
+        if (integration !== undefined && Object.keys(integration).length > 0) await c.integration.set(c.principal, { commandId: `${need(id)}-integration`, projectId: made["id"] as string, ...integration } as never);
+      }
+      return made;
+    } },
   { name: "project.update", kind: "command", summary: "Changes a project (the revision you read must still be current).", args: { projectId: "the project's ID", expectedRevision: "the revision you read", "name?": "new name", "goal?": "new goal", "state?": "`active` or `archived`", "addRepositories?": "repositories to add" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
     run: async (c, a, id) => written(await c.secure.updateProject({ commandId: need(id), ...(a as object) } as never)) },
   { name: "task.create", kind: "command", summary: "Creates a task in a project (it starts `proposed`).", args: { projectId: "the project", title: "the title", "description?": "details", "repositoryId?": "one of the project's repositories" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },

@@ -39,6 +39,9 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "grant.revoke": { verb: "Revoke grant", mode: "propose", revision: "grant" },
   // Where local-only data may go is where work is done: shown to the owner first in every profile (card H07c).
   "placement.change": { verb: "Change where local-only data may go", mode: "propose" },
+  // How finished work lands (card P08b): where work reaches the codebase is authority, so it is shown first in every profile. The record and the rules are the same as through the API.
+  "integration.set": { verb: "Change how finished work lands", mode: "propose" },
+  "integration.default.set": { verb: "Change how new projects land finished work", mode: "propose" },
   // Project resources, plan and responsibilities (card P01). A read-only bind of a location the owner typed in their own words follows the profile like other explicit orders; write access, an acknowledged overlap and anything quoted are shown first.
   "resource.bind": { verb: "Bind resource", mode: "profile", needsProject: true },
   "project.plan": { verb: "Plan project", mode: "apply", revision: "project", needsProject: true },
@@ -54,6 +57,9 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
 export const TITLE_KEYS: Readonly<Record<string, string>> = { taskTitle: "taskId", prerequisiteTitle: "prerequisiteId" };
 
 /** The argument names the operation takes (from the API's own table, so they cannot drift), plus the chat-only names and the revision the chat fills in. */
+/** The owner's own words say that finished work goes to main with no human step (card P08b). Quoted or forwarded text is never part of `words`. */
+export const SAYS_MAIN_AUTOMATIC = /main[\s-]*automatic|automatic(?:ally)?\s+(?:to|into|onto|on)\s+(?:the\s+)?main|(?:straight|directly)\s+(?:to|into|onto)\s+(?:the\s+)?main/i;
+
 export function acceptedArgs(op: string): readonly string[] | undefined {
   const operation = OPERATION_BY_NAME.get(op);
   if (operation === undefined || operation.kind !== "command") return undefined;
@@ -146,7 +152,7 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
 }
 
 /** Keys whose values name records or fixed choices; every other text in a command must be in the owner's own words. */
-const EXEMPT = new Set(["taskId", "projectId", "project", "prerequisiteId", "agentId", "supervisorId", "teamId", "parentTeamId", "repositoryId", "resourceId", "responsibilityId", "ownerId", "managed", "access", "expectedRevision", "expectedVersion", "to", "state", "workClass", "difficulty", "recovery", "kind", "priority", "itemId", "sourceTurnId", "intent", "urgency", "category", "participants"]);
+const EXEMPT = new Set(["taskId", "projectId", "project", "prerequisiteId", "agentId", "supervisorId", "teamId", "parentTeamId", "repositoryId", "resourceId", "responsibilityId", "ownerId", "managed", "access", "landing", "integrator", "requiredChecks", "integration", "expectedRevision", "expectedVersion", "to", "state", "workClass", "difficulty", "recovery", "kind", "priority", "itemId", "sourceTurnId", "intent", "urgency", "category", "participants"]);
 
 /** The first text value of a command's arguments that is not the owner's own words (and not a record reference or fixed choice), or undefined. */
 export function foreignValue(args: Readonly<Record<string, unknown>>, ownText: string, path = ""): string | undefined {

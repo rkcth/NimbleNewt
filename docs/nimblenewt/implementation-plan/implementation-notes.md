@@ -2213,3 +2213,8 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## C01b audit and API surface (2026-10-28)
 - Audit of the card's acceptance against `notes.test.ts` (four backends) found each clause covered: members read, peers cannot write or read private scratch/drafts, versions with revision and author, size bounds, credential shapes refused, mark private, promotion record, reads never wake the author, no cross-project read without an A10 path, owner read/correct/delete with a deletion record.
 - Added the missing surface: state-API `note.write`, `note.revise`, `note.visibility`, `note.get`, `note.versions`, `note.list` (the service decides who may do what; `api/start-notes.test.ts`). Owner `correct`/`delete` and `promote` stay service-level (the promotion links to the review path in a later card).
+
+## P08b: integration settings in chat (partial; 2026-10-28)
+- `integration.set` and `integration.default.set` are chat proposals in every profile (authority: where work reaches the codebase). `project.create` takes an owner-only `integration` section (landing, integrator, requiredChecks, refreshRounds; refused for anyone else before anything is created) and the chat can carry it; the record is the same as the API's (`source: owner`).
+- `main-automatic` is only proposed when the owner's own words say it (`SAYS_MAIN_AUTOMATIC`); quoted or forwarded text never counts. Tests in `api/start-integration.test.ts`; mutations (words check, owner check) killed.
+- Not done (split to P08c): the guided questions at project creation (who integrates, landing, checks, review) and the proposal listing the defaults; they need the interpreter to ask and re-draft.

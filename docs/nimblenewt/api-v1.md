@@ -1561,6 +1561,7 @@ Arguments:
 - `name`: the name
 - `goal` (optional): what it is for
 - `repositories` (optional): list of `{ id, location, label? }`
+- `integration` (optional): how finished work lands, `{ landing?, integrator?, requiredChecks?, refreshRounds? }` (owner only; otherwise the installation default or the profile's)
 
 Result: `{ id, revision, replayed }`.
 
