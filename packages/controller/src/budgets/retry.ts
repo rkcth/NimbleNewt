@@ -116,6 +116,9 @@ export class ChargeRetryService {
     const at = this.#runner.now();
     const body: RetryBody = { charge: JSON.parse(JSON.stringify(charge)) as JsonObject, state: "pending", attempts: 1, firstFailedAt: at, lastError: describe(error), nextAt: later(at, 1) };
     try {
+      // Several charges failing together race for the one index record: the loser rebuilds its change from the newer index and tries again, so none is lost.
+      for (let round = 1; ; round++) {
+        try {
       await this.#runner.command("charge.keep", { commandId: scopedCommandId(by.id, `keep:${charge.commandId}`), actor: by.id }, async () => ({
         payload: { id },
         build: async () => {
@@ -126,6 +129,12 @@ export class ChargeRetryService {
           return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }, ...(await this.#indexChange((ids) => (ids.includes(id) ? ids : [...ids, id])))], detail: { id } };
         },
       }));
+        break;
+        } catch (raced) {
+          if (round >= KEEP_ROUNDS || !(raced instanceof DomainError) || (raced.code !== "command_conflict" && raced.code !== "stale_revision")) throw raced;
+          await new Promise((r) => setTimeout(r, Math.floor(Math.random() * 20 * round)));
+        }
+      }
     } catch (kept) {
       // The charge could not even be kept (the store is down as well): it is lost, and the host is told.
       this.#options.onDropped?.({ commandId: charge.commandId, reason: `could not be kept for a retry: ${describe(kept)}` });
@@ -168,5 +177,6 @@ export class ChargeRetryService {
   }
 }
 
+const KEEP_ROUNDS = 30;
 const describe = (error: unknown): string => (error instanceof Error ? error.message : String(error)).slice(0, 300);
 const later = (iso: string, attempts: number): string => new Date(Date.parse(iso) + Math.min(CHARGE_RETRY_LIMITS.maxMs, CHARGE_RETRY_LIMITS.baseMs * 2 ** Math.min(20, attempts - 1))).toISOString();

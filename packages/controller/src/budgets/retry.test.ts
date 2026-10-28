@@ -9,7 +9,7 @@ import { CHARGE_RETRY_LIMITS, ChargeRetryService, type ChargeRequest } from "./r
 after(stopServer);
 
 for (const backend of backends) {
-  const suite = (name: string, body: (c: { retry: ChargeRetryService; dispatcher: Principal; owner: Principal; calls: ChargeRequest[]; fail: { mode: "ok" | "down" | "wrong" }; clock: { now: number }; dropped: string[] }) => Promise<void>) =>
+  const suite = (name: string, body: (c: { retry: ChargeRetryService; dispatcher: Principal; owner: Principal; calls: ChargeRequest[]; fail: { mode: "ok" | "down" | "wrong" }; clock: { now: number }; dropped: string[]; index: () => Promise<string[]> }) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
       const world = await backend.open();
       try {
@@ -31,7 +31,8 @@ for (const backend of backends) {
         } };
         const dropped: string[] = [];
         const retry = ChargeRetryService.withEpoch(world.storage, projects.epoch, { budgets }, { ...options, onDropped: (e) => dropped.push(`${e.commandId}: ${e.reason}`) });
-        await body({ retry, dispatcher, owner, calls, fail, clock, dropped });
+        const index = async (): Promise<string[]> => ((await world.storage.getAggregate({ kind: "charge-retry-index", id: "pending" }))?.body as { ids?: string[] } | undefined)?.ids ?? [];
+        await body({ retry, dispatcher, owner, calls, fail, clock, dropped, index });
       } finally { await world.close(); }
     });
 
@@ -69,6 +70,27 @@ for (const backend of backends) {
     assert.equal(c.calls.at(-1)!.commandId, "review-use:rev-1");
     assert.deepEqual(await c.retry.unsettled(c.owner), []);
     assert.deepEqual(await c.retry.sweep(c.dispatcher), { booked: 0, later: 0, dropped: 0 }, "a booked charge is not tried again");
+  });
+
+  suite("charges that fail together are all kept, and the index of waiting charges shrinks as they book or are given up (card R05g)", async (c) => {
+    c.fail.mode = "down";
+    const ids = Array.from({ length: 10 }, (_, i) => `meet-${i}`);
+    await Promise.all(ids.map((id) => c.retry.submit(c.dispatcher, charge(id))));
+    assert.deepEqual(c.dropped, [], "none was lost to the race for the index");
+    assert.equal((await c.retry.unsettled(c.owner)).length, 10);
+    assert.equal((await c.index()).length, 10);
+    c.fail.mode = "ok";
+    c.clock.now += CHARGE_RETRY_LIMITS.baseMs + 1;
+    assert.deepEqual(await c.retry.sweep(c.dispatcher), { booked: 10, later: 0, dropped: 0 });
+    assert.deepEqual(await c.index(), [], "booked charges leave the index");
+    c.fail.mode = "wrong";
+    c.fail.mode = "down";
+    await c.retry.submit(c.dispatcher, charge("last"));
+    assert.equal((await c.index()).length, 1);
+    c.fail.mode = "wrong";
+    c.clock.now += CHARGE_RETRY_LIMITS.baseMs + 1;
+    assert.deepEqual(await c.retry.sweep(c.dispatcher), { booked: 0, later: 0, dropped: 1 });
+    assert.deepEqual(await c.index(), [], "a charge given up on leaves it too");
   });
 
   suite("the delay stops growing at an hour and a charge that never books is given up on after twenty tries, and reported (card R05g)", async (c) => {
