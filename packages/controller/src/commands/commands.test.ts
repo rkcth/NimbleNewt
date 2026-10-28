@@ -232,8 +232,9 @@ for (const backend of backends) {
     const first = await c.cmd.run(c.ann, { commandId: cid("r"), id }, how);
     assert.deepEqual([first.state, first.answer], ["done", { paused: true }]);
     const second = await c.cmd.run(c.ann, { commandId: cid("r"), id }, how);
-    assert.deepEqual([second.state, second.at], ["done", first.at], "the second run is the record of the first");
-    assert.deepEqual(calls, [["task.pause", { task: "t1" }, `cmd-${id}`]], "the operation was called once");
+    assert.deepEqual([second.state, second.at, second.answer], ["done", first.at, { paused: true }], "the second run is the record of the first, with the answer fetched again");
+    assert.deepEqual(calls, [["task.pause", { task: "t1" }, `cmd-${id}`], ["task.pause", { task: "t1" }, `cmd-${id}`]], "the operation is asked again with the same command ID, so it answers from its own record and checks rights now");
+    calls.length = 0;
     // Another principal, even the owner, cannot run what ann typed.
     await refuses("not_found", () => c.cmd.run(c.owner, { commandId: cid("r"), id }, how));
     await refuses("not_found", () => c.cmd.run(c.ben, { commandId: cid("r"), id }, how));
@@ -242,13 +243,22 @@ for (const backend of backends) {
     const failed = await c.cmd.run(c.ann, { commandId: cid("r"), id: failing }, how);
     assert.deepEqual([failed.state, failed.error], ["failed", { code: "forbidden", message: "not yours to pause" }]);
     await c.cmd.run(c.ann, { commandId: cid("r"), id: failing }, how);
-    assert.equal(calls.length, 2, "not called again");
+    assert.equal(calls.length, 1, "a failure is final: not called again");
     // Arguments that are not a JSON object never reach the operation.
     for (const text of ["/nimblenewt.pause [1]", "/nimblenewt.pause when it suits"]) {
       const bad = await c.cmd.run(c.ann, { commandId: cid("r"), id: await queue(c.ann, text) }, how);
       assert.deepEqual([bad.state, bad.error?.code], ["failed", "invalid_command"]);
     }
-    assert.equal(calls.length, 2);
+    assert.equal(calls.length, 1);
+    // Arguments that held a secret were not kept, so the command is not run from the redacted text.
+    const secret = await c.cmd.run(c.ann, { commandId: cid("r"), id: await queue(c.ann, '/nimblenewt.pause {"note": "Bearer abcdefghijklmnopqrstuvwxyz0123456789"}') }, how);
+    assert.deepEqual([secret.state, secret.error?.code], ["failed", "invalid_command"]);
+    assert.equal(calls.length, 1);
+    // A refusal that may pass is told but not recorded as final.
+    const busy = await queue(c.ann, "/nimblenewt.pause");
+    const flaky = { ...how, invoke: async () => ({ ok: false as const, code: "unavailable", message: "busy" }) };
+    assert.equal((await c.cmd.run(c.ann, { commandId: cid("r"), id: busy }, flaky)).error?.code, "unavailable");
+    assert.equal((await c.cmd.run(c.ann, { commandId: cid("r"), id: busy }, how)).state, "done", "the same queued command succeeds later");
     // A name that is no longer an operation of the controller fails plainly; toolbox and agent commands are not runnable yet.
     const gone = await c.cmd.run(c.ann, { commandId: cid("r"), id: await queue(c.ann, "/nimblenewt.pause") }, { ...how, operationOf: () => undefined });
     assert.deepEqual([gone.state, gone.error?.code], ["failed", "not_found"]);
@@ -256,10 +266,13 @@ for (const backend of backends) {
       const unsupported = await c.cmd.run(c.ann, { commandId: cid("r"), id: await queue(c.ann, typed) }, how);
       assert.deepEqual([unsupported.state, unsupported.error?.code], ["unsupported", "unsupported"]);
     }
-    assert.equal(calls.length, 2, "nothing ran for them");
+    assert.equal(calls.length, 2, "nothing ran for them (the one call above is the retry)");
     // A big answer is cut and says so.
     const big = await c.cmd.run(c.ann, { commandId: cid("r"), id: await queue(c.ann, "/nimblenewt.pause") }, { ...how, invoke: async () => ({ ok: true as const, result: { text: "x".repeat(20_000) } as never }) });
     assert.equal(big.truncated, true);
+    const emoji = await c.cmd.run(c.ann, { commandId: cid("r"), id: await queue(c.ann, "/nimblenewt.pause") }, { ...how, invoke: async () => ({ ok: true as const, result: { text: "😀".repeat(9000) } as never }) });
+    assert.equal(emoji.truncated, true);
+    assert.doesNotThrow(() => encodeURIComponent((emoji.answer as { cut: string }).cut), "no lone surrogate at the cut");
   });
 
 }

@@ -2191,3 +2191,8 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - Chat: a message that is a typed command goes to `command.run` as typed and not to the assistant. A query is run and its answer shown; a command that changes things is refused with `needs_confirmation` (the chat shows changes as a proposal first, and a typed line is not the owner's confirmation; use `command.run` through the API for it); unknown names get a plain answer. A message with the same ID is answered from its recorded turn.
 - Tests: `api/start-commands.test.ts` (names, queries, replays, conflicting reuse, unresolved names, bad arguments, an agent refused by the operation, chat), `commands/commands.test.ts` (run: typist only, once, failures, unsupported, cut, four backends). Mutations (any principal may run, the record not consulted, chat running changes) killed.
 - Not done (split to T09e): agents show their friendly names in answers, and an alias's scope is tied to grants.
+
+### T09b review fixes (2026-10-28)
+- Arguments that held a secret are not run from the redacted copy: the queued command is marked `redacted` and fails with a plain message (use the API directly).
+- The record of a run no longer keeps the operation's answer (it is source data and would outlive the grant that allowed reading it). A success is recorded as `done`; running again asks the operation again with the same command ID, so it answers from its own record under the caller's current rights. Failures and `unsupported` stay final, except transient codes (`unavailable`, `stale_revision`, …), which are told and not recorded. The answer cut never splits a surrogate pair.
+- Known: when agent commands land (T09d), the chat's refusal of changing commands must cover their namespace too.
