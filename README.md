@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **118 of 228 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **127 of 230 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -110,14 +110,14 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Pi runtime and inference caching | `▓▓▓▓▓▓▓▓░░░░` 72% | 8 of 11 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
 | Pause, suspend and resume | `▓▓▓▓░░░░░░░░` 33% | 3 of 9 |
-| Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓░░░░` 73% | 14 of 19 |
-| Context and memory | `▓▓▓▓▓▓▓▓▓░░░` 76% | 10 of 13 |
+| Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓░░░` 78% | 15 of 19 |
+| Context and memory | `▓▓▓▓▓▓▓▓▓░░░` 78% | 11 of 14 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
-| Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓░░░` 81% | 9 of 11 |
+| Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓░░` 90% | 10 of 11 |
 | Owner chat and web UI | `▓▓▓▓▓▓░░░░░░` 53% | 8 of 15 |
-| Workers, dispatch and teams | `▓▓▓▓▓▓░░░░░░` 51% | 18 of 35 |
+| Workers, dispatch and teams | `▓▓▓▓▓▓▓░░░░░` 63% | 23 of 36 |
 | Agent messaging | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
-| Health and recovery | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
+| Health and recovery | `▓▓▓▓▓▓▓▓▓░░░` 75% | 3 of 4 |
 | Meetings | `▓▓▓▓░░░░░░░░` 36% | 4 of 11 |
 | Tools and skills | `▓▓▓▓▓▓░░░░░░` 50% | 5 of 10 |
 | Projects, repositories and workspaces | `▓▓▓░░░░░░░░░` 30% | 3 of 10 |
@@ -222,7 +222,7 @@ Pause, suspend, stop, release and checked resume, interrupting a model mid-gener
 </details>
 
 <details>
-<summary><strong>Security: identity, approvals and sandboxing</strong> — ▓▓▓▓▓▓▓▓░░░░ 14 of 19</summary>
+<summary><strong>Security: identity, approvals and sandboxing</strong> — ▓▓▓▓▓▓▓▓▓░░░ 15 of 19</summary>
 
 Authenticated principals, revisioned grants, the sandbox launchers, the protected filesystem and Git bridge, approval policy and resource limits.
 
@@ -243,13 +243,13 @@ Authenticated principals, revisioned grants, the sandbox launchers, the protecte
 - [x] **A10b** · P26 · Implement per-task credentials for agents serving several projects _(needs A10, A01)_
 - [x] **A07d** · P27 · Offer a choice of standing-grant lengths with a system-chosen default _(needs A07b, A07c)_
 - [ ] **A08c** · P27 · Enforce per-agent resource limits on macOS and Windows (after the first release) _(needs A08b, A03b)_
-- [ ] **A07e** · P28 · Suggest at least seven days for a standing grant _(needs A07d)_
+- [x] **A07e** · P28 · Suggest at least seven days for a standing grant _(needs A07d)_
 - [ ] **A09** · P32 · Implement reviewed environment changes and maintenance requests _(needs A08, A05, H05, L02, T06)_
 
 </details>
 
 <details>
-<summary><strong>Context and memory</strong> — ▓▓▓▓▓▓▓▓▓░░░ 10 of 13</summary>
+<summary><strong>Context and memory</strong> — ▓▓▓▓▓▓▓▓▓░░░ 11 of 14</summary>
 
 Separated task, chat and meeting context, working notes, source-backed retrieval, safe-boundary continuation, retained branches, context budgets, owner decisions and the activity record.
 
@@ -260,7 +260,8 @@ Separated task, chat and meeting context, working notes, source-backed retrieval
 - [x] **C07** · P25 · Implement context budgets, the startup builder and stall-proof helpers _(needs C04, R01)_
 - [ ] **C01b** · P26 · Implement the shared working-notes tier _(needs C01, A02, A10)_
 - [x] **C07b** · P26 · Wire context budgets into dispatch and bound compaction _(needs C07, C04, R01)_
-- [ ] **C07d** · P29 · Rebuild the context view when a model route changes to a smaller window, and scale MCP result limits to the window _(needs C07b, R02, H12)_
+- [x] **C07d** · P27 · Scale MCP result limits to the window and let the rest be read in pages _(needs C07b, R02)_
+- [ ] **C07e** · P29 · Rebuild the context view when a model route changes to a smaller window _(needs C07d, H12)_
 - [x] **C08** · P29 · Implement owner decision records and correction propagation _(needs C03, C07, U03, H06)_
 - [x] **C08b** · P30 · Record decisions from the chat and interrupt running generation on correction _(needs C08, U03, L05)_
 - [ ] **C09** · P30 · Capture activity records and decision explanations _(needs C04, C08, T06, S05)_
@@ -281,7 +282,7 @@ The versioned state API that every client uses, and the controller-backed MCP st
 </details>
 
 <details>
-<summary><strong>Model routing, fallback and cost</strong> — ▓▓▓▓▓▓▓▓▓░░░ 9 of 11</summary>
+<summary><strong>Model routing, fallback and cost</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 10 of 11</summary>
 
 Routes and capability policy, provider failure fallback, difficulty profiles, drain and cutover, and cost attribution.
 
@@ -295,7 +296,7 @@ Routes and capability policy, provider failure fallback, difficulty profiles, dr
 - [x] **R05b** · P29 · Reserve before dispatch and settle after in the dispatcher _(needs R05, H12)_
 - [x] **R05d** · P30 · Charge meeting presence to the budget ledger _(needs R05, M01)_
 - [x] **R05f** · P31 · Charge supervision, review and background jobs and prove the charges through the state API _(needs R05d)_
-- [ ] **R05g** · P32 · Retry lost charges and prove a held meeting through budget.usage _(needs R05f)_
+- [x] **R05g** · P32 · Retry lost charges and prove a held meeting through budget.usage _(needs R05f)_
 
 </details>
 
@@ -323,7 +324,7 @@ Talking to your agents: the chat interpreter, policy editing, status and blocker
 </details>
 
 <details>
-<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓▓░░░░░░ 18 of 35</summary>
+<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓▓▓░░░░░ 23 of 36</summary>
 
 Enrolled hosts, remote workers, priority admission, the local worker runtime and dispatcher, agents, teams and roles, reviews and wait-cycle handling.
 
@@ -353,13 +354,14 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 - [ ] **H12j** · P30 · Close the H12b worker-process gaps _(needs H12b)_
 - [ ] **H12m** · P30 · Bind the workspace operations to the local host and to remote hosts _(needs H12l, A04, H12b, H02)_
 - [x] **H02c** · P31 · Prove partition fencing, relocation integrity and the store owner in the composed controller _(needs H02b)_
-- [ ] **H02e** · P31 · Stop a poll from deleting a re-placed offer _(needs H02, H07)_
+- [x] **H02e** · P31 · Stop a poll from deleting a re-placed offer _(needs H02, H07)_
 - [ ] **H07b** · P31 · Choose hosts by candidates, fall back on refusal and run the host poller in the worker process _(needs H07, H12a)_
-- [ ] **H07d** · P31 · Limit connections per address only before login _(needs H07)_
+- [x] **H07d** · P31 · Limit connections per address only before login _(needs H07)_
 - [ ] **H12f** · P31 · Wire context enforcement, pause observation and message boundaries into the runtime _(needs H12, C07b, L01, U12)_
-- [ ] **H02d** · P32 · Finish the composed-controller proofs of remote stop, checkpoint fencing and relocation refusals _(needs H02c)_
-- [ ] **H07c** · P32 · Decide local-only placement by profile and let chat override it _(needs H07, C08c)_
+- [x] **H02d** · P32 · Finish the composed-controller proofs of remote stop, checkpoint fencing and relocation refusals _(needs H02c)_
+- [x] **H07c** · P32 · Decide local-only placement by profile and let chat override it _(needs H07, C08c)_
 - [ ] **H12k** · P32 · Compose the local worker host in the controller _(needs H12b, H12c, H12d, H12f, H12g)_
+- [x] **H07e** · P33 · Pass over remote hosts that would refuse the attempt _(needs H07, H07c)_
 - [ ] **H09** · P33 · Implement reconnect reconciliation and primary epochs _(needs H08, L04, S05)_
 - [ ] **H10** · P34 · Implement distributed agent capacity and fan-in limits _(needs H07, H09, H03, R05)_
 
@@ -378,13 +380,13 @@ Durable conversations between agents, delivery classes, and the MCP conversation
 </details>
 
 <details>
-<summary><strong>Health and recovery</strong> — ▓▓▓▓▓▓░░░░░░ 2 of 4</summary>
+<summary><strong>Health and recovery</strong> — ▓▓▓▓▓▓▓▓▓░░░ 3 of 4</summary>
 
 Stall detection and bounded supervisor recovery.
 
 - [x] **V01** · P25 · Implement health and progress stall detection _(needs H01, S08, C04, H11)_
 - [x] **V01b** · P29 · Scale stall thresholds to the prompt size and the measured speed of the model _(needs V01, H12)_
-- [ ] **V01c** · P30 · Read the declared model speed from the routing table and the cache share from the cache adapter _(needs V01b)_
+- [x] **V01c** · P30 · Read the declared model speed from the routing table and the cache share from the cache adapter _(needs V01b)_
 - [ ] **V02** · P33 · Implement bounded supervisor recovery _(needs V01, V01b, L03, L04, R02, H05)_
 
 </details>
@@ -527,7 +529,7 @@ Installation, documentation, QA on real machines, the release decision and closi
 
 - [ ] **D02** · P36 · Finish developer/API/security and license guidance _(needs T05, K03, F03)_
 - [ ] **D01** · P45 · Finish installation and chat-first user guidance _(needs X03, Q03, U11b)_
-- [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, T09b, H07, H07b, H02e, T09, A07d, A07e, H07c, H07d)_
+- [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, C07e, H07e, T09b, H07, H07b, H02e, T09, A07d, A07e, H07c, H07d)_
 - [ ] **D04** · P50 · Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
 - [ ] **D04b** · P51 · Measure code-navigation aids on real coding tasks (optional, after the first release) _(needs D04)_
 - [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, U03c, K06b, K01d, P02b, A08c)_

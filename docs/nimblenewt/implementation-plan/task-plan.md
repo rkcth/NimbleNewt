@@ -34,10 +34,10 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
 | N05 / AII-255 | L05, L05b, L01, L01b, L02, L03, L04, L06, H08 |
 | N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A07e, A08, A08b, A08c, A09, A10, A10b |
-| N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C08, C09, C08b, C08c, C08d |
+| N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C07e, C08, C09, C08b, C08c, C08d |
 | N08 / AII-258 | R01, R02, R03, R04, R05, R05b, R05c, R05d, R05f, R05g, R05e |
 | N09 / AII-259 | U03, U03d, U03e, U05b, U04, U05, U06, U03b, U03c, U07, U09, U08, U10, U11, U11b |
-| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H07b, H07c, H07d, H02e, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H02b, H02c, H02d |
+| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H07b, H07c, H07d, H07e, H02e, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H02b, H02c, H02d |
 | N11 / AII-261 | V01, V01b, V01c, V02 |
 | N12 / AII-262 | M01b, M01c, M01d, M00, M01, M02, M03, M04, M05, M05b, M06 |
 | N13 / AII-263 | T01, T02, T03, T06, T06b, T07, T07b, T08, T09, T09b |
@@ -557,6 +557,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### A07e — Suggest at least seven days for a standing grant
 
 - **Parent:** N06 / AII-256.
+- **Status:** implemented; commits `2ade847`, `ef394f4`; CI runs 40638827504; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** After a short burst of approvals the suggested standing-grant length is at least seven days; every shorter option is still listed.
 - **Blockers:** A07d.
 - **Deliverable:** Owner decision 2026-10-27: after a short burst of approvals the suggested standing-grant length is no shorter than seven days; every shorter option is still listed and any length can be typed.
 - **Acceptance and verification:** The pre-selected length after three approvals within a day is seven days; the shorter options remain; an exact stated number of days is still taken as the length.
@@ -716,12 +718,22 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** A summariser that hangs hits its own short timeout and either uses the fallback route or ends the attempt as context_overflow without hanging; a restart in the middle of the hook neither duplicates nor loses the summary; the first call's size includes Pi's system prompt and tool schemas and is checked against the provider's reported usage; a second compressor on the same context is refused at registration; summary lineage is recorded and earlier owner decisions stay retrievable after repeated compactions and after model fallback; any compressed view, index or embedding keeps the source project and origin and is readable only by someone who can read every source (A10); a crash after a confirmed effect and before the hand-off still yields a hand-off written from the ledger and artifacts; repeated overflow stops with a visible blocker.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
-### C07d — Rebuild the context view when a model route changes to a smaller window, and scale MCP result limits to the window
+### C07d — Scale MCP result limits to the window and let the rest be read in pages
 
 - **Parent:** N07 / AII-257.
-- **Blockers:** C07b, R02, H12.
-- **Deliverable:** Split from C07b: when the route of a running task changes to a model with a smaller window (a fallback, a cutover or a re-admitted attempt), the startup context is built again for that window and that route's fixed part (system prompt and tool schemas); tool output limits and the spill of an MCP result's remainder follow the window of the attempt's route instead of one fixed bound.
-- **Acceptance and verification:** Falling back to a smaller-window route rebuilds the context view and blocks with a visible reason if essential constraints do not fit; the cut text is archived; repeating the change gives the recorded decision; an MCP result longer than the window's tool limit is cut and the rest can be read in pages, as for Pi's tools.
+- **Status:** implemented; commits `1ca9584`, `ed2aefd`, `1711684`, `8b3e705`; CI runs 40638827504; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** MCP results follow the route's window with the rest read in pages (framed as data, for those who may use MCP); the route-change rebuild is C07e.
+- **Blockers:** C07b, R02.
+- **Deliverable:** Split from C07b: tool output limits and the spill of an MCP result's remainder follow the window of the attempt's route instead of one fixed bound; the rest is kept and read in pages through the state API, framed as data and only for those who may use MCP in the project.
+- **Acceptance and verification:** An MCP result longer than the window's tool limit is cut and the rest can be read in pages, as for Pi's tools.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### C07e — Rebuild the context view when a model route changes to a smaller window
+
+- **Parent:** N07 / AII-257.
+- **Blockers:** C07d, H12.
+- **Deliverable:** Split from C07d (2026-10-28): when the route of a running task changes to a model with a smaller window (a fallback, a cutover or a re-admitted attempt), the startup context is built again for that window and that route's fixed part (system prompt and tool schemas); also the window of a remote host's route reaches the tool limit.
+- **Acceptance and verification:** Falling back to a smaller-window route rebuilds the context view and blocks with a visible reason if essential constraints do not fit; the cut text is archived; repeating the change gives the recorded decision; a controller with only remote hosts also scales MCP limits to the window.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### C08 — Implement owner decision records and correction propagation
@@ -916,13 +928,15 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 
 - **Parent:** N10 / AII-260.
 - **Blockers:** H07, H12a.
-- **Deliverable:** Split from H07 (2026-10-27): the dispatcher picks among hosts with the placement candidates and tries the next when a placement is refused; the worker process runs the host poller; a poll ends when its client disconnects; the placement policy is checked again at delivery; the platform index drops revoked hosts and is filled at a controller restart.
+- **Deliverable:** Split from H07 (2026-10-27): the dispatcher picks among hosts with the placement candidates (the refusal fallback is H07e); the worker process runs the host poller; a poll ends when its client disconnects; the placement policy is checked again at delivery; the platform index drops revoked hosts and is filled at a controller restart.
 - **Acceptance and verification:** An attempt whose first host is refused by policy starts on another eligible host and says why in the plan; a worker process polls with one held request and exits cleanly on stop; a revoked host leaves the index; a policy change before delivery withholds the offer.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### H07c — Decide local-only placement by profile and let chat override it
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `f9a3bff`, `aba53de`, `c730582`, `1f20d06`, `4b590a6`, `195da2c`; CI runs 40638827504; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Local-only placement follows the approval profile with an owner setting changed in chat (shown as a proposal first); host names are principal IDs.
 - **Blockers:** H07, C08c.
 - **Deliverable:** Owner decision 2026-10-27: in the strict profile local-only data goes only to listed hosts (today's behaviour); in the other profiles every enrolled host of the owner may hold it unless excluded; the owner can ask in chat for a different setting, shown as a proposal first.
 - **Acceptance and verification:** Placement of a local-only task follows the profile in a started controller; a chat request to allow or exclude a host is a proposal and, once accepted, changes the placement; a host not listed under strict still receives nothing.
@@ -931,14 +945,28 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H07d — Limit connections per address only before login
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `adce268`, `b1383f0`; CI runs 40638827504; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Connection limits per address apply only before login; TLS connections are counted by the accepted socket.
 - **Blockers:** H07.
 - **Deliverable:** Owner decision 2026-10-27: the strict per-address connection cap applies to connections that have not yet authenticated; logged-in hosts are limited by their own principal and a total that grows with the enrolled hosts.
 - **Acceptance and verification:** Many slow unauthenticated connections from a few addresses cannot fill the listener or lock out enrolled hosts; a hundred logged-in hosts behind one address keep their held polls.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
+### H07e — Pass over remote hosts that would refuse the attempt
+
+- **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `e28a540`, `3234ab1`, `9480e70`; CI runs 40638827504; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The dispatcher passes over hosts that would refuse the attempt (lasting refusals reach the owner after the allowed ticks); the rest of H07b stays planned.
+- **Blockers:** H07, H07c.
+- **Deliverable:** Split from H07b (2026-10-28): the dispatcher asks each eligible host whether it would take the attempt (capabilities, connection, placement policy) and starts it on the next one when a host would refuse; when every host refuses for a lasting reason the attempt waits with every host's reasons and the owner is told after the allowed ticks.
+- **Acceptance and verification:** An attempt whose first host is refused by the placement policy starts on another eligible host; when no host is listed it waits in the plan with the reasons and is reported to the owner, not failed; a host only not yet connected never opens a blocker.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
 ### H02e — Stop a poll from deleting a re-placed offer
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `5f0357e`; CI runs 40638827504; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** A poll does not delete an offer that was placed again.
 - **Blockers:** H02, H07.
 - **Deliverable:** Found in review of H07 (2026-10-27): the pending-offers read deletes an offer when the stored placement number differs from the one it read before an await, so an attempt placed again while a poll iterates can lose its new offer until the lease ends.
 - **Acceptance and verification:** A test places an attempt again while a poll is reading and the new offer is still delivered; a mutation that restores the deletion fails it.
@@ -1209,6 +1237,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### R05g — Retry lost charges and prove a held meeting through budget.usage
 
 - **Parent:** N08 / AII-258.
+- **Status:** implemented; commits `1d17b95`, `467fa87`, `40bdad0`; CI runs 40638827504; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Charges the ledger could not take are kept and retried until they land once; racing keeps are retried; a held meeting is read back through budget.usage.
 - **Blockers:** R05f.
 - **Deliverable:** Split from R05f (2026-10-27): a charge that failed while the ledger was down is retried by the owner of the charge until it lands exactly once, and a held meeting's attendance charge is read back through the state API's budget.usage.
 - **Acceptance and verification:** A charge refused while the ledger is unavailable is retried after it returns and appears once in budget.usage with the right basis and actor; a repeat never doubles it; the held-meeting charge is proved through budget.usage in the composed controller.
@@ -1397,6 +1427,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H02d — Finish the composed-controller proofs of remote stop, checkpoint fencing and relocation refusals
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `e83b68a`; CI runs 40638827504; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Composed proofs of remote stop, stale checkpoint wait, routes that admit nothing, and relocation refusals.
 - **Blockers:** H02c.
 - **Deliverable:** Split from H02c (2026-10-27): the production host's stop path reaches a remote worker's poll and ends the attempt; a new host's checkpoint never answers an old handle's request in the dispatcher's checkpoint wait; a worker has no route that admits work and unknown request fields are refused; relocation refusals by platform, workspace paths and credential policy through the composed controller.
 - **Acceptance and verification:** Each clause is proved over the real transport in a started controller with a mutation check; a stop issued by the owner ends a remote attempt through the worker's own poll; a stale handle's checkpoint request is never answered by the new host.
@@ -1537,6 +1569,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### V01c — Read the declared model speed from the routing table and the cache share from the cache adapter
 
 - **Parent:** N11 / AII-261.
+- **Status:** implemented; commits `6f51de5`; CI runs 40638827504; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The stall scan uses the reading speed a route declares in the routing table and the expected cache share on request.
 - **Blockers:** V01b.
 - **Deliverable:** Split from V01b (2026-10-27): a route's declared reading and writing speed comes from its route settings in the routing table, and request_started carries the cache adapter's expected cached share.
 - **Acceptance and verification:** A started controller with a routing table that declares a speed uses it for the first stall judgement without StartOptions.stall; a cached prompt gets a shorter reading allowance than an uncached one of the same size; a route with no declaration falls back to the default and says so.
@@ -2057,7 +2091,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D03 — Approve release readiness and publication decision
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, T09b, H07, H07b, H02e, T09, A07d, A07e, H07c, H07d.
+- **Blockers:** X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, C07e, H07e, T09b, H07, H07b, H02e, T09, A07d, A07e, H07c, H07d.
 - **Deliverable:** Exact release manifest, known limitations and owner signoff.
 - **Acceptance and verification:** All gates mapped to current evidence; no unapproved scope deletion; publication/deployment remains explicit owner decision; the release manifest contains no preset team, backlog, credentials or self-development automation and states the support matrix (OS versions, Linux distributions, architectures, filesystems); the owner inspection policy and the other pre-release owner decisions are recorded.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

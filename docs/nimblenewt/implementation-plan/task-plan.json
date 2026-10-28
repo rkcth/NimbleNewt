@@ -1443,12 +1443,24 @@
       ],
       "deliverable": "Owner decision 2026-10-27: after a short burst of approvals the suggested standing-grant length is no shorter than seven days; every shorter option is still listed and any length can be typed",
       "acceptance_and_verification": "The pre-selected length after three approvals within a day is seven days; the shorter options remain; an exact stated number of days is still taken as the length",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "2ade847",
+          "ef394f4"
+        ],
+        "ci_runs": [
+          "40638827504"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "After a short burst of approvals the suggested standing-grant length is at least seven days; every shorter option is still listed.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "A08",
@@ -1905,14 +1917,45 @@
       "id": "C07d",
       "parent": "N07",
       "existing_issue": "AII-257",
-      "title": "Rebuild the context view when a model route changes to a smaller window, and scale MCP result limits to the window",
+      "title": "Scale MCP result limits to the window and let the rest be read in pages",
       "depends_on": [
         "C07b",
-        "R02",
+        "R02"
+      ],
+      "deliverable": "Split from C07b: tool output limits and the spill of an MCP result's remainder follow the window of the attempt's route instead of one fixed bound; the rest is kept and read in pages through the state API, framed as data and only for those who may use MCP in the project",
+      "acceptance_and_verification": "An MCP result longer than the window's tool limit is cut and the rest can be read in pages, as for Pi's tools",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "1ca9584",
+          "ed2aefd",
+          "1711684",
+          "8b3e705"
+        ],
+        "ci_runs": [
+          "40638827504"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "MCP results follow the route's window with the rest read in pages (framed as data, for those who may use MCP); the route-change rebuild is C07e.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "C07e",
+      "parent": "N07",
+      "existing_issue": "AII-257",
+      "title": "Rebuild the context view when a model route changes to a smaller window",
+      "depends_on": [
+        "C07d",
         "H12"
       ],
-      "deliverable": "Split from C07b: when the route of a running task changes to a model with a smaller window (a fallback, a cutover or a re-admitted attempt), the startup context is built again for that window and that route's fixed part (system prompt and tool schemas); tool output limits and the spill of an MCP result's remainder follow the window of the attempt's route instead of one fixed bound",
-      "acceptance_and_verification": "Falling back to a smaller-window route rebuilds the context view and blocks with a visible reason if essential constraints do not fit; the cut text is archived; repeating the change gives the recorded decision; an MCP result longer than the window's tool limit is cut and the rest can be read in pages, as for Pi's tools",
+      "deliverable": "Split from C07d (2026-10-28): when the route of a running task changes to a model with a smaller window (a fallback, a cutover or a re-admitted attempt), the startup context is built again for that window and that route's fixed part (system prompt and tool schemas); also the window of a remote host's route reaches the tool limit",
+      "acceptance_and_verification": "Falling back to a smaller-window route rebuilds the context view and blocks with a visible reason if essential constraints do not fit; the cut text is archived; repeating the change gives the recorded decision; a controller with only remote hosts also scales MCP limits to the window",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -2473,7 +2516,7 @@
         "H07",
         "H12a"
       ],
-      "deliverable": "Split from H07 (2026-10-27): the dispatcher picks among hosts with the placement candidates and tries the next when a placement is refused; the worker process runs the host poller; a poll ends when its client disconnects; the placement policy is checked again at delivery; the platform index drops revoked hosts and is filled at a controller restart",
+      "deliverable": "Split from H07 (2026-10-27): the dispatcher picks among hosts with the placement candidates (the refusal fallback is H07e); the worker process runs the host poller; a poll ends when its client disconnects; the placement policy is checked again at delivery; the platform index drops revoked hosts and is filled at a controller restart",
       "acceptance_and_verification": "An attempt whose first host is refused by policy starts on another eligible host and says why in the plan; a worker process polls with one held request and exits cleanly on stop; a revoked host leaves the index; a policy change before delivery withholds the offer",
       "status": "planned",
       "research_evidence": null,
@@ -2493,12 +2536,28 @@
       ],
       "deliverable": "Owner decision 2026-10-27: in the strict profile local-only data goes only to listed hosts (today's behaviour); in the other profiles every enrolled host of the owner may hold it unless excluded; the owner can ask in chat for a different setting, shown as a proposal first",
       "acceptance_and_verification": "Placement of a local-only task follows the profile in a started controller; a chat request to allow or exclude a host is a proposal and, once accepted, changes the placement; a host not listed under strict still receives nothing",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "f9a3bff",
+          "aba53de",
+          "c730582",
+          "1f20d06",
+          "4b590a6",
+          "195da2c"
+        ],
+        "ci_runs": [
+          "40638827504"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Local-only placement follows the approval profile with an owner setting changed in chat (shown as a proposal first); host names are principal IDs.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "H07d",
@@ -2510,12 +2569,55 @@
       ],
       "deliverable": "Owner decision 2026-10-27: the strict per-address connection cap applies to connections that have not yet authenticated; logged-in hosts are limited by their own principal and a total that grows with the enrolled hosts",
       "acceptance_and_verification": "Many slow unauthenticated connections from a few addresses cannot fill the listener or lock out enrolled hosts; a hundred logged-in hosts behind one address keep their held polls",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "adce268",
+          "b1383f0"
+        ],
+        "ci_runs": [
+          "40638827504"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Connection limits per address apply only before login; TLS connections are counted by the accepted socket.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "H07e",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Pass over remote hosts that would refuse the attempt",
+      "depends_on": [
+        "H07",
+        "H07c"
+      ],
+      "deliverable": "Split from H07b (2026-10-28): the dispatcher asks each eligible host whether it would take the attempt (capabilities, connection, placement policy) and starts it on the next one when a host would refuse; when every host refuses for a lasting reason the attempt waits with every host's reasons and the owner is told after the allowed ticks",
+      "acceptance_and_verification": "An attempt whose first host is refused by the placement policy starts on another eligible host; when no host is listed it waits in the plan with the reasons and is reported to the owner, not failed; a host only not yet connected never opens a blocker",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "e28a540",
+          "3234ab1",
+          "9480e70"
+        ],
+        "ci_runs": [
+          "40638827504"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "The dispatcher passes over hosts that would refuse the attempt (lasting refusals reach the owner after the allowed ticks); the rest of H07b stays planned.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "H02e",
@@ -2528,12 +2630,23 @@
       ],
       "deliverable": "Found in review of H07 (2026-10-27): the pending-offers read deletes an offer when the stored placement number differs from the one it read before an await, so an attempt placed again while a poll iterates can lose its new offer until the lease ends",
       "acceptance_and_verification": "A test places an attempt again while a poll is reading and the new offer is still delivered; a mutation that restores the deletion fails it",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "5f0357e"
+        ],
+        "ci_runs": [
+          "40638827504"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "A poll does not delete an offer that was placed again.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "H08",
@@ -3266,12 +3379,25 @@
       ],
       "deliverable": "Split from R05f (2026-10-27): a charge that failed while the ledger was down is retried by the owner of the charge until it lands exactly once, and a held meeting's attendance charge is read back through the state API's budget.usage",
       "acceptance_and_verification": "A charge refused while the ledger is unavailable is retried after it returns and appears once in budget.usage with the right basis and actor; a repeat never doubles it; the held-meeting charge is proved through budget.usage in the composed controller",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "1d17b95",
+          "467fa87",
+          "40bdad0"
+        ],
+        "ci_runs": [
+          "40638827504"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Charges the ledger could not take are kept and retried until they land once; racing keeps are retried; a held meeting is read back through budget.usage.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "U01",
@@ -3810,12 +3936,23 @@
       ],
       "deliverable": "Split from H02c (2026-10-27): the production host's stop path reaches a remote worker's poll and ends the attempt; a new host's checkpoint never answers an old handle's request in the dispatcher's checkpoint wait; a worker has no route that admits work and unknown request fields are refused; relocation refusals by platform, workspace paths and credential policy through the composed controller",
       "acceptance_and_verification": "Each clause is proved over the real transport in a started controller with a mutation check; a stop issued by the owner ends a remote attempt through the worker's own poll; a stale handle's checkpoint request is never answered by the new host",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "e83b68a"
+        ],
+        "ci_runs": [
+          "40638827504"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Composed proofs of remote stop, stale checkpoint wait, routes that admit nothing, and relocation refusals.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "U04",
@@ -4205,12 +4342,23 @@
       ],
       "deliverable": "Split from V01b (2026-10-27): a route's declared reading and writing speed comes from its route settings in the routing table, and request_started carries the cache adapter's expected cached share",
       "acceptance_and_verification": "A started controller with a routing table that declares a speed uses it for the first stall judgement without StartOptions.stall; a cached prompt gets a shorter reading allowance than an uncached one of the same size; a route with no declaration falls back to the default and says so",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "6f51de5"
+        ],
+        "ci_runs": [
+          "40638827504"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "The stall scan uses the reading speed a route declares in the routing table and the expected cache share on request.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "V02",
@@ -5614,6 +5762,8 @@
         "R05g",
         "H02d",
         "V01c",
+        "C07e",
+        "H07e",
         "T09b",
         "H07",
         "H07b",
