@@ -232,6 +232,9 @@ for (const backend of backends) {
     assert.equal(chooseStandingLength({ ...base, earlier: [{ days: 1, revoked: false }, { days: 7, revoked: true }] }).days, 1, "taken back at 7 last: shorter than 7");
     assert.equal(chooseStandingLength({ ...base, earlier: [{ days: 90, revoked: false }, { days: 30, revoked: false }] }).days, 90);
     assert.deepEqual([7, 7.01, 2.0001, 30.5, 91].map((d) => chooseStandingLength({ ...base, spanDays: d }).days), [7, 30, 7, 90, 90]);
+    assert.deepEqual([0.01, 0.5, 1, 1.5].map((d) => chooseStandingLength({ ...base, spanDays: d }).days), [7, 7, 7, 7], "a short burst suggests at least a week (card A07e)");
+    assert.match(chooseStandingLength({ ...base, spanDays: 0.2 }).why, /less than a day; 7 days is the least suggested/);
+    assert.equal(chooseStandingLength({ ...base, statedDays: 1 }).days, 1, "a stated length is still taken exactly");
     assert.match(chooseStandingLength({ ...base, spanDays: 2.0001 }).why, /about 2 days, so 7 days covers/);
     assert.equal(chooseStandingLength({ ...base, statedDays: 5 }).source, "owner");
     assert.equal(chooseStandingLength({ ...base, oneOff: true }).source, "owner");
@@ -252,7 +255,7 @@ for (const backend of backends) {
     assert.equal(chooseStandingLength({ ...base, spanDays: 40, earlier: [{ days: 7, revoked: true }] }).days, 1, "then earlier grants: revoked at 7 is shorter than 7");
     assert.equal(chooseStandingLength({ ...base, spanDays: 1, earlier: [{ days: 90, revoked: false }] }).days, 90, "never above the longest option");
     assert.equal(chooseStandingLength({ ...base, spanDays: 40 }).days, 90);
-    assert.equal(chooseStandingLength({ ...base, spanDays: 0.4 }).days, 1);
+    assert.equal(chooseStandingLength({ ...base, spanDays: 0.4 }).days, 7, "a short burst: at least a week (card A07e)");
     assert.equal(chooseStandingLength({ ...base, spanDays: 200 }).days, 90);
     assert.equal(chooseStandingLength(base).days, 30);
   });

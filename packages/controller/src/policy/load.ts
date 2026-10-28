@@ -64,6 +64,8 @@ export interface LengthInputs {
 }
 
 const dayWord = (n: number): string => `${n} day${n === 1 ? "" : "s"}`;
+/** The least length suggested after a burst of approvals (owner decision 2026-10-27, card A07e): shorter options are still listed and any length can be chosen. */
+const LEAST_SUGGESTED_DAYS = 7;
 const optionAtLeast = (days: number): number => GRANT_LENGTHS.find((o) => o >= days) ?? GRANT_LENGTHS[GRANT_LENGTHS.length - 1]!;
 
 /**
@@ -88,8 +90,10 @@ export function chooseStandingLength(input: LengthInputs): { days: number; why: 
     return { days, why: `the last standing rule of this kind ran its full ${last.days}-day term and the same was approved again, so ${dayWord(days)} this time`, source: "default" };
   }
   if (input.spanDays > 0) {
-    const days = optionAtLeast(input.spanDays);
-    return { days, why: `the approvals were spread over ${input.spanDays < 1 ? "less than a day" : `about ${dayWord(Math.round(input.spanDays))}`}, so ${dayWord(days)} covers the same pattern`, source: "default" };
+    const covers = optionAtLeast(input.spanDays);
+    const days = Math.max(covers, LEAST_SUGGESTED_DAYS);
+    const seen = `the approvals were spread over ${input.spanDays < 1 ? "less than a day" : `about ${dayWord(Math.round(input.spanDays))}`}`;
+    return { days, why: days === covers ? `${seen}, so ${dayWord(days)} covers the same pattern` : `${seen}; ${dayWord(days)} is the least suggested, so you are not asked again within a week`, source: "default" };
   }
   return { days: LOAD_LIMITS.proposalDays, source: "default", why: `there is nothing to go on yet, so the usual ${dayWord(LOAD_LIMITS.proposalDays)}` };
 }

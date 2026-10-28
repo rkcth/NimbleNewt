@@ -2096,3 +2096,6 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - A07d and V01b were flipped afterwards, once the owner decided to drop their C09 and H12b/H12e edges.
 - New cards: R05g, H02d, V01c, T09b, H07b, H02e (all in D03's dependencies).
 - **Owner answers (2026-10-27):** drop the C09 edge from A07d, H12b/H12e from V01b and G04 from X11 (X11 now depends on G01 so the plan keeps one root); a stated number of days stays the exact length; the suggested standing-grant length after a short burst is at least seven days (A07e); local-only placement follows the profile, strict lists hosts and the other profiles allow the owner's enrolled hosts, changeable by chat as a proposal (H07c); connection limits per address apply only before login (H07d).
+
+## A07e — at least seven days suggested
+- After a burst of approvals the suggested standing-grant length is `max(option that covers the span, 7 days)`, worded "N days is the least suggested, so you are not asked again within a week". The shorter options stay listed, the lengths after a revoked or full-term grant are unchanged, and a stated number of days is still the exact length. Mutation: removing the floor fails the new assertions.
