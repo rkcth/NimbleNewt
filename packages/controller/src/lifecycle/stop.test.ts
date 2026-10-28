@@ -288,4 +288,23 @@ for (const backend of backends) {
     await c.stops.advance(c.mgr, { intentId: a.intentId });
     assert.equal(c.rt.count("release"), 1);
   });
+  suite("a force that took over a blocked request, sent again after a resume, answers as recorded; a blocked request on a resumed scope is cancelled and released", async (c) => {
+    c.rt.throwOnCheckpoint = true;
+    const a = await c.stops.request(c.mgr, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "r" });
+    assert.equal((await c.stops.advance(c.mgr, { intentId: a.intentId })).phase, "blocked");
+    const fid = cid("f");
+    const first = await c.stops.force(c.mgr, { commandId: fid, scope: scopeOf(c.task), reason: "now" });
+    await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "fixed" });
+    const again = await c.stops.force(c.mgr, { commandId: fid, scope: scopeOf(c.task), reason: "now" });
+    assert.deepEqual(again, first);
+    assert.equal(c.rt.count("terminate-force"), 1);
+    assert.notEqual((await c.pauses.gate(c.owner, scopeOf(c.task)))?.intent, "pause");
+    // blocked, then resumed: the next look cancels and lets go
+    const b = await c.stops.request(c.mgr, { commandId: cid("s"), scope: scopeOf(c.task), mode: "suspend", reason: "r" });
+    assert.equal((await c.stops.advance(c.mgr, { intentId: b.intentId })).phase, "blocked");
+    await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "never mind" });
+    const before = c.rt.count("release");
+    assert.equal((await c.stops.advance(c.mgr, { intentId: b.intentId })).phase, "cancelled");
+    assert.equal(c.rt.count("release"), before + 1);
+  });
 }

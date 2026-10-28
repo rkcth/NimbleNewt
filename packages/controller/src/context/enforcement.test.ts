@@ -113,6 +113,12 @@ for (const backend of backends) {
     assert.deepEqual([kept?.digest, kept?.text.length], [cut.digest, cut.originalChars]);
     assert.equal(await enf.routeArchive(owner, { taskId: t, digest: "sha256:" + "0".repeat(64) }), undefined);
     assert.equal(await enf.routeArchive(owner, { taskId: t2, digest: cut.digest }), undefined, "archived per task");
+    // Many cut items do not overflow the operation limit.
+    const many: StartupItem[] = [{ id: "g", kind: "goal", text: "Goal.", at: at(0) }, { id: "h", kind: "human", text: "Do it.", at: at(1) }];
+    for (let i = 0; i < 300; i++) many.push({ id: `m${i}`, kind: "report", text: `${i} `.repeat(400), at: at(i + 2) });
+    const big = await enf.changeRoute(owner, { taskId: t, attemptId: "att-3", window: 32_768, fixedTokens: 3_000, items: many });
+    assert.ok(big.startup.cuts.length > 150);
+    assert.equal((await enf.routeArchive(owner, { taskId: t, digest: big.startup.cuts[big.startup.cuts.length - 1]!.digest }))?.itemId, big.startup.cuts[big.startup.cuts.length - 1]!.id);
     const named = await enf.changeRoute(owner, { taskId: t, attemptId: "att-2", window: 32_768, route: "local-small", fixedTokens: 3_000, items });
     assert.equal(named.rebuilt, true);
     const blocked = await enf.changeRoute(owner, { taskId: t2, attemptId: "att-1", window: 8_192, fixedTokens: 2_000, items });

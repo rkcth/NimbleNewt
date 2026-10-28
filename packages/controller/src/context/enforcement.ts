@@ -15,7 +15,7 @@ import type { RetrievalService, SourceRef } from "./retrieval.js";
 // Card C07b: the controller-side service the dispatcher (H12) and the Pi adapter's `beforeCompact` hook call to enforce the C07 budgets. Every decision is a durable record keyed by the task and the
 // attempt (or compaction key), so a repeat after a restart finds what was decided and does not decide again.
 
-export const ENFORCEMENT_LIMITS = { pinned: 12, pinnedSnippet: 80, material: 1_000_000, spill: 256_000, handoff: 4000, reason: 300, overflowAttempts: 10, title: 200 } as const;
+export const ENFORCEMENT_LIMITS = { pinned: 12, pinnedSnippet: 80, material: 1_000_000, spill: 256_000, handoff: 4000, reason: 300, overflowAttempts: 10, title: 200, archiveChars: 100_000 } as const;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const key = (field: string, value: unknown): string => (typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(value) ? value : invalid(field, "must be 1 to 80 ASCII letters, digits, '.', '_', ':' or '-'"));
 const round = (value: unknown): number => (value === undefined ? 1 : Number.isSafeInteger(value) && (value as number) >= 1 && (value as number) <= 1000 ? (value as number) : invalid("round", "must be a whole number from 1 to 1000"));
@@ -218,17 +218,24 @@ export class ContextEnforcementService {
     const ref: AggregateRef = { kind: "ctx-admission", id };
     const reasons = review.kind === "blocked" ? [review.reason] : [];
     const body: AdmissionBody = { type: "route-change", taskId, projectId, attemptId, round: r, window: w, route, admit: review.kind === "rebuilt", startupTokens: review.startup.tokens + command.fixedTokens, estimatedTokens: review.startup.tokens + command.fixedTokens, rawEstimatedTokens: review.startup.tokens + command.fixedTokens, workingTokens: 0, basis: "estimated", reasons, decidedBy: principal.id };
+    // The text that was cut is kept (once per task and content) before the decision is written, in batches, so it is archived even if the caller never stores what is returned; a very long item is kept up to a limit and says so.
+    const fresh: { aref: AggregateRef; body: JsonObject }[] = [];
+    for (const a of review.startup.archive) {
+      const aref: AggregateRef = { kind: "ctx-route-archive", id: derivedId("ctx", `${taskId}\0archive\0${a.digest}`) };
+      if (fresh.some((f) => f.aref.id === aref.id) || (await this.#runner.get(aref.kind, aref.id)) !== undefined) continue;
+      const kept = redactText(a.text);
+      fresh.push({ aref, body: { taskId, projectId, itemId: a.id, digest: a.digest, text: kept.slice(0, ENFORCEMENT_LIMITS.archiveChars), ...(kept.length > ENFORCEMENT_LIMITS.archiveChars ? { truncated: true } : {}), routeDecision: id } as unknown as JsonObject });
+    }
+    for (let i = 0; i < fresh.length; i += 50) {
+      const chunk = fresh.slice(i, i + 50);
+      await this.#runner.command("context.route-archive", { commandId: `ctx-rta-${id.slice(4)}-${i / 50}`, actor: principal.id }, async () => ({
+        payload: { digests: chunk.map((c) => c.aref.id) },
+        build: async () => ({ ref: chunk[0]!.aref, creates: true, changes: chunk.map((c) => ({ type: "create" as const, ref: c.aref, body: c.body })), detail: { archived: chunk.length } }),
+      }));
+    }
     const run = await this.#runner.command("context.route", { commandId: `ctx-rte-${id.slice(4)}`, actor: principal.id }, async () => ({
       payload: { taskId, attemptId, round: r, window: w, route, fixedTokens: command.fixedTokens, items: sha256(JSON.stringify(command.items)) },
-      build: async () => {
-        // The text that was cut is kept with the decision (once per task and content), so it is archived even if the caller never stores what is returned.
-        const changes: Change[] = [{ type: "create", ref, body: body as unknown as JsonObject }];
-        for (const a of review.startup.archive) {
-          const aref: AggregateRef = { kind: "ctx-route-archive", id: derivedId("ctx", `${taskId}\0archive\0${a.digest}`) };
-          if ((await this.#runner.get(aref.kind, aref.id)) === undefined && !changes.some((c) => c.ref.id === aref.id)) changes.push({ type: "create", ref: aref, body: { taskId, projectId, itemId: a.id, digest: a.digest, text: redactText(a.text), routeDecision: id } as unknown as JsonObject });
-        }
-        return { ref, creates: true, changes, detail: { rebuilt: review.kind === "rebuilt" } };
-      },
+      build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { rebuilt: review.kind === "rebuilt" } }),
     }));
     const blockerId = review.kind === "blocked" ? await this.#block(principal, taskId, `Attempt ${attemptId} cannot move to the ${w}-token route: ${review.reason}.`) : undefined;
     return { rebuilt: review.kind === "rebuilt", startup: review.startup, ...(review.kind === "blocked" ? { reason: review.reason } : {}), ...(blockerId === undefined ? {} : { blockerId }), id, replayed: run.replayed };

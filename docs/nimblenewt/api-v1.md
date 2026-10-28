@@ -988,7 +988,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `lifecycle.advance`
 
-Takes a suspension or stop as far as it can go now (the controller does this itself after a restart).
+Takes a suspension or stop as far as it can go now (call it again to go on; nothing calls it by itself after a restart yet).
 
 Arguments:
 
@@ -1000,13 +1000,13 @@ Completion: finished when accepted (`completed: true`).
 
 #### `lifecycle.sweep`
 
-Carries every unfinished suspension or stop on (owner only; the controller runs this after a restart).
+Carries every unfinished suspension or stop on (owner only; nothing runs it by itself after a restart yet).
 
 Arguments:
 
 - none
 
-Result: `{ advanced }`.
+Result: `{ advanced, failed }`.
 
 Completion: finished when accepted (`completed: true`).
 

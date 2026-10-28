@@ -87,3 +87,21 @@ test("contained termination ends the process and what it started, TERM then KILL
   await assert.rejects(killContained(process.pid), RangeError);
   await assert.rejects(killContained(1), RangeError);
 });
+
+test("a short sleep, too small to count as a wake, still uses up that much of the lease", async () => {
+  const k = clock(); const { dog } = make(k);
+  await dog.tick();
+  const before = dog.remainingMs();
+  k.sleep(3000); // the monotonic clock did not run for 3 s
+  await dog.tick();
+  assert.equal(dog.remainingMs(), before - 3000, "the lease shrank by the sleep");
+  assert.equal(dog.productive, true);
+});
+
+test("a process that is not its own group leader is refused, not reported gone", async () => {
+  const child = spawn("sleep", ["30"], { stdio: "ignore" }); // same group as ours
+  try {
+    await assert.rejects(killContained(child.pid!), /not its own group leader/);
+    assert.equal(child.exitCode, null, "left alone");
+  } finally { child.kill("SIGKILL"); }
+});

@@ -840,12 +840,16 @@ export class ChatService {
       const text = JSON.stringify(r["answer"] ?? {}, null, 1).slice(0, 1500);
       // A recovery order says what stage it reached: received, accepted, and whether it took effect or waits (card U06). It never says more than the record does.
       const recovery = op !== undefined && RECOVERY_OPS.has(op.name);
-      const answer = (r["answer"] ?? {}) as { phase?: string; outcome?: { state?: string; graceful?: boolean }; blocked?: { reason?: string } };
+      const whole = (r["answer"] ?? {}) as Record<string, unknown>;
+      // advance answers { item }, the others the record or { phase }; read the stage from whichever carries it.
+      const answer = ((whole["item"] ?? whole) as Record<string, unknown>) as { phase?: string; outcome?: { state?: string; graceful?: boolean }; blocked?: { reason?: string } };
       const stages = !recovery ? [] : [
         "Received: yes", "Accepted: yes",
         answer.blocked !== undefined ? `Effected: not yet; it is blocked (${String(answer.blocked.reason)}). Choices: wait, restart-earlier-boundary, force-stop.`
           : answer.outcome !== undefined ? `Effected: ${String(answer.outcome.state)}${answer.outcome.graceful === false ? " (not graceful)" : ""}.`
-            : answer.phase !== undefined ? `Effected: not yet (${answer.phase}).` : "Effected: recorded.",
+            : answer.phase === "cancelled" ? "Effected: no; the request was cancelled because the scope was resumed."
+              : answer.phase === "done" || answer.phase === "recovery-required" ? `Effected: ${answer.phase}.`
+                : answer.phase !== undefined ? `Effected: not yet (${answer.phase}).` : "Effected: recorded.",
       ];
       return { i: item.i, status: "applied", op: String(r["command"]), commandId: `${turnId}-c${item.i}`, shown: [`Ran ${String(r["command"])}:`, ...stages, ...text.split("\n").slice(0, 40)] } as Outcome;
     }

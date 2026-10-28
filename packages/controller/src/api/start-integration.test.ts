@@ -103,7 +103,11 @@ test("in chat, how finished work lands is shown first and applies on the owner's
     assert.equal((await call("project.create", { name: "Bad", integration: { landing: "yolo" } }, "bad1")).error.code, "invalid_command");
     assert.equal((await call("project.create", { name: "Bad", integration: null }, "bad2")).error.code, "invalid_command");
     assert.equal((await call("project.create", { name: "Bad", integration: { projectId: project, landing: "human-promotes" } }, "bad3")).error.code, "invalid_command");
+    // The rule that main-automatic needs a check is judged on the merged settings, before anything is created.
+    assert.ok((await call("integration.default.set", { landing: "main-automatic", requiredChecks: ["tests"] }, "mdef")).ok);
+    assert.equal((await call("project.create", { name: "Bad", integration: { requiredChecks: [] } }, "bad4")).error.code, "invalid_command");
     assert.equal((await call("project.list", {})).result.items.length, before, "nothing was created");
+    assert.ok((await call("integration.default.set", { landing: "integration-branch" }, "mdef2")).ok);
     const make = "create a project Orchard where a human promotes finished work";
     const draft = await turn("m5", make, [{ kind: "command", op: "project.create", args: { name: "Orchard", integration: { landing: "human-promotes", integrator: "human" } }, evidence: make, basis: "owner" }]);
     assert.equal(draft[0].status, "proposed", JSON.stringify(draft));

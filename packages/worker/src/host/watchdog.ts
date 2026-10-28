@@ -94,7 +94,10 @@ export class LeaseWatchdog {
   async tick(): Promise<void> {
     const mono = this.#clock.mono();
     const wall = this.#clock.wall();
-    const jumped = wall - this.#lastWall - (mono - this.#lastMono) > this.#o.sleepJumpMs;
+    const gap = wall - this.#lastWall - (mono - this.#lastMono);
+    const jumped = gap > this.#o.sleepJumpMs;
+    // The monotonic clock may not run while the machine sleeps: a shorter sleep than the jump limit still uses up that much of the lease.
+    if (!jumped && gap > 0) this.#deadline -= gap;
     this.#lastMono = mono; this.#lastWall = wall;
     if (this.#lost === undefined) {
       if (jumped) await this.#stop("wake");
@@ -129,6 +132,11 @@ export class LeaseWatchdog {
  */
 export async function killContained(pid: number, options: { termMs?: number; signal?: (pid: number, sig: NodeJS.Signals) => void; alive?: (pid: number) => boolean } = {}): Promise<boolean> {
   if (!Number.isSafeInteger(pid) || pid <= 1 || pid === process.pid) throw new RangeError("not a process this host may end");
+  if (options.signal === undefined && options.alive === undefined) {
+    // Its own group leader or nothing: `-pid` is a group only if the process leads one; otherwise the signal would miss it and the answer "gone" would be false.
+    let exists = true; try { process.kill(pid, 0); } catch { exists = false; }
+    if (exists) { try { process.kill(-pid, 0); } catch { throw new RangeError("the process is not its own group leader; it cannot be ended as a group"); } }
+  }
   const termMs = options.termMs ?? 2000;
   const signal = options.signal ?? ((p, sig) => { try { process.kill(-p, sig); } catch { /* gone */ } });
   const alive = options.alive ?? ((p) => { try { process.kill(-p, 0); return true; } catch { return false; } });

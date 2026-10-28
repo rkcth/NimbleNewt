@@ -58,6 +58,7 @@ export interface StopIntentBody {
 export const STOP_LIMITS = { reason: 500, deadlineMs: { default: 60_000, max: 3_600_000 }, inventory: 100, history: 60, advances: 8 } as const;
 const KIND = "stop-intent";
 const ACTIVE = "stop-active";
+const FORCE_REF = "stop-force-ref";
 const TERMINAL: readonly StopPhase[] = ["done", "recovery-required", "cancelled"];
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const plain = (value: unknown, field: string): string => {
@@ -148,11 +149,14 @@ export class StopService {
     const scope = { kind: command.scope.kind, id: command.scope.id } as PauseScope;
     // The same force sent again answers with what it did; it never ends running work a second time (the owner may have resumed the scope since).
     const mine = derivedId("stp", scopedCommandId(by.id, command.commandId));
-    const prior = await this.#runner.get(KIND, mine);
+    // A force that took over a request already under way left a marker at its own id naming that request.
+    const marker = await this.#runner.get(FORCE_REF, mine);
+    const took = marker === undefined ? mine : (marker.body as unknown as { intentId: string }).intentId;
+    const prior = await this.#runner.get(KIND, took);
     if (prior !== undefined) {
       const done = (prior.body as unknown as StopIntentBody);
-      if (!TERMINAL.includes(done.phase)) await this.advance(by, { intentId: mine });
-      return { intentId: mine, outcome: ((await this.#runner.get(KIND, mine))!.body as unknown as StopIntentBody).outcome! };
+      if (!TERMINAL.includes(done.phase)) await this.advance(by, { intentId: took });
+      return { intentId: took, outcome: ((await this.#runner.get(KIND, took))!.body as unknown as StopIntentBody).outcome! };
     }
     if ((await this.#pauses.gate(by, scope))?.intent !== "pause") await this.#pauses.pause(by, { commandId: `${String(command.commandId)}-pause`, scope, reason: `force stop: ${reason}`.slice(0, 500) });
     let id = await this.#activeId(scope);
@@ -160,6 +164,9 @@ export class StopService {
     if (existing === undefined || TERMINAL.includes((existing.body as unknown as StopIntentBody).phase)) {
       id = derivedId("stp", scopedCommandId(by.id, command.commandId));
       await this.#create(by, command.commandId, id, scope, target.projectId, "force-stop", reason);
+    } else {
+      const ref: AggregateRef = { kind: FORCE_REF, id: mine };
+      await this.#runner.command("stop.force-ref", { commandId: `stop-fref-${mine.slice(4)}`, actor: by.id }, async () => ({ payload: { intentId: id! }, build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: { intentId: id! } }], detail: {} }) }));
     }
     await this.#update(id!, (b) => ({ ...b, mode: "force-stop", phase: "terminating", forced: { by: by.id, reason, at: this.#runner.now() }, blocked: undefined, history: this.#push(b, "terminating", by.id, `force stop: ${reason}`) }), ["preparing", "blocked", "prepared", "terminating"]);
     await this.advance(by, { intentId: id! });
@@ -201,13 +208,14 @@ export class StopService {
     for (let step = 0; step < STOP_LIMITS.advances; step++) {
       const found = (await this.#runner.get(KIND, id))!;
       const b = found.body as unknown as StopIntentBody;
-      if (TERMINAL.includes(b.phase) || b.phase === "blocked") return view<StopIntentBody>(found);
+      if (TERMINAL.includes(b.phase)) return view<StopIntentBody>(found);
       if (b.forced === undefined && (await this.#pauses.gate(by, b.scope))?.intent !== "pause") {
-        // Somebody resumed the scope before the request finished: the request is over and nothing more is done for it; what preparation froze is let go.
-        await this.#update(id, (x) => ({ ...x, phase: "cancelled", blocked: undefined, history: this.#push(x, "cancelled", by.id, "the scope was resumed before the request finished") }), LIVE);
+        // Somebody resumed the scope before the request finished (blocked or not): the request is over and nothing more is done for it; what preparation froze is let go.
+        await this.#update(id, (x) => (x.forced !== undefined ? x : { ...x, phase: x.phase === "terminating" ? "recovery-required" : "cancelled", blocked: undefined, history: this.#push(x, x.phase === "terminating" ? "recovery-required" : "cancelled", by.id, "the scope was resumed before the request finished") }), LIVE);
         await this.#ports.release?.(b.scope).catch(() => undefined);
         continue;
       }
+      if (b.phase === "blocked") return view<StopIntentBody>(found);
       const now = this.#runner.now();
       if (b.phase === "preparing") {
         await this.#observe(by, b.scope, id, "preparing-to-suspend", "preparing to suspend");
@@ -280,7 +288,7 @@ export class StopService {
       for (const rec of page) {
         after = rec.id;
         const b = rec.body as unknown as StopIntentBody;
-        if (TERMINAL.includes(b.phase) || b.phase === "blocked") continue;
+        if (TERMINAL.includes(b.phase)) continue;
         try { await this.advance(by, { intentId: rec.id }); advanced.push(rec.id); } catch { failed.push(rec.id); }
       }
       if (page.length < 100) break;

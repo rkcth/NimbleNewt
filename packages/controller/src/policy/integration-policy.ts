@@ -90,6 +90,11 @@ export class IntegrationPolicyService {
     for (const key of Object.keys(given)) if (!["landing", "integrator", "requiredChecks", "refreshRounds"].includes(key)) invalid(`integration.${key}`, "is not a field of the integration section");
     const parsed = parse(given, ["landing", "integrator", "requiredChecks", "refreshRounds"]);
     if (parsed.landing === "main-automatic" && (await this.#locked())) throw new DomainError("forbidden", "the installation forbids landing on main automatically; the owner lifts that lock first");
+    // The same merge `ensure` makes (what is given over the installation default over the profile), judged whole: "main-automatic needs a required check" depends on the other fields too.
+    const def = (await this.#runner.get(DEFAULT_REF.kind, DEFAULT_REF.id))?.body as unknown as IntegrationDefaultBody | undefined;
+    const base = profileDefaults(await this.#profile());
+    const landing = parsed.landing ?? def?.landing ?? base.landing; const checks = parsed.requiredChecks ?? def?.requiredChecks ?? base.requiredChecks;
+    if (landing === "main-automatic" && checks.length === 0) invalid("requiredChecks", "main-automatic needs at least one check");
   }
 
   /** Makes the project's record if it has none (a no-op otherwise), from the installation default or the profile. Called when a project is created and when the policy is first read. */
