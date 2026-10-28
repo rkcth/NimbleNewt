@@ -24,6 +24,7 @@ import type { ProtectedBranchService } from "../policy/protected-branches.js";
 import { BuiltinCommands, type CommandService } from "../commands/index.js";
 
 import type { WorkingNoteService } from "../context/notes.js";
+import type { StopChoice, StopService } from "../lifecycle/stop.js";
 import type { IntegrationPolicyService } from "../policy/integration-policy.js";
 import type { Principal } from "../security/principals.js";
 import type { SecureApi } from "../security/secured.js";
@@ -59,6 +60,9 @@ export interface Context {
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set">;
   readonly notes?: Pick<WorkingNoteService, "write" | "revise" | "setVisibility" | "read" | "versions" | "list">;
   readonly integration?: Pick<IntegrationPolicyService, "get" | "set" | "getDefault" | "setDefault" | "ensure" | "precheck">;
+
+  readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep">;
+  readonly integration?: Pick<IntegrationPolicyService, "get" | "set" | "getDefault" | "setDefault" | "ensure">;
 
   readonly commands?: CommandService;
   /** Runs another operation as the same principal (card T09b); its answer, success or not, comes back whole. */
@@ -128,6 +132,7 @@ const plans = (c: Context): ProjectPlanService => c.plans ?? unavailable("projec
 const ownerQuestionsOf = (c: Context): NonNullable<Context["ownerQuestions"]> => c.ownerQuestions ?? unavailable("questions to the owner");
 const branchesOf = (c: Context): ContextBranchService => c.branches ?? unavailable("context branches");
 const notesOf = (c: Context): NonNullable<Context["notes"]> => c.notes ?? unavailable("working notes");
+const stopsOf = (c: Context): NonNullable<Context["stops"]> => c.stops ?? unavailable("suspend and stop");
 const integrationOf = (c: Context): NonNullable<Context["integration"]> => c.integration ?? unavailable("integration policy");
 const branchSettingsOf = (c: Context): NonNullable<Context["branchSettings"]> => c.branchSettings ?? unavailable("branch settings");
 
@@ -205,6 +210,19 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, ["noteId", "viaProject"]); return asJson({ items: await notesOf(c).versions(c.principal, a["noteId"] as string, a["viaProject"] === undefined ? {} : { viaProject: a["viaProject"] as string }) }); } },
   { name: "note.list", kind: "query", summary: "Working notes the caller may read, in ID order.", args: { "projectId?": "only this project's", "ownerId?": "only this agent's", "viaProject?": "one of the caller's own projects, when reading across an opened path", "limit?": `1 to ${PAGE.max}`, "after?": "the `next` of the previous page" }, result: "`{ items, next? }`.", completion: { kind: "completed" },
     run: async (c, a) => { only(a, ["projectId", "ownerId", "viaProject", "limit", "after"]); const { limit: _l, after, ...rest } = a as Record<string, unknown>; return page(await notesOf(c).list(c.principal, { ...rest, limit: limitOf(a), ...(after === undefined ? {} : { afterId: after as string }) } as never)); } },
+  // Suspend and Stop (card L02). Whoever may pause the scope may ask; everyone else is refused.
+  { name: "lifecycle.stop", kind: "command", summary: "Suspends or stops a task, an agent, a team or the installation: it is paused at once, prepared inside a deadline (scoped cleanup only), and called suspended only after a durable checkpoint; a stop then ends execution. Assignments and the task goal are untouched and nothing is resumed. The first steps run now; the answer says where it stands, and `blocked` lists the choices when work will not settle.", args: { scope: "`{ kind: task|agent|team|installation, id }`", mode: "`suspend` or `stop`", reason: "why, in words", "deadlineMs?": "preparation deadline in milliseconds (default 60,000; at most one hour)", "spendBudget?": "most the cleanup may spend" }, result: "`{ intentId, replayed, phase, outcome?, blocked? }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["scope", "mode", "reason", "deadlineMs", "spendBudget"]); const s = stopsOf(c); const r = await s.request(c.principal, { commandId: need(id), ...a } as never); const v = await s.advance(c.principal, { intentId: r.intentId }); return asJson({ intentId: r.intentId, replayed: r.replayed, phase: v.phase, ...(v.outcome === undefined ? {} : { outcome: v.outcome }), ...(v.blocked === undefined ? {} : { blocked: v.blocked }) }); } },
+  { name: "lifecycle.force", kind: "command", summary: "Force Stop: ends execution without waiting for cleanup. Explicit and recorded as forced; unresolved work is reported and the result is `recovery-required`, never a graceful stop.", args: { scope: "`{ kind, id }`", reason: "why, in words" }, result: "`{ intentId, outcome }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["scope", "reason"]); return asJson(await stopsOf(c).force(c.principal, { commandId: need(id), ...a } as never)); } },
+  { name: "lifecycle.choose", kind: "command", summary: "Answers a blocked suspension or stop: `wait` (more time), `restart-earlier-boundary` (the scope is never called suspended) or `force-stop`.", args: { intentId: "the request", choice: "`wait`, `restart-earlier-boundary` or `force-stop`", "extendMs?": "for wait, how much longer", "reason?": "for force-stop, why" }, result: "`{ phase }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["intentId", "choice", "extendMs", "reason"]); return asJson(await stopsOf(c).choose(c.principal, { commandId: need(id), ...a, choice: a["choice"] as StopChoice } as never)); } },
+  { name: "lifecycle.advance", kind: "command", summary: "Takes a suspension or stop as far as it can go now (the controller does this itself after a restart).", args: { intentId: "the request" }, result: "`{ item }`.", completion: { kind: "completed" },
+    run: async (c, a) => { only(a, ["intentId"]); return asJson({ item: await stopsOf(c).advance(c.principal, { intentId: a["intentId"] as string }) }); } },
+  { name: "lifecycle.get", kind: "query", summary: "A suspension or stop request: its phase, mode, inventory, what blocks it, its outcome (graceful or forced) and history.", args: { intentId: "the request" }, result: "`{ item }` or not found.", completion: { kind: "completed" },
+    run: async (c, a) => { only(a, ["intentId"]); const item = await stopsOf(c).get(c.principal, a["intentId"] as string); if (item === undefined) throw new DomainError("not_found", "no such request"); return asJson({ item }); } },
+  { name: "lifecycle.sweep", kind: "command", summary: "Carries every unfinished suspension or stop on (owner only; the controller runs this after a restart).", args: {}, result: "`{ advanced }`.", completion: { kind: "completed" },
+    run: async (c, a) => { only(a, []); if (c.principal.kind !== "owner") throw new DomainError("forbidden", "only the owner sweeps lifecycle requests"); return asJson(await stopsOf(c).sweep(c.principal)); } },
   { name: "grant.revoke", kind: "command", summary: "The owner takes a grant back (owner only; the revision you read must still be current). It stops counting at the next check.", args: { grantId: "the grant's ID", expectedRevision: "the revision you read", reason: "why, in the owner's words" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["grantId", "expectedRevision", "reason"]); await grantsOf(c).revoke(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
   { name: "events.configure-idle", kind: "command", summary: "Sets how long an event subscription may sit without acknowledging before it expires (owner only). A subscription that was made before this existed, or without its own time, uses this one.", args: { idleSeconds: "whole seconds, 10 to 604800" }, result: "`{ ok: true }`.", completion: { kind: "completed" },

@@ -154,6 +154,18 @@ Result: `{ items, next? }`.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `lifecycle.get`
+
+A suspension or stop request: its phase, mode, inventory, what blocks it, its outcome (graceful or forced) and history.
+
+Arguments:
+
+- `intentId`: the request
+
+Result: `{ item }` or not found.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `budget.report`
 
 A task's budget: limit, delegated to children, in flight, uncertain, spent, overrun and available, for money and for compute, with the reservations and open requests behind them. A task you may not read reads like a missing one.
@@ -888,6 +900,74 @@ Arguments:
 - `visibility`: `shared` or `private`
 
 Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `lifecycle.stop`
+
+Suspends or stops a task, an agent, a team or the installation: it is paused at once, prepared inside a deadline (scoped cleanup only), and called suspended only after a durable checkpoint; a stop then ends execution. Assignments and the task goal are untouched and nothing is resumed. The first steps run now; the answer says where it stands, and `blocked` lists the choices when work will not settle.
+
+Arguments:
+
+- `scope`: `{ kind: task|agent|team|installation, id }`
+- `mode`: `suspend` or `stop`
+- `reason`: why, in words
+- `deadlineMs` (optional): preparation deadline in milliseconds (default 60,000; at most one hour)
+- `spendBudget` (optional): most the cleanup may spend
+
+Result: `{ intentId, replayed, phase, outcome?, blocked? }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `lifecycle.force`
+
+Force Stop: ends execution without waiting for cleanup. Explicit and recorded as forced; unresolved work is reported and the result is `recovery-required`, never a graceful stop.
+
+Arguments:
+
+- `scope`: `{ kind, id }`
+- `reason`: why, in words
+
+Result: `{ intentId, outcome }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `lifecycle.choose`
+
+Answers a blocked suspension or stop: `wait` (more time), `restart-earlier-boundary` (the scope is never called suspended) or `force-stop`.
+
+Arguments:
+
+- `intentId`: the request
+- `choice`: `wait`, `restart-earlier-boundary` or `force-stop`
+- `extendMs` (optional): for wait, how much longer
+- `reason` (optional): for force-stop, why
+
+Result: `{ phase }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `lifecycle.advance`
+
+Takes a suspension or stop as far as it can go now (the controller does this itself after a restart).
+
+Arguments:
+
+- `intentId`: the request
+
+Result: `{ item }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `lifecycle.sweep`
+
+Carries every unfinished suspension or stop on (owner only; the controller runs this after a restart).
+
+Arguments:
+
+- none
+
+Result: `{ advanced }`.
 
 Completion: finished when accepted (`completed: true`).
 

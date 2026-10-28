@@ -22,6 +22,7 @@ import type { GrantService } from "../security/grants.js";
 import type { PlacementSettingsService } from "../remote/placement-settings.js";
 import type { ProtectedBranchService } from "../policy/protected-branches.js";
 import type { WorkingNoteService } from "../context/notes.js";
+import type { StopService } from "../lifecycle/stop.js";
 import type { IntegrationPolicyService } from "../policy/integration-policy.js";
 
 import type { CommandService } from "../commands/index.js";
@@ -85,6 +86,9 @@ export interface StateApiDeps {
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set">;
   readonly notes?: Pick<WorkingNoteService, "write" | "revise" | "setVisibility" | "read" | "versions" | "list">;
   readonly integration?: Pick<IntegrationPolicyService, "get" | "set" | "getDefault" | "setDefault" | "ensure" | "precheck">;
+
+  readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep">;
+  readonly integration?: Pick<IntegrationPolicyService, "get" | "set" | "getDefault" | "setDefault" | "ensure">;
 
   /** Typed commands (card T09b). Absent: `command.run` answers as unavailable. */
   readonly commands?: CommandService;
@@ -168,6 +172,7 @@ export class StateApi {
         ...(this.#deps.branchSettings === undefined ? {} : { branchSettings: this.#deps.branchSettings }),
         ...(this.#deps.integration === undefined ? {} : { integration: this.#deps.integration }),
         ...(this.#deps.notes === undefined ? {} : { notes: this.#deps.notes }),
+        ...(this.#deps.stops === undefined ? {} : { stops: this.#deps.stops }),
 
         ...(this.#deps.spill === undefined ? {} : { spill: this.#deps.spill }),
         ...(this.#deps.events === undefined ? {} : { events: this.#deps.events }),

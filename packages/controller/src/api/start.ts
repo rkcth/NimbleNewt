@@ -44,7 +44,7 @@ import { StatusService } from "../status/index.js";
 import { ChatService, CoordinatorService, type ChatInterpreter, type CoordinatorModel } from "../chat/index.js";
 import { ContextBranchService } from "../branches/index.js";
 import { JobService } from "../jobs/index.js";
-import { PauseService } from "../lifecycle/index.js";
+import { PauseService, StopService, dispatchStopPorts } from "../lifecycle/index.js";
 import { ReviewService } from "../review/index.js";
 import { DifficultyService, RoutingService } from "../routing/index.js";
 import { WorkspaceOpService } from "../workspace-ops/index.js";
@@ -295,7 +295,8 @@ export async function startController(options: StartOptions): Promise<Controller
     const commands = CommandService.withEpoch(storage, epoch, BUILTIN_COMMANDS.source(catalogSource(CatalogService.withEpoch(storage, epoch, desks))));
     const integration = IntegrationPolicyService.withEpoch(storage, epoch);
     const notes = WorkingNoteService.withEpoch(storage, epoch);
-    const api = new StateApi({ status, branchSettings, commands, integration, notes, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size) }, watches: watchService, events: EventService.withEpoch(storage, epoch), budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
+    const stops = StopService.withEpoch(storage, epoch, pauses, dispatchStopPorts(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal })));
+    const api = new StateApi({ status, branchSettings, commands, integration, notes, stops, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size) }, watches: watchService, events: EventService.withEpoch(storage, epoch), budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
     let chat: ChatService | undefined;
     let coordinator: CoordinatorService | undefined;
     if (options.chat !== undefined) {

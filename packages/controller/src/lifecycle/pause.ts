@@ -606,6 +606,11 @@ export class PauseService implements PauseGuard, PauseLookup {
     return level !== "control" && scope.kind === "agent" && p.taskScope === undefined && p.id === `agent:${scope.id}`;
   }
 
+  /** Whether the principal may control the scope (pause, suspend, stop it), and that the scope exists: the same check Pause uses (card L02). */
+  async authorizeControl(principal: Principal, scope: PauseScope): Promise<{ projectId?: string }> {
+    return this.#authorize(principal, checkScope(scope), "control", false);
+  }
+
   /** Checks authority first (an unauthorized caller learns nothing about the target), then that the target exists. */
   async #authorize(principal: Principal, scope: PauseScope, level: "control" | "observe", mustBeActive: boolean): Promise<{ projectId?: string }> {
     if (!(await this.#may(principal, scope, level))) throw new DomainError("forbidden", `${principal.id} may not ${level === "control" ? "pause or resume" : "report on"} that ${scope.kind}`);
