@@ -3,10 +3,14 @@ import { derivedId } from "../domain/ids.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { Principal } from "../security/principals.js";
-import type { ControllerStorage, JsonObject } from "../storage/types.js";
+import type { Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { BudgetService } from "./budgets.js";
 
 export const CHARGE_RETRY_KIND = "charge-retry";
+/** One record listing the charges still waiting, so a sweep reads those and not every charge ever kept. */
+const INDEX_KIND = "charge-retry-index";
+const INDEX_ID = "pending";
+interface IndexBody { readonly ids: readonly string[] }
 /** The charge exactly as `BudgetService.charge` takes it. Its command ID makes a retry count once. */
 export type ChargeRequest = Parameters<BudgetService["charge"]>[1];
 
@@ -63,21 +67,19 @@ export class ChargeRetryService {
     const now = this.#runner.now();
     const out = { booked: 0, later: 0, dropped: 0 };
     let handled = 0;
-    let seen = 0;
-    for (let after: string | undefined; seen < CHARGE_RETRY_LIMITS.scan && handled < CHARGE_RETRY_LIMITS.perSweep;) {
-      const page = await this.#runner.list(CHARGE_RETRY_KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
-      for (const found of page) {
-        after = found.id; seen++;
-        const body = found.body as unknown as RetryBody;
-        if (body.state !== "pending" || body.nextAt > now || handled >= CHARGE_RETRY_LIMITS.perSweep) continue;
-        handled++;
-        const result = await this.#try(by, found.id, found.revision, body);
-        out[result]++;
-      }
-      if (page.length < 200) break;
+    for (const id of (await this.#pendingIds()).slice(0, CHARGE_RETRY_LIMITS.scan)) {
+      if (handled >= CHARGE_RETRY_LIMITS.perSweep) break;
+      const found = await this.#runner.get(CHARGE_RETRY_KIND, id);
+      if (found === undefined) continue;
+      const body = found.body as unknown as RetryBody;
+      if (body.state !== "pending" || body.nextAt > now) continue;
+      handled++;
+      out[await this.#try(by, id, found.revision, body)]++;
     }
     return out;
   }
+
+  async #pendingIds(): Promise<readonly string[]> { return ((await this.#runner.get(INDEX_KIND, INDEX_ID))?.body as unknown as IndexBody | undefined)?.ids ?? []; }
 
   /** The charges still waiting or given up on, for the owner. */
   async unsettled(by: Principal): Promise<{ id: string; body: RetryBody }[]> {
@@ -121,13 +123,22 @@ export class ChargeRetryService {
           const current = await this.#runner.get(CHARGE_RETRY_KIND, id);
           // Kept already (the same charge failed again): leave the earlier record and its count.
           if (current !== undefined) return { ref, creates: false, changes: [{ type: "check" as const, ref, expectedRevision: current.revision }], detail: { id } };
-          return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }], detail: { id } };
+          return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }, ...(await this.#indexChange((ids) => (ids.includes(id) ? ids : [...ids, id])))], detail: { id } };
         },
       }));
     } catch (kept) {
       // The charge could not even be kept (the store is down as well): it is lost, and the host is told.
       this.#options.onDropped?.({ commandId: charge.commandId, reason: `could not be kept for a retry: ${describe(kept)}` });
     }
+  }
+
+  /** The change that brings the index of waiting charges to what `edit` makes of it, guarded by the revision read. */
+  async #indexChange(edit: (ids: readonly string[]) => readonly string[]): Promise<readonly Change[]> {
+    const ref = { kind: INDEX_KIND, id: INDEX_ID };
+    const current = await this.#runner.get(INDEX_KIND, INDEX_ID);
+    const ids = edit(((current?.body as unknown as IndexBody | undefined)?.ids) ?? []);
+    const body = { ids } as unknown as JsonObject;
+    return [current === undefined ? { type: "create", ref, body } : { type: "update", ref, expectedRevision: current.revision, body }];
   }
 
   async #end(id: string, revision: number, body: RetryBody, state: "settled" | "dropped", lastError: string): Promise<void> {
@@ -147,7 +158,7 @@ export class ChargeRetryService {
         payload: { id, step },
         build: async () => {
           const ref = { kind: CHARGE_RETRY_KIND, id };
-          return { ref, creates: false, changes: [{ type: "update" as const, ref, expectedRevision: revision, body: next as unknown as JsonObject }], detail: { id, state: next.state } };
+          return { ref, creates: false, changes: [{ type: "update" as const, ref, expectedRevision: revision, body: next as unknown as JsonObject }, ...(next.state === "pending" ? [] : await this.#indexChange((ids) => ids.filter((x) => x !== id)))], detail: { id, state: next.state } };
         },
       }));
     } catch (error) {
