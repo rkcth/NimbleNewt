@@ -33,20 +33,21 @@ export function isProtectedBy(list: readonly string[], branch: string): boolean 
  */
 export function normalBranch(name: string): string | undefined {
   let b = name.startsWith("refs/heads/") ? name.slice("refs/heads/".length) : name;
-  if (b === "" || b.startsWith("heads/") || b.startsWith("refs/") || b.endsWith("/") || b.startsWith("/") || b.includes("//") || b.includes("..")) return undefined;
+  if (b === "" || b === "@" || b.toLowerCase() === "head" || b.startsWith("heads/") || b.startsWith("refs/") || b.startsWith("-") || b.startsWith("/") || b.endsWith("/") || b.endsWith(".") || b.endsWith(".lock") || b.includes("//") || b.includes("..") || b.includes("@{") || /[\s~^:?*\[\\\x00-\x1f\x7f]/.test(b)) return undefined;
   b = b.toLowerCase();
   return b;
 }
 
-/** The branch(es) a call's arguments name: `branch`, `ref`, `refspec`, `to`, `destination`, `target` as plain strings (for a refspec, the part after the colon). Used to hold the call to the branch it declared. */
+/** Every string in a call's arguments, at any depth (for a refspec, the part after the colon): any of them may be the branch the tool really pushes to, so each must be the declared one. Used to hold the call to it. */
 export function branchesNamedIn(args: unknown): string[] {
   const out: string[] = [];
-  if (args === null || typeof args !== "object" || Array.isArray(args)) return out;
-  for (const key of ["branch", "ref", "refspec", "to", "destination", "target"]) {
-    const v = (args as Record<string, unknown>)[key];
+  const walk = (v: unknown, depth: number): void => {
+    if (depth > 6) { out.push(""); return; }
     if (typeof v === "string") out.push(v.includes(":") ? v.slice(v.lastIndexOf(":") + 1) : v);
-    else if (Array.isArray(v)) for (const x of v) if (typeof x === "string") out.push(x.includes(":") ? x.slice(x.lastIndexOf(":") + 1) : x);
-  }
+    else if (Array.isArray(v)) for (const x of v) walk(x, depth + 1);
+    else if (v !== null && typeof v === "object") for (const x of Object.values(v)) walk(x, depth + 1);
+  };
+  walk(args, 0);
   return out;
 }
 

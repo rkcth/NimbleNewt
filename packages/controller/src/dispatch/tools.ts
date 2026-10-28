@@ -217,10 +217,17 @@ export class ToolPath {
     // Which branch a push or merge changes, and whether it is protected, is the controller's to say: the worker's own flag is used only where no controller question was wired (card A07f).
     const branch = c.target?.kind === "branch" ? c.target.id : undefined;
     // The call is held to the branch it declared: arguments that name a different branch, or one that cannot be read as a branch, make the call a protected one (asked of the owner), whatever the target says.
-    const named = branchesNamedIn(c.args);
     const declared = branch === undefined ? undefined : normalBranch(branch);
-    const disagrees = (cls === "push" || cls === "merge") && named.some((n) => declared === undefined || normalBranch(n) !== declared);
-    const branchProtected = this.#deps.protectedBranch !== undefined && (cls === "push" || cls === "merge") ? (disagrees ? true : await this.#deps.protectedBranch(d.projectId, branch)) : this.#deps.protectedBranch !== undefined ? false : c.branchProtected;
+    let disagrees = false;
+    if ((cls === "push" || cls === "merge") && this.#deps.protectedBranch !== undefined) {
+      // Any string in the arguments that reads as another branch, and is a protected one, makes the call a protected one: a tool may push to a branch the arguments name whatever target was declared.
+      for (const leaf of [...new Set(branchesNamedIn(c.args))].slice(0, 50)) {
+        const n = normalBranch(leaf);
+        if (n === undefined || n === declared) continue;
+        if (await this.#deps.protectedBranch(d.projectId, leaf)) { disagrees = true; break; }
+      }
+    }
+    const branchProtected = this.#deps.protectedBranch !== undefined && (cls === "push" || cls === "merge") ? (disagrees || declared === undefined ? true : await this.#deps.protectedBranch(d.projectId, branch)) : this.#deps.protectedBranch !== undefined ? false : c.branchProtected;
     const decision = await this.#deps.policy.evaluate({
       principalId: d.agentId, projectId: d.projectId, tool: c.tool.name, taskId: d.taskId,
       ...(c.target === undefined ? {} : { targetKind: c.target.kind }), ...(c.environment === undefined ? {} : { environment: c.environment }), ...(c.estimatedSpend === undefined ? {} : { estimatedSpend: c.estimatedSpend }),

@@ -1,3 +1,4 @@
+import { isProtectedBy } from "../policy/protected-branches.js";
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
@@ -425,7 +426,7 @@ for (const backend of backends) {
     await c.policy.set(c.owner, { scope: "installation", commandId: "pol", profile: "derived" });
     void taskId; // no contract names the tools: an instruction that names a tool by name would itself cover a protected branch
     const asked: Array<[string, string | undefined]> = [];
-    c.dispatcher = c.restart({ protectedBranch: async (_project: string, branch: string | undefined) => { asked.push(["q", branch]); return branch === undefined || branch === "main"; } } as never);
+    c.dispatcher = c.restart({ protectedBranch: async (_project: string, branch: string | undefined) => { asked.push(["q", branch]); return branch === undefined || isProtectedBy(["main"], branch); } } as never);
     const r: Record<string, ToolResult> = {};
     const push = (label: string, tool: string, extra: Record<string, unknown>) => async (gateway: { call: Function }) => { await gateway.call({ callId: label, tool: { name: tool, version: "1" }, args: { x: label }, ...extra }, { kind: "effect", effectKind: "git-push", target: "repo", input: {}, bridge: { idempotent: true, execute: async () => ({}) } }).then((v: ToolResult) => { r[label] = v; }); };
     const steps = [
@@ -435,6 +436,7 @@ for (const backend of backends) {
       push("claimed", "git-push", { target: { kind: "branch", id: "feature-x" }, branchProtected: true }),
       push("mismatch", "git-push", { target: { kind: "branch", id: "feature-y" }, args: { branch: "main" } }),
       push("refspec", "git-push", { target: { kind: "branch", id: "feature-z" }, args: { refspec: "HEAD:refs/heads/main" } }),
+      push("nested", "git-push", { target: { kind: "branch", id: "feature-u" }, args: { argv: ["push", "origin", "HEAD:main"] } }),
       push("agrees", "git-push", { target: { kind: "branch", id: "feature-v" }, args: { branch: "Feature-V" } }),
     ];
     c.worker.script = async ({ gateway }) => { for (const step of steps) await step(gateway); return { status: "completed", text: "x" }; };
@@ -446,6 +448,7 @@ for (const backend of backends) {
     assert.equal(r["claimed"]!.state, "confirmed", "a true flag on an unprotected branch decides nothing either");
     assert.equal(r["mismatch"]!.state, "awaiting-approval", "a branch in the arguments that is not the declared one makes it a protected call");
     assert.equal(r["refspec"]!.state, "awaiting-approval", "a refspec to main behind another target is caught");
+    assert.equal(r["nested"]!.state, "awaiting-approval", "a destination anywhere in the arguments is caught");
     assert.equal(r["agrees"]!.state, "confirmed", "arguments that name the declared branch (case folded) change nothing");
     assert.ok(asked.some((a) => a[1] === "feature-x"));
   });
