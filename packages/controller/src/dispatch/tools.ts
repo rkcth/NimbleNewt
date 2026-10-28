@@ -12,6 +12,7 @@ import { redactText } from "../security/redact.js";
 import type { Principal } from "../security/principals.js";
 import { canonicalJson, sha256 } from "../storage/json.js";
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
+import { branchesNamedIn, normalBranch } from "../policy/protected-branches.js";
 import type { DispatcherDeps } from "./dispatcher.js";
 import { DISPATCHER_ACTOR, DISPATCH_LIMITS, TERMINAL, checkCallId, checkToolName, operationKind, type DispatchBody, type OperationState, type ToolIdentity, type ToolOperationBody } from "./model.js";
 import type { ToolCallRequest, ToolExecutor, ToolResult, WorkerHandle } from "./ports.js";
@@ -215,7 +216,11 @@ export class ToolPath {
     // The approval policy, only through `PolicyService.evaluate`, with the spend so far from accounting.
     // Which branch a push or merge changes, and whether it is protected, is the controller's to say: the worker's own flag is used only where no controller question was wired (card A07f).
     const branch = c.target?.kind === "branch" ? c.target.id : undefined;
-    const branchProtected = this.#deps.protectedBranch !== undefined && (cls === "push" || cls === "merge") ? await this.#deps.protectedBranch(d.projectId, branch) : this.#deps.protectedBranch !== undefined ? false : c.branchProtected;
+    // The call is held to the branch it declared: arguments that name a different branch, or one that cannot be read as a branch, make the call a protected one (asked of the owner), whatever the target says.
+    const named = branchesNamedIn(c.args);
+    const declared = branch === undefined ? undefined : normalBranch(branch);
+    const disagrees = (cls === "push" || cls === "merge") && named.some((n) => declared === undefined || normalBranch(n) !== declared);
+    const branchProtected = this.#deps.protectedBranch !== undefined && (cls === "push" || cls === "merge") ? (disagrees ? true : await this.#deps.protectedBranch(d.projectId, branch)) : this.#deps.protectedBranch !== undefined ? false : c.branchProtected;
     const decision = await this.#deps.policy.evaluate({
       principalId: d.agentId, projectId: d.projectId, tool: c.tool.name, taskId: d.taskId,
       ...(c.target === undefined ? {} : { targetKind: c.target.kind }), ...(c.environment === undefined ? {} : { environment: c.environment }), ...(c.estimatedSpend === undefined ? {} : { estimatedSpend: c.estimatedSpend }),

@@ -2177,3 +2177,9 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - Approval grants gain the term `branches` (exact names, no wildcard). For a protected push or merge, an approval waives asking only if it names that branch (a grant that names none, or another, or a call that names no branch cannot); a standing grant still never waives it, and an owner instruction that names the tool by name keeps its earlier effect.
 - Tests: `policy/engine.test.ts`, `policy/policy.test.ts` (the `branches` term), `dispatch/dispatcher.test.ts` (false, missing and unnamed flags on main still ask; a true flag on an unprotected branch decides nothing), `api/start-branches.test.ts` (settings, defaults, owner only). Mutations (flag used again, unnamed treated as unprotected, branch-naming rule removed) killed.
 - Not done: the chat's grant proposal cannot set `branches` yet (the owner uses the API); the landing service's own branch-scoped grant is P08/P10c.
+
+### A07f review fixes (2026-10-28)
+- Branch names are read as git reads them (`normalBranch`): `refs/heads/x` is `x`, case is folded, and `heads/x`, `refs/…` others, a leading/trailing/doubled slash have no single reading and count as protected.
+- A push or merge is held to the branch it declared: if its arguments (`branch`, `ref`, `refspec` destination, `to`, `destination`, `target`) name another branch, or the declared one cannot be read, the call is a protected one and asks the owner.
+- Open (owner question): a contract's named permission (`tool.git-push`) still covers a protected branch without naming it. Not changed here.
+- Known gap (own card): `exec`/`shell` calls that run `git push` are classed as workspace edits and never meet this rule. Tests drive the dispatcher with a stub for the question; the composed wiring in `dispatch-compose.ts` is checked by `start-branches`' settings only.

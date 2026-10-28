@@ -433,6 +433,9 @@ for (const backend of backends) {
       push("omitted", "git-push", { target: { kind: "branch", id: "main" } }),
       push("unnamed", "git-merge", { branchProtected: false }),
       push("claimed", "git-push", { target: { kind: "branch", id: "feature-x" }, branchProtected: true }),
+      push("mismatch", "git-push", { target: { kind: "branch", id: "feature-y" }, args: { branch: "main" } }),
+      push("refspec", "git-push", { target: { kind: "branch", id: "feature-z" }, args: { refspec: "HEAD:refs/heads/main" } }),
+      push("agrees", "git-push", { target: { kind: "branch", id: "feature-v" }, args: { branch: "Feature-V" } }),
     ];
     c.worker.script = async ({ gateway }) => { for (const step of steps) await step(gateway); return { status: "completed", text: "x" }; };
     await c.run();
@@ -441,7 +444,10 @@ for (const backend of backends) {
     assert.equal(r["unnamed"]!.state, "awaiting-approval", "a merge that names no branch is treated as protected");
     assert.match((r["falsified"] as { reason: string }).reason, /protected branch/);
     assert.equal(r["claimed"]!.state, "confirmed", "a true flag on an unprotected branch decides nothing either");
-    assert.deepEqual(asked.map((a) => a[1]).sort(), [undefined, "feature-x", "main", "main"].sort());
+    assert.equal(r["mismatch"]!.state, "awaiting-approval", "a branch in the arguments that is not the declared one makes it a protected call");
+    assert.equal(r["refspec"]!.state, "awaiting-approval", "a refspec to main behind another target is caught");
+    assert.equal(r["agrees"]!.state, "confirmed", "arguments that name the declared branch (case folded) change nothing");
+    assert.ok(asked.some((a) => a[1] === "feature-x"));
   });
 
   const deferred = <T = void>() => { let resolve!: (v: T) => void; const promise = new Promise<T>((r) => { resolve = r; }); return { promise, resolve }; };

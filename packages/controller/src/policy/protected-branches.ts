@@ -22,7 +22,32 @@ export interface BranchSettingsBody {
 
 /** Whether a branch is protected by a list of names and `prefix/*` patterns. Pure. */
 export function isProtectedBy(list: readonly string[], branch: string): boolean {
-  return list.some((p) => (p.endsWith("/*") ? branch.startsWith(p.slice(0, -1)) : p === branch));
+  const b = normalBranch(branch);
+  if (b === undefined) return true;
+  return list.some((raw) => { const p = raw.toLowerCase(); return p.endsWith("/*") ? b.startsWith(p.slice(0, -1)) : p === b; });
+}
+
+/**
+ * The branch a name means, the way git would resolve it, lower-cased (a file system or a host may fold case, so `Main` is `main`). `refs/heads/x` is `x`. A name git would read another way (`heads/x`, a trailing or doubled
+ * slash, `refs/...` other than heads) has no single meaning here: undefined, which callers treat as protected.
+ */
+export function normalBranch(name: string): string | undefined {
+  let b = name.startsWith("refs/heads/") ? name.slice("refs/heads/".length) : name;
+  if (b === "" || b.startsWith("heads/") || b.startsWith("refs/") || b.endsWith("/") || b.startsWith("/") || b.includes("//") || b.includes("..")) return undefined;
+  b = b.toLowerCase();
+  return b;
+}
+
+/** The branch(es) a call's arguments name: `branch`, `ref`, `refspec`, `to`, `destination`, `target` as plain strings (for a refspec, the part after the colon). Used to hold the call to the branch it declared. */
+export function branchesNamedIn(args: unknown): string[] {
+  const out: string[] = [];
+  if (args === null || typeof args !== "object" || Array.isArray(args)) return out;
+  for (const key of ["branch", "ref", "refspec", "to", "destination", "target"]) {
+    const v = (args as Record<string, unknown>)[key];
+    if (typeof v === "string") out.push(v.includes(":") ? v.slice(v.lastIndexOf(":") + 1) : v);
+    else if (Array.isArray(v)) for (const x of v) if (typeof x === "string") out.push(x.includes(":") ? x.slice(x.lastIndexOf(":") + 1) : x);
+  }
+  return out;
 }
 
 /**
