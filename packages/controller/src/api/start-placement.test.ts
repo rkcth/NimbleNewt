@@ -64,7 +64,8 @@ test("local-only data goes to the hosts the approval profile and the owner's set
     const attempt0 = await newTask(0);
     const waiting = await c.dispatch.dispatcher.tick();
     assert.deepEqual(waiting.started, [], "no host may hold the data yet");
-    assert.match((await c.dispatch.dispatcher.get(rob, attempt0))!.outcome!.summary, /data is local-only and the data-location policy does not list host:/, "the placement itself refused it");
+    // Since H07e the host is passed over before a place is asked: the plan says why, and the attempt waits (it does not fail).
+    assert.match(waiting.skipped.find((x) => x.attemptId === attempt0)?.reason ?? "", /data is local-only and the data-location policy does not list host:/, "the policy refused it");
     for (const h of hosts) assert.equal((await clients.get(h)!.offers()).length, 0, `${h} was offered nothing`);
     const set1 = await call(boot.token, "placement.set", { allow: ["host:pc"], expectedRevision: 0 }, "pl1");
     assert.ok(set1.ok, JSON.stringify(set1));
@@ -73,7 +74,7 @@ test("local-only data goes to the hosts the approval profile and the owner's set
     assert.equal((await call(boot.token, "placement.set", { allow: ["pc"] }, "pl3")).error?.code, "invalid_command");
     assert.equal((await call(boot.token, "placement.set", {}, "pl4")).error?.code, "invalid_command");
     // The placement itself, not only the list of candidates: a task whose data is local-only starts on the listed host and nowhere else.
-    const attempt1 = await newTask(1);
+    const attempt1 = attempt0; // the attempt that waited starts as soon as a host is listed
     const report = await c.dispatch!.dispatcher.tick();
     assert.deepEqual(report.started, [attempt1], JSON.stringify(report.failures));
     assert.equal((await c.dispatch!.remote!.placement(rob, attempt1))!.hostId, "host:pc", "the listed host got it");
