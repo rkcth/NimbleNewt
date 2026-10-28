@@ -21,6 +21,7 @@ import { SecureApi } from "../security/secured.js";
 import type { GrantService } from "../security/grants.js";
 import type { PlacementSettingsService } from "../remote/placement-settings.js";
 import type { ProtectedBranchService } from "../policy/protected-branches.js";
+import type { WorkingNoteService } from "../context/notes.js";
 import type { IntegrationPolicyService } from "../policy/integration-policy.js";
 
 import type { CommandService } from "../commands/index.js";
@@ -82,6 +83,7 @@ export interface StateApiDeps {
   /** When present, the owner can say which hosts may hold local-only data through the API (card H07c). */
   readonly placement?: Pick<PlacementSettingsService, "get" | "set" | "change">;
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set">;
+  readonly notes?: Pick<WorkingNoteService, "write" | "revise" | "setVisibility" | "read" | "versions" | "list">;
   readonly integration?: Pick<IntegrationPolicyService, "get" | "set" | "getDefault" | "setDefault" | "ensure">;
 
   /** Typed commands (card T09b). Absent: `command.run` answers as unavailable. */
@@ -165,6 +167,7 @@ export class StateApi {
         ...(this.#deps.placement === undefined ? {} : { placement: this.#deps.placement }),
         ...(this.#deps.branchSettings === undefined ? {} : { branchSettings: this.#deps.branchSettings }),
         ...(this.#deps.integration === undefined ? {} : { integration: this.#deps.integration }),
+        ...(this.#deps.notes === undefined ? {} : { notes: this.#deps.notes }),
 
         ...(this.#deps.spill === undefined ? {} : { spill: this.#deps.spill }),
         ...(this.#deps.events === undefined ? {} : { events: this.#deps.events }),
