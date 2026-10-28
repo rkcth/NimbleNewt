@@ -1549,6 +1549,36 @@ for (const backend of backends) {
     await d.idle();
   });
 
+  suite("hosts that refuse the attempt: a passing refusal only skips, a lasting one by every host reaches the owner after the allowed ticks, a count that is broken starts again, and a host that cannot be asked is tried (card H07e)", async (c) => {
+    const { w2, d } = await secondWorker(c, { pinnedStaleTicks: 3 });
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const { attemptId } = await c.task("t", ann);
+    type Answer = { reasons: string[]; lasting: boolean };
+    let answer: () => Answer = () => ({ reasons: [], lasting: false });
+    for (const w of [c.worker, w2]) (w as unknown as { refuses: () => Promise<Answer> }).refuses = async () => answer();
+    const tick = async () => { const r = await d.tick(); return { started: r.started.includes(attemptId!), blocked: r.blocked.length, skipped: r.skipped.find((x) => x.attemptId === attemptId)?.reason }; };
+    // Passing reasons (not connected yet): skipped with the reasons, however long it lasts.
+    answer = () => ({ reasons: ["host is not connected"], lasting: false });
+    for (let i = 0; i < 6; i++) { const t = await tick(); assert.deepEqual([t.started, t.blocked], [false, 0], `tick ${i}`); assert.match(t.skipped ?? "", /not connected/); }
+    // Lasting reasons by every host: two ticks are only skips; a plain skip in between starts the count again.
+    answer = () => ({ reasons: ["policy does not list the host"], lasting: true });
+    assert.equal((await tick()).blocked, 0); assert.equal((await tick()).blocked, 0);
+    answer = () => ({ reasons: ["host is not connected"], lasting: false });
+    assert.equal((await tick()).blocked, 0);
+    answer = () => ({ reasons: ["policy does not list the host"], lasting: true });
+    assert.equal((await tick()).blocked, 0); assert.equal((await tick()).blocked, 0);
+    const third = await tick();
+    assert.equal(third.blocked, 1, "the third consecutive lasting refusal tells the owner");
+    // A host that cannot say is tried, and the placement judges it.
+    answer = () => { throw new Error("policy store down"); };
+    const faults: unknown[] = [];
+    const d2 = c.restart({ workers: [c.worker, w2] }, { pinnedStaleTicks: 3, onError: (e: unknown) => { faults.push(e); } });
+    const r = await d2.tick();
+    assert.ok(r.started.includes(attemptId!), "tried, not refused");
+    assert.ok(faults.length > 0, "the fault is reported");
+    await d2.idle();
+  });
+
   suite("moving an attempt to the host it already runs on, or is pinned to, does nothing", async (c) => {
     const { d } = await secondWorker(c);
     const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
