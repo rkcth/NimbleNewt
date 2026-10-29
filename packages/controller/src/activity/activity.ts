@@ -189,23 +189,23 @@ export class ActivityService {
   }
 
   /** Marks a range of steps as no longer available (archived, deleted, lost). The steps stay in the list as references and their content is withheld. */
-  async markUnavailable(by: Principal, command: NoActor & { taskId: string; from: number; to: number; reason: string }): Promise<{ replayed: boolean }> {
-    onlyKnown(command, ["commandId", "taskId", "from", "to", "reason"]);
+  async markUnavailable(by: Principal, command: NoActor & { taskId: string; first: number; last: number; reason: string }): Promise<{ replayed: boolean }> {
+    onlyKnown(command, ["commandId", "taskId", "first", "last", "reason"]);
     const taskId = checkTaskId(command.taskId);
     await this.#task(taskId);
     if (!(by.kind === "owner" || by.kind === "host" || by.kind === "service")) throw new DomainError("forbidden", `${by.id} may not mark activity unavailable`);
-    if (!Number.isSafeInteger(command.from) || !Number.isSafeInteger(command.to) || command.from < 1 || command.to < command.from) invalid("from", "must be a range of step numbers, from 1");
+    if (!Number.isSafeInteger(command.first) || !Number.isSafeInteger(command.last) || command.first < 1 || command.last < command.first) invalid("first", "must be a range of step numbers, from 1");
     const reason = statement(command.reason, "reason", 200);
     const headRef: AggregateRef = { kind: KIND_OF.head, id: taskId };
     const r = await this.#runner.command("activity.unavailable", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
-      payload: { taskId, from: command.from, to: command.to, reason },
+      payload: { taskId, first: command.first, last: command.last, reason },
       build: async () => {
         const found = await this.#runner.get(headRef.kind, headRef.id);
         const head = found?.body as unknown as HeadBody | undefined;
-        if (head === undefined || command.to >= head.next) throw new DomainError("invalid_command", "that range includes steps that were never recorded", { field: "to" });
-        if (head.unavailable.length >= ACTIVITY_LIMITS.ranges) throw new DomainError("invalid_command", "too many unavailable ranges; merge them", { field: "from" });
-        const next: HeadBody = { ...head, unavailable: [...head.unavailable, { from: command.from, to: command.to, reason, by: by.id, at: this.#runner.now() }] };
-        return { ref: headRef, creates: false, changes: [{ type: "update", ref: headRef, expectedRevision: found!.revision, body: clean(next) }], detail: { taskId, from: command.from, to: command.to } };
+        if (head === undefined || command.last >= head.next) throw new DomainError("invalid_command", "that range includes steps that were never recorded", { field: "last" });
+        if (head.unavailable.length >= ACTIVITY_LIMITS.ranges) throw new DomainError("invalid_command", "too many unavailable ranges; merge them", { field: "first" });
+        const next: HeadBody = { ...head, unavailable: [...head.unavailable, { from: command.first, to: command.last, reason, by: by.id, at: this.#runner.now() }] };
+        return { ref: headRef, creates: false, changes: [{ type: "update", ref: headRef, expectedRevision: found!.revision, body: clean(next) }], detail: { taskId, first: command.first, last: command.last } };
       },
     }));
     return { replayed: r.replayed };

@@ -88,13 +88,13 @@ for (const backend of backends) {
       await refuses("forbidden", () => svc.correct(worker, { commandId: cid("k"), taskId: task, seq: 2, note: "x" }));
 
       // Unavailable ranges stay in the list, without content.
-      await refuses("forbidden", () => svc.markUnavailable(worker, { commandId: cid("u"), taskId: task, from: 1, to: 2, reason: "x" }));
-      await svc.markUnavailable(owner, { commandId: cid("u"), taskId: task, from: 1, to: 2, reason: "archived with the old checkout" });
+      await refuses("forbidden", () => svc.markUnavailable(worker, { commandId: cid("u"), taskId: task, first: 1, last: 2, reason: "x" }));
+      await svc.markUnavailable(owner, { commandId: cid("u"), taskId: task, first: 1, last: 2, reason: "archived with the old checkout" });
       const after = (await svc.steps(auditor, task)).steps;
       assert.deepEqual(after.slice(0, 2), [{ seq: 1, unavailable: "archived with the old checkout" }, { seq: 2, unavailable: "archived with the old checkout" }]);
       await refuses("not_found", () => svc.payload(owner, task, 2));
       assert.match((await svc.explainLater(auditor, { commandId: cid("l"), taskId: task, seq: 1 })).explanation.choice, /unavailable/);
-      await refuses("invalid_command", () => svc.markUnavailable(owner, { commandId: cid("u"), taskId: task, from: 1, to: 500, reason: "x" }));
+      await refuses("invalid_command", () => svc.markUnavailable(owner, { commandId: cid("u"), taskId: task, first: 1, last: 500, reason: "x" }));
     } finally { await world.close(); }
   });
 }

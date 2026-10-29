@@ -190,7 +190,7 @@ export class ResumeCheckService {
       if (TERMINAL.includes(b.phase) || b.phase === "ready" || b.phase === "blocked") return view<ResumeCheckBody>(found);
       if (b.phase === "collecting") {
         const c = await this.#continuations.latest(by, b.taskId);
-        if (c === undefined) { await this.#block(by, id, b, "missing_context", "no complete continuation exists for the task, so there is nothing to resume from"); continue; }
+        if (c === undefined) { await this.#block(by, id, b, "missing_context", "no complete continuation exists for the task, so there is nothing to resume"); continue; }
         const missing = await this.#ports.missingContext(b.taskId, c);
         if (missing.length > 0) { await this.#block(by, id, b, "missing_context", `critical context is missing: ${missing.slice(0, 10).join(", ")}`); continue; }
         await this.#update(id, (x) => ({ ...x, phase: "verifying", continuationId: c.id, history: this.#push(x, "verifying", by.id, `continuation ${c.id} collected`) }), ["collecting"]);

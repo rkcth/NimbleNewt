@@ -42,8 +42,8 @@ test("activity steps, explanations, corrections and unavailable ranges work thro
     assert.equal((await call(ann, "activity.correct", { taskId: task, seq: 1, note: "x" }, "k0")).error.code, "forbidden");
     assert.ok((await call(boot.token, "activity.correct", { taskId: task, seq: 1, note: "ran on the old checkout" }, "k1")).ok);
     assert.equal((await call(aud, "activity.steps", { taskId: task })).result.steps[0].corrections, 1);
-    assert.equal((await call(aud, "activity.unavailable", { taskId: task, from: 1, to: 1, reason: "x" }, "u0")).error.code, "forbidden");
-    assert.ok((await call(boot.token, "activity.unavailable", { taskId: task, from: 1, to: 1, reason: "archived" }, "u1")).ok);
+    assert.equal((await call(aud, "activity.unavailable", { taskId: task, first: 1, last: 1, reason: "x" }, "u0")).error.code, "forbidden");
+    assert.ok((await call(boot.token, "activity.unavailable", { taskId: task, first: 1, last: 1, reason: "archived" }, "u1")).ok);
     assert.deepEqual((await call(aud, "activity.steps", { taskId: task })).result.steps, [{ seq: 1, unavailable: "archived" }]);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

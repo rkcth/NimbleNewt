@@ -1376,8 +1376,8 @@ Owner only: marks a range of steps as no longer available (archived, deleted, lo
 Arguments:
 
 - `taskId`: the task
-- `from`: first step
-- `to`: last step
+- `first`: first step
+- `last`: last step
 - `reason`: why
 - `commandId`: required
 

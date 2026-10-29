@@ -30,7 +30,7 @@ for (const backend of backends) {
     const dir = mkdtempSync(join(tmpdir(), "nn-p01-chat-"));
     try {
       const chat = w.chat();
-      script["start a project Launch"] = [cmd("project.create", { name: "Launch" }, "start a project Launch")];
+      script["start a project Launch"] = [cmd("project.create", { integration: { landing: "default", integrator: "default", requiredChecks: "default", refreshRounds: "default" }, name: "Launch" }, "start a project Launch")];
       const started = await chat.submit(w.ownerToken, { messageId: cid("m"), text: "start a project Launch" });
       const proposal = started.outcomes[0]!;
       assert.equal(proposal.status, "proposed");
