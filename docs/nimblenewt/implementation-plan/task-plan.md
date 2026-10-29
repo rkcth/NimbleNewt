@@ -34,7 +34,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
 | N05 / AII-255 | L05, L05b, L01, L01b, L02, L02b, L02c, L03, L03b, L03c, L03d, L03e, L04, L04b, L04c, L06, H08, H08b |
 | N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A07e, A08, A08b, A08c, A09, A10, A10b, A07f, A07g |
-| N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C07e, C07f, C08, C09, C09b, C09c, C09d, C09e, C08b, C08c, C08d |
+| N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C07e, C07f, C08, C09, C09b, C09c, C09d, C09e, C09f, C08b, C08c, C08d |
 | N08 / AII-258 | R01, R02, R03, R04, R04b, R04c, R05, R05b, R05c, R05d, R05f, R05g, R05e |
 | N09 / AII-259 | U03, U03d, U03e, U05b, U04, U05, U06, U06b, U03b, U03c, U07, U09, U08, U10, U11, U11b |
 | N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H07b, H07c, H07d, H07e, H02e, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H13b, H13c, H13d, H02b, H02c, H02d, H11b, H12n, H12p, H12o |
@@ -44,11 +44,11 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N14 / AII-264 | P01b, P01c, P01, P02, P02b, P03, P04, P05, P06, P07, P08, P08b, P08c, P09, P10, P10b, P10c |
 | N15 / AII-265 | Q01, Q02, Q03, Q04, Q01b |
 | N16 / AII-266 | B01 |
-| N17 / AII-267 | K01, K01e, K01b, K01c, K01d, K02, K03, K04, K05, K06, K06b, K07 |
+| N17 / AII-267 | K01, K01e, K01f, K01b, K01c, K01d, K02, K03, K04, K05, K06, K06b, K07 |
 | N18 / AII-268 | G06, X11, X09, X10, X01, X02, X03, X04, X05, X06, X07, X08, Y01, Y02, Y03 |
 | N19 / AII-269 | D01, D02, D03, D04, D04b, D05 |
 | N07a / AII-519 | U01, U13, T04 |
-| N10a / AII-520 | U02, U02b, U12, U12b, U12c, T05 |
+| N10a / AII-520 | U02, U02b, U12, U12b, U12c, U12d, T05 |
 | N16a / AII-615 | B02, B03, B04, B05, B06 |
 
 ## Cards
@@ -801,8 +801,18 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### C09e — Record activity: approvals, messages, meetings, chat
 
 - **Parent:** N07 / AII-257.
-- **Blockers:** C09d, H12k.
+- **Status:** implemented; commits `ae27510`, `cfb93bd`; CI runs 40889199632; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Split-form tool calls and meeting decisions that change a task are recorded as activity steps.
+- **Blockers:** C09d.
 - **Deliverable:** Split from C09d (2026-10-29): split-form calls, approval, meeting-decision, message and artifact-version steps, chat access, the per-task explanation index.
+- **Acceptance and verification:** Each step of a real run appears in the activity record.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### C09f — Record activity: approvals, messages, artifact versions, chat
+
+- **Parent:** N07 / AII-257.
+- **Blockers:** C09e, H12k.
+- **Deliverable:** Split from C09e (2026-10-29): approval, message and artifact-version steps, chat access, the per-task explanation index.
 - **Acceptance and verification:** Each step of a real run appears in the activity record.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
@@ -1779,9 +1789,19 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### U12c — Finish agent messages: owner questions in chat, stand-up boundary
 
 - **Parent:** N10a / AII-520.
+- **Status:** implemented; commits `4b80664`; CI runs 40889199632; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Owner questions (ask, list with task context, answer) through the state API.
 - **Blockers:** U12b, M03b.
 - **Deliverable:** Split from U12b (2026-10-28): list agent questions to the owner in chat with task context and clear the wait on answer; deliver at the stand-up boundary.
 - **Acceptance and verification:** The owner sees the question in chat; the answer clears the wait.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### U12d — Finish agent messages: stand-up boundary delivery, chat presentation
+
+- **Parent:** N10a / AII-520.
+- **Blockers:** U12c.
+- **Deliverable:** Split from U12c (2026-10-29): deliver at the stand-up boundary, chat presentation of owner questions.
+- **Acceptance and verification:** The owner sees the question in chat and a stand-up boundary delivers messages.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### U13 — Expose lifecycle, decisions, deliverables and activity through the state API
@@ -2249,9 +2269,19 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### K01e — Finish backup: Pi state, maintenance barrier, owner restore, chat, off-tick nightly run
 
 - **Parent:** N17 / AII-267.
+- **Status:** implemented; commits `c9b8af5`, `875a1a8`, `d4ac58f`, `95aed26`, `93fcaf4`, `a9a72cd`; CI runs 40889199632; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Nightly backup beside the tick, blob lock before the dump, command-ID-safe backup.now, older-layout snapshots, restore reports deliveries to resend.
 - **Blockers:** K01.
 - **Deliverable:** Split from K01 (2026-10-29): Pi native state, a maintenance barrier, a restore entry for the owner, the back-up-now chat command, running the nightly backup off the dispatcher tick, per-version snapshot columns, taking the blob lock before the table dump, backup.now commandId.
 - **Acceptance and verification:** A restore runs from the owner interface and a nightly backup never stalls dispatching.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### K01f — Finish backup: Pi state, maintenance barrier, owner restore, chat, non-blocking SQLite copy
+
+- **Parent:** N17 / AII-267.
+- **Blockers:** K01e.
+- **Deliverable:** Split from K01e (2026-10-29): Pi native state, a maintenance barrier, a restore entry for the owner, the back-up-now chat command, a SQLite copy that does not block the event loop.
+- **Acceptance and verification:** A restore runs from the owner interface and a nightly backup never stalls the controller.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### K01b — Implement encrypted backups with passcode and recovery-file unlock
@@ -2597,7 +2627,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e.
+- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f.
 - **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
 - **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

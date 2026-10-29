@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **164 of 281 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **167 of 284 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -111,12 +111,12 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
 | Pause, suspend and resume | `▓▓▓▓▓▓▓▓░░░░` 66% | 12 of 18 |
 | Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓░░░` 80% | 17 of 21 |
-| Context and memory | `▓▓▓▓▓▓▓▓▓▓░░` 89% | 17 of 19 |
+| Context and memory | `▓▓▓▓▓▓▓▓▓▓░░` 90% | 18 of 20 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
 | Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓░░` 84% | 11 of 13 |
 | Owner chat and web UI | `▓▓▓▓▓▓░░░░░░` 56% | 9 of 16 |
 | Workers, dispatch and teams | `▓▓▓▓▓▓▓░░░░░` 60% | 26 of 43 |
-| Agent messaging | `▓▓▓▓▓▓░░░░░░` 50% | 3 of 6 |
+| Agent messaging | `▓▓▓▓▓▓░░░░░░` 57% | 4 of 7 |
 | Health and recovery | `▓▓▓▓▓▓▓▓▓░░░` 75% | 3 of 4 |
 | Meetings | `▓▓▓▓▓▓░░░░░░` 50% | 10 of 20 |
 | Tools and skills | `▓▓▓▓▓▓▓░░░░░` 60% | 9 of 15 |
@@ -124,7 +124,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Quality: deliverables, QA and defects | `░░░░░░░░░░░░` 0% | 0 of 5 |
 | Balancing delivery and improvement | `░░░░░░░░░░░░` 0% | 0 of 1 |
 | Learning and improvement | `░░░░░░░░░░░░` 0% | 0 of 5 |
-| Backup, updates and operations | `▓░░░░░░░░░░░` 8% | 1 of 12 |
+| Backup, updates and operations | `▓░░░░░░░░░░░` 15% | 2 of 13 |
 | Test campaigns and platforms | `▓░░░░░░░░░░░` 13% | 2 of 15 |
 | Release | `░░░░░░░░░░░░` 0% | 0 of 6 |
 
@@ -260,7 +260,7 @@ Authenticated principals, revisioned grants, the sandbox launchers, the protecte
 </details>
 
 <details>
-<summary><strong>Context and memory</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 17 of 19</summary>
+<summary><strong>Context and memory</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 18 of 20</summary>
 
 Separated task, chat and meeting context, working notes, source-backed retrieval, safe-boundary continuation, retained branches, context budgets, owner decisions and the activity record.
 
@@ -282,7 +282,8 @@ Separated task, chat and meeting context, working notes, source-backed retrieval
 - [x] **C09b** · P31 · Compose activity records into the running controller (operations) _(needs C09)_
 - [x] **C09c** · P32 · Record activity at every step and explain through chat _(needs C09b)_
 - [x] **C09d** · P33 · Record activity at every step: dispatcher, tools, messages, meetings, chat _(needs C09c)_
-- [ ] **C09e** · P34 · Record activity: approvals, messages, meetings, chat _(needs C09d, H12k)_
+- [x] **C09e** · P34 · Record activity: approvals, messages, meetings, chat _(needs C09d)_
+- [ ] **C09f** · P35 · Record activity: approvals, messages, artifact versions, chat _(needs C09e, H12k)_
 
 </details>
 
@@ -394,7 +395,7 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 </details>
 
 <details>
-<summary><strong>Agent messaging</strong> — ▓▓▓▓▓▓░░░░░░ 3 of 6</summary>
+<summary><strong>Agent messaging</strong> — ▓▓▓▓▓▓░░░░░░ 4 of 7</summary>
 
 Durable conversations between agents, delivery classes, and the MCP conversation adapter.
 
@@ -403,7 +404,8 @@ Durable conversations between agents, delivery classes, and the MCP conversation
 - [ ] **T05** · P26 · Implement MCP durable conversation adapter _(needs U02, U02b, T04)_
 - [ ] **U12** · P30 · Implement agent messages, delivery classes and interruption budget _(needs U02, S08, L05, M01)_
 - [x] **U12b** · P30 · Deliver informational messages at check-ins and show agent questions in chat _(needs U02, S08, L05, M01)_
-- [ ] **U12c** · P32 · Finish agent messages: owner questions in chat, stand-up boundary _(needs U12b, M03b)_
+- [x] **U12c** · P32 · Finish agent messages: owner questions in chat, stand-up boundary _(needs U12b, M03b)_
+- [ ] **U12d** · P33 · Finish agent messages: stand-up boundary delivery, chat presentation _(needs U12c)_
 
 </details>
 
@@ -531,15 +533,16 @@ Observations, versioned lessons, bounded experiments, scoped adoption and option
 </details>
 
 <details>
-<summary><strong>Backup, updates and operations</strong> — ▓░░░░░░░░░░░ 1 of 12</summary>
+<summary><strong>Backup, updates and operations</strong> — ▓░░░░░░░░░░░ 2 of 13</summary>
 
 Backup and restore, release staging, migration recovery, maintenance windows and update orchestration.
 
 - [x] **K01** · P32 · Implement consistent backup and restore _(needs S06, F04, L02, S05)_
 - [ ] **K01b** · P33 · Implement encrypted backups with passcode and recovery-file unlock _(needs K01, F09)_
-- [ ] **K01e** · P33 · Finish backup: Pi state, maintenance barrier, owner restore, chat, off-tick nightly run _(needs K01)_
+- [x] **K01e** · P33 · Finish backup: Pi state, maintenance barrier, owner restore, chat, off-tick nightly run _(needs K01)_
 - [ ] **K06** · P33 · Implement retention, quotas, archive, export and deletion _(needs K01, S06, C02, C06b)_
 - [ ] **K01c** · P34 · Implement the full configurable backup system (before 1.0) _(needs K01b, K06, U11)_
+- [ ] **K01f** · P34 · Finish backup: Pi state, maintenance barrier, owner restore, chat, non-blocking SQLite copy _(needs K01e)_
 - [ ] **K02** · P34 · Implement deterministic release staging and activation _(needs K01, F02, T02)_
 - [ ] **K06b** · P34 · Implement tiered retention (optional, after the first release) _(needs K06, C02)_
 - [ ] **K01d** · P35 · Implement backup scope tiers (optional, after the first release) _(needs K01c, K06b)_
@@ -583,7 +586,7 @@ Installation, documentation, QA on real machines, the release decision and closi
 - [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, C07e, H07e, T09b, H07, H07b, H02e, T09, A07d, A07e, H07c, H07d, H11b, Q01b, A07f, P08, P08b, H12n, H12p, H12o, P09, P10, P10b, P10c, T09c, T09d)_
 - [ ] **D04** · P50 · Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
 - [ ] **D04b** · P51 · Measure code-navigation aids on real coding tasks (optional, after the first release) _(needs D04)_
-- [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e)_
+- [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f)_
 
 </details>
 
