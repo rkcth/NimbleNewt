@@ -10,6 +10,8 @@ export interface BackupServiceOptions {
   readonly now?: () => Date;
   /** How old the newest scheduled or manual backup may be before the scheduled run makes a new one. Default 24 hours. */
   readonly everyMs?: number;
+  /** How long after a failed scheduled run the next one waits. Default one hour. */
+  readonly retryAfterMs?: number;
   readonly retention?: { daily: number; weekly: number };
   readonly pageSize?: number;
   /** The artifact store, if the installation has one: its blobs are part of each backup. */
@@ -56,10 +58,12 @@ export class BackupService {
   /** The nightly run: makes a scheduled backup when the newest scheduled or manual one is older than the interval (or there is none). Returns whether one was made. */
   async runScheduled(): Promise<boolean> {
     if (this.#running !== undefined) return false;
+    // After a failed run, wait before trying again: a full disk would otherwise be hit with a new copy every tick.
+    if (this.#lastError !== undefined && this.#now().getTime() - Date.parse(this.#lastError.at) < (this.#options.retryAfterMs ?? 3_600_000)) return false;
     const newest = (await listBackups(this.#options.root)).find((b) => b.manifest.kind !== "pre-upgrade");
     const every = this.#options.everyMs ?? 24 * 3_600_000;
     if (newest !== undefined && this.#now().getTime() - Date.parse(newest.manifest.createdAt) < every) return false;
-    await this.backUpNow("scheduled");
+    try { await this.backUpNow("scheduled"); } catch { return false; } // the failure is kept in `status`
     return true;
   }
 

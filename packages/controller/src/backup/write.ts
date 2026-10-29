@@ -83,6 +83,8 @@ export async function createBackup(storage: Pick<ControllerStorage, "snapshot">,
  * Copies every blob of the artifact store into `staging/artifacts/<digest>` while holding the store's shared lock (orphan cleanup, which takes it exclusively, waits), hashing each as it is copied: a blob whose bytes are not
  * its name is not copied and is listed as corrupt, and one that vanished is listed as missing. The index of what was copied is written last.
  */
+class CopyWriteError extends Error { constructor(override readonly cause: unknown) { super("write failed"); } }
+
 async function copyBlobs(blobs: FileBlobStore, staging: string): Promise<BackupArtifacts> {
   const folder = join(staging, ARTIFACT_FOLDER);
   await mkdir(folder, { mode: 0o700 });
@@ -97,8 +99,9 @@ async function copyBlobs(blobs: FileBlobStore, staging: string): Promise<BackupA
       let why: "corrupt" | "missing" | undefined;
       try {
         try {
-          for await (const chunk of createReadStream(blobs.pathOf(info.digest))) { const buffer = chunk as Buffer; hash.update(buffer); await target.write(buffer); size += buffer.length; }
-        } catch { why = "missing"; }
+          // Only a failure to read the blob means it is missing; a failure to write the copy (a full disk) fails the whole backup.
+          for await (const chunk of createReadStream(blobs.pathOf(info.digest))) { const buffer = chunk as Buffer; hash.update(buffer); await target.write(buffer).catch((error) => { throw new CopyWriteError(error); }); size += buffer.length; }
+        } catch (error) { if (error instanceof CopyWriteError) throw error.cause; why = "missing"; }
         if (why === undefined && hash.digest("hex") !== info.digest) why = "corrupt";
         if (why === undefined) await target.sync();
       } finally { await target.close(); }

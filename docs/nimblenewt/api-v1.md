@@ -2210,7 +2210,7 @@ Result: `{ ok }`.
 
 #### `improvement.decide`
 
-Manager or owner: accepts, rejects or defers a proposal (accepting grants nothing; planning and authority come from the usual process). The decision goes back to every proposer.
+Manager or owner: accepts, rejects or defers a proposal (accepting grants nothing; planning and authority come from the usual process). Recorded on the proposal; returning it to the proposers is not connected yet.
 
 Arguments:
 

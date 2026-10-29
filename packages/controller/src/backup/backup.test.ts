@@ -135,6 +135,16 @@ test("the nightly run makes a backup only when the newest is older than a day, o
     assert.match((await broken.status()).lastError?.message ?? "", /no space left/);
     assert.equal((await broken.status()).count, 2);
     assert.equal(readdirSync(root).filter((n) => n.endsWith(".partial")).length, 0);
+    // A failed scheduled run is not tried again at once (a full disk would be hit every tick), but is after the wait.
+    let tries = 0;
+    const flaky = new BackupService(Object.create(store, { snapshot: { value: async () => { tries++; throw new Error("no space left"); } } }), { root, version: "t", now: () => new Date(clock + 2 * 24 * 3_600_000), retryAfterMs: 600_000 });
+    assert.equal(await flaky.runScheduled(), false);
+    assert.equal(await flaky.runScheduled(), false);
+    assert.equal(tries, 1, "the second tick did not try again");
+    clock += 3 * 24 * 3_600_000;
+    const later = new BackupService(Object.create(store, { snapshot: { value: async () => { tries++; throw new Error("no space left"); } } }), { root, version: "t", now: () => new Date(clock), retryAfterMs: 600_000 });
+    assert.equal(await later.runScheduled(), false);
+    assert.equal(tries, 2);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

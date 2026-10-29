@@ -1764,7 +1764,7 @@ for (const backend of backends) {
       assert.match(steps[0]!.summary, /localp\/small/);
       assert.match(steps[2]!.summary, /read-file confirmed/);
       assert.equal(steps[2]!.refs[0]!.kind, "tool-operation");
-      assert.equal(steps[2]!.commandId, `dpa-act:${attemptId}:call:c1`);
+      assert.match(steps[2]!.commandId, new RegExp(`^dpa-act:${attemptId}:call:[0-9a-f]{24}:confirmed$`));
       assert.equal(outcome, "confirmed");
       // A record that fails does not change the call.
       failing = true;

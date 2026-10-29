@@ -367,7 +367,7 @@ export class DispatcherService {
     if (typeof attemptId !== "string" || !ATTEMPT.test(attemptId)) invalid("attemptId", "is not an attempt ID");
     return {
       attemptId,
-      call: async (request, executor) => { const result = await this.#path.call(attemptId, request, executor); await this.#stepOf(attemptId, `call:${request.callId}`, "tool-call", `Tool ${request.tool.name} ${result.state}${"reason" in result ? `: ${result.reason}` : ""}.`, [{ kind: "tool-operation", id: result.operationId }]); return result; },
+      call: async (request, executor) => { const result = await this.#path.call(attemptId, request, executor); await this.#stepOf(attemptId, `call:${createHash("sha256").update(request.callId).digest("hex").slice(0, 24)}:${result.state}`, "tool-call", `Tool ${request.tool.name} ${result.state}${"reason" in result ? `: ${result.reason}` : ""}.`, [{ kind: "tool-operation", id: result.operationId }]); return result; },
       begin: (request) => this.#path.begin(attemptId, request),
       report: (operationId, outcome) => this.#path.report(attemptId, operationId, outcome),
       usage: (usage, requestKey) => this.#usage(attemptId, usage, requestKey),
