@@ -112,6 +112,10 @@ export interface ReviewOptions extends RunnerOptions {
    * Told when an agent reviewer has allowed or denied, with the wall-clock time from its assignment to its decision, so the host can charge the review to the task reviewed (card R05f). Keyed by `commandId`
    * (`review-use:<review>`) so a repeat is not charged twice. A failure here is the host's to handle: it does not undo the decision. The owner's own time is not charged.
    */
+  /**
+   * Told when a reviewer (the owner included) has allowed or denied a request, for the task's activity record (card C09f): which tool, the verdict, who decided and the reason. Best effort and repeatable (the caller derives its command ID from the request and verdict); a failure never changes the verdict.
+   */
+  readonly onDecided?: (event: { readonly requestId: string; readonly taskId: string; readonly verdict: "allow" | "deny"; readonly decidedBy: string; readonly tool: string; readonly reason: string }) => Promise<void>;
   readonly onUsage?: (usage: { readonly commandId: string; readonly taskId: string; readonly agentId: string; readonly computeMs: number }) => Promise<void>;
 }
 
@@ -165,6 +169,7 @@ export class ReviewService {
   readonly #hostStaleAfterMs: number;
   readonly #decisions: DecisionGuard | undefined;
   readonly #onUsage: ReviewOptions["onUsage"];
+  readonly #onDecided: ReviewOptions["onDecided"];
 
   private constructor(runner: CommandRunner, options: ReviewOptions) {
     this.#runner = runner;
@@ -172,6 +177,7 @@ export class ReviewService {
     this.#reviewerHost = options.reviewerHost;
     this.#decisions = options.decisions;
     this.#onUsage = options.onUsage;
+    this.#onDecided = options.onDecided;
     this.#hostStaleAfterMs = options.hostStaleAfterMs ?? DEFAULT_HOST_STALE_AFTER_MS;
     if (!Number.isSafeInteger(this.#hostStaleAfterMs) || this.#hostStaleAfterMs < 1000) throw new DomainError("invalid_command", "hostStaleAfterMs: must be a whole number of at least 1000", { field: "hostStaleAfterMs" });
   }
@@ -322,6 +328,10 @@ export class ReviewService {
         };
       },
     }));
+    if (this.#onDecided !== undefined && (verdict === "allow" || verdict === "deny")) {
+      const after = (await this.#runner.get("review", id))?.body as unknown as ReviewBody | undefined;
+      if (after !== undefined) { try { await this.#onDecided({ requestId: id, taskId: after.binding.taskId, verdict, decidedBy: reviewer.id, tool: after.operation.name, reason }); } catch { /* the record of a verdict never changes it */ } }
+    }
     if (this.#onUsage !== undefined && reviewer.kind !== "owner" && (verdict === "allow" || verdict === "deny")) {
       const after = (await this.#runner.get("review", id))?.body as unknown as ReviewBody | undefined;
       const latency = ((await this.#runner.get("review-route", id))?.body as unknown as ReviewRouteBody | undefined)?.latencyMs;

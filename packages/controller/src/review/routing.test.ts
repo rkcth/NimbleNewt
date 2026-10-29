@@ -24,6 +24,7 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, check
   await assert.rejects(run, (error: unknown) => { assert.ok(error instanceof DomainError, String(error)); assert.equal(error.code, code, error.message); check?.(error); return true; });
 };
 
+const decided: { requestId: string; taskId: string; verdict: string; decidedBy: string; tool: string; reason: string }[] = [];
 const charged: { commandId: string; taskId: string; agentId: string; computeMs: number }[] = [];
 
 for (const backend of backends) {
@@ -58,7 +59,7 @@ for (const backend of backends) {
           return id;
         };
         const task = await newTask("the task");
-        const review = ReviewService.withEpoch(world.storage, projects.epoch, { ...options, onUsage: async (u) => { charged.push(u); } });
+        const review = ReviewService.withEpoch(world.storage, projects.epoch, { ...options, onUsage: async (u) => { charged.push(u); }, onDecided: async (e) => { decided.push(e); } });
         const contracts = ContractService.withEpoch(world.storage, projects.epoch, options);
         const blockers = BlockerService.withEpoch(world.storage, projects.epoch, options);
         const graph = WaitGraphService.withEpoch(world.storage, projects.epoch, contracts, blockers, { ...options, extraEdges: (p, t) => review.waitEdges(p, t) });
@@ -350,6 +351,21 @@ for (const backend of backends) {
     const third = (await ask(c, op({ args: { n: 4 } }))).id;
     await decide(c, c.owner, third, "deny", {});
     assert.equal(charged.length, 1, "the owner's time is not charged");
+  });
+
+  suite("an allow or deny, by an agent or the owner, is reported once for the task's activity with the tool and the reason; an escalation or a request for context is not (card C09f)", async (c) => {
+    decided.length = 0;
+    await c.policy({ reviewers: ["agent:r1"] });
+    const first = await ask(c);
+    await decide(c, c.r1, first.id, "allow", {});
+    assert.equal(decided.length, 1);
+    assert.deepEqual([decided[0]!.requestId, decided[0]!.taskId, decided[0]!.verdict, decided[0]!.decidedBy], [first.id, c.task, "allow", "agent:r1"]);
+    assert.ok(decided[0]!.tool.length > 0 && decided[0]!.reason.length > 0);
+    await decide(c, c.r1, (await ask(c, op({ args: { n: 2 } }))).id, "request-context", {});
+    await decide(c, c.r1, (await ask(c, op({ args: { n: 3 } }))).id, "requires-owner-decision", {});
+    assert.equal(decided.length, 1, "only a final verdict is reported");
+    await decide(c, c.owner, (await ask(c, op({ args: { n: 4 } }))).id, "deny", {});
+    assert.deepEqual(decided.map((d) => `${d.decidedBy} ${d.verdict}`), ["agent:r1 allow", "owner:rob deny"], "the owner's verdict is reported too");
   });
 
   suite("the figures kept about reviewing: queue delay, latency, cost, escalations, false blocks and missed hazards", async (c) => {
