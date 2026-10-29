@@ -2474,3 +2474,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## Batch 4 review fixes (2026-10-29)
 - A meeting-decision step is written only to a task of the decision's own project (a motion already refuses other projects' targets; this keeps the all-tasks service identity from being steered by later changes), and its text is cut to the activity limit so a long summary no longer loses the step. Shutdown waits for a running backup (`BackupService.finish`) before closing the store.
 - Known: while a backup runs it holds the artifact store's shared lock, so a queued orphan cleanup makes publications wait for the dump (writer-preferring lock); a cached `backup.now` answer can name a backup retention has since removed; a failure to list backups in the nightly run is not kept in `lastError`; a call first recorded in the one-step form and replayed in the split form records twice.
+
+## L02c (first part): background jobs are in the Stop inventory (2026-10-29)
+- `dispatchStopPorts` takes a `jobs` lookup (bound to `JobService.list`): the stop inventory of a task, or of the tasks the scope's live attempts belong to, now lists their jobs: admitted, dispatched or running as `running`, `cancellation_requested` as `uncooperative` (so Force Stop is offered), `outcome_unknown` as `unknown`; finished ones are left out. `terminate` names unknown and uncooperative jobs in `unresolved`. Test in `lifecycle/dispatch-ports.test.ts`.
+- Not done (L02c stays planned): local processes and child work, and the cleanup spend from the runtime.

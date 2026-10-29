@@ -5,7 +5,7 @@ import type { Principal } from "../security/principals.js";
 import type { PauseScope } from "./pause.js";
 import type { InventoryItem, StopPorts } from "./stop.js";
 
-type Dispatcher = Pick<DispatcherService, "liveAttemptsOf" | "quiesce" | "stop" | "operations" | "release">;
+type Dispatcher = Pick<DispatcherService, "liveAttemptsOf" | "get" | "quiesce" | "stop" | "operations" | "release">;
 
 /**
  * The agent IDs a scope covers (card L02b): an agent is itself; a team is every agent whose team chain passes through it (the same walk the pause gate reads); the installation is every agent. Cycles and over-long chains stop the walk.
@@ -40,7 +40,7 @@ export async function agentsUnder(storage: Pick<ControllerStorage, "listAggregat
  * ledger call is never cut), and a checkpoint is taken; the checkpoint counts as durable when the checkpoint hook returned one. Whether the artifacts a checkpoint names are durable is not known here, so it is
  * taken from the hook's answer when it says (`artifactsDurable`), and otherwise assumed durable only when the checkpoint came back.
  */
-export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; principal: Principal } | undefined, runtime: () => "none" | "pending" = () => "pending", members?: (scope: PauseScope) => Promise<readonly string[]>): StopPorts {
+export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; principal: Principal } | undefined, runtime: () => "none" | "pending" = () => "pending", members?: (scope: PauseScope) => Promise<readonly string[]>, jobs?: (by: Principal, taskId: string) => Promise<readonly { readonly id: string; readonly state: string }[]>): StopPorts {
   const attemptsOf = async (scope: PauseScope): Promise<string[]> => {
     const h = dispatch();
     // No dispatcher exists in this controller: nothing can be running. A dispatcher that should exist but is not up (a restart in progress, a failed start) is not the same, and nothing is claimed about it.
@@ -52,17 +52,28 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
     for (const agentId of await members(scope)) for (const id of await h.dispatcher.liveAttemptsOf(h.principal, { agentId: principalForm(agentId) })) out.add(id);
     return [...out];
   };
-  const inFlight = async (attempts: readonly string[]): Promise<InventoryItem[]> => {
+  const inFlight = async (attempts: readonly string[], scope: PauseScope): Promise<InventoryItem[]> => {
     const h = dispatch();
     const out: InventoryItem[] = [];
     for (const attemptId of attempts) {
       for (const op of (await h?.dispatcher.operations(h.principal, attemptId)) ?? []) if (!TERMINAL.has(op.state)) out.push({ kind: "foreground", ref: `${attemptId}/${op.callId}`.slice(0, 120), state: "running" });
     }
+    // The task's background jobs (card L02c): a running one is counted, one asked to stop that has not is "uncooperative" (Force Stop is offered for it), and one whose outcome is not known is "unknown".
+    if (jobs !== undefined && h !== undefined) {
+      const tasks = new Set<string>(scope.kind === "task" ? [scope.id] : []);
+      for (const attemptId of attempts) { const taskId = (await h.dispatcher.get(h.principal, attemptId))?.taskId; if (taskId !== undefined) tasks.add(taskId); }
+      for (const taskId of tasks) {
+        for (const job of await jobs(h.principal, taskId)) {
+          const state = job.state === "cancellation_requested" ? "uncooperative" : job.state === "outcome_unknown" ? "unknown" : ["admitted", "dispatched", "running"].includes(job.state) ? "running" : undefined;
+          if (state !== undefined) out.push({ kind: "job", ref: job.id.slice(0, 120), state });
+        }
+      }
+    }
     return out;
   };
   return {
     unsupported: (scope) => (scope.kind === "task" || scope.kind === "agent" || members !== undefined ? undefined : `stopping a whole ${scope.kind} is not supported yet; stop its tasks or agents one by one (Force Stop works on each)`),
-    inventory: async (scope) => inFlight(await attemptsOf(scope)),
+    inventory: async (scope) => inFlight(await attemptsOf(scope), scope),
     release: async (scope) => { const h = dispatch(); if (h === undefined) return; for (const id of await attemptsOf(scope)) await h.dispatcher.release(h.principal, id).catch(() => undefined); },
     cleanup: async (scope, options) => {
       const h = dispatch();
@@ -71,7 +82,7 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
         const strictMs = Math.max(1, Math.min(60_000, Date.parse(options.deadlineAt) - Date.now()));
         await h!.dispatcher.quiesce(h!.principal, id, "suspend or stop preparation", { strictMs });
       }
-      return { remaining: await inFlight(attempts) };
+      return { remaining: await inFlight(attempts, scope) };
     },
     checkpoint: async (scope) => {
       const h = dispatch();
@@ -94,6 +105,8 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
         await h!.dispatcher.stop(h!.principal, id, { reason: options.force ? "force stop" : "stop after preparation", ...(options.force ? { emergency: true } : {}) });
         for (const op of (await h!.dispatcher.operations(h!.principal, id)) ?? []) if (op.state === "uncertain") unresolved.push(`${id}/${op.callId}`.slice(0, 120));
       }
+      // A job whose outcome is not known, or that was asked to stop and has not, is named as unresolved too.
+      for (const item of await inFlight(attempts, scope).catch(() => [] as InventoryItem[])) if (item.kind === "job" && (item.state === "unknown" || item.state === "uncooperative")) unresolved.push(item.ref);
       return { ended: true, unresolved };
     },
   };

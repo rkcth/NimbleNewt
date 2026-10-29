@@ -73,3 +73,25 @@ test("a team or installation scope covers the agents whose team chain passes thr
   await ports.terminate({ kind: "installation", id: "installation" }, { force: true });
   assert.equal(stopped.length, 4);
 });
+
+test("the stop inventory counts a task's running jobs, names one asked to stop as uncooperative and one with an unknown outcome as unknown, and terminate reports those as unresolved (card L02c)", async () => {
+  let jobStates = [{ id: "job-a", state: "running" }, { id: "job-b", state: "cancellation_requested" }, { id: "job-c", state: "outcome_unknown" }, { id: "job-d", state: "completed" }];
+  const dispatcher = {
+    liveAttemptsOf: async () => ["att-1"],
+    get: async () => ({ taskId: "task-x" }) as never,
+    operations: async () => [] as never,
+    stop: async () => undefined,
+    quiesce: async () => ({}),
+    release: async () => undefined,
+  };
+  const ports = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), () => "pending", undefined, async (_by, taskId) => (taskId === "task-x" ? jobStates : []));
+  const task = { kind: "task", id: "task-x" } as const;
+  assert.deepEqual(await ports.inventory(task), [
+    { kind: "job", ref: "job-a", state: "running" },
+    { kind: "job", ref: "job-b", state: "uncooperative" },
+    { kind: "job", ref: "job-c", state: "unknown" },
+  ]);
+  assert.deepEqual(await ports.terminate(task, { force: true }), { ended: true, unresolved: ["job-b", "job-c"] });
+  jobStates = [];
+  assert.deepEqual(await ports.inventory(task), []);
+});
