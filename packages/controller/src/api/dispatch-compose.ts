@@ -133,6 +133,8 @@ export interface DispatchHandle {
   /** Charges that could not be booked and are waiting for a retry, or were given up on (owner or dispatcher). */
   /** The attendance service, composed with the meetings and the budget (card R05g proves a held meeting reaches budget.usage through it). */
   readonly attendance: AttendanceService;
+  /** The stand-up service composed with the meetings (card M03b). */
+  readonly standups: StandupService;
   readonly unsettledCharges: (by: Principal) => ReturnType<ChargeRetryService["unsettled"]>;
   readonly chargeUse: (usage: { commandId: string; activity: "review" | "background-job"; taskId: string; agentId?: string; computeMs: number }) => Promise<void>;
   /** The host side of workspace operations for a task's checkout (card H12l): the host of its live attempt, else the only host that has one; `undefined` when none can be named. */
@@ -361,7 +363,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         // No live attempt names a host: the checkout is on the only host that can do this, if there is exactly one.
         return capable.length === 1 ? capable[0]!.workspace : undefined;
       },
-      attendance,
+      attendance, standups,
       unsettledCharges: (by) => chargeRetry.unsettled(by),
       chargeUse: (u) => chargeRetry.submit(principal, { commandId: u.commandId, activity: u.activity, taskId: u.taskId, computeMs: u.computeMs, ...(u.agentId === undefined ? {} : { agentId: u.agentId }) }).then(() => undefined),
       // An outside server's text is framed as data on every page, with the injection check over the page itself (the visible head was checked when it was cut).

@@ -400,6 +400,56 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `standup.get`
+
+A stand-up's schedule and configuration.
+
+Arguments:
+
+- `scheduleId`: the stand-up schedule
+
+Result: `{ item: { schedule, config } }`.
+
+#### `standup.prepared`
+
+What was prepared for an occurrence.
+
+Arguments:
+
+- `occurrenceId`: the live meeting (occurrence) ID
+
+Result: `{ item }`.
+
+#### `standup.brief`
+
+One agent's brief.
+
+Arguments:
+
+- `briefId`: the brief
+
+Result: `{ item }`.
+
+#### `standup.briefs`
+
+The briefs of an occurrence.
+
+Arguments:
+
+- `occurrenceId`: the live meeting (occurrence) ID
+
+Result: `{ item: [...] }`.
+
+#### `standup.agenda`
+
+The agenda of an occurrence: conflicts, questions and decisions first.
+
+Arguments:
+
+- `occurrenceId`: the live meeting (occurrence) ID
+
+Result: `{ item }`.
+
 #### `budget.report`
 
 A task's budget: limit, delegated to children, in flight, uncertain, spent, overrun and available, for money and for compute, with the reservations and open requests behind them. A task you may not read reads like a missing one.
@@ -1945,6 +1995,87 @@ Arguments:
 - `commandId`: required
 
 Result: `{ ok }`.
+
+#### `standup.configure`
+
+Sets up a stand-up: time, time zone, participants, duration, advance notice and the daily window it may be held in. Agents are told to reach a safe boundary before it.
+
+Arguments:
+
+- `projectId`: the project
+- `title`: the stand-up's name
+- `roster`: the agents (agent:agt-…) who take part
+- `time`: the local time, HH:MM
+- `windowFrom`: earliest local time it may be held
+- `windowTo`: latest local time it may be held
+- `timeZone`: an IANA zone such as Europe/London
+- `recurrence`: how often
+- `startDate`: first date
+- `endDate`: last date
+- `durationMinutes`: planned length
+- `prepareMinutes`: how long before it agents are asked to reach a safe boundary
+- `coverageHours`: how far back briefs look (about 24)
+- `budgetTokens`: token allowance for the meeting
+- `commandId`: required
+
+Result: `{ scheduleId, replayed }`.
+
+#### `standup.update`
+
+Changes, pauses or ends a stand-up. Quote the revision you read.
+
+Arguments:
+
+- `scheduleId`: the stand-up schedule
+- `expectedRevision`: the revision you read
+- `state`: active, paused or ended
+- `title`: the stand-up's name
+- `roster`: the agents (agent:agt-…) who take part
+- `time`: the local time, HH:MM
+- `timeZone`: an IANA zone such as Europe/London
+- `recurrence`: how often
+- `durationMinutes`: planned length
+- `prepareMinutes`: how long before it agents are asked to reach a safe boundary
+- `windowFrom`: earliest local time it may be held
+- `windowTo`: latest local time it may be held
+- `coverageHours`: how far back briefs look (about 24)
+- `commandId`: required
+
+Result: `{ ok }`.
+
+#### `standup.prepare`
+
+Prepares one occurrence: notifies the agents and builds each brief from records (accomplishments over about 24 hours, unfinished work, blockers, advice needed, next priorities) without waking a paused agent.
+
+Arguments:
+
+- `occurrenceId`: the live meeting (occurrence) ID
+
+Result: `{ notified, withheld, briefs, review }`.
+
+#### `standup.add-statement`
+
+An agent adds advice, priorities or a note to its brief.
+
+Arguments:
+
+- `briefId`: the brief
+- `expectedRevision`: the revision you read
+- `section`: advice, priorities or note
+- `text`: the statement
+- `commandId`: required
+
+Result: `{ ok }`.
+
+#### `standup.deliver`
+
+Delivers a project's stand-up outcomes to the conversations they came from.
+
+Arguments:
+
+- `projectId`: the project
+
+Result: `{ delivered, waiting }`.
 
 #### `grant.revoke`
 

@@ -18,6 +18,7 @@ import type { ContextBranchService } from "../branches/index.js";
 import type { InvitationInbox, MeetingService } from "../meetings/index.js";
 import type { MeetingRecordService } from "../meetings/record.js";
 import type { AttendanceService } from "../meetings/attendance.js";
+import type { StandupService } from "../standups/standups.js";
 import type { AgentMessageService } from "../messaging/index.js";
 import { shownLines } from "../standups/standups.js";
 import type { GrantService } from "../security/grants.js";
@@ -77,6 +78,7 @@ export interface Context {
   readonly policyContext?: Pick<PolicyService, "contextFor">;
   readonly records?: Pick<MeetingRecordService, "open" | "setChair" | "join" | "leave" | "append" | "move" | "amend" | "table" | "openVote" | "castBallot" | "closeVote" | "castingVote" | "apply" | "ownerRespond" | "finish" | "summarize" | "returnOutcomes" | "sweep" | "record" | "recordFor" | "discussion" | "motion" | "ballots" | "decision" | "why" | "summary" | "latestPlan">;
   readonly attendance?: Pick<AttendanceService, "admission" | "openRoom" | "callNow" | "status" | "beginDiscussion" | "prepare" | "reportBlocked" | "join" | "joinAsOwner" | "authorizeWake" | "leave" | "keepPaused" | "deferReturn" | "endMeeting" | "returnToWork" | "acknowledge" | "revalidation" | "saveBrief" | "briefOf">;
+  readonly standups?: Pick<StandupService, "configure" | "update" | "standup" | "prepare" | "prepared" | "brief" | "briefs" | "addStatement" | "agenda" | "deliverOutcomes">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep">;
 
   readonly commands?: CommandService;
@@ -215,6 +217,23 @@ const ATTEND_HELP: Readonly<Record<string, string>> = {
   blocked: "true if the agent cannot come", expectedMinutes: "how long the agent's next piece of work would take", yieldsAtBoundary: "the work can stop at a safe boundary", safeLongRunning: "the work is a safe long-running operation", minutes: "how long to defer the return",
   decisions: "decisions the meeting made about tasks", revalidateWithinMinutes: "how soon affected tasks are re-checked", all: "true to clear every pending return", outcome: "continue, replanned or stopping", note: "a short note",
 };
+
+
+const STANDUP_HELP: Readonly<Record<string, string>> = {
+  title: "the stand-up's name", roster: "the agents (agent:agt-…) who take part", time: "the local time, HH:MM", windowFrom: "earliest local time it may be held", windowTo: "latest local time it may be held", timeZone: "an IANA zone such as Europe/London",
+  recurrence: "how often", startDate: "first date", endDate: "last date", durationMinutes: "planned length", prepareMinutes: "how long before it agents are asked to reach a safe boundary", coverageHours: "how far back briefs look (about 24)",
+  budgetTokens: "token allowance for the meeting", scheduleId: "the stand-up schedule", expectedRevision: "the revision you read", state: "active, paused or ended", briefId: "the brief", section: "advice, priorities or note", text: "the statement",
+};
+const standupOp = (name: string, kind: "query" | "command", summary: string, method: keyof NonNullable<Context["standups"]>, fields: readonly string[], result: string, positional: readonly string[] = []): Operation => ({
+  name: `standup.${name}`, kind, summary, args: { ...Object.fromEntries(fields.map((f) => [f, STANDUP_HELP[f] ?? HELP[f] ?? ATTEND_HELP[f] ?? f])), ...(kind === "command" && positional.length === 0 ? { commandId: "required" } : {}) }, result,
+  run: async (c, a, id) => {
+    only(a, fields);
+    const svc = (c.standups ?? unavailable("stand-ups")) as unknown as Record<string, (...x: unknown[]) => Promise<unknown>>;
+    const out = positional.length > 0 ? await svc[method]!(c.principal, ...positional.map((f) => a[f])) : kind === "command" ? await svc[method]!(c.principal, { commandId: need(id), ...a }) : await svc[method]!(c.principal, a[fields[0]!]);
+    if (out === undefined && kind === "query") throw new DomainError("not_found", "no such stand-up, brief or agenda, or none you may read");
+    return asJson(kind === "query" ? { item: out } : ((out ?? { ok: true }) as object));
+  },
+});
 
 export const OPERATIONS: readonly Operation[] = [
   { name: "context.spill.read", kind: "query", summary: "One page of the rest of a tool result that was cut to the model's window (the cut result names its spill ID). Needs the right to work on the task the result belongs to; anyone else gets not found.", args: { spillId: "the spill ID named in the cut result (`spl-…`)", "index?": "the page, from 0", "size?": "page size in characters (at most 50,000)" }, result: "`{ item: { text, next? } }`; `next` is the index of the following page when there is one.",
@@ -411,6 +430,16 @@ export const OPERATIONS: readonly Operation[] = [
   attendOp("revalidation", "query", "What a task must re-check after meeting decisions.", "revalidation", ["taskId"], "`{ item }`.", ["taskId"]),
   attendOp("save-brief", "command", "Saves an agent's brief for a meeting. A saved brief is never shown as a live answer.", "saveBrief", ["occurrenceId", "text"], "`{ ok }`."),
   attendOp("brief", "query", "An agent's saved brief, marked as not live.", "briefOf", ["occurrenceId", "agent"], "`{ item }`.", ["occurrenceId", "agent"]),
+  standupOp("configure", "command", "Sets up a stand-up: time, time zone, participants, duration, advance notice and the daily window it may be held in. Agents are told to reach a safe boundary before it.", "configure", ["projectId", "title", "roster", "time", "windowFrom", "windowTo", "timeZone", "recurrence", "startDate", "endDate", "durationMinutes", "prepareMinutes", "coverageHours", "budgetTokens"], "`{ scheduleId, replayed }`."),
+  standupOp("update", "command", "Changes, pauses or ends a stand-up. Quote the revision you read.", "update", ["scheduleId", "expectedRevision", "state", "title", "roster", "time", "timeZone", "recurrence", "durationMinutes", "prepareMinutes", "windowFrom", "windowTo", "coverageHours"], "`{ ok }`."),
+  standupOp("get", "query", "A stand-up's schedule and configuration.", "standup", ["scheduleId"], "`{ item: { schedule, config } }`."),
+  standupOp("prepare", "command", "Prepares one occurrence: notifies the agents and builds each brief from records (accomplishments over about 24 hours, unfinished work, blockers, advice needed, next priorities) without waking a paused agent.", "prepare", ["occurrenceId"], "`{ notified, withheld, briefs, review }`.", ["occurrenceId"]),
+  standupOp("prepared", "query", "What was prepared for an occurrence.", "prepared", ["occurrenceId"], "`{ item }`."),
+  standupOp("brief", "query", "One agent's brief.", "brief", ["briefId"], "`{ item }`."),
+  standupOp("briefs", "query", "The briefs of an occurrence.", "briefs", ["occurrenceId"], "`{ item: [...] }`."),
+  standupOp("add-statement", "command", "An agent adds advice, priorities or a note to its brief.", "addStatement", ["briefId", "expectedRevision", "section", "text"], "`{ ok }`."),
+  standupOp("agenda", "query", "The agenda of an occurrence: conflicts, questions and decisions first.", "agenda", ["occurrenceId"], "`{ item }`."),
+  standupOp("deliver", "command", "Delivers a project's stand-up outcomes to the conversations they came from.", "deliverOutcomes", ["projectId"], "`{ delivered, waiting }`.", ["projectId"]),
   { name: "grant.revoke", kind: "command", summary: "The owner takes a grant back (owner only; the revision you read must still be current). It stops counting at the next check.", args: { grantId: "the grant's ID", expectedRevision: "the revision you read", reason: "why, in the owner's words" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["grantId", "expectedRevision", "reason"]); await grantsOf(c).revoke(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
   { name: "events.configure-idle", kind: "command", summary: "Sets how long an event subscription may sit without acknowledging before it expires (owner only). A subscription that was made before this existed, or without its own time, uses this one.", args: { idleSeconds: "whole seconds, 10 to 604800" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
