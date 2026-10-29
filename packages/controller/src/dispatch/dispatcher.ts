@@ -368,8 +368,17 @@ export class DispatcherService {
     return {
       attemptId,
       call: async (request, executor) => { const result = await this.#path.call(attemptId, request, executor); await this.#stepOf(attemptId, `call:${createHash("sha256").update(request.callId).digest("hex").slice(0, 24)}:${result.state}`, "tool-call", `Tool ${request.tool.name} ${result.state}${"reason" in result ? `: ${result.reason}` : ""}.`, [{ kind: "tool-operation", id: result.operationId }]); return result; },
-      begin: (request) => this.#path.begin(attemptId, request),
-      report: (operationId, outcome) => this.#path.report(attemptId, operationId, outcome),
+      begin: async (request) => {
+        const started = await this.#path.begin(attemptId, request);
+        // A call decided at once (refused, waiting for approval, already settled) is a step now; one that will run is recorded when it is reported.
+        if (!started.run) await this.#stepOf(attemptId, `op:${createHash("sha256").update(started.operationId).digest("hex").slice(0, 24)}:${started.result.state}`, "tool-call", `Tool ${request.tool.name} ${started.result.state}${"reason" in started.result ? `: ${started.result.reason}` : ""}.`, [{ kind: "tool-operation", id: started.operationId }]);
+        return started;
+      },
+      report: async (operationId, outcome) => {
+        const result = await this.#path.report(attemptId, operationId, outcome);
+        await this.#stepOf(attemptId, `op:${createHash("sha256").update(operationId).digest("hex").slice(0, 24)}:${result.state}`, "tool-call", `Tool call ${result.state}${"reason" in result ? `: ${result.reason}` : ""}.`, [{ kind: "tool-operation", id: operationId }]);
+        return result;
+      },
       usage: (usage, requestKey) => this.#usage(attemptId, usage, requestKey),
       heartbeat: () => this.heartbeat(attemptId),
       acknowledgeDecisions: () => this.acknowledgeDecisions(attemptId),

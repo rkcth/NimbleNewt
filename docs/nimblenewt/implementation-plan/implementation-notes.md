@@ -2459,3 +2459,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 
 ## M04c (third part): no harness means nothing yields (2026-10-29)
 - The dispatcher tells meeting admission that work yields at a boundary only when at least one harness is shipped and every shipped harness can stop a conversation; an empty list used to count as "every harness can". Test in `dispatch/dispatcher.test.ts`.
+
+## C09e (first part): split-form tool calls are recorded in the activity (2026-10-29)
+- `begin` records a step when the call is decided at once (refused, awaiting approval, already settled) and `report` records the outcome the worker reported, keyed by operation and state like the one-step form. Test in `dispatch/dispatcher.test.ts` on all four backends.
+- Not done (C09e stays planned): approval, meeting-decision, message and artifact-version steps, chat access, the per-task explanation index.

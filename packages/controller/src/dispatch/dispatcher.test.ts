@@ -1790,3 +1790,28 @@ for (const backend of backends) {
     } finally { await store.close(); }
   });
 }
+
+// Card C09e: the split form of a tool call is recorded in the activity too.
+for (const backend of backends) {
+  test(`${backend.name}: a call made in the split form is recorded when it is reported, with the outcome the worker reported`, async () => {
+    const store = await backend.open();
+    try {
+      const steps: { kind: string; summary: string; refs: readonly { kind: string; id: string }[] }[] = [];
+      const c = await buildWorld(store.storage);
+      const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+      const { attemptId } = await c.task("Order seeds", ann);
+      await c.policy.set(c.owner, { scope: "installation", commandId: "pol", profile: "autonomous" });
+      c.worker.script = async ({ gateway }) => {
+        const begun = await gateway.begin({ callId: "r1", tool: { name: "read-file", version: "1" }, args: { path: "README.md" } });
+        if (begun.run) await gateway.report(begun.operationId, { state: "confirmed", text: "hello" });
+        return { status: "completed", text: "done" };
+      };
+      c.dispatcher = c.restart({ activity: async (s) => { steps.push(s); } });
+      await c.dispatcher.tick(); await c.dispatcher.idle();
+      const calls = steps.filter((s) => s.kind === "tool-call");
+      assert.equal(calls.length, 1, `${attemptId}: one step for the call, at the report`);
+      assert.match(calls[0]!.summary, /confirmed/);
+      assert.equal(calls[0]!.refs[0]!.kind, "tool-operation");
+    } finally { await store.close(); }
+  });
+}
