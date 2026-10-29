@@ -1,5 +1,5 @@
-import { mkdirSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { mkdirSync, rmSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlite";
 import { StorageError } from "../errors.js";
 import { operationHash } from "../hash.js";
@@ -13,6 +13,9 @@ import { classify, isBusy } from "./errors.js";
 import { assertLocalFilesystem } from "./filesystem.js";
 import { migrationChecksum, planMigrations, type JournalEntry, type Migration } from "../migrations.js";
 import { JOURNAL_SQL, MIGRATIONS } from "./schema.js";
+import { checkSnapshotRow, type SnapshotRow, type SnapshotTable, type StorageSnapshot } from "../snapshot.js";
+import { TABLE_SPECS } from "../snapshot.js";
+import { openFileSnapshot, snapshotFolder, vacuumIntoSql } from "./snapshot.js";
 
 export interface SqliteOptions {
   /** Path of the database file on local storage. `:memory:` is refused: a controller database must be durable. */
@@ -568,6 +571,34 @@ export class SqliteStorage implements ControllerStorage {
         state: text(t, "state") as TimerRecord["state"], attempts: count(t, "attempts"), ...optional("claimedUntil", maybe(t, "claimed_until")),
       };
     });
+  }
+
+  // ---------------------------------------------------------------------------------------------- backup and restore (card K01)
+
+  /** Copies the database into a new file as of one moment (the file must not exist). The copy is a standalone database; the live files are never copied. */
+  async vacuumInto(file: string): Promise<void> {
+    if (typeof file !== "string" || file.length === 0) throw new StorageError("invalid_input", "file: must be a path", { path: "file" });
+    this.#read(() => { this.#db.exec(vacuumIntoSql(file)); });
+  }
+
+  async snapshot(): Promise<StorageSnapshot> {
+    this.#usable();
+    const folder = snapshotFolder(this.path);
+    try { await this.vacuumInto(join(folder, "snapshot.sqlite")); } catch (error) { rmSync(folder, { recursive: true, force: true }); throw error; }
+    return openFileSnapshot(join(folder, "snapshot.sqlite"), folder);
+  }
+
+  async restoreRows(table: SnapshotTable, rows: readonly SnapshotRow[]): Promise<void> {
+    if (!(table in TABLE_SPECS) || !Array.isArray(rows)) throw new StorageError("invalid_input", "table or rows: not understood", { path: "table" });
+    const checked = rows.map((row) => checkSnapshotRow(table, row));
+    this.#writeTransaction(() => {
+      if (this.#currentEpoch() !== 0) throw new StorageError("invalid_input", "a store a controller has owned cannot be restored into", { path: "table" });
+      const spec = TABLE_SPECS[table];
+      for (const row of checked) {
+        if (table === "state") this.#run("UPDATE state SET epoch = ?, holder = ?, audit_seq = ?, delivery_seq = ? WHERE singleton = 1", row["epoch"] as number, row["holder"] as string | null, row["audit_seq"] as number, row["delivery_seq"] as number);
+        else this.#run(`INSERT INTO ${table} (${spec.columns.join(", ")}) VALUES (${spec.columns.map(() => "?").join(", ")})`, ...spec.columns.map((c) => row[c] as SQLInputValue));
+      }
+    }, "retryable");
   }
 
   async close(): Promise<void> {

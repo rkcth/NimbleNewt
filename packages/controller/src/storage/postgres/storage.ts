@@ -12,6 +12,7 @@ import type {
 import { classify, isConnectionLoss } from "./errors.js";
 import { migrationChecksum, planMigrations, type JournalEntry, type Migration } from "../migrations.js";
 import { JOURNAL_SQL, MIGRATIONS } from "./schema.js";
+import { SNAPSHOT_PAGE_MAX, TABLE_SPECS, checkSnapshotRow, type SnapshotRow, type SnapshotTable, type StorageSnapshot } from "../snapshot.js";
 
 export interface PostgresOptions {
   /**
@@ -717,6 +718,69 @@ export class PostgresStorage implements ControllerStorage {
         state: text(t, "state") as TimerRecord["state"], attempts: count(t, "attempts"), ...optional("claimedUntil", maybe(t, "claimed_until")),
       };
     });
+  }
+
+  // ------------------------------------------------------------------------------------------ backup and restore (card K01)
+
+  /** A consistent copy: one repeatable-read, read-only transaction on a connection of its own, read a page at a time until the copy is closed. */
+  async snapshot(): Promise<StorageSnapshot> {
+    this.#usable();
+    let client: pg.PoolClient;
+    try { client = await this.#pool.connect(); } catch (error) { throw classify(error); }
+    const ignore = () => undefined;
+    client.on("error", ignore);
+    let broken = false;
+    let schemaVersion: number;
+    try {
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      schemaVersion = count((await client.query("SELECT COALESCE(MAX(version), 0)::int AS v FROM schema_migrations WHERE state = 'done'")).rows[0] as Row, "v");
+    } catch (error) {
+      broken = isConnectionLoss(error);
+      client.off("error", ignore);
+      client.release(broken);
+      throw classify(error);
+    }
+    let closed = false;
+    return {
+      schemaVersion,
+      read: async (table: SnapshotTable, page: { after?: SnapshotRow; limit: number }): Promise<SnapshotRow[]> => {
+        if (closed) throw new StorageError("unavailable", "the snapshot is closed");
+        if (!Number.isSafeInteger(page.limit) || page.limit < 1 || page.limit > SNAPSHOT_PAGE_MAX) throw new StorageError("invalid_input", `limit: must be a whole number from 1 to ${SNAPSHOT_PAGE_MAX}`, { path: "limit" });
+        const spec = TABLE_SPECS[table];
+        try {
+          if (table === "state") return (await client.query("SELECT s.epoch, s.holder, c.audit_seq, c.delivery_seq FROM state s, counters c WHERE s.singleton = 1 AND c.singleton = 1")).rows as SnapshotRow[];
+          const key = spec.key.join(", ");
+          const params: unknown[] = [];
+          let where = "";
+          if (page.after !== undefined) { where = ` WHERE (${key}) > (${spec.key.map((_, i) => `$${i + 1}`).join(", ")})`; for (const k of spec.key) params.push(page.after[k]); }
+          return (await client.query(`SELECT ${spec.columns.join(", ")} FROM ${table}${where} ORDER BY ${key} LIMIT ${page.limit}`, params)).rows as SnapshotRow[];
+        } catch (error) { throw classify(error); }
+      },
+      close: async (): Promise<void> => {
+        if (closed) return;
+        closed = true;
+        await client.query("ROLLBACK").catch(() => { broken = true; });
+        client.off("error", ignore);
+        client.release(broken);
+      },
+    };
+  }
+
+  async restoreRows(table: SnapshotTable, rows: readonly SnapshotRow[]): Promise<void> {
+    if (!(table in TABLE_SPECS) || !Array.isArray(rows)) throw new StorageError("invalid_input", "table or rows: not understood", { path: "table" });
+    const checked = rows.map((row) => checkSnapshotRow(table, row));
+    await this.#writeTransaction(async (tx) => {
+      if (count((await tx.q("SELECT epoch FROM state WHERE singleton = 1 FOR UPDATE"))[0]!, "epoch") !== 0) throw new StorageError("invalid_input", "a store a controller has owned cannot be restored into", { path: "table" });
+      const spec = TABLE_SPECS[table];
+      for (const row of checked) {
+        if (table === "state") {
+          await tx.q("UPDATE state SET epoch = $1, holder = $2 WHERE singleton = 1", [row["epoch"], row["holder"]]);
+          await tx.q("UPDATE counters SET audit_seq = $1, delivery_seq = $2 WHERE singleton = 1", [row["audit_seq"], row["delivery_seq"]]);
+        } else {
+          await tx.q(`INSERT INTO ${table} (${spec.columns.join(", ")}) VALUES (${spec.columns.map((_, i) => `$${i + 1}`).join(", ")})`, spec.columns.map((c) => row[c]));
+        }
+      }
+    }, "retryable");
   }
 
   async close(): Promise<void> {

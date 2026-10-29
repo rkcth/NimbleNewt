@@ -43,5 +43,7 @@ export class FaultInjectingStorage implements ControllerStorage {
   getEffect: ControllerStorage["getEffect"] = (...a) => this.#inner.getEffect(...a);
   claimDueTimers: ControllerStorage["claimDueTimers"] = (...a) => this.#inner.claimDueTimers(...a);
   getTimer: ControllerStorage["getTimer"] = (...a) => this.#inner.getTimer(...a);
+  snapshot: ControllerStorage["snapshot"] = () => this.#inner.snapshot();
+  restoreRows: ControllerStorage["restoreRows"] = (...a) => this.#inner.restoreRows(...a);
   close: ControllerStorage["close"] = () => this.#inner.close();
 }

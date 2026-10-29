@@ -5,7 +5,7 @@ import type { SqliteOptions } from "./storage.js";
 /** The storage methods the worker answers; anything else is refused. */
 export const METHODS: ReadonlySet<string> = new Set([
   "currentEpoch", "acquireEpoch", "applyOperation", "getOperation", "getAggregate", "listAggregates", "listAudit", "claimDeliveries",
-  "retryDelivery", "getDelivery", "getEffect", "claimDueTimers", "getTimer", "settings", "close",
+  "retryDelivery", "getDelivery", "getEffect", "claimDueTimers", "getTimer", "settings", "vacuumInto", "restoreRows", "close",
 ]);
 /** Answered by the worker itself, only when a crash plan was given: the highest numbered statement seen in a write since the store opened. */
 export const TEST_STATEMENT_COUNT = "testStatementCount";

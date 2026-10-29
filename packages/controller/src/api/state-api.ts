@@ -26,6 +26,7 @@ import type { PolicyService } from "../policy/policy.js";
 import type { WorkingNoteService } from "../context/notes.js";
 import type { PauseService } from "../lifecycle/pause.js";
 import type { StopService } from "../lifecycle/stop.js";
+import type { BackupService } from "../backup/index.js";
 import type { MeetingRecordService } from "../meetings/record.js";
 import type { AttendanceService } from "../meetings/attendance.js";
 import type { PolicyEditService } from "../chat/policy-edit.js";
@@ -113,6 +114,7 @@ export interface StateApiDeps {
     list(owner: Principal): Promise<string[]>;
   };
   readonly policyForward?: Pick<PolicyEditService, "forward">;
+  readonly backups?: Pick<BackupService, "backUpNow" | "list" | "status">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep">;
 
   /** Typed commands (card T09b). Absent: `command.run` answers as unavailable. */
@@ -200,6 +202,7 @@ export class StateApi {
         ...(this.#deps.notes === undefined ? {} : { notes: this.#deps.notes }),
         ...(this.#deps.stops === undefined ? {} : { stops: this.#deps.stops }),
         ...(this.#deps.policyForward === undefined ? {} : { policyForward: this.#deps.policyForward }),
+        ...(this.#deps.backups === undefined ? {} : { backups: this.#deps.backups }),
         ...(this.#deps.watchControl === undefined ? {} : { watchControl: this.#deps.watchControl }),
         ...(this.#deps.standups === undefined ? {} : { standups: this.#deps.standups }),
         ...(this.#deps.attendance === undefined ? {} : { attendance: this.#deps.attendance }),

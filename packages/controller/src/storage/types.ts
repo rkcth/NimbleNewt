@@ -261,6 +261,8 @@ export interface Page {
   readonly limit: number;
 }
 
+import type { SnapshotRow, SnapshotTable, StorageSnapshot } from "./snapshot.js";
+
 export interface ControllerStorage {
   // ---- epochs: which controller instance may write -------------------------------------------------------------
   /** The current primary epoch. 0 means no controller has taken ownership yet; no operation can be admitted at 0. */
@@ -314,6 +316,15 @@ export interface ControllerStorage {
   /** Claims up to `limit` timers due at or before `now` (pending, or claimed with an expired lease), earliest first. Fired through `applyOperation`'s `completeTimers`. */
   claimDueTimers(input: { epoch: number; claimant: string; now: Timestamp; leaseMs: number; limit: number }): Promise<TimerClaim[]>;
   getTimer(timerId: Id): Promise<TimerRecord | undefined>;
+
+  // ---- backup and restore (card K01) ---------------------------------------------------------------------------
+  /** A consistent copy of the whole store as of this moment, readable while the store goes on being used. Close it when done. */
+  snapshot(): Promise<StorageSnapshot>;
+  /**
+   * Writes rows of a copy into a store no controller has ever owned (epoch 0): it refuses once an epoch was taken, and a row that is not exactly the table's columns. Used only by a restore, one table at a time, `state` last.
+   * Rows of other tables go in the order of `SNAPSHOT_TABLES`; a key that is already there is `duplicate_id`.
+   */
+  restoreRows(table: SnapshotTable, rows: readonly SnapshotRow[]): Promise<void>;
 
   close(): Promise<void>;
 }

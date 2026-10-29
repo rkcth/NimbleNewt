@@ -16,6 +16,7 @@ import type { ProjectPlanService, ProjectResourceService, ResponsibilityService 
 import type { RetrievalService } from "../context/index.js";
 import type { ContextBranchService } from "../branches/index.js";
 import type { InvitationInbox, MeetingService } from "../meetings/index.js";
+import type { BackupService } from "../backup/index.js";
 import type { MeetingRecordService } from "../meetings/record.js";
 import type { AttendanceService } from "../meetings/attendance.js";
 import type { PolicyEditService } from "../chat/policy-edit.js";
@@ -86,6 +87,7 @@ export interface Context {
     list(owner: Principal): Promise<string[]>;
   };
   readonly policyForward?: Pick<PolicyEditService, "forward">;
+  readonly backups?: Pick<BackupService, "backUpNow" | "list" | "status">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep">;
 
   readonly commands?: CommandService;
@@ -151,6 +153,8 @@ function limitOf(args: Args): number {
 /** A task credential acts for its one task: it may not read the failed event queue, which spans tasks and carries text from outside. */
 const notFromTask = (c: Context, what: string): void => { if (c.principal.taskScope !== undefined) throw new DomainError("forbidden", `a task credential may not ${what}`); };
 const watches = (c: Context): WatchService => c.watches ?? ((): never => { throw new DomainError("unavailable", "event handling is not configured"); })();
+const ownerOnly = (c: Context, what: string): void => { if (c.principal.kind !== "owner") throw new DomainError("forbidden", `${c.principal.id} may not ${what}`); };
+const backupItem = (m: { name: string; createdAt: string; kind: string; schemaVersion: number; epoch: number; files: readonly { rows: number }[] }) => ({ name: m.name, createdAt: m.createdAt, kind: m.kind, schemaVersion: m.schemaVersion, epoch: m.epoch, rows: m.files.reduce((n, f) => n + f.rows, 0) });
 const unavailable = (what: string): never => { throw new DomainError("unavailable", `${what} is not configured`); };
 const resources = (c: Context): ProjectResourceService => c.resources ?? unavailable("project resources");
 const plans = (c: Context): ProjectPlanService => c.plans ?? unavailable("project plans");
@@ -473,6 +477,10 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => { only(a, ["watchId"]); await (c.watchControl ?? unavailable("event watching")).cancel(c.principal, { commandId: need(id), watchId: a["watchId"] as string }); return asJson({ ok: true }); } },
   { name: "watch.list", kind: "query", summary: "Owner only: the active watches.", args: {}, result: "`{ items: [watchId] }`.",
     run: async (c, a) => { only(a, []); return asJson({ items: await (c.watchControl ?? unavailable("event watching")).list(c.principal) }); } },
+  { name: "backup.now", kind: "command", summary: "Owner only: takes a consistent backup of the controller database now (a backup already running is the answer).", args: { commandId: "required" }, result: "`{ item: { name, createdAt, kind, schemaVersion, epoch, rows } }`.",
+    run: async (c, a, id) => { only(a, []); need(id); ownerOnly(c, "take a backup"); const made = await (c.backups ?? unavailable("backups")).backUpNow("manual"); return asJson({ item: backupItem(made.manifest) }); } },
+  { name: "backup.list", kind: "query", summary: "Owner only: the complete backups, newest first, and whether the last one failed.", args: {}, result: "`{ items: [{ name, createdAt, kind, schemaVersion, epoch, rows }], status }`.",
+    run: async (c, a) => { only(a, []); ownerOnly(c, "list backups"); const backups = c.backups ?? unavailable("backups"); return asJson({ items: (await backups.list()).map((b) => backupItem(b.manifest)), status: await backups.status() }); } },
   messageOp("send", "command", "Sends a message (or a reply) about a task. Information and advice wait for the agent's next check-in; a request or blocking message is kept for it; only an urgent one with the right can interrupt.", "send", ["taskId", "to", "class", "purpose", "text", "expectsReply", "deadline", "escalateTo", "replyTo", "correlationId", "coalesceKey"], "`{ id, replayed, coalesced, effectiveClass, reach, woke }`."),
   messageOp("readable", "query", "The messages an agent may read at a boundary (check-in, stand-up and so on); focus time and pauses hold some back.", "readable", ["boundary", "occurrenceId", "limit"], "`{ item: { items, withheld } }`."),
   messageOp("receive", "command", "Marks messages as received at a boundary.", "acknowledge", ["boundary", "messageIds", "occurrenceId"], "`{ delivered, refused }`."),

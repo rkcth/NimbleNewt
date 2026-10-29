@@ -460,6 +460,16 @@ Arguments:
 
 Result: `{ items: [watchId] }`.
 
+#### `backup.list`
+
+Owner only: the complete backups, newest first, and whether the last one failed.
+
+Arguments:
+
+- none
+
+Result: `{ items: [{ name, createdAt, kind, schemaVersion, epoch, rows }], status }`.
+
 #### `message.readable`
 
 The messages an agent may read at a boundary (check-in, stand-up and so on); focus time and pauses hold some back.
@@ -2144,6 +2154,16 @@ Arguments:
 - `commandId`: required
 
 Result: `{ ok }`.
+
+#### `backup.now`
+
+Owner only: takes a consistent backup of the controller database now (a backup already running is the answer).
+
+Arguments:
+
+- `commandId`: required
+
+Result: `{ item: { name, createdAt, kind, schemaVersion, epoch, rows } }`.
 
 #### `message.send`
 

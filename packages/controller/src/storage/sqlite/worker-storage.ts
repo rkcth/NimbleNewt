@@ -1,3 +1,5 @@
+import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { Worker } from "node:worker_threads";
 import { StorageError } from "../errors.js";
 import type {
@@ -5,6 +7,8 @@ import type {
   StoredOperation, TimerClaim, TimerRecord, Timestamp,
 } from "../types.js";
 import type { SqliteSettings } from "./storage.js";
+import type { SnapshotRow, SnapshotTable, StorageSnapshot } from "../snapshot.js";
+import { openFileSnapshot, snapshotFolder } from "./snapshot.js";
 import type { TestCrash, WireError, WorkerInit, WorkerReply, WorkerRequest, WorkerStorageOptions } from "./worker-protocol.js";
 
 export type { TestCrash, WorkerStorageOptions } from "./worker-protocol.js";
@@ -136,6 +140,15 @@ export class SqliteWorkerStorage implements ControllerStorage {
   getEffect(effectId: Id): Promise<EffectRecord | undefined> { return this.#call("getEffect", effectId); }
   claimDueTimers(input: { epoch: number; claimant: string; now: Timestamp; leaseMs: number; limit: number }): Promise<TimerClaim[]> { return this.#call("claimDueTimers", input); }
   getTimer(timerId: Id): Promise<TimerRecord | undefined> { return this.#call("getTimer", timerId); }
+
+  /** A consistent copy of the database made on the worker thread, read on this one from its own file. */
+  async snapshot(): Promise<StorageSnapshot> {
+    const folder = snapshotFolder(this.path);
+    const file = join(folder, "snapshot.sqlite");
+    try { await this.#call("vacuumInto", file); } catch (error) { rmSync(folder, { recursive: true, force: true }); throw error; }
+    return openFileSnapshot(file, folder);
+  }
+  restoreRows(table: SnapshotTable, rows: readonly SnapshotRow[]): Promise<void> { return this.#call("restoreRows", table, rows); }
 
   /** Closes the database on the worker (after the calls already made have been answered), then ends the thread. Repeated and concurrent calls share one close. */
   close(): Promise<void> {

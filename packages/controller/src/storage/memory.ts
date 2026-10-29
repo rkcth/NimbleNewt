@@ -4,6 +4,7 @@ import { canonicalJson, compareCodePoints, parseJson } from "./json.js";
 import {
   checkBody, checkCount, checkId, checkKind, checkLease, checkPage, checkRef, checkText, checkTimestamp, validateOperation,
 } from "./validate.js";
+import { SNAPSHOT_TABLES, TABLE_SPECS, checkSnapshotRow, type SnapshotRow, type SnapshotTable, type StorageSnapshot } from "./snapshot.js";
 import type {
   Aggregate, AggregateRef, AuditRecord, ControllerStorage, DeliveryClaim, DeliveryRecord, EffectRecord, EffectStatus, Id, JsonObject, OperationInput,
   OperationResult, Page, StoredOperation, TimerClaim, TimerRecord, Timestamp,
@@ -298,6 +299,65 @@ export class MemoryStorage implements ControllerStorage {
     const t = this.#timers.get(timerId);
     if (t === undefined) return undefined;
     return { timerId: t.timerId, dueAt: t.dueAt, ...optional("aggregate", t.aggregate === undefined ? undefined : { ...t.aggregate }), payload: parseJson(t.payload) as JsonObject, state: t.state, attempts: t.attempts, ...optional("claimedUntil", t.claimedUntil) };
+  }
+
+  // ---- backup and restore (card K01) ------------------------------------------------------------------------------
+
+  async snapshot(): Promise<StorageSnapshot> {
+    this.#open();
+    const by = (table: SnapshotTable): SnapshotRow[] => {
+      const nul = <T>(v: T | undefined): T | null => (v === undefined ? null : v);
+      switch (table) {
+        case "state": return [{ epoch: this.#epoch, holder: nul(this.#holder), audit_seq: this.#audit.length === 0 ? 0 : this.#audit[this.#audit.length - 1]!.seq, delivery_seq: this.#deliverySeq }];
+        case "operations": return [...this.#operations].map(([id, o]) => ({ operation_id: id, request_hash: o.hash, actor: o.actor, correlation_id: o.correlationId, at: o.at, result: o.result }));
+        case "aggregates": return [...this.#aggregates.values()].map((a) => ({ kind: a.kind, id: a.id, revision: a.revision, body: a.body, created_at: a.createdAt, updated_at: a.updatedAt }));
+        case "audit": return this.#audit.map((a) => ({ seq: a.seq, operation_id: a.operationId, correlation_id: a.correlationId, actor: a.actor, at: a.at, type: a.type, subject_kind: nul(a.subject?.kind), subject_id: nul(a.subject?.id), detail: a.detail }));
+        case "deliveries": return [...this.#deliveries.values()].map((d) => ({ delivery_id: d.deliveryId, seq: d.seq, destination: d.destination, ordering_key: nul(d.orderingKey), priority: d.priority, aggregate_kind: d.aggregate.kind, aggregate_id: d.aggregate.id, aggregate_revision: d.aggregateRevision, payload: d.payload, state: d.state, attempts: d.attempts, next_attempt_at: d.nextAttemptAt, claimed_until: nul(d.claimedUntil), token: nul(d.token), last_error: nul(d.lastError), receipt: nul(d.receipt), delivered_at: nul(d.deliveredAt) }));
+        case "effects": return [...this.#effects.values()].map((e) => ({ effect_id: e.effectId, operation_id: e.operationId, attempt_id: nul(e.attemptId), target: e.target, input_digest: e.inputDigest, reconciliation_handle: nul(e.reconciliationHandle), status: e.status, evidence: nul(e.evidence), created_at: e.createdAt, updated_at: e.updatedAt }));
+        case "timers": return [...this.#timers.values()].map((t) => ({ timer_id: t.timerId, due_at: t.dueAt, aggregate_kind: nul(t.aggregate?.kind), aggregate_id: nul(t.aggregate?.id), payload: t.payload, state: t.state, attempts: t.attempts, claimed_until: nul(t.claimedUntil), token: nul(t.token) }));
+      }
+    };
+    const copies = new Map<SnapshotTable, SnapshotRow[]>(SNAPSHOT_TABLES.map((t) => {
+      const spec = TABLE_SPECS[t];
+      const rows = by(t).map((r) => ({ ...r }));
+      rows.sort((a, b) => { for (const k of spec.key) { const x = a[k]!; const y = b[k]!; if (x !== y) return typeof x === "number" ? (x as number) - (y as number) : compareCodePoints(String(x), String(y)); } return 0; });
+      return [t, rows];
+    }));
+    let closed = false;
+    return {
+      schemaVersion: 1,
+      read: async (table, page) => {
+        if (closed) throw new StorageError("unavailable", "the snapshot is closed");
+        const spec = TABLE_SPECS[table];
+        const rows = copies.get(table)!;
+        if (spec.key.length === 0) return rows;
+        const after = page.after;
+        const past = (r: SnapshotRow): boolean => { if (after === undefined) return true; for (const k of spec.key) { const x = r[k]!; const y = after[k]!; if (x !== y) return typeof x === "number" ? (x as number) > (y as number) : compareCodePoints(String(x), String(y)) > 0; } return false; };
+        return rows.filter(past).slice(0, page.limit);
+      },
+      close: async () => { closed = true; },
+    };
+  }
+
+  async restoreRows(table: SnapshotTable, rows: readonly SnapshotRow[]): Promise<void> {
+    this.#open();
+    if (!(table in TABLE_SPECS) || !Array.isArray(rows)) throw new StorageError("invalid_input", "table or rows: not understood", { path: "table" });
+    const checked = rows.map((row) => checkSnapshotRow(table, row));
+    if (this.#epoch !== 0) throw new StorageError("invalid_input", "a store a controller has owned cannot be restored into", { path: "table" });
+    const un = <T>(v: T | null): T | undefined => (v === null ? undefined : v);
+    const ref = (kind: unknown, id: unknown): AggregateRef | undefined => (kind === null ? undefined : { kind: kind as string, id: id as string });
+    const dup = (id: string): never => { throw new StorageError("duplicate_id", `${table}: ${id} is already there`, { path: table }); };
+    for (const r of checked) {
+      switch (table) {
+        case "state": this.#epoch = r["epoch"] as number; this.#holder = un(r["holder"] as string | null); this.#deliverySeq = r["delivery_seq"] as number; break;
+        case "operations": if (this.#operations.has(r["operation_id"] as string)) dup(r["operation_id"] as string); this.#operations.set(r["operation_id"] as string, { hash: r["request_hash"] as string, actor: r["actor"] as string, correlationId: r["correlation_id"] as string, at: r["at"] as string, result: r["result"] as string }); break;
+        case "aggregates": { const k = key({ kind: r["kind"] as string, id: r["id"] as string }); if (this.#aggregates.has(k)) dup(k); this.#aggregates.set(k, { kind: r["kind"] as string, id: r["id"] as string, revision: r["revision"] as number, body: r["body"] as string, createdAt: r["created_at"] as string, updatedAt: r["updated_at"] as string }); break; }
+        case "audit": { const subject = ref(r["subject_kind"], r["subject_id"]); this.#audit.push({ seq: r["seq"] as number, operationId: r["operation_id"] as string, correlationId: r["correlation_id"] as string, actor: r["actor"] as string, at: r["at"] as string, type: r["type"] as string, ...(subject === undefined ? {} : { subject }), detail: r["detail"] as string }); break; }
+        case "deliveries": if (this.#deliveries.has(r["delivery_id"] as string)) dup(r["delivery_id"] as string); this.#deliveries.set(r["delivery_id"] as string, { deliveryId: r["delivery_id"] as string, seq: r["seq"] as number, destination: r["destination"] as string, ...optional("orderingKey", un(r["ordering_key"] as string | null)), priority: r["priority"] as number, aggregate: { kind: r["aggregate_kind"] as string, id: r["aggregate_id"] as string }, aggregateRevision: r["aggregate_revision"] as number, payload: r["payload"] as string, state: r["state"] as "pending", attempts: r["attempts"] as number, nextAttemptAt: r["next_attempt_at"] as string, ...optional("claimedUntil", un(r["claimed_until"] as string | null)), ...optional("token", un(r["token"] as string | null)), ...optional("lastError", un(r["last_error"] as string | null)), ...optional("receipt", un(r["receipt"] as string | null)), ...optional("deliveredAt", un(r["delivered_at"] as string | null)) }); break;
+        case "effects": if (this.#effects.has(r["effect_id"] as string)) dup(r["effect_id"] as string); this.#effects.set(r["effect_id"] as string, { effectId: r["effect_id"] as string, operationId: r["operation_id"] as string, ...optional("attemptId", un(r["attempt_id"] as string | null)), target: r["target"] as string, inputDigest: r["input_digest"] as string, ...optional("reconciliationHandle", un(r["reconciliation_handle"] as string | null)), status: r["status"] as EffectStatus, ...optional("evidence", un(r["evidence"] as string | null)), createdAt: r["created_at"] as string, updatedAt: r["updated_at"] as string }); break;
+        case "timers": { if (this.#timers.has(r["timer_id"] as string)) dup(r["timer_id"] as string); const aggregate = ref(r["aggregate_kind"], r["aggregate_id"]); this.#timers.set(r["timer_id"] as string, { timerId: r["timer_id"] as string, dueAt: r["due_at"] as string, ...(aggregate === undefined ? {} : { aggregate }), payload: r["payload"] as string, state: r["state"] as "pending", attempts: r["attempts"] as number, ...optional("claimedUntil", un(r["claimed_until"] as string | null)), ...optional("token", un(r["token"] as string | null)) }); break; }
+      }
+    }
   }
 
   async close(): Promise<void> {

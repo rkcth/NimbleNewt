@@ -1,0 +1,77 @@
+import { createHash } from "node:crypto";
+import { mkdir, open, rename, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { SNAPSHOT_TABLES, TABLE_SPECS, type ControllerStorage, type SnapshotRow, type SnapshotTable } from "../storage/index.js";
+import { BACKUP_FORMAT, BACKUP_NOTES, MANIFEST_FILE, PARTIAL_SUFFIX, type BackupFileEntry, type BackupKind, type BackupManifest } from "./format.js";
+
+export interface BackupOptions {
+  /** The folder the backups live in; each backup is a folder of its own inside it. */
+  readonly root: string;
+  readonly kind: BackupKind;
+  /** The version of NimbleNewt (written in the manifest). */
+  readonly version: string;
+  readonly now?: () => Date;
+  /** Rows read from the store at a time. Default 500. */
+  readonly pageSize?: number;
+}
+
+const stamp = (d: Date): string => d.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+
+/** The name of the folder a backup made at `at` has. Two made in the same second differ by their kind, and a repeat is refused rather than overwritten. */
+export const backupName = (at: Date, kind: BackupKind): string => `backup-${stamp(at)}-${kind}`;
+
+/**
+ * Takes a consistent snapshot of the store and writes it as a backup folder. It is written under a `.partial` name, every file is flushed, the manifest is written last, and only then is the
+ * folder renamed to its final name: a crash, a full disk or a failed read leaves a `.partial` folder (which is removed here and never mistaken for a backup), never a half-written backup that looks complete.
+ */
+export async function createBackup(storage: ControllerStorage, options: BackupOptions): Promise<{ path: string; manifest: BackupManifest }> {
+  const at = (options.now ?? (() => new Date()))();
+  const name = backupName(at, options.kind);
+  const final = join(options.root, name);
+  const staging = `${final}${PARTIAL_SUFFIX}`;
+  const pageSize = options.pageSize ?? 500;
+  const snapshot = await storage.snapshot();
+  try {
+    await mkdir(options.root, { recursive: true, mode: 0o700 });
+    await rm(staging, { recursive: true, force: true });
+    await mkdir(staging, { mode: 0o700 });
+    const files: BackupFileEntry[] = [];
+    let epoch = 0;
+    for (const table of SNAPSHOT_TABLES) {
+      const file = `${table}.jsonl`;
+      const handle = await open(join(staging, file), "wx", 0o600);
+      const hash = createHash("sha256");
+      let rows = 0;
+      let bytes = 0;
+      try {
+        for (let after: SnapshotRow | undefined; ;) {
+          const page = await snapshot.read(table, { ...(after === undefined ? {} : { after }), limit: pageSize });
+          if (page.length === 0) break;
+          const text = page.map((row) => `${JSON.stringify(Object.fromEntries(TABLE_SPECS[table].columns.map((c) => [c, row[c] ?? null])))}\n`).join("");
+          const buffer = Buffer.from(text, "utf8");
+          await handle.write(buffer);
+          hash.update(buffer);
+          rows += page.length;
+          bytes += buffer.length;
+          if (table === "state") epoch = Number(page[0]!["epoch"]);
+          if (table === "state" || page.length < pageSize) break;
+          after = page[page.length - 1];
+        }
+        await handle.sync();
+      } finally { await handle.close(); }
+      files.push({ table, file, rows, bytes, sha256: hash.digest("hex") });
+    }
+    const manifest: BackupManifest = { format: BACKUP_FORMAT, product: "nimblenewt", name, createdAt: at.toISOString(), kind: options.kind, version: options.version, schemaVersion: snapshot.schemaVersion, epoch, files, notes: BACKUP_NOTES, complete: true };
+    const manifestHandle = await open(join(staging, MANIFEST_FILE), "wx", 0o600);
+    try { await manifestHandle.write(`${JSON.stringify(manifest, null, 2)}\n`); await manifestHandle.sync(); } finally { await manifestHandle.close(); }
+    await rename(staging, final);
+    const dir = await open(options.root, "r").catch(() => undefined);
+    if (dir !== undefined) { await dir.sync().catch(() => undefined); await dir.close(); }
+    return { path: final, manifest };
+  } catch (error) {
+    await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  } finally { await snapshot.close(); }
+}
+
+export type { SnapshotTable };
