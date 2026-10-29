@@ -92,6 +92,11 @@ export interface DispatcherDeps {
   readonly replaySafe?: (tool: ToolIdentity, agent: Principal, attemptId: string, callId: string) => Promise<boolean>;
   readonly environments?: Pick<EnvironmentService, "pin">;
   readonly meetings?: Pick<AttendanceService, "admission" | "revalidation">;
+  /**
+   * Puts a step in the task's activity record (card C09d): the model route and harness an attempt started under and every tool call's outcome, each with a reference to the record that holds the detail.
+   * Best effort: a step that cannot be recorded never stops the attempt or changes a call's result.
+   */
+  readonly activity?: (step: { commandId: string; taskId: string; kind: "model-selected" | "harness-selected" | "tool-call"; summary: string; refs: readonly { kind: string; id: string }[] }) => Promise<void>;
   readonly notifications?: Pick<NotificationService, "emitFromController">;
   /**
    * Context enforcement (card C07b) at the end of an attempt: an attempt that failed for want of context is counted (repeated overflow opens a visible blocker), and an attempt that ended without a hand-off gets
@@ -362,13 +367,22 @@ export class DispatcherService {
     if (typeof attemptId !== "string" || !ATTEMPT.test(attemptId)) invalid("attemptId", "is not an attempt ID");
     return {
       attemptId,
-      call: (request, executor) => this.#path.call(attemptId, request, executor),
+      call: async (request, executor) => { const result = await this.#path.call(attemptId, request, executor); await this.#stepOf(attemptId, `call:${request.callId}`, "tool-call", `Tool ${request.tool.name} ${result.state}${"reason" in result ? `: ${result.reason}` : ""}.`, [{ kind: "tool-operation", id: result.operationId }]); return result; },
       begin: (request) => this.#path.begin(attemptId, request),
       report: (operationId, outcome) => this.#path.report(attemptId, operationId, outcome),
       usage: (usage, requestKey) => this.#usage(attemptId, usage, requestKey),
       heartbeat: () => this.heartbeat(attemptId),
       acknowledgeDecisions: () => this.acknowledgeDecisions(attemptId),
     };
+  }
+
+  /** Records a step of an attempt in its task's activity (best effort, see `DispatcherDeps.activity`). */
+  async #stepOf(attemptId: string, key: string, kind: "model-selected" | "harness-selected" | "tool-call", summary: string, refs: readonly { kind: string; id: string }[]): Promise<void> {
+    if (this.#deps.activity === undefined) return;
+    try {
+      const taskId = (await this.#load(attemptId))?.body.taskId;
+      if (taskId !== undefined) await this.#deps.activity({ commandId: `dpa-act:${attemptId}:${key}`.slice(0, 120), taskId, kind, summary: summary.slice(0, 300), refs });
+    } catch { /* the record of a step never changes what happened */ }
   }
 
   /** The worker is alive: extends its lease. Refused (`fenced`) once the attempt is no longer the task's current one, so a stale worker learns it has lost. */
@@ -997,6 +1011,8 @@ export class DispatcherService {
       return { kind: "skipped", check: "host", reason: `the worker did not start: ${why}` };
     }
     await this.#update(b.attemptId, (x) => ({ ...x, workerVersion: handle.workerVersion, recipeRevision: recipe.revision }));
+    await this.#stepOf(b.attemptId, "model", "model-selected", `Attempt ${b.attemptId} runs on route ${b.route}.`, [{ kind: "dispatch", id: b.attemptId }]);
+    if (b.harness !== undefined) await this.#stepOf(b.attemptId, "harness", "harness-selected", `Attempt ${b.attemptId} runs in the ${b.harness} harness.`, [{ kind: "dispatch", id: b.attemptId }]);
     const turn = this.#run(b.attemptId, handle);
     this.#live.set(b.attemptId, { handle, host, turn });
     return { kind: "started" };

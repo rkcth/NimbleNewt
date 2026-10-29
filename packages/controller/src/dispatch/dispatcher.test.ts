@@ -1739,3 +1739,40 @@ for (const backend of backends) {
     } finally { await store.close(); }
   });
 }
+
+// Card C09d: the steps of an attempt are recorded in the task's activity.
+for (const backend of backends) {
+  test(`${backend.name}: the route and harness an attempt started under and each tool call's outcome are put in the task's activity, and a failing record changes nothing`, async () => {
+    const store = await backend.open();
+    try {
+      const steps: { commandId: string; taskId: string; kind: string; summary: string; refs: readonly { kind: string; id: string }[] }[] = [];
+      let failing = false;
+      const c = await buildWorld(store.storage);
+      const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+      const { taskId, attemptId } = await c.task("Order seeds", ann);
+      await c.policy.set(c.owner, { scope: "installation", commandId: "pol", profile: "autonomous" });
+      let outcome = "";
+      c.worker.script = async ({ gateway }) => {
+        const r = await gateway.call({ callId: "c1", tool: { name: "read-file", version: "1" }, args: { path: "README.md" } }, { kind: "local", run: async () => ({ text: "hello" }) });
+        outcome = r.state;
+        return { status: "completed", text: "done" };
+      };
+      c.dispatcher = c.restart({ activity: async (s) => { if (failing) throw new Error("activity is down"); steps.push(s); } });
+      await c.dispatcher.tick(); await c.dispatcher.idle();
+      assert.deepEqual(steps.map((s) => s.kind), ["model-selected", "harness-selected", "tool-call"]);
+      assert.ok(steps.every((s) => s.taskId === taskId));
+      assert.match(steps[0]!.summary, /localp\/small/);
+      assert.match(steps[2]!.summary, /read-file confirmed/);
+      assert.equal(steps[2]!.refs[0]!.kind, "tool-operation");
+      assert.equal(steps[2]!.commandId, `dpa-act:${attemptId}:call:c1`);
+      assert.equal(outcome, "confirmed");
+      // A record that fails does not change the call.
+      failing = true;
+      const second = await c.task("Water beds", ann);
+      outcome = "";
+      await c.dispatcher.tick(); await c.dispatcher.idle();
+      assert.equal(outcome, "confirmed", "the call still succeeded");
+      assert.equal((await c.dispatcher.get(c.owner, second.attemptId!))?.state, "finished");
+    } finally { await store.close(); }
+  });
+}

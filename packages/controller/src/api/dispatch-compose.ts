@@ -36,6 +36,7 @@ import type { HistoryService } from "../context/index.js";
 import type { InquiryService } from "../inquiries/index.js";
 import { PauseService } from "../lifecycle/index.js";
 import type { Availability } from "../conversations/index.js";
+import { ActivityService } from "../activity/index.js";
 import type { BackupService } from "../backup/index.js";
 import type { MeetingRecordService } from "../meetings/record.js";
 import { AttendanceService, InvitationInbox, MeetingService, meetingNoticeSink, withNudge, type InvitationSink } from "../meetings/index.js";
@@ -354,7 +355,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     }
     const dispatcher = DispatcherService.withEpoch(storage, epoch, {
       principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, hosts, workers,  contracts: i.contracts, harnesses: i.catalog, policy, protectedBranch: (projectId, branch) => branchSettings.isProtected(projectId, branch), effects, blockers, route,
-      routing: i.routing, pauses, decisions, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
+      activity: async (step) => { await ActivityService.withEpoch(storage, epoch, ro).record(principal, { commandId: step.commandId, taskId: step.taskId, kind: step.kind, summary: step.summary, manifest: { refs: step.refs } } as never); }, routing: i.routing, pauses, decisions, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
       ...(i.options.local === undefined ? {} : { toolWindow: (route: string) => { try { return i.options.local!.window({ route } as WorkOrder); } catch { return undefined; } } }),
       ...(remote === undefined ? {} : { storeOwner: (agentId: string, attemptId: string) => remote!.storeOwner(principal, agentId, attemptId) }),
     }, { ...ro, holder: "dispatcher", ...(i.onError === undefined ? {} : { onError: i.onError }), ...(i.options.dispatcher ?? {}) });
