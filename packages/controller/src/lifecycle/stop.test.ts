@@ -31,6 +31,8 @@ class Runtime implements StopPorts {
   ended = true;
   crashOnTerminate = false;
   throwOnTerminate = false;
+  unsupportedWith: string | undefined;
+  unsupported(): string | undefined { return this.unsupportedWith; }
   throwOnCheckpoint = false;
   /** Runs inside cleanup, so a test can make something else happen while preparation is in progress. */
   duringCleanup: (() => Promise<void>) | undefined;
@@ -307,5 +309,12 @@ for (const backend of backends) {
     const before = c.rt.count("release");
     assert.equal((await c.stops.advance(c.mgr, { intentId: b.intentId })).phase, "cancelled");
     assert.equal(c.rt.count("release"), before + 1);
+  });
+  suite("a scope that cannot be stopped yet is refused before anything is paused or recorded", async (c) => {
+    c.rt.unsupportedWith = "stopping a whole team is not supported yet";
+    await refuses("unavailable", () => c.stops.request(c.mgr, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "r" }));
+    await refuses("unavailable", () => c.stops.force(c.mgr, { commandId: cid("f"), scope: scopeOf(c.task), reason: "r" }));
+    assert.notEqual((await c.pauses.gate(c.owner, scopeOf(c.task)))?.intent, "pause", "not paused");
+    assert.equal(c.rt.count("terminate-force"), 0);
   });
 }

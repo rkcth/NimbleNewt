@@ -34,6 +34,8 @@ test("the dispatcher ports: live attempts of a task, calls in flight as inventor
   assert.ok(log.every((l) => !l.includes("quiesce") || l.endsWith("as service:dispatcher")), "the runtime acts as the dispatcher, not as the asker");
   // A scope the runtime does not resolve is said so; with no dispatcher there is nothing to do.
   await assert.rejects(ports.inventory({ kind: "team", id: "team-x" }), /not resolved to attempts/);
+  assert.match(ports.unsupported!({ kind: "team", id: "team-x" }) ?? "", /not supported yet/);
+  assert.equal(ports.unsupported!(task), undefined);
   // No dispatcher in this controller: nothing can be running. One that should exist but is not up: nothing is claimed.
   const none = dispatchStopPorts(() => undefined, () => "none");
   assert.deepEqual(await none.inventory(task), []);

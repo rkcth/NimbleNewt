@@ -30,6 +30,7 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
     return out;
   };
   return {
+    unsupported: (scope) => (scope.kind === "task" || scope.kind === "agent" ? undefined : `stopping a whole ${scope.kind} is not supported yet; stop its tasks or agents one by one (Force Stop works on each)`),
     inventory: async (scope) => inFlight(await attemptsOf(scope)),
     release: async (scope) => { const h = dispatch(); if (h === undefined) return; for (const id of await attemptsOf(scope)) await h.dispatcher.release(h.principal, id).catch(() => undefined); },
     cleanup: async (scope, options) => {

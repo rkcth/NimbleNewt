@@ -2257,3 +2257,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - H08: `killContained` refuses a process that is not its own group leader instead of reporting it gone; a short sleep (below the wake threshold) shortens the lease by the gap.
 - C07e: `changeRoute` archives cut text in batches of 50 before the decision (more than ~99 cut items used to fail the operation), each item capped at 100,000 characters with `truncated` set.
 - Known, not fixed: the worker lease is `until − local clock`, so a worker clock behind the controller's gets a longer lease up to `maxLeaseMs` (the controller should send a duration); `pollControl`/`putCheckpoint`/`publish` do not act on a fenced answer or check `assertProductive`; `lifecycle.status` says `active` for an unreadable scope or one held only by its agent's or team's gate.
+
+## Owner decisions on the batch questions (2026-10-28)
+- Protected branches: a contract's named permission (for example `tool.git-push`) covers a protected branch **only for a contract of the integrator role**; every other role needs the branch named by an approval or grant. Not built yet: the policy check still treats a contract-named permission as covering a protected branch for any role (new card A07g).
+- Stopping a whole team or the whole installation is **refused with a clear reason** until L02b can reach every attempt under it (`lifecycle.stop`/`force` answer `unavailable` before anything is paused or recorded). Built.

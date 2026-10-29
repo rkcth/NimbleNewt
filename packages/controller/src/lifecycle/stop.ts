@@ -23,6 +23,8 @@ export interface StopPorts {
   inventory(scope: PauseScope): Promise<readonly InventoryItem[]>;
   /** Lets go of what preparation froze, when the request is cancelled because the scope was resumed. Best effort. */
   release?(scope: PauseScope): Promise<void>;
+  /** Why a stop cannot be done for this scope at all (so it is refused before anything is paused or recorded), or undefined. */
+  unsupported?(scope: PauseScope): string | undefined;
   /** Scoped cleanup only (finish or checkpoint what is running, nothing new). `backup` asks for an eligible backup model after the first one was lost. */
   cleanup(scope: PauseScope, options: { deadlineAt: string; spendBudget?: number; backup: boolean }): Promise<{ remaining: readonly InventoryItem[]; spent?: number; modelLost?: boolean }>;
   /** The checkpoint of the scope's state, and whether it and the artifacts it names are durable. */
@@ -102,6 +104,8 @@ export class StopService {
     if (command.spendBudget !== undefined && (typeof command.spendBudget !== "number" || !(command.spendBudget >= 0) || !Number.isFinite(command.spendBudget))) invalid("spendBudget", "must be a number of at least 0");
     const target = await this.#pauses.authorizeControl(by, command.scope);
     const scope = { kind: command.scope.kind, id: command.scope.id } as PauseScope;
+    const cannot = this.#ports.unsupported?.(scope);
+    if (cannot !== undefined) throw new DomainError("unavailable", cannot, { field: "scope" });
     await this.#abandonIfResumed(by, scope);
     if ((await this.#pauses.gate(by, scope))?.intent !== "pause") await this.#pauses.pause(by, { commandId: `${String(command.commandId)}-pause`, scope, reason: `${command.mode}: ${reason}`.slice(0, 500) });
     const gateRequestId = (await this.#pauses.gate(by, scope))?.requestId;
@@ -147,6 +151,8 @@ export class StopService {
     const reason = plain(command.reason, "reason");
     const target = await this.#pauses.authorizeControl(by, command.scope);
     const scope = { kind: command.scope.kind, id: command.scope.id } as PauseScope;
+    const cannot = this.#ports.unsupported?.(scope);
+    if (cannot !== undefined) throw new DomainError("unavailable", cannot, { field: "scope" });
     // The same force sent again answers with what it did; it never ends running work a second time (the owner may have resumed the scope since).
     const mine = derivedId("stp", scopedCommandId(by.id, command.commandId));
     // A force that took over a request already under way left a marker at its own id naming that request.
