@@ -1080,7 +1080,7 @@ for (const backend of backends) {
     const asked: string[] = [];
     const meetings = {
       revalidation: async (_by: unknown, id: string) => { asked.push(`revalidation ${id === taskId}`); return required ? { required: true, entries: [] } : { required: false, entries: [] }; },
-      admission: async (_by: unknown, q: { agent: string; expectedMinutes: number }) => { asked.push(`admission ${q.agent} ${q.expectedMinutes}`); return defer ? { decision: "defer" as const, reason: "a stand-up starts", until: "x", meeting: { occurrenceId: "o", startsAt: "a", endsAt: "b" } } : { decision: "start" as const, reason: "ok" }; },
+      admission: async (_by: unknown, q: { agent: string; expectedMinutes: number; yieldsAtBoundary?: boolean }) => { asked.push(`admission ${q.agent} ${q.expectedMinutes} yields=${q.yieldsAtBoundary}`); return defer ? { decision: "defer" as const, reason: "a stand-up starts", until: "x", meeting: { occurrenceId: "o", startsAt: "a", endsAt: "b" } } : { decision: "start" as const, reason: "ok" }; },
     };
     const emitted: string[] = [];
     const notifications = { emitFromController: async (cmd: { kind: string; ref: { kind: string; id: string } }) => { emitted.push(`${cmd.kind} ${cmd.ref.kind}`); return { itemId: "i", coalesced: false, immediate: false }; } };
@@ -1088,7 +1088,7 @@ for (const backend of backends) {
     assert.deepEqual((await c.dispatcher.tick()).skipped.map((x) => x.check), ["revalidation"]);
     required = false;
     assert.deepEqual((await c.dispatcher.tick()).skipped.map((x) => x.check), ["meeting"]);
-    assert.ok(asked.includes("admission agent:ann 30"));
+    assert.ok(asked.includes("admission agent:ann 30 yields=true"), "Pi can stop a conversation, so its work yields at a boundary (card M04c)");
     defer = false;
     await c.difficulty.setProfiles(c.owner, { commandId: "sp2", expectedRevision: 1, profiles: { profiles: { default: { harness: "other", routingProfile: "r-local" } }, mapping: { unrated: "default" } } });
     assert.equal((await c.dispatcher.tick()).blocked[0]?.check, "harness");

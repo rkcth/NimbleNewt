@@ -2391,3 +2391,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## M02c (first part): the meeting record sweep runs each tick (2026-10-29)
 - A dispatcher loop `meeting-records.sweep` runs `MeetingRecordService.sweep` for every project as the dispatcher service, so a vote past its time closes, a tie past its casting window fails and a record nobody finished ends, without a call. Tests: `dispatch/loops.test.ts` (every project, the tick's principal) and `api/start-dispatch.test.ts` (the loop is in the running tick). Removes the "no loop for meeting.record.sweep" known item.
 - Not done (M02c stays planned): the task-update applier, authority and shareable checks, the narrator and chat commands.
+
+## M04c (first part): the dispatcher says work yields at a boundary (2026-10-29)
+- The dispatcher's meeting check now passes `yieldsAtBoundary` to `AttendanceService.admission`: true when every harness the installation ships can stop a conversation (`abort` is not `none`; Pi does). It is conservative on purpose: the route, and so the harness, is chosen after this check. Test: the existing dispatcher meeting test asserts the hint.
+- Not done (M04c stays planned): `safeLongRunning` (needs T07 job knowledge), notice and wake sinks, chat commands, the stand-up link.
