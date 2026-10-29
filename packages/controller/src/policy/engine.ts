@@ -64,6 +64,8 @@ export interface PolicyRequest {
   readonly branchProtected?: boolean;
   /** The branch a push or merge changes, when it is known (card A07f). */
   readonly branch?: string;
+  /** The roles of the acting agent (card A07g). Only an integrator's named permission covers a protected branch without naming the branch. */
+  readonly actorRoles?: readonly string[];
   /** A send or publication to an audience that no grant names. */
   readonly audience?: string;
   /** The action cannot be undone outside a sandbox. */
@@ -145,7 +147,9 @@ export function evaluate(policy: PolicyView, request: PolicyRequest, held: reado
   }
   const reasons: string[] = [];
   const tool = `tool.${request.tool}`;
-  const named = request.scope !== undefined && request.scope.ceiling.includes(tool) && request.scope.approvedBy.startsWith("owner:");
+  const protectedChange = (request.cls === "push" || request.cls === "merge") && request.branchProtected === true;
+  // The owner's instruction naming the tool is enough for most things that stay a decision; for a protected branch it is enough only for an integrator's contract (card A07g). Anyone else needs the branch named by a grant.
+  const named = request.scope !== undefined && request.scope.ceiling.includes(tool) && request.scope.approvedBy.startsWith("owner:") && (!protectedChange || (request.actorRoles ?? []).includes("integrator"));
   const decisions: string[] = [];
   if (request.cls === "access-change") decisions.push("it changes access");
   if (request.cls === "deploy" && tier === "live") decisions.push("it deploys to a customer-live environment");

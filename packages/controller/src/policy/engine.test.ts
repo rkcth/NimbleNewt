@@ -52,7 +52,13 @@ test("the things that stay decisions stay decisions in every profile unless the 
     // Naming it, in an owner-approved instruction, is the owner's decision.
     const named = ask(profile, "deploy", "customer-live", { scope: { ceiling: ["tool.deploy"], approvedBy: "owner:rob" } });
     assert.deepEqual([named.mode, named.via], ["allow", "scope"]);
-    assert.equal(ask(profile, "git-push", "development", { branchProtected: true, scope: { ceiling: ["tool.git-push"], approvedBy: "owner:rob" } }).mode, "allow");
+    // The owner's instruction naming git-push covers a protected branch only for an integrator (card A07g).
+    const ceilingNamed = { ceiling: ["tool.git-push"], approvedBy: "owner:rob" };
+    assert.equal(ask(profile, "git-push", "development", { branchProtected: true, scope: ceilingNamed, actorRoles: ["integrator"] }).mode, "allow");
+    for (const roles of [undefined, [], ["author"], ["reviewer", "qa", "docs", "director"], ["integrators"]]) {
+      assert.equal(ask(profile, "git-push", "development", { branchProtected: true, scope: ceilingNamed, ...(roles === undefined ? {} : { actorRoles: roles }) }).mode, "owner", `roles ${JSON.stringify(roles)}`);
+    }
+    assert.equal(ask(profile, "git-push", "development", { scope: ceilingNamed, actorRoles: ["author"] }).mode, "allow", "an unprotected branch is unaffected");
     // Named by an agent's say-so it is not.
     assert.equal(ask(profile, "deploy", "customer-live", { scope: { ceiling: ["tool.deploy"], approvedBy: "agent:x" } }).mode, "owner");
   }

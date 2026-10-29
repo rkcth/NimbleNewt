@@ -2261,3 +2261,8 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## Owner decisions on the batch questions (2026-10-28)
 - Protected branches: a contract's named permission (for example `tool.git-push`) covers a protected branch **only for a contract of the integrator role**; every other role needs the branch named by an approval or grant. Not built yet: the policy check still treats a contract-named permission as covering a protected branch for any role (new card A07g).
 - Stopping a whole team or the whole installation is **refused with a clear reason** until L02b can reach every attempt under it (`lifecycle.stop`/`force` answer `unavailable` before anything is paused or recorded). Built.
+
+## A07g: only an integrator's named permission covers a protected branch (2026-10-28)
+- The engine's "the owner's instruction named this tool" waiver no longer covers a push or merge to a protected branch unless the acting agent has the `integrator` role (`PolicyRequest.actorRoles`); every other role is held for an approval or grant that names the branch (A07f). Other things that stay a decision are unchanged.
+- Roles come from the agent record: `AgentService.rolesOfPrincipal` (active agents only), passed to `PolicyService` as the `roles` option and wired in the dispatcher's composition and in `start.ts`. Without a roles source nobody counts as an integrator (fails closed).
+- Tests: engine (every other role, a near-miss name, no roles, an unprotected branch), policy with roles from the harness. Mutation (waiver without the role check) killed. Not done: a composed end-to-end test through the dispatcher with a real agent record.

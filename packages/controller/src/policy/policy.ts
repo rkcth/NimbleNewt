@@ -96,6 +96,9 @@ export interface EvaluateInput {
   readonly spentSoFar?: number;
 }
 
+/** The roles of an acting principal (an agent's roles), read from the agent records by whoever composes the service (card A07g). */
+export type RolesOf = (principalId: string) => Promise<readonly string[]>;
+
 /** A policy record being edited. */
 interface Draft { profile?: Profile; allCommandGate?: boolean; environment?: Environment; overrides: Record<string, Mode>; locked: string[]; history: PolicyBody["history"] }
 
@@ -115,12 +118,14 @@ export class PolicyService {
   readonly #grants: GrantService;
   readonly #catalog: ActionCatalog;
 
-  private constructor(runner: CommandRunner, grants: GrantService, catalog: ActionCatalog) {
-    this.#runner = runner; this.#grants = grants; this.#catalog = catalog;
+  readonly #roles: RolesOf | undefined;
+
+  private constructor(runner: CommandRunner, grants: GrantService, catalog: ActionCatalog, roles?: RolesOf) {
+    this.#runner = runner; this.#grants = grants; this.#catalog = catalog; this.#roles = roles;
   }
 
-  static withEpoch(storage: ControllerStorage, epoch: number, grants: GrantService, options: RunnerOptions & { catalog?: ActionCatalog } = {}): PolicyService {
-    return new PolicyService(new CommandRunner(storage, epoch, options), grants, options.catalog ?? ActionCatalog.default);
+  static withEpoch(storage: ControllerStorage, epoch: number, grants: GrantService, options: RunnerOptions & { catalog?: ActionCatalog; roles?: RolesOf } = {}): PolicyService {
+    return new PolicyService(new CommandRunner(storage, epoch, options), grants, options.catalog ?? ActionCatalog.default, options.roles);
   }
 
   /** The owner changes the installation's policy or one project's. */
@@ -281,6 +286,8 @@ export class PolicyService {
       ...(input.estimatedSpend === undefined ? {} : { estimatedSpend: input.estimatedSpend }), ...(input.branchProtected === undefined ? {} : { branchProtected: input.branchProtected }), ...(input.branch === undefined ? {} : { branch: input.branch }),
       ...(input.audience === undefined ? {} : { audience: input.audience }), ...(input.irreversible === undefined ? {} : { irreversible: input.irreversible }),
       ...scopeFields,
+      // Only asked for when it can matter: a protected-branch change. Without a way to read roles nobody counts as an integrator.
+      ...(input.branchProtected === true && this.#roles !== undefined ? { actorRoles: await this.#roles(input.principalId) } : {}),
     };
     return evaluate(this.#view(inst.body, proj, await this.#reserved(project)), request, held, restricted);
   }

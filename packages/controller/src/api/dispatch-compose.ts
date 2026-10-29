@@ -179,7 +179,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   const hosts = HostService.withEpoch(storage, epoch, i.assignments, ro);
   const effects = EffectService.withEpoch(storage, epoch, i.assignments, { ...ro, holder: "dispatcher" });
   const blockers = BlockerService.withEpoch(storage, epoch, ro);
-  const policy = PolicyService.withEpoch(storage, epoch, i.grants, ro);
+  const policy = PolicyService.withEpoch(storage, epoch, i.grants, { ...ro, roles: (id) => i.agents.rolesOfPrincipal(id) });
   const branchSettings = ProtectedBranchService.withEpoch(storage, epoch, ro);
   const budgets = BudgetService.withEpoch(storage, epoch, ro);
   const pauses = PauseService.withEpoch(storage, epoch, { waits: i.waits }, { ...ro, ...(i.availability === undefined ? {} : { otherAvailability: i.availability }) });

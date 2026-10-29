@@ -19,7 +19,7 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, check
 };
 
 for (const backend of backends) {
-  interface Ctx { policy: PolicyService; grants: GrantService; review: ReviewService; contracts: ContractService; owner: Principal; ann: Principal; reader: Principal; a: string; b: string; task: string; lead: Principal; agent(name: string, g?: Grant[]): Promise<Principal> }
+  interface Ctx { policy: PolicyService; grants: GrantService; review: ReviewService; contracts: ContractService; owner: Principal; ann: Principal; reader: Principal; a: string; b: string; task: string; lead: Principal; agent(name: string, g?: Grant[]): Promise<Principal>; roles: Map<string, string[]> }
   const suite = (name: string, body: (c: Ctx) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
       now = Date.parse("2026-10-21T12:00:00.000Z");
@@ -29,12 +29,13 @@ for (const backend of backends) {
         const principals = PrincipalService.withEpoch(world.storage, projects.epoch, options);
         const grants = GrantService.withEpoch(world.storage, projects.epoch, options);
         const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+        const roles = new Map<string, string[]>();
         const agent = async (nm: string, g: Grant[] = []) => { await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: nm, grants: g }); return principals.authenticate((await principals.issueCredential(owner, `agent:${nm}`)).token); };
         const a = (await projects.createProject({ commandId: cid("pa"), actor: "owner:rob", name: "A" })).id;
         const b = (await projects.createProject({ commandId: cid("pb"), actor: "owner:rob", name: "B" })).id;
         const task = (await projects.createTask({ commandId: cid("t"), actor: "owner:rob", projectId: a, title: "the task" })).id;
         const lead = await agent("lead", [{ action: "task.read", project: a }, { action: "task.contract.write", project: a }]);
-        await body({ policy: PolicyService.withEpoch(world.storage, projects.epoch, grants, options), grants, review: ReviewService.withEpoch(world.storage, projects.epoch, options), contracts: ContractService.withEpoch(world.storage, projects.epoch, options), owner, ann: await agent("ann", [{ action: "task.read", project: a }, { action: "task.contract.write", project: a }]), reader: await agent("reader", [{ action: "config.read", project: "*" }]), a, b, task, lead, agent });
+        await body({ policy: PolicyService.withEpoch(world.storage, projects.epoch, grants, { ...options, roles: async (id) => roles.get(id) ?? [] }), grants, review: ReviewService.withEpoch(world.storage, projects.epoch, options), contracts: ContractService.withEpoch(world.storage, projects.epoch, options), owner, ann: await agent("ann", [{ action: "task.read", project: a }, { action: "task.contract.write", project: a }]), reader: await agent("reader", [{ action: "config.read", project: "*" }]), a, b, task, lead, agent, roles });
       } finally { await world.close(); }
     });
   const ask = (c: Ctx, tool: string, extra: Record<string, unknown> = {}, project?: string) => c.policy.evaluate({ principalId: "agent:ann", projectId: project ?? c.a, tool, ...extra });
@@ -203,7 +204,13 @@ for (const backend of backends) {
     await c.contracts.setContract(c.owner, { commandId: cid("c"), taskId: c.task, expectedVersion: 1, expectedResult: "ship it" });
     assert.equal((await ask(c, "git-commit", { taskId: c.task })).via, "scope");
     // The ceiling is the owner's, so naming a protected-branch push in it is the owner's decision; an unnamed one is not.
+    // Naming git-push in the owner's ceiling covers a protected branch only for an integrator (A07g); the roles come from the agent's record.
+    assert.equal((await ask(c, "git-push", { taskId: c.task, branchProtected: true })).mode, "owner");
+    c.roles.set("agent:ann", ["author"]);
+    assert.equal((await ask(c, "git-push", { taskId: c.task, branchProtected: true })).mode, "owner");
+    c.roles.set("agent:ann", ["author", "integrator"]);
     assert.equal((await ask(c, "git-push", { taskId: c.task, branchProtected: true })).via, "scope");
+    c.roles.delete("agent:ann");
     assert.equal((await ask(c, "git-merge", { taskId: c.task, branchProtected: true })).mode, "owner");
     // Another project's task gives no scope here.
     assert.equal((await ask(c, "git-commit", { taskId: c.task }, c.b)).mode, "owner");

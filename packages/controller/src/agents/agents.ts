@@ -394,6 +394,14 @@ export class AgentService {
     });
   }
 
+  /** The roles of the agent behind an `agent:<ID>` principal, for the controller's own checks (the approval policy, card A07g). Nothing for any other principal or an agent that does not exist. */
+  async rolesOfPrincipal(principalId: string): Promise<readonly string[]> {
+    if (typeof principalId !== "string" || !principalId.startsWith("agent:")) return [];
+    const found = await this.#runner.get("agent", principalId.slice("agent:".length));
+    const body = found?.body as unknown as AgentBody | undefined;
+    return body === undefined || (body as { state?: string }).state !== "active" ? [] : body.roles;
+  }
+
   /** One agent. The owner, a manager or reader, and the agent itself may ask; anyone else gets the answer a missing agent would get. */
   async get(by: Principal, id: string): Promise<View<AgentBody> | undefined> {
     const found = await this.#runner.get("agent", agentId(id));
