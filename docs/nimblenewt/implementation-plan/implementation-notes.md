@@ -2478,3 +2478,6 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## L02c (first part): background jobs are in the Stop inventory (2026-10-29)
 - `dispatchStopPorts` takes a `jobs` lookup (bound to `JobService.list`): the stop inventory of a task, or of the tasks the scope's live attempts belong to, now lists their jobs: admitted, dispatched or running as `running`, `cancellation_requested` as `uncooperative` (so Force Stop is offered), `outcome_unknown` as `unknown`; finished ones are left out. `terminate` names unknown and uncooperative jobs in `unresolved`. Test in `lifecycle/dispatch-ports.test.ts`.
 - Not done (L02c stays planned): local processes and child work, and the cleanup spend from the runtime.
+
+## T09c and T09d closed without building (owner decision, 2026-10-29)
+- Asked how a chat-typed `/toolbox.<name>` should run (the tool path needs an attempt, which a typed command does not have), the owner answered that users should not type toolbox commands at all: typed commands stay for things specific to running the process (`/nimblenewt.…`), and the rest is conversational. T09c is closed on that basis, and T09d (`/a_<id>.<name>`) the same way. Both stay answered with the plain "cannot be run from here yet" message from T09b. They are marked implemented only to take them off the plan; no code was written.

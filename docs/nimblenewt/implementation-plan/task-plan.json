@@ -7143,12 +7143,23 @@
       ],
       "deliverable": "Owner decision 2026-10-28 (follow-on of T09b): /toolbox.<name> runs as a tool call for the typist, going through the normal grants and approval gates, answered once",
       "acceptance_and_verification": "A toolbox command runs only with the typist's grants and approvals; a replay never runs twice; a refused or unknown tool gets a plain answer",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "ce0cf57"
+        ],
+        "ci_runs": [
+          "40768256488"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Closed by owner decision 2026-10-29: users do not type toolbox commands (chat is conversational); the plain 'cannot be run from here yet' answer from T09b stays as the final behaviour. Nothing was built.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "T09d",
@@ -7160,12 +7171,23 @@
       ],
       "deliverable": "Owner decision 2026-10-28 (follow-on of T09b): /a_<id>.<name> acts on that agent (a task or a message; the exact behaviour is agreed with the owner when the card is started), under the typist's rights",
       "acceptance_and_verification": "The chosen behaviour is built once and tested; an agent that does not offer the command gets a plain answer; a replay never runs twice",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "ce0cf57"
+        ],
+        "ci_runs": [
+          "40768256488"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Closed by owner decision 2026-10-29: users do not type agent commands (chat is conversational); the plain 'cannot be run from here yet' answer from T09b stays as the final behaviour. Nothing was built.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "D03",

@@ -2587,6 +2587,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### T09c — Run queued toolbox commands through the approval gates
 
 - **Parent:** N13 / AII-263.
+- **Status:** implemented; commits `ce0cf57`; CI runs 40768256488; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Closed by owner decision 2026-10-29: users do not type toolbox commands (chat is conversational); the plain 'cannot be run from here yet' answer from T09b stays as the final behaviour. Nothing was built.
 - **Blockers:** T09b.
 - **Deliverable:** Owner decision 2026-10-28 (follow-on of T09b): /toolbox.<name> runs as a tool call for the typist, going through the normal grants and approval gates, answered once.
 - **Acceptance and verification:** A toolbox command runs only with the typist's grants and approvals; a replay never runs twice; a refused or unknown tool gets a plain answer.
@@ -2595,6 +2597,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### T09d — Run queued agent commands
 
 - **Parent:** N13 / AII-263.
+- **Status:** implemented; commits `ce0cf57`; CI runs 40768256488; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Closed by owner decision 2026-10-29: users do not type agent commands (chat is conversational); the plain 'cannot be run from here yet' answer from T09b stays as the final behaviour. Nothing was built.
 - **Blockers:** T09b.
 - **Deliverable:** Owner decision 2026-10-28 (follow-on of T09b): /a_<id>.<name> acts on that agent (a task or a message; the exact behaviour is agreed with the owner when the card is started), under the typist's rights.
 - **Acceptance and verification:** The chosen behaviour is built once and tested; an agent that does not offer the command gets a plain answer; a replay never runs twice.
