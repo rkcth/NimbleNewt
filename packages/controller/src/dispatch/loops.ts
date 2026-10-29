@@ -3,7 +3,7 @@ import type { WorkspaceOpService } from "../workspace-ops/index.js";
 import type { DecisionService } from "../decisions/index.js";
 import { DomainError } from "../domain/errors.js";
 import type { Principal } from "../security/principals.js";
-import type { EventService, Waker, WatchService } from "../events/index.js";
+import type { EventService, EventSource, SourceService, Waker, WatchService } from "../events/index.js";
 import type { ReviewService } from "../review/index.js";
 import type { StallService } from "../health/index.js";
 import type { AttendanceService, MeetingService } from "../meetings/index.js";
@@ -187,6 +187,18 @@ export function watchLoops(watches: { activeOf(by: Principal): Promise<string[]>
     const results = (await watches.dispatchAll(by, await watches.activeOf(by))) as Array<{ watchId: string; error?: string }>;
     const failed = results.filter((r) => r.error !== undefined);
     if (failed.length > 0) throw new Error(`${failed.length} watch(es) could not be dispatched: ${failed.slice(0, 3).map((f) => `${f.watchId}: ${f.error}`).join("; ")}`);
+  } }];
+}
+
+/**
+ * H13d: polls the external event sources the controller was given, once per tick, and publishes what they found. A source that fails is reported after the rest, so the loop shows as failing and one bad source does not stop the others.
+ * Sources are given by the caller; none is built in, so without any there is no loop and nothing is polled.
+ */
+export function sourceLoops(sources: Pick<SourceService, "run">, list: readonly EventSource[]): DispatcherLoop[] {
+  if (list.length === 0) return [];
+  return [{ name: "events.sources", run: async (by) => {
+    const failed = (await sources.run(by, list)).filter((r) => r.error !== undefined);
+    if (failed.length > 0) throw new Error(`${failed.length} event source(s) could not be polled: ${failed.slice(0, 3).map((f) => `${f.source}: ${f.error}`).join("; ")}`);
   } }];
 }
 

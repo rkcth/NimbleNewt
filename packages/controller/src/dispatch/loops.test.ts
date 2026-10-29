@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { DomainError } from "../domain/errors.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
-import { activeAgents, attendanceLoops, budgetNoticeLoops, decisionLoops, eventLoops, meetingLoops, messageLoops, projectIds, recordLoops, attemptWaker, wakeLoops, recoveryLoops, standupLoops } from "./loops.js";
+import { activeAgents, attendanceLoops, budgetNoticeLoops, decisionLoops, eventLoops, meetingLoops, messageLoops, projectIds, recordLoops, attemptWaker, wakeLoops, recoveryLoops, standupLoops, sourceLoops } from "./loops.js";
 import { buildWorld, workGrants } from "./testing/world.js";
 
 after(stopServer);
@@ -132,4 +132,16 @@ test("a watched event wakes the agent only when its attempt will read the inbox,
   assert.equal(loop!.name, "events.wakes");
   await loop!.run({ id: "service:dispatcher", kind: "service" } as never); await loop!.run({ id: "service:dispatcher", kind: "service" } as never);
   assert.equal(asked, 2);
+});
+
+test("the source loop polls the given sources once per tick as the dispatcher, does nothing without any, and reports a failed source after the rest (card H13d)", async () => {
+  assert.deepEqual(sourceLoops({ run: async () => [] }, []), [], "no sources, no loop");
+  const seen: string[] = [];
+  let runs: { source: string; polled: number; published: number; duplicates: number; suppressed: number; rejected: string[]; more: boolean; error?: string }[] = [{ source: "a", polled: 2, published: 2, duplicates: 0, suppressed: 0, rejected: [], more: false }];
+  const sources = [{ id: "a", poll: async () => ({ signals: [] }) }, { id: "b", poll: async () => ({ signals: [] }) }];
+  const [loop] = sourceLoops({ run: async (by, list) => { seen.push(`${by.id}:${list.map((x) => x.id).join(",")}`); return runs; } }, sources as never);
+  await loop!.run({ id: "service:dispatcher", kind: "service" } as never);
+  assert.deepEqual(seen, ["service:dispatcher:a,b"]);
+  runs = [{ source: "a", polled: 0, published: 0, duplicates: 0, suppressed: 0, rejected: [], more: false }, { source: "b", polled: 0, published: 0, duplicates: 0, suppressed: 0, rejected: [], more: false, error: "the server did not answer" }];
+  await assert.rejects(loop!.run({ id: "service:dispatcher", kind: "service" } as never), /1 event source\(s\) could not be polled: b: the server did not answer/);
 });

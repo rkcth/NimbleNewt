@@ -5,7 +5,7 @@ import { InvitationInbox, MEETING_LIMITS, MEETING_SETTINGS, MeetingService } fro
 import { BackupService, createBackup } from "../backup/index.js";
 import { ImprovementService } from "../standups/improvements.js";
 import { MeetingRecordService, taskUpdateApplier } from "../meetings/record.js";
-import { EventService } from "../events/index.js";
+import { EventService, type EventSource } from "../events/index.js";
 import { BudgetService, holderNotice } from "../budgets/index.js";
 import { NotificationService } from "../notifications/index.js";
 import { StallService, type StallOptions } from "../health/index.js";
@@ -121,6 +121,8 @@ export interface StartOptions {
   /**
    * Health probes of failed-over routes (card R04c). Off unless given, and `enabled` starts false: the owner asked for no probes to reach their model servers until they say so, so nothing sends a request on its own. `run` sends one small request to a route.
    */
+  /** External event sources polled by the dispatcher each tick (card H13d). None by default; the sources reach out, so they are only the ones the caller chooses. */
+  readonly eventSources?: readonly EventSource[];
   readonly routeProbes?: { readonly run: RouteProbes["run"]; readonly intervalMs?: number; readonly enabled?: boolean };
   readonly backup?: { readonly directory: string; readonly everyMs?: number; readonly retention?: { readonly daily: number; readonly weekly: number }; readonly version?: string; readonly now?: () => Date };
   /**
@@ -389,7 +391,7 @@ export async function startController(options: StartOptions): Promise<Controller
     let dispatchProblem: string | undefined;
     if (options.dispatch !== undefined) {
       try {
-        dispatch = await composeDispatch({ storage, epoch, workspaceOps, stops, records, ...(options.routeProbes === undefined ? {} : { probes: { cutover, probes: { enabled: () => options.routeProbes?.enabled === true, run: options.routeProbes.run, intervalMs: options.routeProbes.intervalMs ?? 60_000 } } }), ...(backups === undefined ? {} : { backups }), sweeps: [{ name: "handoffs.sweep", sweep: (by) => handoffs.sweep(by) }, { name: "resumes.sweep", sweep: (by) => resumes.sweep(by) }], leadMinutes: meetingLead, options: withPlacement(options.dispatch), ...(options.availability === undefined ? {} : { availability: options.availability }), recovery: { stall, reconciler }, principals, grants, taskCredentials, projects, assignments, waits, contracts, catalog, routing, inquiries, agents, histories, reviews, retrieval, ...(options.onInternalError === undefined ? {} : { onError: options.onInternalError }) });
+        dispatch = await composeDispatch({ storage, epoch, workspaceOps, stops, records, ...(options.eventSources === undefined ? {} : { eventSources: options.eventSources }), ...(options.routeProbes === undefined ? {} : { probes: { cutover, probes: { enabled: () => options.routeProbes?.enabled === true, run: options.routeProbes.run, intervalMs: options.routeProbes.intervalMs ?? 60_000 } } }), ...(backups === undefined ? {} : { backups }), sweeps: [{ name: "handoffs.sweep", sweep: (by) => handoffs.sweep(by) }, { name: "resumes.sweep", sweep: (by) => resumes.sweep(by) }], leadMinutes: meetingLead, options: withPlacement(options.dispatch), ...(options.availability === undefined ? {} : { availability: options.availability }), recovery: { stall, reconciler }, principals, grants, taskCredentials, projects, assignments, waits, contracts, catalog, routing, inquiries, agents, histories, reviews, retrieval, ...(options.onInternalError === undefined ? {} : { onError: options.onInternalError }) });
       } catch (error) {
         // A dispatcher the owner disabled, or a store that failed here, must not keep the rest of the controller from starting; the operator is told, and the reason stays on the controller.
         dispatchProblem = error instanceof Error ? error.message.slice(0, 300) : "the dispatcher could not be built";
