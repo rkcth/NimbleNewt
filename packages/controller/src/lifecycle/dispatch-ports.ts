@@ -11,6 +11,9 @@ type Dispatcher = Pick<DispatcherService, "liveAttemptsOf" | "quiesce" | "stop" 
  * The agent IDs a scope covers (card L02b): an agent is itself; a team is every agent whose team chain passes through it (the same walk the pause gate reads); the installation is every agent. Cycles and over-long chains stop the walk.
  * Read from the records at the moment of asking, so an agent moved into the team since the request is in the next call's answer (the inventory is asked again at each phase).
  */
+/** The dispatcher keeps an attempt's agent as its principal ID (`agent:agt-…`); scopes and agent records use the bare ID. */
+const principalForm = (id: string): string => (id.startsWith("agent:") ? id : `agent:${id}`);
+
 export async function agentsUnder(storage: Pick<ControllerStorage, "listAggregates">, scope: PauseScope): Promise<string[]> {
   const page = 200;
   const teams = new Map<string, string | undefined>();
@@ -43,10 +46,10 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
     // No dispatcher exists in this controller: nothing can be running. A dispatcher that should exist but is not up (a restart in progress, a failed start) is not the same, and nothing is claimed about it.
     if (h === undefined) { if (runtime() === "none") return []; throw new Error("the dispatcher is not running, so what is running cannot be known"); }
     if (scope.kind === "task") return h.dispatcher.liveAttemptsOf(h.principal, { taskId: scope.id });
-    if (scope.kind === "agent") return h.dispatcher.liveAttemptsOf(h.principal, { agentId: scope.id });
+    if (scope.kind === "agent") return h.dispatcher.liveAttemptsOf(h.principal, { agentId: principalForm(scope.id) });
     if (members === undefined) throw new Error(`a ${scope.kind} scope is not resolved to attempts by this runtime yet`);
     const out = new Set<string>();
-    for (const agentId of await members(scope)) for (const id of await h.dispatcher.liveAttemptsOf(h.principal, { agentId })) out.add(id);
+    for (const agentId of await members(scope)) for (const id of await h.dispatcher.liveAttemptsOf(h.principal, { agentId: principalForm(agentId) })) out.add(id);
     return [...out];
   };
   const inFlight = async (attempts: readonly string[]): Promise<InventoryItem[]> => {

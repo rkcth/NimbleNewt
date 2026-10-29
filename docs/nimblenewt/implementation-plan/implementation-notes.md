@@ -2373,3 +2373,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 
 ## C09d: suspensions and stops are recorded in the task's activity (first part, 2026-10-28)
 - `StopService` tells an optional `onSettled` when a request ends (suspended, stopped, recovery-required); for a task scope the controller records a `lifecycle` step (what was reached, graceful or not, the first unresolved items). Best effort. Test: `api/start-lifecycle.test.ts` reads the step through `activity.steps`. Team, agent and installation stops are not copied into each task's record (their attempts' tasks are not resolved here).
+
+## Batch 2 review fixes (2026-10-28)
+- Fixed: the dispatcher keeps an attempt's agent as `agent:agt-…`, so agent, team and installation Stop looked for bare IDs and found no attempts (the unit test's mock hid it): the ports now pass the principal form. `message.release` is called without a command ID (the service takes none). `WatchService.dispatchAll` reports a broken watch and carries on with the rest.
+- Known, not fixed: owner-requested watch actions are audited as the dispatcher (the owner is not named); `stops.sweep` runs inside the tick and a long cleanup (up to 60 s per attempt) can delay the later loops; the stop, hand-off and resume sweeps and `agentsUnder` read all records each tick (grows with history); `meeting.record.sweep` has no dispatcher loop; the late-binding proxies answer every property (including `then`) with a function.

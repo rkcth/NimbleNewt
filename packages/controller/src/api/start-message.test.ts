@@ -34,5 +34,7 @@ test("an informational message sent through the state API reaches the agent at i
     const got = await call(tok, "message.receive", { boundary: "check-in", messageIds: [sent.result.id] }, "r1");
     assert.deepEqual(got.result.delivered, [sent.result.id], JSON.stringify(got));
     assert.equal((await call(tok, "message.readable", { boundary: "check-in" })).result.item.items.length, 0, "received once");
+    const rel = await call(boot.token, "message.release", { recipient: pid });
+    assert.ok(rel.ok, JSON.stringify(rel));
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

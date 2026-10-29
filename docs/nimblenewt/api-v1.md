@@ -2210,7 +2210,6 @@ Releases what is queued for an agent whose focus ended.
 Arguments:
 
 - `recipient`: the agent whose inbox
-- `commandId`: required
 
 Result: `{ woken, stillQueued, downgraded }`.
 

@@ -250,11 +250,11 @@ const MSG_HELP: Readonly<Record<string, string>> = {
   messageIds: "the messages being received", messageId: "the message", recipient: "the agent whose inbox", agent: "the agent", until: "when the focus ends (ISO time) or null to end it", reason: "why",
 };
 const messageOp = (name: string, kind: "query" | "command", summary: string, method: keyof NonNullable<Context["messages"]>, fields: readonly string[], result: string, positional?: string): Operation => ({
-  name: `message.${name}`, kind, summary, args: { ...Object.fromEntries(fields.map((f) => [f, MSG_HELP[f] ?? f])), ...(kind === "command" ? { commandId: "required" } : {}) }, result,
+  name: `message.${name}`, kind, summary, args: { ...Object.fromEntries(fields.map((f) => [f, MSG_HELP[f] ?? f])), ...(kind === "command" && method !== "release" ? { commandId: "required" } : {}) }, result,
   run: async (c, a, id) => {
     only(a, fields);
     const svc = (c.messages ?? unavailable("agent messages")) as unknown as Record<string, (...x: unknown[]) => Promise<unknown>>;
-    if (kind === "command") return asJson(((await svc[method]!(c.principal, { commandId: need(id), ...a })) ?? { ok: true }) as object);
+    if (kind === "command") return asJson(((await svc[method]!(c.principal, method === "release" ? { ...a } : { commandId: need(id), ...a })) ?? { ok: true }) as object);
     const out = await svc[method]!(c.principal, ...(positional === undefined ? [a] : [a[positional]]));
     if (out === undefined) throw new DomainError("not_found", "no such message or inbox, or none you may read");
     return asJson({ item: out });

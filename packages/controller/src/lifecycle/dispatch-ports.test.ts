@@ -58,7 +58,7 @@ test("a team or installation scope covers the agents whose team chain passes thr
   assert.deepEqual(await agentsUnder(storage, { kind: "team", id: "team-c" }), ["agt-3"]);
   assert.equal((await agentsUnder(storage, { kind: "installation", id: "installation" })).length, 5);
 
-  const live: Record<string, string[]> = { "agt-1": ["att-1"], "agt-2": ["att-2", "att-3"], "agt-3": ["att-9"] };
+  const live: Record<string, string[]> = { "agent:agt-1": ["att-1"], "agent:agt-2": ["att-2", "att-3"], "agent:agt-3": ["att-9"] };
   const stopped: string[] = [];
   const dispatcher = {
     liveAttemptsOf: async (_b: Principal, s: { agentId?: string }) => live[s.agentId ?? ""] ?? [],

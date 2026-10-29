@@ -177,7 +177,8 @@ export class WatchService {
   async dispatchAll(by: Principal, watchIds: readonly string[]): Promise<Array<{ watchId: string; result: Dispatch } | { watchId: string; error: string }>> {
     const out: Array<{ watchId: string; result: Dispatch } | { watchId: string; error: string }> = [];
     for (const watchId of watchIds) {
-      try { out.push({ watchId, result: await this.dispatch(by, watchId) }); } catch (error) { if (error instanceof DomainError && error.code === "not_found") out.push({ watchId, error: error.message }); else throw error; }
+      // One broken watch (its subscription cancelled behind its back, a write that raced) never holds back the others: it is reported and tried again next time.
+      try { out.push({ watchId, result: await this.dispatch(by, watchId) }); } catch (error) { if (error instanceof DomainError) out.push({ watchId, error: error.message }); else throw error; }
     }
     return out;
   }
