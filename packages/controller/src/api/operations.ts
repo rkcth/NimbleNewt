@@ -17,6 +17,7 @@ import type { RetrievalService } from "../context/index.js";
 import type { ContextBranchService } from "../branches/index.js";
 import type { InvitationInbox, MeetingService } from "../meetings/index.js";
 import type { MeetingRecordService } from "../meetings/record.js";
+import type { AttendanceService } from "../meetings/attendance.js";
 import type { AgentMessageService } from "../messaging/index.js";
 import { shownLines } from "../standups/standups.js";
 import type { GrantService } from "../security/grants.js";
@@ -75,6 +76,7 @@ export interface Context {
   readonly activity?: Pick<ActivityService, "record" | "explain" | "explainLater" | "correct" | "markUnavailable" | "steps" | "payload" | "explanations" | "corrections">;
   readonly policyContext?: Pick<PolicyService, "contextFor">;
   readonly records?: Pick<MeetingRecordService, "open" | "setChair" | "join" | "leave" | "append" | "move" | "amend" | "table" | "openVote" | "castBallot" | "closeVote" | "castingVote" | "apply" | "ownerRespond" | "finish" | "summarize" | "returnOutcomes" | "sweep" | "record" | "recordFor" | "discussion" | "motion" | "ballots" | "decision" | "why" | "summary" | "latestPlan">;
+  readonly attendance?: Pick<AttendanceService, "admission" | "openRoom" | "callNow" | "status" | "beginDiscussion" | "prepare" | "reportBlocked" | "join" | "joinAsOwner" | "authorizeWake" | "leave" | "keepPaused" | "deferReturn" | "endMeeting" | "returnToWork" | "acknowledge" | "revalidation" | "saveBrief" | "briefOf">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep">;
 
   readonly commands?: CommandService;
@@ -196,6 +198,23 @@ const recordOp = (name: string, kind: "query" | "command", summary: string, meth
     return out === undefined ? ((): never => { throw new DomainError("not_found", "no such meeting record, or none you may read"); })() : asJson({ item: out });
   },
 });
+
+
+const attendOp = (name: string, kind: "query" | "command", summary: string, method: keyof NonNullable<Context["attendance"]>, fields: readonly string[], result: string, viewerArgs: readonly string[] = []): Operation => ({
+  name: `meeting.attend.${name}`, kind, summary, args: { ...Object.fromEntries(fields.map((f) => [f, ATTEND_HELP[f] ?? HELP[f] ?? f])), ...(kind === "command" ? { commandId: "required" } : {}) }, result,
+  run: async (c, a, id) => {
+    only(a, fields);
+    const svc = (c.attendance ?? unavailable("meeting attendance")) as unknown as Record<string, (...x: unknown[]) => Promise<unknown>>;
+    if (kind === "command") return asJson(((await svc[method]!(c.principal, { commandId: need(id), ...a })) ?? { ok: true }) as object);
+    const out = await svc[method]!(c.principal, ...(viewerArgs.length === 0 ? [a] : viewerArgs.map((f) => a[f])));
+    return out === undefined ? ((): never => { throw new DomainError("not_found", "no such room, brief or task, or none you may read"); })() : asJson({ item: out });
+  },
+});
+const ATTEND_HELP: Readonly<Record<string, string>> = {
+  agent: "the agent (agent:agt-…)", requireAll: "{ timeoutMinutes } to wait for everyone", title: "the meeting's title", scope: "{ kind: project } or { kind: team, teamId }", durationMinutes: "planned length", interrupted: "tasks the agent interrupted",
+  blocked: "true if the agent cannot come", expectedMinutes: "how long the agent's next piece of work would take", yieldsAtBoundary: "the work can stop at a safe boundary", safeLongRunning: "the work is a safe long-running operation", minutes: "how long to defer the return",
+  decisions: "decisions the meeting made about tasks", revalidateWithinMinutes: "how soon affected tasks are re-checked", all: "true to clear every pending return", outcome: "continue, replanned or stopping", note: "a short note",
+};
 
 export const OPERATIONS: readonly Operation[] = [
   { name: "context.spill.read", kind: "query", summary: "One page of the rest of a tool result that was cut to the model's window (the cut result names its spill ID). Needs the right to work on the task the result belongs to; anyone else gets not found.", args: { spillId: "the spill ID named in the cut result (`spl-…`)", "index?": "the page, from 0", "size?": "page size in characters (at most 50,000)" }, result: "`{ item: { text, next? } }`; `next` is the index of the following page when there is one.",
@@ -373,6 +392,25 @@ export const OPERATIONS: readonly Operation[] = [
   recordOp("why", "query", "Why a decision was taken, from the record, with links to the discussion; conclusions from records you may not see are marked unverifiable.", "why", ["decisionId"], "`{ item: { decision, lines } }`.", "id", ["decisionId"]),
   recordOp("summary", "query", "The meeting summary: attendance, updates, decisions with reasons, dissent, open questions, actions, plan; adopted kept apart from applied.", "summary", ["recordId"], "`{ item }`.", "id", ["recordId"]),
   recordOp("plan", "query", "The project's latest plan from a meeting.", "latestPlan", ["projectId"], "`{ item }`.", "id", ["projectId"]),
+  attendOp("admission", "query", "Whether work an agent is about to start would collide with a nearby meeting (long work that cannot yield is advised against; safe long-running operations continue).", "admission", ["agent", "expectedMinutes", "yieldsAtBoundary", "safeLongRunning"], "`{ item }`."),
+  attendOp("open-room", "command", "Opens the room for a planned meeting: a bounded meeting task under a task-scoped pause for each attendee.", "openRoom", ["occurrenceId", "requireAll"], "`{ roomId, replayed }`."),
+  attendOp("call-now", "command", "Starts an immediate meeting with the available participants of the project or a named team.", "callNow", ["projectId", "title", "reason", "scope", "requireAll", "durationMinutes"], "the room."),
+  attendOp("status", "query", "Who is preparing, present, unavailable or blocked in a room.", "status", ["occurrenceId"], "`{ item }`.", ["occurrenceId"]),
+  attendOp("begin", "command", "Starts the discussion with whoever is present; with 'everyone required' waits for the rest until the timeout.", "beginDiscussion", ["occurrenceId"], "`{ startedWith, missing, fullAttendance }`."),
+  attendOp("prepare", "command", "Asks an agent to reach a safe boundary before the meeting.", "prepare", ["occurrenceId", "agent", "interrupted"], "`{ state, waitingOn }`."),
+  attendOp("blocked", "command", "Says an agent cannot attend, or can again.", "reportBlocked", ["occurrenceId", "agent", "blocked", "reason"], "`{ ok }`."),
+  attendOp("join", "command", "An agent joins the room; its ownership and background work stay as they are.", "join", ["occurrenceId", "agent"], "`{ joined, state, meetingTaskId?, waitingOn }`."),
+  attendOp("join-owner", "command", "The owner joins the room.", "joinAsOwner", ["occurrenceId"], "`{ replayed }`."),
+  attendOp("wake", "command", "The owner authorizes waking a suspended or stopped agent for this meeting.", "authorizeWake", ["occurrenceId", "agent"], "`{ ok }`."),
+  attendOp("leave", "command", "An agent leaves the room.", "leave", ["occurrenceId", "agent"], "`{ ok }`."),
+  attendOp("keep-paused", "command", "Keeps a task paused after the meeting.", "keepPaused", ["occurrenceId", "agent", "taskId"], "`{ ok }`."),
+  attendOp("defer-return", "command", "Delays the return to a task.", "deferReturn", ["occurrenceId", "agent", "taskId", "minutes", "reason"], "`{ until }`."),
+  attendOp("end", "command", "Ends the meeting; attendance-only pauses are lifted and decisions that affect tasks are queued for re-checking.", "endMeeting", ["occurrenceId", "decisions", "revalidateWithinMinutes"], "the outcome."),
+  attendOp("return", "command", "Returns an agent to its tasks after the meeting.", "returnToWork", ["occurrenceId", "agent"], "`{ ok }`."),
+  attendOp("acknowledge", "command", "An agent says what it will do about the decisions that touch its tasks.", "acknowledge", ["occurrenceId", "all", "outcome", "note"], "`{ cleared }`."),
+  attendOp("revalidation", "query", "What a task must re-check after meeting decisions.", "revalidation", ["taskId"], "`{ item }`.", ["taskId"]),
+  attendOp("save-brief", "command", "Saves an agent's brief for a meeting. A saved brief is never shown as a live answer.", "saveBrief", ["occurrenceId", "text"], "`{ ok }`."),
+  attendOp("brief", "query", "An agent's saved brief, marked as not live.", "briefOf", ["occurrenceId", "agent"], "`{ item }`.", ["occurrenceId", "agent"]),
   { name: "grant.revoke", kind: "command", summary: "The owner takes a grant back (owner only; the revision you read must still be current). It stops counting at the next check.", args: { grantId: "the grant's ID", expectedRevision: "the revision you read", reason: "why, in the owner's words" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["grantId", "expectedRevision", "reason"]); await grantsOf(c).revoke(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
   { name: "events.configure-idle", kind: "command", summary: "Sets how long an event subscription may sit without acknowledging before it expires (owner only). A subscription that was made before this existed, or without its own time, uses this one.", args: { idleSeconds: "whole seconds, 10 to 604800" }, result: "`{ ok: true }`.", completion: { kind: "completed" },

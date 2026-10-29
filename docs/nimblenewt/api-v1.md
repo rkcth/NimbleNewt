@@ -356,6 +356,50 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `meeting.attend.admission`
+
+Whether work an agent is about to start would collide with a nearby meeting (long work that cannot yield is advised against; safe long-running operations continue).
+
+Arguments:
+
+- `agent`: the agent (agent:agt-…)
+- `expectedMinutes`: how long the agent's next piece of work would take
+- `yieldsAtBoundary`: the work can stop at a safe boundary
+- `safeLongRunning`: the work is a safe long-running operation
+
+Result: `{ item }`.
+
+#### `meeting.attend.status`
+
+Who is preparing, present, unavailable or blocked in a room.
+
+Arguments:
+
+- `occurrenceId`: the live meeting (occurrence) ID
+
+Result: `{ item }`.
+
+#### `meeting.attend.revalidation`
+
+What a task must re-check after meeting decisions.
+
+Arguments:
+
+- `taskId`: a task this concerns
+
+Result: `{ item }`.
+
+#### `meeting.attend.brief`
+
+An agent's saved brief, marked as not live.
+
+Arguments:
+
+- `occurrenceId`: the live meeting (occurrence) ID
+- `agent`: the agent (agent:agt-…)
+
+Result: `{ item }`.
+
 #### `budget.report`
 
 A task's budget: limit, delegated to children, in flight, uncertain, spent, overrun and available, for money and for compute, with the reservations and open requests behind them. A task you may not read reads like a missing one.
@@ -1709,6 +1753,198 @@ Arguments:
 - `commandId`: required
 
 Result: `{ closed, tied, failedTies, interrupted }`.
+
+#### `meeting.attend.open-room`
+
+Opens the room for a planned meeting: a bounded meeting task under a task-scoped pause for each attendee.
+
+Arguments:
+
+- `occurrenceId`: the live meeting (occurrence) ID
+- `requireAll`: { timeoutMinutes } to wait for everyone
+- `commandId`: required
+
+Result: `{ roomId, replayed }`.
+
+#### `meeting.attend.call-now`
+
+Starts an immediate meeting with the available participants of the project or a named team.
+
+Arguments:
+
+- `projectId`: the project
+- `title`: the meeting's title
+- `reason`: why
+- `scope`: { kind: project } or { kind: team, teamId }
+- `requireAll`: { timeoutMinutes } to wait for everyone
+- `durationMinutes`: planned length
+- `commandId`: required
+
+Result: the room.
+
+#### `meeting.attend.begin`
+
+Starts the discussion with whoever is present; with 'everyone required' waits for the rest until the timeout.
+
+Arguments:
+
+- `occurrenceId`: the live meeting (occurrence) ID
+- `commandId`: required
+
+Result: `{ startedWith, missing, fullAttendance }`.
+
+#### `meeting.attend.prepare`
+
+Asks an agent to reach a safe boundary before the meeting.
+
+Arguments:
+
+- `occurrenceId`: the live meeting (occurrence) ID
+- `agent`: the agent (agent:agt-…)
+- `interrupted`: tasks the agent interrupted
+- `commandId`: required
+
+Result: `{ state, waitingOn }`.
+
+#### `meeting.attend.blocked`
+
+Says an agent cannot attend, or can again.
+
+Arguments:
+
+- `occurrenceId`: the live meeting (occurrence) ID
+- `agent`: the agent (agent:agt-…)
+- `blocked`: true if the agent cannot come
+- `reason`: why
+- `commandId`: required
+
+Result: `{ ok }`.
+
+#### `meeting.attend.join`
+
+An agent joins the room; its ownership and background work stay as they are.
+
+Arguments:
+
+- `occurrenceId`: the live meeting (occurrence) ID
+- `agent`: the agent (agent:agt-…)
+- `commandId`: required
+
+Result: `{ joined, state, meetingTaskId?, waitingOn }`.
+
+#### `meeting.attend.join-owner`
+
+The owner joins the room.
+
+Arguments:
+
+- `occurrenceId`: the live meeting (occurrence) ID
+- `commandId`: required
+
+Result: `{ replayed }`.
+
+#### `meeting.attend.wake`
+
+The owner authorizes waking a suspended or stopped agent for this meeting.
+
+Arguments:
+
+- `occurrenceId`: the live meeting (occurrence) ID
+- `agent`: the agent (agent:agt-…)
+- `commandId`: required
+
+Result: `{ ok }`.
+
+#### `meeting.attend.leave`
+
+An agent leaves the room.
+
+Arguments:
+
+- `occurrenceId`: the live meeting (occurrence) ID
+- `agent`: the agent (agent:agt-…)
+- `commandId`: required
+
+Result: `{ ok }`.
+
+#### `meeting.attend.keep-paused`
+
+Keeps a task paused after the meeting.
+
+Arguments:
+
+- `occurrenceId`: the live meeting (occurrence) ID
+- `agent`: the agent (agent:agt-…)
+- `taskId`: a task this concerns
+- `commandId`: required
+
+Result: `{ ok }`.
+
+#### `meeting.attend.defer-return`
+
+Delays the return to a task.
+
+Arguments:
+
+- `occurrenceId`: the live meeting (occurrence) ID
+- `agent`: the agent (agent:agt-…)
+- `taskId`: a task this concerns
+- `minutes`: how long to defer the return
+- `reason`: why
+- `commandId`: required
+
+Result: `{ until }`.
+
+#### `meeting.attend.end`
+
+Ends the meeting; attendance-only pauses are lifted and decisions that affect tasks are queued for re-checking.
+
+Arguments:
+
+- `occurrenceId`: the live meeting (occurrence) ID
+- `decisions`: decisions the meeting made about tasks
+- `revalidateWithinMinutes`: how soon affected tasks are re-checked
+- `commandId`: required
+
+Result: the outcome.
+
+#### `meeting.attend.return`
+
+Returns an agent to its tasks after the meeting.
+
+Arguments:
+
+- `occurrenceId`: the live meeting (occurrence) ID
+- `agent`: the agent (agent:agt-…)
+- `commandId`: required
+
+Result: `{ ok }`.
+
+#### `meeting.attend.acknowledge`
+
+An agent says what it will do about the decisions that touch its tasks.
+
+Arguments:
+
+- `occurrenceId`: the live meeting (occurrence) ID
+- `all`: true to clear every pending return
+- `outcome`: continue, replanned or stopping
+- `note`: a short note
+- `commandId`: required
+
+Result: `{ cleared }`.
+
+#### `meeting.attend.save-brief`
+
+Saves an agent's brief for a meeting. A saved brief is never shown as a live answer.
+
+Arguments:
+
+- `occurrenceId`: the live meeting (occurrence) ID
+- `text`: the words
+- `commandId`: required
+
+Result: `{ ok }`.
 
 #### `grant.revoke`
 
