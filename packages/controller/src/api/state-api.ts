@@ -14,6 +14,7 @@ import type { AgentMessageService } from "../messaging/index.js";
 import type { EventService } from "../events/index.js";
 import type { BudgetService } from "../budgets/index.js";
 import type { DifficultyService } from "../routing/difficulty.js";
+import type { CutoverService } from "../routing/cutover.js";
 import type { WorkspaceOpService } from "../workspace-ops/index.js";
 import type { StatusService } from "../status/index.js";
 import type { DecisionService } from "../decisions/index.js";
@@ -89,6 +90,7 @@ export interface StateApiDeps {
   readonly integration?: Pick<IntegrationPolicyService, "get" | "set" | "getDefault" | "setDefault" | "ensure" | "precheck">;
 
   readonly pauses?: Pick<PauseService, "pause" | "resume" | "gate">;
+  readonly cutover?: Pick<CutoverService, "disable" | "drain" | "cutover" | "reenable" | "setFailbackPolicy" | "controls" | "report" | "topology" | "tick">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep">;
 
   /** Typed commands (card T09b). Absent: `command.run` answers as unavailable. */
@@ -174,6 +176,7 @@ export class StateApi {
         ...(this.#deps.integration === undefined ? {} : { integration: this.#deps.integration }),
         ...(this.#deps.notes === undefined ? {} : { notes: this.#deps.notes }),
         ...(this.#deps.stops === undefined ? {} : { stops: this.#deps.stops }),
+        ...(this.#deps.cutover === undefined ? {} : { cutover: this.#deps.cutover }),
         ...(this.#deps.pauses === undefined ? {} : { pauses: this.#deps.pauses }),
 
         ...(this.#deps.spill === undefined ? {} : { spill: this.#deps.spill }),

@@ -9,6 +9,7 @@ import type { DecisionService } from "../decisions/index.js";
 import type { WatchService } from "../events/handling.js";
 import type { EventService } from "../events/index.js";
 import type { DifficultyService } from "../routing/difficulty.js";
+import type { CutoverService } from "../routing/cutover.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
 import type { ProjectPlanService, ProjectResourceService, ResponsibilityService } from "../projects/index.js";
@@ -63,6 +64,7 @@ export interface Context {
   readonly integration?: Pick<IntegrationPolicyService, "get" | "set" | "getDefault" | "setDefault" | "ensure" | "precheck">;
 
   readonly pauses?: Pick<PauseService, "pause" | "resume" | "gate">;
+  readonly cutover?: Pick<CutoverService, "disable" | "drain" | "cutover" | "reenable" | "setFailbackPolicy" | "controls" | "report" | "topology" | "tick">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep">;
 
   readonly commands?: CommandService;
@@ -134,6 +136,7 @@ const ownerQuestionsOf = (c: Context): NonNullable<Context["ownerQuestions"]> =>
 const branchesOf = (c: Context): ContextBranchService => c.branches ?? unavailable("context branches");
 const notesOf = (c: Context): NonNullable<Context["notes"]> => c.notes ?? unavailable("working notes");
 const pausesOf = (c: Context): NonNullable<Context["pauses"]> => c.pauses ?? unavailable("pause");
+const cutoverOf = (c: Context): NonNullable<Context["cutover"]> => c.cutover ?? unavailable("provider drain and cutover");
 const stopsOf = (c: Context): NonNullable<Context["stops"]> => c.stops ?? unavailable("suspend and stop");
 const integrationOf = (c: Context): NonNullable<Context["integration"]> => c.integration ?? unavailable("integration policy");
 const branchSettingsOf = (c: Context): NonNullable<Context["branchSettings"]> => c.branchSettings ?? unavailable("branch settings");
@@ -231,6 +234,27 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, ["intentId"]); const item = await stopsOf(c).get(c.principal, a["intentId"] as string); if (item === undefined) throw new DomainError("not_found", "no such request"); return asJson({ item }); } },
   { name: "lifecycle.sweep", kind: "command", summary: "Carries every unfinished suspension or stop on (owner only; nothing runs it by itself after a restart yet).", args: {}, result: "`{ advanced, failed }`.", completion: { kind: "completed" },
     run: async (c, a) => { only(a, []); if (c.principal.kind !== "owner") throw new DomainError("forbidden", "only the owner sweeps lifecycle requests"); return asJson(await stopsOf(c).sweep(c.principal)); } },
+  { name: "routing.disable", kind: "command", summary: "The owner stops new work from reaching a model, endpoint, account, provider or local service. Running work is left alone; only the owner lifts it (routing.reenable).", args: { level: "model, endpoint, account, provider or service", name: "which one", reason: "why", commandId: "required" },
+    result: "`{ revision, replayed }`.",
+    run: async (c, a, id) => { only(a, ["level", "name", "reason"]); return asJson(await cutoverOf(c).disable(c.principal, { commandId: need(id), ...a } as never)); } },
+  { name: "routing.drain", kind: "command", summary: "Planned maintenance: new work stops reaching the target now, running work may finish until `drainSeconds` from now. There is no default; you choose it.", args: { level: "model, endpoint, account, provider or service", name: "which one", reason: "why", drainSeconds: "how long running work may take, in seconds", commandId: "required" },
+    result: "`{ revision, replayed }`.",
+    run: async (c, a, id) => { only(a, ["level", "name", "reason", "drainSeconds"]); return asJson(await cutoverOf(c).drain(c.principal, { commandId: need(id), ...a } as never)); } },
+  { name: "routing.cutover", kind: "command", summary: "Immediate cutover: new work stops reaching the target and the running attempts on it are cancelled so their calls move to the next route. Repeat the same command to carry out what a crash left.", args: { level: "model, endpoint, account, provider or service", name: "which one", reason: "why", commandId: "required" },
+    result: "`{ revision, replayed, cancelled: [{ callId, taskId, route, attempt, since }] }`.",
+    run: async (c, a, id) => { only(a, ["level", "name", "reason"]); return asJson(await cutoverOf(c).cutover(c.principal, { commandId: need(id), ...a } as never)); } },
+  { name: "routing.reenable", kind: "command", summary: "The owner lets a disabled, draining or cut-over target be used again. Probes and recoveries never do this.", args: { level: "model, endpoint, account, provider or service", name: "which one", reason: "why", commandId: "required" },
+    result: "`{ revision, replayed }`.",
+    run: async (c, a, id) => { only(a, ["level", "name", "reason"]); return asJson(await cutoverOf(c).reenable(c.principal, { commandId: need(id), ...a } as never)); } },
+  { name: "routing.failback.set", kind: "command", summary: "Sets how a target that failed comes back: manual, or automatic after enough good probes over enough time (and never automatically if it failed soon after its last restore).", args: { policy: "{ mode: manual|automatic, minProbes, stableSeconds, holdDownSeconds }", commandId: "required" },
+    result: "`{ revision, replayed }`.",
+    run: async (c, a, id) => { only(a, ["policy"]); return asJson(await cutoverOf(c).setFailbackPolicy(c.principal, { commandId: need(id), ...a } as never)); } },
+  { name: "routing.controls", kind: "query", summary: "The controls in force (disabled, draining, cut over) and the failback policy. Owner only.", args: {},
+    result: "`{ controls: { entries, failback, … } }`.",
+    run: async (c, a) => { only(a, []); if (c.principal.kind !== "owner") throw new DomainError("forbidden", "only the owner reads routing controls"); return asJson({ controls: await cutoverOf(c).controls() }); } },
+  { name: "routing.report", kind: "query", summary: "The three facts about taking a target out of service, kept apart: routing applied, requests still running on it, and whether it is safe to stop; with possible charges.", args: { level: "model, endpoint, account, provider or service", name: "which one" },
+    result: "`{ report: { routingApplied, inFlightRemaining, safeToStop, routesAffected, drainUntil?, possibleCharges, … } }`.",
+    run: async (c, a) => { only(a, ["level", "name"]); return asJson({ report: await cutoverOf(c).report(c.principal, a as never) }); } },
   { name: "grant.revoke", kind: "command", summary: "The owner takes a grant back (owner only; the revision you read must still be current). It stops counting at the next check.", args: { grantId: "the grant's ID", expectedRevision: "the revision you read", reason: "why, in the owner's words" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["grantId", "expectedRevision", "reason"]); await grantsOf(c).revoke(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
   { name: "events.configure-idle", kind: "command", summary: "Sets how long an event subscription may sit without acknowledging before it expires (owner only). A subscription that was made before this existed, or without its own time, uses this one.", args: { idleSeconds: "whole seconds, 10 to 604800" }, result: "`{ ok: true }`.", completion: { kind: "completed" },

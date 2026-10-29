@@ -178,6 +178,27 @@ Result: `{ item }` or not found.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `routing.controls`
+
+The controls in force (disabled, draining, cut over) and the failback policy. Owner only.
+
+Arguments:
+
+- none
+
+Result: `{ controls: { entries, failback, … } }`.
+
+#### `routing.report`
+
+The three facts about taking a target out of service, kept apart: routing applied, requests still running on it, and whether it is safe to stop; with possible charges.
+
+Arguments:
+
+- `level`: model, endpoint, account, provider or service
+- `name`: which one
+
+Result: `{ report: { routingApplied, inFlightRemaining, safeToStop, routesAffected, drainUntil?, possibleCharges, … } }`.
+
 #### `budget.report`
 
 A task's budget: limit, delegated to children, in flight, uncertain, spent, overrun and available, for money and for compute, with the reservations and open requests behind them. A task you may not read reads like a missing one.
@@ -1009,6 +1030,70 @@ Arguments:
 Result: `{ advanced, failed }`.
 
 Completion: finished when accepted (`completed: true`).
+
+#### `routing.disable`
+
+The owner stops new work from reaching a model, endpoint, account, provider or local service. Running work is left alone; only the owner lifts it (routing.reenable).
+
+Arguments:
+
+- `level`: model, endpoint, account, provider or service
+- `name`: which one
+- `reason`: why
+- `commandId`: required
+
+Result: `{ revision, replayed }`.
+
+#### `routing.drain`
+
+Planned maintenance: new work stops reaching the target now, running work may finish until `drainSeconds` from now. There is no default; you choose it.
+
+Arguments:
+
+- `level`: model, endpoint, account, provider or service
+- `name`: which one
+- `reason`: why
+- `drainSeconds`: how long running work may take, in seconds
+- `commandId`: required
+
+Result: `{ revision, replayed }`.
+
+#### `routing.cutover`
+
+Immediate cutover: new work stops reaching the target and the running attempts on it are cancelled so their calls move to the next route. Repeat the same command to carry out what a crash left.
+
+Arguments:
+
+- `level`: model, endpoint, account, provider or service
+- `name`: which one
+- `reason`: why
+- `commandId`: required
+
+Result: `{ revision, replayed, cancelled: [{ callId, taskId, route, attempt, since }] }`.
+
+#### `routing.reenable`
+
+The owner lets a disabled, draining or cut-over target be used again. Probes and recoveries never do this.
+
+Arguments:
+
+- `level`: model, endpoint, account, provider or service
+- `name`: which one
+- `reason`: why
+- `commandId`: required
+
+Result: `{ revision, replayed }`.
+
+#### `routing.failback.set`
+
+Sets how a target that failed comes back: manual, or automatic after enough good probes over enough time (and never automatically if it failed soon after its last restore).
+
+Arguments:
+
+- `policy`: { mode: manual|automatic, minProbes, stableSeconds, holdDownSeconds }
+- `commandId`: required
+
+Result: `{ revision, replayed }`.
 
 #### `grant.revoke`
 
