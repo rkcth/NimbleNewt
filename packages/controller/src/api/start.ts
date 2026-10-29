@@ -2,7 +2,7 @@ import { PlacementSettingsService } from "../remote/placement-settings.js";
 import { InvitationInbox, MEETING_LIMITS, MEETING_SETTINGS, MeetingService } from "../meetings/index.js";
 import { BackupService, createBackup } from "../backup/index.js";
 import { ImprovementService } from "../standups/improvements.js";
-import { MeetingRecordService } from "../meetings/record.js";
+import { MeetingRecordService, taskUpdateApplier } from "../meetings/record.js";
 import { EventService } from "../events/index.js";
 import { BudgetService, holderNotice } from "../budgets/index.js";
 import { NotificationService } from "../notifications/index.js";
@@ -325,6 +325,8 @@ export async function startController(options: StartOptions): Promise<Controller
     const resumes = ResumeCheckService.withEpoch(storage, epoch, { continuations, dependencies: DependencyService.withEpoch(storage, epoch), blockers: BlockerService.withEpoch(storage, epoch), ports: controllerResumePorts(storage) });
     const activity = ActivityService.withEpoch(storage, epoch);
     const records = MeetingRecordService.withEpoch(storage, epoch, { meetings, decisions }, {
+      // A meeting may retitle or reword a task; the change is made by the project service as the agent that holds the right, and only once (card M02c).
+      appliers: { "task.update": taskUpdateApplier(projects) },
       authority: async (principalId) => { const p = await principals.get(principalId); return p === undefined || p.state !== "active" ? undefined : grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); },
     });
     // The attendance service lives with the dispatcher (it needs the budget and the pause service it was composed with), which starts after the API: calls reach it when it is there.
