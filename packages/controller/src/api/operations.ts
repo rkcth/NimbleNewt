@@ -88,7 +88,7 @@ export interface Context {
     list(owner: Principal): Promise<string[]>;
   };
   readonly policyForward?: Pick<PolicyEditService, "forward">;
-  readonly backups?: Pick<BackupService, "backUpNow" | "list" | "status">;
+  readonly backups?: Pick<BackupService, "backUpNow" | "backUpFor" | "list" | "status">;
   readonly improvements?: Pick<ImprovementService, "propose" | "group" | "decide" | "bringToStandup" | "get" | "open">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep">;
 
@@ -501,7 +501,7 @@ export const OPERATIONS: readonly Operation[] = [
   improvementOp("get", "query", "One proposal with its evidence and disposition, if you may read it.", "get", ["itemId"], "`{ item }`.", "itemId"),
   improvementOp("list", "query", "The open proposals of a project, a page at a time.", "open", ["projectId", "afterId", "limit"], "`{ item: { items, next? } }`."),
   { name: "backup.now", kind: "command", summary: "Owner only: takes a consistent backup of the controller database now (a backup already running is the answer).", args: { commandId: "required" }, result: "`{ item: { name, createdAt, kind, schemaVersion, epoch, rows } }`.",
-    run: async (c, a, id) => { only(a, []); need(id); ownerOnly(c, "take a backup"); const made = await (c.backups ?? unavailable("backups")).backUpNow("manual"); return asJson({ item: backupItem(made.manifest) }); } },
+    run: async (c, a, id) => { only(a, []); const commandId = need(id); ownerOnly(c, "take a backup"); const made = await (c.backups ?? unavailable("backups")).backUpFor(commandId); return asJson({ item: backupItem(made.manifest) }); } },
   { name: "backup.list", kind: "query", summary: "Owner only: the complete backups, newest first, and whether the last one failed.", args: {}, result: "`{ items: [{ name, createdAt, kind, schemaVersion, epoch, rows }], status }`.",
     run: async (c, a) => { only(a, []); ownerOnly(c, "list backups"); const backups = c.backups ?? unavailable("backups"); return asJson({ items: (await backups.list()).map((b) => backupItem(b.manifest)), status: await backups.status() }); } },
   messageOp("send", "command", "Sends a message (or a reply) about a task. Information and advice wait for the agent's next check-in; a request or blocking message is kept for it; only an urgent one with the right can interrupt.", "send", ["taskId", "to", "class", "purpose", "text", "expectsReply", "deadline", "escalateTo", "replyTo", "correlationId", "coalesceKey"], "`{ id, replayed, coalesced, effectiveClass, reach, woke }`."),

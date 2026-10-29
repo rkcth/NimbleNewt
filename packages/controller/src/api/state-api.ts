@@ -115,7 +115,7 @@ export interface StateApiDeps {
     list(owner: Principal): Promise<string[]>;
   };
   readonly policyForward?: Pick<PolicyEditService, "forward">;
-  readonly backups?: Pick<BackupService, "backUpNow" | "list" | "status">;
+  readonly backups?: Pick<BackupService, "backUpNow" | "backUpFor" | "list" | "status">;
   readonly improvements?: Pick<ImprovementService, "propose" | "group" | "decide" | "bringToStandup" | "get" | "open">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep">;
 

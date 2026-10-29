@@ -36,6 +36,10 @@ test("the owner takes a backup through the state API, the nightly run keeps them
     assert.equal(made.result.item.kind, "manual");
     assert.ok(made.result.item.rows > 0);
     assert.equal((await call(boot.token, "backup.list", {})).result.items.length, 1);
+    // The same command repeated gets the same backup and makes no second one.
+    const again = await call(boot.token, "backup.now", {}, "b1");
+    assert.equal(again.result.item.name, made.result.item.name);
+    assert.equal((await call(boot.token, "backup.list", {})).result.items.length, 1);
 
     // The nightly run does nothing the same day, and makes a scheduled backup a day later.
     assert.ok((await c.dispatch.dispatcher.tick()).loops.some((l) => l.name === "backups.nightly" && l.ok));

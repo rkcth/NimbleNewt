@@ -2450,3 +2450,6 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 
 ## K01e (second part): blobs are locked before the rows are read (2026-10-29)
 - `createBackup` takes the artifact store's shared lock before it opens the database snapshot and keeps it until the blobs are copied (it used to take it only for the copy), so orphan cleanup cannot delete a blob that the copied rows still name. A cleanup already running delays the backup; one that arrives waits for it. Test in `backup/backup.test.ts`.
+
+## K01e (third part): `backup.now` honours its command ID (2026-10-29)
+- A repeated `backup.now` with the same command ID gets the backup the first one made (the last 50 are remembered in memory; a failed one may be retried). A restart forgets them, so a retry after a restart can make one more backup, which is harmless. Test in `api/start-backup.test.ts`.

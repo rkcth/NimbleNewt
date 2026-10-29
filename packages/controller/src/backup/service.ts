@@ -37,6 +37,20 @@ export class BackupService {
 
   #now(): Date { return (this.#options.now ?? (() => new Date()))(); }
 
+  /** The last few asks by command ID, so a client that repeats a request after a timeout is given the backup its first ask made (kept in memory: a restart forgets them). */
+  readonly #asked = new Map<string, Promise<{ path: string; manifest: BackupManifest }>>();
+
+  /** `backUpNow` for a command: the same command ID gets the same backup, whether it is still running or done. */
+  backUpFor(commandId: string): Promise<{ path: string; manifest: BackupManifest }> {
+    const known = this.#asked.get(commandId);
+    if (known !== undefined) return known;
+    const run = this.backUpNow("manual");
+    this.#asked.set(commandId, run);
+    run.catch(() => this.#asked.delete(commandId)); // a failed ask may be tried again
+    while (this.#asked.size > 50) this.#asked.delete(this.#asked.keys().next().value as string);
+    return run;
+  }
+
   /** Takes a backup now. A backup already running is the answer to a second ask. */
   backUpNow(kind: BackupKind = "manual"): Promise<{ path: string; manifest: BackupManifest }> {
     if (this.#running !== undefined) return this.#running;
