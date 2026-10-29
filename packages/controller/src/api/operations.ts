@@ -21,6 +21,7 @@ import { shownLines } from "../standups/standups.js";
 import type { GrantService } from "../security/grants.js";
 import type { PlacementSettingsService } from "../remote/placement-settings.js";
 import type { ProtectedBranchService } from "../policy/protected-branches.js";
+import type { PolicyService } from "../policy/policy.js";
 
 import { BuiltinCommands, type CommandService } from "../commands/index.js";
 
@@ -71,6 +72,7 @@ export interface Context {
   readonly handoffs?: Pick<HandoffService, "prepare" | "complete" | "takeover" | "choose" | "cancel" | "advance" | "get" | "sweep">;
   readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep">;
   readonly activity?: Pick<ActivityService, "record" | "explain" | "explainLater" | "correct" | "markUnavailable" | "steps" | "payload" | "explanations" | "corrections">;
+  readonly policyContext?: Pick<PolicyService, "contextFor">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep">;
 
   readonly commands?: CommandService;
@@ -146,6 +148,7 @@ const cutoverOf = (c: Context): NonNullable<Context["cutover"]> => c.cutover ?? 
 const handoffsOf = (c: Context): NonNullable<Context["handoffs"]> => c.handoffs ?? unavailable("hand-off");
 const resumesOf = (c: Context): NonNullable<Context["resumes"]> => c.resumes ?? unavailable("checked resume");
 const activityOf = (c: Context): NonNullable<Context["activity"]> => c.activity ?? unavailable("activity records");
+const policyContextOf = (c: Context): NonNullable<Context["policyContext"]> => c.policyContext ?? unavailable("policy context");
 const stopsOf = (c: Context): NonNullable<Context["stops"]> => c.stops ?? unavailable("suspend and stop");
 const integrationOf = (c: Context): NonNullable<Context["integration"]> => c.integration ?? unavailable("integration policy");
 const branchSettingsOf = (c: Context): NonNullable<Context["branchSettings"]> => c.branchSettings ?? unavailable("branch settings");
@@ -320,6 +323,8 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => { only(a, ["taskId", "seq", "note"]); return asJson(await activityOf(c).correct(c.principal, { commandId: need(id), ...a } as never)); } },
   { name: "activity.unavailable", kind: "command", summary: "Owner only: marks a range of steps as no longer available (archived, deleted, lost). They stay listed; their content is withheld.", args: { taskId: "the task", from: "first step", to: "last step", reason: "why", commandId: "required" }, result: "`{ replayed }`.",
     run: async (c, a, id) => { only(a, ["taskId", "from", "to", "reason"]); return asJson(await activityOf(c).markUnavailable(c.principal, { commandId: need(id), ...a } as never)); } },
+  { name: "policy.context", kind: "query", summary: "The approval policy as it binds you in a project, read from the records now: which kinds of action are decided by the owner, by review or not at all, the environment tier, the approvals you hold and the latest changes. Nothing is cached, so a change the owner made is in your next read. You may ask about yourself only.", args: { projectId: "the project" }, result: "`{ context: { … } | null }`; null when the project does not exist or you hold nothing in it.",
+    run: async (c, a) => { only(a, ["projectId"]); return asJson({ context: (await policyContextOf(c).contextFor(c.principal, a["projectId"] as string)) ?? null }); } },
   { name: "grant.revoke", kind: "command", summary: "The owner takes a grant back (owner only; the revision you read must still be current). It stops counting at the next check.", args: { grantId: "the grant's ID", expectedRevision: "the revision you read", reason: "why, in the owner's words" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["grantId", "expectedRevision", "reason"]); await grantsOf(c).revoke(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
   { name: "events.configure-idle", kind: "command", summary: "Sets how long an event subscription may sit without acknowledging before it expires (owner only). A subscription that was made before this existed, or without its own time, uses this one.", args: { idleSeconds: "whole seconds, 10 to 604800" }, result: "`{ ok: true }`.", completion: { kind: "completed" },

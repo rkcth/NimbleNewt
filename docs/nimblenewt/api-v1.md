@@ -253,6 +253,16 @@ Arguments:
 
 Result: `{ items: [...] }`.
 
+#### `policy.context`
+
+The approval policy as it binds you in a project, read from the records now: which kinds of action are decided by the owner, by review or not at all, the environment tier, the approvals you hold and the latest changes. Nothing is cached, so a change the owner made is in your next read. You may ask about yourself only.
+
+Arguments:
+
+- `projectId`: the project
+
+Result: `{ context: { … } | null }`; null when the project does not exist or you hold nothing in it.
+
 #### `budget.report`
 
 A task's budget: limit, delegated to children, in flight, uncertain, spent, overrun and available, for money and for compute, with the reservations and open requests behind them. A task you may not read reads like a missing one.
