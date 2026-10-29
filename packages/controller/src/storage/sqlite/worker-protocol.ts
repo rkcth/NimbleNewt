@@ -11,7 +11,7 @@ export const METHODS: ReadonlySet<string> = new Set([
 export const TEST_STATEMENT_COUNT = "testStatementCount";
 
 /** Settings that can cross the thread boundary. The functions of `SqliteOptions` (test hooks) cannot, so crash plans are data. */
-export type WorkerStorageOptions = Omit<SqliteOptions, "testHooks" | "migrations"> & { readonly migrations?: readonly Migration[] };
+export type WorkerStorageOptions = Omit<SqliteOptions, "testHooks" | "migrations" | "beforeUpgrade"> & { readonly migrations?: readonly Migration[] };
 
 /** For the crash qualification only: stop at an exact numbered statement of a write, after the store has opened. */
 export interface TestCrash {

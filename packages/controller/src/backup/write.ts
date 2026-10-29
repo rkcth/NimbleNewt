@@ -28,7 +28,7 @@ export const backupName = (at: Date, kind: BackupKind): string => `backup-${stam
  * Takes a consistent snapshot of the store and writes it as a backup folder. It is written under a `.partial` name, every file is flushed, the manifest is written last, and only then is the
  * folder renamed to its final name: a crash, a full disk or a failed read leaves a `.partial` folder (which is removed here and never mistaken for a backup), never a half-written backup that looks complete.
  */
-export async function createBackup(storage: ControllerStorage, options: BackupOptions): Promise<{ path: string; manifest: BackupManifest }> {
+export async function createBackup(storage: Pick<ControllerStorage, "snapshot">, options: BackupOptions): Promise<{ path: string; manifest: BackupManifest }> {
   const at = (options.now ?? (() => new Date()))();
   const name = backupName(at, options.kind);
   const final = join(options.root, name);

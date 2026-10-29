@@ -1,6 +1,6 @@
 import { PlacementSettingsService } from "../remote/placement-settings.js";
 import { InvitationInbox, MEETING_LIMITS, MEETING_SETTINGS, MeetingService } from "../meetings/index.js";
-import { BackupService } from "../backup/index.js";
+import { BackupService, createBackup } from "../backup/index.js";
 import { MeetingRecordService } from "../meetings/record.js";
 import { EventService } from "../events/index.js";
 import { BudgetService, holderNotice } from "../budgets/index.js";
@@ -31,6 +31,7 @@ import { GrantService, PrincipalService, TaskCredentialService, type Principal }
 import { SqliteStorage, probeSqliteLibrary } from "../storage/sqlite/index.js";
 import { PostgresStorage, probePostgresLibrary } from "../storage/postgres/index.js";
 import type { ControllerStorage } from "../storage/types.js";
+import type { BeforeUpgrade } from "../storage/snapshot.js";
 import { StateApi } from "./state-api.js";
 import { ConfigurationService } from "../configuration/index.js";
 import { ConversationService, type Availability } from "../conversations/index.js";
@@ -203,8 +204,13 @@ export async function startController(options: StartOptions): Promise<Controller
   for (const line of check.output) print(line);
 
   let storage: ControllerStorage;
+  // An existing database that is about to be upgraded to a newer schema is copied first, when backups are configured (card K01): if the copy cannot be made, the upgrade does not happen.
+  const beforeUpgrade: BeforeUpgrade | undefined = options.backup === undefined ? undefined : async (notice) => {
+    await createBackup({ snapshot: notice.snapshot }, { root: options.backup!.directory, kind: "pre-upgrade", version: options.backup!.version ?? "0.0.0", ...(options.backup!.now === undefined ? {} : { now: options.backup!.now }) });
+    print(`The database is being upgraded from schema ${notice.from} to ${notice.to}; a backup of it as it was is in ${options.backup!.directory}.`);
+  };
   if (options.storage.kind === "postgres") {
-    const pg = await PostgresStorage.open({ connectionString: options.storage.url, allowUnsupportedServer: override, ...(options.storage.schema === undefined ? {} : { schema: options.storage.schema }), ...(options.storage.maxConnections === undefined ? {} : { maxConnections: options.storage.maxConnections }), ...(options.storage.minimumServerVersionNum === undefined ? {} : { minimumServerVersionNum: options.storage.minimumServerVersionNum }) }).catch((error: unknown) => { if (error instanceof Error && error.message.startsWith("NimbleNewt will not start")) print(error.message); throw error; });
+    const pg = await PostgresStorage.open({ connectionString: options.storage.url, allowUnsupportedServer: override, ...(beforeUpgrade === undefined ? {} : { beforeUpgrade }), ...(options.storage.schema === undefined ? {} : { schema: options.storage.schema }), ...(options.storage.maxConnections === undefined ? {} : { maxConnections: options.storage.maxConnections }), ...(options.storage.minimumServerVersionNum === undefined ? {} : { minimumServerVersionNum: options.storage.minimumServerVersionNum }) }).catch((error: unknown) => { if (error instanceof Error && error.message.startsWith("NimbleNewt will not start")) print(error.message); throw error; });
     storage = pg;
     const server = pg.unsupportedServer;
     if (server !== undefined) {
@@ -215,7 +221,7 @@ export async function startController(options: StartOptions): Promise<Controller
       check = full;
     }
   } else {
-    storage = await SqliteStorage.open({ path: options.storage.path, allowNetworkFilesystem: override });
+    storage = await SqliteStorage.open({ path: options.storage.path, allowNetworkFilesystem: override, ...(beforeUpgrade === undefined ? {} : { beforeUpgrade }) });
   }
 
   let dispatch: DispatchHandle | undefined;

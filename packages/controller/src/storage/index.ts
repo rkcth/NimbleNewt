@@ -1,5 +1,5 @@
 export * from "./types.js";
-export { SNAPSHOT_PAGE_MAX, SNAPSHOT_TABLES, TABLE_SPECS, checkSnapshotRow, keyOf, type SnapshotRow, type SnapshotTable, type StorageSnapshot } from "./snapshot.js";
+export { SNAPSHOT_PAGE_MAX, SNAPSHOT_TABLES, TABLE_SPECS, checkSnapshotRow, keyOf, type BeforeUpgrade, type SnapshotRow, type SnapshotTable, type StorageSnapshot, type UpgradeNotice } from "./snapshot.js";
 export { StorageError, isStorageError, type StorageErrorKind } from "./errors.js";
 export { operationHash } from "./hash.js";
 export { canonicalJson, compareCodePoints, sha256 } from "./json.js";

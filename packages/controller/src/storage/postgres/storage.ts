@@ -12,7 +12,7 @@ import type {
 import { classify, isConnectionLoss } from "./errors.js";
 import { migrationChecksum, planMigrations, type JournalEntry, type Migration } from "../migrations.js";
 import { JOURNAL_SQL, MIGRATIONS } from "./schema.js";
-import { SNAPSHOT_PAGE_MAX, TABLE_SPECS, checkSnapshotRow, type SnapshotRow, type SnapshotTable, type StorageSnapshot } from "../snapshot.js";
+import { SNAPSHOT_PAGE_MAX, TABLE_SPECS, checkSnapshotRow, type BeforeUpgrade, type SnapshotRow, type SnapshotTable, type StorageSnapshot } from "../snapshot.js";
 
 export interface PostgresOptions {
   /**
@@ -33,6 +33,8 @@ export interface PostgresOptions {
   readonly statementTimeoutMs?: number;
   /** For the migration qualification only: the migrations to apply instead of this version's own. Production code never sets it. */
   readonly migrations?: readonly Migration[];
+  /** Called before an existing database is upgraded to a newer schema, with a snapshot of it as it is (card K01). A throw stops the upgrade and the open. */
+  readonly beforeUpgrade?: BeforeUpgrade;
   /**
    * Start on a server older than the supported minimum instead of refusing (card F04h). The operator sets this with the same switch as the
    * rest of the environment check (`--allow-unsupported-environment`); nothing else about the adapter changes. The problem is available
@@ -124,13 +126,13 @@ const types = { getTypeParser: (oid: number, format?: "text" | "binary") => (oid
  */
 export class PostgresStorage implements ControllerStorage {
   readonly #pool: pg.Pool;
-  readonly #options: Required<Omit<PostgresOptions, "connectionString" | "migrations" | "allowUnsupportedServer" | "minimumServerVersionNum">>;
+  readonly #options: Required<Omit<PostgresOptions, "connectionString" | "migrations" | "beforeUpgrade" | "allowUnsupportedServer" | "minimumServerVersionNum">>;
   readonly #version: { readonly allowUnsupported: boolean; readonly minimum: number | undefined };
   #unsupportedServer: Problem | undefined;
   #closed = false;
   #poolError: Error | undefined;
 
-  private constructor(pool: pg.Pool, options: Required<Omit<PostgresOptions, "connectionString" | "migrations" | "allowUnsupportedServer" | "minimumServerVersionNum">>, version: { allowUnsupported: boolean; minimum: number | undefined }) {
+  private constructor(pool: pg.Pool, options: Required<Omit<PostgresOptions, "connectionString" | "migrations" | "beforeUpgrade" | "allowUnsupportedServer" | "minimumServerVersionNum">>, version: { allowUnsupported: boolean; minimum: number | undefined }) {
     this.#pool = pool;
     this.#options = options;
     this.#version = version;
@@ -176,12 +178,22 @@ export class PostgresStorage implements ControllerStorage {
     const store = new PostgresStorage(pool, resolved, { allowUnsupported: options.allowUnsupportedServer === true, minimum: options.minimumServerVersionNum });
     try {
       await store.#verifyServer();
+      if (options.beforeUpgrade !== undefined) await store.#announceUpgrade(options.migrations ?? MIGRATIONS, options.beforeUpgrade);
       await store.#migrate(options.migrations ?? MIGRATIONS);
       return store;
     } catch (error) {
       await pool.end().catch(() => undefined);
       throw classify(error);
     }
+  }
+
+  /** An existing database whose journal is behind the migrations this version has: the hook is told, with a snapshot, before anything changes. */
+  async #announceUpgrade(migrations: readonly Migration[], hook: BeforeUpgrade): Promise<void> {
+    const from = await this.#read(async (tx) => {
+      if ((await tx.q("SELECT to_regclass($1) AS t", [`${this.#options.schema}.schema_migrations`]))[0]!.t === null) return 0;
+      return count((await tx.q("SELECT COALESCE(MAX(version), 0)::int AS v FROM schema_migrations WHERE state = 'done'"))[0]!, "v");
+    });
+    if (from > 0 && from < migrations.length) await hook({ from, to: migrations.length, snapshot: () => this.snapshot() });
   }
 
   async #verifyServer(): Promise<void> {

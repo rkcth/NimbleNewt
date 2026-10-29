@@ -39,6 +39,13 @@ export interface StorageSnapshot {
 
 export const SNAPSHOT_PAGE_MAX = 1000;
 
+/**
+ * Told to the store's owner before an existing database is upgraded to a newer schema (card K01): the version it has, the version it is about to get, and a snapshot of the database as it is now.
+ * If the hook throws, the upgrade does not happen and the store does not open, so the owner is never upgraded without the safety copy they asked for.
+ */
+export interface UpgradeNotice { readonly from: number; readonly to: number; snapshot(): Promise<StorageSnapshot> }
+export type BeforeUpgrade = (notice: UpgradeNotice) => Promise<void>;
+
 /** Refuses a row that is not exactly the table's columns with values of the right kind: the restore writes only what it understood. */
 export function checkSnapshotRow(table: SnapshotTable, row: unknown): SnapshotRow {
   const spec = TABLE_SPECS[table];

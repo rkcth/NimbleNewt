@@ -13,7 +13,7 @@ import { classify, isBusy } from "./errors.js";
 import { assertLocalFilesystem } from "./filesystem.js";
 import { migrationChecksum, planMigrations, type JournalEntry, type Migration } from "../migrations.js";
 import { JOURNAL_SQL, MIGRATIONS } from "./schema.js";
-import { checkSnapshotRow, type SnapshotRow, type SnapshotTable, type StorageSnapshot } from "../snapshot.js";
+import { checkSnapshotRow, type BeforeUpgrade, type SnapshotRow, type SnapshotTable, type StorageSnapshot } from "../snapshot.js";
 import { TABLE_SPECS } from "../snapshot.js";
 import { openFileSnapshot, snapshotFolder, vacuumIntoSql } from "./snapshot.js";
 
@@ -36,6 +36,8 @@ export interface SqliteOptions {
    * For the migration qualification only: the migrations to apply instead of this version's own. Production code never sets it.
    */
   readonly migrations?: readonly Migration[];
+  /** Called before an existing database is upgraded to a newer schema, with a snapshot of it as it is (card K01). A throw stops the upgrade and the open. */
+  readonly beforeUpgrade?: BeforeUpgrade;
 }
 
 /** The durability and safety settings in force, read back from the database after they were applied. */
@@ -104,12 +106,20 @@ export class SqliteStorage implements ControllerStorage {
       db = new DatabaseSync(absolute, { timeout: busyTimeoutMs, enableForeignKeyConstraints: true });
       const store = new SqliteStorage(db, absolute, busyTimeoutMs, options.testHooks);
       store.#configure();
+      if (options.beforeUpgrade !== undefined) await store.#announceUpgrade(options.migrations ?? MIGRATIONS, options.beforeUpgrade);
       store.#migrate(options.migrations ?? MIGRATIONS);
       return store;
     } catch (error) {
       try { db?.close(); } catch { /* already unusable */ }
       throw classify(error);
     }
+  }
+
+  /** An existing database whose journal is behind the migrations this version has: the hook is told, with a snapshot, before anything changes. */
+  async #announceUpgrade(migrations: readonly Migration[], hook: BeforeUpgrade): Promise<void> {
+    const journal = this.#get("SELECT 1 AS x FROM sqlite_schema WHERE type = 'table' AND name = 'schema_migrations'") === undefined ? undefined : this.#get("SELECT MAX(version) AS v FROM schema_migrations WHERE state = 'done'");
+    const from = journal === undefined ? 0 : count(journal, "v") || 0;
+    if (from > 0 && from < migrations.length) await hook({ from, to: migrations.length, snapshot: () => this.snapshot() });
   }
 
   #configure(): void {
