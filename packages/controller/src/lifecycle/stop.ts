@@ -33,6 +33,7 @@ export interface StopPorts {
   terminate(scope: PauseScope, options: { force: boolean }): Promise<{ ended: boolean; unresolved: readonly string[] }>;
 }
 
+export type StopSettled = (by: Principal, event: { intentId: string; scope: PauseScope; mode: StopMode; outcome: StopOutcome }) => Promise<void>;
 export interface StopOutcome { readonly state: "suspended" | "stopped" | "recovery-required"; readonly graceful: boolean; readonly unresolved: readonly string[]; readonly at: string }
 
 export interface StopIntentBody {
@@ -83,10 +84,11 @@ export class StopService {
   readonly #pauses: PauseService;
   readonly #ports: StopPorts;
 
-  private constructor(runner: CommandRunner, pauses: PauseService, ports: StopPorts) { this.#runner = runner; this.#pauses = pauses; this.#ports = ports; }
+  readonly #onSettled: StopSettled | undefined;
+  private constructor(runner: CommandRunner, pauses: PauseService, ports: StopPorts, onSettled?: StopSettled) { this.#runner = runner; this.#pauses = pauses; this.#ports = ports; this.#onSettled = onSettled; }
 
-  static withEpoch(storage: ControllerStorage, epoch: number, pauses: PauseService, ports: StopPorts, options: RunnerOptions = {}): StopService {
-    return new StopService(new CommandRunner(storage, epoch, options), pauses, ports);
+  static withEpoch(storage: ControllerStorage, epoch: number, pauses: PauseService, ports: StopPorts, options: RunnerOptions & { /** Told when a request reaches its end (best effort: a failure never undoes the stop). */ onSettled?: StopSettled } = {}): StopService {
+    return new StopService(new CommandRunner(storage, epoch, options), pauses, ports, options.onSettled);
   }
 
   // ---- requests ------------------------------------------------------------------------------------------------------------
@@ -198,7 +200,7 @@ export class StopService {
       return { phase: body.blocked?.resume ?? "preparing" };
     }
     await this.#observe(by, body.scope, String(command.intentId), "recovery-required", "restart from an earlier boundary chosen; the scope is not suspended");
-    await this.#settle(String(command.intentId), by.id, { state: "recovery-required", graceful: false, unresolved: body.inventory.filter((i) => i.state !== "settled").map((i) => i.ref), at }, "recovery-required", "restart from an earlier boundary chosen", ["blocked"]);
+    await this.#settle(String(command.intentId), by, { state: "recovery-required", graceful: false, unresolved: body.inventory.filter((i) => i.state !== "settled").map((i) => i.ref), at }, "recovery-required", "restart from an earlier boundary chosen", ["blocked"]);
     return { phase: "recovery-required" };
   }
 
@@ -258,7 +260,7 @@ export class StopService {
       if (b.phase === "prepared") {
         if (b.mode === "suspend") {
           await this.#observe(by, b.scope, id, "suspended", `checkpoint ${b.prepared?.checkpointId ?? "?"} is durable`);
-          await this.#settle(id, by.id, { state: "suspended", graceful: true, unresolved: [], at: now }, "done", "suspended", ["prepared"]);
+          await this.#settle(id, by, { state: "suspended", graceful: true, unresolved: [], at: now }, "done", "suspended", ["prepared"]);
           continue;
         }
         await this.#update(id, (x) => ({ ...x, phase: "terminating", history: this.#push(x, "terminating", by.id, "ending execution") }), ["prepared"]);
@@ -274,10 +276,10 @@ export class StopService {
         const graceful = b.forced === undefined;
         if (ended.ended && ended.unresolved.length === 0) {
           await this.#observe(by, b.scope, id, "stopped", graceful ? "ended after preparation" : "force stopped; incomplete state may need reconciling");
-          await this.#settle(id, by.id, { state: "stopped", graceful, unresolved: [], at: now }, "done", graceful ? "stopped" : "force stopped", ["terminating"]);
+          await this.#settle(id, by, { state: "stopped", graceful, unresolved: [], at: now }, "done", graceful ? "stopped" : "force stopped", ["terminating"]);
         } else {
           await this.#observe(by, b.scope, id, "recovery-required", `unresolved: ${ended.unresolved.join(", ").slice(0, 300) || "execution did not end"}`);
-          await this.#settle(id, by.id, { state: "recovery-required", graceful: false, unresolved: ended.unresolved.slice(0, 50), at: now }, "recovery-required", "unresolved work remains", ["terminating"]);
+          await this.#settle(id, by, { state: "recovery-required", graceful: false, unresolved: ended.unresolved.slice(0, 50), at: now }, "recovery-required", "unresolved work remains", ["terminating"]);
         }
         continue;
       }
@@ -377,8 +379,10 @@ export class StopService {
     await this.#update(id, (x) => ({ ...x, phase: "blocked", blocked: { reason, choices: STOP_CHOICES, ...(resume === undefined ? {} : { resume }) }, history: this.#push(x, "blocked", by, reason) }), from);
   }
 
-  async #settle(id: string, by: string, outcome: StopOutcome, phase: "done" | "recovery-required", note: string, from: readonly StopPhase[]): Promise<void> {
-    await this.#update(id, (x) => ({ ...x, phase, blocked: undefined, outcome, history: this.#push(x, phase, by, note) }), from);
+  async #settle(id: string, by: Principal, outcome: StopOutcome, phase: "done" | "recovery-required", note: string, from: readonly StopPhase[]): Promise<void> {
+    await this.#update(id, (x) => ({ ...x, phase, blocked: undefined, outcome, history: this.#push(x, phase, by.id, note) }), from);
+    const b = (await this.#runner.get(KIND, id))?.body as unknown as StopIntentBody | undefined;
+    if (b !== undefined) try { await this.#onSettled?.(by, { intentId: id, scope: b.scope, mode: b.mode, outcome }); } catch { /* the record of it is best effort */ }
   }
 
   /** Tells the pause gate what was reached. The intent's own record is the durable source; a refusal here (the gate was resumed meanwhile) does not undo it. */

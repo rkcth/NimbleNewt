@@ -2370,3 +2370,6 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## C09c: hand-offs are recorded in the task's activity (first part, 2026-10-28)
 - `HandoffService` tells an optional `onTransferred` once a task has moved; the controller records an `ownership` step (from, to, a reference to the hand-off) in the task's activity record, best effort (a failure never holds back the hand-off). Test: `api/start-handoff.test.ts` reads the step through `activity.steps`.
 - Not done (C09d): the dispatcher's model and tool steps with context manifests, stops (`lifecycle` steps), meeting decisions, approvals and messages recording to the activity record; chat access and the per-task explanation index.
+
+## C09d: suspensions and stops are recorded in the task's activity (first part, 2026-10-28)
+- `StopService` tells an optional `onSettled` when a request ends (suspended, stopped, recovery-required); for a task scope the controller records a `lifecycle` step (what was reached, graceful or not, the first unresolved items). Best effort. Test: `api/start-lifecycle.test.ts` reads the step through `activity.steps`. Team, agent and installation stops are not copied into each task's record (their attempts' tasks are not resolved here).
