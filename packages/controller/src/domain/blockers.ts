@@ -16,10 +16,12 @@ import { CommandRunner, view, type CommandMeta, type CommandResult, type RunnerO
  * - `unexplained_block`: a task is blocked and nothing says why or what happens next (card S08).
  * - `grant_needed`: the task needs a grant that neither its instructions nor the standing policy give, so the dispatcher did not start it; the owner decides whether to give it (card H12).
  * - `dispatch_blocked`: the dispatcher cannot start the attempt for a reason that waiting will not fix (no eligible route, a harness that cannot recover the task, an exhausted budget); a person changes the route, the task or the budget (card H12).
+ * - `missing_context`: a checked resume found that context the task cannot continue without is not there (card L04); a person supplies it or changes the task.
+ * - `resume_churn`: the inputs a checked resume was reviewing kept changing, so it never reached a state it could commit (card L04); a person looks at what keeps changing.
  * - `context_overflow`: the context kept running out (a first call that does not fit, a summary that could not be made, repeated overflow); a person changes the route, the task or the budget (card C07b).
  */
-export type BlockerType = "manual_hold" | "delivery_exhausted" | "effect_uncertain" | "wait_overdue" | "scan_failure" | "unexplained_block" | "runtime_hold" | "circular_wait" | "context_overflow" | "grant_needed" | "dispatch_blocked";
-export const BLOCKER_TYPES: readonly BlockerType[] = ["manual_hold", "delivery_exhausted", "effect_uncertain", "wait_overdue", "scan_failure", "unexplained_block", "runtime_hold", "circular_wait", "context_overflow", "grant_needed", "dispatch_blocked"];
+export type BlockerType = "manual_hold" | "delivery_exhausted" | "effect_uncertain" | "wait_overdue" | "scan_failure" | "unexplained_block" | "runtime_hold" | "circular_wait" | "context_overflow" | "grant_needed" | "dispatch_blocked" | "missing_context" | "resume_churn";
+export const BLOCKER_TYPES: readonly BlockerType[] = ["manual_hold", "delivery_exhausted", "effect_uncertain", "wait_overdue", "scan_failure", "unexplained_block", "runtime_hold", "circular_wait", "context_overflow", "grant_needed", "dispatch_blocked", "missing_context", "resume_churn"];
 
 /**
  * What kind of obstacle a blocker is (card U05), so a status answer can say what stands in the way and the route out:

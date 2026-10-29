@@ -122,6 +122,8 @@ const HINTS: Readonly<Record<BlockerType, string>> = {
   context_overflow: "change the model route, the task or the budget",
   grant_needed: "give the grant the task needs, or change the task so it does not need it",
   dispatch_blocked: "change the route, the harness, the budget or the task, then the dispatcher starts it",
+  missing_context: "supply the context the resume needs, or change the task so it does not need it",
+  resume_churn: "look at what keeps changing under the task, settle it, then resume again",
 };
 
 /** The first words of the route: what kind of obstacle it is. */
