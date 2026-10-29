@@ -5,3 +5,4 @@ export { CELL_KEYS, MODES, PROFILES, PROFILE_TABLES, termsMet, tightness, type C
 export { PolicyService, type RolesOf, type AgentPolicyContext, type EffectivePolicy, type EffectiveCell, type EvaluateInput, type PolicyBody, type PolicyChange, type PolicyPreview, type SetPolicy } from "./policy.js";
 export { ApprovalLoadService, GRANT_LENGTHS, chooseStandingLength, LOAD_LIMITS, type CounterBody, type LoadFigures, type ProposalBody } from "./load.js";
 export { ProfileSuggestionService, SUGGESTION_EVERY, TRIAL_DAYS, type Suggestion, type SuggestionAnswer, type SuggestionBody, type SuggestionKind } from "./suggestion.js";
+export { describePolicyContext } from "./describe.js";

@@ -2383,3 +2383,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - Each card is a first part with a remainder card: M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d. L04c stays planned (its start-up sweep is done; dispatcher use, observation and reviewer are not).
 - The parent cards (M02, M03, M04, H13, U12, R04, U04) stay planned until the running controller really uses their services.
 - Time-sensitive test: `api/start-meetings.test.ts` "urgent meeting's invitations" failed on four runs within a few minutes at about 03:26-03:29 UTC and passed before and after (also with the fixes reverted); it depends on the real clock.
+
+## U04d: the policy is in the agent's context at dispatch (2026-10-29)
+- The dispatcher reads `PolicyService.contextFor` for the attempt's agent when it starts the attempt and appends `describePolicyContext` (profile, how each class of action is decided, owner-only tools, held approvals, the latest changes) to the task text in the work order. It is read at each start, so an owner's edit is in the next attempt. A policy that cannot be read (no grant on the project, a failure) leaves the text as it was; it never stops an attempt. Test in `dispatch/dispatcher.test.ts`.
+- Known: the text is fixed for the attempt; a change during a long attempt reaches the agent only through `policy.context` or the next attempt.

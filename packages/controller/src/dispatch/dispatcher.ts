@@ -23,7 +23,7 @@ import type { HandoffFacts } from "../context/budget.js";
 import type { AttendanceService } from "../meetings/index.js";
 import type { NotificationService } from "../notifications/index.js";
 import type { ContractService } from "../planning/index.js";
-import type { PolicyService } from "../policy/index.js";
+import { describePolicyContext, type PolicyService } from "../policy/index.js";
 import { ActionCatalog } from "../policy/catalog.js";
 import type { ReviewService } from "../review/index.js";
 import { selectRoute, type RoutingService } from "../routing/index.js";
@@ -69,7 +69,7 @@ export interface DispatcherDeps {
   readonly workers: readonly WorkerHost[];
   readonly contracts: Pick<ContractService, "priorityOf" | "recoveryOf">;
   readonly harnesses: HarnessCatalog;
-  readonly policy: Pick<PolicyService, "evaluate">;
+  readonly policy: Pick<PolicyService, "evaluate"> & Partial<Pick<PolicyService, "contextFor">>;
   /**
    * Whether a push or a merge changes a protected branch of the project, decided here and not by the worker (card A07f). Without it the worker's own `branchProtected` flag is used as before, so a controller always passes it.
    */
@@ -984,7 +984,7 @@ export class DispatcherService {
     const recipe: RecipeSummary = { revision: `r-${b.attemptId.slice(4, 16)}`, reach: [] };
     const order: WorkOrder = {
       attemptId: b.attemptId, taskId: b.taskId, projectId: b.projectId, agentId: b.agentId, generation: b.generation, ...(b.harness === undefined ? {} : { harness: b.harness }), route: b.route, credential: credential.token, recipe,
-      content: await this.#contentOf(b.taskId), requestId: `cmd:adm:${b.attemptId}`, expiresAt: b.expiresAt,
+      content: await this.#contentOf(b.taskId) + await this.#policyNote(b), requestId: `cmd:adm:${b.attemptId}`, expiresAt: b.expiresAt,
       ...(b.resumeFrom === undefined ? {} : { resumeFrom: b.resumeFrom }), ...(b.resumeNote === undefined ? {} : { resumeNote: b.resumeNote }),
     };
     let handle: WorkerHandle;
@@ -998,6 +998,16 @@ export class DispatcherService {
     const turn = this.#run(b.attemptId, handle);
     this.#live.set(b.attemptId, { handle, host, turn });
     return { kind: "started" };
+  }
+
+  /** The rules that bind the agent in the project, read now (card U04d): an owner's edit is in the next attempt's context. Not being able to read them never stops the attempt. */
+  async #policyNote(b: DispatchBody): Promise<string> {
+    if (this.#deps.policy.contextFor === undefined) return "";
+    try {
+      const agent = await this.#deps.credentials.principalOf(this.#deps.principal, b.attemptId);
+      const context = await this.#deps.policy.contextFor(agent, b.projectId);
+      return context === undefined ? "" : `\n\n${describePolicyContext(context)}`;
+    } catch { return ""; }
   }
 
   async #contentOf(taskId: string): Promise<string> {

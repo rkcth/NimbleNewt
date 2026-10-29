@@ -1722,3 +1722,20 @@ for (const backend of backends) {
   });
 
 }
+
+// Card U04d: the policy that binds the agent is part of what it is started with.
+for (const backend of backends) {
+  test(`${backend.name}: the started attempt's text carries the policy that binds the agent, read at the start`, async () => {
+    const store = await backend.open();
+    try {
+      const c = await buildWorld(store.storage);
+      const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+      await c.task("Order seeds", ann);
+      await c.dispatcher.tick(); await c.dispatcher.idle();
+      const order = c.worker.starts[0]!;
+      assert.match(order.content, /^Order seeds\n\nRules that bind you in this project/);
+      assert.match(order.content, /Goes to the owner: /);
+      assert.match(order.content, /Approval profile: /);
+    } finally { await store.close(); }
+  });
+}
