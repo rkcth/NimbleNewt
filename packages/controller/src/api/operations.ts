@@ -79,6 +79,11 @@ export interface Context {
   readonly records?: Pick<MeetingRecordService, "open" | "setChair" | "join" | "leave" | "append" | "move" | "amend" | "table" | "openVote" | "castBallot" | "closeVote" | "castingVote" | "apply" | "ownerRespond" | "finish" | "summarize" | "returnOutcomes" | "sweep" | "record" | "recordFor" | "discussion" | "motion" | "ballots" | "decision" | "why" | "summary" | "latestPlan">;
   readonly attendance?: Pick<AttendanceService, "admission" | "openRoom" | "callNow" | "status" | "beginDiscussion" | "prepare" | "reportBlocked" | "join" | "joinAsOwner" | "authorizeWake" | "leave" | "keepPaused" | "deferReturn" | "endMeeting" | "returnToWork" | "acknowledge" | "revalidation" | "saveBrief" | "briefOf">;
   readonly standups?: Pick<StandupService, "configure" | "update" | "standup" | "prepare" | "prepared" | "brief" | "briefs" | "addStatement" | "agenda" | "deliverOutcomes">;
+  readonly watchControl?: {
+    create(owner: Principal, command: { commandId: string; stream: string; taskId: string; kinds?: readonly string[]; cooldownSeconds?: number; batch?: number }): Promise<{ id: string; replayed: boolean }>;
+    cancel(owner: Principal, command: { commandId: string; watchId: string }): Promise<void>;
+    list(owner: Principal): Promise<string[]>;
+  };
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep">;
 
   readonly commands?: CommandService;
@@ -440,6 +445,13 @@ export const OPERATIONS: readonly Operation[] = [
   standupOp("add-statement", "command", "An agent adds advice, priorities or a note to its brief.", "addStatement", ["briefId", "expectedRevision", "section", "text"], "`{ ok }`."),
   standupOp("agenda", "query", "The agenda of an occurrence: conflicts, questions and decisions first.", "agenda", ["occurrenceId"], "`{ item }`."),
   standupOp("deliver", "command", "Delivers a project's stand-up outcomes to the conversations they came from.", "deliverOutcomes", ["projectId"], "`{ delivered, waiting }`.", ["projectId"]),
+  { name: "watch.create", kind: "command", summary: "Owner only: watches a task's stream (or its project's) so that matching events become an inbox item for the task's owner and schedule it. The controller's dispatcher keeps the watch and hands over the waiting events each tick.", args: { stream: "`task:<id>` or `project:<id>`", taskId: "the task whose owner is told", "kinds?": "only these event kinds", "cooldownSeconds?": "least seconds between hand-overs", "batch?": "most events per hand-over", commandId: "required" },
+    result: "`{ id, replayed }`.",
+    run: async (c, a, id) => { only(a, ["stream", "taskId", "kinds", "cooldownSeconds", "batch"]); return asJson(await (c.watchControl ?? unavailable("event watching")).create(c.principal, { commandId: need(id), ...a } as never)); } },
+  { name: "watch.cancel", kind: "command", summary: "Owner only: ends a watch and its subscription.", args: { watchId: "the watch", commandId: "required" }, result: "`{ ok }`.",
+    run: async (c, a, id) => { only(a, ["watchId"]); await (c.watchControl ?? unavailable("event watching")).cancel(c.principal, { commandId: need(id), watchId: a["watchId"] as string }); return asJson({ ok: true }); } },
+  { name: "watch.list", kind: "query", summary: "Owner only: the active watches.", args: {}, result: "`{ items: [watchId] }`.",
+    run: async (c, a) => { only(a, []); return asJson({ items: await (c.watchControl ?? unavailable("event watching")).list(c.principal) }); } },
   { name: "grant.revoke", kind: "command", summary: "The owner takes a grant back (owner only; the revision you read must still be current). It stops counting at the next check.", args: { grantId: "the grant's ID", expectedRevision: "the revision you read", reason: "why, in the owner's words" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["grantId", "expectedRevision", "reason"]); await grantsOf(c).revoke(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
   { name: "events.configure-idle", kind: "command", summary: "Sets how long an event subscription may sit without acknowledging before it expires (owner only). A subscription that was made before this existed, or without its own time, uses this one.", args: { idleSeconds: "whole seconds, 10 to 604800" }, result: "`{ ok: true }`.", completion: { kind: "completed" },

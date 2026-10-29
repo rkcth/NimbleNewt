@@ -576,6 +576,18 @@ export class WatchService {
   // ---- internals ------------------------------------------------------------------------------------------------------------
 
   #hid(value: unknown): string { return typeof value === "string" && HANDLING_ID.test(value) ? value : invalid("handlingId", "is not a handling ID"); }
+  /** The IDs of the active watches the caller set up (the owner and services see their own; a watch is dispatched only by the principal that set it up). */
+  async activeOf(by: Principal): Promise<string[]> {
+    if (!(by.kind === "owner" || by.kind === "service")) throw new DomainError("forbidden", `${by.id} may not list watches`);
+    const out: string[] = [];
+    for (let after: string | undefined, pages = 0; pages < this.#pages; pages++) {
+      const chunk = await this.#runner.list(WATCH_KIND, { ...(after === undefined ? {} : { afterId: after }), limit: this.#pageSize });
+      for (const rec of chunk) { after = rec.id; const w = rec.body as unknown as WatchBody; if (w.state === "active" && w.subscriber === by.id) out.push(rec.id); }
+      if (chunk.length < this.#pageSize) break;
+    }
+    return out;
+  }
+
   async #watch(id: string): Promise<Aggregate | undefined> { return typeof id === "string" && WATCH_ID.test(id) ? this.#runner.get(WATCH_KIND, id) : undefined; }
   #mayRead(by: Principal, h: HandlingBody): boolean { return by.kind === "owner" || by.id === h.owner.id || allows(by, "history.read", h.projectId); }
 

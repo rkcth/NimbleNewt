@@ -26,7 +26,7 @@ import { BlockerService } from "../domain/blockers.js";
 import { ContractService, WaitGraphService } from "../planning/index.js";
 import { ProjectPlanService, ProjectResourceService, ResponsibilityService } from "../projects/index.js";
 import { InquiryService } from "../inquiries/index.js";
-import { GrantService, PrincipalService, TaskCredentialService } from "../security/index.js";
+import { GrantService, PrincipalService, TaskCredentialService, type Principal } from "../security/index.js";
 import { SqliteStorage, probeSqliteLibrary } from "../storage/sqlite/index.js";
 import { PostgresStorage, probePostgresLibrary } from "../storage/postgres/index.js";
 import type { ControllerStorage } from "../storage/types.js";
@@ -315,7 +315,18 @@ export async function startController(options: StartOptions): Promise<Controller
     // The attendance service lives with the dispatcher (it needs the budget and the pause service it was composed with), which starts after the API: calls reach it when it is there.
     const attendance = new Proxy({}, { get: (_t, method: string) => (...args: unknown[]) => { const live = dispatch?.attendance as unknown as Record<string, (...x: unknown[]) => unknown> | undefined; if (live === undefined) throw new DomainError("unavailable", "meeting attendance is not running: the dispatcher is not"); return live[method]!(...args); } }) as NonNullable<ConstructorParameters<typeof StateApi>[0]["attendance"]>;
     const standups = new Proxy({}, { get: (_t, method: string) => (...args: unknown[]) => { const live = dispatch?.standups as unknown as Record<string, (...x: unknown[]) => unknown> | undefined; if (live === undefined) throw new DomainError("unavailable", "stand-ups are not running: the dispatcher is not"); return live[method]!(...args); } }) as NonNullable<ConstructorParameters<typeof StateApi>[0]["standups"]>;
-    const api = new StateApi({ status, branchSettings, standups, attendance, records, policyContext: PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }), activity, resumes, handoffs, cutover, commands, integration, notes, stops, pauses, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size) }, watches: watchService, events: EventService.withEpoch(storage, epoch), budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
+    // A watch is dispatched only by the principal that set it up, so the owner's request is carried out as the dispatcher, which runs the dispatching (card H13b).
+    const asDispatcher = (owner: Principal): { watches: NonNullable<typeof dispatch>["watches"]; by: Principal } => {
+      if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} may not set up watches`);
+      if (dispatch === undefined) throw new DomainError("unavailable", "event watching is not running: the dispatcher is not");
+      return { watches: dispatch.watches, by: dispatch.principal };
+    };
+    const watchControl = {
+      create: async (owner: Principal, command: { commandId: string; stream: string; taskId: string; kinds?: readonly string[]; cooldownSeconds?: number; batch?: number }) => { const w = asDispatcher(owner); return w.watches.watch(w.by, command); },
+      cancel: async (owner: Principal, command: { commandId: string; watchId: string }) => { const w = asDispatcher(owner); await w.watches.cancelWatch(w.by, command); },
+      list: async (owner: Principal) => { const w = asDispatcher(owner); return w.watches.activeOf(w.by); },
+    };
+    const api = new StateApi({ status, branchSettings, watchControl, standups, attendance, records, policyContext: PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }), activity, resumes, handoffs, cutover, commands, integration, notes, stops, pauses, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size) }, watches: watchService, events: EventService.withEpoch(storage, epoch), budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
     let chat: ChatService | undefined;
     let coordinator: CoordinatorService | undefined;
     if (options.chat !== undefined) {

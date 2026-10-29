@@ -152,6 +152,11 @@ export function eventLoops(events: Pick<EventService, "expireIdle">): Dispatcher
   return [{ name: "events.expireIdle", run: (by) => drain(() => events.expireIdle(by)) }];
 }
 
+/** H13b: each active watch the dispatcher set up hands its waiting events to the owning agent, once per tick (a watch is dispatched only by the principal that set it up). */
+export function watchLoops(watches: { activeOf(by: Principal): Promise<string[]>; dispatchAll(by: Principal, watchIds: readonly string[]): Promise<unknown> }): DispatcherLoop[] {
+  return [{ name: "events.watch-dispatch", run: async (by) => { await watches.dispatchAll(by, await watches.activeOf(by)); } }];
+}
+
 /** C08: the corrections whose propagation did not finish (a step that failed, a restart) are finished for each project. */
 export function decisionLoops(decisions: Pick<DecisionService, "resume">, projects: () => Promise<readonly string[]>): DispatcherLoop[] {
   return [{ name: "decisions.resume", run: async (by) => { for (const projectId of await projects()) await drain(() => decisions.resume(by, { projectId })); } }];

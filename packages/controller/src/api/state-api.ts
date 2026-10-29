@@ -105,6 +105,11 @@ export interface StateApiDeps {
   readonly records?: Pick<MeetingRecordService, "open" | "setChair" | "join" | "leave" | "append" | "move" | "amend" | "table" | "openVote" | "castBallot" | "closeVote" | "castingVote" | "apply" | "ownerRespond" | "finish" | "summarize" | "returnOutcomes" | "sweep" | "record" | "recordFor" | "discussion" | "motion" | "ballots" | "decision" | "why" | "summary" | "latestPlan">;
   readonly attendance?: Pick<AttendanceService, "admission" | "openRoom" | "callNow" | "status" | "beginDiscussion" | "prepare" | "reportBlocked" | "join" | "joinAsOwner" | "authorizeWake" | "leave" | "keepPaused" | "deferReturn" | "endMeeting" | "returnToWork" | "acknowledge" | "revalidation" | "saveBrief" | "briefOf">;
   readonly standups?: Pick<StandupService, "configure" | "update" | "standup" | "prepare" | "prepared" | "brief" | "briefs" | "addStatement" | "agenda" | "deliverOutcomes">;
+  readonly watchControl?: {
+    create(owner: Principal, command: { commandId: string; stream: string; taskId: string; kinds?: readonly string[]; cooldownSeconds?: number; batch?: number }): Promise<{ id: string; replayed: boolean }>;
+    cancel(owner: Principal, command: { commandId: string; watchId: string }): Promise<void>;
+    list(owner: Principal): Promise<string[]>;
+  };
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep">;
 
   /** Typed commands (card T09b). Absent: `command.run` answers as unavailable. */
@@ -190,6 +195,7 @@ export class StateApi {
         ...(this.#deps.integration === undefined ? {} : { integration: this.#deps.integration }),
         ...(this.#deps.notes === undefined ? {} : { notes: this.#deps.notes }),
         ...(this.#deps.stops === undefined ? {} : { stops: this.#deps.stops }),
+        ...(this.#deps.watchControl === undefined ? {} : { watchControl: this.#deps.watchControl }),
         ...(this.#deps.standups === undefined ? {} : { standups: this.#deps.standups }),
         ...(this.#deps.attendance === undefined ? {} : { attendance: this.#deps.attendance }),
         ...(this.#deps.records === undefined ? {} : { records: this.#deps.records }),

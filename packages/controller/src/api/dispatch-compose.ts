@@ -10,7 +10,7 @@ import { ContextEnforcementService } from "../context/index.js";
 import { CachePolicies, type AttemptCache, type CachePolicyDeps } from "../dispatch/cache.js";
 import { MarkerService } from "../inference-cache/index.js";
 import type { WorkspaceOpService, WorkspacePort } from "../workspace-ops/index.js";
-import { DispatchDriver, DispatcherService, QuiesceCoordinator, controllerGuards, type RuntimeGuards, type WorkOrder, activeAgents, attendanceLoops, budgetNoticeLoops, workspaceLoops, decisionLoops, meetingLoops, eventLoops, recoveryLoops, reviewLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLoop, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
+import { DispatchDriver, DispatcherService, QuiesceCoordinator, controllerGuards, type RuntimeGuards, type WorkOrder, activeAgents, attendanceLoops, budgetNoticeLoops, workspaceLoops, decisionLoops, meetingLoops, eventLoops, watchLoops, recoveryLoops, reviewLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLoop, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
 import { DomainError } from "../domain/errors.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import { BlockerService } from "../domain/blockers.js";
@@ -23,6 +23,8 @@ import type { RunnerOptions } from "../domain/runner.js";
 import type { ProjectService } from "../domain/service.js";
 import type { WaitService } from "../domain/waits.js";
 import { EventService, noticeThroughNotifications } from "../events/index.js";
+import { WatchService } from "../events/handling.js";
+import { InboxService } from "../domain/inbox.js";
 import { GenerationService } from "../generation/index.js";
 import type { HarnessCatalog } from "../harness/index.js";
 import { HostService } from "../hosts/index.js";
@@ -135,6 +137,8 @@ export interface DispatchHandle {
   readonly attendance: AttendanceService;
   /** The stand-up service composed with the meetings (card M03b). */
   readonly standups: StandupService;
+  /** The watches the dispatcher set up and dispatches each tick (card H13b). */
+  readonly watches: WatchService;
   readonly unsettledCharges: (by: Principal) => ReturnType<ChargeRetryService["unsettled"]>;
   readonly chargeUse: (usage: { commandId: string; activity: "review" | "background-job"; taskId: string; agentId?: string; computeMs: number }) => Promise<void>;
   /** The host side of workspace operations for a task's checkout (card H12l): the host of its live attempt, else the only host that has one; `undefined` when none can be named. */
@@ -218,12 +222,13 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     // The time an agent spends in a meeting is charged as compute: to its meeting task, or to the shared-overhead rule "meeting" (card R05d).
     charge: (u) => chargeRetry.submit(principal, { commandId: u.commandId, activity: "meeting", agentId: u.agentId, computeMs: u.computeMs, projectId: u.projectId, ...(u.taskId === undefined ? { sharedOverheadRule: "meeting" } : { taskId: u.taskId }) }).then(() => undefined),
     ...(i.onError === undefined ? {} : { onChargeError: i.onError }), ...(i.leadMinutes === undefined ? {} : { leadMinutes: i.leadMinutes }) }, { ...ro, availability: pauses.availability });
+  const watches = WatchService.withEpoch(storage, epoch, { events, inbox: InboxService.withEpoch(storage, epoch, i.assignments), assignments: i.assignments, projects: i.projects }, ro);
   const standups = StandupService.withEpoch(storage, epoch, { meetings, assignments: i.assignments }, { ...ro, availability: pauses.availability });
   const projects = (): Promise<string[]> => projectIds(i.projects);
   let stallNotices = 0;
   const loops: DispatcherLoop[] = [
     { name: "charge-retry", run: (by) => chargeRetry.sweep(by) },
-    ...messageLoops(messages, () => activeAgents(storage)), ...(i.workspaceOps === undefined ? [] : workspaceLoops(i.workspaceOps)), ...budgetNoticeLoops(budgets, (n) => { const { purpose, text } = holderNotice(n); return messages.noticeFromController({ commandId: `bgt-hold-${n.requestId}`, taskId: n.parentTaskId ?? n.taskId, to: n.to, purpose, text, admit: "budget.manage" }); }), ...attendanceLoops(attendance), ...meetingLoops(meetings, projects), ...standupLoops(standups, meetings, projects), ...eventLoops(events), ...reviewLoops(i.reviews, projects), ...decisionLoops(decisions, projects),
+    ...messageLoops(messages, () => activeAgents(storage)), ...(i.workspaceOps === undefined ? [] : workspaceLoops(i.workspaceOps)), ...budgetNoticeLoops(budgets, (n) => { const { purpose, text } = holderNotice(n); return messages.noticeFromController({ commandId: `bgt-hold-${n.requestId}`, taskId: n.parentTaskId ?? n.taskId, to: n.to, purpose, text, admit: "budget.manage" }); }), ...attendanceLoops(attendance), ...meetingLoops(meetings, projects), ...standupLoops(standups, meetings, projects), ...eventLoops(events), ...watchLoops(watches), ...reviewLoops(i.reviews, projects), ...decisionLoops(decisions, projects),
     ...(i.recovery === undefined ? [] : recoveryLoops(i.recovery.stall, i.recovery.reconciler, () => notifications.emitFromController({ commandId: `stall-off:${epoch}:${++stallNotices}`, kind: "maintenance", ref: { kind: "principal", id: "dispatcher" }, detail: "Stall detection is not running: the dispatcher does not hold the recovery.stall-scan right. Grant it that right to turn stall detection on." }), () => i.principals.authenticate(issued.token))),
   ];
   // The local worker host gets its guards here, bound to the services built above (card H12k); the dispatcher then has it among its workers.
@@ -363,7 +368,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         // No live attempt names a host: the checkout is on the only host that can do this, if there is exactly one.
         return capable.length === 1 ? capable[0]!.workspace : undefined;
       },
-      attendance, standups,
+      attendance, standups, watches,
       unsettledCharges: (by) => chargeRetry.unsettled(by),
       chargeUse: (u) => chargeRetry.submit(principal, { commandId: u.commandId, activity: u.activity, taskId: u.taskId, computeMs: u.computeMs, ...(u.agentId === undefined ? {} : { agentId: u.agentId }) }).then(() => undefined),
       // An outside server's text is framed as data on every page, with the injection check over the page itself (the visible head was checked when it was cut).

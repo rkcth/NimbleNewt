@@ -450,6 +450,16 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `watch.list`
+
+Owner only: the active watches.
+
+Arguments:
+
+- none
+
+Result: `{ items: [watchId] }`.
+
 #### `budget.report`
 
 A task's budget: limit, delegated to children, in flight, uncertain, spent, overrun and available, for money and for compute, with the reservations and open requests behind them. A task you may not read reads like a missing one.
@@ -2076,6 +2086,32 @@ Arguments:
 - `projectId`: the project
 
 Result: `{ delivered, waiting }`.
+
+#### `watch.create`
+
+Owner only: watches a task's stream (or its project's) so that matching events become an inbox item for the task's owner and schedule it. The controller's dispatcher keeps the watch and hands over the waiting events each tick.
+
+Arguments:
+
+- `stream`: `task:<id>` or `project:<id>`
+- `taskId`: the task whose owner is told
+- `kinds` (optional): only these event kinds
+- `cooldownSeconds` (optional): least seconds between hand-overs
+- `batch` (optional): most events per hand-over
+- `commandId`: required
+
+Result: `{ id, replayed }`.
+
+#### `watch.cancel`
+
+Owner only: ends a watch and its subscription.
+
+Arguments:
+
+- `watchId`: the watch
+- `commandId`: required
+
+Result: `{ ok }`.
 
 #### `grant.revoke`
 
