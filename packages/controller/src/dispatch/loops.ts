@@ -7,6 +7,7 @@ import type { EventService } from "../events/index.js";
 import type { ReviewService } from "../review/index.js";
 import type { StallService } from "../health/index.js";
 import type { AttendanceService, MeetingService } from "../meetings/index.js";
+import type { MeetingRecordService } from "../meetings/record.js";
 import type { AgentMessageService } from "../messaging/index.js";
 import type { ProjectService } from "../domain/service.js";
 import type { StandupService } from "../standups/index.js";
@@ -184,4 +185,9 @@ export function budgetNoticeLoops(budgets: Pick<BudgetService, "openForHolders">
 /** H12l: a workspace operation the controller was running when it stopped is resolved as unknown and the attempts it froze are released. */
 export function workspaceLoops(workspace: Pick<WorkspaceOpService, "recover">): DispatcherLoop[] {
   return [{ name: "workspace.recover", run: (by) => workspace.recover(by) }];
+}
+
+/** M02c: votes whose time is up are closed, ties past the casting window fail and meeting records nobody finished are ended, for each project (the lease of `MeetingRecordService.sweep`). */
+export function recordLoops(records: Pick<MeetingRecordService, "sweep">, projects: () => Promise<readonly string[]>): DispatcherLoop[] {
+  return [{ name: "meeting-records.sweep", run: async (by) => { for (const projectId of await projects()) await records.sweep(by, { projectId }); } }];
 }

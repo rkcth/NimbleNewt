@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { DomainError } from "../domain/errors.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
-import { activeAgents, attendanceLoops, budgetNoticeLoops, decisionLoops, eventLoops, meetingLoops, messageLoops, projectIds, recoveryLoops, standupLoops } from "./loops.js";
+import { activeAgents, attendanceLoops, budgetNoticeLoops, decisionLoops, eventLoops, meetingLoops, messageLoops, projectIds, recordLoops, recoveryLoops, standupLoops } from "./loops.js";
 import { buildWorld, workGrants } from "./testing/world.js";
 
 after(stopServer);
@@ -111,4 +111,12 @@ test("a request that cannot be told does not hold back the ones after it, and it
   const [loop] = budgetNoticeLoops({ openForHolders: async () => owed }, async (n) => { if (n.requestId === "r1") throw new DomainError("invalid_command", "bad request"); told.push(n.requestId); });
   await assert.rejects(() => loop!.run({ id: "x" } as never), /bad request/);
   assert.deepEqual(told, ["r2", "r3"], "the holders after the bad request were still told");
+});
+
+test("the meeting record sweep runs for every project, as the tick's principal (card M02c)", async () => {
+  const seen: string[] = [];
+  const [loop] = recordLoops({ sweep: async (by, c) => { seen.push(`${by.id}:${c.projectId}`); return { closed: [], tied: [], failedTies: [], interrupted: [] }; } }, async () => ["proj-a", "proj-b"]);
+  assert.equal(loop!.name, "meeting-records.sweep");
+  await loop!.run({ id: "service:dispatcher", kind: "service" } as never);
+  assert.deepEqual(seen, ["service:dispatcher:proj-a", "service:dispatcher:proj-b"]);
 });

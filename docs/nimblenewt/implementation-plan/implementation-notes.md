@@ -2387,3 +2387,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## U04d: the policy is in the agent's context at dispatch (2026-10-29)
 - The dispatcher reads `PolicyService.contextFor` for the attempt's agent when it starts the attempt and appends `describePolicyContext` (profile, how each class of action is decided, owner-only tools, held approvals, the latest changes) to the task text in the work order. It is read at each start, so an owner's edit is in the next attempt. A policy that cannot be read (no grant on the project, a failure) leaves the text as it was; it never stops an attempt. Test in `dispatch/dispatcher.test.ts`.
 - Known: the text is fixed for the attempt; a change during a long attempt reaches the agent only through `policy.context` or the next attempt.
+
+## M02c (first part): the meeting record sweep runs each tick (2026-10-29)
+- A dispatcher loop `meeting-records.sweep` runs `MeetingRecordService.sweep` for every project as the dispatcher service, so a vote past its time closes, a tie past its casting window fails and a record nobody finished ends, without a call. Tests: `dispatch/loops.test.ts` (every project, the tick's principal) and `api/start-dispatch.test.ts` (the loop is in the running tick). Removes the "no loop for meeting.record.sweep" known item.
+- Not done (M02c stays planned): the task-update applier, authority and shareable checks, the narrator and chat commands.

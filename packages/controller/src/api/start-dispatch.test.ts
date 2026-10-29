@@ -72,6 +72,8 @@ test("start builds the dispatcher and its loops under the controller's epoch; th
     assert.ok((await c.dispatch.dispatcher.tick()).loops.some((l) => l.name === "meetings.tick" && l.ok), "the meeting clock ran");
     // Reviews are moved along as the dispatcher with no grant (card H05b), and the reviewer's host is found from its live attempt.
     assert.ok((await c.dispatch.dispatcher.tick()).loops.some((l) => l.name === "reviews.sweep" && l.ok), "the review sweep ran");
+    // Meeting records are swept for votes past their time and records nobody finished (card M02c).
+    assert.ok((await c.dispatch.dispatcher.tick()).loops.some((l) => l.name === "meeting-records.sweep" && l.ok), "the meeting record sweep ran");
     assert.equal(await c.dispatch.hostOfAgent("agent:nobody"), undefined);
     assert.equal(await c.dispatch.hostOfAgent("agent:agt-abcdefghijklmnopqrst"), undefined, "an attempt that is not running yet has no host to judge");
   } finally {
