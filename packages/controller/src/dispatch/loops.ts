@@ -31,7 +31,9 @@ export interface RouteProbes {
   readonly intervalMs: number;
 }
 
+const PROBE_TIMEOUT_MS = 30_000;
 export function probeLoops(cutover: Pick<CutoverService, "downTargets" | "probe">, probes: RouteProbes, now: () => number = Date.now): DispatcherLoop[] {
+  if (!Number.isSafeInteger(probes.intervalMs) || probes.intervalMs < 1000) throw new RangeError("route probes: intervalMs must be a whole number of at least 1000");
   const probed = new Map<string, number>();
   return [{ name: "routes.probe", run: async (by) => {
     if (!probes.enabled()) return;
@@ -39,7 +41,7 @@ export function probeLoops(cutover: Pick<CutoverService, "downTargets" | "probe"
     for (const t of await cutover.downTargets()) {
       if (probed.get(`${t.scope}/${t.name}`) === slot) continue; // already probed in this interval: no second request
       probed.set(`${t.scope}/${t.name}`, slot);
-      const ok = await probes.run({ scope: t.scope, route: t.route }).catch(() => false);
+      const ok = await Promise.race([probes.run({ scope: t.scope, route: t.route }), new Promise<boolean>((r) => { setTimeout(() => { r(false); }, PROBE_TIMEOUT_MS).unref(); })]).catch(() => false); // a probe that hangs counts as failed and never stalls the tick
       // One probe per target per interval: the command ID names the interval, so a second tick in it records nothing new.
       await cutover.probe(by, { commandId: `prb-${t.scope}-${t.name}-${slot}`.slice(0, 120), scope: t.scope, route: t.route, ok });
     }

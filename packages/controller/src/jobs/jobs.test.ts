@@ -118,6 +118,16 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.jobs.requestCancel(c.boss, { commandId: cid("cx"), jobId: id, reason: "late" }), (e) => assert.match(e.message, /nothing to stop/));
   });
 
+  suite("the controller's own list of a task's unfinished jobs needs no viewer's rights, skips ended jobs and reads past one page (card L02c)", async (c) => {
+    await c.admit(c.t1);
+    for (let i = 0; i < JOB_LIMITS.page + 5; i++) await c.admit(c.t1);
+    await c.admit(c.t2);
+    const found = await c.jobs.unfinishedOf(c.t1);
+    assert.equal(found.length, JOB_LIMITS.page + 6, "every unfinished job of the task, past the first page, and none of another task");
+    assert.ok(found.every((j) => !["completed", "failed", "cancelled"].includes(j.state)));
+    await refuses("forbidden", () => c.jobs.list(c.stranger, c.t1));
+  });
+
   suite("the time a job took, from its admission to its end, is reported once for the host to charge, whatever way it ended (card R05f)", async (c) => {
     const seen: { commandId: string; taskId: string; background: boolean; computeMs: number }[] = [];
     const jobs = c.reopen({ onUsage: async (u) => { seen.push({ commandId: u.commandId, taskId: u.taskId, background: u.background, computeMs: u.computeMs }); } });

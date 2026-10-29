@@ -275,9 +275,11 @@ export class HandoffService {
         if (TERMINAL.includes(b.phase) || b.phase === "ready") continue;
         try {
           // A hand-off finished after a restart is finished for whoever asked, but only while they still hold the right to control the task (owner decision 2026-10-29); otherwise it is dropped and says why.
-          if (this.#asker !== undefined && !b.requestedBy.startsWith("owner")) {
+          // Only while the task has not moved: a hand-off whose transfer already happened is finished, not judged again.
+          const moved = b.phase === "transferring" && await this.#currentOwner(b.taskId).then(({ assignment }) => assignment.state === "assigned" && sameOwner(assignment.owner, b.to) && assignment.generation > b.generation, () => false);
+          if (this.#asker !== undefined && !moved && !b.requestedBy.startsWith("owner")) {
             const asker = await this.#asker(b.requestedBy);
-            const still = asker !== undefined && await this.#pauses.authorizeControl(asker, { kind: "task", id: b.taskId }).then(() => true, () => false);
+            const still = asker !== undefined && await this.#pauses.authorizeControl(asker, { kind: "task", id: b.taskId }).then(() => true, (e: unknown) => { if (e instanceof DomainError && (e.code === "forbidden" || e.code === "not_found")) return false; throw e; }); // any other failure (storage down) leaves the hand-off for the next sweep
             if (!still) { await this.#fail(by, rec.id, `${b.requestedBy} no longer holds the right to hand this task over, so the hand-off was not finished after the restart`); failed.push(rec.id); continue; }
           }
           await this.advance(by, { handoffId: rec.id }); advanced.push(rec.id);
