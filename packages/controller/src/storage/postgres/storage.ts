@@ -765,7 +765,9 @@ export class PostgresStorage implements ControllerStorage {
           const params: unknown[] = [];
           let where = "";
           if (page.after !== undefined) { where = ` WHERE (${key}) > (${spec.key.map((_, i) => `$${i + 1}`).join(", ")})`; for (const k of spec.key) params.push(page.after[k]); }
-          return (await client.query(`SELECT ${spec.columns.join(", ")} FROM ${table}${where} ORDER BY ${key} LIMIT ${page.limit}`, params)).rows as SnapshotRow[];
+          // Only the columns this database has: one from an older schema (read before an upgrade) lacks the newer ones, which come out absent.
+          const have = new Set(((await client.query("SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2", [this.#options.schema, table])).rows as { column_name: string }[]).map((c) => c.column_name));
+          return (await client.query(`SELECT ${spec.columns.filter((c) => have.has(c)).join(", ")} FROM ${table}${where} ORDER BY ${key} LIMIT ${page.limit}`, params)).rows as SnapshotRow[];
         } catch (error) { throw classify(error); }
       },
       close: async (): Promise<void> => {

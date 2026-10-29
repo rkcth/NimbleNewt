@@ -25,8 +25,10 @@ export function openFileSnapshot(file: string, folder: string): StorageSnapshot 
       if (closed) throw new StorageError("unavailable", "the snapshot is closed");
       if (!Number.isSafeInteger(page.limit) || page.limit < 1 || page.limit > SNAPSHOT_PAGE_MAX) throw new StorageError("invalid_input", `limit: must be a whole number from 1 to ${SNAPSHOT_PAGE_MAX}`, { path: "limit" });
       const spec = TABLE_SPECS[table];
-      const columns = spec.columns.join(", ");
       try {
+        // Only the columns this database has: one from an older schema (read before an upgrade) lacks the newer ones, which come out absent.
+        const have = new Set((db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name));
+        const columns = spec.columns.filter((c) => have.has(c)).join(", ");
         if (spec.key.length === 0) return (db.prepare(`SELECT ${columns} FROM ${table}`).all() as SnapshotRow[]).map(plain);
         const key = spec.key.join(", ");
         const params: SQLInputValue[] = [];
