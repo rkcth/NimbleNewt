@@ -103,6 +103,7 @@ export interface Context {
   /** Absent when the controller runs without owner decision records (card C08). */
   readonly decisions?: Pick<DecisionService, "record" | "resolveDispute" | "ask" | "dismissQuestion" | "link" | "revalidate" | "closeFollowUp" | "get" | "history" | "authoritative" | "context" | "reliance" | "propagation">;
   /** Absent when the controller runs without agent messages (card U12): questions to the owner. */
+  readonly messages?: Pick<AgentMessageService, "send" | "readable" | "acknowledge" | "markHandled" | "get" | "inbox" | "setFocus" | "release">;
   readonly ownerQuestions?: Pick<AgentMessageService, "askOwner" | "ownerQuestions" | "answerOwner">;
 }
 
@@ -237,6 +238,24 @@ const standupOp = (name: string, kind: "query" | "command", summary: string, met
     const out = positional.length > 0 ? await svc[method]!(c.principal, ...positional.map((f) => a[f])) : kind === "command" ? await svc[method]!(c.principal, { commandId: need(id), ...a }) : await svc[method]!(c.principal, a[fields[0]!]);
     if (out === undefined && kind === "query") throw new DomainError("not_found", "no such stand-up, brief or agenda, or none you may read");
     return asJson(kind === "query" ? { item: out } : ((out ?? { ok: true }) as object));
+  },
+});
+
+
+const MSG_HELP: Readonly<Record<string, string>> = {
+  taskId: "the task the message is about", to: "the recipient (agent:agt-…)", class: "informational, advice, request, blocking or urgent", purpose: "a short reason", text: "the message", expectsReply: "an answer is expected", deadline: "when a reply is due", escalateTo: "who is told if there is no reply",
+  replyTo: "the message being answered", correlationId: "groups related messages", coalesceKey: "repeated updates replace the one waiting message", boundary: "check-in, stand-up, safe-boundary or interrupt", occurrenceId: "the meeting, for a stand-up boundary", limit: "most items",
+  messageIds: "the messages being received", messageId: "the message", recipient: "the agent whose inbox", agent: "the agent", until: "when the focus ends (ISO time) or null to end it", reason: "why",
+};
+const messageOp = (name: string, kind: "query" | "command", summary: string, method: keyof NonNullable<Context["messages"]>, fields: readonly string[], result: string, positional?: string): Operation => ({
+  name: `message.${name}`, kind, summary, args: { ...Object.fromEntries(fields.map((f) => [f, MSG_HELP[f] ?? f])), ...(kind === "command" ? { commandId: "required" } : {}) }, result,
+  run: async (c, a, id) => {
+    only(a, fields);
+    const svc = (c.messages ?? unavailable("agent messages")) as unknown as Record<string, (...x: unknown[]) => Promise<unknown>>;
+    if (kind === "command") return asJson(((await svc[method]!(c.principal, { commandId: need(id), ...a })) ?? { ok: true }) as object);
+    const out = await svc[method]!(c.principal, ...(positional === undefined ? [a] : [a[positional]]));
+    if (out === undefined) throw new DomainError("not_found", "no such message or inbox, or none you may read");
+    return asJson({ item: out });
   },
 });
 
@@ -452,6 +471,14 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => { only(a, ["watchId"]); await (c.watchControl ?? unavailable("event watching")).cancel(c.principal, { commandId: need(id), watchId: a["watchId"] as string }); return asJson({ ok: true }); } },
   { name: "watch.list", kind: "query", summary: "Owner only: the active watches.", args: {}, result: "`{ items: [watchId] }`.",
     run: async (c, a) => { only(a, []); return asJson({ items: await (c.watchControl ?? unavailable("event watching")).list(c.principal) }); } },
+  messageOp("send", "command", "Sends a message (or a reply) about a task. Information and advice wait for the agent's next check-in; a request or blocking message is kept for it; only an urgent one with the right can interrupt.", "send", ["taskId", "to", "class", "purpose", "text", "expectsReply", "deadline", "escalateTo", "replyTo", "correlationId", "coalesceKey"], "`{ id, replayed, coalesced, effectiveClass, reach, woke }`."),
+  messageOp("readable", "query", "The messages an agent may read at a boundary (check-in, stand-up and so on); focus time and pauses hold some back.", "readable", ["boundary", "occurrenceId", "limit"], "`{ item: { items, withheld } }`."),
+  messageOp("receive", "command", "Marks messages as received at a boundary.", "acknowledge", ["boundary", "messageIds", "occurrenceId"], "`{ delivered, refused }`."),
+  messageOp("handled", "command", "Says a message has been dealt with.", "markHandled", ["messageId"], "`{ ok }`."),
+  messageOp("get", "query", "One message, marked as untrusted content.", "get", ["messageId"], "`{ item }`.", "messageId"),
+  messageOp("inbox", "query", "An agent's waiting messages and focus.", "inbox", ["recipient"], "`{ item }`.", "recipient"),
+  messageOp("focus", "command", "Sets or ends an agent's focus time, when only urgent messages break in.", "setFocus", ["agent", "until", "reason"], "`{ ok }`."),
+  messageOp("release", "command", "Releases what is queued for an agent whose focus ended.", "release", ["recipient"], "`{ woken, stillQueued, downgraded }`."),
   { name: "grant.revoke", kind: "command", summary: "The owner takes a grant back (owner only; the revision you read must still be current). It stops counting at the next check.", args: { grantId: "the grant's ID", expectedRevision: "the revision you read", reason: "why, in the owner's words" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["grantId", "expectedRevision", "reason"]); await grantsOf(c).revoke(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
   { name: "events.configure-idle", kind: "command", summary: "Sets how long an event subscription may sit without acknowledging before it expires (owner only). A subscription that was made before this existed, or without its own time, uses this one.", args: { idleSeconds: "whole seconds, 10 to 604800" }, result: "`{ ok: true }`.", completion: { kind: "completed" },

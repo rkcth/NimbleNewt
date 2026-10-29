@@ -87,6 +87,7 @@ export interface StateApiDeps {
   /** When present, context branches can be opened, switched, resumed and delegated through the API (card C05). */
   readonly branches?: ContextBranchService;
   /** When present, an agent can ask the owner a question and the owner can see and answer the questions (card U12). */
+  readonly messages?: Pick<AgentMessageService, "send" | "readable" | "acknowledge" | "markHandled" | "get" | "inbox" | "setFocus" | "release">;
   readonly ownerQuestions?: Pick<AgentMessageService, "askOwner" | "ownerQuestions" | "answerOwner">;
   /** When present, the owner can grant and revoke rights through the API (card U03e). */
   readonly grants?: Pick<GrantService, "grant" | "revoke" | "getGrant" | "list">;
@@ -188,6 +189,7 @@ export class StateApi {
         ...(this.#deps.invitations === undefined ? {} : { invitations: this.#deps.invitations }),
         ...(this.#deps.branches === undefined ? {} : { branches: this.#deps.branches }),
         ...(this.#deps.ownerQuestions === undefined ? {} : { ownerQuestions: this.#deps.ownerQuestions }),
+        ...(this.#deps.messages === undefined ? {} : { messages: this.#deps.messages }),
         ...(this.#deps.decisions === undefined ? {} : { decisions: this.#deps.decisions }),
         ...(this.#deps.grants === undefined ? {} : { grants: this.#deps.grants }),
         ...(this.#deps.placement === undefined ? {} : { placement: this.#deps.placement }),

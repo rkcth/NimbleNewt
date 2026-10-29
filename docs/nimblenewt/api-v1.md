@@ -460,6 +460,38 @@ Arguments:
 
 Result: `{ items: [watchId] }`.
 
+#### `message.readable`
+
+The messages an agent may read at a boundary (check-in, stand-up and so on); focus time and pauses hold some back.
+
+Arguments:
+
+- `boundary`: check-in, stand-up, safe-boundary or interrupt
+- `occurrenceId`: the meeting, for a stand-up boundary
+- `limit`: most items
+
+Result: `{ item: { items, withheld } }`.
+
+#### `message.get`
+
+One message, marked as untrusted content.
+
+Arguments:
+
+- `messageId`: the message
+
+Result: `{ item }`.
+
+#### `message.inbox`
+
+An agent's waiting messages and focus.
+
+Arguments:
+
+- `recipient`: the agent whose inbox
+
+Result: `{ item }`.
+
 #### `budget.report`
 
 A task's budget: limit, delegated to children, in flight, uncertain, spent, overrun and available, for money and for compute, with the reservations and open requests behind them. A task you may not read reads like a missing one.
@@ -2112,6 +2144,75 @@ Arguments:
 - `commandId`: required
 
 Result: `{ ok }`.
+
+#### `message.send`
+
+Sends a message (or a reply) about a task. Information and advice wait for the agent's next check-in; a request or blocking message is kept for it; only an urgent one with the right can interrupt.
+
+Arguments:
+
+- `taskId`: the task the message is about
+- `to`: the recipient (agent:agt-…)
+- `class`: informational, advice, request, blocking or urgent
+- `purpose`: a short reason
+- `text`: the message
+- `expectsReply`: an answer is expected
+- `deadline`: when a reply is due
+- `escalateTo`: who is told if there is no reply
+- `replyTo`: the message being answered
+- `correlationId`: groups related messages
+- `coalesceKey`: repeated updates replace the one waiting message
+- `commandId`: required
+
+Result: `{ id, replayed, coalesced, effectiveClass, reach, woke }`.
+
+#### `message.receive`
+
+Marks messages as received at a boundary.
+
+Arguments:
+
+- `boundary`: check-in, stand-up, safe-boundary or interrupt
+- `messageIds`: the messages being received
+- `occurrenceId`: the meeting, for a stand-up boundary
+- `commandId`: required
+
+Result: `{ delivered, refused }`.
+
+#### `message.handled`
+
+Says a message has been dealt with.
+
+Arguments:
+
+- `messageId`: the message
+- `commandId`: required
+
+Result: `{ ok }`.
+
+#### `message.focus`
+
+Sets or ends an agent's focus time, when only urgent messages break in.
+
+Arguments:
+
+- `agent`: the agent
+- `until`: when the focus ends (ISO time) or null to end it
+- `reason`: why
+- `commandId`: required
+
+Result: `{ ok }`.
+
+#### `message.release`
+
+Releases what is queued for an agent whose focus ended.
+
+Arguments:
+
+- `recipient`: the agent whose inbox
+- `commandId`: required
+
+Result: `{ woken, stillQueued, downgraded }`.
 
 #### `grant.revoke`
 
