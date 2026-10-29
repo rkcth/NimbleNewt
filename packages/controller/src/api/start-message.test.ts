@@ -38,3 +38,39 @@ test("an informational message sent through the state API reaches the agent at i
     assert.ok(rel.ok, JSON.stringify(rel));
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+test("an agent asks the owner about its task, the owner sees the question with the task, and answering it is the owner's alone (card U12c)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-msg-"));
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [] });
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const call = async (token: string, op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    const project = (await call(boot.token, "project.create", { name: "Garden" }, "p1")).result.id as string;
+    const task = (await call(boot.token, "task.create", { projectId: project, title: "Order seeds" }, "t1")).result.id as string;
+    const agent = (await c.services.agents.create(rob, { commandId: "ag-a", friendlyName: "A" })).id;
+    const pid = `agent:${agent}`;
+    const f = await c.storage.getAggregate({ kind: "principal", id: pid });
+    await c.services.principals.setGrants(rob, { commandId: "g1", principalId: pid, expectedRevision: f!.revision, grants: [{ action: "task.read", project }, { action: "message.read", project }, { action: "attempt.work", project }, { action: "history.append", project }, { action: "history.read", project }] as never });
+    const tok = (await c.services.principals.issueCredential(rob, pid)).token;
+    await c.services.projects.transitionTask({ commandId: "rdy", actor: rob.id, taskId: task, expectedRevision: 1, to: "ready" });
+    await c.services.assignments.assignTask({ commandId: "as", actor: rob.id, taskId: task, owner: { kind: "agent", id: agent } });
+    assert.equal((await c.services.assignments.getAssignment(task))?.owner?.id, agent);
+
+    const asked = await call(tok, "message.ask-owner", { taskId: task, question: "Which supplier?" }, "q1");
+    assert.ok(asked.ok, JSON.stringify(asked));
+    assert.equal((await call(tok, "message.ask-owner", { taskId: task, question: "Which supplier?" }, "q1")).result.replayed, true);
+    // Only the owner reads and answers the list.
+    assert.equal((await call(tok, "message.owner-questions", {})).error.code, "forbidden");
+    const list = await call(boot.token, "message.owner-questions", {});
+    assert.ok(list.ok, JSON.stringify(list));
+    assert.equal(list.result.item.items.length, 1);
+    assert.equal(list.result.item.items[0].question, "Which supplier?");
+    assert.equal(list.result.item.items[0].task.title, "Order seeds");
+    assert.equal(list.result.item.items[0].trust, "untrusted-content");
+    assert.equal((await call(tok, "message.answer-owner", { inquiryId: asked.result.inquiryId, answer: "Acme" }, "a0")).error.code, "forbidden");
+    const answered = await call(boot.token, "message.answer-owner", { inquiryId: asked.result.inquiryId, answer: "Acme" }, "a1");
+    assert.ok(answered.ok, JSON.stringify(answered));
+    assert.equal((await call(boot.token, "message.owner-questions", {})).result.item.items.length, 0, "an answered question leaves the list");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});

@@ -90,7 +90,7 @@ export interface StateApiDeps {
   /** When present, context branches can be opened, switched, resumed and delegated through the API (card C05). */
   readonly branches?: ContextBranchService;
   /** When present, an agent can ask the owner a question and the owner can see and answer the questions (card U12). */
-  readonly messages?: Pick<AgentMessageService, "send" | "readable" | "acknowledge" | "markHandled" | "get" | "inbox" | "setFocus" | "release">;
+  readonly messages?: Pick<AgentMessageService, "send" | "readable" | "acknowledge" | "markHandled" | "get" | "inbox" | "setFocus" | "release" | "askOwner" | "ownerQuestions" | "answerOwner">;
   readonly ownerQuestions?: Pick<AgentMessageService, "askOwner" | "ownerQuestions" | "answerOwner">;
   /** When present, the owner can grant and revoke rights through the API (card U03e). */
   readonly grants?: Pick<GrantService, "grant" | "revoke" | "getGrant" | "list">;

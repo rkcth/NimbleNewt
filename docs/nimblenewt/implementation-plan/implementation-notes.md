@@ -2443,3 +2443,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## K01e (first part): the nightly backup no longer holds up the dispatcher tick (2026-10-29)
 - The `backups.nightly` loop starts `runScheduled` without awaiting it, so reviews, decisions and recovery loops after it run on time; one backup still runs at a time and a failure stays in `backup.list`'s status (and now waits an hour before the next try). Test updated to wait for the background run.
 - Still open: on SQLite `VACUUM INTO` blocks the event loop for the copy itself (needs the worker-thread storage or a separate connection), per-version snapshot columns, blob lock before the table dump, `backup.now` commandId, Pi state, maintenance barrier, owner restore, chat.
+
+## U12c (first part): owner questions through the state API (2026-10-29)
+- `message.ask-owner` (an agent asks about the task it is assigned, which needs `attempt.work`, `history.append` and `history.read` in the project), `message.owner-questions` (owner only: oldest first with the task's title, state and project and the wait it will resolve, marked untrusted content) and `message.answer-owner` (owner only; resolves the wait). Test in `api/start-message.test.ts`: ask and replay, an agent refused the list and the answer, the owner sees task context, answers, and the list empties.
+- Not done: delivering at the stand-up boundary, chat presentation of the questions.

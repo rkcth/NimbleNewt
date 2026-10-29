@@ -109,7 +109,7 @@ export interface Context {
   /** Absent when the controller runs without owner decision records (card C08). */
   readonly decisions?: Pick<DecisionService, "record" | "resolveDispute" | "ask" | "dismissQuestion" | "link" | "revalidate" | "closeFollowUp" | "get" | "history" | "authoritative" | "context" | "reliance" | "propagation">;
   /** Absent when the controller runs without agent messages (card U12): questions to the owner. */
-  readonly messages?: Pick<AgentMessageService, "send" | "readable" | "acknowledge" | "markHandled" | "get" | "inbox" | "setFocus" | "release">;
+  readonly messages?: Pick<AgentMessageService, "send" | "readable" | "acknowledge" | "markHandled" | "get" | "inbox" | "setFocus" | "release" | "askOwner" | "ownerQuestions" | "answerOwner">;
   readonly ownerQuestions?: Pick<AgentMessageService, "askOwner" | "ownerQuestions" | "answerOwner">;
 }
 
@@ -268,7 +268,7 @@ const standupOp = (name: string, kind: "query" | "command", summary: string, met
 const MSG_HELP: Readonly<Record<string, string>> = {
   taskId: "the task the message is about", to: "the recipient (agent:agt-…)", class: "informational, advice, request, blocking or urgent", purpose: "a short reason", text: "the message", expectsReply: "an answer is expected", deadline: "when a reply is due", escalateTo: "who is told if there is no reply",
   replyTo: "the message being answered", correlationId: "groups related messages", coalesceKey: "repeated updates replace the one waiting message", boundary: "check-in, stand-up, safe-boundary or interrupt", occurrenceId: "the meeting, for a stand-up boundary", limit: "most items",
-  messageIds: "the messages being received", messageId: "the message", recipient: "the agent whose inbox", agent: "the agent", until: "when the focus ends (ISO time) or null to end it", reason: "why",
+  messageIds: "the messages being received", messageId: "the message", recipient: "the agent whose inbox", agent: "the agent", until: "when the focus ends (ISO time) or null to end it", reason: "why", question: "what you need to know", waitId: "the wait that ends with the answer", afterId: "continue after this question", inquiryId: "the question", answer: "the answer",
 };
 const messageOp = (name: string, kind: "query" | "command", summary: string, method: keyof NonNullable<Context["messages"]>, fields: readonly string[], result: string, positional?: string): Operation => ({
   name: `message.${name}`, kind, summary, args: { ...Object.fromEntries(fields.map((f) => [f, MSG_HELP[f] ?? f])), ...(kind === "command" && method !== "release" ? { commandId: "required" } : {}) }, result,
@@ -511,6 +511,9 @@ export const OPERATIONS: readonly Operation[] = [
   messageOp("get", "query", "One message, marked as untrusted content.", "get", ["messageId"], "`{ item }`.", "messageId"),
   messageOp("inbox", "query", "An agent's waiting messages and focus.", "inbox", ["recipient"], "`{ item }`.", "recipient"),
   messageOp("focus", "command", "Sets or ends an agent's focus time, when only urgent messages break in.", "setFocus", ["agent", "until", "reason"], "`{ ok }`."),
+  messageOp("ask-owner", "command", "An agent asks the owner a question about a task it works on; the task's wait (if named) ends when the owner answers. The question is shown to the owner as untrusted content.", "askOwner", ["taskId", "question", "waitId"], "`{ inquiryId, replayed }`."),
+  messageOp("owner-questions", "query", "Owner only: the questions waiting for an answer, oldest first, each with its task and the wait it will resolve.", "ownerQuestions", ["afterId", "limit"], "`{ item: { items, next? } }`."),
+  messageOp("answer-owner", "command", "Owner only: answers a question; the task's wait is resolved and the task is ready again.", "answerOwner", ["inquiryId", "answer"], "`{ id, replayed }`."),
   messageOp("release", "command", "Releases what is queued for an agent whose focus ended.", "release", ["recipient"], "`{ woken, stillQueued, downgraded }`."),
   { name: "policy.forward", kind: "command", summary: "An agent passes on a message the owner wrote in a conversation it can read, so a policy edit in it can be prepared for the owner. The edit records who wrote it and who passed it on; it is never applied on the forwarder's say-so, only the owner applies it.", args: { threadId: "the conversation", seq: "the message's number in it", commandId: "required" }, result: "`{ edits: [{ editId, status }] }`.",
     run: async (c, a, id) => { only(a, ["threadId", "seq"]); return asJson(await (c.policyForward ?? unavailable("forwarding owner messages (chat is not configured)")).forward(c.principal, { commandId: need(id), threadId: str(a, "threadId"), seq: Number(a["seq"]) })); } },

@@ -524,6 +524,17 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `message.owner-questions`
+
+Owner only: the questions waiting for an answer, oldest first, each with its task and the wait it will resolve.
+
+Arguments:
+
+- `afterId`: continue after this question
+- `limit`: most items
+
+Result: `{ item: { items, next? } }`.
+
 #### `budget.report`
 
 A task's budget: limit, delegated to children, in flight, uncertain, spent, overrun and available, for money and for compute, with the reservations and open requests behind them. A task you may not read reads like a missing one.
@@ -2305,6 +2316,31 @@ Arguments:
 - `commandId`: required
 
 Result: `{ ok }`.
+
+#### `message.ask-owner`
+
+An agent asks the owner a question about a task it works on; the task's wait (if named) ends when the owner answers. The question is shown to the owner as untrusted content.
+
+Arguments:
+
+- `taskId`: the task the message is about
+- `question`: what you need to know
+- `waitId`: the wait that ends with the answer
+- `commandId`: required
+
+Result: `{ inquiryId, replayed }`.
+
+#### `message.answer-owner`
+
+Owner only: answers a question; the task's wait is resolved and the task is ready again.
+
+Arguments:
+
+- `inquiryId`: the question
+- `answer`: the answer
+- `commandId`: required
+
+Result: `{ id, replayed }`.
 
 #### `message.release`
 
