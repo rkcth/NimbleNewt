@@ -42,6 +42,8 @@ test("the owner takes a backup through the state API, the nightly run keeps them
     assert.equal((await call(boot.token, "backup.list", {})).result.items.length, 1);
     clock += 25 * 3_600_000;
     await c.dispatch.dispatcher.tick();
+    // The run is started by the tick and finishes on its own.
+    for (let i = 0; i < 200 && (await call(boot.token, "backup.list", {})).result.items.length < 2; i++) await new Promise((r) => setTimeout(r, 25));
     const listed = (await call(boot.token, "backup.list", {})).result;
     assert.deepEqual(listed.items.map((i: { kind: string }) => i.kind), ["scheduled", "manual"]);
     assert.equal(listed.status.running, false);
