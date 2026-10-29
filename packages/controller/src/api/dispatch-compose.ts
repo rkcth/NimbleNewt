@@ -44,6 +44,7 @@ import { PolicyService, ProtectedBranchService } from "../policy/index.js";
 import type { ReviewService } from "../review/index.js";
 import { DifficultyService, type RoutingService } from "../routing/index.js";
 import { DISPATCHER_PRINCIPAL, type GrantService, type Principal, type PrincipalService, type TaskCredentialService } from "../security/index.js";
+import type { StopService } from "../lifecycle/stop.js";
 import { StandupService } from "../standups/index.js";
 import type { ControllerStorage } from "../storage/types.js";
 
@@ -158,6 +159,8 @@ export interface ComposeInput {
   readonly retrieval: RetrievalService;
   /** The workspace operations service; the tick resolves the ones a stopped controller left unfinished (card H12l). */
   readonly workspaceOps?: Pick<WorkspaceOpService, "recover">;
+  /** Suspensions and stops the controller was carrying out are carried on each tick, and at start-up by the first one (card L02b). */
+  readonly stops?: Pick<StopService, "sweep">;
   /** The stall detection and the reconciler the controller built; the dispatcher's tick runs them (card L01b). */
   readonly recovery?: { readonly stall: Pick<StallService, "scan"> & Partial<Pick<StallService, "reportFromRelay">>; readonly reconciler: { runPass(): Promise<unknown> } };
   readonly onError?: (error: unknown) => void;
@@ -228,7 +231,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   let stallNotices = 0;
   const loops: DispatcherLoop[] = [
     { name: "charge-retry", run: (by) => chargeRetry.sweep(by) },
-    ...messageLoops(messages, () => activeAgents(storage)), ...(i.workspaceOps === undefined ? [] : workspaceLoops(i.workspaceOps)), ...budgetNoticeLoops(budgets, (n) => { const { purpose, text } = holderNotice(n); return messages.noticeFromController({ commandId: `bgt-hold-${n.requestId}`, taskId: n.parentTaskId ?? n.taskId, to: n.to, purpose, text, admit: "budget.manage" }); }), ...attendanceLoops(attendance), ...meetingLoops(meetings, projects), ...standupLoops(standups, meetings, projects), ...eventLoops(events), ...watchLoops(watches), ...reviewLoops(i.reviews, projects), ...decisionLoops(decisions, projects),
+    ...(i.stops === undefined ? [] : [{ name: "stops.sweep", run: async (by: Principal) => { await i.stops!.sweep(by); } }]), ...messageLoops(messages, () => activeAgents(storage)), ...(i.workspaceOps === undefined ? [] : workspaceLoops(i.workspaceOps)), ...budgetNoticeLoops(budgets, (n) => { const { purpose, text } = holderNotice(n); return messages.noticeFromController({ commandId: `bgt-hold-${n.requestId}`, taskId: n.parentTaskId ?? n.taskId, to: n.to, purpose, text, admit: "budget.manage" }); }), ...attendanceLoops(attendance), ...meetingLoops(meetings, projects), ...standupLoops(standups, meetings, projects), ...eventLoops(events), ...watchLoops(watches), ...reviewLoops(i.reviews, projects), ...decisionLoops(decisions, projects),
     ...(i.recovery === undefined ? [] : recoveryLoops(i.recovery.stall, i.recovery.reconciler, () => notifications.emitFromController({ commandId: `stall-off:${epoch}:${++stallNotices}`, kind: "maintenance", ref: { kind: "principal", id: "dispatcher" }, detail: "Stall detection is not running: the dispatcher does not hold the recovery.stall-scan right. Grant it that right to turn stall detection on." }), () => i.principals.authenticate(issued.token))),
   ];
   // The local worker host gets its guards here, bound to the services built above (card H12k); the dispatcher then has it among its workers.

@@ -2351,3 +2351,8 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## U12b: agent messages through the state API (first part, 2026-10-28)
 - State API `message.send`, `.readable`, `.receive`, `.handled`, `.get`, `.inbox`, `.focus`, `.release` over `AgentMessageService`, with the service's own rights (sending needs `message.send`/`message.urgent`; an agent reads only its own). Test `api/start-message.test.ts`: informational message sent (replay answers as recorded), readable at check-in marked untrusted, received once, then gone.
 - Not done (U12c): showing agent questions to the owner in chat with task context and clearing the wait on answer (the `owner.*` operations exist; the chat commands do not), and the stand-up boundary delivery wired to the running stand-up.
+
+## L02b: team and installation Stop, and the start-up sweep (first part, 2026-10-28)
+- Decision lifted: stopping a whole team or the installation is no longer refused. `agentsUnder` reads the agents whose team chain passes through a team (the pause gate's own walk; a loop in the chain ends it) or all agents, and the dispatch ports union their live attempts for the inventory, cleanup, checkpoint and termination. Force Stop reaches them the same way.
+- A dispatcher loop `stops.sweep` carries every unfinished suspension or stop on each tick, so one left in preparation when the controller stopped finishes after the next start without any call. Test `api/start-lifecycle.test.ts` (team Stop, installation Suspend, an intent reset to preparing then finished by the next controller); ports test for the team walk and attempts.
+- Not done (L02c): counting T07 jobs, local processes and child work in the inventory with uncooperative ones named; the cleanup spend from the runtime.

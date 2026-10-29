@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { ScriptedInterpreter } from "../chat/index.js";
+import { ManualTimer } from "../dispatch/testing/timer.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -41,6 +42,39 @@ test("suspend and stop through the state API: whoever may pause may ask, nothing
     assert.equal((await call(boot.token, "lifecycle.stop", { scope: { kind: "installation", id: "nope" }, mode: "stop", reason: "x" }, "s4")).error.code, "invalid_command");
     assert.equal((await call(boot.token, "lifecycle.sweep", {}, "sw")).result.advanced.length, 0);
     assert.equal((await call(ann, "lifecycle.sweep", {}, "sw2")).error.code, "forbidden");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("a team and the whole installation can be suspended and stopped, and an intent left unfinished when the controller stopped is finished by the next one without any call (card L02b)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-lifecycle-"));
+  const file = join(d, "c.sqlite");
+  const open = () => startController({ storage: { kind: "sqlite", path: file }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer(), intervalMs: 1000 } });
+  let c = await open();
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const call = async (op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    const team = (await c.services.agents.createTeam(rob, { commandId: "tm1", name: "builders" }) as { id: string }).id;
+    await c.services.agents.create(rob, { commandId: "ag1", friendlyName: "A", teamId: team });
+    const stopped = await call("lifecycle.stop", { scope: { kind: "team", id: team }, mode: "stop", reason: "night shift over" }, "s1");
+    assert.ok(stopped.ok, JSON.stringify(stopped));
+    assert.deepEqual([stopped.result.phase, stopped.result.outcome.state], ["done", "stopped"]);
+    const whole = await call("lifecycle.stop", { scope: { kind: "installation", id: "installation" }, mode: "suspend", reason: "maintenance" }, "s2");
+    assert.ok(whole.ok, JSON.stringify(whole));
+    assert.equal(whole.result.outcome.state, "suspended");
+
+    // An intent the controller stopped in the middle of: written as preparing, never advanced. The next start finishes it on its own.
+    const rec = await c.storage.getAggregate({ kind: "stop-intent", id: stopped.result.intentId });
+    const { outcome: _gone, ...rest } = rec!.body as Record<string, unknown>;
+    const left = { ...rest, phase: "preparing" } as never;
+    const done = await c.storage.applyOperation({ operationId: "left", epoch: c.epoch, actor: "owner:rob", correlationId: "left", at: new Date().toISOString(), changes: [{ type: "update", ref: { kind: "stop-intent", id: stopped.result.intentId }, expectedRevision: rec!.revision, body: left }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
+    assert.ok(done !== undefined);
+  } finally { await c.close(); }
+  c = await open();
+  try {
+    await c.dispatch!.dispatcher.tick();
+    const after = await c.storage.getAggregate({ kind: "stop-intent", id: (await c.storage.listAggregates("stop-intent", { limit: 10 }))[0]!.id });
+    assert.ok(["done", "recovery-required"].includes((after!.body as { phase: string }).phase), "no intent is left preparing");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
