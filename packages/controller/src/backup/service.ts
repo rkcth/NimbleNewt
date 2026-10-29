@@ -81,6 +81,9 @@ export class BackupService {
     return true;
   }
 
+  /** Resolves when no backup is running (a failure is already in the status). Called at shutdown, so the store is not closed in the middle of a copy. */
+  async finish(): Promise<void> { await this.#running?.catch(() => undefined); }
+
   list(): Promise<BackupInfo[]> { return listBackups(this.#options.root); }
 
   async status(): Promise<BackupStatus> {

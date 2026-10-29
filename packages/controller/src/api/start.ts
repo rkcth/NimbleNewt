@@ -331,7 +331,9 @@ export async function startController(options: StartOptions): Promise<Controller
       // A change that was carried out, or refused, is a step in the task it names (card C09f); the step is written by the controller itself (a service identity with no grants, which the activity service accepts as a service).
       onChange: async (e) => {
         if (e.target.kind !== "task") return;
-        await activity.record({ id: "service:meeting-records", kind: "service", name: "meeting-records", grants: [] } as Principal, { commandId: `mdn-act:${e.decisionId}:${e.index}:${e.state}`, taskId: e.target.id, kind: "meeting-decision", summary: `A meeting decision ${e.state === "applied" ? "changed" : "could not change"} this task: ${e.summary}${e.reason === undefined ? "" : ` (${e.reason})`}.`, manifest: { refs: [{ kind: "meeting-decision", id: e.decisionId }] } } as never);
+        // Only a task of the decision's own project: the target and the words are an agent's, and this identity may write to any task.
+        if ((await projects.getTask(e.target.id))?.projectId !== e.projectId) return;
+        await activity.record({ id: "service:meeting-records", kind: "service", name: "meeting-records", grants: [] } as Principal, { commandId: `mdn-act:${e.decisionId}:${e.index}:${e.state}`, taskId: e.target.id, kind: "meeting-decision", summary: `A meeting decision ${e.state === "applied" ? "changed" : "could not change"} this task: ${e.summary}${e.reason === undefined ? "" : ` (${e.reason})`}.`.slice(0, 300), manifest: { refs: [{ kind: "meeting-decision", id: e.decisionId }] } } as never);
       },
       authority: async (principalId) => { const p = await principals.get(principalId); return p === undefined || p.state !== "active" ? undefined : grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); },
     });
@@ -391,7 +393,7 @@ export async function startController(options: StartOptions): Promise<Controller
       ...(chat === undefined ? {} : { chat }), ...(coordinator === undefined ? {} : { coordinator }),
       ...(dispatch === undefined ? {} : { dispatch }), ...(dispatchProblem === undefined ? {} : { dispatchProblem }),
       ...(transport === undefined ? {} : { conversationUrl: transport.url }),
-      close: async () => { await dispatch?.driver.stop(); await dispatch?.closeWorkers().catch(() => undefined); await transport?.close(); await storage.close(); },
+      close: async () => { await dispatch?.driver.stop(); await dispatch?.closeWorkers().catch(() => undefined); await transport?.close(); await backups?.finish(); await storage.close(); },
     };
   } catch (error) {
     await dispatch?.driver.stop().catch(() => undefined);
