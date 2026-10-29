@@ -263,6 +263,99 @@ Arguments:
 
 Result: `{ context: { … } | null }`; null when the project does not exist or you hold nothing in it.
 
+#### `meeting.record.get`
+
+A meeting record, if you may read it.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+
+Result: `{ item }`.
+
+#### `meeting.record.of-meeting`
+
+The record of a meeting occurrence.
+
+Arguments:
+
+- `occurrenceId`: the live meeting (occurrence) ID
+
+Result: `{ item }`.
+
+#### `meeting.record.discussion`
+
+The full discussion in order, a page at a time.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+- `fromSeq`: first entry number
+- `toSeq`: last entry number
+- `limit`: at most 100
+
+Result: `{ item: { entries, next? } }`.
+
+#### `meeting.record.motion`
+
+A motion with its versions.
+
+Arguments:
+
+- `motionId`: the motion's ID
+
+Result: `{ item }`.
+
+#### `meeting.record.ballots`
+
+The ballots on a motion; while the vote is open only the count is shown.
+
+Arguments:
+
+- `motionId`: the motion's ID
+
+Result: `{ item }`.
+
+#### `meeting.record.decision`
+
+A decision record.
+
+Arguments:
+
+- `decisionId`: the decision's ID
+
+Result: `{ item }`.
+
+#### `meeting.record.why`
+
+Why a decision was taken, from the record, with links to the discussion; conclusions from records you may not see are marked unverifiable.
+
+Arguments:
+
+- `decisionId`: the decision's ID
+
+Result: `{ item: { decision, lines } }`.
+
+#### `meeting.record.summary`
+
+The meeting summary: attendance, updates, decisions with reasons, dissent, open questions, actions, plan; adopted kept apart from applied.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+
+Result: `{ item }`.
+
+#### `meeting.record.plan`
+
+The project's latest plan from a meeting.
+
+Arguments:
+
+- `projectId`: the project
+
+Result: `{ item }`.
+
 #### `budget.report`
 
 A task's budget: limit, delegated to children, in flight, uncertain, spent, overrun and available, for money and for compute, with the reservations and open requests behind them. A task you may not read reads like a missing one.
@@ -1382,6 +1475,240 @@ Arguments:
 - `commandId`: required
 
 Result: `{ replayed }`.
+
+#### `meeting.record.open`
+
+Opens the record of a live meeting that is still planned (owner, host, service or meeting.manage in the project). The roster is the occurrence's; those it could not reach are absent. Without a chair a tie fails.
+
+Arguments:
+
+- `occurrenceId`: the live meeting (occurrence) ID
+- `chair`: an agent (agent:name) who chairs; none means a tie fails
+- `commandId`: required
+
+Result: `{ id, replayed }`.
+
+#### `meeting.record.set-chair`
+
+Changes the chair (or clears it with null).
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+- `chair`: an agent (agent:name) who chairs; none means a tie fails
+- `commandId`: required
+
+Result: `{ ok }`.
+
+#### `meeting.record.join`
+
+The caller joins the meeting.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+- `commandId`: required
+
+Result: `{ ok }`.
+
+#### `meeting.record.leave`
+
+The caller leaves the meeting.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+- `commandId`: required
+
+Result: `{ ok }`.
+
+#### `meeting.record.append`
+
+Adds a statement, an owner message, a ruling or a correction to the discussion. Corrections are linked updates; nothing is rewritten.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+- `kind`: statement, owner-message, ruling or correction
+- `text`: the words
+- `speaker`: an agent speaking (agent:name)
+- `tag`: decision, action, plan, question or similar tag
+- `assignee`: an agent an action or plan item is for
+- `taskId`: a task this concerns
+- `motionId`: the motion's ID
+- `corrects`: an entry this corrects
+- `overrules`: a ruling this overrules
+- `answers`: a question this answers
+- `sources`: records the words rest on
+- `commandId`: required
+
+Result: `{ id, seq, replayed }`.
+
+#### `meeting.record.move`
+
+Makes a motion, optionally with proposed task changes.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+- `text`: the words
+- `topic`: the topic
+- `agendaItemId`: the agenda item discussed
+- `changes`: proposed changes to tasks (applied only if adopted and allowed)
+- `sources`: records the words rest on
+- `commandId`: required
+
+Result: `{ id, replayed }`.
+
+#### `meeting.record.amend`
+
+Amends a motion; a material amendment restarts any vote.
+
+Arguments:
+
+- `motionId`: the motion's ID
+- `expectedVersion`: the motion version you read
+- `text`: the words
+- `material`: true if the change alters what is voted on
+- `changes`: proposed changes to tasks (applied only if adopted and allowed)
+- `commandId`: required
+
+Result: `{ version }`.
+
+#### `meeting.record.table`
+
+Tables a motion.
+
+Arguments:
+
+- `motionId`: the motion's ID
+- `reason`: why
+- `commandId`: required
+
+Result: `{ ok }`.
+
+#### `meeting.record.open-vote`
+
+Opens the vote on a motion version.
+
+Arguments:
+
+- `motionId`: the motion's ID
+- `expectedVersion`: the motion version you read
+- `limitMinutes`: how long the vote stays open
+- `commandId`: required
+
+Result: `{ closesAt }`.
+
+#### `meeting.record.cast-ballot`
+
+Casts or revises a ballot, with a reason.
+
+Arguments:
+
+- `motionId`: the motion's ID
+- `version`: the motion version voted on
+- `value`: yes, no or abstain (casting vote: yes or no)
+- `reason`: why
+- `sources`: records the words rest on
+- `ownerMessageEntryId`: the owner's message this vote follows
+- `commandId`: required
+
+Result: `{ revised }`.
+
+#### `meeting.record.close-vote`
+
+Counts the vote and closes it.
+
+Arguments:
+
+- `motionId`: the motion's ID
+- `commandId`: required
+
+Result: `{ state, decisionId? }`.
+
+#### `meeting.record.casting-vote`
+
+The chair breaks a tie.
+
+Arguments:
+
+- `motionId`: the motion's ID
+- `value`: yes, no or abstain (casting vote: yes or no)
+- `reason`: why
+- `commandId`: required
+
+Result: `{ state, decisionId? }`.
+
+#### `meeting.record.apply`
+
+Applies an adopted decision's changes with expected revisions; a target that moved is reported as not applied.
+
+Arguments:
+
+- `decisionId`: the decision's ID
+- `commandId`: required
+
+Result: `{ applied, notApplied, pending }`.
+
+#### `meeting.record.owner-respond`
+
+The owner agrees, declines or answers with an alternative to a decision that needs them.
+
+Arguments:
+
+- `decisionId`: the decision's ID
+- `response`: agree, decline or alternative
+- `alternative`: the owner's own decision instead
+- `commandId`: required
+
+Result: `{ ownerDecisionId?, applied? }`.
+
+#### `meeting.record.finish`
+
+Ends the meeting; an interrupted meeting voids open votes and keeps the record.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+- `interrupted`: true if the meeting was cut short
+- `reason`: why
+- `commandId`: required
+
+Result: `{ voided }`.
+
+#### `meeting.record.summarize`
+
+Builds the summary from the record alone.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+- `commandId`: required
+
+Result: `{ builds, overviewFailed? }`.
+
+#### `meeting.record.outcomes`
+
+Returns the outcomes to the conversations they came from.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+- `commandId`: required
+
+Result: `{ returned, pending }`.
+
+#### `meeting.record.sweep`
+
+Closes votes past their time, breaks or fails ties and finishes abandoned meetings in a project.
+
+Arguments:
+
+- `projectId`: the project
+- `commandId`: required
+
+Result: `{ closed, tied, failedTies, interrupted }`.
 
 #### `grant.revoke`
 

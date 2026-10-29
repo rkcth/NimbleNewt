@@ -16,6 +16,7 @@ import type { ProjectPlanService, ProjectResourceService, ResponsibilityService 
 import type { RetrievalService } from "../context/index.js";
 import type { ContextBranchService } from "../branches/index.js";
 import type { InvitationInbox, MeetingService } from "../meetings/index.js";
+import type { MeetingRecordService } from "../meetings/record.js";
 import type { AgentMessageService } from "../messaging/index.js";
 import { shownLines } from "../standups/standups.js";
 import type { GrantService } from "../security/grants.js";
@@ -73,6 +74,7 @@ export interface Context {
   readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep">;
   readonly activity?: Pick<ActivityService, "record" | "explain" | "explainLater" | "correct" | "markUnavailable" | "steps" | "payload" | "explanations" | "corrections">;
   readonly policyContext?: Pick<PolicyService, "contextFor">;
+  readonly records?: Pick<MeetingRecordService, "open" | "setChair" | "join" | "leave" | "append" | "move" | "amend" | "table" | "openVote" | "castBallot" | "closeVote" | "castingVote" | "apply" | "ownerRespond" | "finish" | "summarize" | "returnOutcomes" | "sweep" | "record" | "recordFor" | "discussion" | "motion" | "ballots" | "decision" | "why" | "summary" | "latestPlan">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep">;
 
   readonly commands?: CommandService;
@@ -176,6 +178,25 @@ const written = (r: { id: string; revision?: number; replayed: boolean }): JsonO
 const rest = (args: Args, ...skip: string[]): Args => Object.fromEntries(Object.entries(args).filter(([k]) => !skip.includes(k)));
 
 /** The version-1 operations. The documentation (`renderApiDocs`) is generated from this table, so it cannot drift. */
+
+const HELP: Readonly<Record<string, string>> = {
+  occurrenceId: "the live meeting (occurrence) ID", chair: "an agent (agent:name) who chairs; none means a tie fails", recordId: "the meeting record's ID", motionId: "the motion's ID", decisionId: "the decision's ID", projectId: "the project",
+  kind: "statement, owner-message, ruling or correction", text: "the words", speaker: "an agent speaking (agent:name)", tag: "decision, action, plan, question or similar tag", assignee: "an agent an action or plan item is for", taskId: "a task this concerns",
+  corrects: "an entry this corrects", overrules: "a ruling this overrules", answers: "a question this answers", sources: "records the words rest on", topic: "the topic", agendaItemId: "the agenda item discussed", changes: "proposed changes to tasks (applied only if adopted and allowed)",
+  expectedVersion: "the motion version you read", material: "true if the change alters what is voted on", reason: "why", limitMinutes: "how long the vote stays open", version: "the motion version voted on", value: "yes, no or abstain (casting vote: yes or no)",
+  ownerMessageEntryId: "the owner's message this vote follows", response: "agree, decline or alternative", alternative: "the owner's own decision instead", interrupted: "true if the meeting was cut short", fromSeq: "first entry number", toSeq: "last entry number", limit: "at most 100",
+};
+const recordOp = (name: string, kind: "query" | "command", summary: string, method: keyof NonNullable<Context["records"]>, fields: readonly string[], result: string, shape: "id" | "viewer" = "id", viewerArgs: readonly string[] = []): Operation => ({
+  name: `meeting.record.${name}`, kind, summary, args: { ...Object.fromEntries(fields.map((f) => [f, HELP[f] ?? f])), ...(kind === "command" ? { commandId: "required" } : {}) }, result,
+  run: async (c, a, id) => {
+    only(a, fields);
+    const svc = (c.records ?? unavailable("meeting records")) as unknown as Record<string, (...x: unknown[]) => Promise<unknown>>;
+    if (kind === "command") return asJson(((await svc[method]!(c.principal, { ...(shape === "id" ? { commandId: need(id) } : {}), ...a })) ?? { ok: true }) as object);
+    const out = await svc[method]!(c.principal, ...viewerArgs.map((f) => a[f]), ...(viewerArgs.length < fields.length ? [Object.fromEntries(fields.filter((f) => !viewerArgs.includes(f) && a[f] !== undefined).map((f) => [f, a[f]]))] : []));
+    return out === undefined ? ((): never => { throw new DomainError("not_found", "no such meeting record, or none you may read"); })() : asJson({ item: out });
+  },
+});
+
 export const OPERATIONS: readonly Operation[] = [
   { name: "context.spill.read", kind: "query", summary: "One page of the rest of a tool result that was cut to the model's window (the cut result names its spill ID). Needs the right to work on the task the result belongs to; anyone else gets not found.", args: { spillId: "the spill ID named in the cut result (`spl-…`)", "index?": "the page, from 0", "size?": "page size in characters (at most 50,000)" }, result: "`{ item: { text, next? } }`; `next` is the index of the following page when there is one.",
     run: async (c, a) => { only(a, ["spillId", "index", "size"]); const size = optNum(a, "size"); return found("spill", await (c.spill ?? unavailable("tool result spills")).readSpill(c.principal, str(a, "spillId"), optNum(a, "index") ?? 0, size === undefined ? undefined : Math.min(Math.max(1, Math.floor(size)), 50_000))); } },
@@ -325,6 +346,33 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => { only(a, ["taskId", "first", "last", "reason"]); return asJson(await activityOf(c).markUnavailable(c.principal, { commandId: need(id), ...a } as never)); } },
   { name: "policy.context", kind: "query", summary: "The approval policy as it binds you in a project, read from the records now: which kinds of action are decided by the owner, by review or not at all, the environment tier, the approvals you hold and the latest changes. Nothing is cached, so a change the owner made is in your next read. You may ask about yourself only.", args: { projectId: "the project" }, result: "`{ context: { … } | null }`; null when the project does not exist or you hold nothing in it.",
     run: async (c, a) => { only(a, ["projectId"]); return asJson({ context: (await policyContextOf(c).contextFor(c.principal, a["projectId"] as string)) ?? null }); } },
+  recordOp("open", "command", "Opens the record of a live meeting that is still planned (owner, host, service or meeting.manage in the project). The roster is the occurrence's; those it could not reach are absent. Without a chair a tie fails.", "open", ["occurrenceId", "chair"], "`{ id, replayed }`."),
+  recordOp("set-chair", "command", "Changes the chair (or clears it with null).", "setChair", ["recordId", "chair"], "`{ ok }`."),
+  recordOp("join", "command", "The caller joins the meeting.", "join", ["recordId"], "`{ ok }`."),
+  recordOp("leave", "command", "The caller leaves the meeting.", "leave", ["recordId"], "`{ ok }`."),
+  recordOp("append", "command", "Adds a statement, an owner message, a ruling or a correction to the discussion. Corrections are linked updates; nothing is rewritten.", "append", ["recordId", "kind", "text", "speaker", "tag", "assignee", "taskId", "motionId", "corrects", "overrules", "answers", "sources"], "`{ id, seq, replayed }`."),
+  recordOp("move", "command", "Makes a motion, optionally with proposed task changes.", "move", ["recordId", "text", "topic", "agendaItemId", "changes", "sources"], "`{ id, replayed }`."),
+  recordOp("amend", "command", "Amends a motion; a material amendment restarts any vote.", "amend", ["motionId", "expectedVersion", "text", "material", "changes"], "`{ version }`."),
+  recordOp("table", "command", "Tables a motion.", "table", ["motionId", "reason"], "`{ ok }`."),
+  recordOp("open-vote", "command", "Opens the vote on a motion version.", "openVote", ["motionId", "expectedVersion", "limitMinutes"], "`{ closesAt }`."),
+  recordOp("cast-ballot", "command", "Casts or revises a ballot, with a reason.", "castBallot", ["motionId", "version", "value", "reason", "sources", "ownerMessageEntryId"], "`{ revised }`."),
+  recordOp("close-vote", "command", "Counts the vote and closes it.", "closeVote", ["motionId"], "`{ state, decisionId? }`."),
+  recordOp("casting-vote", "command", "The chair breaks a tie.", "castingVote", ["motionId", "value", "reason"], "`{ state, decisionId? }`."),
+  recordOp("apply", "command", "Applies an adopted decision's changes with expected revisions; a target that moved is reported as not applied.", "apply", ["decisionId"], "`{ applied, notApplied, pending }`.", "viewer"),
+  recordOp("owner-respond", "command", "The owner agrees, declines or answers with an alternative to a decision that needs them.", "ownerRespond", ["decisionId", "response", "alternative"], "`{ ownerDecisionId?, applied? }`."),
+  recordOp("finish", "command", "Ends the meeting; an interrupted meeting voids open votes and keeps the record.", "finish", ["recordId", "interrupted", "reason"], "`{ voided }`."),
+  recordOp("summarize", "command", "Builds the summary from the record alone.", "summarize", ["recordId"], "`{ builds, overviewFailed? }`."),
+  recordOp("outcomes", "command", "Returns the outcomes to the conversations they came from.", "returnOutcomes", ["recordId"], "`{ returned, pending }`.", "viewer"),
+  recordOp("sweep", "command", "Closes votes past their time, breaks or fails ties and finishes abandoned meetings in a project.", "sweep", ["projectId"], "`{ closed, tied, failedTies, interrupted }`.", "viewer"),
+  recordOp("get", "query", "A meeting record, if you may read it.", "record", ["recordId"], "`{ item }`.", "id", ["recordId"]),
+  recordOp("of-meeting", "query", "The record of a meeting occurrence.", "recordFor", ["occurrenceId"], "`{ item }`.", "id", ["occurrenceId"]),
+  recordOp("discussion", "query", "The full discussion in order, a page at a time.", "discussion", ["recordId", "fromSeq", "toSeq", "limit"], "`{ item: { entries, next? } }`.", "id", ["recordId"]),
+  recordOp("motion", "query", "A motion with its versions.", "motion", ["motionId"], "`{ item }`.", "id", ["motionId"]),
+  recordOp("ballots", "query", "The ballots on a motion; while the vote is open only the count is shown.", "ballots", ["motionId"], "`{ item }`.", "id", ["motionId"]),
+  recordOp("decision", "query", "A decision record.", "decision", ["decisionId"], "`{ item }`.", "id", ["decisionId"]),
+  recordOp("why", "query", "Why a decision was taken, from the record, with links to the discussion; conclusions from records you may not see are marked unverifiable.", "why", ["decisionId"], "`{ item: { decision, lines } }`.", "id", ["decisionId"]),
+  recordOp("summary", "query", "The meeting summary: attendance, updates, decisions with reasons, dissent, open questions, actions, plan; adopted kept apart from applied.", "summary", ["recordId"], "`{ item }`.", "id", ["recordId"]),
+  recordOp("plan", "query", "The project's latest plan from a meeting.", "latestPlan", ["projectId"], "`{ item }`.", "id", ["projectId"]),
   { name: "grant.revoke", kind: "command", summary: "The owner takes a grant back (owner only; the revision you read must still be current). It stops counting at the next check.", args: { grantId: "the grant's ID", expectedRevision: "the revision you read", reason: "why, in the owner's words" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["grantId", "expectedRevision", "reason"]); await grantsOf(c).revoke(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
   { name: "events.configure-idle", kind: "command", summary: "Sets how long an event subscription may sit without acknowledging before it expires (owner only). A subscription that was made before this existed, or without its own time, uses this one.", args: { idleSeconds: "whole seconds, 10 to 604800" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
