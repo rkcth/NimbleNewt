@@ -3,7 +3,7 @@ import { createReadStream } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { SNAPSHOT_TABLES } from "../storage/index.js";
-import { BACKUP_FORMAT, MANIFEST_FILE, type BackupManifest } from "./format.js";
+import { ARTIFACT_FOLDER, BACKUP_FORMAT, MANIFEST_FILE, type BackupManifest } from "./format.js";
 
 export interface BackupCheck { readonly ok: boolean; readonly manifest?: BackupManifest; readonly problems: readonly string[] }
 
@@ -47,5 +47,25 @@ export async function verifyBackup(path: string): Promise<BackupCheck> {
     else if (hash.digest("hex") !== entry.sha256) problems.push(`${entry.table}: the contents do not match the manifest's SHA-256`);
     else if (lines !== entry.rows) problems.push(`${entry.table}: ${lines} rows, the manifest says ${entry.rows}`);
   }
+  if (manifest.artifacts !== undefined) problems.push(...await verifyArtifacts(path, manifest));
   return { ok: problems.length === 0, manifest, problems };
+}
+
+/** The artifact index matches the manifest, and every blob it lists is there with the size it says and the SHA-256 that is its name. */
+async function verifyArtifacts(path: string, manifest: BackupManifest): Promise<string[]> {
+  const a = manifest.artifacts!;
+  const problems: string[] = [];
+  let text: Buffer;
+  try { text = await readFile(join(path, a.index.file)); } catch { return ["artifacts: the index is missing"]; }
+  if (text.length !== a.index.bytes || createHash("sha256").update(text).digest("hex") !== a.index.sha256) return ["artifacts: the index does not match the manifest"];
+  const entries = text.toString("utf8").split("\n").filter((l) => l !== "").map((l) => JSON.parse(l) as { digest: string; size: number });
+  if (entries.length !== a.index.rows) problems.push(`artifacts: ${entries.length} blobs listed, the manifest says ${a.index.rows}`);
+  for (const e of entries) {
+    if (!/^[0-9a-f]{64}$/.test(e.digest)) { problems.push("artifacts: the index names something that is not a blob"); continue; }
+    const hash = createHash("sha256");
+    let size = 0;
+    try { for await (const chunk of createReadStream(join(path, ARTIFACT_FOLDER, e.digest))) { const b = chunk as Buffer; hash.update(b); size += b.length; } } catch { problems.push(`artifacts: blob ${e.digest.slice(0, 12)} is missing`); continue; }
+    if (size !== e.size || hash.digest("hex") !== e.digest) problems.push(`artifacts: blob ${e.digest.slice(0, 12)} is not what its name says`);
+  }
+  return problems;
 }

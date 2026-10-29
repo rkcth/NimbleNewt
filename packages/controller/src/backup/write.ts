@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { mkdir, open, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { SNAPSHOT_TABLES, TABLE_SPECS, type ControllerStorage, type SnapshotRow, type SnapshotTable } from "../storage/index.js";
-import { BACKUP_FORMAT, BACKUP_NOTES, MANIFEST_FILE, PARTIAL_SUFFIX, type BackupFileEntry, type BackupKind, type BackupManifest } from "./format.js";
+import type { FileBlobStore } from "../artifacts/index.js";
+import { ARTIFACT_FOLDER, ARTIFACT_INDEX, BACKUP_FORMAT, BACKUP_NOTES, MANIFEST_FILE, PARTIAL_SUFFIX, type BackupArtifacts, type BackupFileEntry, type BackupKind, type BackupManifest } from "./format.js";
 
 export interface BackupOptions {
   /** The folder the backups live in; each backup is a folder of its own inside it. */
@@ -13,6 +15,8 @@ export interface BackupOptions {
   readonly now?: () => Date;
   /** Rows read from the store at a time. Default 500. */
   readonly pageSize?: number;
+  /** The artifact store, when the installation has one: its blobs go into the backup too. */
+  readonly blobs?: FileBlobStore;
 }
 
 const stamp = (d: Date): string => d.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
@@ -61,7 +65,8 @@ export async function createBackup(storage: ControllerStorage, options: BackupOp
       } finally { await handle.close(); }
       files.push({ table, file, rows, bytes, sha256: hash.digest("hex") });
     }
-    const manifest: BackupManifest = { format: BACKUP_FORMAT, product: "nimblenewt", name, createdAt: at.toISOString(), kind: options.kind, version: options.version, schemaVersion: snapshot.schemaVersion, epoch, files, notes: BACKUP_NOTES, complete: true };
+    const artifacts = options.blobs === undefined ? undefined : await copyBlobs(options.blobs, staging);
+    const manifest: BackupManifest = { format: BACKUP_FORMAT, product: "nimblenewt", name, createdAt: at.toISOString(), kind: options.kind, version: options.version, schemaVersion: snapshot.schemaVersion, epoch, files, ...(artifacts === undefined ? {} : { artifacts }), notes: BACKUP_NOTES, complete: true };
     const manifestHandle = await open(join(staging, MANIFEST_FILE), "wx", 0o600);
     try { await manifestHandle.write(`${JSON.stringify(manifest, null, 2)}\n`); await manifestHandle.sync(); } finally { await manifestHandle.close(); }
     await rename(staging, final);
@@ -72,6 +77,40 @@ export async function createBackup(storage: ControllerStorage, options: BackupOp
     await rm(staging, { recursive: true, force: true }).catch(() => undefined);
     throw error;
   } finally { await snapshot.close(); }
+}
+
+/**
+ * Copies every blob of the artifact store into `staging/artifacts/<digest>` while holding the store's shared lock (orphan cleanup, which takes it exclusively, waits), hashing each as it is copied: a blob whose bytes are not
+ * its name is not copied and is listed as corrupt, and one that vanished is listed as missing. The index of what was copied is written last.
+ */
+async function copyBlobs(blobs: FileBlobStore, staging: string): Promise<BackupArtifacts> {
+  const folder = join(staging, ARTIFACT_FOLDER);
+  await mkdir(folder, { mode: 0o700 });
+  return blobs.lock.shared(async () => {
+    const lines: string[] = [];
+    const skipped: { digest: string; why: "corrupt" | "missing" }[] = [];
+    let bytes = 0;
+    for (const info of await blobs.list()) {
+      const target = await open(join(folder, info.digest), "wx", 0o600);
+      const hash = createHash("sha256");
+      let size = 0;
+      let why: "corrupt" | "missing" | undefined;
+      try {
+        try {
+          for await (const chunk of createReadStream(blobs.pathOf(info.digest))) { const buffer = chunk as Buffer; hash.update(buffer); await target.write(buffer); size += buffer.length; }
+        } catch { why = "missing"; }
+        if (why === undefined && hash.digest("hex") !== info.digest) why = "corrupt";
+        if (why === undefined) await target.sync();
+      } finally { await target.close(); }
+      if (why !== undefined) { await rm(join(folder, info.digest), { force: true }); skipped.push({ digest: info.digest, why }); continue; }
+      lines.push(`${JSON.stringify({ digest: info.digest, size })}\n`);
+      bytes += size;
+    }
+    const text = Buffer.from(lines.join(""), "utf8");
+    const index = await open(join(staging, ARTIFACT_INDEX), "wx", 0o600);
+    try { await index.write(text); await index.sync(); } finally { await index.close(); }
+    return { index: { file: ARTIFACT_INDEX, rows: lines.length, bytes: text.length, sha256: createHash("sha256").update(text).digest("hex") }, blobs: lines.length, bytes, skipped };
+  });
 }
 
 export type { SnapshotTable };

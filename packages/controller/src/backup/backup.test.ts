@@ -3,6 +3,8 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, existsSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { FileBlobStore } from "../artifacts/index.js";
+import { chmodSync } from "node:fs";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { MemoryStorage, type ControllerStorage } from "../storage/index.js";
 import { BackupService, RestoreRefused, chooseKept, createBackup, listBackups, pruneBackups, restoreBackup, verifyBackup, type BackupInfo, type BackupKind } from "./index.js";
@@ -134,4 +136,36 @@ test("the nightly run makes a backup only when the newest is older than a day, o
     assert.equal((await broken.status()).count, 2);
     assert.equal(readdirSync(root).filter((n) => n.endsWith(".partial")).length, 0);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("the artifact blobs are in the backup, checked against their names, and come back into a new artifact store (card K01)", async () => {
+  const store = new MemoryStorage(); const target = new MemoryStorage(); const root = tmp(); const live = tmp(); const fresh = tmp();
+  try {
+    await populate(store);
+    const blobs = await FileBlobStore.open({ directory: live });
+    const one = await blobs.put(new TextEncoder().encode("the north bed plan"));
+    const two = await blobs.put(new TextEncoder().encode("photos of the beds"));
+    // One blob has gone bad on disk since it was stored: it is left out of the copy and named, never copied as if it were fine.
+    const three = await blobs.put(new TextEncoder().encode("a third file"));
+    chmodSync(blobs.pathOf(three.digest), 0o644);
+    writeFileSync(blobs.pathOf(three.digest), "rotten");
+    const { path, manifest } = await createBackup(store, { root, kind: "manual", version: "t", now: () => new Date(AT), blobs });
+    assert.equal(manifest.artifacts?.blobs, 2);
+    assert.deepEqual(manifest.artifacts?.skipped, [{ digest: three.digest, why: "corrupt" }]);
+    assert.equal((await verifyBackup(path)).ok, true);
+    await assert.rejects(restoreBackup(path, target), (e: unknown) => e instanceof RestoreRefused && /no artifact store/.test(e.message));
+    assert.equal(await target.currentEpoch(), 0, "refused before anything was written");
+    const into = await FileBlobStore.open({ directory: fresh });
+    const done = await restoreBackup(path, target, { blobs: into });
+    assert.equal(done.blobsRestored, 2);
+    assert.equal(new TextDecoder().decode(await into.read(one.digest)), "the north bed plan");
+    assert.equal(await into.has(two.digest), true);
+    assert.equal(await into.has(three.digest), false);
+    // A blob changed inside the backup is caught.
+    chmodSync(join(path, "artifacts", one.digest), 0o644);
+    writeFileSync(join(path, "artifacts", one.digest), "changed");
+    const bad = await verifyBackup(path);
+    assert.equal(bad.ok, false);
+    assert.match(bad.problems.join(";"), /artifacts: blob/);
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(live, { recursive: true, force: true }); rmSync(fresh, { recursive: true, force: true }); }
 });

@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { FileBlobStore } from "../artifacts/index.js";
 import { restoreBackup } from "../backup/index.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
@@ -17,7 +18,7 @@ test("the owner takes a backup through the state API, the nightly run keeps them
   let clock = Date.parse("2026-10-29T10:00:00.000Z");
   const timer = new ManualTimer();
   const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer, intervalMs: 1000 },
-    backup: { directory: join(d, "backups"), now: () => new Date(clock) } });
+    artifacts: { directory: join(d, "artifacts") }, backup: { directory: join(d, "backups"), now: () => new Date(clock) } });
   try {
     assert.ok(c.dispatch !== undefined, c.dispatchProblem);
     const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
@@ -47,9 +48,10 @@ test("the owner takes a backup through the state API, the nightly run keeps them
 
     // The first backup restores into a new, empty database, and the project made before it is there.
     const backups = await c.services.backups!.list();
+    assert.equal(backups[1]!.manifest.artifacts?.blobs, 0, "the installation has an artifact store, so its (empty) contents are part of the backup");
     const target = await SqliteStorage.open({ path: join(d, "restored.sqlite") });
     try {
-      const done = await restoreBackup(backups[1]!.path, target);
+      const done = await restoreBackup(backups[1]!.path, target, { blobs: await FileBlobStore.open({ directory: join(d, "restored-artifacts") }) });
       assert.ok(done.rows > 0);
       const projects = await target.listAggregates("project", { limit: 10 });
       assert.deepEqual(projects.map((p) => p.id), [project]);

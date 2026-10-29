@@ -12,6 +12,12 @@ export const BACKUP_KINDS: readonly BackupKind[] = ["manual", "scheduled", "pre-
 
 export interface BackupFileEntry { readonly table: SnapshotTable; readonly file: string; readonly rows: number; readonly bytes: number; readonly sha256: string }
 
+/** The artifact bytes in a backup (card K01): `artifacts.jsonl` lists each blob's digest and size, and the blob is the file `artifacts/<digest>`, whose name is the SHA-256 of its content. */
+export interface BackupArtifacts { readonly index: BackupIndexEntry; readonly blobs: number; readonly bytes: number; /** Blobs the store listed that were corrupt or vanished while the copy was made, and so are not in it. */ readonly skipped: readonly { readonly digest: string; readonly why: "corrupt" | "missing" }[] }
+export interface BackupIndexEntry { readonly file: string; readonly rows: number; readonly bytes: number; readonly sha256: string }
+export const ARTIFACT_INDEX = "artifacts.jsonl";
+export const ARTIFACT_FOLDER = "artifacts";
+
 export interface BackupManifest {
   readonly format: typeof BACKUP_FORMAT;
   readonly product: "nimblenewt";
@@ -25,6 +31,8 @@ export interface BackupManifest {
   /** The epoch the store had when the copy was taken (a restored store continues from it). */
   readonly epoch: number;
   readonly files: readonly BackupFileEntry[];
+  /** Present when the installation has an artifact store: its blobs are in the backup. */
+  readonly artifacts?: BackupArtifacts;
   /** What the owner should know about what is and is not in the copy. */
   readonly notes: readonly string[];
   readonly complete: true;
