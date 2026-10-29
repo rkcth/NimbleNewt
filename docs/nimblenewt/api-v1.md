@@ -460,6 +460,28 @@ Arguments:
 
 Result: `{ items: [watchId] }`.
 
+#### `improvement.get`
+
+One proposal with its evidence and disposition, if you may read it.
+
+Arguments:
+
+- `itemId`: the proposal
+
+Result: `{ item }`.
+
+#### `improvement.list`
+
+The open proposals of a project, a page at a time.
+
+Arguments:
+
+- `projectId`: the project
+- `afterId`: continue after this proposal
+- `limit`: most items
+
+Result: `{ item: { items, next? } }`.
+
 #### `backup.list`
 
 Owner only: the complete backups, newest first, and whether the last one failed.
@@ -2154,6 +2176,67 @@ Arguments:
 - `commandId`: required
 
 Result: `{ ok }`.
+
+#### `improvement.propose`
+
+Reports friction in a tool, skill, communication or workflow, with the evidence you may share and the work it affected. Anyone with meeting.agenda may; a similar proposal is grouped, never merged.
+
+Arguments:
+
+- `projectId`: the project
+- `title`: a short name for the friction
+- `observation`: what keeps going wrong
+- `possibleImprovement`: what might fix it
+- `evidence`: records that show it (task, artifact or desk record of this project)
+- `affectedTasks`: tasks it slowed
+- `timeboxMinutes`: how long the stand-up may spend on it
+- `commandId`: required
+
+Result: `{ id, replayed }`.
+
+#### `improvement.group`
+
+Manager or owner: records that a proposal is another report of the same friction as an earlier one. Each proposer's evidence stays on its own record.
+
+Arguments:
+
+- `itemId`: the proposal
+- `expectedRevision`: the revision you read
+- `under`: the earlier proposal it repeats
+- `underRevision`: that proposal's revision
+- `commandId`: required
+
+Result: `{ ok }`.
+
+#### `improvement.decide`
+
+Manager or owner: accepts, rejects or defers a proposal (accepting grants nothing; planning and authority come from the usual process). The decision goes back to every proposer.
+
+Arguments:
+
+- `itemId`: the proposal
+- `expectedRevision`: the revision you read
+- `to`: accepted, rejected or deferred
+- `reason`: why
+- `nextStep`: what happens next
+- `evaluation`: how the change will be judged
+- `taskId`: the task made for it
+- `owner`: who will do it
+- `commandId`: required
+
+Result: `{ ok }`.
+
+#### `improvement.bring`
+
+Manager or owner: puts a proposal on the next stand-up's agenda, timeboxed.
+
+Arguments:
+
+- `itemId`: the proposal
+- `expectedRevision`: the revision you read
+- `commandId`: required
+
+Result: `{ agendaItemId }`.
 
 #### `backup.now`
 

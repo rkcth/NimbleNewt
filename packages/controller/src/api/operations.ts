@@ -17,6 +17,7 @@ import type { RetrievalService } from "../context/index.js";
 import type { ContextBranchService } from "../branches/index.js";
 import type { InvitationInbox, MeetingService } from "../meetings/index.js";
 import type { BackupService } from "../backup/index.js";
+import type { ImprovementService } from "../standups/improvements.js";
 import type { MeetingRecordService } from "../meetings/record.js";
 import type { AttendanceService } from "../meetings/attendance.js";
 import type { PolicyEditService } from "../chat/policy-edit.js";
@@ -88,6 +89,7 @@ export interface Context {
   };
   readonly policyForward?: Pick<PolicyEditService, "forward">;
   readonly backups?: Pick<BackupService, "backUpNow" | "list" | "status">;
+  readonly improvements?: Pick<ImprovementService, "propose" | "group" | "decide" | "bringToStandup" | "get" | "open">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep">;
 
   readonly commands?: CommandService;
@@ -236,6 +238,21 @@ const STANDUP_HELP: Readonly<Record<string, string>> = {
   recurrence: "how often", startDate: "first date", endDate: "last date", durationMinutes: "planned length", prepareMinutes: "how long before it agents are asked to reach a safe boundary", coverageHours: "how far back briefs look (about 24)",
   budgetTokens: "token allowance for the meeting", scheduleId: "the stand-up schedule", expectedRevision: "the revision you read", state: "active, paused or ended", briefId: "the brief", section: "advice, priorities or note", text: "the statement",
 };
+const IMP_HELP: Readonly<Record<string, string>> = {
+  projectId: "the project", title: "a short name for the friction", observation: "what keeps going wrong", possibleImprovement: "what might fix it", evidence: "records that show it (task, artifact or desk record of this project)", affectedTasks: "tasks it slowed", timeboxMinutes: "how long the stand-up may spend on it",
+  itemId: "the proposal", expectedRevision: "the revision you read", under: "the earlier proposal it repeats", underRevision: "that proposal's revision", to: "accepted, rejected or deferred", reason: "why", nextStep: "what happens next", evaluation: "how the change will be judged", taskId: "the task made for it", owner: "who will do it", afterId: "continue after this proposal", limit: "most items",
+};
+const improvementOp = (name: string, kind: "query" | "command", summary: string, method: keyof NonNullable<Context["improvements"]>, fields: readonly string[], result: string, positional?: string): Operation => ({
+  name: `improvement.${name}`, kind, summary, args: { ...Object.fromEntries(fields.map((f) => [f, IMP_HELP[f] ?? f])), ...(kind === "command" ? { commandId: "required" } : {}) }, result,
+  run: async (c, a, id) => {
+    only(a, fields);
+    const svc = (c.improvements ?? unavailable("improvement proposals")) as unknown as Record<string, (...x: unknown[]) => Promise<unknown>>;
+    if (kind === "command") return asJson(((await svc[method]!(c.principal, { commandId: need(id), ...a })) ?? { ok: true }) as object);
+    const out = positional !== undefined ? await svc[method]!(c.principal, a[positional]) : await svc[method]!(c.principal, a["projectId"], { ...(a["afterId"] === undefined ? {} : { afterId: a["afterId"] }), ...(a["limit"] === undefined ? {} : { limit: a["limit"] }) });
+    if (out === undefined) throw new DomainError("not_found", "no such proposal or project, or none you may read");
+    return asJson({ item: out });
+  },
+});
 const standupOp = (name: string, kind: "query" | "command", summary: string, method: keyof NonNullable<Context["standups"]>, fields: readonly string[], result: string, positional: readonly string[] = []): Operation => ({
   name: `standup.${name}`, kind, summary, args: { ...Object.fromEntries(fields.map((f) => [f, STANDUP_HELP[f] ?? HELP[f] ?? ATTEND_HELP[f] ?? f])), ...(kind === "command" && positional.length === 0 ? { commandId: "required" } : {}) }, result,
   run: async (c, a, id) => {
@@ -477,6 +494,12 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => { only(a, ["watchId"]); await (c.watchControl ?? unavailable("event watching")).cancel(c.principal, { commandId: need(id), watchId: a["watchId"] as string }); return asJson({ ok: true }); } },
   { name: "watch.list", kind: "query", summary: "Owner only: the active watches.", args: {}, result: "`{ items: [watchId] }`.",
     run: async (c, a) => { only(a, []); return asJson({ items: await (c.watchControl ?? unavailable("event watching")).list(c.principal) }); } },
+  improvementOp("propose", "command", "Reports friction in a tool, skill, communication or workflow, with the evidence you may share and the work it affected. Anyone with meeting.agenda may; a similar proposal is grouped, never merged.", "propose", ["projectId", "title", "observation", "possibleImprovement", "evidence", "affectedTasks", "timeboxMinutes"], "`{ id, replayed }`."),
+  improvementOp("group", "command", "Manager or owner: records that a proposal is another report of the same friction as an earlier one. Each proposer's evidence stays on its own record.", "group", ["itemId", "expectedRevision", "under", "underRevision"], "`{ ok }`."),
+  improvementOp("decide", "command", "Manager or owner: accepts, rejects or defers a proposal (accepting grants nothing; planning and authority come from the usual process). The decision goes back to every proposer.", "decide", ["itemId", "expectedRevision", "to", "reason", "nextStep", "evaluation", "taskId", "owner"], "`{ ok }`."),
+  improvementOp("bring", "command", "Manager or owner: puts a proposal on the next stand-up's agenda, timeboxed.", "bringToStandup", ["itemId", "expectedRevision"], "`{ agendaItemId }`."),
+  improvementOp("get", "query", "One proposal with its evidence and disposition, if you may read it.", "get", ["itemId"], "`{ item }`.", "itemId"),
+  improvementOp("list", "query", "The open proposals of a project, a page at a time.", "open", ["projectId", "afterId", "limit"], "`{ item: { items, next? } }`."),
   { name: "backup.now", kind: "command", summary: "Owner only: takes a consistent backup of the controller database now (a backup already running is the answer).", args: { commandId: "required" }, result: "`{ item: { name, createdAt, kind, schemaVersion, epoch, rows } }`.",
     run: async (c, a, id) => { only(a, []); need(id); ownerOnly(c, "take a backup"); const made = await (c.backups ?? unavailable("backups")).backUpNow("manual"); return asJson({ item: backupItem(made.manifest) }); } },
   { name: "backup.list", kind: "query", summary: "Owner only: the complete backups, newest first, and whether the last one failed.", args: {}, result: "`{ items: [{ name, createdAt, kind, schemaVersion, epoch, rows }], status }`.",
