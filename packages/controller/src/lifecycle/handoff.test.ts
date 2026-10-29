@@ -56,7 +56,7 @@ class Sources implements HandoffSources {
 for (const backend of backends) {
   interface Ctx {
     owner: Principal; mgr: Principal; ann: Principal; task: string; a: { kind: string; id: string }; b: { kind: string; id: string }; rt: Runtime; src: Sources; stops: StopService; pauses: PauseService;
-    handoffs: HandoffService; assignments: AssignmentService; failTransfer: { times: number }; reopen(): HandoffService;
+    handoffs: HandoffService; assignments: AssignmentService; failTransfer: { times: number }; reopen(asker?: (id: string) => Promise<Principal | undefined>): HandoffService;
   }
   const suite = (name: string, body: (c: Ctx) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
@@ -83,10 +83,10 @@ for (const backend of backends) {
         const failTransfer = { times: 0 };
         // The transfer can be made to fail once or more before it reaches the store, as a crash before it would.
         const assignments = { getAssignment: (t: string) => real.getAssignment(t), transferTask: async (cmd: Parameters<AssignmentService["transferTask"]>[0]) => { if (failTransfer.times > 0) { failTransfer.times--; throw new Error("process died before the transfer"); } return real.transferTask(cmd); } } as unknown as AssignmentService;
-        const mk = (): HandoffService => {
+        const mk = (asker?: (id: string) => Promise<Principal | undefined>): HandoffService => {
           const pauses = PauseService.withEpoch(world.storage, epoch, {}, options);
           const stops = StopService.withEpoch(world.storage, epoch, pauses, rt, options);
-          return HandoffService.withEpoch(world.storage, epoch, { pauses, stops, assignments, sources: src }, options);
+          return HandoffService.withEpoch(world.storage, epoch, { pauses, stops, assignments, sources: src, ...(asker === undefined ? {} : { asker }) }, options);
         };
         const pauses = PauseService.withEpoch(world.storage, epoch, {}, options);
         const stops = StopService.withEpoch(world.storage, epoch, pauses, rt, options);
@@ -112,6 +112,26 @@ for (const backend of backends) {
     // A second hand-off may start once the first ended.
     const back = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.a, reason: "back again" });
     assert.equal(back.phase, "ready");
+  });
+
+  suite("a hand-off carried on after a restart is dropped when its asker no longer holds the right, and finished when it still does (owner decision 2026-10-29)", async (c) => {
+    const h = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "move it" });
+    c.failTransfer.times = 1;
+    await assert.rejects(c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h.id }), /process died/);
+    // The asker is gone: the sweep does not finish the hand-off, says why, and the task stays with its owner.
+    const gone = await c.reopen(async () => undefined).sweep(c.owner);
+    assert.deepEqual(gone, { advanced: [], failed: [h.id] });
+    const failed = await c.handoffs.get(c.owner, h.id);
+    assert.equal(failed?.phase, "failed");
+    assert.match(failed?.failure ?? "", /no longer holds the right/);
+    assert.equal(await ownerOf(c), `${c.a.id}@1`);
+    // An asker who still holds the right: the hand-off is finished after the restart.
+    const h2 = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "again" });
+    c.failTransfer.times = 1;
+    await assert.rejects(c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h2.id }), /process died/);
+    const kept = await c.reopen(async (id) => (id === c.mgr.id ? c.mgr : undefined)).sweep(c.owner);
+    assert.deepEqual(kept.advanced, [h2.id]);
+    assert.equal(await ownerOf(c), `${c.b.id}@2`);
   });
 
   suite("the package holds only the named sections, without credentials; a missing required section is reported and needs the gap accepted", async (c) => {

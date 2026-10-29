@@ -2481,3 +2481,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 
 ## T09c and T09d closed without building (owner decision, 2026-10-29)
 - Asked how a chat-typed `/toolbox.<name>` should run (the tool path needs an attempt, which a typed command does not have), the owner answered that users should not type toolbox commands at all: typed commands stay for things specific to running the process (`/nimblenewt.…`), and the rest is conversational. T09c is closed on that basis, and T09d (`/a_<id>.<name>`) the same way. Both stay answered with the plain "cannot be run from here yet" message from T09b. They are marked implemented only to take them off the plan; no code was written.
+
+## L03d (second part): a hand-off carried on after a restart re-checks its asker (owner decision, 2026-10-29)
+- `HandoffService.sweep` (the restart recovery) now asks, for each unfinished hand-off asked by an agent, whether that agent is still active and still holds the right to control the task (the same check as asking); if not, the hand-off is marked failed with that reason, nothing moves, and it is reported as failed. An owner's hand-off is always carried on. Stop, Pause and Suspend sweeps are unchanged: they always finish. `startController` supplies the asker's current rights. Test in `lifecycle/handoff.test.ts` on all four backends (asker gone: dropped; asker still entitled: finished).
+- Grant- and spend-changing actions have no restart recovery sweeps of their own yet; when they get one it must do the same.

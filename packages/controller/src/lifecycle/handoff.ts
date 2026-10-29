@@ -96,15 +96,17 @@ export class HandoffService {
   readonly #stops: Pick<StopService, "request" | "advance" | "force" | "get">;
   readonly #assignments: Pick<AssignmentService, "getAssignment" | "transferTask">;
   readonly #sources: HandoffSources;
+  readonly #asker: ((principalId: string) => Promise<Principal | undefined>) | undefined;
   readonly #onTransferred: ((by: Principal, event: { handoffId: string; taskId: string; from: Owner; to: Owner }) => Promise<void>) | undefined;
 
-  private constructor(runner: CommandRunner, pauses: PauseService, stops: Pick<StopService, "request" | "advance" | "force" | "get">, assignments: Pick<AssignmentService, "getAssignment" | "transferTask">, sources: HandoffSources, onTransferred?: (by: Principal, event: { handoffId: string; taskId: string; from: Owner; to: Owner }) => Promise<void>) {
+  private constructor(runner: CommandRunner, pauses: PauseService, stops: Pick<StopService, "request" | "advance" | "force" | "get">, assignments: Pick<AssignmentService, "getAssignment" | "transferTask">, sources: HandoffSources, onTransferred?: (by: Principal, event: { handoffId: string; taskId: string; from: Owner; to: Owner }) => Promise<void>, asker?: (principalId: string) => Promise<Principal | undefined>) {
     this.#onTransferred = onTransferred;
+    this.#asker = asker;
     this.#runner = runner; this.#pauses = pauses; this.#stops = stops; this.#assignments = assignments; this.#sources = sources;
   }
 
-  static withEpoch(storage: ControllerStorage, epoch: number, deps: { pauses: PauseService; stops: Pick<StopService, "request" | "advance" | "force" | "get">; assignments: Pick<AssignmentService, "getAssignment" | "transferTask">; sources: HandoffSources; /** Told once a task has moved, so the move can be put in the task's activity record (best effort: a failure here never undoes or holds back the hand-off). */ onTransferred?: (by: Principal, event: { handoffId: string; taskId: string; from: Owner; to: Owner }) => Promise<void> }, options: RunnerOptions = {}): HandoffService {
-    return new HandoffService(new CommandRunner(storage, epoch, options), deps.pauses, deps.stops, deps.assignments, deps.sources, deps.onTransferred);
+  static withEpoch(storage: ControllerStorage, epoch: number, deps: { pauses: PauseService; stops: Pick<StopService, "request" | "advance" | "force" | "get">; assignments: Pick<AssignmentService, "getAssignment" | "transferTask">; sources: HandoffSources; /** Told once a task has moved, so the move can be put in the task's activity record (best effort: a failure here never undoes or holds back the hand-off). */ onTransferred?: (by: Principal, event: { handoffId: string; taskId: string; from: Owner; to: Owner }) => Promise<void>; /** The principal that asked for a hand-off, with the rights it holds now (undefined when it is gone or not active): a hand-off carried on after a restart is dropped when the asker no longer holds the right to control the task. */ asker?: (principalId: string) => Promise<Principal | undefined> }, options: RunnerOptions = {}): HandoffService {
+    return new HandoffService(new CommandRunner(storage, epoch, options), deps.pauses, deps.stops, deps.assignments, deps.sources, deps.onTransferred, deps.asker);
   }
 
   // ---- requests ------------------------------------------------------------------------------------------------------------
@@ -271,7 +273,15 @@ export class HandoffService {
         after = rec.id;
         const b = rec.body as unknown as TaskHandoffBody;
         if (TERMINAL.includes(b.phase) || b.phase === "ready") continue;
-        try { await this.advance(by, { handoffId: rec.id }); advanced.push(rec.id); } catch { failed.push(rec.id); }
+        try {
+          // A hand-off finished after a restart is finished for whoever asked, but only while they still hold the right to control the task (owner decision 2026-10-29); otherwise it is dropped and says why.
+          if (this.#asker !== undefined && !b.requestedBy.startsWith("owner")) {
+            const asker = await this.#asker(b.requestedBy);
+            const still = asker !== undefined && await this.#pauses.authorizeControl(asker, { kind: "task", id: b.taskId }).then(() => true, () => false);
+            if (!still) { await this.#fail(by, rec.id, `${b.requestedBy} no longer holds the right to hand this task over, so the hand-off was not finished after the restart`); failed.push(rec.id); continue; }
+          }
+          await this.advance(by, { handoffId: rec.id }); advanced.push(rec.id);
+        } catch { failed.push(rec.id); }
       }
       if (page.length < 100) break;
     }
