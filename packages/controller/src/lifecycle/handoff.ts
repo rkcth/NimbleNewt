@@ -49,6 +49,8 @@ export interface TaskHandoffBody {
   readonly requestedAt: string;
   /** The scope was already held when this began, so it stays held (a manual hold is never lifted by a hand-off). */
   readonly heldBefore: boolean;
+  /** A takeover ends the prepared hand-off it replaces; recorded so a restart finishes that too. */
+  readonly replaces?: string;
   readonly stopIntentId?: string;
   readonly package?: { readonly collectedAt: string; readonly sections: Readonly<Record<string, string>>; readonly missing: readonly string[]; readonly ready: boolean };
   readonly blocked?: { readonly reason: string; readonly choices: readonly ("wait" | "force-takeover" | "cancel")[] } | undefined;
@@ -162,9 +164,8 @@ export class HandoffService {
     // A hold the replaced hand-off had added (its suspension) is still the hand-off's to lift; a hold that was there before it stays.
     const replaced = active === undefined ? undefined : ((await this.#runner.get(KIND, active))?.body as unknown as TaskHandoffBody | undefined);
     const heldBefore = replaced !== undefined ? replaced.heldBefore : (await this.#pauses.gate(by, scope))?.intent === "pause";
-    if (active !== undefined) await this.#update(active, (x) => ({ ...x, phase: "cancelled", blocked: undefined, history: this.#push(x, "cancelled", by.id, "replaced by a forced takeover") }), LIVE);
     // Written as preparing: the stop, the package and the exception come next, in `advance`, and the task moves only after them.
-    await this.#create(by, command.commandId, id, scope.id, target.projectId, from, to, assignment.generation, "forced", reason, heldBefore);
+    await this.#create(by, command.commandId, id, scope.id, target.projectId, from, to, assignment.generation, "forced", reason, heldBefore, active);
     return this.advance(by, { handoffId: id });
   }
 
@@ -195,6 +196,7 @@ export class HandoffService {
     const b = found.body as unknown as TaskHandoffBody;
     await this.#mayControl(by, b.taskId);
     if (b.phase === "transferring" || b.phase === "transferred") throw new DomainError("invalid_command", `the hand-off is ${b.phase}; it can no longer be cancelled`, { field: "handoffId" });
+    if (b.mode === "forced" && !TERMINAL.includes(b.phase)) throw new DomainError("invalid_command", "a takeover cannot be cancelled once begun", { field: "handoffId" });
     if (TERMINAL.includes(b.phase)) return view<TaskHandoffBody>(found);
     await this.#update(command.handoffId, (x) => ({ ...x, phase: "cancelled", blocked: undefined, history: this.#push(x, "cancelled", by.id, "cancelled; the old owner keeps the task") }), ["preparing", "blocked", "ready"]);
     await this.#letGo(by, command.handoffId);
@@ -213,6 +215,7 @@ export class HandoffService {
       const b = found.body as unknown as TaskHandoffBody;
       if (TERMINAL.includes(b.phase) || b.phase === "ready" || b.phase === "blocked") return view<TaskHandoffBody>(found);
       if (b.phase === "preparing" && b.mode === "forced") {
+        if (b.replaces !== undefined) await this.#update(b.replaces, (x) => ({ ...x, phase: "cancelled", blocked: undefined, history: this.#push(x, "cancelled", by.id, "replaced by a forced takeover") }), LIVE);
         // Force Stop is repeatable under this hand-off's own command ID, so a crash anywhere here is finished by the next pass.
         const stopped = await this.#stops.force(by, { commandId: `${id}-force`, scope: { kind: "task", id: b.taskId }, reason: `takeover: ${b.reason}`.slice(0, 500) });
         const collected = await this.#collect(b.taskId, b.from, b.to);
@@ -318,7 +321,7 @@ export class HandoffService {
     return { collectedAt: this.#runner.now(), sections, missing, ready: missing.length === 0 };
   }
 
-  async #create(by: Principal, commandId: unknown, id: string, taskId: string, projectId: string | undefined, from: Owner, to: Owner, generation: number, mode: "prepared" | "forced", reason: string, heldBefore: boolean): Promise<void> {
+  async #create(by: Principal, commandId: unknown, id: string, taskId: string, projectId: string | undefined, from: Owner, to: Owner, generation: number, mode: "prepared" | "forced", reason: string, heldBefore: boolean, replaces?: string): Promise<void> {
     const activeRef: AggregateRef = { kind: ACTIVE, id: derivedId("hnd", `active\0${taskId}`) };
     await this.#runner.command("handoff.create", { commandId: scopedCommandId(by.id, commandId), actor: by.id }, async () => ({
       payload: { taskId, to: to as unknown as JsonObject, mode, reason },
@@ -332,7 +335,7 @@ export class HandoffService {
         }
         const ref: AggregateRef = { kind: KIND, id };
         const body: TaskHandoffBody = {
-          taskId, ...(projectId === undefined ? {} : { projectId }), from, to, generation, phase: "preparing", mode, reason, requestedBy: by.id, requestedAt: at, heldBefore,
+          taskId, ...(projectId === undefined ? {} : { projectId }), from, to, generation, phase: "preparing", mode, reason, requestedBy: by.id, requestedAt: at, heldBefore, ...(replaces === undefined ? {} : { replaces }),
           history: [{ phase: "preparing", at, by: by.id, note: mode === "forced" ? "takeover requested" : "hand-off requested" }],
         };
         const pointer = clean({ handoffId: id });
