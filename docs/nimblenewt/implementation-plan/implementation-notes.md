@@ -2399,3 +2399,8 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## M04c (second part): absent agents are told what a meeting decided (2026-10-29)
 - The attendance service now has a notice sink in the running controller: `meetingNoticeSink` files a controller notice (`AgentMessageService.noticeFromController`) in the agent's inbox against the first task the decisions touch, naming the decisions, the other tasks and the acknowledgement time; the command ID is derived from the attendance key, so retries file it once, and a failure leaves the agent in the unnotified list for the sweep as before. An agent with no affected task is not sent one. Test `meetings/notice-sink.test.ts`; attendance and start tests unchanged and green.
 - Not done: the wake sink (the owner-authorized wake of a suspended agent; needs the recovery path from L03), `safeLongRunning`, chat commands, the stand-up link.
+
+## H13c (first part): the wake consumer runs each tick (2026-10-29)
+- A dispatcher loop `events.wakes` runs `WatchService.consumeWakes` with `attemptWaker`: the watched event is already in the owner's inbox, so a wake means making sure an attempt will read it. An attempt the dispatcher has running (reads at its next boundary) or waiting for a place (reads when it starts) is `woken`; no record yet, parked or finished is `deferred` and asked again next tick, so a handling never stays unwoken for good. Tests: `dispatch/loops.test.ts` (the waker's answers, the loop), `api/start-dispatch.test.ts` (the loop runs in the tick).
+- Not tested end to end: a running attempt in the real tick (needs a scripted worker in the start-level tests).
+- Not done (H13c stays planned): polling external sources, `verifyAtResume` at resume, the chat command.

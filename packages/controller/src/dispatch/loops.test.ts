@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { DomainError } from "../domain/errors.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
-import { activeAgents, attendanceLoops, budgetNoticeLoops, decisionLoops, eventLoops, meetingLoops, messageLoops, projectIds, recordLoops, recoveryLoops, standupLoops } from "./loops.js";
+import { activeAgents, attendanceLoops, budgetNoticeLoops, decisionLoops, eventLoops, meetingLoops, messageLoops, projectIds, recordLoops, attemptWaker, wakeLoops, recoveryLoops, standupLoops } from "./loops.js";
 import { buildWorld, workGrants } from "./testing/world.js";
 
 after(stopServer);
@@ -119,4 +119,17 @@ test("the meeting record sweep runs for every project, as the tick's principal (
   assert.equal(loop!.name, "meeting-records.sweep");
   await loop!.run({ id: "service:dispatcher", kind: "service" } as never);
   assert.deepEqual(seen, ["service:dispatcher:proj-a", "service:dispatcher:proj-b"]);
+});
+
+test("a watched event wakes the agent only when its attempt will read the inbox, and the wake loop asks every tick (card H13c)", async () => {
+  const states = new Map<string, string>([["att-run", "running"], ["att-wait", "waiting"], ["att-park", "parked"], ["att-done", "finished"]]);
+  const waker = attemptWaker(() => ({ get: async (_by, id) => (states.has(id) ? { state: states.get(id)! } : undefined) }), { id: "service:dispatcher", kind: "service" } as never);
+  const ask = async (attemptId: string) => waker.wake({ agent: "agt-a", taskId: "task-1", attemptId, handlingId: "h", round: 0, messageId: "m", reconcile: false, events: 1 });
+  assert.deepEqual(await Promise.all(["att-run", "att-wait", "att-park", "att-done", "att-none"].map(ask)), ["woken", "woken", "deferred", "deferred", "deferred"]);
+  assert.equal(attemptWaker(() => undefined, { id: "x", kind: "service" } as never).wake.length, 1);
+  let asked = 0;
+  const [loop] = wakeLoops({ consumeWakes: async () => { asked++; return { woken: 0, deferred: 0, scanLimited: false }; } }, waker);
+  assert.equal(loop!.name, "events.wakes");
+  await loop!.run({ id: "service:dispatcher", kind: "service" } as never); await loop!.run({ id: "service:dispatcher", kind: "service" } as never);
+  assert.equal(asked, 2);
 });

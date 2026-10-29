@@ -3,7 +3,7 @@ import type { WorkspaceOpService } from "../workspace-ops/index.js";
 import type { DecisionService } from "../decisions/index.js";
 import { DomainError } from "../domain/errors.js";
 import type { Principal } from "../security/principals.js";
-import type { EventService } from "../events/index.js";
+import type { EventService, Waker, WatchService } from "../events/index.js";
 import type { ReviewService } from "../review/index.js";
 import type { StallService } from "../health/index.js";
 import type { AttendanceService, MeetingService } from "../meetings/index.js";
@@ -190,4 +190,14 @@ export function workspaceLoops(workspace: Pick<WorkspaceOpService, "recover">): 
 /** M02c: votes whose time is up are closed, ties past the casting window fail and meeting records nobody finished are ended, for each project (the lease of `MeetingRecordService.sweep`). */
 export function recordLoops(records: Pick<MeetingRecordService, "sweep">, projects: () => Promise<readonly string[]>): DispatcherLoop[] {
   return [{ name: "meeting-records.sweep", run: async (by) => { for (const projectId of await projects()) await records.sweep(by, { projectId }); } }];
+}
+
+/** H13c: the agent whose watched event is waiting is told to look at its inbox: the waker reports `woken` once the agent's current attempt will see it, and `deferred` (tried again next tick) when there is none to wake. */
+export function wakeLoops(watches: Pick<WatchService, "consumeWakes">, waker: Waker): DispatcherLoop[] {
+  return [{ name: "events.wakes", run: async (by) => { await watches.consumeWakes(by, waker); } }];
+}
+
+/** The waker of the running controller (card H13c): an attempt that is running reads its inbox at its next boundary, and one waiting for a place reads it when it starts; anything else (no record yet, parked on an approval, finished) is tried again next tick. */
+export function attemptWaker(dispatcher: () => { get(by: Principal, attemptId: string): Promise<{ state: string } | undefined> } | undefined, by: Principal): Waker {
+  return { wake: async (r) => { const state = (await dispatcher()?.get(by, r.attemptId))?.state; return state === "running" || state === "waiting" ? "woken" : "deferred"; } };
 }
