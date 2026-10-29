@@ -2456,3 +2456,6 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 
 ## K01e (fourth part): snapshots read the columns the database has (2026-10-29)
 - Both backends' snapshot reads select only the columns of each table that exist in the database being read (SQLite `PRAGMA table_info`, PostgreSQL `information_schema.columns`), so the pre-upgrade snapshot of an older layout still works after a later migration adds a column to one of the seven tables; the missing column is absent from the row and written as null. Test in `storage/sqlite/snapshot-columns.test.ts` (a column dropped from the effects table). A backup taken this way restores only into a store of the same layout; restoring an older layout into a newer store is still refused.
+
+## M04c (third part): no harness means nothing yields (2026-10-29)
+- The dispatcher tells meeting admission that work yields at a boundary only when at least one harness is shipped and every shipped harness can stop a conversation; an empty list used to count as "every harness can". Test in `dispatch/dispatcher.test.ts`.

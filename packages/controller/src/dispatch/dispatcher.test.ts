@@ -1,3 +1,4 @@
+import { HarnessCatalog } from "../harness/index.js";
 import { isProtectedBy } from "../policy/protected-branches.js";
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
@@ -1093,6 +1094,19 @@ for (const backend of backends) {
     await c.difficulty.setProfiles(c.owner, { commandId: "sp2", expectedRevision: 1, profiles: { profiles: { default: { harness: "other", routingProfile: "r-local" } }, mapping: { unrated: "default" } } });
     assert.equal((await c.dispatcher.tick()).blocked[0]?.check, "harness");
     assert.deepEqual(emitted, ["blocker blocker"], "the owner is told through a notification of the blocker");
+  });
+
+  suite("with no harness shipped, nothing is said to yield at a boundary (card M04c)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, []));
+    await c.task("t", ann);
+    const asked: string[] = [];
+    const meetings = {
+      revalidation: async () => ({ required: false, entries: [] }),
+      admission: async (_by: unknown, q: { yieldsAtBoundary?: boolean }) => { asked.push(`yields=${q.yieldsAtBoundary}`); return { decision: "defer" as const, reason: "later" }; },
+    };
+    c.dispatcher = c.restart({ meetings: meetings as never, harnesses: HarnessCatalog.of([]) });
+    await c.dispatcher.tick();
+    assert.deepEqual(asked, ["yields=false"]);
   });
 
   suite("an effect call recorded on the ledger is never run again outside it: asked again with a local executor, or through begin, after a restart, it is settled from the ledger", async (c) => {

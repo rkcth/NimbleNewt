@@ -724,7 +724,9 @@ export class DispatcherService {
       const need = await this.#deps.meetings.revalidation(this.#deps.principal, taskId);
       if (need?.required === true) return skip("revalidation", "a meeting's decisions must be acknowledged by the agent before it continues");
       // Work yields to a meeting at a safe boundary when every harness this installation ships can stop a conversation (the route, and so the harness, is chosen after this check, so the answer cannot depend on it) (card M04c).
-      const yieldsAtBoundary = this.#deps.harnesses.list().every((h) => h.abort !== "none");
+      // With no harness shipped nothing can stop a conversation, so nothing yields (an empty list is not "every harness can").
+      const shipped = this.#deps.harnesses.list();
+      const yieldsAtBoundary = shipped.length > 0 && shipped.every((h) => h.abort !== "none");
       const advice = await this.#deps.meetings.admission(this.#deps.principal, { agent: agentId, expectedMinutes: (await this.#contractOf(taskId)).maxMinutes ?? this.#options.expectedMinutes, yieldsAtBoundary });
       if (advice.decision === "defer") return skip("meeting", "a meeting the agent attends starts before this work would end");
     }
