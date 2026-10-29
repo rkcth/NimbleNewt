@@ -2188,10 +2188,39 @@
       "existing_issue": "AII-257",
       "title": "Record activity: approvals, messages, artifact versions, chat",
       "depends_on": [
-        "C09e",
-        "H12k"
+        "C09e"
       ],
       "deliverable": "Split from C09e (2026-10-29): approval, message and artifact-version steps, chat access, the per-task explanation index",
+      "acceptance_and_verification": "Each step of a real run appears in the activity record",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "3b11648",
+          "4e8cf24"
+        ],
+        "ci_runs": [
+          "40922009179"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Approvals and messages are recorded as activity steps.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "C09g",
+      "parent": "N07",
+      "existing_issue": "AII-257",
+      "title": "Record activity: artifact versions, chat, explanation index",
+      "depends_on": [
+        "C09f",
+        "H12k"
+      ],
+      "deliverable": "Split from C09f (2026-10-29): artifact-version steps, chat access, the per-task explanation index",
       "acceptance_and_verification": "Each step of a real run appears in the activity record",
       "status": "planned",
       "research_evidence": null,
@@ -2383,6 +2412,35 @@
       ],
       "deliverable": "Split from L02b (2026-10-28): count T07 jobs, local processes and child work (uncooperative ones named, offered Force Stop), take the cleanup spend from the runtime",
       "acceptance_and_verification": "A job that ignores the request is listed as uncooperative; the cleanup budget counts real spend",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "02c9ff1",
+          "8646369"
+        ],
+        "ci_runs": [
+          "40922009179"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Running jobs are counted in the Stop inventory, read by the controller itself.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "L02d",
+      "parent": "N05",
+      "existing_issue": "AII-255",
+      "title": "Finish Stop: local processes, child work, cleanup spend",
+      "depends_on": [
+        "L02c"
+      ],
+      "deliverable": "Split from L02c (2026-10-29): count local processes and child work in the inventory (uncooperative ones named, offered Force Stop), take the cleanup spend from the runtime",
+      "acceptance_and_verification": "A process that ignores the request is listed and Force Stop offered; the cleanup spend is charged",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -2498,13 +2556,13 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
       "progress": {
         "commits": [
-          "adb8dce"
+          "a6a9d89"
         ],
         "ci_runs": [
-          "40880430804"
+          "40922009179"
         ],
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
-        "note": "A hand-off recipient must hold the right to work in the task project.",
+        "note": "A hand-off finished after a restart re-checks that its asker still holds the right to control the task.",
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
       }
     },
@@ -3622,11 +3680,39 @@
       "existing_issue": "AII-260",
       "title": "Finish event watching: source polling, resume check, chat",
       "depends_on": [
-        "H13c",
-        "H12k"
+        "H13c"
       ],
       "deliverable": "Split from H13c (2026-10-29): poll external sources, call verifyAtResume at resume, chat command",
       "acceptance_and_verification": "A resumed attempt is checked against events",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "63926b6"
+        ],
+        "ci_runs": [
+          "40922009179"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "The dispatcher polls the event sources it is given.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "H13e",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Finish event watching: real sources, chat",
+      "depends_on": [
+        "H13d",
+        "H12k"
+      ],
+      "deliverable": "Split from H13d (2026-10-29): choose and configure the sources a real installation polls, the owner chat command",
+      "acceptance_and_verification": "Events from a real source wake the right agent",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -6309,6 +6395,35 @@
       ],
       "deliverable": "Split from K01e (2026-10-29): Pi native state, a maintenance barrier, a restore entry for the owner, the back-up-now chat command, a SQLite copy that does not block the event loop",
       "acceptance_and_verification": "A restore runs from the owner interface and a nightly backup never stalls the controller",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "3131380",
+          "ba45fe2"
+        ],
+        "ci_runs": [
+          "40922009179"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "The SQLite copy runs on a worker thread and a command line lists, verifies and restores backups.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "K01g",
+      "parent": "N17",
+      "existing_issue": "AII-267",
+      "title": "Finish backup: Pi state, maintenance barrier, in-controller restore",
+      "depends_on": [
+        "K01f"
+      ],
+      "deliverable": "Split from K01f (2026-10-29): Pi native state, a maintenance barrier across stores, an owner restore from inside the running controller",
+      "acceptance_and_verification": "A restore is verified end to end including Pi state",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -7362,7 +7477,11 @@
         "K01e",
         "U12d",
         "K01f",
-        "C09f"
+        "C09f",
+        "L02d",
+        "C09g",
+        "K01g",
+        "H13e"
       ],
       "deliverable": "Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete",
       "acceptance_and_verification": "D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards",
