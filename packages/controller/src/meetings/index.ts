@@ -10,3 +10,4 @@ export type * from "./record-types.js";
 export { buildSummary, isConsistent, type Shared, type SummaryInput } from "./summary.js";
 export { BALLOT_VALUES, castingOutcome, quorumOf, tallyOf, verdictOf, type BallotValue, type CountedBallot, type VoteOutcome, type Tally, type TieBreak, type VoteVerdict } from "./votes.js";
 export { INVITATION_LIMITS, InvitationInbox, withNudge, type InvitationView, type Nudge } from "./invitations.js";
+export { meetingNoticeSink } from "./notice-sink.js";

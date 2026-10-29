@@ -2395,3 +2395,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## M04c (first part): the dispatcher says work yields at a boundary (2026-10-29)
 - The dispatcher's meeting check now passes `yieldsAtBoundary` to `AttendanceService.admission`: true when every harness the installation ships can stop a conversation (`abort` is not `none`; Pi does). It is conservative on purpose: the route, and so the harness, is chosen after this check. Test: the existing dispatcher meeting test asserts the hint.
 - Not done (M04c stays planned): `safeLongRunning` (needs T07 job knowledge), notice and wake sinks, chat commands, the stand-up link.
+
+## M04c (second part): absent agents are told what a meeting decided (2026-10-29)
+- The attendance service now has a notice sink in the running controller: `meetingNoticeSink` files a controller notice (`AgentMessageService.noticeFromController`) in the agent's inbox against the first task the decisions touch, naming the decisions, the other tasks and the acknowledgement time; the command ID is derived from the attendance key, so retries file it once, and a failure leaves the agent in the unnotified list for the sweep as before. An agent with no affected task is not sent one. Test `meetings/notice-sink.test.ts`; attendance and start tests unchanged and green.
+- Not done: the wake sink (the owner-authorized wake of a suspended agent; needs the recovery path from L03), `safeLongRunning`, chat commands, the stand-up link.

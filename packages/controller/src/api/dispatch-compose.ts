@@ -37,7 +37,7 @@ import type { InquiryService } from "../inquiries/index.js";
 import { PauseService } from "../lifecycle/index.js";
 import type { Availability } from "../conversations/index.js";
 import type { MeetingRecordService } from "../meetings/record.js";
-import { AttendanceService, InvitationInbox, MeetingService, withNudge, type InvitationSink } from "../meetings/index.js";
+import { AttendanceService, InvitationInbox, MeetingService, meetingNoticeSink, withNudge, type InvitationSink } from "../meetings/index.js";
 import { AgentMessageService } from "../messaging/index.js";
 import { NotificationService } from "../notifications/index.js";
 import type { ContractService } from "../planning/index.js";
@@ -235,7 +235,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   const attendance = AttendanceService.withEpoch(storage, epoch, { meetings, pauses, projects: i.projects, assignments: i.assignments, agents: i.agents, histories: i.histories,
     // The time an agent spends in a meeting is charged as compute: to its meeting task, or to the shared-overhead rule "meeting" (card R05d).
     charge: (u) => chargeRetry.submit(principal, { commandId: u.commandId, activity: "meeting", agentId: u.agentId, computeMs: u.computeMs, projectId: u.projectId, ...(u.taskId === undefined ? { sharedOverheadRule: "meeting" } : { taskId: u.taskId }) }).then(() => undefined),
-    ...(i.onError === undefined ? {} : { onChargeError: i.onError }), ...(i.leadMinutes === undefined ? {} : { leadMinutes: i.leadMinutes }) }, { ...ro, availability: pauses.availability });
+    ...(i.onError === undefined ? {} : { onChargeError: i.onError }), ...(i.leadMinutes === undefined ? {} : { leadMinutes: i.leadMinutes }) }, { ...ro, availability: pauses.availability, notices: meetingNoticeSink(messages) });
   const watches = WatchService.withEpoch(storage, epoch, { events, inbox: InboxService.withEpoch(storage, epoch, i.assignments), assignments: i.assignments, projects: i.projects }, ro);
   const standups = StandupService.withEpoch(storage, epoch, { meetings, assignments: i.assignments }, { ...ro, availability: pauses.availability });
   const projects = (): Promise<string[]> => projectIds(i.projects);
