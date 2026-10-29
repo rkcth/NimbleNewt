@@ -27,6 +27,7 @@ import { BuiltinCommands, type CommandService } from "../commands/index.js";
 import type { WorkingNoteService } from "../context/notes.js";
 import type { PauseService } from "../lifecycle/pause.js";
 import type { StopChoice, StopService } from "../lifecycle/stop.js";
+import type { ResumeCheckService } from "../continuation/resume.js";
 import type { HandoffService } from "../lifecycle/handoff.js";
 import type { IntegrationPolicyService } from "../policy/integration-policy.js";
 import type { Principal } from "../security/principals.js";
@@ -67,6 +68,7 @@ export interface Context {
   readonly pauses?: Pick<PauseService, "pause" | "resume" | "gate">;
   readonly cutover?: Pick<CutoverService, "disable" | "drain" | "cutover" | "reenable" | "setFailbackPolicy" | "controls" | "report" | "topology" | "tick">;
   readonly handoffs?: Pick<HandoffService, "prepare" | "complete" | "takeover" | "choose" | "cancel" | "advance" | "get" | "sweep">;
+  readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep">;
 
   readonly commands?: CommandService;
@@ -140,6 +142,7 @@ const notesOf = (c: Context): NonNullable<Context["notes"]> => c.notes ?? unavai
 const pausesOf = (c: Context): NonNullable<Context["pauses"]> => c.pauses ?? unavailable("pause");
 const cutoverOf = (c: Context): NonNullable<Context["cutover"]> => c.cutover ?? unavailable("provider drain and cutover");
 const handoffsOf = (c: Context): NonNullable<Context["handoffs"]> => c.handoffs ?? unavailable("hand-off");
+const resumesOf = (c: Context): NonNullable<Context["resumes"]> => c.resumes ?? unavailable("checked resume");
 const stopsOf = (c: Context): NonNullable<Context["stops"]> => c.stops ?? unavailable("suspend and stop");
 const integrationOf = (c: Context): NonNullable<Context["integration"]> => c.integration ?? unavailable("integration policy");
 const branchSettingsOf = (c: Context): NonNullable<Context["branchSettings"]> => c.branchSettings ?? unavailable("branch settings");
@@ -280,6 +283,22 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, ["handoffId"]); const item = await handoffsOf(c).get(c.principal, a["handoffId"] as string); if (item === undefined) throw new DomainError("not_found", "no such hand-off"); return asJson({ item }); } },
   { name: "handoff.sweep", kind: "command", summary: "Owner only: carries unfinished hand-offs on after a restart.", args: { commandId: "required" }, result: "`{ advanced: [id], failed: [id] }`.",
     run: async (c, a) => { only(a, []); if (c.principal.kind !== "owner") throw new DomainError("forbidden", "only the owner sweeps hand-offs"); return asJson(await handoffsOf(c).sweep(c.principal)); } },
+  { name: "resume.start", kind: "command", summary: "Begins a checked resume of a task from its latest complete continuation: the recorded dependencies are verified against what is true now, each change is reviewed, and the resume waits for `resume.commit`. Missing critical context, earlier effects of unknown outcome and a failed review stop it with a reason.", args: { taskId: "the task", model: "{ provider, id } the resume will run on", "previousModel?": "{ provider, id } it ran on before", after: "restart, model-change or continue", commandId: "required" },
+    result: "`{ item: { id, phase, delta, verdicts, blocked? } }`.",
+    run: async (c, a, id) => { only(a, ["taskId", "model", "previousModel", "after"]); return asJson({ item: await resumesOf(c).start(c.principal, { commandId: need(id), ...a } as never) }); } },
+  { name: "resume.commit", kind: "command", summary: "Commits a ready resume: the inputs are checked once more, and if anything changed since the review the check starts over (and stops as a blocker after three rounds). Otherwise the resume is recorded with how the context came back and what that cannot promise.", args: { checkId: "the check", "restoredBy?": "native-restore, reconstruction or restart", "limits?": "what the restoration cannot promise, as short statements", commandId: "required" },
+    result: "`{ item }`.",
+    run: async (c, a, id) => { only(a, ["checkId", "restoredBy", "limits"]); return asJson({ item: await resumesOf(c).commit(c.principal, { commandId: need(id), ...a } as never) }); } },
+  { name: "resume.retry", kind: "command", summary: "Starts a blocked resume check over once the reason has been dealt with.", args: { checkId: "the check", commandId: "required" }, result: "`{ item }`.",
+    run: async (c, a) => { only(a, ["checkId"]); return asJson({ item: await resumesOf(c).retry(c.principal, { checkId: a["checkId"] as string }) }); } },
+  { name: "resume.cancel", kind: "command", summary: "Cancels a resume check that has not been committed.", args: { checkId: "the check", commandId: "required" }, result: "`{ item }`.",
+    run: async (c, a) => { only(a, ["checkId"]); return asJson({ item: await resumesOf(c).cancel(c.principal, { checkId: a["checkId"] as string }) }); } },
+  { name: "resume.advance", kind: "command", summary: "Takes a resume check as far as it can go now (safe to repeat).", args: { checkId: "the check", commandId: "required" }, result: "`{ item }`.",
+    run: async (c, a) => { only(a, ["checkId"]); return asJson({ item: await resumesOf(c).advance(c.principal, { checkId: a["checkId"] as string }) }); } },
+  { name: "resume.get", kind: "query", summary: "A resume check, with what changed, the verdicts and the history.", args: { checkId: "the check" }, result: "`{ item }`.",
+    run: async (c, a) => { only(a, ["checkId"]); const item = await resumesOf(c).get(c.principal, a["checkId"] as string); if (item === undefined) throw new DomainError("not_found", "no such resume check"); return asJson({ item }); } },
+  { name: "resume.sweep", kind: "command", summary: "Owner only: carries unfinished resume checks on after a restart.", args: { commandId: "required" }, result: "`{ advanced: [id], failed: [id] }`.",
+    run: async (c, a) => { only(a, []); if (c.principal.kind !== "owner") throw new DomainError("forbidden", "only the owner sweeps resume checks"); return asJson(await resumesOf(c).sweep(c.principal)); } },
   { name: "grant.revoke", kind: "command", summary: "The owner takes a grant back (owner only; the revision you read must still be current). It stops counting at the next check.", args: { grantId: "the grant's ID", expectedRevision: "the revision you read", reason: "why, in the owner's words" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["grantId", "expectedRevision", "reason"]); await grantsOf(c).revoke(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
   { name: "events.configure-idle", kind: "command", summary: "Sets how long an event subscription may sit without acknowledging before it expires (owner only). A subscription that was made before this existed, or without its own time, uses this one.", args: { idleSeconds: "whole seconds, 10 to 604800" }, result: "`{ ok: true }`.", completion: { kind: "completed" },

@@ -46,7 +46,7 @@ class Fakes {
   ports: ResumePorts = {
     observe: async (): Promise<Record<string, Observation>> => ({}),
     missingContext: async () => this.missing,
-    uncertainEffects: async () => this.effects,
+    uncertainEffects: async (_t, _c) => this.effects,
     review: async (r) => { this.reviewCalls.push(r.changes.map((c) => c.id)); if (this.reviewFails) throw new Error("reviewer offline"); return Object.fromEntries(r.changes.map((c) => [c.id, { relevant: true, rationale: `${c.key} matters` }])); },
   };
 }

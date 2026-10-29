@@ -209,6 +209,16 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `resume.get`
+
+A resume check, with what changed, the verdicts and the history.
+
+Arguments:
+
+- `checkId`: the check
+
+Result: `{ item }`.
+
 #### `budget.report`
 
 A task's budget: limit, delegated to children, in flight, uncertain, spent, overrun and available, for money and for compute, with the reservations and open requests behind them. A task you may not read reads like a missing one.
@@ -1182,6 +1192,76 @@ Result: `{ item }`.
 #### `handoff.sweep`
 
 Owner only: carries unfinished hand-offs on after a restart.
+
+Arguments:
+
+- `commandId`: required
+
+Result: `{ advanced: [id], failed: [id] }`.
+
+#### `resume.start`
+
+Begins a checked resume of a task from its latest complete continuation: the recorded dependencies are verified against what is true now, each change is reviewed, and the resume waits for `resume.commit`. Missing critical context, earlier effects of unknown outcome and a failed review stop it with a reason.
+
+Arguments:
+
+- `taskId`: the task
+- `model`: { provider, id } the resume will run on
+- `previousModel` (optional): { provider, id } it ran on before
+- `after`: restart, model-change or continue
+- `commandId`: required
+
+Result: `{ item: { id, phase, delta, verdicts, blocked? } }`.
+
+#### `resume.commit`
+
+Commits a ready resume: the inputs are checked once more, and if anything changed since the review the check starts over (and stops as a blocker after three rounds). Otherwise the resume is recorded with how the context came back and what that cannot promise.
+
+Arguments:
+
+- `checkId`: the check
+- `restoredBy` (optional): native-restore, reconstruction or restart
+- `limits` (optional): what the restoration cannot promise, as short statements
+- `commandId`: required
+
+Result: `{ item }`.
+
+#### `resume.retry`
+
+Starts a blocked resume check over once the reason has been dealt with.
+
+Arguments:
+
+- `checkId`: the check
+- `commandId`: required
+
+Result: `{ item }`.
+
+#### `resume.cancel`
+
+Cancels a resume check that has not been committed.
+
+Arguments:
+
+- `checkId`: the check
+- `commandId`: required
+
+Result: `{ item }`.
+
+#### `resume.advance`
+
+Takes a resume check as far as it can go now (safe to repeat).
+
+Arguments:
+
+- `checkId`: the check
+- `commandId`: required
+
+Result: `{ item }`.
+
+#### `resume.sweep`
+
+Owner only: carries unfinished resume checks on after a restart.
 
 Arguments:
 

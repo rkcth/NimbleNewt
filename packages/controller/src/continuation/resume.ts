@@ -27,7 +27,7 @@ export interface ResumePorts {
   /** Names of context the task cannot continue without that is not there (an empty list when it is all present). */
   missingContext(taskId: string, continuation: ContinuationBody & { id: string }): Promise<readonly string[]>;
   /** Earlier effects whose outcome is unknown; they are resolved before work goes on. */
-  uncertainEffects(taskId: string): Promise<readonly string[]>;
+  uncertainEffects(taskId: string, continuation: ContinuationBody & { id: string }): Promise<readonly string[]>;
   /** An independent verdict on whether each change matters to the work, with a reason. May fail; the resume then waits at the review. */
   review(request: { taskId: string; changes: readonly DeltaItem[] }): Promise<Readonly<Record<string, { relevant: boolean; rationale: string }>>>;
 }
@@ -195,7 +195,8 @@ export class ResumeCheckService {
         continue;
       }
       if (b.phase === "verifying") {
-        const effects = await this.#ports.uncertainEffects(b.taskId);
+        const current = await this.#continuations.latest(by, b.taskId);
+        const effects = current === undefined ? [] : await this.#ports.uncertainEffects(b.taskId, current);
         if (effects.length > 0) { await this.#block(by, id, b, "effects_uncertain", `earlier effects of unknown outcome must be settled first: ${effects.slice(0, 10).join(", ")}`); continue; }
         const now = await this.#verify(by, b, true);
         const changed = now.changed;
