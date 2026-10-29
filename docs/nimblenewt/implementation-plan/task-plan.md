@@ -32,19 +32,19 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N02 / AII-252 | F01, F02, F03, F04a, F04b, F04c, F04d, F04, F04f, F04g, F04h, F04i, F04j, F04k, F04e, F09 |
 | N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06, C06b |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
-| N05 / AII-255 | L05, L05b, L01, L01b, L02, L02b, L02c, L03, L03b, L03c, L03d, L04, L04b, L04c, L06, H08, H08b |
+| N05 / AII-255 | L05, L05b, L01, L01b, L02, L02b, L02c, L03, L03b, L03c, L03d, L03e, L04, L04b, L04c, L06, H08, H08b |
 | N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A07e, A08, A08b, A08c, A09, A10, A10b, A07f, A07g |
-| N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C07e, C07f, C08, C09, C09b, C09c, C09d, C08b, C08c, C08d |
+| N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C07e, C07f, C08, C09, C09b, C09c, C09d, C09e, C08b, C08c, C08d |
 | N08 / AII-258 | R01, R02, R03, R04, R04b, R04c, R05, R05b, R05c, R05d, R05f, R05g, R05e |
 | N09 / AII-259 | U03, U03d, U03e, U05b, U04, U05, U06, U06b, U03b, U03c, U07, U09, U08, U10, U11, U11b |
-| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H07b, H07c, H07d, H07e, H02e, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H13b, H13c, H02b, H02c, H02d, H11b, H12n, H12p, H12o |
+| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H07b, H07c, H07d, H07e, H02e, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H13b, H13c, H13d, H02b, H02c, H02d, H11b, H12n, H12p, H12o |
 | N11 / AII-261 | V01, V01b, V01c, V02 |
-| N12 / AII-262 | M01b, M01c, M01d, M00, M01, M02, M02b, M02c, M03, M03b, M03c, M04, M04b, M04c, M05, M05b, M06 |
+| N12 / AII-262 | M01b, M01c, M01d, M00, M01, M02, M02b, M02c, M02d, M03, M03b, M03c, M03d, M04, M04b, M04c, M04d, M05, M05b, M06 |
 | N13 / AII-263 | U04b, U04c, U04d, T01, T02, T03, T06, T06b, T07, T07b, T08, T09, T09b, T09c, T09d |
 | N14 / AII-264 | P01b, P01c, P01, P02, P02b, P03, P04, P05, P06, P07, P08, P08b, P08c, P09, P10, P10b, P10c |
 | N15 / AII-265 | Q01, Q02, Q03, Q04, Q01b |
 | N16 / AII-266 | B01 |
-| N17 / AII-267 | K01, K01b, K01c, K01d, K02, K03, K04, K05, K06, K06b, K07 |
+| N17 / AII-267 | K01, K01e, K01b, K01c, K01d, K02, K03, K04, K05, K06, K06b, K07 |
 | N18 / AII-268 | G06, X11, X09, X10, X01, X02, X03, X04, X05, X06, X07, X08, Y01, Y02, Y03 |
 | N19 / AII-269 | D01, D02, D03, D04, D04b, D05 |
 | N07a / AII-519 | U01, U13, T04 |
@@ -791,8 +791,18 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### C09d — Record activity at every step: dispatcher, tools, messages, meetings, chat
 
 - **Parent:** N07 / AII-257.
-- **Blockers:** C09c, H12k.
+- **Status:** implemented; commits `299d568`; CI runs 40880430804; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Model route, harness and tool calls of an attempt are recorded in the task activity.
+- **Blockers:** C09c.
 - **Deliverable:** Split from C09c (2026-10-28): model and tool steps with manifests, meeting decisions, approvals, messages recording; chat access and the per-task explanation index.
+- **Acceptance and verification:** Each step of a real run appears in the activity record.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### C09e — Record activity: approvals, messages, meetings, chat
+
+- **Parent:** N07 / AII-257.
+- **Blockers:** C09d, H12k.
+- **Deliverable:** Split from C09d (2026-10-29): split-form calls, approval, meeting-decision, message and artifact-version steps, chat access, the per-task explanation index.
 - **Acceptance and verification:** Each step of a real run appears in the activity record.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
@@ -895,8 +905,18 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### L03d — Finish hand-off: chat, richer package, temporary reassignment, responsibilities
 
 - **Parent:** N05 / AII-255.
+- **Status:** implemented; commits `adb8dce`; CI runs 40880430804; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** A hand-off recipient must hold the right to work in the task project.
 - **Blockers:** L03c.
 - **Deliverable:** Split from L03c (2026-10-28): chat commands, package sections from continuation, locks, drafts, temporary reassignment with auto-return, responsibilities, recipient project access check.
+- **Acceptance and verification:** A temporary reassignment returns on its own.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### L03e — Finish hand-off: chat, richer package, temporary reassignment
+
+- **Parent:** N05 / AII-255.
+- **Blockers:** L03d.
+- **Deliverable:** Split from L03d (2026-10-29): chat commands, package sections from continuation, locks, drafts, temporary reassignment with auto-return, responsibilities.
 - **Acceptance and verification:** A temporary reassignment returns on its own.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
@@ -1281,9 +1301,19 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H13c — Finish event watching: wakes, source polling, resume check
 
 - **Parent:** N10 / AII-260.
-- **Blockers:** H13b, H12k.
+- **Status:** implemented; commits `ea505ab`; CI runs 40880430804; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The dispatcher consumes event wakes each tick.
+- **Blockers:** H13b.
 - **Deliverable:** Split from H13b (2026-10-28): consume wakes with a real waker, poll external sources, call verifyAtResume at resume, chat command.
 - **Acceptance and verification:** A matching event wakes the owner agent and a resumed attempt is checked against events.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### H13d — Finish event watching: source polling, resume check, chat
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H13c, H12k.
+- **Deliverable:** Split from H13c (2026-10-29): poll external sources, call verifyAtResume at resume, chat command.
+- **Acceptance and verification:** A resumed attempt is checked against events.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### R01 — Implement model routing and capability policy
@@ -1623,7 +1653,9 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### U04d — Put the policy in the agent context
 
 - **Parent:** N13 / AII-263.
-- **Blockers:** U04c, H12k.
+- **Status:** implemented; commits `a6b25d0`; CI runs 40880430804; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The policy that binds an agent is part of its task text at dispatch, with a note when it cannot be read.
+- **Blockers:** U04c.
 - **Deliverable:** Split from U04c (2026-10-28): the context build at dispatch includes the policy.
 - **Acceptance and verification:** A direct edit appears in the next agent context.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
@@ -1837,9 +1869,19 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### M02c — Finish meeting records: appliers, shareable checks, narrator, sweep loop, chat
 
 - **Parent:** N12 / AII-262.
+- **Status:** implemented; commits `7949e83`, `1fa9f5a`; CI runs 40880430804; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Records are swept each dispatcher tick; a decision can retitle a task through the project service.
 - **Blockers:** M02b.
 - **Deliverable:** Split from M02b (2026-10-28): the task-update applier, authority and shareable checks, the narrator, a sweep loop and chat commands for meeting records.
 - **Acceptance and verification:** Records, votes and decisions work through the running controller, and a decision applies once.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### M02d — Finish meeting records: other appliers, narrator, chat
+
+- **Parent:** N12 / AII-262.
+- **Blockers:** M02c.
+- **Deliverable:** Split from M02c (2026-10-29): appliers for grants, budgets and ownership, the narrator, chat commands for meeting records.
+- **Acceptance and verification:** A decision that changes more than a task applies once.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### M03 — Implement stand-up preparation, briefs and agenda items
@@ -1863,8 +1905,18 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### M03c — Finish stand-ups: sinks, improvements, real occurrences, chat
 
 - **Parent:** N12 / AII-262.
+- **Status:** implemented; commits `bb5b340`; CI runs 40880430804; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Improvement proposals (propose, group, decide, bring, get, list) through the state API.
 - **Blockers:** M03b.
 - **Deliverable:** Split from M03b (2026-10-28): the notice, outcome, allocation, usage and owner-item sinks, the improvement service with its timebox, briefs for a real occurrence through the API, chat commands.
+- **Acceptance and verification:** A stand-up runs end to end in the running controller.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### M03d — Finish stand-ups: sinks, real occurrences, chat
+
+- **Parent:** N12 / AII-262.
+- **Blockers:** M03c.
+- **Deliverable:** Split from M03c (2026-10-29): the notice, outcome, allocation, usage and owner-item sinks, improvement outcome delivery, briefs for a real occurrence, chat commands.
 - **Acceptance and verification:** A stand-up runs end to end in the running controller.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
@@ -1889,8 +1941,18 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### M04c — Finish meeting attendance: sinks, dispatcher hints, chat
 
 - **Parent:** N12 / AII-262.
+- **Status:** implemented; commits `9ba220f`, `d13a58c`; CI runs 40880430804; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The dispatcher tells attendance when work yields at a boundary; a notice sink tells absent agents what a meeting decided.
 - **Blockers:** M04b.
 - **Deliverable:** Split from M04b (2026-10-28): notice and wake sinks, safeLongRunning and yieldsAtBoundary from the dispatcher, chat commands, the stand-up link.
+- **Acceptance and verification:** An absent agent is woken and told what was decided.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### M04d — Finish meeting attendance: wake sinks, chat, stand-up link
+
+- **Parent:** N12 / AII-262.
+- **Blockers:** M04c.
+- **Deliverable:** Split from M04c (2026-10-29): wake sinks, chat commands, the stand-up link.
 - **Acceptance and verification:** An absent agent is woken and told what was decided.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
@@ -2177,9 +2239,19 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### K01 — Implement consistent backup and restore
 
 - **Parent:** N17 / AII-267.
+- **Status:** implemented; commits `d019c35`, `4f60444`, `ad9ec43`; CI runs 40880430804; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Verified backups of the database and artifact blobs, nightly run with retention, back-up-now operation, restore, and a pre-upgrade snapshot.
 - **Blockers:** S06, F04, L02, S05.
 - **Deliverable:** Both-backend manifested backup/export and restore runner including Pi state; nightly backups retaining 7 daily and 4 weekly copies plus pre-upgrade snapshot, and a 'back up now' command; first-release backup is this simple built-in one (owner decision 2026-10-22), the configurable system is K01c.
 - **Acceptance and verification:** Portable recovery folder from consistent database snapshots and Pi/artifact manifest; coordinate maintenance barrier across stores; restore into empty install verifies artifacts/versions; separate secret recovery (secret values go into a backup only when encrypted backup K01b is on); uncertain later effects not replayed; interrupted backup never labeled complete; never sync live SQLite files as backup.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### K01e — Finish backup: Pi state, maintenance barrier, owner restore, chat, off-tick nightly run
+
+- **Parent:** N17 / AII-267.
+- **Blockers:** K01.
+- **Deliverable:** Split from K01 (2026-10-29): Pi native state, a maintenance barrier, a restore entry for the owner, the back-up-now chat command, running the nightly backup off the dispatcher tick, per-version snapshot columns, taking the blob lock before the table dump, backup.now commandId.
+- **Acceptance and verification:** A restore runs from the owner interface and a nightly backup never stalls dispatching.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### K01b — Implement encrypted backups with passcode and recovery-file unlock
@@ -2525,7 +2597,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d.
+- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e.
 - **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
 - **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
