@@ -199,6 +199,16 @@ Arguments:
 
 Result: `{ report: { routingApplied, inFlightRemaining, safeToStop, routesAffected, drainUntil?, possibleCharges, … } }`.
 
+#### `handoff.get`
+
+A hand-off, with its package, readiness and history.
+
+Arguments:
+
+- `handoffId`: the hand-off
+
+Result: `{ item }`.
+
 #### `budget.report`
 
 A task's budget: limit, delegated to children, in flight, uncertain, spent, overrun and available, for money and for compute, with the reservations and open requests behind them. A task you may not read reads like a missing one.
@@ -1094,6 +1104,90 @@ Arguments:
 - `commandId`: required
 
 Result: `{ revision, replayed }`.
+
+#### `handoff.prepare`
+
+Starts a prepared hand-off of a task to another agent: the task is suspended at a checkpoint, a package is collected (brief, acceptance criteria, versions, questions, work done and unfinished, next action, …), and it is ready to be completed. Nothing moves until you complete it. One at a time per task.
+
+Arguments:
+
+- `taskId`: the task
+- `to`: { kind: "agent", id }
+- `reason`: why
+- `deadlineMs`: optional deadline for the suspension
+- `commandId`: required
+
+Result: `{ id, phase, package: { sections, missing, ready }, blocked? }`.
+
+#### `handoff.complete`
+
+Moves the task to the recipient in one fenced step. A package with required sections missing is refused unless `acceptGaps` is true, which is recorded.
+
+Arguments:
+
+- `handoffId`: the hand-off
+- `acceptGaps`: true to hand over an incomplete package
+- `commandId`: required
+
+Result: `{ item: { id, phase, … } }`.
+
+#### `handoff.takeover`
+
+Forced takeover for a task whose owner cannot prepare: Force Stop, the package as it can be collected, the move, and a recorded exception listing missing cleanup and uncertain effects.
+
+Arguments:
+
+- `taskId`: the task
+- `to`: { kind: "agent", id }
+- `reason`: why
+- `commandId`: required
+
+Result: `{ item: { id, phase, exception } }`.
+
+#### `handoff.choose`
+
+Answers a blocked hand-off: wait, force-takeover or cancel (the old owner keeps the task).
+
+Arguments:
+
+- `handoffId`: the hand-off
+- `choice`: wait, force-takeover or cancel
+- `reason`: why (for a takeover)
+- `commandId`: required
+
+Result: `{ item }`.
+
+#### `handoff.cancel`
+
+Ends a hand-off that has not moved the task; the old owner keeps it and a hold the hand-off added is lifted.
+
+Arguments:
+
+- `handoffId`: the hand-off
+- `commandId`: required
+
+Result: `{ item }`.
+
+#### `handoff.advance`
+
+Takes a hand-off as far as it can go now (safe to repeat).
+
+Arguments:
+
+- `handoffId`: the hand-off
+- `commandId`: required
+
+Result: `{ item }`.
+
+#### `handoff.sweep`
+
+Owner only: carries unfinished hand-offs on after a restart.
+
+Arguments:
+
+- `commandId`: required
+
+Result: `{ advanced: [id], failed: [id] }`.
 
 #### `grant.revoke`
 

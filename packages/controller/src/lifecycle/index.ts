@@ -6,3 +6,4 @@ export {
 export { STOP_CHOICES, STOP_LIMITS, StopService, type InventoryItem, type StopChoice, type StopIntentBody, type StopMode, type StopOutcome, type StopPhase, type StopPorts } from "./stop.js";
 export { dispatchStopPorts } from "./dispatch-ports.js";
 export { HANDOFF_LIMITS, HANDOFF_SECTIONS, HandoffService, REQUIRED_SECTIONS, type TaskHandoffBody, type HandoffPhase, type HandoffSection, type HandoffSources } from "./handoff.js";
+export { controllerHandoffSources } from "./handoff-sources.js";

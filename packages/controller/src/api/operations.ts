@@ -27,6 +27,7 @@ import { BuiltinCommands, type CommandService } from "../commands/index.js";
 import type { WorkingNoteService } from "../context/notes.js";
 import type { PauseService } from "../lifecycle/pause.js";
 import type { StopChoice, StopService } from "../lifecycle/stop.js";
+import type { HandoffService } from "../lifecycle/handoff.js";
 import type { IntegrationPolicyService } from "../policy/integration-policy.js";
 import type { Principal } from "../security/principals.js";
 import type { SecureApi } from "../security/secured.js";
@@ -65,6 +66,7 @@ export interface Context {
 
   readonly pauses?: Pick<PauseService, "pause" | "resume" | "gate">;
   readonly cutover?: Pick<CutoverService, "disable" | "drain" | "cutover" | "reenable" | "setFailbackPolicy" | "controls" | "report" | "topology" | "tick">;
+  readonly handoffs?: Pick<HandoffService, "prepare" | "complete" | "takeover" | "choose" | "cancel" | "advance" | "get" | "sweep">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep">;
 
   readonly commands?: CommandService;
@@ -137,6 +139,7 @@ const branchesOf = (c: Context): ContextBranchService => c.branches ?? unavailab
 const notesOf = (c: Context): NonNullable<Context["notes"]> => c.notes ?? unavailable("working notes");
 const pausesOf = (c: Context): NonNullable<Context["pauses"]> => c.pauses ?? unavailable("pause");
 const cutoverOf = (c: Context): NonNullable<Context["cutover"]> => c.cutover ?? unavailable("provider drain and cutover");
+const handoffsOf = (c: Context): NonNullable<Context["handoffs"]> => c.handoffs ?? unavailable("hand-off");
 const stopsOf = (c: Context): NonNullable<Context["stops"]> => c.stops ?? unavailable("suspend and stop");
 const integrationOf = (c: Context): NonNullable<Context["integration"]> => c.integration ?? unavailable("integration policy");
 const branchSettingsOf = (c: Context): NonNullable<Context["branchSettings"]> => c.branchSettings ?? unavailable("branch settings");
@@ -255,6 +258,28 @@ export const OPERATIONS: readonly Operation[] = [
   { name: "routing.report", kind: "query", summary: "The three facts about taking a target out of service, kept apart: routing applied, requests still running on it, and whether it is safe to stop; with possible charges.", args: { level: "model, endpoint, account, provider or service", name: "which one" },
     result: "`{ report: { routingApplied, inFlightRemaining, safeToStop, routesAffected, drainUntil?, possibleCharges, … } }`.",
     run: async (c, a) => { only(a, ["level", "name"]); return asJson({ report: await cutoverOf(c).report(c.principal, a as never) }); } },
+  { name: "handoff.prepare", kind: "command", summary: "Starts a prepared hand-off of a task to another agent: the task is suspended at a checkpoint, a package is collected (brief, acceptance criteria, versions, questions, work done and unfinished, next action, …), and it is ready to be completed. Nothing moves until you complete it. One at a time per task.", args: { taskId: "the task", to: "{ kind: \"agent\", id }", reason: "why", deadlineMs: "optional deadline for the suspension", commandId: "required" },
+    result: "`{ id, phase, package: { sections, missing, ready }, blocked? }`.",
+    run: async (c, a, id) => { only(a, ["taskId", "to", "reason", "deadlineMs"]); return asJson({ item: await handoffsOf(c).prepare(c.principal, { commandId: need(id), ...a } as never) }); } },
+  { name: "handoff.complete", kind: "command", summary: "Moves the task to the recipient in one fenced step. A package with required sections missing is refused unless `acceptGaps` is true, which is recorded.", args: { handoffId: "the hand-off", acceptGaps: "true to hand over an incomplete package", commandId: "required" },
+    result: "`{ item: { id, phase, … } }`.",
+    run: async (c, a, id) => { only(a, ["handoffId", "acceptGaps"]); return asJson({ item: await handoffsOf(c).complete(c.principal, { commandId: need(id), ...a } as never) }); } },
+  { name: "handoff.takeover", kind: "command", summary: "Forced takeover for a task whose owner cannot prepare: Force Stop, the package as it can be collected, the move, and a recorded exception listing missing cleanup and uncertain effects.", args: { taskId: "the task", to: "{ kind: \"agent\", id }", reason: "why", commandId: "required" },
+    result: "`{ item: { id, phase, exception } }`.",
+    run: async (c, a, id) => { only(a, ["taskId", "to", "reason"]); return asJson({ item: await handoffsOf(c).takeover(c.principal, { commandId: need(id), ...a } as never) }); } },
+  { name: "handoff.choose", kind: "command", summary: "Answers a blocked hand-off: wait, force-takeover or cancel (the old owner keeps the task).", args: { handoffId: "the hand-off", choice: "wait, force-takeover or cancel", reason: "why (for a takeover)", commandId: "required" },
+    result: "`{ item }`.",
+    run: async (c, a, id) => { only(a, ["handoffId", "choice", "reason"]); return asJson({ item: await handoffsOf(c).choose(c.principal, { commandId: need(id), ...a } as never) }); } },
+  { name: "handoff.cancel", kind: "command", summary: "Ends a hand-off that has not moved the task; the old owner keeps it and a hold the hand-off added is lifted.", args: { handoffId: "the hand-off", commandId: "required" },
+    result: "`{ item }`.",
+    run: async (c, a) => { only(a, ["handoffId"]); return asJson({ item: await handoffsOf(c).cancel(c.principal, { handoffId: a["handoffId"] as string }) }); } },
+  { name: "handoff.advance", kind: "command", summary: "Takes a hand-off as far as it can go now (safe to repeat).", args: { handoffId: "the hand-off", commandId: "required" },
+    result: "`{ item }`.",
+    run: async (c, a) => { only(a, ["handoffId"]); return asJson({ item: await handoffsOf(c).advance(c.principal, { handoffId: a["handoffId"] as string }) }); } },
+  { name: "handoff.get", kind: "query", summary: "A hand-off, with its package, readiness and history.", args: { handoffId: "the hand-off" }, result: "`{ item }`.",
+    run: async (c, a) => { only(a, ["handoffId"]); const item = await handoffsOf(c).get(c.principal, a["handoffId"] as string); if (item === undefined) throw new DomainError("not_found", "no such hand-off"); return asJson({ item }); } },
+  { name: "handoff.sweep", kind: "command", summary: "Owner only: carries unfinished hand-offs on after a restart.", args: { commandId: "required" }, result: "`{ advanced: [id], failed: [id] }`.",
+    run: async (c, a) => { only(a, []); if (c.principal.kind !== "owner") throw new DomainError("forbidden", "only the owner sweeps hand-offs"); return asJson(await handoffsOf(c).sweep(c.principal)); } },
   { name: "grant.revoke", kind: "command", summary: "The owner takes a grant back (owner only; the revision you read must still be current). It stops counting at the next check.", args: { grantId: "the grant's ID", expectedRevision: "the revision you read", reason: "why, in the owner's words" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["grantId", "expectedRevision", "reason"]); await grantsOf(c).revoke(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
   { name: "events.configure-idle", kind: "command", summary: "Sets how long an event subscription may sit without acknowledging before it expires (owner only). A subscription that was made before this existed, or without its own time, uses this one.", args: { idleSeconds: "whole seconds, 10 to 604800" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
