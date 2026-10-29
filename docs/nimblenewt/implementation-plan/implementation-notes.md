@@ -2494,3 +2494,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## C09f (first part): approvals are steps in the task's activity (2026-10-29)
 - `ReviewService` takes `onDecided`, called after a final verdict (allow or deny, by an agent reviewer or the owner) with the request, the task, who decided, the tool and the reason; an escalation or a request for context is not reported. `startController` records it as an `approval` step on the task (with a reference to the review), written by a service identity with no grants, under a command ID derived from the request and verdict so a repeat records once. A failure never changes the verdict. Test in `review/routing.test.ts` on all four backends.
 - Not done (C09f stays planned): message and artifact-version steps, chat access, the explanation index.
+
+## C09f (second part): messages are steps in the task's activity (2026-10-29)
+- `AgentMessageService` takes `onSent`, called once a message is accepted (a replay calls it again with the same message ID): `startController` records an `owner-message` or `agent-message` step on the task with who sent it, to whom, its class and purpose and a reference to the message, never its text, under the command ID `msg-act:<message>` so it is recorded once. A failure never changes the message. Test in `api/start-message.test.ts`.
+- Not done (C09f stays planned): artifact-version steps, chat access, the explanation index.

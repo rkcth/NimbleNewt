@@ -27,6 +27,13 @@ test("an informational message sent through the state API reaches the agent at i
     const sent = await call(boot.token, "message.send", { taskId: task, to: pid, class: "informational", purpose: "weather", text: "frost tonight" }, "m1");
     assert.ok(sent.ok, JSON.stringify(sent));
     assert.equal((await call(boot.token, "message.send", { taskId: task, to: pid, class: "informational", purpose: "weather", text: "frost tonight" }, "m1")).result.replayed, true);
+    // The message is a step in the task's activity: who, to whom, the class and purpose, never the text.
+    const steps = (await call(boot.token, "activity.steps", { taskId: task })).result.steps as { kind: string; summary: string }[];
+    const step = steps.find((x) => x.kind === "owner-message");
+    assert.ok(step, JSON.stringify(steps));
+    assert.match(step.summary, /informational message: weather/);
+    assert.doesNotMatch(step.summary, /frost/, "the text stays in the message");
+    assert.equal(steps.filter((x) => x.kind === "owner-message").length, 1, "the replayed send recorded nothing more");
     const read = await call(tok, "message.readable", { boundary: "check-in" });
     assert.ok(read.ok, JSON.stringify(read));
     assert.equal(read.result.item.items.length, 1);

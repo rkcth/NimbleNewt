@@ -164,6 +164,11 @@ export interface AgentMessageOptions extends RunnerOptions {
   /** For questions to the owner (card H04's inquiries carry them). */
   readonly inquiries?: InquiryService;
   readonly notifications?: NotificationService;
+  /**
+   * Told when a message has been accepted, for the task's activity record (card C09f): who sent it, to whom, its class and purpose, never its text (the text is an agent's words and stays in the message). Best effort and repeatable
+   * (the caller derives a command ID from the message ID); a failure never changes the message.
+   */
+  readonly onSent?: (event: { readonly messageId: string; readonly taskId: string; readonly sender: string; readonly ownerSent: boolean; readonly to: string; readonly class: string; readonly purpose: string }) => Promise<void>;
   /** Test and tuning hooks: the cap on open deadline requests (default 1000) and the places above it kept for the owner (default 50). */
   readonly deadlineCap?: number;
   readonly ownerDeadlineReserve?: number;
@@ -236,6 +241,7 @@ export class AgentMessageService {
     })));
     const stored = (await this.#runner.get("agent-message", result.id))?.body as unknown as AgentMessageBody | undefined;
     if (stored === undefined) throw new DomainError("unavailable", "the message was accepted but cannot be read back");
+    if (this.#o.onSent !== undefined) { try { await this.#o.onSent({ messageId: result.id, taskId: stored.taskId, sender: by.id, ownerSent: by.kind === "owner", to: stored.to, class: stored.effectiveClass, purpose: stored.purpose }); } catch { /* the record of a message never changes it */ } }
     const coalesced = result.id !== newId;
     let woke = false;
     if (stored.effectiveClass === "blocking-dependency" && stored.state === "accepted") woke = (await this.#tryWake(result.id)) === "woke";

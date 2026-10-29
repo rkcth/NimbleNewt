@@ -301,7 +301,9 @@ export async function startController(options: StartOptions): Promise<Controller
     const responsibilities = ResponsibilityService.withEpoch(storage, epoch);
     // Questions to the owner (card U12): agents ask through the API, the owner sees and answers them; the owner is told through the notifications.
     const notifications = NotificationService.withEpoch(storage, epoch);
-    const messages = AgentMessageService.withEpoch(storage, epoch, { availability: pauses.availability, taskPaused: (t) => pauses.isPaused(t), guard: (t) => pauses.guard(t), waits, assignments, inquiries, notifications });
+    const messages = AgentMessageService.withEpoch(storage, epoch, {
+      onSent: async (e) => { await activity.record({ id: "service:messages", kind: "service", name: "messages", grants: [] } as Principal, { commandId: `msg-act:${e.messageId}`, taskId: e.taskId, kind: e.ownerSent ? "owner-message" : "agent-message", summary: `${e.sender} sent ${e.to} a ${e.class} message: ${e.purpose}`.slice(0, 300), manifest: { refs: [{ kind: "agent-message", id: e.messageId }] } } as never); },
+      availability: pauses.availability, taskPaused: (t) => pauses.isPaused(t), guard: (t) => pauses.guard(t), waits, assignments, inquiries, notifications });
     const branches = ContextBranchService.withEpoch(storage, epoch, { histories, retrieval });
     // Decisions recorded here block the next action of affected tasks through the stored guard; interrupting a generation already running is the dispatcher's own instance of the service (card C08b).
     const decisions = DecisionService.withEpoch(storage, epoch, { events: EventService.withEpoch(storage, epoch), effects: EffectService.withEpoch(storage, epoch, assignments) });
