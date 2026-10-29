@@ -32,6 +32,11 @@ test("a task is handed to another agent through the state API: prepared, package
     assert.equal((await call(boot.token, "handoff.prepare", { taskId: task, to: { kind: "agent", id: "agt-zzzzzzzzzzzzzzzzzzzz" }, reason: "x" }, "h1")).error.code, "invalid_command");
     assert.equal((await call(boot.token, "handoff.prepare", { taskId: task, to: { kind: "agent", id: a }, reason: "x" }, "h2")).error.code, "invalid_command");
 
+    // An agent with no right to work in the project cannot take the task (card L03d); once it has the right the hand-off goes ahead.
+    const noRight = await call(boot.token, "handoff.prepare", { taskId: task, to: { kind: "agent", id: b }, reason: "A is going on leave" }, "h2b");
+    assert.equal(noRight.error.code, "invalid_command");
+    assert.match(noRight.error.message, /no right to work/);
+    await c.services.grants.grant(rob, { commandId: "g-b", grantee: `agent:${b}`, action: "attempt.work", project, source: "direct", basis: "test" });
     const prepared = await call(boot.token, "handoff.prepare", { taskId: task, to: { kind: "agent", id: b }, reason: "A is going on leave" }, "h3");
     assert.ok(prepared.ok, JSON.stringify(prepared));
     const item = prepared.result.item;
@@ -70,6 +75,7 @@ test("a hand-off left mid-transfer when the controller stopped is finished by th
     task = (await call("task.create", { projectId: project, title: "weed", description: "north beds" }, "t1")).result.id as string;
     const a = (await c.services.agents.create(rob, { commandId: "ag-a", friendlyName: "A" })).id;
     b = (await c.services.agents.create(rob, { commandId: "ag-b", friendlyName: "B" })).id;
+    await c.services.grants.grant(rob, { commandId: "g-b", grantee: `agent:${b}`, action: "attempt.work", project, source: "direct", basis: "test" });
     await call("task.transition", { taskId: task, to: "ready", expectedRevision: 1 }, "tr1");
     await call("task.assign", { taskId: task, owner: { kind: "agent", id: a } }, "as1");
     const prepared = await call("handoff.prepare", { taskId: task, to: { kind: "agent", id: b }, reason: "leave" }, "h1");

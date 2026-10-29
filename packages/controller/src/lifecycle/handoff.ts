@@ -32,7 +32,7 @@ const LIVE: readonly HandoffPhase[] = ["preparing", "blocked", "ready", "transfe
 export interface HandoffSources {
   collect(request: { taskId: string; from: Owner; to: Owner }): Promise<{ sections: Readonly<Record<string, string>> }>;
   /** Why this recipient cannot take the task (retired, paused, wrong kind), or undefined. */
-  ineligible?(to: Owner): Promise<string | undefined>;
+  ineligible?(to: Owner, task: { readonly taskId: string }): Promise<string | undefined>;
 }
 
 export interface TaskHandoffBody {
@@ -118,7 +118,7 @@ export class HandoffService {
     const target = await this.#pauses.authorizeControl(by, scope);
     const { assignment, from } = await this.#currentOwner(scope.id);
     if (sameOwner(from, to)) invalid("to", "is already the owner of the task");
-    const why = await this.#sources.ineligible?.(to);
+    const why = await this.#sources.ineligible?.(to, { taskId: scope.id });
     if (why !== undefined) throw new DomainError("invalid_command", `${to.kind}:${to.id} cannot take the task: ${why}`, { field: "to" });
     const id = derivedId("hnd", scopedCommandId(by.id, command.commandId));
     const heldBefore = (await this.#pauses.gate(by, scope))?.intent === "pause";
@@ -159,7 +159,7 @@ export class HandoffService {
     if (prior !== undefined) return this.advance(by, { handoffId: id }); // the same takeover sent again answers as recorded
     const { assignment, from } = await this.#currentOwner(scope.id);
     if (sameOwner(from, to)) invalid("to", "is already the owner of the task");
-    const why = await this.#sources.ineligible?.(to);
+    const why = await this.#sources.ineligible?.(to, { taskId: scope.id });
     if (why !== undefined) throw new DomainError("invalid_command", `${to.kind}:${to.id} cannot take the task: ${why}`, { field: "to" });
     // A prepared hand-off already under way is taken over by this one: it ends as cancelled and the takeover stands alone.
     const active = await this.#activeId(scope.id);

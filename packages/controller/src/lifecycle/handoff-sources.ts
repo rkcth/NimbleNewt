@@ -13,6 +13,8 @@ export function controllerHandoffSources(deps: {
   contracts: Pick<ContractService, "runner">;
   /** The state of an agent record, or undefined when there is none. */
   agentState(id: string): Promise<"active" | "retired" | undefined>;
+  /** Whether the agent holds the right to work on tasks of the project (card L03d): a task is not handed to an agent that could not act on it. Without it the access is not checked. */
+  canWork?(agentId: string, projectId: string): Promise<boolean>;
   /** Extra sections from services that hold them (continuation, locks, background operations), each already limited to what the recipient may see. */
   more?: (request: { taskId: string; from: Owner; to: Owner }) => Promise<Readonly<Record<string, string>>>;
 }): HandoffSources {
@@ -28,10 +30,14 @@ export function controllerHandoffSources(deps: {
       Object.assign(sections, await deps.more?.({ taskId, from, to }));
       return { sections };
     },
-    async ineligible(to) {
+    async ineligible(to, { taskId }) {
       if (to.kind !== "agent") return `${to.kind} is not something a task can be handed to`;
       const state = await deps.agentState(to.id);
-      return state === undefined ? "no such agent" : state === "retired" ? "that agent is retired" : undefined;
+      if (state === undefined) return "no such agent";
+      if (state === "retired") return "that agent is retired";
+      const projectId = (await deps.getTask(taskId))?.projectId;
+      if (deps.canWork !== undefined && projectId !== undefined && !(await deps.canWork(to.id, projectId))) return "that agent has no right to work in the task's project";
+      return undefined;
     },
   };
 }
