@@ -261,7 +261,7 @@ export class HandoffService {
 
   /** Carries every unfinished hand-off on after a restart. A hand-off in transferring is finished; one waiting on preparation looks again. */
   async sweep(by: Principal): Promise<{ advanced: string[]; failed: string[] }> {
-    if (by.kind !== "owner") throw new DomainError("forbidden", `${by.id} may not sweep hand-offs`);
+    if (by.kind !== "owner" && by.kind !== "service") throw new DomainError("forbidden", `${by.id} may not sweep hand-offs`);
     const advanced: string[] = []; const failed: string[] = [];
     for (let after: string | undefined; ;) {
       const page = await this.#runner.list(KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 100 });

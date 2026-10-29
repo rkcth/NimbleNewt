@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
+import { ManualTimer } from "../dispatch/testing/timer.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -47,5 +48,40 @@ test("a task is handed to another agent through the state API: prepared, package
     assert.equal(owner.owner.id, b);
     assert.equal((await call(boot.token, "handoff.sweep", {}, "sw")).ok, true);
     assert.equal((await call(zed, "handoff.sweep", {}, "sw2")).error.code, "forbidden");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("a hand-off left mid-transfer when the controller stopped is finished by the running controller's own sweep, once (card L03c)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-handoff-"));
+  const file = join(d, "c.sqlite");
+  const open = () => startController({ storage: { kind: "sqlite", path: file }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer(), intervalMs: 1000 } });
+  let c = await open();
+  let hid = "";
+  let task = ""; let b = ""; let token = "";
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    token = boot.token;
+    const rob = await c.services.principals.authenticate(boot.token);
+    const call = async (op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    const project = (await call("project.create", { name: "Garden" }, "p1")).result.id as string;
+    task = (await call("task.create", { projectId: project, title: "weed", description: "north beds" }, "t1")).result.id as string;
+    const a = (await c.services.agents.create(rob, { commandId: "ag-a", friendlyName: "A" })).id;
+    b = (await c.services.agents.create(rob, { commandId: "ag-b", friendlyName: "B" })).id;
+    await call("task.transition", { taskId: task, to: "ready", expectedRevision: 1 }, "tr1");
+    await call("task.assign", { taskId: task, owner: { kind: "agent", id: a } }, "as1");
+    const prepared = await call("handoff.prepare", { taskId: task, to: { kind: "agent", id: b }, reason: "leave" }, "h1");
+    hid = prepared.result.item.id;
+    // The controller died after writing "transferring" and before the transfer.
+    const rec = await c.storage.getAggregate({ kind: "handoff", id: hid });
+    const left = { ...(rec!.body as Record<string, unknown>), phase: "transferring" } as never;
+    await c.storage.applyOperation({ operationId: "left", epoch: c.epoch, actor: "owner:rob", correlationId: "left", at: new Date().toISOString(), changes: [{ type: "update", ref: { kind: "handoff", id: hid }, expectedRevision: rec!.revision, body: left }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
+  } finally { await c.close(); }
+  c = await open();
+  try {
+    await c.dispatch!.dispatcher.tick();
+    const after = await c.storage.getAggregate({ kind: "handoff", id: hid });
+    assert.equal((after!.body as { phase: string }).phase, "transferred");
+    const owner = (await c.api.handle(token, { v: 1, op: "assignment.get", args: { taskId: task } } as never)) as any;
+    assert.equal(owner.result.item.owner.id, b, "moved to the new owner");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

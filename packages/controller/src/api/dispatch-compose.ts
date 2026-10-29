@@ -48,6 +48,12 @@ import type { StopService } from "../lifecycle/stop.js";
 import { StandupService } from "../standups/index.js";
 import type { ControllerStorage } from "../storage/types.js";
 
+/**
+ * Finishing what a request already started (a suspension, a stop, a hand-off, a checked resume) after a restart is not a new decision: whoever was entitled to ask did, and the record says so. The dispatcher's service principal holds no
+ * control grants of its own, so the sweeps run with its identity at the owner's level of control, in this process only (no API operation reaches it); the audit still names the dispatcher as the actor.
+ */
+const recovering = (by: Principal): Principal => ({ ...by, kind: "owner" });
+
 /** What the operator gives the controller to run the dispatcher (card H12c). Absent from `StartOptions`: no dispatcher is built and no loop runs. */
 /** The worker process's context limits for an order, in the shape of the channel's `ChannelContext` (the controller does not depend on the contracts package; the host's `context` option takes it structurally). */
 export interface WorkerContextLimits { readonly toolOutputBytes?: number; readonly toolOutputLines?: number; readonly compaction?: { readonly timeoutMs?: number; readonly fallback?: "extractive" } }
@@ -161,6 +167,8 @@ export interface ComposeInput {
   readonly workspaceOps?: Pick<WorkspaceOpService, "recover">;
   /** Suspensions and stops the controller was carrying out are carried on each tick, and at start-up by the first one (card L02b). */
   readonly stops?: Pick<StopService, "sweep">;
+  /** Unfinished hand-offs and checked resumes are carried on the same way (cards L03c, L04c). */
+  readonly sweeps?: readonly { readonly name: string; readonly sweep: (by: Principal) => Promise<unknown> }[];
   /** The stall detection and the reconciler the controller built; the dispatcher's tick runs them (card L01b). */
   readonly recovery?: { readonly stall: Pick<StallService, "scan"> & Partial<Pick<StallService, "reportFromRelay">>; readonly reconciler: { runPass(): Promise<unknown> } };
   readonly onError?: (error: unknown) => void;
@@ -231,7 +239,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   let stallNotices = 0;
   const loops: DispatcherLoop[] = [
     { name: "charge-retry", run: (by) => chargeRetry.sweep(by) },
-    ...(i.stops === undefined ? [] : [{ name: "stops.sweep", run: async (by: Principal) => { await i.stops!.sweep(by); } }]), ...messageLoops(messages, () => activeAgents(storage)), ...(i.workspaceOps === undefined ? [] : workspaceLoops(i.workspaceOps)), ...budgetNoticeLoops(budgets, (n) => { const { purpose, text } = holderNotice(n); return messages.noticeFromController({ commandId: `bgt-hold-${n.requestId}`, taskId: n.parentTaskId ?? n.taskId, to: n.to, purpose, text, admit: "budget.manage" }); }), ...attendanceLoops(attendance), ...meetingLoops(meetings, projects), ...standupLoops(standups, meetings, projects), ...eventLoops(events), ...watchLoops(watches), ...reviewLoops(i.reviews, projects), ...decisionLoops(decisions, projects),
+    ...(i.stops === undefined ? [] : [{ name: "stops.sweep", run: async (by: Principal) => { await i.stops!.sweep(recovering(by)); } }]), ...(i.sweeps ?? []).map((s) => ({ name: s.name, run: async (by: Principal) => { await s.sweep(recovering(by)); } })), ...messageLoops(messages, () => activeAgents(storage)), ...(i.workspaceOps === undefined ? [] : workspaceLoops(i.workspaceOps)), ...budgetNoticeLoops(budgets, (n) => { const { purpose, text } = holderNotice(n); return messages.noticeFromController({ commandId: `bgt-hold-${n.requestId}`, taskId: n.parentTaskId ?? n.taskId, to: n.to, purpose, text, admit: "budget.manage" }); }), ...attendanceLoops(attendance), ...meetingLoops(meetings, projects), ...standupLoops(standups, meetings, projects), ...eventLoops(events), ...watchLoops(watches), ...reviewLoops(i.reviews, projects), ...decisionLoops(decisions, projects),
     ...(i.recovery === undefined ? [] : recoveryLoops(i.recovery.stall, i.recovery.reconciler, () => notifications.emitFromController({ commandId: `stall-off:${epoch}:${++stallNotices}`, kind: "maintenance", ref: { kind: "principal", id: "dispatcher" }, detail: "Stall detection is not running: the dispatcher does not hold the recovery.stall-scan right. Grant it that right to turn stall detection on." }), () => i.principals.authenticate(issued.token))),
   ];
   // The local worker host gets its guards here, bound to the services built above (card H12k); the dispatcher then has it among its workers.

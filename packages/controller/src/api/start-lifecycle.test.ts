@@ -50,6 +50,7 @@ test("a team and the whole installation can be suspended and stopped, and an int
   const file = join(d, "c.sqlite");
   const open = () => startController({ storage: { kind: "sqlite", path: file }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer(), intervalMs: 1000 } });
   let c = await open();
+  let intent = "";
   try {
     const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
     const rob = await c.services.principals.authenticate(boot.token);
@@ -63,6 +64,7 @@ test("a team and the whole installation can be suspended and stopped, and an int
     assert.ok(whole.ok, JSON.stringify(whole));
     assert.equal(whole.result.outcome.state, "suspended");
 
+    intent = stopped.result.intentId;
     // An intent the controller stopped in the middle of: written as preparing, never advanced. The next start finishes it on its own.
     const rec = await c.storage.getAggregate({ kind: "stop-intent", id: stopped.result.intentId });
     const { outcome: _gone, ...rest } = rec!.body as Record<string, unknown>;
@@ -73,8 +75,8 @@ test("a team and the whole installation can be suspended and stopped, and an int
   c = await open();
   try {
     await c.dispatch!.dispatcher.tick();
-    const after = await c.storage.getAggregate({ kind: "stop-intent", id: (await c.storage.listAggregates("stop-intent", { limit: 10 }))[0]!.id });
-    assert.ok(["done", "recovery-required"].includes((after!.body as { phase: string }).phase), "no intent is left preparing");
+    const after = await c.storage.getAggregate({ kind: "stop-intent", id: intent });
+    assert.equal((after!.body as { phase: string }).phase, "done", "the intent left preparing was finished by the running controller");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
