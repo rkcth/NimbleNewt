@@ -2214,6 +2214,18 @@ Arguments:
 
 Result: `{ woken, stillQueued, downgraded }`.
 
+#### `policy.forward`
+
+An agent passes on a message the owner wrote in a conversation it can read, so a policy edit in it can be prepared for the owner. The edit records who wrote it and who passed it on; it is never applied on the forwarder's say-so, only the owner applies it.
+
+Arguments:
+
+- `threadId`: the conversation
+- `seq`: the message's number in it
+- `commandId`: required
+
+Result: `{ edits: [{ editId, status }] }`.
+
 #### `grant.revoke`
 
 The owner takes a grant back (owner only; the revision you read must still be current). It stops counting at the next check.

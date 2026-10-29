@@ -18,6 +18,7 @@ import type { ContextBranchService } from "../branches/index.js";
 import type { InvitationInbox, MeetingService } from "../meetings/index.js";
 import type { MeetingRecordService } from "../meetings/record.js";
 import type { AttendanceService } from "../meetings/attendance.js";
+import type { PolicyEditService } from "../chat/policy-edit.js";
 import type { StandupService } from "../standups/standups.js";
 import type { AgentMessageService } from "../messaging/index.js";
 import { shownLines } from "../standups/standups.js";
@@ -84,6 +85,7 @@ export interface Context {
     cancel(owner: Principal, command: { commandId: string; watchId: string }): Promise<void>;
     list(owner: Principal): Promise<string[]>;
   };
+  readonly policyForward?: Pick<PolicyEditService, "forward">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep">;
 
   readonly commands?: CommandService;
@@ -479,6 +481,8 @@ export const OPERATIONS: readonly Operation[] = [
   messageOp("inbox", "query", "An agent's waiting messages and focus.", "inbox", ["recipient"], "`{ item }`.", "recipient"),
   messageOp("focus", "command", "Sets or ends an agent's focus time, when only urgent messages break in.", "setFocus", ["agent", "until", "reason"], "`{ ok }`."),
   messageOp("release", "command", "Releases what is queued for an agent whose focus ended.", "release", ["recipient"], "`{ woken, stillQueued, downgraded }`."),
+  { name: "policy.forward", kind: "command", summary: "An agent passes on a message the owner wrote in a conversation it can read, so a policy edit in it can be prepared for the owner. The edit records who wrote it and who passed it on; it is never applied on the forwarder's say-so, only the owner applies it.", args: { threadId: "the conversation", seq: "the message's number in it", commandId: "required" }, result: "`{ edits: [{ editId, status }] }`.",
+    run: async (c, a, id) => { only(a, ["threadId", "seq"]); return asJson(await (c.policyForward ?? unavailable("forwarding owner messages (chat is not configured)")).forward(c.principal, { commandId: need(id), threadId: str(a, "threadId"), seq: Number(a["seq"]) })); } },
   { name: "grant.revoke", kind: "command", summary: "The owner takes a grant back (owner only; the revision you read must still be current). It stops counting at the next check.", args: { grantId: "the grant's ID", expectedRevision: "the revision you read", reason: "why, in the owner's words" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["grantId", "expectedRevision", "reason"]); await grantsOf(c).revoke(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
   { name: "events.configure-idle", kind: "command", summary: "Sets how long an event subscription may sit without acknowledging before it expires (owner only). A subscription that was made before this existed, or without its own time, uses this one.", args: { idleSeconds: "whole seconds, 10 to 604800" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
