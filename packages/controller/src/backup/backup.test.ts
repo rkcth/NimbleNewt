@@ -146,6 +146,12 @@ test("the nightly run makes a backup only when the newest is older than a day, o
     const later = new BackupService(Object.create(store, { snapshot: { value: async () => { tries++; throw new Error("no space left"); } } }), { root, version: "t", now: () => new Date(clock), retryAfterMs: 600_000 });
     assert.equal(await later.runScheduled(), false);
     assert.equal(tries, 2);
+    // A backups folder that cannot be read is also a failed run, shown in the status.
+    const file = join(root, "not-a-folder");
+    writeFileSync(file, "x");
+    const unreadable = new BackupService(store, { root: file, version: "t", now: () => new Date(clock) });
+    assert.equal(await unreadable.runScheduled(), false);
+    assert.ok((await unreadable.status()).lastError !== undefined, "the unreadable folder is reported, not lost");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

@@ -74,7 +74,12 @@ export class BackupService {
     if (this.#running !== undefined) return false;
     // After a failed run, wait before trying again: a full disk would otherwise be hit with a new copy every tick.
     if (this.#lastError !== undefined && this.#now().getTime() - Date.parse(this.#lastError.at) < (this.#options.retryAfterMs ?? 3_600_000)) return false;
-    const newest = (await listBackups(this.#options.root)).find((b) => b.manifest.kind !== "pre-upgrade");
+    let newest;
+    try { newest = (await listBackups(this.#options.root)).find((b) => b.manifest.kind !== "pre-upgrade"); } catch (error) {
+      // A backups folder that cannot be read is a failed run: it shows in the status and is not retried every tick.
+      this.#lastError = { at: this.#now().toISOString(), message: error instanceof Error ? error.message.slice(0, 300) : "the backups folder could not be read" };
+      return false;
+    }
     const every = this.#options.everyMs ?? 24 * 3_600_000;
     if (newest !== undefined && this.#now().getTime() - Date.parse(newest.manifest.createdAt) < every) return false;
     try { await this.backUpNow("scheduled"); } catch { return false; } // the failure is kept in `status`
@@ -87,7 +92,7 @@ export class BackupService {
   list(): Promise<BackupInfo[]> { return listBackups(this.#options.root); }
 
   async status(): Promise<BackupStatus> {
-    const all = await listBackups(this.#options.root);
+    const all = await listBackups(this.#options.root).catch(() => [] as BackupInfo[]); // an unreadable folder shows as empty, with the reason in lastError
     const newest = all[0];
     return { root: this.#options.root, count: all.length, running: this.#running !== undefined, ...(newest === undefined ? {} : { newest: { name: newest.manifest.name, createdAt: newest.manifest.createdAt, kind: newest.manifest.kind } }), ...(this.#lastError === undefined ? {} : { lastError: this.#lastError }) };
   }

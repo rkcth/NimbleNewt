@@ -2516,3 +2516,6 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - **Hand-off re-check:** skipped when the task has already moved to the new owner (the hand-off is then finished, not failed); only `forbidden` and `not_found` count as "no right", any other error leaves the hand-off for the next sweep.
 - **Route probes:** `intervalMs` must be a whole number of at least 1000 ms; a probe that takes over 30 s counts as failed so it cannot stall the tick.
 - Left as is: the summary of an activity step is cut before redaction (the inputs are validated and bounded upstream); `backup restore` opens its target with the ordinary open, so it must be pointed at a new database (the usage says so).
+
+## K01g (first part): an unreadable backups folder is a failed run (2026-10-29)
+- The nightly run used to throw (and be dropped) when the backups folder could not be listed. It now records the failure in the backup status (`lastError`), is not retried until the retry wait has passed, and `status` shows the folder as empty with the reason instead of failing. Test in `backup/backup.test.ts`.
