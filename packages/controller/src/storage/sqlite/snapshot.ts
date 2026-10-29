@@ -3,6 +3,8 @@ import { dirname, join } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { StorageError } from "../errors.js";
 import { SNAPSHOT_PAGE_MAX, TABLE_SPECS, type SnapshotRow, type SnapshotTable, type StorageSnapshot } from "../snapshot.js";
+import { Worker } from "node:worker_threads";
+import { fileURLToPath } from "node:url";
 import { classify } from "./errors.js";
 
 /** The folder a snapshot file is made in: next to the database, on the same disk, with a name that says what it is. The caller removes it with the snapshot. */
@@ -10,6 +12,17 @@ export const snapshotFolder = (databasePath: string): string => mkdtempSync(join
 
 /** The statement that copies a live database into a new file as of one moment (`VACUUM INTO` reads under one transaction, so the copy is consistent while writers go on). */
 export const vacuumIntoSql = (file: string): string => `VACUUM INTO '${file.replaceAll("'", "''")}'`;
+
+/** Copies the database into a new file on a worker thread with its own connection, so the copy never holds up the event loop. A failure of the copy is the worker's message, as an unavailable store. */
+export function vacuumIntoOnWorker(database: string, file: string, busyTimeoutMs: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(fileURLToPath(new URL("./snapshot-worker.js", import.meta.url)), { workerData: { database, file, busyTimeoutMs } });
+    let answered = false;
+    worker.once("message", (m: { ok: boolean; message?: string }) => { answered = true; if (m.ok) resolve(); else reject(new StorageError("unavailable", `the snapshot copy failed: ${m.message ?? "unknown"}`)); });
+    worker.once("error", (error) => { if (!answered) { answered = true; reject(classify(error)); } });
+    worker.once("exit", (code) => { if (!answered) { answered = true; reject(new StorageError("unavailable", `the snapshot worker stopped (${code}) before it answered`)); } });
+  });
+}
 
 const plain = (row: SnapshotRow): SnapshotRow => ({ ...row });
 

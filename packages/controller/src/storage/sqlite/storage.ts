@@ -15,7 +15,7 @@ import { migrationChecksum, planMigrations, type JournalEntry, type Migration } 
 import { JOURNAL_SQL, MIGRATIONS } from "./schema.js";
 import { checkSnapshotRow, type BeforeUpgrade, type SnapshotRow, type SnapshotTable, type StorageSnapshot } from "../snapshot.js";
 import { TABLE_SPECS } from "../snapshot.js";
-import { openFileSnapshot, snapshotFolder, vacuumIntoSql } from "./snapshot.js";
+import { openFileSnapshot, snapshotFolder, vacuumIntoOnWorker, vacuumIntoSql } from "./snapshot.js";
 
 export interface SqliteOptions {
   /** Path of the database file on local storage. `:memory:` is refused: a controller database must be durable. */
@@ -594,7 +594,8 @@ export class SqliteStorage implements ControllerStorage {
   async snapshot(): Promise<StorageSnapshot> {
     this.#usable();
     const folder = snapshotFolder(this.path);
-    try { await this.vacuumInto(join(folder, "snapshot.sqlite")); } catch (error) { rmSync(folder, { recursive: true, force: true }); throw error; }
+    // On a worker thread with its own read connection: a long copy of a big database does not stop the event loop (card K01f).
+    try { await vacuumIntoOnWorker(this.path, join(folder, "snapshot.sqlite"), this.#busyTimeoutMs); } catch (error) { rmSync(folder, { recursive: true, force: true }); throw error; }
     return openFileSnapshot(join(folder, "snapshot.sqlite"), folder);
   }
 

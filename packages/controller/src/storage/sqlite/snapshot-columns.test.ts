@@ -33,3 +33,17 @@ test("a snapshot of a database from an older layout reads the columns it has (ca
     } finally { await snapshot.close(); await store.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("the snapshot copy runs off the event loop: the caller's loop turns while the copy is still being made (card K01f)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nn-snap-loop-"));
+  try {
+    const store = await SqliteStorage.open({ path: join(dir, "c.sqlite") });
+    await populate(store);
+    let settled = false;
+    const made = store.snapshot().then((s) => { settled = true; return s; });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(settled, false, "the copy was not finished by the time the event loop turned once");
+    const snapshot = await made;
+    try { assert.equal((await snapshot.read("aggregates", { limit: 10 })).length, 1); } finally { await snapshot.close(); await store.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

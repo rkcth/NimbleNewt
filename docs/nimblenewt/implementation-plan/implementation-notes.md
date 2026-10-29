@@ -2498,3 +2498,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## C09f (second part): messages are steps in the task's activity (2026-10-29)
 - `AgentMessageService` takes `onSent`, called once a message is accepted (a replay calls it again with the same message ID): `startController` records an `owner-message` or `agent-message` step on the task with who sent it, to whom, its class and purpose and a reference to the message, never its text, under the command ID `msg-act:<message>` so it is recorded once. A failure never changes the message. Test in `api/start-message.test.ts`.
 - Not done (C09f stays planned): artifact-version steps, chat access, the explanation index.
+
+## K01f (first part): the SQLite snapshot copy runs on a worker thread (2026-10-29)
+- `SqliteStorage.snapshot()` now copies the database with `VACUUM INTO` on a worker thread (`snapshot-worker.ts`) that opens its own read-only connection, so a backup of a large database no longer stops the controller's event loop (it used to run on the main thread). The copy is as consistent as before (a WAL reader sees the database as of the start of its read). A failure of the copy is reported as an unavailable store. `SqliteStorage.vacuumInto` (the direct call) is unchanged. Test in `storage/sqlite/snapshot-columns.test.ts` (the loop turns while the copy is still being made); the existing snapshot, backup and restore tests pass unchanged.
+- Not done (K01f stays planned): Pi native state, the maintenance barrier, a restore entry for the owner, the back-up-now chat command.
