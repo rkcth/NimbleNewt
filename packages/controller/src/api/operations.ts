@@ -27,6 +27,7 @@ import { BuiltinCommands, type CommandService } from "../commands/index.js";
 import type { WorkingNoteService } from "../context/notes.js";
 import type { PauseService } from "../lifecycle/pause.js";
 import type { StopChoice, StopService } from "../lifecycle/stop.js";
+import type { ActivityService } from "../activity/activity.js";
 import type { ResumeCheckService } from "../continuation/resume.js";
 import type { HandoffService } from "../lifecycle/handoff.js";
 import type { IntegrationPolicyService } from "../policy/integration-policy.js";
@@ -69,6 +70,7 @@ export interface Context {
   readonly cutover?: Pick<CutoverService, "disable" | "drain" | "cutover" | "reenable" | "setFailbackPolicy" | "controls" | "report" | "topology" | "tick">;
   readonly handoffs?: Pick<HandoffService, "prepare" | "complete" | "takeover" | "choose" | "cancel" | "advance" | "get" | "sweep">;
   readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep">;
+  readonly activity?: Pick<ActivityService, "record" | "explain" | "explainLater" | "correct" | "markUnavailable" | "steps" | "payload" | "explanations" | "corrections">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep">;
 
   readonly commands?: CommandService;
@@ -143,6 +145,7 @@ const pausesOf = (c: Context): NonNullable<Context["pauses"]> => c.pauses ?? una
 const cutoverOf = (c: Context): NonNullable<Context["cutover"]> => c.cutover ?? unavailable("provider drain and cutover");
 const handoffsOf = (c: Context): NonNullable<Context["handoffs"]> => c.handoffs ?? unavailable("hand-off");
 const resumesOf = (c: Context): NonNullable<Context["resumes"]> => c.resumes ?? unavailable("checked resume");
+const activityOf = (c: Context): NonNullable<Context["activity"]> => c.activity ?? unavailable("activity records");
 const stopsOf = (c: Context): NonNullable<Context["stops"]> => c.stops ?? unavailable("suspend and stop");
 const integrationOf = (c: Context): NonNullable<Context["integration"]> => c.integration ?? unavailable("integration policy");
 const branchSettingsOf = (c: Context): NonNullable<Context["branchSettings"]> => c.branchSettings ?? unavailable("branch settings");
@@ -299,6 +302,24 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, ["checkId"]); const item = await resumesOf(c).get(c.principal, a["checkId"] as string); if (item === undefined) throw new DomainError("not_found", "no such resume check"); return asJson({ item }); } },
   { name: "resume.sweep", kind: "command", summary: "Owner only: carries unfinished resume checks on after a restart.", args: { commandId: "required" }, result: "`{ advanced: [id], failed: [id] }`.",
     run: async (c, a) => { only(a, []); if (c.principal.kind !== "owner") throw new DomainError("forbidden", "only the owner sweeps resume checks"); return asJson(await resumesOf(c).sweep(c.principal)); } },
+  { name: "activity.record", kind: "command", summary: "Appends a step to a task's activity record with the exact context it used. Sensitive content goes in `payload` (stored apart, redacted, readable only with history rights); a missing manifest or payload is marked missing, never left silent.", args: { taskId: "the task", kind: "owner-message, agent-message, instruction, source-retrieved, model-selected, harness-selected, tool-call, approval, artifact-version, compression, branch, meeting-decision, lifecycle or ownership", summary: "one line", "manifest?": "{ refs: [{ kind, id, version? }], summaryId? } or { missing: true, reason }", "payload?": "{ text, sensitive? } or { missing: true, reason }", commandId: "required" },
+    result: "`{ id, seq, replayed }`.",
+    run: async (c, a, id) => { only(a, ["taskId", "kind", "summary", "manifest", "payload"]); return asJson(await activityOf(c).record(c.principal, { commandId: need(id), ...a } as never)); } },
+  { name: "activity.steps", kind: "query", summary: "A task's steps in order. A step in an unavailable range shows only that it was there.", args: { taskId: "the task", "after?": "the last step number you have", "limit?": "at most 100" }, result: "`{ steps: [...], next? }`.",
+    run: async (c, a) => { only(a, ["taskId", "after", "limit"]); return asJson(await activityOf(c).steps(c.principal, a["taskId"] as string, { ...(a["after"] === undefined ? {} : { after: a["after"] as number }), ...(a["limit"] === undefined ? {} : { limit: a["limit"] as number }) })); } },
+  { name: "activity.payload", kind: "query", summary: "The stored content of one step (redacted). Sensitive content needs the owner or a history grant.", args: { taskId: "the task", seq: "the step number" }, result: "`{ payload: { text, redactions } | null }`.",
+    run: async (c, a) => { only(a, ["taskId", "seq"]); return asJson({ payload: (await activityOf(c).payload(c.principal, a["taskId"] as string, a["seq"] as number)) ?? null }); } },
+  { name: "activity.explain", kind: "command", summary: "Explains a choice as it is made: the choice, the alternatives considered and why not, the key evidence, and what is uncertain. Statements to a person; provider thinking is refused.", args: { taskId: "the task", "seq?": "the step it explains", choice: "what was chosen", alternatives: "[{ option, whyNot }]", evidence: "[{ statement, ref? }]", uncertainty: "what is uncertain", commandId: "required" },
+    result: "`{ id, replayed }`.",
+    run: async (c, a, id) => { only(a, ["taskId", "seq", "choice", "alternatives", "evidence", "uncertainty"]); return asJson(await activityOf(c).explain(c.principal, { commandId: need(id), ...a } as never)); } },
+  { name: "activity.explain-later", kind: "command", summary: "Asks for an explanation of a step after the fact. It is labelled retrospective, built only from the records, and says so when they cannot explain.", args: { taskId: "the task", seq: "the step", commandId: "required" }, result: "`{ id, replayed, explanation }`.",
+    run: async (c, a, id) => { only(a, ["taskId", "seq"]); return asJson(await activityOf(c).explainLater(c.principal, { commandId: need(id), ...a } as never)); } },
+  { name: "activity.explanations", kind: "query", summary: "The explanations written for a task, or one step of it.", args: { taskId: "the task", "seq?": "one step" }, result: "`{ items: [...] }`.",
+    run: async (c, a) => { only(a, ["taskId", "seq"]); return asJson({ items: await activityOf(c).explanations(c.principal, a["taskId"] as string, a["seq"] as number | undefined) }); } },
+  { name: "activity.correct", kind: "command", summary: "Appends a correction to a step. The step is never changed; the correction keeps who and when.", args: { taskId: "the task", seq: "the step", note: "the correction", commandId: "required" }, result: "`{ id, replayed }`.",
+    run: async (c, a, id) => { only(a, ["taskId", "seq", "note"]); return asJson(await activityOf(c).correct(c.principal, { commandId: need(id), ...a } as never)); } },
+  { name: "activity.unavailable", kind: "command", summary: "Owner only: marks a range of steps as no longer available (archived, deleted, lost). They stay listed; their content is withheld.", args: { taskId: "the task", from: "first step", to: "last step", reason: "why", commandId: "required" }, result: "`{ replayed }`.",
+    run: async (c, a, id) => { only(a, ["taskId", "from", "to", "reason"]); return asJson(await activityOf(c).markUnavailable(c.principal, { commandId: need(id), ...a } as never)); } },
   { name: "grant.revoke", kind: "command", summary: "The owner takes a grant back (owner only; the revision you read must still be current). It stops counting at the next check.", args: { grantId: "the grant's ID", expectedRevision: "the revision you read", reason: "why, in the owner's words" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["grantId", "expectedRevision", "reason"]); await grantsOf(c).revoke(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
   { name: "events.configure-idle", kind: "command", summary: "Sets how long an event subscription may sit without acknowledging before it expires (owner only). A subscription that was made before this existed, or without its own time, uses this one.", args: { idleSeconds: "whole seconds, 10 to 604800" }, result: "`{ ok: true }`.", completion: { kind: "completed" },

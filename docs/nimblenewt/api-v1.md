@@ -219,6 +219,40 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `activity.steps`
+
+A task's steps in order. A step in an unavailable range shows only that it was there.
+
+Arguments:
+
+- `taskId`: the task
+- `after` (optional): the last step number you have
+- `limit` (optional): at most 100
+
+Result: `{ steps: [...], next? }`.
+
+#### `activity.payload`
+
+The stored content of one step (redacted). Sensitive content needs the owner or a history grant.
+
+Arguments:
+
+- `taskId`: the task
+- `seq`: the step number
+
+Result: `{ payload: { text, redactions } | null }`.
+
+#### `activity.explanations`
+
+The explanations written for a task, or one step of it.
+
+Arguments:
+
+- `taskId`: the task
+- `seq` (optional): one step
+
+Result: `{ items: [...] }`.
+
 #### `budget.report`
 
 A task's budget: limit, delegated to children, in flight, uncertain, spent, overrun and available, for money and for compute, with the reservations and open requests behind them. A task you may not read reads like a missing one.
@@ -1268,6 +1302,76 @@ Arguments:
 - `commandId`: required
 
 Result: `{ advanced: [id], failed: [id] }`.
+
+#### `activity.record`
+
+Appends a step to a task's activity record with the exact context it used. Sensitive content goes in `payload` (stored apart, redacted, readable only with history rights); a missing manifest or payload is marked missing, never left silent.
+
+Arguments:
+
+- `taskId`: the task
+- `kind`: owner-message, agent-message, instruction, source-retrieved, model-selected, harness-selected, tool-call, approval, artifact-version, compression, branch, meeting-decision, lifecycle or ownership
+- `summary`: one line
+- `manifest` (optional): { refs: [{ kind, id, version? }], summaryId? } or { missing: true, reason }
+- `payload` (optional): { text, sensitive? } or { missing: true, reason }
+- `commandId`: required
+
+Result: `{ id, seq, replayed }`.
+
+#### `activity.explain`
+
+Explains a choice as it is made: the choice, the alternatives considered and why not, the key evidence, and what is uncertain. Statements to a person; provider thinking is refused.
+
+Arguments:
+
+- `taskId`: the task
+- `seq` (optional): the step it explains
+- `choice`: what was chosen
+- `alternatives`: [{ option, whyNot }]
+- `evidence`: [{ statement, ref? }]
+- `uncertainty`: what is uncertain
+- `commandId`: required
+
+Result: `{ id, replayed }`.
+
+#### `activity.explain-later`
+
+Asks for an explanation of a step after the fact. It is labelled retrospective, built only from the records, and says so when they cannot explain.
+
+Arguments:
+
+- `taskId`: the task
+- `seq`: the step
+- `commandId`: required
+
+Result: `{ id, replayed, explanation }`.
+
+#### `activity.correct`
+
+Appends a correction to a step. The step is never changed; the correction keeps who and when.
+
+Arguments:
+
+- `taskId`: the task
+- `seq`: the step
+- `note`: the correction
+- `commandId`: required
+
+Result: `{ id, replayed }`.
+
+#### `activity.unavailable`
+
+Owner only: marks a range of steps as no longer available (archived, deleted, lost). They stay listed; their content is withheld.
+
+Arguments:
+
+- `taskId`: the task
+- `from`: first step
+- `to`: last step
+- `reason`: why
+- `commandId`: required
+
+Result: `{ replayed }`.
 
 #### `grant.revoke`
 
