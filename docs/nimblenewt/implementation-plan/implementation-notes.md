@@ -2377,3 +2377,9 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## Batch 2 review fixes (2026-10-28)
 - Fixed: the dispatcher keeps an attempt's agent as `agent:agt-…`, so agent, team and installation Stop looked for bare IDs and found no attempts (the unit test's mock hid it): the ports now pass the principal form. `message.release` is called without a command ID (the service takes none). `WatchService.dispatchAll` reports a broken watch and carries on with the rest.
 - Known, not fixed: owner-requested watch actions are audited as the dispatcher (the owner is not named); `stops.sweep` runs inside the tick and a long cleanup (up to 60 s per attempt) can delay the later loops; the stop, hand-off and resume sweeps and `agentsUnder` read all records each tick (grows with history); `meeting.record.sweep` has no dispatcher loop; the late-binding proxies answer every property (including `then`) with a function.
+
+## Batch of ten, second batch (2026-10-28): M02b, M03b, M04b, H13b, U12b, L02b, U04c, L03c, C09c (and the C09d lifecycle steps)
+- Reviewed twice by Opus (fixes in "Batch 2 review fixes"), local sweep green, exhaustive CI green on 878e0e2 (run 40814110081).
+- Each card is a first part with a remainder card: M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d. L04c stays planned (its start-up sweep is done; dispatcher use, observation and reviewer are not).
+- The parent cards (M02, M03, M04, H13, U12, R04, U04) stay planned until the running controller really uses their services.
+- Time-sensitive test: `api/start-meetings.test.ts` "urgent meeting's invitations" failed on four runs within a few minutes at about 03:26-03:29 UTC and passed before and after (also with the fixes reverted); it depends on the real clock.
