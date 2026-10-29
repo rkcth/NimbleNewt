@@ -5942,6 +5942,23 @@
       }
     },
     {
+      "id": "A07g",
+      "parent": "N06",
+      "existing_issue": "AII-256",
+      "title": "Let only an integrator's contract cover protected branches",
+      "depends_on": [
+        "A07f"
+      ],
+      "deliverable": "Owner decision 2026-10-28: a contract's named permission (for example tool.git-push) covers a protected branch only when the contract belongs to the integrator role; all other roles need the branch named by an approval or grant",
+      "acceptance_and_verification": "A push or merge to a protected branch under an author, reviewer, qa or docs contract is held for an approval that names the branch even if the contract names tool.git-push; under an integrator contract it is allowed without further naming; changing the role of a contract changes the answer at once",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "P08",
       "parent": "N14",
       "existing_issue": "AII-264",
@@ -6332,7 +6349,8 @@
         "L02b",
         "H08b",
         "U06b",
-        "P08c"
+        "P08c",
+        "A07g"
       ],
       "deliverable": "Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete",
       "acceptance_and_verification": "D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards",

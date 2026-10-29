@@ -33,7 +33,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06, C06b |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
 | N05 / AII-255 | L05, L05b, L01, L01b, L02, L02b, L03, L04, L06, H08, H08b |
-| N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A07e, A08, A08b, A08c, A09, A10, A10b, A07f |
+| N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A07e, A08, A08b, A08c, A09, A10, A10b, A07f, A07g |
 | N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C07e, C07f, C08, C09, C08b, C08c, C08d |
 | N08 / AII-258 | R01, R02, R03, R04, R05, R05b, R05c, R05d, R05f, R05g, R05e |
 | N09 / AII-259 | U03, U03d, U03e, U05b, U04, U05, U06, U06b, U03b, U03c, U07, U09, U08, U10, U11, U11b |
@@ -2160,6 +2160,14 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** An agent that omits or falsifies branchProtected is still sent to the owner (test); a grant that does not name the branch cannot waive it; a standing grant still never waives a protected branch.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
+### A07g — Let only an integrator's contract cover protected branches
+
+- **Parent:** N06 / AII-256.
+- **Blockers:** A07f.
+- **Deliverable:** Owner decision 2026-10-28: a contract's named permission (for example tool.git-push) covers a protected branch only when the contract belongs to the integrator role; all other roles need the branch named by an approval or grant.
+- **Acceptance and verification:** A push or merge to a protected branch under an author, reviewer, qa or docs contract is held for an approval that names the branch even if the contract names tool.git-push; under an integrator contract it is allowed without further naming; changing the role of a contract changes the answer at once.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
 ### P08 — Store the integration policy per project with an installation default
 
 - **Parent:** N14 / AII-264.
@@ -2287,7 +2295,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c.
+- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g.
 - **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
 - **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
