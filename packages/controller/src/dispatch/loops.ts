@@ -153,8 +153,13 @@ export function eventLoops(events: Pick<EventService, "expireIdle">): Dispatcher
 }
 
 /** H13b: each active watch the dispatcher set up hands its waiting events to the owning agent, once per tick (a watch is dispatched only by the principal that set it up). */
-export function watchLoops(watches: { activeOf(by: Principal): Promise<string[]>; dispatchAll(by: Principal, watchIds: readonly string[]): Promise<unknown> }): DispatcherLoop[] {
-  return [{ name: "events.watch-dispatch", run: async (by) => { await watches.dispatchAll(by, await watches.activeOf(by)); } }];
+export function watchLoops(watches: { activeOf(by: Principal): Promise<string[]>; dispatchAll(by: Principal, watchIds: readonly string[]): Promise<readonly unknown[]> }): DispatcherLoop[] {
+  return [{ name: "events.watch-dispatch", run: async (by) => {
+    // Every watch is tried; one that could not be dispatched is reported after the rest, so the loop shows as failing instead of silently never serving it.
+    const results = (await watches.dispatchAll(by, await watches.activeOf(by))) as Array<{ watchId: string; error?: string }>;
+    const failed = results.filter((r) => r.error !== undefined);
+    if (failed.length > 0) throw new Error(`${failed.length} watch(es) could not be dispatched: ${failed.slice(0, 3).map((f) => `${f.watchId}: ${f.error}`).join("; ")}`);
+  } }];
 }
 
 /** C08: the corrections whose propagation did not finish (a step that failed, a restart) are finished for each project. */
