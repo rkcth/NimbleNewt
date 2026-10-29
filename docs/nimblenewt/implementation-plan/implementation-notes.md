@@ -2467,3 +2467,6 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## C09e (second part): meeting decisions are steps in the task's activity (2026-10-29)
 - When a decision's apply reaches the end of its changes, each change that was applied or not applied and that names a task is recorded as a `meeting-decision` step on that task (the summary says whether it changed the task, and why not), with a reference to the decision. The observer (`onChange` in the record options) is told again on a repeat of the apply; its command ID (`mdn-act:<decision>:<index>:<state>`) makes that record once. A failing observer never changes the decision. Test in `api/start-meeting-record.test.ts` (one step after two applies).
 - Part of C09e (stays planned): approvals, messages, artifact versions, chat access and the explanation index.
+
+## K01e (fifth part): a restore says how many deliveries will be sent again (2026-10-29)
+- `RestoreResult.deliveriesToResend` counts the deliveries that were not yet delivered when the copy was taken; they are sent again after a restore, so a recipient may see one it had already received after the copy (effects are the other side: they are never run again, see `effectsMarkedUncertain`). Test in `backup/backup.test.ts`.

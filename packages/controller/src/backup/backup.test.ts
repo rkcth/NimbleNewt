@@ -38,6 +38,7 @@ for (const backend of backends) {
       const restored = await restoreBackup(path, b.storage);
       assert.equal(restored.rows, 10);
       assert.equal(restored.effectsMarkedUncertain, 1, "eff-1 was only intended");
+      assert.equal(restored.deliveriesToResend, 1, "dlv-1 had not been delivered");
       assert.equal((await b.storage.getEffect("eff-1"))?.status, "uncertain");
       assert.equal((await b.storage.getEffect("eff-2"))?.status, "confirmed");
       assert.equal((await b.storage.getAggregate({ kind: "task", id: "task-a" }))?.body["title"], "café");

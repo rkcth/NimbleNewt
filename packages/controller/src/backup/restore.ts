@@ -16,6 +16,8 @@ export interface RestoreResult {
   readonly rows: number;
   /** Effects that were only intended when the copy was taken: they may have happened afterwards, so they are restored as uncertain and left to be reconciled, never run again. */
   readonly effectsMarkedUncertain: number;
+  /** Messages and notices that had not been delivered when the copy was taken (or were being delivered): they are sent again, so a recipient may see one it had already received after the copy. */
+  readonly deliveriesToResend: number;
   /** Artifact blobs put back into the artifact store. */
   readonly blobsRestored: number;
 }
@@ -50,6 +52,7 @@ export async function restoreBackup(path: string, storage: ControllerStorage, op
   const pageSize = options.pageSize ?? 500;
   let total = 0;
   let marked = 0;
+  let resend = 0;
   for (const table of SNAPSHOT_TABLES) {
     const entry = manifest.files.find((f) => f.table === table)!;
     let batch: SnapshotRow[] = [];
@@ -58,10 +61,11 @@ export async function restoreBackup(path: string, storage: ControllerStorage, op
       if (line === "") continue;
       let row = JSON.parse(line) as SnapshotRow;
       if (table === "effects" && row["status"] === "intended") { row = { ...row, status: "uncertain", evidence: RESTORED_EVIDENCE }; marked += 1; }
+      if (table === "deliveries" && row["state"] !== "delivered") resend += 1;
       batch.push(row);
       if (batch.length >= pageSize) await flush();
     }
     await flush();
   }
-  return { manifest, rows: total, effectsMarkedUncertain: marked, blobsRestored: blobs };
+  return { manifest, rows: total, effectsMarkedUncertain: marked, deliveriesToResend: resend, blobsRestored: blobs };
 }
