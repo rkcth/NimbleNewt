@@ -179,3 +179,25 @@ test("the artifact blobs are in the backup, checked against their names, and com
     assert.match(bad.problems.join(";"), /artifacts: blob/);
   } finally { rmSync(root, { recursive: true, force: true }); rmSync(live, { recursive: true, force: true }); rmSync(fresh, { recursive: true, force: true }); }
 });
+
+test("the artifact store is locked against orphan cleanup from before the database is read until the blobs are copied (card K01)", async () => {
+  const store = new MemoryStorage(); const root = tmp(); const live = tmp();
+  try {
+    await populate(store);
+    const blobs = await FileBlobStore.open({ directory: live });
+    await blobs.put(new TextEncoder().encode("a plan"));
+    const events: string[] = [];
+    const watched = Object.create(store, { snapshot: { value: async () => { events.push("snapshot"); return store.snapshot(); } } });
+    let release!: () => void;
+    const held = blobs.lock.exclusive(async () => { events.push("cleanup-start"); await new Promise<void>((r) => { release = r; }); events.push("cleanup-end"); });
+    await new Promise((r) => setTimeout(r, 20));
+    const made = createBackup(watched, { root, kind: "manual", version: "t", now: () => new Date(AT), blobs });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.deepEqual(events, ["cleanup-start"], "the backup waits for a running cleanup before reading anything");
+    release(); await held; await made;
+    assert.deepEqual(events, ["cleanup-start", "cleanup-end", "snapshot"]);
+    // A cleanup that arrives while the backup runs waits for it.
+    const cleanup = blobs.lock.exclusive(async () => { events.push("cleanup-2"); });
+    await cleanup;
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(live, { recursive: true, force: true }); }
+});

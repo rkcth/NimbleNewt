@@ -2447,3 +2447,6 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## U12c (first part): owner questions through the state API (2026-10-29)
 - `message.ask-owner` (an agent asks about the task it is assigned, which needs `attempt.work`, `history.append` and `history.read` in the project), `message.owner-questions` (owner only: oldest first with the task's title, state and project and the wait it will resolve, marked untrusted content) and `message.answer-owner` (owner only; resolves the wait). Test in `api/start-message.test.ts`: ask and replay, an agent refused the list and the answer, the owner sees task context, answers, and the list empties.
 - Not done: delivering at the stand-up boundary, chat presentation of the questions.
+
+## K01e (second part): blobs are locked before the rows are read (2026-10-29)
+- `createBackup` takes the artifact store's shared lock before it opens the database snapshot and keeps it until the blobs are copied (it used to take it only for the copy), so orphan cleanup cannot delete a blob that the copied rows still name. A cleanup already running delays the backup; one that arrives waits for it. Test in `backup/backup.test.ts`.

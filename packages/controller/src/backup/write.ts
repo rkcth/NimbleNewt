@@ -28,7 +28,12 @@ export const backupName = (at: Date, kind: BackupKind): string => `backup-${stam
  * Takes a consistent snapshot of the store and writes it as a backup folder. It is written under a `.partial` name, every file is flushed, the manifest is written last, and only then is the
  * folder renamed to its final name: a crash, a full disk or a failed read leaves a `.partial` folder (which is removed here and never mistaken for a backup), never a half-written backup that looks complete.
  */
-export async function createBackup(storage: Pick<ControllerStorage, "snapshot">, options: BackupOptions): Promise<{ path: string; manifest: BackupManifest }> {
+export function createBackup(storage: Pick<ControllerStorage, "snapshot">, options: BackupOptions): Promise<{ path: string; manifest: BackupManifest }> {
+  // The artifact store's shared lock is held from before the database is read until the blobs are copied, so orphan cleanup (which takes it exclusively) cannot delete a blob the copied rows still name.
+  return options.blobs === undefined ? write(storage, options) : options.blobs.lock.shared(() => write(storage, options));
+}
+
+async function write(storage: Pick<ControllerStorage, "snapshot">, options: BackupOptions): Promise<{ path: string; manifest: BackupManifest }> {
   const at = (options.now ?? (() => new Date()))();
   const name = backupName(at, options.kind);
   const final = join(options.root, name);
@@ -80,7 +85,7 @@ export async function createBackup(storage: Pick<ControllerStorage, "snapshot">,
 }
 
 /**
- * Copies every blob of the artifact store into `staging/artifacts/<digest>` while holding the store's shared lock (orphan cleanup, which takes it exclusively, waits), hashing each as it is copied: a blob whose bytes are not
+ * Copies every blob of the artifact store into `staging/artifacts/<digest>` (the caller holds the store's shared lock: orphan cleanup, which takes it exclusively, waits), hashing each as it is copied: a blob whose bytes are not
  * its name is not copied and is listed as corrupt, and one that vanished is listed as missing. The index of what was copied is written last.
  */
 class CopyWriteError extends Error { constructor(override readonly cause: unknown) { super("write failed"); } }
@@ -88,7 +93,7 @@ class CopyWriteError extends Error { constructor(override readonly cause: unknow
 async function copyBlobs(blobs: FileBlobStore, staging: string): Promise<BackupArtifacts> {
   const folder = join(staging, ARTIFACT_FOLDER);
   await mkdir(folder, { mode: 0o700 });
-  return blobs.lock.shared(async () => {
+  return (async () => {
     const lines: string[] = [];
     const skipped: { digest: string; why: "corrupt" | "missing" }[] = [];
     let bytes = 0;
@@ -113,7 +118,7 @@ async function copyBlobs(blobs: FileBlobStore, staging: string): Promise<BackupA
     const index = await open(join(staging, ARTIFACT_INDEX), "wx", 0o600);
     try { await index.write(text); await index.sync(); } finally { await index.close(); }
     return { index: { file: ARTIFACT_INDEX, rows: lines.length, bytes: text.length, sha256: createHash("sha256").update(text).digest("hex") }, blobs: lines.length, bytes, skipped };
-  });
+  })();
 }
 
 export type { SnapshotTable };
