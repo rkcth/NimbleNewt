@@ -304,6 +304,25 @@ export class CutoverService {
     }));
   }
 
+  /**
+   * The accounts and endpoints marked down that can be probed now: one route that goes to each, for the prober to call. A target with a rate-limit cooldown needs no probe, and one that failed again soon after a restore waits for the owner.
+   */
+  async downTargets(): Promise<{ scope: "account" | "endpoint"; name: string; route: string }[]> {
+    const topology = await this.topology();
+    const out: { scope: "account" | "endpoint"; name: string; route: string }[] = [];
+    for (let after: string | undefined; ;) {
+      const page = await this.#runner.list("route-health", { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
+      for (const rec of page) {
+        after = rec.id;
+        const h = rec.body as unknown as HealthBody;
+        if (h.state !== "down" || h.scope === "model" || h.needsOwner || (h.cooldownUntil !== undefined && Date.parse(h.cooldownUntil) > Date.parse(this.#runner.now()))) continue;
+        const route = Object.entries(topology.targets).find(([, t]) => (h.scope === "account" ? t.account : t.endpoint) === h.name)?.[0];
+        if (route !== undefined) out.push({ scope: h.scope, name: h.name, route });
+      }
+      if (page.length < 100) return out;
+    }
+  }
+
   async health(scope: HealthScope, name: string): Promise<HealthBody | undefined> {
     return (await this.#runner.get("route-health", healthId(scope, name)))?.body as unknown as HealthBody | undefined;
   }

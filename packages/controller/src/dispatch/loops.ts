@@ -12,6 +12,7 @@ import type { AgentMessageService } from "../messaging/index.js";
 import type { ProjectService } from "../domain/service.js";
 import type { StandupService } from "../standups/index.js";
 import type { ControllerStorage } from "../storage/types.js";
+import type { CutoverService } from "../routing/cutover.js";
 import type { DispatcherLoop } from "./dispatcher.js";
 
 /**
@@ -19,6 +20,32 @@ import type { DispatcherLoop } from "./dispatcher.js";
  * the composer lists them in `DispatcherDeps.loops` and `tick()` runs them with the dispatcher's service principal. A call that reports `more` is repeated, at most `ROUNDS` times in one tick, so a
  * backlog is worked off over several ticks without one tick running for ever.
  */
+/**
+ * The health probes of failed-over routes (card R04c). A probe is one small request to a target that is marked down, so that failback can follow its own policy. It runs only when `enabled()` says so: the owner asked for it to stay
+ * off while their own model servers are busy, so nothing here is switched on by default, and without a `run` there is no loop at all. A target is probed at most once per `intervalMs`, whatever the tick rate.
+ */
+export interface RouteProbes {
+  readonly enabled: () => boolean;
+  /** Sends one small request to the route and says whether it answered well. Never throws for a bad answer; a throw counts as a failed probe. */
+  readonly run: (target: { scope: "account" | "endpoint"; route: string }) => Promise<boolean>;
+  readonly intervalMs: number;
+}
+
+export function probeLoops(cutover: Pick<CutoverService, "downTargets" | "probe">, probes: RouteProbes, now: () => number = Date.now): DispatcherLoop[] {
+  const probed = new Map<string, number>();
+  return [{ name: "routes.probe", run: async (by) => {
+    if (!probes.enabled()) return;
+    const slot = Math.floor(now() / probes.intervalMs);
+    for (const t of await cutover.downTargets()) {
+      if (probed.get(`${t.scope}/${t.name}`) === slot) continue; // already probed in this interval: no second request
+      probed.set(`${t.scope}/${t.name}`, slot);
+      const ok = await probes.run({ scope: t.scope, route: t.route }).catch(() => false);
+      // One probe per target per interval: the command ID names the interval, so a second tick in it records nothing new.
+      await cutover.probe(by, { commandId: `prb-${t.scope}-${t.name}-${slot}`.slice(0, 120), scope: t.scope, route: t.route, ok });
+    }
+  } }];
+}
+
 const ROUNDS = 10;
 const PAGE = 100;
 

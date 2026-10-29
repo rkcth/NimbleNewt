@@ -4,6 +4,7 @@ import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
+import { probeLoops } from "../dispatch/loops.js";
 import type { InFlight, RouteGate } from "./fallback.js";
 import { CutoverService, DEFAULT_FAILBACK, FallbackService, RoutingService, checkLists, type CallBody, type FailbackPolicy, type HealthBody, type RouteRequest, type Step, type Topology } from "./index.js";
 
@@ -365,6 +366,34 @@ for (const backend of backends) {
     now += 3600_000;
     await w.cut.gate().failure!({ route: "strata/qwen", class: "outage", at: new Date(now).toISOString(), key: "later" });
     assert.equal((await healthOf(w, "endpoint-strata-http"))!.needsOwner, false, "the owner's restore cleared it, and the next failure came long after");
+  });
+
+  suite("the probe loop probes only targets that are down, once per interval, only while enabled, and a good run brings the target back by the failback policy (card R04c)", async (w) => {
+    await w.cut.setFailbackPolicy(w.owner, { commandId: cid("fp"), policy: auto });
+    const ran: string[] = [];
+    let enabled = false;
+    let answer = true;
+    const loop = probeLoops(w.cut, { enabled: () => enabled, intervalMs: 60_000, run: async (t) => { ran.push(`${t.scope} ${t.route}`); return answer; } }, () => now)[0]!;
+    // Nothing is down and nothing is switched on: no request is sent.
+    await loop.run(w.host);
+    assert.deepEqual(ran, []);
+    const s = step(await begin(w, "plain"));
+    await fail(w, s, "ECONNREFUSED");
+    assert.deepEqual(await w.cut.downTargets(), [{ scope: "endpoint", name: "strata-http", route: "strata/qwen" }]);
+    // Down, but probes are off: still no request.
+    await loop.run(w.host);
+    assert.deepEqual(ran, [], "off by default means no request reaches the server");
+    enabled = true;
+    await loop.run(w.host); await loop.run(w.host);
+    assert.deepEqual(ran, ["endpoint strata/qwen"], "twice in one interval is one request");
+    answer = false;
+    now += 61_000; await loop.run(w.host);
+    assert.equal(ran.length, 2);
+    assert.equal((await healthOf(w, "endpoint-strata-http"))!.probesOk, 0, "a bad answer counts as a bad probe");
+    answer = true;
+    for (let i = 0; i < 4; i++) { now += 61_000; await loop.run(w.host); }
+    assert.equal((await healthOf(w, "endpoint-strata-http"))!.state, "healthy");
+    assert.deepEqual(await w.cut.downTargets(), [], "a healthy target is no longer probed");
   });
 
   suite("manual failback never restores by probes; the policy has bounds", async (w) => {
