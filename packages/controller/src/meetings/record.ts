@@ -59,6 +59,11 @@ export interface RecordOptions extends RunnerOptions {
   readonly shareable?: (cite: SourceCite) => Promise<boolean>;
   /** Writes a short narrative overview of a record that is already complete. If it throws, the summary is kept without it. */
   readonly narrate?: (input: { readonly summary: SummaryContent }) => Promise<string>;
+  /**
+   * Told of each change of a decision that was carried out or not carried out, once it has a final state (card C09f): the target, the outcome and the reason, for the task activity. Best effort and repeatable (the caller derives a stable
+   * command ID from the decision and the change); a failure never changes the decision.
+   */
+  readonly onChange?: (event: { decisionId: string; index: number; projectId: string; target: { kind: string; id: string }; state: "applied" | "not-applied"; summary: string; reason?: string }) => Promise<void>;
   /** Minutes a vote stays open (default 10), unless the vote names its own. */
   readonly voteMinutes?: number;
 }
@@ -789,7 +794,7 @@ export class MeetingRecordService {
       });
       if (d.outcome !== "adopted" || d.scope !== "in-scope" || d.ownerResponse === "pending") return tally();
       const change = d.changes.find((c) => c.state === "adopted" || c.state === "applying");
-      if (change === undefined) return tally();
+      if (change === undefined) { await this.#announceChanges(decisionId); return tally(); }
       const save = async (next: ChangeRecord): Promise<void> => {
         await this.#retrying(() => this.#runner.command("meeting.decision.change", { commandId: `${decisionId}:${change.id}:${next.state}`.slice(0, 120), actor: by.id }, async () => ({
           payload: { decisionId, changeId: change.id, to: next.state },
@@ -828,7 +833,19 @@ export class MeetingRecordService {
         else throw error;
       }
     }
+    await this.#announceChanges(decisionId);
     return this.#applyDecisionTally(decisionId);
+  }
+
+  /** Tells the observer of every change that has reached a final state; each is told again on a repeat of the apply, which the observer's stable command IDs make harmless. */
+  async #announceChanges(decisionId: string): Promise<void> {
+    if (this.#options.onChange === undefined) return;
+    const d = known<DecisionRecordBody>(await this.#runner.get("meeting-decision", decisionId));
+    if (d === undefined) return;
+    for (const [index, c] of d.changes.entries()) {
+      if (c.state !== "applied" && c.state !== "not-applied") continue;
+      try { await this.#options.onChange({ decisionId, index, projectId: d.projectId, target: { kind: c.target.kind, id: c.target.id }, state: c.state, summary: c.summary, ...(c.reason === undefined ? {} : { reason: c.reason }) }); } catch { /* an observer never changes the decision */ }
+    }
   }
 
   async #applyDecisionTally(decisionId: string): Promise<{ applied: number; notApplied: number; pending: number }> {

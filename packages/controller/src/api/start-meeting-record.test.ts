@@ -81,8 +81,12 @@ test("a decision of a meeting that names a change to a task is applied once by t
     assert.equal(applied.result.applied, 1, JSON.stringify(applied));
     const after = await call(boot.token, "task.get", { taskId: task.id });
     assert.equal(after.result.item.title, "Cover beds tonight", JSON.stringify(after));
+    const steps = (await call(boot.token, "activity.steps", { taskId: task.id })).result.steps as { kind: string; summary: string }[];
+    assert.equal(steps.filter((x) => x.kind === "meeting-decision").length, 1, JSON.stringify(steps));
+    assert.match(steps.find((x) => x.kind === "meeting-decision")!.summary, /changed this task/);
     // Applying again changes nothing: the decision applies once.
     await call(boot.token, "meeting.record.apply", { decisionId: closed.result.decisionId }, "ap2");
     assert.equal((await call(boot.token, "task.get", { taskId: task.id })).result.item.revision, after.result.item.revision);
+    assert.equal(((await call(boot.token, "activity.steps", { taskId: task.id })).result.steps as { kind: string }[]).filter((x) => x.kind === "meeting-decision").length, 1, "the step is recorded once");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
