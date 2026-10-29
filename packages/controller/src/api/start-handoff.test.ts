@@ -46,6 +46,9 @@ test("a task is handed to another agent through the state API: prepared, package
     assert.deepEqual(done.result.item.acceptedGaps.missing, ["unfinishedWork", "nextAction"]);
     const owner = (await call(boot.token, "assignment.get", { taskId: task })).result.item;
     assert.equal(owner.owner.id, b);
+    const steps = await call(boot.token, "activity.steps", { taskId: task });
+    assert.ok(steps.ok, JSON.stringify(steps));
+    assert.ok(steps.result.steps.some((x: { kind: string; summary: string }) => x.kind === "ownership" && x.summary.includes(b)), "the move is in the task's activity record");
     assert.equal((await call(boot.token, "handoff.sweep", {}, "sw")).ok, true);
     assert.equal((await call(zed, "handoff.sweep", {}, "sw2")).error.code, "forbidden");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }

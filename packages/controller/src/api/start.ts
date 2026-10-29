@@ -305,7 +305,7 @@ export async function startController(options: StartOptions): Promise<Controller
     const cutover = CutoverService.withEpoch(storage, epoch, routing, {});
     const fallback = FallbackService.withEpoch(storage, epoch, routing, {}, cutover.gate());
     cutover.bind(fallback);
-    const handoffs = HandoffService.withEpoch(storage, epoch, { pauses, stops, assignments, sources: controllerHandoffSources({ getTask: (id) => projects.getTask(id), contracts, agentState: async (id) => ((await storage.getAggregate({ kind: "agent", id }))?.body as unknown as { state?: "active" | "retired" } | undefined)?.state }) });
+    const handoffs = HandoffService.withEpoch(storage, epoch, { onTransferred: async (by, e) => { await activity.record(by, { commandId: `${e.handoffId}-act`, taskId: e.taskId, kind: "ownership", summary: `Handed over from ${e.from.kind} ${e.from.id} to ${e.to.kind} ${e.to.id}.`, manifest: { refs: [{ kind: "handoff", id: e.handoffId }] } } as never); }, pauses, stops, assignments, sources: controllerHandoffSources({ getTask: (id) => projects.getTask(id), contracts, agentState: async (id) => ((await storage.getAggregate({ kind: "agent", id }))?.body as unknown as { state?: "active" | "retired" } | undefined)?.state }) });
     const continuations = ContinuationService.withEpoch(storage, epoch);
     const resumes = ResumeCheckService.withEpoch(storage, epoch, { continuations, dependencies: DependencyService.withEpoch(storage, epoch), blockers: BlockerService.withEpoch(storage, epoch), ports: controllerResumePorts(storage) });
     const activity = ActivityService.withEpoch(storage, epoch);

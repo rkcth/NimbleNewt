@@ -96,13 +96,15 @@ export class HandoffService {
   readonly #stops: Pick<StopService, "request" | "advance" | "force" | "get">;
   readonly #assignments: Pick<AssignmentService, "getAssignment" | "transferTask">;
   readonly #sources: HandoffSources;
+  readonly #onTransferred: ((by: Principal, event: { handoffId: string; taskId: string; from: Owner; to: Owner }) => Promise<void>) | undefined;
 
-  private constructor(runner: CommandRunner, pauses: PauseService, stops: Pick<StopService, "request" | "advance" | "force" | "get">, assignments: Pick<AssignmentService, "getAssignment" | "transferTask">, sources: HandoffSources) {
+  private constructor(runner: CommandRunner, pauses: PauseService, stops: Pick<StopService, "request" | "advance" | "force" | "get">, assignments: Pick<AssignmentService, "getAssignment" | "transferTask">, sources: HandoffSources, onTransferred?: (by: Principal, event: { handoffId: string; taskId: string; from: Owner; to: Owner }) => Promise<void>) {
+    this.#onTransferred = onTransferred;
     this.#runner = runner; this.#pauses = pauses; this.#stops = stops; this.#assignments = assignments; this.#sources = sources;
   }
 
-  static withEpoch(storage: ControllerStorage, epoch: number, deps: { pauses: PauseService; stops: Pick<StopService, "request" | "advance" | "force" | "get">; assignments: Pick<AssignmentService, "getAssignment" | "transferTask">; sources: HandoffSources }, options: RunnerOptions = {}): HandoffService {
-    return new HandoffService(new CommandRunner(storage, epoch, options), deps.pauses, deps.stops, deps.assignments, deps.sources);
+  static withEpoch(storage: ControllerStorage, epoch: number, deps: { pauses: PauseService; stops: Pick<StopService, "request" | "advance" | "force" | "get">; assignments: Pick<AssignmentService, "getAssignment" | "transferTask">; sources: HandoffSources; /** Told once a task has moved, so the move can be put in the task's activity record (best effort: a failure here never undoes or holds back the hand-off). */ onTransferred?: (by: Principal, event: { handoffId: string; taskId: string; from: Owner; to: Owner }) => Promise<void> }, options: RunnerOptions = {}): HandoffService {
+    return new HandoffService(new CommandRunner(storage, epoch, options), deps.pauses, deps.stops, deps.assignments, deps.sources, deps.onTransferred);
   }
 
   // ---- requests ------------------------------------------------------------------------------------------------------------
@@ -385,6 +387,7 @@ export class HandoffService {
   /** The task moved: the new owner may run, so a hold this hand-off added is lifted. */
   async #finish(by: Principal, id: string, b: TaskHandoffBody): Promise<void> {
     await this.#update(id, (x) => ({ ...x, phase: "transferred", transferredAt: this.#runner.now(), history: this.#push(x, "transferred", by.id, `now owned by ${b.to.kind}:${b.to.id}`) }), ["transferring"]);
+    try { await this.#onTransferred?.(by, { handoffId: id, taskId: b.taskId, from: b.from, to: b.to }); } catch { /* the record of the move is best effort */ }
     await this.#letGo(by, id);
   }
 
