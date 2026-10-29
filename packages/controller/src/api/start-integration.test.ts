@@ -109,13 +109,44 @@ test("in chat, how finished work lands is shown first and applies on the owner's
     assert.equal((await call("project.list", {})).result.items.length, before, "nothing was created");
     assert.ok((await call("integration.default.set", { landing: "integration-branch" }, "mdef2")).ok);
     const make = "create a project Orchard where a human promotes finished work";
-    const draft = await turn("m5", make, [{ kind: "command", op: "project.create", args: { name: "Orchard", integration: { landing: "human-promotes", integrator: "human" } }, evidence: make, basis: "owner" }]);
+    const draft = await turn("m5", make, [{ kind: "command", op: "project.create", args: { name: "Orchard", integration: { landing: "human-promotes", integrator: "human", requiredChecks: ["tests"], refreshRounds: "default" } }, evidence: make, basis: "owner" }]);
     assert.equal(draft[0].status, "proposed", JSON.stringify(draft));
     const made = await turn("m6", "yes, go ahead with that", [{ kind: "apply_proposal", proposalId: draft[0].proposalId, evidence: "go ahead with that", basis: "owner" }]);
     assert.equal(made[0].status, "applied", JSON.stringify(made));
     const orchard = (await call("project.list", {})).result.items.find((p: { name: string }) => p.name === "Orchard").id as string;
     const section = (await call("integration.get", { project: orchard })).result.item;
     assert.deepEqual([section.landing, section.integrator, section.source], ["human-promotes", "human", "owner"]);
+    // A project made in chat walks through its questions one at a time; an answer fills one field; "default" is not sent.
+    const guided = "create a project Grove";
+    say[guided] = [{ kind: "command", op: "project.create", args: { name: "Grove" }, evidence: guided, basis: "owner" }];
+    let r = await c.chat!.submit(boot.token, { messageId: "g1", text: guided });
+    const asked: string[] = [];
+    const answers: [string, string][] = [["integration-branch", "landing"], ["agent", "integrator"], ["tests+review", "requiredChecks"], ["default", "refreshRounds"]];
+    for (const [i, [choice, field]] of answers.entries()) {
+      const o = r.outcomes[0] as any;
+      assert.equal(o.status, "asked", JSON.stringify(r.outcomes));
+      asked.push(`${o.question.slice(0, 20)}|${o.options.some((x: string) => x.startsWith("main-automatic"))}`);
+      assert.ok(o.options.some((x: string) => x.startsWith(`${choice}:`)), `${field} offers ${choice}`);
+      assert.match(o.question, /I suggest/);
+      const reply = `${choice} is what I want`;
+      say[reply] = [{ kind: "answer", turnId: r.turnId, choice, evidence: reply, basis: "owner" }];
+      r = await c.chat!.submit(boot.token, { messageId: `g${i + 2}`, text: reply });
+    }
+    assert.equal(asked[0]!.endsWith("|true"), true, "main-automatic is offered while the lock is off");
+    assert.equal((r.outcomes[0] as any).status, "proposed", JSON.stringify(r.outcomes));
+    const grove = "yes, go ahead with that";
+    say[grove] = [{ kind: "apply_proposal", proposalId: (r.outcomes[0] as any).proposalId, evidence: "go ahead with that", basis: "owner" }];
+    assert.equal(((await c.chat!.submit(boot.token, { messageId: "g9", text: grove })).outcomes[0] as any).status, "applied");
+    const groveId = (await call("project.list", {})).result.items.find((p: { name: string }) => p.name === "Grove").id as string;
+    const g = (await call("integration.get", { project: groveId })).result.item;
+    assert.deepEqual([g.landing, g.requiredChecks, g.refreshRounds, g.source], ["integration-branch", ["tests", "review"], 3, "owner"]);
+    // With the lock on, main-automatic is not offered.
+    assert.ok((await call("integration.default.set", { forbidMainAutomatic: true }, "lock1")).ok);
+    const guided2 = "create a project Hedge";
+    say[guided2] = [{ kind: "command", op: "project.create", args: { name: "Hedge" }, evidence: guided2, basis: "owner" }];
+    const q = (await c.chat!.submit(boot.token, { messageId: "h1", text: guided2 })).outcomes[0] as any;
+    assert.equal(q.options.some((x: string) => x.startsWith("main-automatic")), false);
+    assert.ok((await call("integration.default.set", { forbidMainAutomatic: false }, "lock2")).ok);
     await c.services.principals.enroll(await c.services.principals.authenticate(boot.token), { commandId: "e-ann", kind: "agent", name: "ann", grants: [{ action: "project.create", project: "*" }] });
     const ann = (await c.services.principals.issueCredential(await c.services.principals.authenticate(boot.token), "agent:ann")).token;
     const sent = (await c.api.handle(ann, { v: 1, op: "project.create", commandId: "a1", args: { name: "Sneaky", integration: { landing: "main-automatic" } } } as never)) as any;

@@ -13,6 +13,7 @@ import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../sto
 import type { Cite, StatusRequest } from "../status/index.js";
 import type { CoordinatorService } from "./coordinator.js";
 import { saysMainAutomatic, CHAT_OPS, TITLE_KEYS, acceptedArgs, describe, foreignValue, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
 
@@ -482,6 +483,14 @@ export class ChatService {
     const titleKey = Object.entries(TITLE_KEYS).find(([, id]) => id === asked.field)?.[0];
     if (titleKey !== undefined) delete args[titleKey];
     if (asked.field === "projectId") delete args["projectName"];
+    if (asked.field.startsWith("integration.")) {
+      // An answer to one of the project-creation questions fills one field of the integration section (a number for the refresh rounds, a list for the checks); the choice is the owner's word, so it counts as said.
+      const key = asked.field.slice("integration.".length);
+      const value: unknown = key === "refreshRounds" && choice !== "default" ? Number(choice) : key === "requiredChecks" && choice !== "default" ? choice.split("+") : choice;
+      args["integration"] = { ...((args["integration"] as Record<string, unknown> | undefined) ?? {}), [key]: value };
+      work[asked.intentIndex] = { intent: { ...target.intent, args }, text: `${target.text}. ${choice}` };
+      return { work, quoted: old.quotedCount > 0 };
+    }
     args[asked.field] = choice;
     work[asked.intentIndex] = { intent: { ...target.intent, args }, text: target.text };
     return { work, quoted: old.quotedCount > 0 };
@@ -527,6 +536,18 @@ export class ChatService {
           labels[found.id] = found.name;
         } else return refuse("invalid_command", "which project? Name its ID, or say everywhere.");
       }
+    }
+
+    // A project made in chat walks through how its finished work is handled, one question at a time (card P08c); a question left unanswered is never guessed.
+    if (intent.op === "project.create") {
+      const section = args["integration"];
+      if (section !== undefined && (section === null || typeof section !== "object" || Array.isArray(section))) return refuse("invalid_command", "integration must be an object");
+      const given = { ...((section as Record<string, unknown> | undefined) ?? {}) };
+      const q = await this.#integrationQuestion(token, given, profile);
+      if (q !== undefined) return q;
+      // "default" means the owner chose what the installation default or the profile gives; it is not sent.
+      const kept = Object.fromEntries(Object.entries(given).filter(([, v]) => v !== "default"));
+      if (Object.keys(kept).length === 0) delete args["integration"]; else args["integration"] = kept;
     }
 
     // The project: named, or the one in focus.
@@ -727,6 +748,45 @@ export class ChatService {
         return item === undefined ? refuse("not_found", "no such task") : { ok: true, name: "expectedVersion", value: (item["version"] as number) + ahead(`contract:${args["taskId"] as string}`) };
       }
     }
+  }
+
+  /** The next question about how a new project's work is handled, or undefined when every setting has been given or taken as the default. Each has a plain explanation and a recommendation. */
+  async #integrationQuestion(token: string, given: Record<string, unknown>, profile: string): Promise<{ ok: false; kind: "ask"; question: string; options: string[]; field: string; choices: string[] } | undefined> {
+    const rec = profileDefaults(profile);
+    const def = await this.#deps.api.handle(token, { v: API_VERSION, op: "integration.default.get", args: {} });
+    const locked = def.ok && (def.result as { item?: { forbidMainAutomatic?: boolean } }).item?.forbidMainAutomatic === true;
+    const ask = (field: string, question: string, rows: { choice: string; says: string }[]) => ({ ok: false as const, kind: "ask" as const, question, options: rows.map((r) => `${r.choice}: ${r.says}`), field: `integration.${field}`, choices: rows.map((r) => r.choice) });
+    if (given["landing"] === undefined) {
+      const rows = [
+        { choice: "integration-branch", says: "finished work is merged onto a separate integration branch; nothing reaches main until you or an integrator promotes it" },
+        { choice: "human-promotes", says: "finished work waits for a person to promote it" },
+        ...(locked ? [] : [{ choice: "main-automatic", says: "finished work goes to main by itself once its required checks pass, with no human step" }]),
+        { choice: "default", says: `use the installation default (or the ${profile} profile's, which is ${rec.landing})` },
+      ];
+      return ask("landing", `How should finished work land on this project? I suggest ${rec.landing}.`, rows);
+    }
+    if (given["integrator"] === undefined) {
+      return ask("integrator", `Who integrates finished work, an agent (the integrator role) or a person? I suggest ${rec.integrator}.`, [
+        { choice: "agent", says: "an integrator agent merges and resolves refresh conflicts with the author" },
+        { choice: "human", says: "a person merges" },
+        { choice: "default", says: `use the default (${rec.integrator})` },
+      ]);
+    }
+    if (given["requiredChecks"] === undefined) {
+      return ask("requiredChecks", `Which checks must pass before work lands? I suggest ${rec.requiredChecks.join(" and ")}.`, [
+        { choice: "tests", says: "automated tests only" },
+        { choice: "tests+review", says: "tests and an independent review" },
+        { choice: "tests+review+qa", says: "tests, review and a QA pass" },
+        { choice: "default", says: `use the default (${rec.requiredChecks.join(" and ")})` },
+      ]);
+    }
+    if (given["refreshRounds"] === undefined) {
+      return ask("refreshRounds", `How many times may an author refresh onto newer work before the integrator steps in? I suggest ${rec.refreshRounds}.`, [
+        { choice: "1", says: "one refresh" }, { choice: "3", says: "three refreshes" }, { choice: "5", says: "five refreshes" },
+        { choice: "default", says: `use the default (${rec.refreshRounds})` },
+      ]);
+    }
+    return undefined;
   }
 
   async #projectByIntent(token: string, projectId: string | undefined, projectName: string | undefined): Promise<{ ok: true; id: string; name: string } | { ok: false; kind: "ask"; question: string; options: string[]; field?: string; choices?: string[] } | { ok: false; kind: "refuse"; code: string; message: string }> {

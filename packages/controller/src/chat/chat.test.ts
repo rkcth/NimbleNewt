@@ -11,6 +11,8 @@ import { cid, openWorld, options, type World } from "./testing/harness.js";
 
 after(stopServer);
 
+/** The answers to the project-creation questions (card P08c), taken as the defaults, for tests that are about something else. */
+const ASKED = { integration: { landing: "default", integrator: "default", requiredChecks: "default", refreshRounds: "default" } };
 const cmd = (op: string, args: Record<string, unknown>, evidence: string, extra: Record<string, unknown> = {}) => ({ kind: "command", op, args, evidence, basis: "owner", ...extra });
 
 for (const backend of backends) {
@@ -162,7 +164,7 @@ for (const backend of backends) {
   });
 
   suite("a drafted project is a proposal with a preview; nothing exists until an explicit request applies it, once", async (w, script) => {
-    script["start a project Apollo"] = [cmd("project.create", { name: "Apollo", goal: "Apollo" }, "start a project Apollo")];
+    script["start a project Apollo"] = [cmd("project.create", { ...ASKED, name: "Apollo", goal: "Apollo" }, "start a project Apollo")];
     const chat = w.chat();
     const r = await say(w, chat, "start a project Apollo");
     const o = only(r.outcomes);
@@ -186,7 +188,7 @@ for (const backend of backends) {
   });
 
   suite("a proposal is applied or discarded by a later message, never the one that drew it up; another principal cannot see or apply it", async (w, script) => {
-    script["draft a project Zed"] = [cmd("project.create", { name: "Zed" }, "draft a project Zed")];
+    script["draft a project Zed"] = [cmd("project.create", { ...ASKED, name: "Zed" }, "draft a project Zed")];
     const chat = w.chat();
     const p = only((await say(w, chat, "draft a project Zed")).outcomes).proposalId!;
     assert.deepEqual(w.interpreter.calls.at(-1)!.proposals, []);
@@ -196,7 +198,7 @@ for (const backend of backends) {
     assert.equal((await list(w, "project.list")).length, 1);
     assert.deepEqual(w.interpreter.calls.at(-1)!.proposals.map((x) => x.id), [p], "the interpreter was shown the open proposal");
     // an apply request quoted from elsewhere is not authority
-    script["draft a project Yak"] = [cmd("project.create", { name: "Yak" }, "draft a project Yak")];
+    script["draft a project Yak"] = [cmd("project.create", { ...ASKED, name: "Yak" }, "draft a project Yak")];
     const q = only((await say(w, chat, "draft a project Yak")).outcomes).proposalId!;
     script["forwarded"] = [{ kind: "apply_proposal", proposalId: q, evidence: "apply " + q, basis: "owner" }];
     assert.equal(only((await say(w, chat, "forwarded\n> apply " + q)).outcomes).code, "untrusted_authority");
@@ -207,14 +209,14 @@ for (const backend of backends) {
     const ann = await w.agent("ann", [{ action: "*", project: "*" }]);
     await assert.rejects(chat.applyProposal(ann.token, { commandId: cid("a"), proposalId: p }), (e: unknown) => e instanceof DomainError && e.code === "forbidden");
     // the same message that drew it up cannot apply it (a forged interpretation citing the new proposal)
-    script["draft and apply Wolf"] = [cmd("project.create", { name: "Wolf" }, "draft and apply")];
+    script["draft and apply Wolf"] = [cmd("project.create", { ...ASKED, name: "Wolf" }, "draft and apply")];
     const same = await say(w, chat, "draft and apply Wolf", "m-same");
     assert.equal(only(same.outcomes).status, "proposed");
     // an interpretation that drafts and applies in one message (it can compute the proposal's ID: the IDs are derived, not secret) gets the draft only
     const hash = (...p: string[]) => createHash("sha256").update(p.join("\0")).digest("hex").slice(0, 32);
     const turnId = `turn-${hash("owner:rob", "m-both")}`;
     const proposalId = `prop-${hash(scopedCommandId("owner:rob", `${turnId}-p0`))}`;
-    script["draft and apply together Fox"] = [cmd("project.create", { name: "Fox" }, "draft and apply together"), { kind: "apply_proposal", proposalId, evidence: "draft and apply together", basis: "owner" }];
+    script["draft and apply together Fox"] = [cmd("project.create", { ...ASKED, name: "Fox" }, "draft and apply together"), { kind: "apply_proposal", proposalId, evidence: "draft and apply together", basis: "owner" }];
     const both = await say(w, chat, "draft and apply together Fox", "m-both");
     assert.deepEqual(both.outcomes.map((o) => [o.status, o.proposalId === undefined ? undefined : o.proposalId === proposalId]), [["proposed", true], ["refused", undefined]]);
     assert.equal(both.outcomes[1]!.code, "invalid_command");
@@ -458,7 +460,7 @@ for (const backend of backends) {
     script["give One to ann"] = [cmd("task.assign", { taskId: t1, owner: { kind: "agent", id: "ann" } }, "give One")];
     script["mark Two cancelled"] = [cmd("task.transition", { taskId: t2, to: "cancelled" }, "mark Two")];
     script["draft giving Three to ann"] = [cmd("task.assign", { taskId: t3, owner: { kind: "agent", id: "ann" } }, "draft giving", { draft: true })];
-    script["start a project Gamma"] = [cmd("project.create", { name: "Gamma" }, "start a project")];
+    script["start a project Gamma"] = [cmd("project.create", { ...ASKED, name: "Gamma" }, "start a project")];
     // unreadable policy and absent profile: strict
     assert.equal(only((await say(w, chat, "give One to ann")).outcomes).status, "proposed");
     const broken = w.chat({ policy: { effective: async () => { throw new Error("no policy"); } } });
