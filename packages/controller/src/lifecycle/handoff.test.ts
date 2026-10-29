@@ -184,6 +184,25 @@ for (const backend of backends) {
     assert.equal(c.rt.count("terminate-force"), 1);
   });
 
+  suite("a takeover that replaces a blocked hand-off lets the new owner run, and one that crashes before the stop moves nothing", async (c) => {
+    c.rt.cleanups = [{ remaining: [{ kind: "job", ref: "j", state: "running" }] }];
+    const stuck = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "again", deadlineMs: 1000 });
+    now += 5000;
+    assert.equal((await c.handoffs.advance(c.mgr, { handoffId: stuck.id })).phase, "blocked");
+    const t = await c.handoffs.choose(c.mgr, { commandId: cid("ch"), handoffId: stuck.id, choice: "force-takeover", reason: "stuck" });
+    assert.equal(t.phase, "transferred");
+    assert.equal(await paused(c), false, "the hold the replaced hand-off added is lifted");
+    // A forced takeover whose stop fails leaves the old owner in place.
+    await c.assignments.transferTask({ commandId: cid("x"), actor: c.owner.id, taskId: c.task, expectedRevision: (await c.assignments.getAssignment(c.task))!.revision, to: c.a });
+    const gen = await ownerOf(c);
+    c.rt.throwOnTerminate = true;
+    await assert.rejects(c.handoffs.takeover(c.owner, { commandId: cid("tk"), taskId: c.task, to: c.b, reason: "gone" }));
+    assert.equal(await ownerOf(c), gen, "not moved without the stop");
+    const pending = (await c.reopen().sweep(c.owner));
+    assert.deepEqual(pending.advanced.length + pending.failed.length, 1);
+    assert.equal(await ownerOf(c), gen, "a sweep does not move it either while the stop keeps failing");
+  });
+
   suite("refusals: the same owner, an ineligible recipient, a second hand-off at once, and a caller without authority learns nothing", async (c) => {
     await refuses("invalid_command", () => c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.a, reason: "x" }));
     c.src.ineligibleWith = "B is retired";

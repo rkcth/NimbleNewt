@@ -42,7 +42,8 @@ class Fakes {
       return out;
     },
   };
-  bl = { openBlocker: async (c: { type: string }) => { this.blockers.push(c.type); return { id: `blk-${this.blockers.length}` } as never; } };
+  seen = new Map<string, string>();
+  bl = { openBlocker: async (c: { type: string; commandId: string }) => { const old = this.seen.get(c.commandId); if (old !== undefined) return { id: old } as never; this.blockers.push(c.type); const id = `blk-${this.blockers.length}`; this.seen.set(c.commandId, id); return { id } as never; } };
   ports: ResumePorts = {
     observe: async (): Promise<Record<string, Observation>> => ({}),
     missingContext: async () => this.missing,
@@ -113,6 +114,8 @@ for (const backend of backends) {
     const m = await svc.start(owner, { commandId: cid("s"), taskId: task, model, after: "restart" });
     assert.deepEqual([m.phase, m.blocked?.type], ["blocked", "missing_context"]);
     assert.deepEqual(f.blockers, ["missing_context"]);
+    const again = await svc.retry(owner, { checkId: m.id });
+    assert.deepEqual([again.phase, again.blocked?.type, f.blockers], ["blocked", "missing_context", ["missing_context", "missing_context"]], "blocking again after a retry opens a new blocker");
     f.missing = []; f.effects = ["effect:push-1"];
     const e = await svc.retry(owner, { checkId: m.id });
     assert.deepEqual([e.phase, e.blocked?.type], ["blocked", "effects_uncertain"]);

@@ -104,7 +104,7 @@ export class DependencyService {
   /** The manifest of a task, for those who may work on it, read the project's histories, or the owner. */
   async get(by: Principal, taskId: string): Promise<ManifestBody | undefined> {
     const task = (await this.#runner.get("task", checkTaskId(taskId)))?.body as unknown as TaskBody | undefined;
-    if (task === undefined || !(allows(by, "attempt.work", task.projectId, { resource: { kind: "task", id: taskId } }) || allows(by, "history.read", task.projectId))) return undefined;
+    if (task === undefined || !(by.kind === "owner" || by.kind === "host" || by.kind === "service" || allows(by, "attempt.work", task.projectId, { resource: { kind: "task", id: taskId } }) || allows(by, "history.read", task.projectId))) return undefined;
     return (await this.#runner.get("dependency-manifest", derivedId("dpm", taskId)))?.body as unknown as ManifestBody | undefined;
   }
 

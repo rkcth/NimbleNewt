@@ -133,7 +133,7 @@ export class ActivityService {
     const taskId = checkTaskId(command.taskId);
     const task = await this.#task(taskId);
     if (!(by.kind === "owner" || by.kind === "host" || by.kind === "service" || allows(by, "history.append", task.projectId) || allows(by, "attempt.work", task.projectId, { resource: { kind: "task", id: taskId } }))) throw new DomainError("forbidden", `${by.id} may not explain choices on that task`);
-    if (command.seq !== undefined) await this.#step(taskId, command.seq);
+    if (command.seq !== undefined && (await this.#stepView(taskId, command.seq)).gone !== undefined) invalid("seq", "that step is unavailable");
     if (!Array.isArray(command.alternatives) || command.alternatives.length < 1 || command.alternatives.length > ACTIVITY_LIMITS.alternatives) invalid("alternatives", `give 1 to ${ACTIVITY_LIMITS.alternatives} alternatives that were considered`);
     if (!Array.isArray(command.evidence) || command.evidence.length < 1 || command.evidence.length > ACTIVITY_LIMITS.evidence) invalid("evidence", `give 1 to ${ACTIVITY_LIMITS.evidence} pieces of key evidence`);
     const body: ExplanationBody = {
@@ -176,6 +176,7 @@ export class ActivityService {
     const taskId = checkTaskId(command.taskId);
     const task = await this.#task(taskId);
     if (!(by.kind === "owner" || by.kind === "host" || by.kind === "service" || allows(by, "history.append", task.projectId))) throw new DomainError("forbidden", `${by.id} may not correct that task's activity`);
+    if ((await this.#stepView(taskId, command.seq)).gone !== undefined) invalid("seq", "that step is unavailable");
     const step = await this.#step(taskId, command.seq);
     const note = statement(command.note, "note");
     const id = derivedId("acr", scopedCommandId(by.id, command.commandId));
@@ -233,6 +234,7 @@ export class ActivityService {
   async payload(by: Principal, taskId: string, seq: number): Promise<{ text: string; redactions: number } | undefined> {
     const tid = checkTaskId(taskId);
     const task = await this.#task(tid);
+    this.#mayRead(by, task.projectId, tid);
     const { step, gone } = await this.#stepView(tid, seq);
     if (gone !== undefined) throw new DomainError("not_found", `the content of step ${seq} is unavailable: ${gone}`);
     if (step!.payload.state !== "stored") return undefined;
@@ -248,14 +250,15 @@ export class ActivityService {
     const tid = checkTaskId(taskId);
     const task = await this.#task(tid);
     this.#mayRead(by, task.projectId, tid);
-    return seq === undefined ? this.#allExplanations(tid) : this.#explanationsFor(tid, seq);
+    if (seq === undefined) { const keep: ExplanationBody[] = []; for (const e of await this.#allExplanations(tid)) if (e.seq === undefined || (await this.#stepView(tid, e.seq)).gone === undefined) keep.push(e); return keep; }
+    return (await this.#stepView(tid, seq)).gone !== undefined ? [] : this.#explanationsFor(tid, seq);
   }
 
   async corrections(by: Principal, taskId: string, seq: number): Promise<CorrectionBody[]> {
     const tid = checkTaskId(taskId);
     const task = await this.#task(tid);
     this.#mayRead(by, task.projectId, tid);
-    return this.#corrections(tid, seq);
+    return (await this.#stepView(tid, seq)).gone !== undefined ? [] : this.#corrections(tid, seq);
   }
 
   // ---- internals -----------------------------------------------------------------------------------------------------------

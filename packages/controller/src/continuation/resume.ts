@@ -38,6 +38,8 @@ export interface ResumeCheckBody {
   readonly phase: ResumePhase;
   /** How many times the inputs changed between review and commit and the check started over. */
   readonly round: number;
+  /** How many times it has blocked: part of each blocker's command ID, so a retry that blocks again opens a new blocker. */
+  readonly blocks: number;
   readonly maxRounds: number;
   readonly model: { readonly provider: string; readonly id: string };
   readonly previousModel?: { readonly provider: string; readonly id: string };
@@ -121,7 +123,7 @@ export class ResumeCheckService {
         }
         const ref: AggregateRef = { kind: KIND, id };
         const body: ResumeCheckBody = {
-          taskId, projectId, phase: "collecting", round: 0, maxRounds: this.#rounds, model, ...(previousModel === undefined ? {} : { previousModel }), after: command.after, verdicts: {},
+          taskId, projectId, phase: "collecting", round: 0, blocks: 0, maxRounds: this.#rounds, model, ...(previousModel === undefined ? {} : { previousModel }), after: command.after, verdicts: {},
           requestedBy: by.id, requestedAt: at, history: [{ phase: "collecting", at, by: by.id, note: "resume check started" }],
         };
         const pointer = clean({ checkId: id });
@@ -300,10 +302,10 @@ export class ResumeCheckService {
   async #block(by: Principal, id: string, b: ResumeCheckBody, type: NonNullable<ResumeCheckBody["blocked"]>["type"], reason: string, from: readonly ResumePhase[] = LIVE): Promise<void> {
     let blockerId: string | undefined;
     if (type === "missing_context" || type === "resume_churn") {
-      const opened = await this.#blockers.openBlocker({ commandId: `${id}-blk-${type}-${b.round}`, actor: "system", type, subject: { kind: "task", id: b.taskId }, summary: short(reason), resolver: "owner" });
+      const opened = await this.#blockers.openBlocker({ commandId: `${id}-blk-${type}-${b.blocks}`, actor: "system", type, subject: { kind: "task", id: b.taskId }, summary: short(reason), resolver: "owner" });
       blockerId = opened.id;
     }
-    await this.#update(id, (x) => ({ ...x, phase: "blocked", blocked: { type, reason: short(reason), ...(blockerId === undefined ? {} : { blockerId }) }, history: this.#push(x, "blocked", by.id, short(reason)) }), from);
+    await this.#update(id, (x) => ({ ...x, phase: "blocked", blocks: x.blocks + 1, blocked: { type, reason: short(reason), ...(blockerId === undefined ? {} : { blockerId }) }, history: this.#push(x, "blocked", by.id, short(reason)) }), from);
   }
 
   async #update(id: string, change: (b: ResumeCheckBody) => ResumeCheckBody, from: readonly ResumePhase[]): Promise<boolean> {
