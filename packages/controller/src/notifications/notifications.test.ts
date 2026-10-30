@@ -29,7 +29,7 @@ for (const backend of backends) {
   interface Ctx {
     svc: NotificationService; owner: Principal; ann: Principal; evil: Principal; ctl: Principal; wide: Principal; a: string; b: string; ta: string;
     sent: { text: string; links: unknown }[]; failing: { on: boolean }; responded: { commandId: string; id: string; answer: string }[];
-    review(): Promise<string>; blocker(type?: "manual_hold" | "wait_overdue" | "unexplained_block"): Promise<string>; question(): Promise<string>;
+    review(): Promise<string>; resolveBlocker(id: string): Promise<void>; blocker(type?: "manual_hold" | "wait_overdue" | "unexplained_block"): Promise<string>; question(): Promise<string>;
     report(who: Principal, kind: NotificationKind, refKind: string, id: string, extra?: Record<string, unknown>): ReturnType<NotificationService["emit"]>;
   }
   const suite = (name: string, body: (c: Ctx) => Promise<void>) =>
@@ -65,6 +65,7 @@ for (const backend of backends) {
           svc, owner, ann, evil, ctl, wide, a, b, ta, sent, failing, responded,
           review: async () => (await reviews.request(ann, { commandId: cid("rq"), taskId: ta, operation: { name: "git-commit", args: { n: n++ }, target: { kind: "repository", id: "main" } }, context })).id,
           blocker: async (type = "manual_hold") => (await blockers.openBlocker({ commandId: cid("bl"), actor: "owner:rob", type, subject: { kind: "task", id: ta }, summary: "stuck", resolver: "owner:rob" })).id,
+          resolveBlocker: async (id) => { const b = (await blockers.getBlocker(id))!; await blockers.resolveBlocker({ commandId: cid("rs"), actor: "owner:rob", blockerId: id, expectedRevision: b.revision, resolution: "fixed" }); },
           question: async () => (await inquiries.ask(ann, { commandId: cid("q"), taskId: ta, to: "owner:rob", question: "which one?" })).id,
           report: (who, kind, refKind, id, extra = {}) => who === ctl ? svc.emitFromController({ commandId: cid("n"), kind, ref: { kind: refKind, id }, ...extra } as never) : svc.emit(who, { commandId: cid("n"), kind, ref: { kind: refKind, id }, ...extra } as never),
         });
@@ -168,8 +169,13 @@ for (const backend of backends) {
     hours(23);
     await c.svc.runDue();
     assert.equal((await item(waiting.itemId)).urgent, false, "23 hours: not yet");
+    // A blocker that was resolved in its own flow is not raised as Urgent.
+    const settledBlocker = await c.blocker("manual_hold");
+    const settled = await c.report(c.ann, "blocker", "blocker", settledBlocker);
+    await c.resolveBlocker(settledBlocker);
     hours(25);
     await c.svc.runDue();
+    assert.equal((await item(settled.itemId)).urgent, false, "a settled record is not raised");
     const raised = await item(waiting.itemId);
     assert.deepEqual([raised.urgent, raised.state, raised.escalatedAt], [true, "sent", new Date(now).toISOString()]);
     assert.equal((await item(note.itemId)).urgent, false, "an item that only informs is never raised");

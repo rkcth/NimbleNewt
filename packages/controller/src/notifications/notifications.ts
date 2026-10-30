@@ -261,7 +261,11 @@ export class NotificationService {
     const digestIds: string[] = [];
     let problem: unknown;
     try {
-      if (!this.#quiet(settings, now)) { await this.#escalateStale(settings, now); await this.#releaseUrgent(settings, now); }
+      if (!this.#quiet(settings, now)) {
+        // A failure to raise one item does not hold back the release of urgent reviews and the digests; it is raised after they were tried.
+        try { await this.#escalateStale(settings, now); } catch (error) { problem = error; }
+        await this.#releaseUrgent(settings, now);
+      }
       const state = (await this.#runner.get("notification-state", "installation"))?.body as unknown as StateBody | undefined;
       const due = this.#latestDigestTime(settings, now);
       if (due !== undefined && (state?.lastDigestAt === undefined || state.lastDigestAt < due) && !this.#quiet(settings, now)) digestIds.push(...await this.#collect(settings, now, due));
@@ -418,6 +422,8 @@ export class NotificationService {
     const limit = Date.parse(now) - (settings.escalateAfterHours ?? DEFAULT_ESCALATE_AFTER_HOURS) * 3_600_000;
     for (const item of await this.#load<ItemBody>("notification-item", (await this.#index()).body.items)) {
       if (item.state === "answered" || item.escalatedAt !== undefined || !WAITS_ON_OWNER.has(item.kind) || Date.parse(item.firstAt) > limit) continue;
+      // What the item points at may have been settled in its own flow (a blocker resolved, a review decided): a settled record is not raised as Urgent.
+      try { await this.#describe(item.kind, item.ref, item.projectId); } catch (error) { if (error instanceof DomainError && (error.code === "not_found" || error.code === "invalid_command")) continue; throw error; }
       const hours = Math.floor((Date.parse(now) - Date.parse(item.firstAt)) / 3_600_000);
       const delivery = this.#delivery(settings, { kind: "item", id: item.id }, `URGENT, unanswered for ${hours} hours: ${item.kind}: ${item.label}`, now, `${item.id}|${item.firstAt}|escalated`);
       await this.#apply("notification.escalate", { commandId: `escalate-${item.id}-${item.firstAt}`, actor: "notifications" }, { id: item.id }, async (index) => {

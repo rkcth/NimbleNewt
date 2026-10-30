@@ -186,6 +186,7 @@ for (const backend of backends) {
     // Only the owner records one; it is a UTC time; the pause must be in force.
     await refuses("forbidden", () => c.pauses.setResumeCondition(c.mgr, { commandId: cid("rc"), scope: task, at: new Date(now + 3_600_000).toISOString() }));
     await refuses("invalid_command", () => c.pauses.setResumeCondition(c.owner, { commandId: cid("rc"), scope: task, at: "tomorrow morning" }));
+    await refuses("invalid_command", () => c.pauses.setResumeCondition(c.owner, { commandId: cid("rc"), scope: task, at: "2030-01-01T08:00:00" }), (e) => assert.match(e.message, /zone/));
     await refuses("invalid_command", () => c.pauses.setResumeCondition(c.owner, { commandId: cid("rc"), scope: { kind: "task", id: c.t3 }, at: new Date(now + 3_600_000).toISOString() }));
     const at = new Date(now + 3_600_000).toISOString();
     const set = await c.pauses.setResumeCondition(c.owner, { commandId: "rc-fixed", scope: task, at });

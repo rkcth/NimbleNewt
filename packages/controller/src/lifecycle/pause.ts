@@ -244,7 +244,7 @@ export class PauseService implements PauseGuard, PauseLookup {
     if (principal.kind !== "owner") throw new DomainError("forbidden", `${principal.id} is not the owner; only the owner records a condition that lifts a pause`);
     const scope = checkScope(command.scope);
     const parsed = typeof command.at === "string" ? Date.parse(command.at) : Number.NaN;
-    if (!Number.isFinite(parsed) || !/^\d{4}-\d{2}-\d{2}T/.test(command.at)) invalid("at", "must be a UTC time such as 2026-11-01T08:00:00Z");
+    if (!Number.isFinite(parsed) || !/^\d{4}-\d{2}-\d{2}T.*(Z|[+-]\d{2}:\d{2})$/.test(command.at)) invalid("at", "must be a time with its zone, in UTC such as 2026-11-01T08:00:00Z");
     const at = new Date(parsed).toISOString();
     await this.#authorize(principal, scope, "control", false);
     const gateId = gateIdOf(scope);
@@ -267,9 +267,30 @@ export class PauseService implements PauseGuard, PauseLookup {
    * The controller's tick: lifts every pause whose recorded condition has come, and only that scope, with the reason naming the condition. A gate with no recorded condition is never touched, and a repeat of the tick
    * (or a restart) lifts nothing twice. The caller is the dispatcher (owner, host or service). Answers the scopes it lifted.
    */
+  /**
+   * A Stop, a Suspend or a hand-off takes the pause over: the time the owner recorded for an ordinary pause no longer applies to it, so it is dropped (card L06b). The caller is the one controlling the scope.
+   * Safe to repeat; a gate with no recorded condition is not touched.
+   */
+  async dropResumeCondition(principal: Principal, scope: PauseScope): Promise<void> {
+    const checked = checkScope(scope);
+    await this.#authorize(principal, checked, "control", false);
+    const gateId = gateIdOf(checked);
+    await this.#retrying(async () => {
+      const ref: AggregateRef = { kind: "pause-gate", id: gateId };
+      const found = await this.#runner.get(ref.kind, ref.id);
+      if (found === undefined || (found.body as unknown as PauseGateBody).resumeAt === undefined) return;
+      const { resumeAt: _dropped, ...rest } = found.body as unknown as PauseGateBody; void _dropped;
+      await this.#runner.command("pause.condition-drop", { commandId: `drop-cond-${gateId}-${found.revision}`, actor: principal.id }, async () => ({
+        payload: { scope: checked as unknown as JsonObject },
+        build: async () => ({ ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: clean(rest) }], detail: { scope: checked as unknown as JsonObject, resumeAt: null } }),
+      }));
+    });
+  }
+
   async liftDue(by: Principal): Promise<PauseScope[]> {
     if (!(by.kind === "owner" || by.kind === "host" || by.kind === "service")) throw new DomainError("forbidden", `${by.id} is not the dispatcher; recorded conditions are carried out by the controller`);
     const lifted: PauseScope[] = [];
+    let failure: unknown;
     const now = Date.parse(this.#runner.now());
     let after: string | undefined;
     for (;;) {
@@ -278,19 +299,22 @@ export class PauseService implements PauseGuard, PauseLookup {
         after = a.id;
         const gate = a.body as unknown as PauseGateBody;
         if (gate.intent !== "pause" || gate.resumeAt === undefined || Date.parse(gate.resumeAt.at) > now) continue;
+        // A pause that has gone on to be suspended or stopped is not an ordinary pause any more.
+        if (gate.observed !== undefined && ["preparing-to-suspend", "suspended", "stopping", "stopped", "recovery-required"].includes(gate.observed.state)) continue;
         try {
-          await this.#request(by, `cond-${gate.requestId ?? a.id}`, "resume", gate.scope, `the owner's recorded condition (set by ${gate.resumeAt.setBy} at ${gate.resumeAt.setAt}): not before ${gate.resumeAt.at}`, undefined, gate.projectId);
+          await this.#request(by, `cond-${gate.requestId ?? a.id}`, "resume", gate.scope, `the owner's recorded condition (set by ${gate.resumeAt.setBy} at ${gate.resumeAt.setAt}): not before ${gate.resumeAt.at}`, undefined, gate.projectId, { requestId: gate.requestId, at: gate.resumeAt.at, now });
           lifted.push(gate.scope);
         } catch (error) {
-          // A gate resumed or paused again by someone else since it was read is no longer this condition's to lift.
-          if (!(error instanceof DomainError) || error.code !== "invalid_command") throw error;
+          // A gate resumed, paused again or given another time since it was read is no longer this condition's to lift. One gate that cannot be lifted does not hold up the others.
+          if (error instanceof DomainError && error.code === "invalid_command") continue;
+          failure ??= error;
         }
       }
-      if (page.length < 200) return lifted;
+      if (page.length < 200) { if (failure !== undefined) throw failure; return lifted; }
     }
   }
 
-  async #request(principal: Principal, commandId: unknown, action: "pause" | "resume", scope: PauseScope, reason: string, background: BackgroundPolicy | undefined, projectId: string | undefined) {
+  async #request(principal: Principal, commandId: unknown, action: "pause" | "resume", scope: PauseScope, reason: string, background: BackgroundPolicy | undefined, projectId: string | undefined, onlyIf?: { requestId: string | undefined; at: string; now: number }) {
     const scoped = scopedCommandId(principal.id, commandId);
     const gateId = gateIdOf(scope);
     const result = await this.#retrying(() => this.#runner.command(`pause.${action}`, { commandId: scoped, actor: principal.id }, async () => ({
@@ -301,6 +325,8 @@ export class PauseService implements PauseGuard, PauseLookup {
         const gate = found === undefined ? this.#fresh(scope, projectId) : (found.body as unknown as PauseGateBody);
         if (action === "pause" && gate.intent === "pause") throw new DomainError("invalid_command", `${scope.kind} ${scope.id} is already paused`, { field: "scope" });
         if (action === "resume" && gate.intent !== "pause") throw new DomainError("invalid_command", `${scope.kind} ${scope.id} is not paused`, { field: "scope" });
+        // A lift by recorded condition applies only to the very pause and time it was read with.
+        if (onlyIf !== undefined && (gate.requestId !== onlyIf.requestId || gate.resumeAt?.at !== onlyIf.at || Date.parse(onlyIf.at) > onlyIf.now)) throw new DomainError("invalid_command", `${scope.kind} ${scope.id} no longer has that condition`, { field: "scope" });
         const at = this.#runner.now();
         const seq = gate.requests + 1;
         const requestId = requestIdOf(gateId, seq);

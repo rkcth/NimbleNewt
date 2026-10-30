@@ -102,6 +102,18 @@ for (const backend of backends) {
     assert.equal((await c.pauses.gate(c.owner, scopeOf(c.task)))?.intent, "pause", "stop never resumes execution to shut it down");
   });
 
+  suite("a Stop that takes over an ordinary pause drops the time the owner recorded for it, so that time never reverses the Stop (card L06b)", async (c) => {
+    const scope = scopeOf(c.task);
+    await c.pauses.pause(c.owner, { commandId: cid("pz"), scope, reason: "for the weekend" });
+    await c.pauses.setResumeCondition(c.owner, { commandId: cid("rc"), scope, at: "2026-01-01T00:00:00Z" });
+    assert.ok((await c.pauses.gate(c.owner, scope))?.resumeAt !== undefined, "the owner's time is recorded");
+    const { intentId } = await c.stops.request(c.owner, { commandId: cid("s"), scope, mode: "stop", reason: "shutting down" });
+    assert.equal((await c.pauses.gate(c.owner, scope))?.resumeAt, undefined, "the stop took the pause over");
+    await c.stops.advance(c.owner, { intentId });
+    assert.deepEqual(await c.pauses.liftDue(c.owner), [], "a time that was set for the earlier pause lifts nothing");
+    assert.equal((await c.pauses.gate(c.owner, scope))?.intent, "pause");
+  });
+
   suite("a kill in the middle resumes the intent after a restart and reuses the finished preparation", async (c) => {
     c.rt.crashOnTerminate = true;
     const { intentId } = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "stop" });

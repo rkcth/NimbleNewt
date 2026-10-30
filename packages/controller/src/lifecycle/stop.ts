@@ -111,6 +111,8 @@ export class StopService {
     if (cannot !== undefined) throw new DomainError("unavailable", cannot, { field: "scope" });
     await this.#abandonIfResumed(by, scope);
     if ((await this.#pauses.gate(by, scope))?.intent !== "pause") await this.#pauses.pause(by, { commandId: `${String(command.commandId)}-pause`, scope, reason: `${command.mode}: ${reason}`.slice(0, 500) });
+    // A time the owner recorded for an ordinary pause does not carry over to a Stop or Suspend that takes the pause over (card L06b).
+    await this.#pauses.dropResumeCondition(by, scope);
     const gateRequestId = (await this.#pauses.gate(by, scope))?.requestId;
     const intentId = derivedId("stp", scopedCommandId(by.id, command.commandId));
     const activeRef: AggregateRef = { kind: ACTIVE, id: derivedId("stp", scopeKey(scope)) };
@@ -168,6 +170,7 @@ export class StopService {
       return { intentId: took, outcome: ((await this.#runner.get(KIND, took))!.body as unknown as StopIntentBody).outcome! };
     }
     if ((await this.#pauses.gate(by, scope))?.intent !== "pause") await this.#pauses.pause(by, { commandId: `${String(command.commandId)}-pause`, scope, reason: `force stop: ${reason}`.slice(0, 500) });
+    await this.#pauses.dropResumeCondition(by, scope);
     let id = await this.#activeId(scope);
     const existing = id === undefined ? undefined : await this.#runner.get(KIND, id);
     if (existing === undefined || TERMINAL.includes((existing.body as unknown as StopIntentBody).phase)) {
