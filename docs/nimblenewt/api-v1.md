@@ -1421,6 +1421,20 @@ Result: `{ revision }`.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `workers.limits.change`
+
+The owner changes some of the limits for local agents, leaving the others as they are (owner only): `set` has any of `cpus`, `memoryMb`, `diskMb`, `processes` (same bounds as `workers.limits.set`) and `unset` lists figures to clear so the start-up figure applies. This is the form the chat uses, so a request that waits to be accepted does only what it says and keeps a figure changed meanwhile. It counts from the next agent launched.
+
+Arguments:
+
+- `set` (optional): for example `{ "memoryMb": 4096 }`
+- `unset` (optional): figure names to clear, for example `["processes"]`
+- `expectedRevision` (optional): the revision of the setting you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `events.sources.set`
 
 The owner names the event sources to leave off (owner only); the list replaces the earlier one and an empty list turns all on. Each must be a source this controller has. A source not listed, including one added later, is watched. A turned-off source is not polled from the next tick and keeps its saved position, so what happened meanwhile is reported when it is turned on again.

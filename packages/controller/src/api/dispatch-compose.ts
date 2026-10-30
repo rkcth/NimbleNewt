@@ -109,7 +109,7 @@ export interface DispatchStartOptions {
     readonly storedTokens?: (from: NonNullable<WorkOrder["resumeFrom"]>) => number | undefined;
     /** What one agent on this host may use (cpus, memoryMb, diskMb, processes), checked at start and handed to `build` as `limits` for the host's `workspace` to carry (`AttemptWorkspace.limits`). Absent: none applied. */
     readonly limits?: LocalWorkerLimits;
-    readonly build: (services: { readonly guards: RuntimeGuards; /** The checked limits for each local agent (`dispatch.local.limits`); `undefined` when none were configured. */ readonly limits?: LocalWorkerLimits; /** The limits for an agent launched now (start-up figures with the owner's setting over them), read fresh at each call; throws when the setting cannot be read, and the host must then refuse the launch. */ readonly currentLimits: () => Promise<LocalWorkerLimits | undefined>; /** The process's context limits for an order (card C07b): tool output cut to the window\'s share and the extractive compaction fallback; `undefined` when the route does not say its window. The host\'s `context` option takes it. */ readonly context: (order: WorkOrder) => WorkerContextLimits | undefined; /** Records the input size the provider reported for the attempt\'s first model call (the relay\'s `onFirstUsage`) against the call that was admitted. Never throws. */ readonly confirmFirstCall: (order: WorkOrder, usage: { readonly inputTokens: number; readonly requestChars: number }) => Promise<void>; /** The relay of one attempt (the same object for every call of the attempt, so that only its first call is measured), with the first-call count already going to `confirmFirstCall`. Use this instead of `relay.forAttempt`. */ readonly attemptRelay: (order: WorkOrder, relay: ModelRelay, options?: { readonly model?: string; readonly cache?: Parameters<ModelRelay["forAttempt"]>[1] }) => AttemptRelay; readonly cache?: { forOrder(order: WorkOrder): Promise<AttemptCache> } }) => WorkerHost | Promise<WorkerHost>;
+    readonly build: (services: { readonly guards: RuntimeGuards; /** The limits for an agent launched now (start-up figures with the owner's setting over them), read fresh at each call; `undefined` when none apply. There is deliberately no static copy of the start-up figures here, so a host cannot read stale ones. It throws when the setting cannot be read, and the host must then refuse the launch (fail visibly), never run the agent unlimited. */ readonly currentLimits: () => Promise<LocalWorkerLimits | undefined>; /** The process's context limits for an order (card C07b): tool output cut to the window\'s share and the extractive compaction fallback; `undefined` when the route does not say its window. The host\'s `context` option takes it. */ readonly context: (order: WorkOrder) => WorkerContextLimits | undefined; /** Records the input size the provider reported for the attempt\'s first model call (the relay\'s `onFirstUsage`) against the call that was admitted. Never throws. */ readonly confirmFirstCall: (order: WorkOrder, usage: { readonly inputTokens: number; readonly requestChars: number }) => Promise<void>; /** The relay of one attempt (the same object for every call of the attempt, so that only its first call is measured), with the first-call count already going to `confirmFirstCall`. Use this instead of `relay.forAttempt`. */ readonly attemptRelay: (order: WorkOrder, relay: ModelRelay, options?: { readonly model?: string; readonly cache?: Parameters<ModelRelay["forAttempt"]>[1] }) => AttemptRelay; readonly cache?: { forOrder(order: WorkOrder): Promise<AttemptCache> } }) => WorkerHost | Promise<WorkerHost>;
     /** Shuts down what `build` made (live workers, the sandbox launcher, the relay). Called when the controller closes and when a later step of the start fails. */
     readonly close?: () => Promise<void>;
   };
@@ -188,9 +188,9 @@ export interface ComposeInput {
   readonly backups?: Pick<BackupService, "runScheduled">;
   /** External event sources polled each tick (card H13d). None are built in. */
   readonly eventSources?: readonly EventSource[];
-  /** The sources the owner turned off, read at every tick (card H13f). */
   /** The limits for the next local agent: the start-up figures with the owner's setting over them (card H12k). Throws when unreadable. */
   readonly workerLimits?: () => Promise<LocalWorkerLimits | undefined>;
+  /** The sources the owner turned off, read at every tick (card H13f). */
   readonly eventSourcesOff?: () => Promise<ReadonlySet<string>>;
   /** Health probes of failed-over routes (card R04c): off unless given, and then only while `enabled()` says so. */
   readonly probes?: { readonly cutover: Pick<CutoverService, "downTargets" | "probe">; readonly probes: RouteProbes };
@@ -362,7 +362,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       }
       return found.relay;
     };
-    workers.push(await i.options.local.build({ guards, ...(limits === undefined ? {} : { limits }), currentLimits: async () => i.workerLimits === undefined ? limits : i.workerLimits(), context: contextFor, confirmFirstCall, attemptRelay, ...(cache === undefined ? {} : { cache }) }));
+    workers.push(await i.options.local.build({ guards, currentLimits: async () => i.workerLimits === undefined ? limits : i.workerLimits(), context: contextFor, confirmFirstCall, attemptRelay, ...(cache === undefined ? {} : { cache }) }));
   }
   // Whatever was built before a later step fails is closed again: the listener, and the local host built above (a host the controller was given the means to build owns real resources).
   let transport: WorkerTransport | undefined;
