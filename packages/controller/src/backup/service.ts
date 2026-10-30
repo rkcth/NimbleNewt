@@ -1,3 +1,4 @@
+import { stat } from "node:fs/promises";
 import type { FileBlobStore } from "../artifacts/index.js";
 import type { ControllerStorage } from "../storage/index.js";
 import { type BackupKind, type BackupManifest } from "./format.js";
@@ -41,9 +42,14 @@ export class BackupService {
   readonly #asked = new Map<string, Promise<{ path: string; manifest: BackupManifest }>>();
 
   /** `backUpNow` for a command: the same command ID gets the same backup, whether it is still running or done. */
-  backUpFor(commandId: string): Promise<{ path: string; manifest: BackupManifest }> {
+  async backUpFor(commandId: string): Promise<{ path: string; manifest: BackupManifest }> {
     const known = this.#asked.get(commandId);
-    if (known !== undefined) return known;
+    if (known !== undefined) {
+      // A backup the retention rule has since removed is not an answer to give again: the ask gets a new one.
+      const made = await known.catch(() => undefined);
+      if (made === undefined || await stat(made.path).then(() => true, () => false)) return known;
+      if (this.#asked.get(commandId) === known) this.#asked.delete(commandId);
+    }
     const run = this.backUpNow("manual");
     this.#asked.set(commandId, run);
     run.catch(() => this.#asked.delete(commandId)); // a failed ask may be tried again

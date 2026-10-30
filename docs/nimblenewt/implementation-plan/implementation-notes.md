@@ -2708,3 +2708,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - `StopService.readiness(by, scope)` and the query `lifecycle.readiness` say whether a stop of a task, agent, team or the installation could finish now, without pausing or recording anything: it lists what the stop inventory finds that is not settled (`{ kind, ref, state }`), says whether the scope is paused, and says when the list was cut at its limit. A look that fails is one unknown item (`runtime:inventory`), never "ready". The caller needs the right to control the scope; an unsupported scope is `unavailable`.
 - Remaining in L06: a team and installation report that also lists permitted remote jobs as tracked exceptions, the reboot procedure, resume conditions, the authenticated non-chat Stop command, and a chat view of the report.
 - **L06 (part 2): chat view.** `status.ask { kind: "shutdown" }` (owner only) tells whether the installation could be stopped now, or lists up to 20 things still running or unknown; others and an installation without the stop service get no answer. The chat assistant asks it as any status view. Scope is the installation only (team, agent and task scopes are still asked through `lifecycle.readiness`).
+
+## K01 known item closed: a cached backup answer that was pruned
+
+- `BackupService.backUpFor(commandId)` still returns the backup its first ask made, but if that backup's folder has since been removed (by retention or by hand) the repeat ask is given a new backup instead of a path that no longer exists.

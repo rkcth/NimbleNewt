@@ -208,3 +208,20 @@ test("the artifact store is locked against orphan cleanup from before the databa
     await cleanup;
   } finally { rmSync(root, { recursive: true, force: true }); rmSync(live, { recursive: true, force: true }); }
 });
+
+test("a repeated ask gets the backup its first ask made, unless that backup has since been removed, and then it gets a new one", async () => {
+  const store = new MemoryStorage(); const root = tmp();
+  let clock = Date.parse(AT);
+  try {
+    await populate(store);
+    const service = new BackupService(store, { root, version: "t", now: () => new Date(clock) });
+    const first = await service.backUpFor("cmd-1");
+    clock += 5000;
+    assert.equal((await service.backUpFor("cmd-1")).path, first.path, "the same ask, the same backup");
+    rmSync(first.path, { recursive: true, force: true });
+    const again = await service.backUpFor("cmd-1");
+    assert.notEqual(again.path, first.path, "the backup was removed, so the ask gets a new one");
+    assert.ok(existsSync(again.path));
+    assert.equal((await service.backUpFor("cmd-1")).path, again.path);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
