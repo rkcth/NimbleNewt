@@ -2754,3 +2754,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 
 - `model-budget.set` (owner only; `maxCostMicros`, `maxTokens`, `maxFailedAttempts`, a limit left out keeps its value) and `model-budget.get` (the limits and what the task has used: cost, tokens, calls, failed attempts). `FallbackService` is passed to the API as `modelBudget`. No chat command yet (the owner would ask for it by task title); the limits survive a restart.
 - **V02 (part 3): chat.** `model-budget.set` is a chat command (the owner names the task by its title), always a proposal shown first with its numbers, because raising a limit lets a task spend more. Reading the limits in chat is not built.
+
+## U04 close-out
+
+- Audit found one uncovered acceptance clause: an edit made straight through the API shows in the next attempt's text. Added a dispatcher test (policy changed between two starts; the second attempt shows the new approval profile, the first does not). Audit also noted: `start.ts` passes no `shareable` hook to the meeting record (cited records read as unverifiable, safe but strict; add to M02e), no remainder card names a model-health event source (add to H13f), and the dispatcher never passes `safeLongRunning` (add to M04f).

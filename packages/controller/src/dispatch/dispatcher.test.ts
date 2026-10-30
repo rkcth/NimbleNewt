@@ -1786,6 +1786,29 @@ for (const backend of backends) {
   });
 }
 
+// Card U04: an edit made straight through the API is in the text of the next attempt started, not a copy kept from before.
+for (const backend of backends) {
+  test(`${backend.name}: a policy edit made between two starts shows in the second attempt's text and not in the first`, async () => {
+    const store = await backend.open();
+    try {
+      const c = await buildWorld(store.storage);
+      const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+      await c.task("Order seeds", ann);
+      await c.dispatcher.tick(); await c.dispatcher.idle();
+      const before = c.worker.starts[0]!.content;
+      await c.policy.set(c.owner, { scope: "installation", commandId: "pol-u04", profile: "autonomous" });
+      await c.task("Order tools", ann);
+      await c.dispatcher.tick(); await c.dispatcher.idle();
+      const after = c.worker.starts[c.worker.starts.length - 1]!.content;
+      assert.match(after, /^Order tools/);
+      const profile = (t: string) => /Approval profile: (\w+)/.exec(t)?.[1];
+      assert.notEqual(profile(before), undefined);
+      assert.equal(profile(after), "autonomous");
+      assert.notEqual(profile(before), "autonomous");
+    } finally { await store.close(); }
+  });
+}
+
 // Card C09d: the steps of an attempt are recorded in the task's activity.
 for (const backend of backends) {
   test(`${backend.name}: the route and harness an attempt started under and each tool call's outcome are put in the task's activity, and a failing record changes nothing`, async () => {
