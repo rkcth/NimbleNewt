@@ -44,7 +44,7 @@ import { ActivityService } from "../activity/index.js";
 import type { BackupService } from "../backup/index.js";
 import type { MeetingRecordService } from "../meetings/record.js";
 import type { IncidentService, ResponsibilityChecks } from "../projects/index.js";
-import { AttendanceService, InvitationInbox, MeetingService, meetingNoticeSink, meetingWindowSink, withNudge, type InvitationSink } from "../meetings/index.js";
+import { AttendanceService, InvitationInbox, MeetingService, meetingNoticeSink, meetingWindowSink, withNudge, type InvitationSink, type WakeSink } from "../meetings/index.js";
 import { AgentMessageService } from "../messaging/index.js";
 import { NotificationService } from "../notifications/index.js";
 import type { ContractService } from "../planning/index.js";
@@ -170,6 +170,8 @@ export interface DispatchHandle {
 export interface ComposeInput {
   /** Whether an agent can be reached apart from its pause gates (the controller's `availability` option): `suspended` and `stopped` agents are withheld from meetings, the same as in the API's own instance. */
   readonly availability?: (principalId: string) => Promise<Availability>;
+  /** Brings an agent the host reports stopped or suspended up for one meeting, after the owner authorized it (card M04f). Absent: the owner's authorization is refused ("no wake path"). */
+  readonly meetingWake?: WakeSink;
   readonly storage: ControllerStorage; readonly epoch: number; readonly options: DispatchStartOptions;
   readonly principals: PrincipalService; readonly grants: GrantService; readonly taskCredentials: TaskCredentialService; readonly projects: ProjectService; readonly assignments: AssignmentService; readonly waits: WaitService;
   readonly contracts: ContractService; readonly catalog: HarnessCatalog; readonly routing: RoutingService; readonly inquiries: InquiryService; readonly agents: AgentService; readonly histories: HistoryService; readonly reviews: ReviewService;
@@ -257,7 +259,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   const attendance = AttendanceService.withEpoch(storage, epoch, { meetings, pauses, projects: i.projects, assignments: i.assignments, agents: i.agents, histories: i.histories,
     // The time an agent spends in a meeting is charged as compute: to its meeting task, or to the shared-overhead rule "meeting" (card R05d).
     charge: (u) => chargeRetry.submit(principal, { commandId: u.commandId, activity: "meeting", agentId: u.agentId, computeMs: u.computeMs, projectId: u.projectId, ...(u.taskId === undefined ? { sharedOverheadRule: "meeting" } : { taskId: u.taskId }) }).then(() => undefined),
-    ...(i.onError === undefined ? {} : { onChargeError: i.onError }), ...(i.leadMinutes === undefined ? {} : { leadMinutes: i.leadMinutes }) }, { ...ro, availability: pauses.availability, notices: meetingNoticeSink(messages), window: meetingWindowSink(messages) });
+    ...(i.onError === undefined ? {} : { onChargeError: i.onError }), ...(i.leadMinutes === undefined ? {} : { leadMinutes: i.leadMinutes }) }, { ...ro, availability: pauses.availability, notices: meetingNoticeSink(messages), window: meetingWindowSink(messages), ...(i.meetingWake === undefined ? {} : { wake: i.meetingWake }) });
   const watches = WatchService.withEpoch(storage, epoch, { events, inbox: InboxService.withEpoch(storage, epoch, i.assignments), assignments: i.assignments, projects: i.projects }, ro);
   const followUps = chatTurnFollowUps(storage, epoch, ro);
   const improvements = ImprovementService.withEpoch(storage, epoch, { meetings }, { ...ro, outcomes: improvementOutcomeSink(messages) });

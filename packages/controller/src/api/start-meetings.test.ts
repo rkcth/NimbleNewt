@@ -186,3 +186,43 @@ test("through the composed controller a paused agent and an agent the host repor
     assert.deepEqual(open.result.items.map((i: { id: string }) => i.id), [topic.result.id]);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+test("through the composed controller the owner's wake of an agent the host reports stopped reaches the host once, and without a host wake path it is refused (card M04f)", async () => {
+  for (const withHost of [true, false]) {
+    const d = mkdtempSync(join(tmpdir(), "nn-meet-"));
+    const slot = Date.parse(`${new Date(Date.now() + 86_400_000).toISOString().slice(0, 10)}T08:00:00.000Z`);
+    let now = Date.now();
+    const stopped = new Set<string>();
+    const recovered: { key: string; agent: string }[] = [];
+    const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], availability: async (id: string) => (stopped.has(id) ? "stopped" : "available"),
+      ...(withHost ? { meetingWake: { recover: async (r: { key: string; agent: string }) => { recovered.push({ key: r.key, agent: r.agent }); } } } : {}),
+      dispatch: { timer: new ManualTimer(), intervalMs: 1000, clock: () => new Date(now).toISOString(), invitations: { invite: async () => undefined } } } as never);
+    try {
+      const s = c.services;
+      const boot = await s.principals.bootstrapOwner({ name: "rob" });
+      const rob = await s.principals.authenticate(boot.token);
+      const project = (await s.projects.createProject({ commandId: "p1", actor: rob.id, name: "Garden" })).id;
+      const ids: Record<string, string> = {};
+      for (const n of ["ann", "cat"]) {
+        ids[n] = (await s.agents.create(rob, { commandId: `ag-${n}`, friendlyName: n })).id;
+        await s.grants.grant(rob, { commandId: `g-${n}`, grantee: `agent:${ids[n]}`, action: "task.read", project, source: "direct", basis: "test" });
+        await s.grants.grant(rob, { commandId: `h-${n}`, grantee: `agent:${ids[n]}`, action: "history.read", project, source: "direct", basis: "test" });
+      }
+      const call = (op: string, args: Record<string, unknown>, commandId?: string, token = boot.token) => c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<{ ok: boolean; result?: any; error?: { message: string } }>;
+      const made = await call("meeting.schedule", { projectId: project, title: "Stand-up", roster: ["ann", "cat"].map((n) => `agent:${ids[n]}`), time: "08:00", timeZone: "UTC", startDate: new Date(slot).toISOString().slice(0, 10), recurrence: { kind: "daily" } }, "ms1");
+      assert.ok(made.ok, JSON.stringify(made));
+      stopped.add(`agent:${ids.cat}`);
+      now = slot;
+      for (let i = 0; i < 2; i++) await c.dispatch!.dispatcher.tick();
+      const occurrenceId = (await call("meeting.schedule-get", { scheduleId: made.result.id })).result.item.lastOccurrenceId;
+      const opened = await call("meeting.attend.open-room", { occurrenceId }, "or1"); assert.ok(opened.ok, JSON.stringify(opened));
+      const wake = await call("meeting.attend.wake", { occurrenceId, agent: `agent:${ids.cat}` }, "wk1");
+      if (!withHost) { assert.equal(wake.ok, false); assert.match(wake.error!.message, /no wake path/); assert.deepEqual(recovered, []); continue; }
+      assert.ok(wake.ok, JSON.stringify(wake));
+      assert.deepEqual(recovered, [{ key: `${occurrenceId}:agent:${ids.cat}`, agent: `agent:${ids.cat}` }]);
+      // The agent that is available needs no wake, and nothing else reached the host.
+      assert.equal((await call("meeting.attend.wake", { occurrenceId, agent: `agent:${ids.ann}` }, "wk2")).ok, false);
+      assert.equal(recovered.length, 1);
+    } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+  }
+});
