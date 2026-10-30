@@ -10,7 +10,7 @@ import { DeskService, HistoryService, RetrievalService } from "../context/index.
 import { InquiryService } from "../inquiries/index.js";
 import { ReviewService } from "../review/index.js";
 import { PrincipalService, type Grant, type Principal } from "../security/index.js";
-import { NotificationService, type ChannelAdapter, type NotificationKind } from "./index.js";
+import { NOTIFICATION_LIMITS, NotificationService, type ChannelAdapter, type NotificationKind } from "./index.js";
 
 after(stopServer);
 
@@ -218,7 +218,7 @@ for (const backend of backends) {
     const settledBlocker = await c.blocker("manual_hold");
     const settled = await c.report(c.ann, "blocker", "blocker", settledBlocker);
     await c.resolveBlocker(settledBlocker);
-    const note = await c.report(c.ctl, "maintenance", "host", "host-3");
+    const note = await c.report(c.ctl, "maintenance", "host", "host-3", { level: "notice" });
     const hours = (n: number) => set(new Date(Date.parse("2026-10-22T08:00:00.000Z") + n * 3_600_000).toISOString());
     const item = async (id: string) => (await c.svc.inbox(c.owner)).items.find((i) => i.id === id)!;
     hours(23);
@@ -303,8 +303,8 @@ for (const backend of backends) {
     await c.svc.answerItem(c.owner, { commandId: cid("ai"), itemId: live.itemId, answer: "ok", revision: seen.revision });
     // A replayed report is the same report.
     const id = cid("n");
-    const x = await c.svc.emitFromController({ commandId: id, kind: "maintenance", ref: { kind: "host", id: "h-1" } });
-    const y = await c.svc.emitFromController({ commandId: id, kind: "maintenance", ref: { kind: "host", id: "h-1" } });
+    const x = await c.svc.emitFromController({ commandId: id, kind: "maintenance", level: "notice", ref: { kind: "host", id: "h-1" } });
+    const y = await c.svc.emitFromController({ commandId: id, kind: "maintenance", level: "notice", ref: { kind: "host", id: "h-1" } });
     assert.equal(x.itemId, y.itemId);
     for (let i = 0; i < 55; i++) await c.report(c.ann, "review-request", "review", await c.review());
     minutes(60);
@@ -316,7 +316,7 @@ for (const backend of backends) {
 
   suite("a Notice is never pushed: it stays in the inbox, is counted in the digest message without its text, and the levels are told apart (card U11b)", async (c) => {
     await c.svc.configure(c.owner, { commandId: cid("cf"), channel: "external", channelName: "pager", digestTimes: ["09:00", "20:00"] });
-    const note = await c.report(c.ctl, "maintenance", "host", "host-secret-1", { detail: "private note" });
+    const note = await c.report(c.ctl, "maintenance", "host", "host-secret-1", { detail: "private note", level: "notice" });
     const present = await c.report(c.ctl, "presence", "host", "host-2");
     const asks = await c.report(c.ann, "owner-question", "inquiry", await c.question());
     const stop = await c.report(c.ctl, "safety-stop", "host", "host-9");
@@ -338,7 +338,7 @@ for (const backend of backends) {
     const counted = inbox.items.find((i) => i.id === note.itemId)!;
     assert.deepEqual([counted.state, counted.countedAt, counted.digestId], ["sent", new Date(now).toISOString(), undefined], "counted once and still in the inbox");
     // A later digest time with only Notices waiting counts them quietly: no digest, no message.
-    const more = await c.report(c.ctl, "maintenance", "host", "host-3");
+    const more = await c.report(c.ctl, "maintenance", "host", "host-3", { level: "notice" });
     set("2026-10-22T20:30:00.000Z");
     const next = await c.svc.runDue();
     assert.deepEqual([next.digestIds, next.delivered, c.sent.length], [[], 0, 2], "a Notice alone is never pushed");
@@ -349,6 +349,92 @@ for (const backend of backends) {
     // The owner closes a Notice with "ok".
     await c.svc.answerItem(c.owner, { commandId: cid("ai"), itemId: more.itemId, answer: "ok", revision: after.revision });
     assert.equal((await c.svc.inbox(c.owner)).items.some((i) => i.id === more.itemId), false);
+  });
+
+  suite("the controller names the level: a maintenance item that needs a decision is told and escalated, a pure notice is only counted; an agent cannot set a level (card U11b)", async (c) => {
+    await c.svc.configure(c.owner, { commandId: cid("cf"), channel: "external", channelName: "pager", digestTimes: ["09:00"] });
+    const budget = await c.report(c.ctl, "maintenance", "budget-request", "bgt-1", { level: "needs-you", detail: "asked for more budget. Decide it with budget.decide." });
+    const unnamed = await c.report(c.ctl, "maintenance", "host", "host-unnamed");
+    const info = await c.report(c.ctl, "maintenance", "host", "host-info", { level: "notice" });
+    const level = async (id: string) => (await c.svc.inbox(c.owner)).items.find((i) => i.id === id)!.level;
+    assert.deepEqual([await level(budget.itemId), await level(unnamed.itemId), await level(info.itemId)], ["needs-you", "needs-you", "notice"], "no level means Needs you, never Notice");
+    await refuses("forbidden", () => c.report(c.ann, "owner-question", "inquiry", "q-1", { level: "notice" }));
+    await refuses("invalid_command", () => c.report(c.ctl, "maintenance", "host", "host-bad", { level: "loud" }));
+    minutes(60);
+    await c.svc.runDue();
+    const digest = c.sent.map((s) => s.text).find((t) => /items? for you/.test(t))!;
+    assert.match(digest, /maintenance: budget-request bgt-1/);
+    assert.match(digest, /1 notice in your inbox, no action needed\.$/);
+    assert.ok(!/host-info/.test(digest), "the pure notice is only counted");
+    // Unanswered for a day: the decision-bearing maintenance item is raised to Urgent and told; the notice never is.
+    set("2026-10-23T10:00:00.000Z");
+    await c.svc.runDue();
+    const items = (await c.svc.inbox(c.owner)).items;
+    assert.deepEqual([items.find((i) => i.id === budget.itemId)!.level, items.find((i) => i.id === unnamed.itemId)!.level, items.find((i) => i.id === info.itemId)!.level], ["urgent", "urgent", "notice"]);
+    assert.equal(c.sent.filter((s) => s.text.startsWith("URGENT") && s.text.includes("budget-request")).length, 1);
+  });
+
+  suite("the owner sets the level per kind: moved to notice and back, agents cannot, a safety stop stays Urgent (card U11b)", async (c) => {
+    const ask = await c.report(c.ctl, "maintenance", "budget-request", "bgt-5");
+    const level = async () => (await c.svc.inbox(c.owner)).items.find((i) => i.id === ask.itemId)!.level;
+    assert.equal(await level(), "needs-you");
+    const rev = async () => (await c.svc.settings(c.owner)).revision;
+    await c.svc.configure(c.owner, { commandId: cid("cf"), expectedRevision: await rev(), levelByKind: { maintenance: "notice" } });
+    assert.equal(await level(), "notice", "the owner's choice overrides the default");
+    assert.equal((await c.svc.settings(c.owner)).levelByKind?.maintenance, "notice");
+    await c.svc.configure(c.owner, { commandId: cid("cf"), expectedRevision: await rev(), levelByKind: { maintenance: "needs-you" } });
+    assert.equal(await level(), "needs-you");
+    await c.svc.configure(c.owner, { commandId: cid("cf"), expectedRevision: await rev(), levelByKind: { maintenance: "notice" } });
+    await c.svc.configure(c.owner, { commandId: cid("cf"), expectedRevision: await rev(), levelByKind: { maintenance: null } });
+    assert.deepEqual([await level(), (await c.svc.settings(c.owner)).levelByKind], ["needs-you", undefined]);
+    for (const who of [c.ann, c.wide]) await refuses("forbidden", () => c.svc.configure(who, { commandId: cid("cf"), expectedRevision: 0, levelByKind: { maintenance: "notice" } }));
+    await refuses("invalid_command", async () => c.svc.configure(c.owner, { commandId: cid("cf"), expectedRevision: await rev(), levelByKind: { safety_stop: "notice" } as never }));
+    await refuses("invalid_command", async () => c.svc.configure(c.owner, { commandId: cid("cf"), expectedRevision: await rev(), levelByKind: { "safety-stop": "notice" } }));
+    const stop = await c.report(c.ctl, "safety-stop", "host", "host-77");
+    assert.equal((await c.svc.inbox(c.owner)).items.find((i) => i.id === stop.itemId)!.level, "urgent");
+  });
+
+  suite("Notices counted quietly are reported later, and a digest tells the true number of Notices it marked (card U11b)", async (c) => {
+    await c.svc.configure(c.owner, { commandId: cid("cf"), channel: "external", channelName: "pager", digestTimes: ["09:00"] });
+    const told = () => c.sent.map((s) => s.text).filter((t) => /in your inbox, no action needed/.test(t));
+    for (let i = 0; i < 3; i++) await c.report(c.ctl, "presence", "host", `quiet-${i}`);
+    minutes(90);
+    assert.deepEqual([(await c.svc.runDue()).digestIds, c.sent.length], [[], 0], "counted quietly: nothing is sent");
+    for (let i = 0; i < 120; i++) await c.report(c.ctl, "presence", "host", `loud-${i}`);
+    await c.report(c.ctl, "maintenance", "budget-request", "bgt-9", { level: "needs-you" });
+    set("2026-10-23T09:10:00.000Z");
+    await c.svc.runDue();
+    assert.match(told().at(-1)!, /123 notices in your inbox, no action needed\.$/, "the 120 marked in the pass plus the 3 counted quietly before");
+    const items = (await c.svc.inbox(c.owner)).items.filter((i) => i.kind === "presence");
+    assert.equal(items.filter((i) => i.mentionedAt !== undefined).length, 123);
+    // Told once: a later pass with a new Notice does not tell the old ones again.
+    await c.report(c.ctl, "presence", "host", "later-1");
+    await c.report(c.ctl, "maintenance", "budget-request", "bgt-10", { level: "needs-you" });
+    set("2026-10-24T09:05:00.000Z");
+    await c.svc.runDue();
+    assert.match(told().at(-1)!, /1 notice in your inbox, no action needed\.$/);
+  });
+
+  suite("Notices are closed after their retention and never block what needs the owner (card U11b)", async (c) => {
+    for (let i = 0; i < 1100; i++) await c.report(c.ctl, "presence", "host", `flood-${i}`);
+    const open = (await c.svc.inbox(c.owner)).items;
+    assert.equal(open.filter((i) => i.state !== "settled").length, NOTIFICATION_LIMITS.openNotices, "the oldest Notices were closed to keep the cap");
+    const blocker = await c.report(c.ann, "blocker", "blocker", await c.blocker("manual_hold"));
+    assert.equal(blocker.coalesced, false, "a blocker is still taken in");
+    const review = await c.report(c.ann, "review-request", "review", await c.review());
+    assert.ok(review.itemId);
+    assert.equal((await c.svc.inbox(c.owner)).items.filter((i) => i.level === "needs-you").length, 2);
+    // Retention: settable, default 7 days.
+    await refuses("invalid_command", () => c.svc.configure(c.owner, { commandId: cid("cf"), noticeRetentionDays: 0 }));
+    set("2026-10-29T07:00:00.000Z");
+    await c.svc.runDue();
+    assert.equal((await c.svc.inbox(c.owner)).items.filter((i) => i.level === "notice").length, NOTIFICATION_LIMITS.openNotices, "6 days: kept");
+    set("2026-10-29T09:00:00.000Z");
+    await c.svc.runDue();
+    assert.equal((await c.svc.inbox(c.owner)).items.filter((i) => i.level === "notice").length, 0, "past 7 days: closed");
+    assert.equal((await c.svc.inbox(c.owner)).items.filter((i) => i.level !== "notice").length, 2, "what needs the owner stays (raised to Urgent by now)");
+    await c.svc.configure(c.owner, { commandId: cid("cf"), noticeRetentionDays: 1 });
+    assert.equal((await c.svc.settings(c.owner)).noticeRetentionDays, 1);
   });
 
   suite("nothing leaves the installation unless an external channel is configured, and then only the controller-built label; failures are visible and bounded", async (c) => {

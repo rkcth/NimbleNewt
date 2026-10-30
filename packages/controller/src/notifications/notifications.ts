@@ -30,14 +30,26 @@ export interface NotificationSettings {
   readonly quietHours?: { readonly start: string; readonly end: string };
   /** Hours an item that waits on the owner may stay unanswered before the controller raises it to Urgent (card U11b); default 24. */
   readonly escalateAfterHours?: number;
+  /** Days a Notice stays in the inbox before the controller closes it (card U11b); default 7. */
+  readonly noticeRetentionDays?: number;
+  /** The owner's own level per kind; it overrides the default level of the kind (a safety stop cannot be set below Urgent). */
+  readonly levelByKind?: Readonly<Partial<Record<NotificationKind, NotificationLevel>>>;
 }
 
 export const DEFAULT_ESCALATE_AFTER_HOURS = 24;
-/** The kinds that wait on the owner's decision; the others (maintenance, presence) only inform, and a safety stop is Urgent from the start. */
+export const DEFAULT_NOTICE_RETENTION_DAYS = 7;
+/** The kinds whose record is a pointer the owner answers (a blocker, a review, a question): they are closed when the record is settled elsewhere. */
 const WAITS_ON_OWNER: ReadonlySet<NotificationKind> = new Set<NotificationKind>(["blocker", "review-request", "owner-question"]);
 
 /** The three levels of everything that reaches the owner (card U11b, owner decision 2026-10-22). */
 export type NotificationLevel = "notice" | "needs-you" | "urgent";
+const LEVELS: readonly NotificationLevel[] = ["notice", "needs-you", "urgent"];
+const RANK: Readonly<Record<NotificationLevel, number>> = { notice: 0, "needs-you": 1, urgent: 2 };
+/**
+ * The level a kind has when the controller names none. Exhaustive on purpose: a new kind does not compile until it is placed here. Only presence only informs; maintenance may carry a decision
+ * (a budget request, an escalated incident), so a maintenance item is Needs you unless the controller says it is a Notice.
+ */
+const KIND_LEVEL: Readonly<Record<NotificationKind, NotificationLevel>> = { blocker: "needs-you", "review-request": "needs-you", "owner-question": "needs-you", maintenance: "needs-you", presence: "notice", "safety-stop": "urgent" };
 
 export interface ItemBody {
   readonly kind: NotificationKind;
@@ -51,6 +63,8 @@ export interface ItemBody {
   readonly answers: readonly string[];
   readonly immediate: boolean;
   readonly urgent: boolean;
+  /** The level the controller set when it reported (never from a producer); a missing or unknown value falls back to the safe side, Needs you. */
+  readonly level?: NotificationLevel;
   /** When the controller raised this item to Urgent because it waited too long (card U11b); told once. */
   readonly escalatedAt?: string;
   readonly state: "queued" | "sent" | "answered" | "settled";
@@ -66,15 +80,20 @@ export interface ItemBody {
   readonly settledAt?: string;
   /** When a Notice was counted in a digest message (a count only; the Notice itself is never pushed). */
   readonly countedAt?: string;
+  /** When a Notice was last counted in a digest message that went out (a Notice counted quietly is not yet mentioned). */
+  readonly mentionedAt?: string;
 }
 
 /**
- * The level of an item, from what it is and how it was raised, never from a stored claim: an interrupting or urgent item is Urgent, an item that waits on the owner's decision is Needs you,
- * and anything that only informs (maintenance, presence) is a Notice.
+ * The level of an item, from what the controller set and how it was raised, never from a producer's claim: an interrupting or urgent item is Urgent, otherwise the level the controller named,
+ * otherwise the level of its kind. Nothing falls to Notice by accident: a missing level on a kind that is not purely informational is Needs you.
  */
-export function levelOf(item: Pick<ItemBody, "kind" | "urgent" | "immediate">): NotificationLevel {
+export function levelOf(item: Pick<ItemBody, "kind" | "urgent" | "immediate"> & { readonly level?: NotificationLevel }, owner?: NotificationSettings["levelByKind"]): NotificationLevel {
   if (item.kind === "safety-stop" || item.urgent || item.immediate) return "urgent";
-  return WAITS_ON_OWNER.has(item.kind) ? "needs-you" : "notice";
+  const chosen = owner?.[item.kind];
+  if (chosen !== undefined && LEVELS.includes(chosen)) return chosen;
+  if (item.level !== undefined && LEVELS.includes(item.level)) return item.level;
+  return KIND_LEVEL[item.kind] ?? "needs-you";
 }
 
 export interface DigestBody { readonly createdAt: string; readonly itemIds: readonly string[]; readonly state: "open" | "answered" }
@@ -89,7 +108,7 @@ export interface DeliveryBody {
 }
 interface StateBody { readonly lastDigestAt?: string }
 /** What is open, so nothing has to scan every record ever made: unanswered items, open digests, deliveries waiting, and the latest failed deliveries. */
-interface IndexBody { readonly items: readonly string[]; readonly digests: readonly string[]; readonly deliveries: readonly string[]; readonly failed: readonly string[] }
+interface IndexBody { readonly items: readonly string[]; /** Open Notices, kept apart so they never count against the open-item limit. */ readonly notices?: readonly string[]; readonly digests: readonly string[]; readonly deliveries: readonly string[]; readonly failed: readonly string[] }
 
 /** An external way to reach the owner. It receives controller-built text and the IDs of the records; nothing else. Delivery is at least once: `deliveryId` lets an adapter drop a repeat. */
 export interface ChannelAdapter { send(message: { readonly deliveryId: string; readonly text: string; readonly links: readonly { kind: string; id: string }[] }): Promise<void> }
@@ -100,7 +119,7 @@ export interface ChannelAdapter { send(message: { readonly deliveryId: string; r
  */
 export type Responder = (owner: Principal, item: View<ItemBody>, answer: string, commandId: string) => Promise<void>;
 
-export const NOTIFICATION_LIMITS = { label: 200, detail: 200, retries: 5, retryMinutes: [1, 5, 30, 120, 480] as readonly number[], openItems: 1000, failedKept: 100, digestItems: 50, digestsPerRun: 20, occurrences: 50 } as const;
+export const NOTIFICATION_LIMITS = { label: 200, detail: 200, retries: 5, retryMinutes: [1, 5, 30, 120, 480] as readonly number[], openItems: 1000, openNotices: 500, failedKept: 100, digestItems: 50, digestsPerRun: 20, occurrences: 50 } as const;
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 const NAME = /^[a-z][a-z0-9-]{0,39}$/;
 const ITEM_ID = /^ntf-[a-z2-7]{20}$/;
@@ -122,6 +141,8 @@ export interface Emit extends NoActor {
   readonly critical?: boolean;
   /** A review the policy marks urgent (sent at once outside quiet hours; otherwise it waits for the digest or the end of quiet hours). Controller only: a producer does not decide its own urgency. */
   readonly urgent?: boolean;
+  /** The level the controller gives this item (controller only; an agent cannot set it). Default: the level of the kind, Needs you for maintenance. */
+  readonly level?: NotificationLevel;
   /** The project of a controller-side report that has no record to look it up from. */
   readonly projectId?: string;
 }
@@ -147,9 +168,9 @@ export class NotificationService {
   }
 
   /** The owner sets how notifications reach them (owner only; counts from the next notification). */
-  async configure(owner: Principal, command: NoActor & { expectedRevision?: number; channel?: "inbox" | "external"; channelName?: string; digestTimes?: readonly string[]; quietHours?: { start: string; end: string } | null; escalateAfterHours?: number }): Promise<{ revision: number }> {
+  async configure(owner: Principal, command: NoActor & { expectedRevision?: number; channel?: "inbox" | "external"; channelName?: string; digestTimes?: readonly string[]; quietHours?: { start: string; end: string } | null; escalateAfterHours?: number; noticeRetentionDays?: number; levelByKind?: Readonly<Record<string, NotificationLevel | null>> }): Promise<{ revision: number }> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner sets how notifications reach them`);
-    onlyKnown(command, ["commandId", "expectedRevision", "channel", "channelName", "digestTimes", "quietHours", "escalateAfterHours"]);
+    onlyKnown(command, ["commandId", "expectedRevision", "channel", "channelName", "digestTimes", "quietHours", "escalateAfterHours", "noticeRetentionDays", "levelByKind"]);
     const current = await this.#runner.get("notification-settings", "installation");
     if ((command.expectedRevision ?? 0) !== (current?.revision ?? 0)) throw new DomainError("stale_revision", `notification settings are at revision ${current?.revision ?? 0}, not ${command.expectedRevision ?? 0}`, ...(current === undefined ? [] : [{ currentRevision: current.revision }]));
     const old = (current?.body as unknown as NotificationSettings | undefined) ?? DEFAULTS;
@@ -175,6 +196,24 @@ export class NotificationService {
     if (command.escalateAfterHours !== undefined) {
       if (!Number.isSafeInteger(command.escalateAfterHours) || command.escalateAfterHours < 1 || command.escalateAfterHours > 24 * 30) invalid("escalateAfterHours", "must be a whole number of hours from 1 to 720");
       next = { ...next, escalateAfterHours: command.escalateAfterHours };
+    }
+    if (command.noticeRetentionDays !== undefined) {
+      if (!Number.isSafeInteger(command.noticeRetentionDays) || command.noticeRetentionDays < 1 || command.noticeRetentionDays > 365) invalid("noticeRetentionDays", "must be a whole number of days from 1 to 365");
+      next = { ...next, noticeRetentionDays: command.noticeRetentionDays };
+    }
+    if (command.levelByKind !== undefined) {
+      const given = command.levelByKind;
+      if (typeof given !== "object" || given === null || Array.isArray(given)) invalid("levelByKind", "must map kinds to notice, needs-you or urgent (null puts a kind back to its default)");
+      const merged: Partial<Record<NotificationKind, NotificationLevel>> = { ...(old.levelByKind ?? {}) };
+      for (const [kind, level] of Object.entries(given)) {
+        if (!NOTIFICATION_KINDS.includes(kind as NotificationKind)) invalid("levelByKind", `${kind} is not a kind; use ${NOTIFICATION_KINDS.join(", ")}`);
+        if (level === null) { delete merged[kind as NotificationKind]; continue; }
+        if (!LEVELS.includes(level)) invalid("levelByKind", `${kind}: must be notice, needs-you or urgent`);
+        if (kind === "safety-stop" && level !== "urgent") invalid("levelByKind", "a safety stop stays Urgent");
+        merged[kind as NotificationKind] = level;
+      }
+      const { levelByKind: _l, ...rest } = next; void _l;
+      next = Object.keys(merged).length === 0 ? rest : { ...rest, levelByKind: merged };
     }
     const ref: AggregateRef = { kind: "notification-settings", id: "installation" };
     const result = await this.#runner.command("notification.configure", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
@@ -206,16 +245,17 @@ export class NotificationService {
   }
 
   async #emit(actor: string, controller: boolean, by: Principal | undefined, command: Emit): Promise<{ itemId: string; coalesced: boolean; immediate: boolean }> {
-    onlyKnown(command, ["commandId", "kind", "ref", "detail", "critical", "urgent", "projectId"]);
+    onlyKnown(command, ["commandId", "kind", "ref", "detail", "critical", "urgent", "level", "projectId"]);
     if (!NOTIFICATION_KINDS.includes(command.kind)) invalid("kind", `must be one of ${NOTIFICATION_KINDS.join(", ")}`);
     const ref = command.ref;
     // A record ID is a short code, not free text: nothing a reporter writes can ride along in it.
     if (typeof ref !== "object" || ref === null || typeof ref.kind !== "string" || typeof ref.id !== "string" || !/^[a-z][a-z0-9-]{0,40}$/.test(ref.kind) || !/^[a-z0-9][a-z0-9-]{0,40}$/.test(ref.id)) invalid("ref", "must name a record: { kind, id } with short lower-case codes");
     if (command.critical !== undefined && typeof command.critical !== "boolean") invalid("critical", "must be true or false");
     if (command.urgent !== undefined && typeof command.urgent !== "boolean") invalid("urgent", "must be true or false");
+    if (command.level !== undefined && !LEVELS.includes(command.level)) invalid("level", `must be one of ${LEVELS.join(", ")}`);
     if (command.critical === true && command.kind !== "blocker") invalid("critical", "applies to a blocker only");
     if (command.urgent === true && command.kind !== "review-request") invalid("urgent", "applies to a review request only");
-    if (!controller && (!PRODUCER_KINDS.has(command.kind) || command.critical === true || command.urgent === true || command.detail !== undefined || command.projectId !== undefined)) {
+    if (!controller && (!PRODUCER_KINDS.has(command.kind) || command.critical === true || command.urgent === true || command.detail !== undefined || command.level !== undefined || command.projectId !== undefined)) {
       throw new DomainError("forbidden", `${actor} may report blockers, review requests and owner questions about records it can report for; safety stops, maintenance, presence, critical blockers, urgency and extra text are for the controller`);
     }
     const record = await this.#describe(command.kind, ref, command.projectId);
@@ -224,7 +264,9 @@ export class NotificationService {
     const settings = await this.#settings();
     const now = this.#runner.now();
     const interrupts = command.kind === "safety-stop" || command.critical === true;
-    const urgent = command.urgent === true;
+    const level: NotificationLevel = command.level ?? KIND_LEVEL[command.kind];
+    // A controller-set Urgent that is not an interruption waits out quiet hours like an urgent review.
+    const urgent = command.urgent === true || command.level === "urgent";
     const immediate = interrupts || (urgent && !this.#quiet(settings, now));
     const base = `${command.kind}|${record.projectId ?? "-"}|${ref.kind}:${ref.id}`;
     for (let attempt = 1; ; attempt++) {
@@ -240,11 +282,19 @@ export class NotificationService {
         const itemId = derivedId("ntf", `${base}|${occurrence}`);
         const old = found?.body as unknown as ItemBody | undefined;
         const coalesced = old !== undefined;
-        if (!coalesced && !interrupts && index.body.items.length >= NOTIFICATION_LIMITS.openItems) throw new DomainError("unavailable", `there are ${NOTIFICATION_LIMITS.openItems} unanswered notifications; answer some first`);
+        // Notices live in their own list and never count against the limit that guards what needs the owner.
+        if (!coalesced && !interrupts && levelOf({ kind: command.kind, urgent, immediate, level }, settings.levelByKind) !== "notice" && index.body.items.length >= NOTIFICATION_LIMITS.openItems) throw new DomainError("unavailable", `there are ${NOTIFICATION_LIMITS.openItems} unanswered notifications; answer some first`);
         const sendNow = immediate && (!coalesced || old!.state === "queued");
         const body: ItemBody = coalesced
-          ? { ...old!, count: old!.count + 1, lastAt: now, immediate: old!.immediate || immediate, urgent: old!.urgent || urgent, ...(sendNow ? { state: "sent" as const } : {}) }
-          : { kind: command.kind, ref: { kind: ref.kind, id: ref.id }, ...(record.projectId === undefined ? {} : { projectId: record.projectId }), label: record.label, ...(detail === undefined ? {} : { detail }), reportedBy: actor, answers: [...ANSWERS[command.kind]], immediate, urgent, state: sendNow ? "sent" : "queued", count: 1, occurrence, firstAt: now, lastAt: now };
+          ? { ...old!, count: old!.count + 1, lastAt: now, immediate: old!.immediate || immediate, urgent: old!.urgent || urgent, ...(RANK[level] > RANK[levelOf(old!, settings.levelByKind)] ? { level } : {}), ...(sendNow ? { state: "sent" as const } : {}) }
+          : { kind: command.kind, ref: { kind: ref.kind, id: ref.id }, ...(record.projectId === undefined ? {} : { projectId: record.projectId }), label: record.label, ...(detail === undefined ? {} : { detail }), reportedBy: actor, answers: [...ANSWERS[command.kind]], immediate, urgent, level, state: sendNow ? "sent" : "queued", count: 1, occurrence, firstAt: now, lastAt: now };
+        const isNotice = levelOf(body, settings.levelByKind) === "notice";
+        // At the Notice cap the oldest Notice is closed to make room.
+        const openNotices = index.body.notices ?? [];
+        const evict = !coalesced && isNotice && openNotices.length >= NOTIFICATION_LIMITS.openNotices ? openNotices[0] : undefined;
+        const evicted = evict === undefined ? undefined : await this.#runner.get("notification-item", evict);
+        const listed = { items: isNotice ? without(index.body.items, itemId) : withId(index.body.items, itemId), notices: isNotice ? withId(openNotices, itemId) : without(openNotices, itemId) };
+        if (evict !== undefined) listed.notices = without(listed.notices, evict);
         const delivery = sendNow ? this.#delivery(settings, { kind: "item", id: itemId }, `${command.kind}: ${record.label}`, now, `${itemId}|${body.firstAt}`) : undefined;
         const itemRef: AggregateRef = { kind: "notification-item", id: itemId };
         await this.#runner.command("notification.emit", { commandId: scopedCommandId(actor, command.commandId), actor }, async () => ({
@@ -254,7 +304,8 @@ export class NotificationService {
             changes: [
               found === undefined ? { type: "create", ref: itemRef, body: body as unknown as JsonObject } : { type: "update", ref: itemRef, expectedRevision: found.revision, body: body as unknown as JsonObject },
               ...(delivery === undefined ? [] : [{ type: "create" as const, ref: { kind: "notification-delivery", id: delivery.id }, body: delivery.body as unknown as JsonObject }]),
-              this.#indexChange(index, { items: withId(index.body.items, itemId), deliveries: delivery !== undefined && delivery.body.state === "pending" ? withId(index.body.deliveries, delivery.id) : index.body.deliveries }),
+              ...(evicted === undefined || (evicted.body as unknown as ItemBody).state === "answered" || (evicted.body as unknown as ItemBody).state === "settled" ? [] : [{ type: "update" as const, ref: { kind: "notification-item", id: evict! }, expectedRevision: evicted.revision, body: { ...(evicted.body as unknown as ItemBody), state: "settled", settledAt: now } as unknown as JsonObject }]),
+              this.#indexChange(index, { ...listed, deliveries: delivery !== undefined && delivery.body.state === "pending" ? withId(index.body.deliveries, delivery.id) : index.body.deliveries }),
             ],
             detail: { kind: command.kind, coalesced, immediate: sendNow },
             contention: async () => new DomainError("stale_revision", "the same notification was reported at the same moment"),
@@ -278,6 +329,8 @@ export class NotificationService {
     let problem: unknown;
     // Items whose record was settled elsewhere are closed first, so they reach neither an escalation nor a digest; quiet hours do not matter, nothing is told.
     try { await this.#closeSettled(now); } catch (error) { problem = error; }
+    // Notices past their retention are closed, whatever the hour.
+    try { await this.#expireNotices(settings, now); } catch (error) { problem ??= error; }
     try {
       if (!this.#quiet(settings, now)) {
         // A failure to raise one item does not hold back the release of urgent reviews and the digests; it is raised after they were tried.
@@ -325,7 +378,8 @@ export class NotificationService {
   async inbox(owner: Principal): Promise<{ items: (View<ItemBody> & { level: NotificationLevel })[]; digests: View<DigestBody>[] }> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner`);
     const index = (await this.#index()).body;
-    return { items: (await this.#load<ItemBody>("notification-item", index.items)).map((i) => ({ ...i, level: levelOf(i) })), digests: await this.#load<DigestBody>("notification-digest", index.digests) };
+    const by = (await this.#settings()).levelByKind;
+    return { items: (await this.#load<ItemBody>("notification-item", this.#openIds(index))).map((i) => ({ ...i, level: levelOf(i, by) })), digests: await this.#load<DigestBody>("notification-digest", index.digests) };
   }
 
   /** Deliveries still waiting, and the latest ones given up on, so a failure is visible (owner only). */
@@ -352,6 +406,8 @@ export class NotificationService {
     const body = { ...index.body, ...next, failed: (next.failed ?? index.body.failed).slice(-NOTIFICATION_LIMITS.failedKept) } as unknown as JsonObject;
     return index.revision === 0 ? { type: "create", ref, body } : { type: "update", ref, expectedRevision: index.revision, body };
   }
+
+  #openIds(index: IndexBody): string[] { return [...index.items, ...(index.notices ?? [])]; }
 
   async #load<B>(kind: string, ids: readonly string[]): Promise<View<B>[]> {
     const out: View<B>[] = [];
@@ -438,8 +494,8 @@ export class NotificationService {
    */
   async #escalateStale(settings: NotificationSettings, now: string): Promise<void> {
     const limit = Date.parse(now) - (settings.escalateAfterHours ?? DEFAULT_ESCALATE_AFTER_HOURS) * 3_600_000;
-    for (const item of await this.#load<ItemBody>("notification-item", (await this.#index()).body.items)) {
-      if (item.state === "answered" || item.state === "settled" || item.escalatedAt !== undefined || !WAITS_ON_OWNER.has(item.kind) || Date.parse(item.firstAt) > limit) continue;
+    for (const item of await this.#load<ItemBody>("notification-item", this.#openIds((await this.#index()).body))) {
+      if (item.state === "answered" || item.state === "settled" || item.escalatedAt !== undefined || levelOf(item, settings.levelByKind) !== "needs-you" || Date.parse(item.firstAt) > limit) continue;
       // What the item points at may have been settled in its own flow (a blocker resolved, a review decided): a settled record is not raised as Urgent.
       try { await this.#describe(item.kind, item.ref, item.projectId); } catch (error) { if (error instanceof DomainError && (error.code === "not_found" || error.code === "invalid_command")) continue; throw error; }
       const hours = Math.floor((Date.parse(now) - Date.parse(item.firstAt)) / 3_600_000);
@@ -464,7 +520,7 @@ export class NotificationService {
    */
   async #closeSettled(now: string): Promise<void> {
     let problem: unknown;
-    for (const item of await this.#load<ItemBody>("notification-item", (await this.#index()).body.items)) {
+    for (const item of await this.#load<ItemBody>("notification-item", this.#openIds((await this.#index()).body))) {
       if (item.state === "answered" || item.state === "settled" || !WAITS_ON_OWNER.has(item.kind)) continue;
       try {
         try { await this.#describe(item.kind, item.ref, item.projectId); continue; } catch (error) { if (!(error instanceof DomainError && (error.code === "not_found" || error.code === "invalid_command"))) throw error; }
@@ -480,7 +536,7 @@ export class NotificationService {
           return { ref, creates: false, changes: [
             { type: "update", ref, expectedRevision: current.revision, body: { ...body, state: "settled", settledAt: now } as unknown as JsonObject },
             ...dropped,
-            this.#indexChange(index, { items: without(index.body.items, item.id), deliveries: index.body.deliveries.filter((id) => !waiting.some((d) => d.id === id)) }),
+            this.#indexChange(index, { items: without(index.body.items, item.id), notices: without(index.body.notices ?? [], item.id), deliveries: index.body.deliveries.filter((id) => !waiting.some((d) => d.id === id)) }),
           ], detail: { settled: true } };
         });
         if (item.digestId !== undefined) await this.#closeDigestIfDone("notifications", item.digestId, `settle-${item.id}`);
@@ -489,8 +545,30 @@ export class NotificationService {
     if (problem !== undefined) throw problem;
   }
 
+  /** A Notice that has stayed in the inbox past the retention (default 7 days since it was last reported) is closed as settled; nobody had to answer it. */
+  async #expireNotices(settings: NotificationSettings, now: string): Promise<void> {
+    const limit = new Date(Date.parse(now) - (settings.noticeRetentionDays ?? DEFAULT_NOTICE_RETENTION_DAYS) * 86_400_000).toISOString();
+    const old = (await this.#load<ItemBody>("notification-item", (await this.#index()).body.notices ?? [])).filter((i) => levelOf(i, settings.levelByKind) === "notice" && i.lastAt <= limit && i.state !== "answered" && i.state !== "settled");
+    for (let k = 0; k < old.length; k += 90) {
+      const chunk = old.slice(k, k + 90);
+      await this.#apply("notification.expire-notices", { commandId: `expire-${chunk[0]!.id}-${chunk[0]!.lastAt}-${chunk.length}`, actor: "notifications" }, { ids: chunk.map((i) => i.id).join(",") }, async (index) => {
+        const changes: Change[] = [];
+        const closed: string[] = [];
+        for (const c of chunk) {
+          const cur = await this.#runner.get("notification-item", c.id);
+          const b = cur?.body as unknown as ItemBody | undefined;
+          if (cur === undefined || b === undefined || b.state === "answered" || b.state === "settled" || b.lastAt > limit) continue;
+          changes.push({ type: "update", ref: { kind: "notification-item", id: c.id }, expectedRevision: cur.revision, body: { ...b, state: "settled", settledAt: now } as unknown as JsonObject });
+          closed.push(c.id);
+        }
+        if (changes.length === 0) return undefined;
+        return { ref: { kind: "notification-item", id: closed[0]! }, creates: false, changes: [...changes, this.#indexChange(index, { notices: (index.body.notices ?? []).filter((x) => !closed.includes(x)) })], detail: { expired: closed.length } };
+      });
+    }
+  }
+
   async #releaseUrgent(settings: NotificationSettings, now: string): Promise<void> {
-    for (const item of await this.#load<ItemBody>("notification-item", (await this.#index()).body.items)) {
+    for (const item of await this.#load<ItemBody>("notification-item", this.#openIds((await this.#index()).body))) {
       if (item.state !== "queued" || !item.urgent) continue;
       const delivery = this.#delivery(settings, { kind: "item", id: item.id }, `${item.kind}: ${item.label}`, now, `${item.id}|${item.firstAt}`);
       await this.#apply("notification.release", { commandId: `release-${item.id}-${item.firstAt}`, actor: "notifications" }, { id: item.id }, async (index) => {
@@ -509,30 +587,57 @@ export class NotificationService {
   async #collect(settings: NotificationSettings, now: string, due: string): Promise<string[]> {
     const ids: string[] = [];
     for (let n = 0; n < NOTIFICATION_LIMITS.digestsPerRun; n++) {
-      const waiting = (await this.#load<ItemBody>("notification-item", (await this.#index()).body.items)).filter((i) => i.state === "queued" && i.firstAt <= due).sort((a, b) => (a.firstAt < b.firstAt ? -1 : 1));
-      // A Notice is never listed or pushed: it stays in the inbox and is only counted in the digest message (card U11b).
-      const queued = waiting.filter((i) => levelOf(i) !== "notice").slice(0, NOTIFICATION_LIMITS.digestItems);
-      const notices = waiting.filter((i) => levelOf(i) === "notice").slice(0, NOTIFICATION_LIMITS.digestItems);
+      const open = await this.#load<ItemBody>("notification-item", this.#openIds((await this.#index()).body));
+      const waiting = open.filter((i) => i.state === "queued" && i.firstAt <= due).sort((a, b) => (a.firstAt < b.firstAt ? -1 : 1));
+      // A Notice is never listed or pushed: it stays in the inbox and is only counted in the digest message (card U11b). Every Notice waiting is counted in this pass, and the Notices
+      // that were counted quietly earlier (no digest went out) are carried into the first message that does go out, so the number told is the true total.
+      const queued = waiting.filter((i) => levelOf(i, settings.levelByKind) !== "notice").slice(0, NOTIFICATION_LIMITS.digestItems);
+      const notices = waiting.filter((i) => levelOf(i, settings.levelByKind) === "notice");
+      const carried = open.filter((i) => levelOf(i, settings.levelByKind) === "notice" && i.state !== "answered" && i.state !== "settled" && i.countedAt !== undefined && i.mentionedAt === undefined);
       if (queued.length === 0 && notices.length === 0) break;
+      const told = queued.length === 0 ? [] : [...notices, ...carried];
       const id = derivedId("dgs", `${due}|${queued.map((i) => i.id).sort().join(",")}${notices.length === 0 ? "" : `|n:${notices.map((i) => i.id).sort().join(",")}`}`);
       const ref: AggregateRef = { kind: "notification-digest", id };
       const lines = queued.map((i, k) => `${k + 1}. ${i.kind}: ${i.label}${i.count > 1 ? ` (x${i.count})` : ""}`);
-      const noticeLine = notices.length === 0 ? "" : `\n${notices.length} notice${notices.length === 1 ? "" : "s"} in your inbox, no action needed.`;
+      const noticeLine = told.length === 0 ? "" : `\n${told.length} notice${told.length === 1 ? "" : "s"} in your inbox, no action needed.`;
       const delivery = queued.length === 0 ? undefined : this.#delivery(settings, { kind: "digest", id }, `${queued.length} item${queued.length === 1 ? "" : "s"} for you:\n${lines.join("\n")}${noticeLine}`, now, `digest|${id}`);
       const body: DigestBody = { createdAt: now, itemIds: queued.map((i) => i.id), state: "open" };
-      const ok = await this.#apply(queued.length === 0 ? "notification.notices-counted" : "notification.digest", { commandId: queued.length === 0 ? `notices-${id}` : `digest-${id}`, actor: "notifications" }, { due, items: body.itemIds.join(","), notices: notices.map((i) => i.id).join(",") }, async (index) => {
+      // One command holds at most 100 changes: the digest takes as many Notices as fit, the rest are marked right after in commands of their own (each marks only what is still unmarked, so a
+      // repeat or a crash in between at worst tells a Notice once more, never fewer than the truth).
+      const marking = [...notices, ...(queued.length === 0 ? [] : carried)];
+      const room = queued.length === 0 ? 90 : 40;
+      const mark = async (list: readonly { readonly id: string }[]): Promise<Change[]> => {
+        const out: Change[] = [];
+        for (const q of list) {
+          const a = await this.#runner.get("notification-item", q.id); const cur = a?.body as unknown as ItemBody | undefined;
+          if (a === undefined || cur === undefined || cur.state === "answered" || cur.state === "settled") continue;
+          const was = cur.countedAt !== undefined;
+          if (cur.state === "queued" || (queued.length > 0 && cur.mentionedAt === undefined)) out.push({ type: "update", ref: { kind: "notification-item", id: q.id }, expectedRevision: a.revision, body: { ...cur, state: "sent", countedAt: was ? cur.countedAt! : now, ...(queued.length === 0 ? {} : { mentionedAt: now }) } as unknown as JsonObject });
+        }
+        return out;
+      };
+      const ok = await this.#apply(queued.length === 0 ? "notification.notices-counted" : "notification.digest", { commandId: queued.length === 0 ? `notices-${id}` : `digest-${id}`, actor: "notifications" }, { due, items: body.itemIds.join(","), notices: notices.slice(0, room).map((i) => i.id).join(",") }, async (index) => {
         // Every item must still be queued at the revision just read.
         const fresh: { id: string; revision: number; body: ItemBody }[] = [];
         for (const q of queued) { const a = await this.#runner.get("notification-item", q.id); if (a === undefined || (a.body as unknown as ItemBody).state !== "queued") return undefined; fresh.push({ id: q.id, revision: a.revision, body: a.body as unknown as ItemBody }); }
-        const counted: Change[] = [];
-        for (const q of notices) { const a = await this.#runner.get("notification-item", q.id); if (a === undefined || (a.body as unknown as ItemBody).state !== "queued") return undefined; counted.push({ type: "update", ref: { kind: "notification-item", id: q.id }, expectedRevision: a.revision, body: { ...(a.body as unknown as ItemBody), state: "sent", countedAt: now } as unknown as JsonObject }); }
-        return { ref: delivery === undefined ? { kind: "notification-item", id: notices[0]!.id } : ref, creates: delivery !== undefined, changes: [
+        const counted = await mark(marking.slice(0, room));
+        if (queued.length === 0 && counted.length === 0) return undefined;
+        return { ref: delivery === undefined ? counted[0]!.ref : ref, creates: delivery !== undefined, changes: [
           ...(delivery === undefined ? [] : [{ type: "create" as const, ref, body: body as unknown as JsonObject }, { type: "create" as const, ref: { kind: "notification-delivery", id: delivery.id }, body: delivery.body as unknown as JsonObject }]),
           ...fresh.map((f): Change => ({ type: "update", ref: { kind: "notification-item", id: f.id }, expectedRevision: f.revision, body: { ...f.body, state: "sent", digestId: id } as unknown as JsonObject })),
           ...counted,
           this.#indexChange(index, delivery === undefined ? {} : { digests: withId(index.body.digests, id), deliveries: delivery.body.state === "pending" ? withId(index.body.deliveries, delivery.id) : index.body.deliveries }),
-        ], detail: { items: queued.length, notices: notices.length } };
+        ], detail: { items: queued.length, notices: told.length } };
       });
+      if (ok) {
+        for (let k = room; k < marking.length; k += 90) {
+          const chunk = marking.slice(k, k + 90);
+          await this.#apply("notification.notices-marked", { commandId: `marked-${id}-${k}`, actor: "notifications" }, { due, from: k }, async () => {
+            const changes = await mark(chunk);
+            return changes.length === 0 ? undefined : { ref: changes[0]!.ref, creates: false, changes, detail: { notices: changes.length } };
+          });
+        }
+      }
       if (ok && delivery !== undefined) ids.push(id);
     }
     // Everything waiting at that digest time has been collected (or there was nothing): the next digest time is the next chance.
@@ -599,7 +704,7 @@ export class NotificationService {
       if ((current.body as unknown as ItemBody).state === "answered" || (current.body as unknown as ItemBody).state === "settled") return undefined;
       return { ref, creates: false, changes: [
         { type: "update", ref, expectedRevision: current.revision, body: { ...(current.body as unknown as ItemBody), state: "answered", answer, answeredAt: this.#runner.now() } as unknown as JsonObject },
-        this.#indexChange(index, { items: without(index.body.items, command.itemId) }),
+        this.#indexChange(index, { items: without(index.body.items, command.itemId), notices: without(index.body.notices ?? [], command.itemId) }),
       ], detail: { answer } };
     });
   }

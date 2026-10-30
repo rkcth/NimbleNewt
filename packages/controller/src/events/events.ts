@@ -553,6 +553,6 @@ export class EventService {
 void checkRevision;
 
 /** Wires idle-expiry notices to the owner notifications (U11): a `maintenance` item pointing at the subscription, with the cursor and the number of events left unhandled. U11b's Needs-you view is not in code yet; the notice reaches the owner's inbox and digest like any maintenance report. */
-export const noticeThroughNotifications = (notifications: { emitFromController(command: { commandId: string; kind: "maintenance"; ref: { kind: string; id: string }; detail?: string; projectId?: string }): Promise<unknown> }): NotifyExpiry => async (n) => {
-  await notifications.emitFromController({ commandId: `events-expired-${n.subscriptionId}-${n.expiredAt}`, kind: "maintenance", ref: { kind: "subscription", id: n.subscriptionId }, detail: `${n.subscriber} stopped acknowledging events on ${n.stream} for ${n.idleSeconds}s; it was expired at event ${n.cursor} with ${n.pending} unhandled`, ...(n.projectId === undefined ? {} : { projectId: n.projectId }) });
+export const noticeThroughNotifications = (notifications: { emitFromController(command: { commandId: string; kind: "maintenance"; level: "needs-you" | "notice"; ref: { kind: string; id: string }; detail?: string; projectId?: string }): Promise<unknown> }): NotifyExpiry => async (n) => {
+  await notifications.emitFromController({ commandId: `events-expired-${n.subscriptionId}-${n.expiredAt}`, kind: "maintenance", level: "needs-you", ref: { kind: "subscription", id: n.subscriptionId }, detail: `${n.subscriber} stopped acknowledging events on ${n.stream} for ${n.idleSeconds}s; it was expired at event ${n.cursor} with ${n.pending} unhandled`, ...(n.projectId === undefined ? {} : { projectId: n.projectId }) });
 };

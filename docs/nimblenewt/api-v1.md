@@ -2717,6 +2717,8 @@ Arguments:
 - `channelName` (optional): the name of the external channel (needed for external)
 - `digestTimes` (optional): 1 to 8 UTC times such as 09:00
 - `quietHours` (optional): { start, end } UTC times, or null to remove them
+- `levelByKind` (optional): { kind: notice | needs-you | urgent } for blocker, review-request, owner-question, maintenance, presence, safety-stop; null puts a kind back to its default (a safety stop stays urgent)
+- `noticeRetentionDays` (optional): whole days (1 to 365) a Notice stays in the inbox before it is closed (default 7)
 - `escalateAfterHours` (optional): whole hours (1 to 720) before an unanswered item is escalated
 - `expectedRevision` (optional): the settings revision you read (0 or absent when none were set yet)
 
