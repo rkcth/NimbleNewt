@@ -164,12 +164,12 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
         return;
       case "tell":
         if (adapter === undefined || started === undefined) return fault("the process was not started", message.id);
-        // The host is answered when the update is placed, not when the turn it landed in ends: a turn can run for minutes and the host's pause observation and further messages wait on this answer. A failure of the placed
-        // update after that is a fault with the same ID.
+        // The host is answered when the update is placed, not when the turn it landed in ends: a turn can run for minutes and the host's pause observation and further messages wait on this answer. What happens to the
+        // placed update afterwards is not reported (a fault with no ID would fail the running turn, and one with the ID has no one waiting).
         try {
           const placed = await adapter.root().submit({ kind: "update", requestId: requestId(`tell-${started.attemptId}-${message.id}`), content: message.text, run: false });
           send({ t: "tell.ok", id: message.id });
-          void placed.result().catch((error) => fault(`tell failed: ${String((error as Error)?.message ?? error)}`));
+          void placed.result().catch(() => undefined);
         } catch (error) { fault(`tell failed: ${String((error as Error)?.message ?? error)}`, message.id); }
         return;
       case "compact":

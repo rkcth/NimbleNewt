@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { fork } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -33,7 +33,8 @@ test("the running worker has no network but loopback, no git directory, a read-o
         lookedAt.push(pid);
         const names = dev.split("\n").slice(2).map((l) => l.split(":")[0]!.trim()).filter((n) => n !== "");
         assert.deepEqual(names, ["lo"], `process ${pid} sees network devices other than loopback: ${names.join(", ")}`);
-        const mounts = read(pid, "mountinfo");
+        // mountinfo writes a space (and other odd characters) in a path as an octal escape, so the paths are decoded before they are compared.
+        const mounts = read(pid, "mountinfo").replace(/\\([0-7]{3})/g, (_m, o: string) => String.fromCharCode(parseInt(o, 8)));
         assert.ok(!mounts.includes(c.dirs.gitDir), `process ${pid} has the git directory mounted`);
         const dotGit = mounts.split("\n").filter((l) => l.split(" ")[4]?.endsWith("/.git"));
         for (const line of dotGit) assert.ok(line.split(" ")[5]?.split(",").includes("ro"), `process ${pid}: ${line.split(" ")[4]} is not read-only`);
@@ -70,8 +71,15 @@ test("the worker and everything it started die when the controller process is ki
     if (line.startsWith("UNUSABLE")) { if (required) assert.fail(line); t.skip(line.trim()); return; }
     const directory = line.replace(/^READY /, "").trim();
     await until(() => processesMentioning(directory).length > 0, 20_000, "the worker never appeared (positive control)");
+    // The processes inside the sandbox have the guest's paths on their command lines, so they are found as the descendants of the ones that mention the host directory, and watched by number.
+    const insidePids = (): string[] => descendantsOf(processesMentioning(directory).map((p) => p.pid)).map((p) => p.pid);
+    await until(() => insidePids().length > 0, 20_000, "the worker's own processes never appeared (positive control)");
+    const watched = [...new Set([...processesMentioning(directory).map((p) => p.pid), ...insidePids()])];
     child.kill("SIGKILL");
     await until(() => child.exitCode !== null || child.signalCode !== null, 5000, "the fixture did not die");
-    await until(() => processesMentioning(directory).length === 0, 10_000, `the worker outlived its controller: ${JSON.stringify(processesMentioning(directory))}`);
+    // A process that has died but not been collected (a zombie) is gone for this purpose.
+    const state = (pid: string): string => { try { const stat = readFileSync(`/proc/${pid}/stat`, "utf8"); return stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3); } catch { return "Z"; } };
+    const alive = (): string[] => watched.filter((pid) => existsSync(`/proc/${pid}`) && state(pid) !== "Z");
+    await until(() => alive().length === 0 && processesMentioning(directory).length === 0, 10_000, `the worker outlived its controller: ${JSON.stringify([...alive(), ...processesMentioning(directory).map((p) => p.pid)])}`);
   } finally { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); }
 });

@@ -210,6 +210,31 @@ for (const backend of backends) {
   const records = async (r: Awaited<ReturnType<typeof rig>>) => (await r.w.storage.listAggregates("workspace-request", { limit: 10 })).map((a) => ({ id: a.id, ...(a.body as unknown as { state: string; held?: string[] }) }));
   const keepAlive = (r: Awaited<ReturnType<typeof rig>>) => { let stay!: () => void; const alive = new Promise<void>((ok) => { stay = ok; }); r.turn.second = async () => { await alive; return "x"; }; return stay; };
 
+  test(`${backend.name}: a release that was running when the controller stopped is recovered like the others: its freeze is lifted (card H12d)`, async () => {
+    const r = await rig(async () => ({}));
+    try {
+      const stay = keepAlive(r);
+      await r.d.tick();
+      await r.inCall;
+      let finish!: () => void;
+      const hold = new Promise<void>((ok) => { finish = ok; });
+      let asked = 0;
+      const port: WorkspacePort = { run: async () => { asked++; await hold; return { ok: true, summary: "late" }; } };
+      const make = () => WorkspaceOpService.withEpoch(r.w.storage, r.w.epoch, { quiesce: r.coordinator, portOf: async () => port, attempts: control(r) }, { clock: r.w.clock.now });
+      const pending = make().request(r.w.owner, { commandId: "rel1", operation: "release", taskId: r.taskId, reason: "free the slot" });
+      while (asked === 0) await new Promise((ok) => setTimeout(ok, 5));
+      assert.ok((await r.d.get(r.w.owner, r.attemptId))!.frozen !== undefined, "the attempt is frozen while the release runs");
+      const [only] = await records(r);
+      assert.deepEqual(await make().recover(r.w.owner), [only!.id]);
+      assert.equal((await r.d.get(r.w.owner, r.attemptId))!.frozen, undefined, "the freeze left by a release was lifted");
+      finish();
+      await pending;
+      await r.d.release(r.w.owner, r.attemptId);
+      stay();
+      await r.d.idle();
+    } finally { await r.store.close(); }
+  });
+
   test(`${backend.name}: a controller that stopped while the host worked leaves the request uncertain, the attempt it froze is released, and the freeze of anything else is not (card H12l)`, async () => {
     const r = await rig(async () => ({}));
     try {

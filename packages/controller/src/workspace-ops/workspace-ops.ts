@@ -29,7 +29,7 @@ const RECORD = "workspace-request";
 const OPEN = "workspace-open";
 const WORKSPACE_ID = /^wsr-[a-z2-7]{20}$/;
 /** A freeze set for this request says so in its reason (the quiesce writes the tag); recovery lifts only that one. */
-const frozenFor = (reason: string, requestId: string): boolean => /^(integration|refresh|quarantine): the agent's work is being changed \(/.test(reason) && reason.endsWith(`(${requestId})`);
+const frozenFor = (reason: string, requestId: string): boolean => /^(integration|refresh|release|quarantine): the agent's work is being changed \(/.test(reason) && reason.endsWith(`(${requestId})`);
 
 /** What the host is asked, with the attempts that were made quiet for it. */
 export interface WorkspaceCall {
