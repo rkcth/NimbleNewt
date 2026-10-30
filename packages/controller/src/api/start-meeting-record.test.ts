@@ -90,3 +90,34 @@ test("a decision of a meeting that names a change to a task is applied once by t
     assert.equal(((await call(boot.token, "activity.steps", { taskId: task.id })).result.steps as { kind: string }[]).filter((x) => x.kind === "meeting-decision").length, 1, "the step is recorded once");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+test("a statement citing a shared artifact is shown verified to a reader; one citing a desk record, or a missing record, is marked unverifiable and the citation is withheld (card M02e)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-mrec-"));
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [] });
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const call = async (token: string, op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    const project = (await call(boot.token, "project.create", { name: "Garden" }, "p1")).result.id as string;
+    const seed = async (kind: string, id: string) => { await c.storage.applyOperation({ operationId: `seed-${kind}-${id}`, epoch: c.epoch, actor: "test", correlationId: `seed-${id}`, at: new Date().toISOString(), changes: [{ type: "create", ref: { kind, id }, body: { projectId: project, name: id } }], audit: [{ type: "seed", detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never); };
+    await seed("artifact", "art-bench");
+    await seed("desk-record", "dsk-private");
+    const tok = async (name: string, grants: { action: string; project: string }[]) => { await c.services.principals.enroll(rob, { commandId: `e-${name}`, kind: "agent", name, grants }); return (await c.services.principals.issueCredential(rob, `agent:${name}`)).token; };
+    const ann = await tok("ann", [{ action: "task.read", project }, { action: "meeting.attend", project }]);
+    const reader = await tok("reader", [{ action: "task.read", project }, { action: "meeting.read", project }]);
+    const urgent = await call(boot.token, "meeting.call-urgent", { projectId: project, title: "Beds", reason: "frost tonight", roster: ["agent:ann"] }, "mu1");
+    const rec = (await call(boot.token, "meeting.record.open", { occurrenceId: urgent.result.id, chair: "agent:ann" }, "mo1")).result.id as string;
+    await call(ann, "meeting.record.join", { recordId: rec }, "j1");
+    const say = async (text: string, id: string, sources: { kind: string; id: string }[]) => assert.ok((await call(ann, "meeting.record.append", { recordId: rec, kind: "statement", text, sources }, id)).ok, id);
+    await say("The benchmark shows 35 minutes.", "a1", [{ kind: "artifact", id: "art-bench" }]);
+    await say("My notes say Sundays fail.", "a2", [{ kind: "desk-record", id: "dsk-private" }]);
+    await say("Some artifact that is not there.", "a3", [{ kind: "artifact", id: "art-missing" }]);
+    const entries = (await call(reader, "meeting.record.discussion", { recordId: rec })).result.item.entries as { text: string; verifiable: boolean; sources?: unknown[] }[];
+    const by = (t: string) => entries.find((e) => e.text === t)!;
+    assert.equal(by("The benchmark shows 35 minutes.").verifiable, true);
+    assert.equal(by("The benchmark shows 35 minutes.").sources?.length, 1);
+    assert.equal(by("My notes say Sundays fail.").verifiable, false);
+    assert.equal(by("My notes say Sundays fail.").sources, undefined);
+    assert.equal(by("Some artifact that is not there.").verifiable, false);
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});

@@ -6,6 +6,7 @@ import { InvitationInbox, MEETING_LIMITS, MEETING_SETTINGS, MeetingService } fro
 import { BackupService, createBackup } from "../backup/index.js";
 import { defaultEventSources } from "./default-sources.js";
 import { ImprovementService } from "../standups/improvements.js";
+import { shareableCite } from "../meetings/shareable.js";
 import { MeetingRecordService, budgetRaiseApplier, grantApplier, taskUpdateApplier } from "../meetings/record.js";
 import { EventService, type EventSource } from "../events/index.js";
 import { BudgetService, holderNotice } from "../budgets/index.js";
@@ -353,6 +354,8 @@ export async function startController(options: StartOptions): Promise<Controller
     // The identity that carries out what a meeting decided and was allowed: a service with no grants of its own (the carrying agent's rights are checked separately).
     const meetingController = { id: "service:meeting-records", kind: "service", name: "meeting-records", grants: [] } as Principal;
     const records = MeetingRecordService.withEpoch(storage, epoch, { meetings, decisions }, {
+      // A cited record may be shown to a meeting's readers only when it is a project-visible kind and exists; desks, scratch and unknown kinds stay private (card M02e).
+      shareable: shareableCite(storage),
       // A meeting may retitle or reword a task; the change is made by the project service as the agent that holds the right, and only once (card M02c).
       appliers: { "task.update": taskUpdateApplier(projects), "budget.raise": budgetRaiseApplier(budgets, meetingController, projects), "grant.add": grantApplier(grants, meetingController) },
       // Changes that widen rights or spend (a budget raise is registered; a grant is not yet) are carried out without the owner only when the approval policy lets their class through: the profile, with a specific setting overriding it (owner decision 2026-10-29).
