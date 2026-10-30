@@ -2799,3 +2799,9 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 
 - `IncidentService` (`projects/incidents.ts`): `report` groups alerts (`attention`/`failed`) with the same signature on one responsibility into one open incident (count, first and last time, worst outcome); a resolved signature that alerts again opens a new incident. `resolve` needs evidence. `escalate(by, projectId)` marks each open incident escalated once (to the responsibility's `escalation.to`) when `escalation.afterMinutes` has passed since it opened; repeats and other instances record nothing new; resolved ones never. `observed` tells what the checks found apart from the desired condition: `unknown` with no check or one older than twice the period, never healthy by default; open incidents show as attention or failed. Authority is the same as for adding history (owner, the responsible agent, `responsibility.write`).
 - **Not here (P04c):** the bounded retry count before escalation (only the time rule exists), a loop that runs `generate` and `escalate` on the clock, turning an escalation into an owner notice, turning a due check into a bounded task, API operations and the status view, maintenance leases, event-driven checks, and the coverage-gap record from an outage of the event source.
+
+## P04 (part 3): wired into the running controller
+
+- A dispatcher loop (`responsibilities.checks`) runs `ResponsibilityChecks.generate` and `IncidentService.escalate` for every project on each tick, as the tick's principal.
+- State API: `responsibility.checks` (due checks not yet finished), `responsibility.incidents`, `responsibility.observed`, and the commands `incident.report` and `incident.resolve`.
+- Remaining in P04 (P04c): the bounded retry count, turning a due check into a bounded task and an escalation into an owner notice, maintenance leases, event-driven checks, coverage gap from an event-source outage, and the chat/status view.

@@ -257,6 +257,11 @@ export function recordLoops(records: Pick<MeetingRecordService, "sweep">, projec
   return [{ name: "meeting-records.sweep", run: async (by) => { for (const projectId of await projects()) await records.sweep(by, { projectId }); } }];
 }
 
+/** P04: checks that came due are recorded and open incidents past their escalation time are escalated, for every project, on each tick. */
+export function responsibilityLoops(checks: { generate(by: Principal, projectId: string): Promise<unknown> }, incidents: { escalate(by: Principal, projectId: string): Promise<unknown> }, projects: () => Promise<readonly string[]>): DispatcherLoop[] {
+  return [{ name: "responsibilities.checks", run: async (by) => { for (const projectId of await projects()) { await checks.generate(by, projectId); await incidents.escalate(by, projectId); } } }];
+}
+
 /** H13c: the agent whose watched event is waiting is told to look at its inbox: the waker reports `woken` once the agent's current attempt will see it, and `deferred` (tried again next tick) when there is none to wake. */
 export function wakeLoops(watches: Pick<WatchService, "consumeWakes">, waker: Waker): DispatcherLoop[] {
   return [{ name: "events.wakes", run: async (by) => { await watches.consumeWakes(by, waker); } }];

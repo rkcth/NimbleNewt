@@ -1146,6 +1146,37 @@ Arguments:
 
 Result: `{ items, next? }`.
 
+#### `responsibility.checks`
+
+The checks of a project's responsibilities that came due and are not yet finished by a `check` entry in the history, oldest first. A catch-up after downtime names the gap it covers.
+
+Arguments:
+
+- `projectId`: the project
+
+Result: `{ items }`.
+
+#### `responsibility.incidents`
+
+A project's incidents: repeated alerts grouped by what they are about, open ones first, with how many, the worst outcome and whether they were escalated.
+
+Arguments:
+
+- `projectId`: the project
+- `open` (optional): true for the open ones only
+
+Result: `{ items }`.
+
+#### `responsibility.observed`
+
+What the checks found for a responsibility, apart from what is wanted: `unknown` without a check in the last two periods, never healthy by default.
+
+Arguments:
+
+- `responsibilityId`: the responsibility
+
+Result: `{ item }`.
+
 #### `agenda.get`
 
 One agenda item with its state, owner, deferral and outcome link.
@@ -3405,6 +3436,32 @@ Arguments:
 Result: `{ id, revision, replayed }`.
 
 Completion: finished when accepted (`completed: true`).
+
+#### `incident.report`
+
+Reports an alert on a responsibility: the first of a signature opens an incident, later ones add to it.
+
+Arguments:
+
+- `responsibilityId`: the responsibility
+- `signature`: what the alert is about, for example `disk-full:web-1`
+- `summary`: what was found
+- `outcome`: `attention` or `failed`
+- `commandId`: required
+
+Result: `{ id, replayed }`.
+
+#### `incident.resolve`
+
+Resolves an open incident with the evidence that it is over.
+
+Arguments:
+
+- `incidentId`: the incident
+- `evidence`: what shows it is resolved
+- `commandId`: required
+
+Result: `{ id, replayed }`.
 
 #### `agenda.capture`
 

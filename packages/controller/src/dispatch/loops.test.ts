@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { DomainError } from "../domain/errors.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
-import { activeAgents, attendanceLoops, budgetNoticeLoops, decisionLoops, eventLoops, meetingLoops, messageLoops, projectIds, recordLoops, untoldImprovementLoops, attemptWaker, wakeLoops, recoveryLoops, standupLoops, sourceLoops } from "./loops.js";
+import { activeAgents, attendanceLoops, budgetNoticeLoops, decisionLoops, eventLoops, meetingLoops, messageLoops, projectIds, recordLoops, responsibilityLoops, untoldImprovementLoops, attemptWaker, wakeLoops, recoveryLoops, standupLoops, sourceLoops } from "./loops.js";
 import { buildWorld, workGrants } from "./testing/world.js";
 
 after(stopServer);
@@ -119,6 +119,14 @@ test("the meeting record sweep runs for every project, as the tick's principal (
   assert.equal(loop!.name, "meeting-records.sweep");
   await loop!.run({ id: "service:dispatcher", kind: "service" } as never);
   assert.deepEqual(seen, ["service:dispatcher:proj-a", "service:dispatcher:proj-b"]);
+});
+
+test("each tick records the checks that came due and escalates incidents, for every project, as the tick's principal (card P04)", async () => {
+  const seen: string[] = [];
+  const [loop] = responsibilityLoops({ generate: async (by, p) => { seen.push(`check:${by.id}:${p}`); return []; } }, { escalate: async (by, p) => { seen.push(`escalate:${by.id}:${p}`); return []; } }, async () => ["proj-a", "proj-b"]);
+  assert.equal(loop!.name, "responsibilities.checks");
+  await loop!.run({ id: "service:dispatcher", kind: "service" } as never);
+  assert.deepEqual(seen, ["check:service:dispatcher:proj-a", "escalate:service:dispatcher:proj-a", "check:service:dispatcher:proj-b", "escalate:service:dispatcher:proj-b"]);
 });
 
 test("a watched event wakes the agent only when its attempt will read the inbox, and the wake loop asks every tick (card H13c)", async () => {

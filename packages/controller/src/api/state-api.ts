@@ -7,7 +7,7 @@ import type { AgentService } from "../agents/index.js";
 import type { WatchService } from "../events/handling.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
-import type { ProjectPlanService, ProjectResourceService, ResponsibilityService } from "../projects/index.js";
+import type { IncidentService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
 import type { ContextBranchService } from "../branches/index.js";
 import type { InvitationInbox, MeetingService } from "../meetings/index.js";
 import type { AgentMessageService } from "../messaging/index.js";
@@ -81,6 +81,8 @@ export interface StateApiDeps {
   readonly resources?: ProjectResourceService;
   readonly plans?: ProjectPlanService;
   readonly responsibilities?: ResponsibilityService;
+  readonly responsibilityChecks?: Pick<ResponsibilityChecks, "pending">;
+  readonly incidents?: Pick<IncidentService, "report" | "resolve" | "list" | "observed">;
   /** When present, agenda items can be captured, corrected and listed through the API (cards M01 and M03). */
   readonly meetings?: MeetingService;
   /** When present, integration, checkout refresh and quarantine of a task's work can be requested (cards H12l, H12d). */
@@ -192,6 +194,8 @@ export class StateApi {
         ...(this.#deps.resources === undefined ? {} : { resources: this.#deps.resources }),
         ...(this.#deps.plans === undefined ? {} : { plans: this.#deps.plans }),
         ...(this.#deps.responsibilities === undefined ? {} : { responsibilities: this.#deps.responsibilities }),
+        ...(this.#deps.responsibilityChecks === undefined ? {} : { responsibilityChecks: this.#deps.responsibilityChecks }),
+        ...(this.#deps.incidents === undefined ? {} : { incidents: this.#deps.incidents }),
         ...(this.#deps.meetings === undefined ? {} : { meetings: this.#deps.meetings }),
         ...(this.#deps.workspaceOps === undefined ? {} : { workspaceOps: this.#deps.workspaceOps }),
         ...(this.#deps.status === undefined ? {} : { status: this.#deps.status }),

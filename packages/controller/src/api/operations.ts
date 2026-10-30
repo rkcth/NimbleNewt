@@ -13,7 +13,7 @@ import type { CutoverService } from "../routing/cutover.js";
 import type { FallbackService } from "../routing/fallback.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
-import type { ProjectPlanService, ProjectResourceService, ResponsibilityService } from "../projects/index.js";
+import type { IncidentService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
 import type { RetrievalService } from "../context/index.js";
 import type { ContextBranchService } from "../branches/index.js";
 import type { InvitationInbox, MeetingService } from "../meetings/index.js";
@@ -59,6 +59,9 @@ export interface Context {
   readonly resources?: ProjectResourceService;
   readonly plans?: ProjectPlanService;
   readonly responsibilities?: ResponsibilityService;
+  /** Checks that came due and incidents for responsibilities (card P04). */
+  readonly responsibilityChecks?: Pick<ResponsibilityChecks, "pending">;
+  readonly incidents?: Pick<IncidentService, "report" | "resolve" | "list" | "observed">;
   /** Absent when the controller runs without meetings (cards M01 and M03). */
   readonly meetings?: MeetingService;
   /** Absent when the controller runs without a dispatcher (cards H12l, H12d). */
@@ -189,6 +192,8 @@ const ownTask = (c: Context, taskId: string): string => { if (c.principal.taskSc
 const difficultyOf = (c: Context): NonNullable<Context["difficulty"]> => c.difficulty ?? unavailable("difficulty profiles");
 const decisionsOf = (c: Context): NonNullable<Context["decisions"]> => c.decisions ?? unavailable("owner decision records");
 const meetingsOf = (c: Context): MeetingService => c.meetings ?? unavailable("meetings");
+const incidentsOf = (c: Context): NonNullable<Context["incidents"]> => c.incidents ?? unavailable("responsibility incidents");
+const checksOf = (c: Context): NonNullable<Context["responsibilityChecks"]> => c.responsibilityChecks ?? unavailable("responsibility checks");
 const duties = (c: Context): ResponsibilityService => c.responsibilities ?? unavailable("responsibilities");
 const optNum = (args: Args, key: string): number | undefined => { const v = args[key]; return v === undefined ? undefined : (typeof v === "number" ? v : invalid(`args.${key}`, "must be a number")); };
 const need = (commandId: string | undefined): string => commandId ?? invalid("commandId", "is required for a command");
@@ -790,6 +795,16 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => written(await duties(c).update(c.principal, { commandId: need(id), ...(a as object) } as never)) },
   { name: "responsibility.record", kind: "command", summary: "Adds a check, intervention, incident or note to a responsibility's history, optionally linked to the bounded task it produced.", args: { responsibilityId: "the responsibility", kind: "`check`, `intervention`, `incident` or `note`", summary: "what was found or done", "outcome?": "`ok`, `attention` or `failed`", "taskId?": "the task it produced" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
     run: async (c, a, id) => written(await duties(c).record(c.principal, { commandId: need(id), ...(a as object) } as never)) },
+  { name: "responsibility.checks", kind: "query", summary: "The checks of a project's responsibilities that came due and are not yet finished by a `check` entry in the history, oldest first. A catch-up after downtime names the gap it covers.", args: { projectId: "the project" }, result: "`{ items }`.",
+    run: async (c, a) => { only(a, ["projectId"]); return asJson({ items: (await checksOf(c).pending(c.principal, str(a, "projectId"))) ?? ((): never => { throw new DomainError("not_found", "no such project"); })() } as never); } },
+  { name: "responsibility.incidents", kind: "query", summary: "A project's incidents: repeated alerts grouped by what they are about, open ones first, with how many, the worst outcome and whether they were escalated.", args: { projectId: "the project", "open?": "true for the open ones only" }, result: "`{ items }`.",
+    run: async (c, a) => { only(a, ["projectId", "open"]); return asJson({ items: (await incidentsOf(c).list(c.principal, str(a, "projectId"), { open: a["open"] === true })) ?? ((): never => { throw new DomainError("not_found", "no such project"); })() } as never); } },
+  { name: "responsibility.observed", kind: "query", summary: "What the checks found for a responsibility, apart from what is wanted: `unknown` without a check in the last two periods, never healthy by default.", args: { responsibilityId: "the responsibility" }, result: "`{ item }`.",
+    run: async (c, a) => { only(a, ["responsibilityId"]); return found("responsibility", await incidentsOf(c).observed(c.principal, str(a, "responsibilityId"))); } },
+  { name: "incident.report", kind: "command", summary: "Reports an alert on a responsibility: the first of a signature opens an incident, later ones add to it.", args: { responsibilityId: "the responsibility", signature: "what the alert is about, for example `disk-full:web-1`", summary: "what was found", outcome: "`attention` or `failed`", commandId: "required" }, result: "`{ id, replayed }`.",
+    run: async (c, a, id) => written(await incidentsOf(c).report(c.principal, { commandId: need(id), ...(a as object) } as never)) },
+  { name: "incident.resolve", kind: "command", summary: "Resolves an open incident with the evidence that it is over.", args: { incidentId: "the incident", evidence: "what shows it is resolved", commandId: "required" }, result: "`{ id, replayed }`.",
+    run: async (c, a, id) => written(await incidentsOf(c).resolve(c.principal, { commandId: need(id), ...(a as object) } as never)) },
   { name: "agenda.capture", kind: "command", summary: "Saves a topic for a later stand-up or meeting, linked to the conversation it came from, and returns it as it will appear so it can be checked and corrected. The request type sets its authority: `discussion` and `recommendation` never execute anything; `delegated-decision` and `owner-instruction` can be recorded by the owner only. Needs `meeting.agenda` in the project (or the owner).", args: { projectId: "the project", topic: "the topic, in the requester's words", "question?": "the requester's actual question", "context?": "relevant context and constraints", "requestedOutcome?": "what the requester wants out of it", "urgency?": "`normal` (default) or `urgent`", "intent?": "`discussion` (default), `recommendation`, `delegated-decision` or `owner-instruction`", "participants?": "agent principal IDs it is for (empty: whoever attends)", "category?": "`conflict` (managers and the owner), `question`, `decision`, `topic` or `improvement`; default derived from the request type", "sourceTurnId?": "the owner's chat turn it came from (the chat sets this)" }, result: "`{ id, revision, replayed, shown }`: `shown` is the plain lines to show the requester.", completion: { kind: "completed" },
     run: async (c, a, id) => {
       only(a, ["projectId", "topic", "question", "context", "requestedOutcome", "urgency", "intent", "participants", "category", "sourceTurnId"]);
