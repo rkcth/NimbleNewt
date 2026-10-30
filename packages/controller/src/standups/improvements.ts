@@ -304,6 +304,25 @@ export class ImprovementService {
     return this.#markTold(by, body.projectId, itemId, revision);
   }
 
+  /**
+   * Decisions that have waited longer than `olderThanMs` to be told to their proposers (service principals only): the owner is shown these so a decision is never lost quietly. Each carries the revision it was decided at, so the owner
+   * is told once per decision. Reads the project's open index only (at most 200).
+   */
+  async untold(by: Principal, projectId: string, olderThanMs: number): Promise<{ id: string; revision: number; title: string; disposition: Disposition; decidedAt: string }[]> {
+    if ((by.kind !== "owner" && by.kind !== "host" && by.kind !== "service") || by.taskScope !== undefined) throw new DomainError("forbidden", `${by.id} may not list untold improvement outcomes`);
+    if (!Number.isFinite(olderThanMs) || olderThanMs < 0) throw new DomainError("invalid_command", "olderThanMs must be zero or more", { field: "olderThanMs" });
+    const cutoff = Date.parse(this.#runner.now()) - olderThanMs;
+    const out: { id: string; revision: number; title: string; disposition: Disposition; decidedAt: string }[] = [];
+    for (const id of (await this.#index(checkProjectId(projectId))).ids) {
+      const found = await this.#runner.get("improvement-item", id);
+      const body = found?.body as unknown as ImprovementBody | undefined;
+      if (found === undefined || body === undefined || !body.returnPending) continue;
+      const decidedAt = body.history[body.history.length - 1]?.at;
+      if (decidedAt !== undefined && Date.parse(decidedAt) <= cutoff) out.push({ id, revision: found.revision, title: body.title, disposition: body.disposition, decidedAt });
+    }
+    return out;
+  }
+
   /** One proposal: the owner, a manager or reader of the project's meetings, or its proposer (and the proposers grouped under it). Anyone else gets `undefined`, as for one that does not exist. */
   async get(viewer: Principal, itemId: string): Promise<View<ImprovementBody> | undefined> {
     const found = typeof itemId === "string" && IMPROVEMENT_ID.test(itemId) ? await this.#runner.get("improvement-item", itemId) : undefined;

@@ -98,6 +98,20 @@ export function improvementOutcomeLoops(improvements: { deliverOutcomes(by: Prin
   } }];
 }
 
+/** M03e: a decision on an improvement that has gone untold for some days is shown to the owner (once per decision), project by project. */
+export function untoldImprovementLoops(improvements: { untold(by: Principal, projectId: string, olderThanMs: number): Promise<readonly { id: string; revision: number; title: string; disposition: string; decidedAt: string }[]> }, projects: () => Promise<readonly string[]>, tell: (notice: { readonly key: string; readonly projectId: string; readonly itemId: string; readonly text: string }) => Promise<unknown>, days = 7): DispatcherLoop[] {
+  if (!Number.isFinite(days) || days <= 0) throw new Error("days must be above zero");
+  return [{ name: "improvements.untold", run: async (by) => {
+    const failed: string[] = [];
+    for (const projectId of await projects()) {
+      try {
+        for (const item of await improvements.untold(by, projectId, days * 86_400_000)) await tell({ key: `imu:${item.id}:${item.revision}`, projectId, itemId: item.id, text: `The decision on the improvement "${item.title.length > 60 ? `${item.title.slice(0, 59)}…` : item.title}" (${item.disposition}, decided ${item.decidedAt.slice(0, 10)}) has not reached its proposer for ${days} days or more.` });
+      } catch (error) { failed.push(`${projectId}: ${error instanceof Error ? error.message : String(error)}`); }
+    }
+    if (failed.length > 0) throw new Error(`untold improvement decisions could not be shown for ${failed.length} project(s): ${failed.slice(0, 3).join("; ")}`);
+  } }];
+}
+
 /** M03: for each project, the preparation of every planned occurrence (briefs, notices) and the delivery of agenda outcomes to the conversations they came from. */
 export function standupLoops(standups: Pick<StandupService, "prepare" | "deliverOutcomes">, meetings: Pick<MeetingService, "planned">, projects: () => Promise<readonly string[]>): DispatcherLoop[] {
   return [

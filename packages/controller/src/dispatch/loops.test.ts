@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { DomainError } from "../domain/errors.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
-import { activeAgents, attendanceLoops, budgetNoticeLoops, decisionLoops, eventLoops, meetingLoops, messageLoops, projectIds, recordLoops, attemptWaker, wakeLoops, recoveryLoops, standupLoops, sourceLoops } from "./loops.js";
+import { activeAgents, attendanceLoops, budgetNoticeLoops, decisionLoops, eventLoops, meetingLoops, messageLoops, projectIds, recordLoops, untoldImprovementLoops, attemptWaker, wakeLoops, recoveryLoops, standupLoops, sourceLoops } from "./loops.js";
 import { buildWorld, workGrants } from "./testing/world.js";
 
 after(stopServer);
@@ -144,4 +144,23 @@ test("the source loop polls the given sources once per tick as the dispatcher, d
   assert.deepEqual(seen, ["service:dispatcher:a,b"]);
   runs = [{ source: "a", polled: 0, published: 0, duplicates: 0, suppressed: 0, rejected: [], more: false }, { source: "b", polled: 0, published: 0, duplicates: 0, suppressed: 0, rejected: [], more: false, error: "the server did not answer" }];
   await assert.rejects(loop!.run({ id: "service:dispatcher", kind: "service" } as never), /1 event source\(s\) could not be polled: b: the server did not answer/);
+});
+
+test("the owner is told of a decision that has gone untold, once per decision and project by project, and a project that fails is named after the rest (card M03e)", async () => {
+  const told: string[] = [];
+  const asked: string[] = [];
+  const [loop] = untoldImprovementLoops(
+    { untold: async (_by, projectId, olderThanMs) => { asked.push(`${projectId}:${olderThanMs}`); if (projectId === "bad") throw new Error("storage hiccup"); return [{ id: "imp-1", revision: 3, title: "Retry builds", disposition: "adopted", decidedAt: "2026-10-01T00:00:00.000Z" }]; } },
+    async () => ["p1", "bad", "p2"],
+    async (n) => { told.push(`${n.key}|${n.projectId}|${n.itemId}`); },
+  );
+  await assert.rejects(loop!.run({ id: "service:dispatcher", kind: "service" } as never), /1 project\(s\): bad: storage hiccup/);
+  assert.deepEqual(asked, ["p1:604800000", "bad:604800000", "p2:604800000"]);
+  assert.deepEqual(told, ["imu:imp-1:3|p1|imp-1", "imu:imp-1:3|p2|imp-1"]);
+  assert.throws(() => untoldImprovementLoops({ untold: async () => [] }, async () => [], async () => undefined, 0));
+  // The owner's notification keeps detail text to 200 characters, so a long title is cut.
+  const long: string[] = [];
+  const [cut] = untoldImprovementLoops({ untold: async () => [{ id: "imp-2", revision: 1, title: "t".repeat(200), disposition: "investigating", decidedAt: "2026-10-01T00:00:00.000Z" }] }, async () => ["p1"], async (n) => { long.push(n.text); });
+  await cut!.run({ id: "service:dispatcher", kind: "service" } as never);
+  assert.ok(long[0]!.length <= 200, String(long[0]!.length));
 });

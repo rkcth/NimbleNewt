@@ -766,6 +766,16 @@ for (const backend of backends) {
     await refuses("forbidden", () => im.deliverOutcomes(c.mgr, c.a));
     const quiet = c.makeImprovements(false);
     assert.ok((await quiet.deliverOutcomes(c.host, c.a)).waiting.includes(first.id));
+    // A decision that is still waiting shows up for the owner only once it is old enough (card M03e), and only to the controller.
+    await refuses("forbidden", () => im.untold(c.mgr, c.a, 0));
+    await refuses("invalid_command", () => im.untold(c.host, c.a, -1));
+    const day = 86_400_000;
+    assert.deepEqual((await im.untold(c.host, c.a, 3 * day)).map((x) => x.id), [], "a fresh decision is not shown");
+    const decidedAt = now;
+    at(new Date(decidedAt + 4 * day).toISOString());
+    const stale = await im.untold(c.host, c.a, 3 * day);
+    assert.deepEqual(stale.filter((x) => x.id === first.id).map((x) => [x.disposition, x.title]), [["adopted", "Retry flaky builds once"]]);
+    at(new Date(decidedAt).toISOString());
     // A sink that could not file it (no task to hang it on) leaves it waiting, not told.
     const unfiled = ImprovementService.withEpoch(c.storage, c.epoch, { meetings: c.meetings }, { outcomes: { deliver: async () => false } });
     assert.ok((await unfiled.deliverOutcomes(c.host, c.a)).waiting.includes(first.id));

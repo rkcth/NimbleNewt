@@ -2552,3 +2552,9 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - A stopped or suspended agent is held by a pause gate whose observed state is `stopped` or `suspended`, so the room already treats it as paused: it stays out unless the owner invited it by hand ahead of time (the exception), then attends its meeting task only, its other work stays held, and it is back to stopped when the meeting ends. A test pins this for a stopped agent.
 - `meeting.invite-direct` (owner only) is the state-API operation for that request, so the chat reaches it. An agent the host's own availability hook reports stopped is still not woken by it; that is `meeting.attend.wake`.
 - Not built yet (remains in M04e): chat wording that explains the exception to the owner, and a wake sink for agents the host reports stopped.
+
+## M03e (part 1): the owner is shown decisions that went untold
+
+- `ImprovementService.untold(by, projectId, olderThanMs)` (service principals only) lists decisions still `returnPending` whose last decision is at least that old, with the revision decided at.
+- `untoldImprovementLoops` (dispatcher loop `improvements.untold`, 7 days by default) hands each to a `tell` callback keyed `imu:<item>:<revision>`, so the owner is told once per decision; one project's failure is named after the rest. The composed controller files it as a `maintenance` notification (detail cut to the 200-character limit, the title to 60) on the improvement record.
+- Not built yet (remains in M03e): agenda outcomes to chat turns and inquiries, the notice/allocation/usage/owner-item sinks, and chat commands.
