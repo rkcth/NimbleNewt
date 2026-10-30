@@ -33,11 +33,14 @@ test("the running worker has no network but loopback, no git directory, a read-o
         lookedAt.push(pid);
         const names = dev.split("\n").slice(2).map((l) => l.split(":")[0]!.trim()).filter((n) => n !== "");
         assert.deepEqual(names, ["lo"], `process ${pid} sees network devices other than loopback: ${names.join(", ")}`);
-        // mountinfo writes a space (and other odd characters) in a path as an octal escape, so the paths are decoded before they are compared.
-        const mounts = read(pid, "mountinfo").replace(/\\([0-7]{3})/g, (_m, o: string) => String.fromCharCode(parseInt(o, 8)));
-        assert.ok(!mounts.includes(c.dirs.gitDir), `process ${pid} has the git directory mounted`);
-        const dotGit = mounts.split("\n").filter((l) => l.split(" ")[4]?.endsWith("/.git"));
-        for (const line of dotGit) assert.ok(line.split(" ")[5]?.split(",").includes("ro"), `process ${pid}: ${line.split(" ")[4]} is not read-only`);
+        // mountinfo writes a space (and other odd characters) in a path as an octal escape, so each field is decoded after the line is split (a decoded space would split a field).
+        const unescape = (field: string): string => field.replace(/\\([0-7]{3})/g, (_m, o: string) => String.fromCharCode(parseInt(o, 8)));
+        const lines = read(pid, "mountinfo").split("\n").filter((l) => l !== "").map((l) => l.split(" ").map(unescape));
+        // A mount's root is relative to the filesystem it comes from (on a /tmp of its own it does not start with /tmp), so the check names the last two parts of the directory: the attempt's private folder and the git directory.
+        const gitTail = c.dirs.gitDir.split("/").slice(-2).join("/");
+        assert.ok(lines.length > 0, "the mount table was read");
+        assert.ok(!lines.some((f) => f.slice(0, 5).some((x) => x.includes(gitTail))), `process ${pid} has the git directory mounted`);
+        for (const f of lines.filter((x) => x[4]?.endsWith("/.git"))) assert.ok(f[5]?.split(",").includes("ro"), `process ${pid}: ${f[4]} is not read-only`);
       }
       assert.ok(lookedAt.length > 0, "at least one worker process was inspected");
       assert.ok(inner.some((p) => read(p.pid, "mountinfo").split("\n").some((l) => l.split(" ")[4]?.endsWith("/.git"))), "the protected .git is mounted in the worker (positive control)");
