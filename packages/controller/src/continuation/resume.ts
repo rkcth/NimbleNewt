@@ -85,15 +85,15 @@ export class ResumeCheckService {
   readonly #runner: CommandRunner;
   readonly #continuations: Pick<ContinuationService, "latest" | "resume">;
   readonly #dependencies: Pick<DependencyService, "check">;
-  readonly #blockers: Pick<BlockerService, "openBlocker">;
+  readonly #blockers: Pick<BlockerService, "openBlocker" | "getBlocker">;
   readonly #ports: ResumePorts;
   readonly #rounds: number;
 
-  private constructor(runner: CommandRunner, deps: { continuations: Pick<ContinuationService, "latest" | "resume">; dependencies: Pick<DependencyService, "check">; blockers: Pick<BlockerService, "openBlocker">; ports: ResumePorts }, rounds: number) {
+  private constructor(runner: CommandRunner, deps: { continuations: Pick<ContinuationService, "latest" | "resume">; dependencies: Pick<DependencyService, "check">; blockers: Pick<BlockerService, "openBlocker" | "getBlocker">; ports: ResumePorts }, rounds: number) {
     this.#runner = runner; this.#continuations = deps.continuations; this.#dependencies = deps.dependencies; this.#blockers = deps.blockers; this.#ports = deps.ports; this.#rounds = rounds;
   }
 
-  static withEpoch(storage: ControllerStorage, epoch: number, deps: { continuations: Pick<ContinuationService, "latest" | "resume">; dependencies: Pick<DependencyService, "check">; blockers: Pick<BlockerService, "openBlocker">; ports: ResumePorts }, options: RunnerOptions & { maxRounds?: number } = {}): ResumeCheckService {
+  static withEpoch(storage: ControllerStorage, epoch: number, deps: { continuations: Pick<ContinuationService, "latest" | "resume">; dependencies: Pick<DependencyService, "check">; blockers: Pick<BlockerService, "openBlocker" | "getBlocker">; ports: ResumePorts }, options: RunnerOptions & { maxRounds?: number } = {}): ResumeCheckService {
     const rounds = options.maxRounds ?? RESUME_LIMITS.rounds;
     if (!Number.isSafeInteger(rounds) || rounds < 1 || rounds > 10) throw new RangeError("maxRounds must be a whole number from 1 to 10");
     return new ResumeCheckService(new CommandRunner(storage, epoch, options), deps, rounds);
@@ -255,6 +255,27 @@ export class ResumeCheckService {
       if (page.length < 100) break;
     }
     return { advanced, failed };
+  }
+
+  /** The task's current check (the one its active pointer names, in any phase), or nothing. */
+  async forTask(by: Principal, taskId: string): Promise<View<ResumeCheckBody> | undefined> {
+    const tid = checkTaskId(taskId);
+    await this.#authorize(by, tid);
+    const active = await this.#runner.get(ACTIVE, derivedId("rck", `active\0${tid}`));
+    const current = (active?.body as unknown as { checkId?: string } | undefined)?.checkId;
+    const found = current === undefined ? undefined : await this.#runner.get(KIND, current);
+    return found === undefined ? undefined : view<ResumeCheckBody>(found);
+  }
+
+  /** The ID the check started with this command ID by this principal has (or would have): lets a caller tell its own check from another one. */
+  checkIdFor(by: Principal, commandId: string): string { return derivedId("rck", scopedCommandId(by.id, commandId)); }
+
+  /** Whether a blocked check can be started over now: the blocker it opened is resolved, or it opened none (a failed review, uncertain effects) and has not blocked more than the rounds allow. */
+  async retryable(check: View<ResumeCheckBody>): Promise<boolean> {
+    if (check.phase !== "blocked") return false;
+    const id = check.blocked?.blockerId;
+    if (id === undefined) return check.blocks <= RESUME_LIMITS.rounds;
+    return (await this.#blockers.getBlocker(id))?.state === "resolved";
   }
 
   async get(by: Principal, checkId: string): Promise<View<ResumeCheckBody> | undefined> {

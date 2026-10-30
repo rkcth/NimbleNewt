@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { DomainError } from "../domain/errors.js";
 import { after, test } from "node:test";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { buildWorld, workGrants, type DispatchWorld } from "./testing/world.js";
@@ -39,6 +40,27 @@ for (const backend of backends) {
     assert.equal(c.worker.starts.length, 1);
   });
 
+  suite("a cancelled or missing prerequisite says so and opens one owner blocker per dependent task; an unreadable dependency list skips the attempt without failing the tick", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, []));
+    const { taskId, attemptId } = await c.task("needs a dead one", ann);
+    let mode: "dead" | "unavailable" = "dead";
+    const d = c.restart({ prerequisites: async () => { if (mode === "unavailable") throw new DomainError("unavailable", "too many dependency records"); return { open: ["tsk-x (in_progress)"], dead: ["tsk-gone (cancelled)"] }; } });
+    for (let n = 0; n < 2; n++) {
+      const t = await d.tick();
+      assert.deepEqual(t.started, []);
+      assert.deepEqual(t.failures, []);
+      assert.deepEqual([t.skipped[0]!.attemptId, t.skipped[0]!.check], [attemptId, "dependency"]);
+      assert.match(t.skipped[0]!.reason, /tsk-gone \(cancelled\) is cancelled or missing/);
+    }
+    const blockers = (await c.blockers.list({ limit: 50, openOnly: true })).items.filter((b) => b.subject.id === taskId);
+    assert.equal(blockers.length, 1, "one blocker however many ticks");
+    mode = "unavailable";
+    const u = await d.tick();
+    assert.deepEqual(u.failures, []);
+    assert.equal(u.skipped[0]!.reason, "dependencies could not be read");
+    assert.deepEqual(u.started, []);
+  });
+
   suite("an attempt that brings earlier work back is started only after the checked resume is done: blocked waits with the reason, ready is committed, a fresh attempt is not checked", async (c) => {
     const ann = await c.agent("ann", workGrants(c.project, []));
     const { taskId, attemptId } = await c.task("long job", ann);
@@ -48,6 +70,8 @@ for (const backend of backends) {
       start: async (_by, command) => { calls.push(`start:${command.taskId}:${command.after}`); return { id: "rck-1", revision: 1, body: undefined, phase, ...(phase === "blocked" ? { blocked: { type: "missing_context", reason: "no continuation" } } : {}) } as never; },
       commit: async (_by, command) => { calls.push(`commit:${command.checkId}`); return { id: "rck-1", phase: "done" } as never; },
       advance: async () => { throw new Error("not used"); },
+      forTask: async () => undefined, get: async () => undefined, checkIdFor: (_by, k) => `rck-${k}`, retryable: async () => false,
+      retry: async () => { throw new Error("not used"); }, cancel: async () => { throw new Error("not used"); },
     };
     // A fresh attempt has nothing to resume: the check is not asked.
     const gate = deferred<void>();

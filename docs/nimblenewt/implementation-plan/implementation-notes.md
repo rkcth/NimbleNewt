@@ -3131,3 +3131,18 @@ Before this slice no chair desk read existed in code (no `meetingRead`, no chair
 - Wired in `api/dispatch-compose.ts` and `api/start.ts` (`resumes` passed through).
 - Tests: `dispatch/resume-dependency.test.ts` (prerequisites wait then start; first start unchecked, blocked and open check wait with reason, ready check is committed and the attempt goes on from its checkpoint).
 - Not done (L04c stays planned): workers observing dependencies themselves (`ResumePorts.observe` is still the controller's port), a reviewer agent giving verdicts (`ResumePorts.review`), chat commands, the continuation capture operation for hosts, and an `after: model-change` when the resume is onto a different model than the checkpoint's. Resumes of a pause or suspension lift (as opposed to a restart or move) are not checked here: those attempts keep their place and have no checkpoint to bring back.
+
+## L04c follow-up: review findings on the checked resume and prerequisite waits
+
+- Finding 1 (high): the resume check key now includes the model of the chosen route (attempt, checkpoint, note, model). A re-chosen route is a different command, so the service's digest check can no longer raise `command_conflict` forever.
+- Finding 2 (high): before starting, the dispatcher reads the task's current check (`ResumeCheckService.forTask`). A live check that is not one of this attempt's keys is stale and is cancelled with the dispatcher's principal; then the new one starts. If the cancel is refused (for example it is executing) the skip reason says so. New service methods: `forTask`, `checkIdFor`, `retryable`.
+- Finding 5 (medium): a cancelled check of this attempt is started again under key `...-rN`, at most 3 restarts (4 checks); then one owner `dispatch_blocked` blocker (`dpa-blk:resume:<attempt>`) and a skip reason that names it. A blocked check is retried by the dispatcher when its blocker is resolved, or when it opened none (review failed, effects uncertain) and has blocked no more than the round limit.
+- Finding 6 (medium): `prerequisites` may now return `{ open, dead }`; a cancelled or missing prerequisite is `dead`, the skip reason says "cancelled or missing", and one owner blocker per dependent task is opened (key from the sorted dead set, so every tick gives the same command ID). In-progress prerequisites wait as before.
+- Finding 7 (medium): `unavailable` from the dependency read skips the attempt ("dependencies could not be read") and does not fail the tick. An unreadable prerequisite task fails closed through the same path. Not done: a per-tick, per-project cache of the prerequisite scan (`ContractService.dependencies` still scans per waiting attempt); open item.
+- Tests: `dispatch/resume-wedge.test.ts` uses the real `ResumeCheckService` (changed route, second checkpoint, cancelled restarts, blocker retry); `resume-dependency.test.ts` covers dead and unreadable prerequisites.
+
+### Open items L04c3
+
+- Finding 3: the resume check is committed before the later admission steps (host, place, budget, grant); if one of them skips the attempt, the commit has already been recorded. The commit should come last, just before the claim.
+- Finding 4: a `ready` check is committed even when it holds relevant verdicts (changes judged to matter); the dispatcher should hold such a check for the agent or owner instead of committing it.
+- Per-tick cache of prerequisites per project (finding 7, remainder).

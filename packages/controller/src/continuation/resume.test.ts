@@ -43,7 +43,8 @@ class Fakes {
     },
   };
   seen = new Map<string, string>();
-  bl = { openBlocker: async (c: { type: string; commandId: string }) => { const old = this.seen.get(c.commandId); if (old !== undefined) return { id: old } as never; this.blockers.push(c.type); const id = `blk-${this.blockers.length}`; this.seen.set(c.commandId, id); return { id } as never; } };
+  resolved = new Set<string>();
+  bl = { getBlocker: async (id: string) => ({ id, state: this.resolved.has(id) ? "resolved" : "open" }) as never, openBlocker: async (c: { type: string; commandId: string }) => { const old = this.seen.get(c.commandId); if (old !== undefined) return { id: old } as never; this.blockers.push(c.type); const id = `blk-${this.blockers.length}`; this.seen.set(c.commandId, id); return { id } as never; } };
   ports: ResumePorts = {
     observe: async (): Promise<Record<string, Observation>> => ({}),
     missingContext: async () => this.missing,

@@ -90,12 +90,12 @@ export interface DispatcherDeps {
    * The prerequisite tasks of `taskId` that are not complete, each as a short description (card L04c). Work whose prerequisites are not done is not started: the attempt waits, with the reason in the tick's report, and nothing fails.
    * Without it prerequisites are not looked at here.
    */
-  readonly prerequisites?: (taskId: string) => Promise<readonly string[]>;
+  readonly prerequisites?: (taskId: string) => Promise<readonly string[] | { readonly open: readonly string[]; /** Prerequisites that will not complete by themselves: cancelled or gone. The dependent waits and the owner gets one blocker. */ readonly dead: readonly string[] }>;
   /**
    * The checked resume (card L04c). An attempt that brings earlier work back (it has a checkpoint to continue from: after a restart or a move) starts only once its resume check is done: the dispatcher starts the check,
    * commits it when it is ready and waits while it is open or blocked (a blocked check has opened its own blocker). Without it such an attempt starts as before.
    */
-  readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "advance">;
+  readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "advance" | "retry" | "cancel" | "forTask" | "checkIdFor" | "retryable" | "get">;
   /** `GenerationService.guardFor` is handed to every effect that is started (it adds the generation hold to the pause and decision guards). */
   readonly generation?: Pick<GenerationService, "guardFor">;
   readonly reviews?: Pick<ReviewService, "request" | "admit" | "get">;
@@ -156,6 +156,9 @@ export interface AttemptDispatcherOptions extends RunnerOptions {
   /** The bridge for each effect kind, so an effect that was started before a restart is reconciled without the worker. */
   readonly bridges?: Readonly<Record<string, EffectBridge>>;
 }
+
+/** How many times a cancelled resume check of an attempt is started again before the owner is told. */
+const RESUME_RESTARTS = 3;
 
 export type DispatchCheck = "generation" | "checkout" | "pause" | "decision" | "revalidation" | "meeting" | "harness" | "route" | "budget" | "grant" | "host" | "place" | "expired" | "dependency" | "resume";
 
@@ -708,7 +711,11 @@ export class DispatcherService {
     return { kind: "claimed" };
   }
 
-  /** The checked resume of an attempt that has a checkpoint to continue from. Returns why it waits, or nothing when it may start. A fault in the check is a wait, not a failure of the attempt. */
+  /**
+   * The checked resume of an attempt that has a checkpoint to continue from. Returns why it waits, or nothing when it may start. A fault in the check is a wait, not a failure of the attempt.
+   * The check's key names the attempt, the checkpoint and the model it is about to run on, so a re-chosen route is a different check (the service refuses a command ID reused with other content). A live check of the task that is not this attempt's
+   * is stale and is cancelled; a cancelled check of this attempt is started again under a new key, at most RESUME_RESTARTS times, and then the owner gets a blocker; a blocked check whose blocker is dealt with is retried here.
+   */
   async #resumeCheck(attemptId: string, taskId: string, route: string): Promise<string | undefined> {
     const resumes = this.#deps.resumes;
     const b = (await this.#load(attemptId))?.body;
@@ -717,13 +724,31 @@ export class DispatcherService {
     const slash = route.indexOf("/");
     const plain = (v: string): string => v.replace(/[^A-Za-z0-9._:-]/g, "_").slice(0, 80) || "unknown";
     const model = { provider: plain(slash < 0 ? "route" : route.slice(0, slash)), id: plain(slash < 0 ? route : route.slice(slash + 1)) };
-    const key = `dpa-rck:${attemptId}:${derivedId("dpa", JSON.stringify([b.resumeFrom, b.resumeNote ?? null])).slice(4, 16)}`;
+    const base = `dpa-rck:${attemptId}:${derivedId("dpa", JSON.stringify([b.resumeFrom, b.resumeNote ?? null, model])).slice(4, 16)}`;
+    const keys = Array.from({ length: RESUME_RESTARTS + 1 }, (_, n) => (n === 0 ? base : `${base}-r${n}`));
     try {
+      const mine = new Set(keys.map((k) => resumes.checkIdFor(by, k)));
+      // Another check of the task still in progress (an earlier checkpoint, another route) is stale: this attempt's is the one that counts.
+      const live = await resumes.forTask(by, taskId);
+      if (live !== undefined && !mine.has(live.id) && !["done", "cancelled"].includes(live.phase)) {
+        try { await resumes.cancel(by, { checkId: live.id }); } catch (error) { return `an earlier resume check ${live.id} (${live.phase}) is still in progress and could not be cancelled: ${errorText(error)}`.slice(0, 500); }
+      }
+      let n = 0;
+      for (; n < keys.length; n++) {
+        const existing = await resumes.get(by, resumes.checkIdFor(by, keys[n]!));
+        if (existing === undefined || existing.phase !== "cancelled") break;
+      }
+      if (n >= keys.length) {
+        const opened = await this.#deps.blockers.openBlocker({ commandId: `dpa-blk:resume:${attemptId}`, actor: DISPATCHER_ACTOR, type: "dispatch_blocked", subject: { kind: "task", id: taskId }, summary: `Attempt ${attemptId} cannot start: its resume check was cancelled ${keys.length} times. Look at why, then assign the task again.`, resolver: "owner" }).catch(() => undefined);
+        return `the resume check was cancelled ${keys.length} times; ${opened === undefined ? "the attempt waits" : `blocker ${opened.id} opened for the owner`}`.slice(0, 500);
+      }
+      const key = keys[n]!;
       let check = await resumes.start(by, { commandId: key, taskId, model, after: b.resumeNote?.includes("restarted") === true ? "restart" : "continue" });
+      if (check.phase === "blocked" && await resumes.retryable(check)) check = await resumes.retry(by, { checkId: check.id });
       if (check.phase === "ready") check = await resumes.commit(by, { commandId: `${key}-commit`, checkId: check.id });
       if (check.phase === "done") return undefined;
       if (check.phase === "blocked") return `the resume check ${check.id} is blocked: ${check.blocked?.reason ?? "see its blocker"}`.slice(0, 500);
-      if (check.phase === "cancelled") return `the resume check ${check.id} was cancelled`;
+      if (check.phase === "cancelled") return `the resume check ${check.id} was cancelled; it is started again on the next tick`;
       return `the resume check ${check.id} is ${check.phase}`;
     } catch (error) {
       return `the resume check could not be run: ${errorText(error)}`.slice(0, 500);
@@ -755,7 +780,20 @@ export class DispatcherService {
     }
     // 3a. Prerequisite tasks: work does not start before the tasks it depends on are complete (card L04c). The wait is recorded in the tick's report; it is not a failure.
     if (this.#deps.prerequisites !== undefined) {
-      const open = await this.#deps.prerequisites(taskId);
+      let got: Awaited<ReturnType<NonNullable<DispatcherDeps["prerequisites"]>>>;
+      try { got = await this.#deps.prerequisites(taskId); } catch (error) {
+        // Too many dependency records to look through, or an unreadable prerequisite: the attempt does not start (fail closed) and the tick goes on.
+        if (!isDomainError(error, "unavailable")) throw error;
+        return skip("dependency", "dependencies could not be read");
+      }
+      const open = Array.isArray(got) ? got as readonly string[] : (got as { open: readonly string[] }).open;
+      const dead = Array.isArray(got) ? [] : (got as { dead: readonly string[] }).dead;
+      if (dead.length > 0) {
+        // A cancelled or missing prerequisite never completes by itself: one blocker per dependent task (the same set gives the same command ID) tells the owner.
+        const ids = dead.slice(0, 5).join(", ");
+        await this.#deps.blockers.openBlocker({ commandId: `dpa-blk:prereq:${taskId}:${derivedId("dpa", JSON.stringify([...dead].sort())).slice(4, 16)}`, actor: DISPATCHER_ACTOR, type: "dispatch_blocked", subject: { kind: "task", id: taskId }, summary: `Task ${taskId} cannot start: its prerequisite ${ids} was cancelled or is gone. Remove the dependency or restore the prerequisite.`.slice(0, 900), resolver: "owner" }).catch(() => undefined);
+        return skip("dependency", `prerequisite ${ids} is cancelled or missing; waiting for the owner`.slice(0, 500));
+      }
       if (open.length > 0) return skip("dependency", `waiting for ${open.slice(0, 5).join(", ")}${open.length > 5 ? ` and ${open.length - 5} more` : ""} to be complete`.slice(0, 500));
     }
     // 3b. The checkout: a task that names a repository is pinned to the binding and location it has now, and a moved, unbound or re-pointed one does not start until the owner confirms it (card P01).
