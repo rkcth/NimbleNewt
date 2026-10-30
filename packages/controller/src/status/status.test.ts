@@ -440,6 +440,93 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.status.task(c.owner, "not-a-task"));
   });
 
+  suite("attention: a scan cursor reveals no task the caller cannot read, and a stale or revoked host is still listed (card U13 fixes)", async (c) => {
+    const a = await c.work("paused a", "ann"); await c.seen(a);
+    const b = await c.work("paused b", "ann"); await c.seen(b);
+    for (const t of [a, b]) await c.pauses.pause(c.owner, { commandId: cid("pz"), scope: { kind: "task", id: t }, reason: "look" });
+    const elsewhere: string[] = [];
+    for (let i = 0; i < 5; i++) elsewhere.push(await c.work(`elsewhere ${i}`, "ann", c.other));
+    const tiny = c.rebuild({ scanPageSize: 1, scanPages: 2 });
+    const ID = /task-[a-z2-7]{20}/;
+    // Attention: every cursor left by a budget-limited scan is opaque, and following them reaches both tasks.
+    let cursor: string | undefined;
+    const got = new Set<string>();
+    let cuts = 0;
+    for (let i = 0; i < 40; i++) {
+      const page = await tiny.attention(c.owner, { projectId: c.project, kind: "paused_assignee", ...(cursor === undefined ? {} : { afterId: cursor }) });
+      for (const x of page.items) got.add(x.taskId);
+      if (page.scanLimited === true) { cuts++; assert.ok(page.next !== undefined && !ID.test(page.next), "a limited scan's cursor holds no task id"); }
+      cursor = page.next;
+      if (cursor === undefined) break;
+    }
+    assert.ok(cuts > 0);
+    assert.deepEqual([...got].sort(), [a, b].sort());
+    await refuses("invalid_command", () => tiny.attention(c.owner, { projectId: c.project, afterId: "~AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" }));
+    // Overview, with another project's tasks walked past.
+    cursor = undefined;
+    const rows = new Set<string>();
+    let overviewCuts = 0;
+    for (let i = 0; i < 40; i++) {
+      const page = await tiny.overview(c.owner, { projectId: c.project, ...(cursor === undefined ? {} : { afterId: cursor }) });
+      for (const x of page.items) rows.add(x.taskId);
+      if (page.partial) { overviewCuts++; assert.ok(page.next !== undefined && !ID.test(page.next), "a partial overview's cursor holds no task id"); }
+      cursor = page.next;
+      if (cursor === undefined) break;
+    }
+    assert.ok(overviewCuts > 0);
+    assert.deepEqual([...rows].sort(), [a, b].sort());
+    await refuses("invalid_command", () => tiny.overview(c.owner, { projectId: c.project, afterId: "~AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" }));
+    void elsewhere;
+  });
+
+  suite("attention: an unreachable worker stays listed when the report is older than the stale window, and when the host is revoked", async (c) => {
+    const quietTask = await c.work("quiet host", "carl");
+    const h = await c.host("h1");
+    const g1 = (await c.assignments.getAssignment(quietTask))!;
+    await c.hosts.announce(h, { commandId: cid("an"), capabilities: { os: "linux", arch: "x64", harnesses: [], isolation: [], tools: [], workspaces: [] } });
+    await c.hosts.heartbeat(h, { commandId: cid("hb"), sequence: 1 });
+    await c.stall.report(h, { commandId: cid("rp"), taskId: quietTask, generation: g1.generation, event: { type: "step", label: "compile" } });
+    const revokedTask = await c.work("revoked host", "dana");
+    const h2 = await c.host("h2");
+    const g2 = (await c.assignments.getAssignment(revokedTask))!;
+    await c.hosts.announce(h2, { commandId: cid("an"), capabilities: { os: "linux", arch: "x64", harnesses: [], isolation: [], tools: [], workspaces: [] } });
+    await c.hosts.heartbeat(h2, { commandId: cid("hb"), sequence: 1 });
+    await c.stall.report(h2, { commandId: cid("rp"), taskId: revokedTask, generation: g2.generation, event: { type: "step", label: "compile" } });
+    const reasons = async (): Promise<Record<string, unknown>> => Object.fromEntries((await c.status.attention(c.owner, { projectId: c.project, kind: "unreachable_worker" })).items.map((i) => [i.taskId, i.detail["reason"]]));
+    now += 3 * MIN;
+    assert.deepEqual(await reasons(), { [quietTask]: "quiet", [revokedTask]: "quiet" });
+    // Far beyond the silence window for the work (the default for medium work is 20 minutes), the items must not vanish.
+    now += 5 * 60 * MIN;
+    assert.deepEqual(await reasons(), { [quietTask]: "quiet", [revokedTask]: "quiet" });
+    // A revoked host with an old report is listed as revoked.
+    await c.principals.disable(c.owner, { commandId: cid("dis"), principalId: h2.id, expectedRevision: (await c.principals.get(h2.id))!.revision });
+    assert.deepEqual(await reasons(), { [quietTask]: "quiet", [revokedTask]: "revoked" });
+  });
+
+  suite("attention: the budget is checked inside a task's call list", async (c) => {
+    const server = await c.mcp.register(c.owner, { commandId: cid("rg"), name: "files", mode: "local", transport: "stdio", protocolRevision: "2025-06-18", sdk: SDK, launch: { command: "/opt/mcp/files-server", args: [], env: {}, secretRefs: [] }, audience: [c.project], allowed: { tools: ["write_file"], resources: [], prompts: [] } } as never);
+    const cat = await c.host("catalog");
+    const snap = await c.mcp.recordCatalog(cat, { commandId: cid("sn"), serverId: server.id, protocolRevision: "2025-06-18", tools: [item("write_file")] });
+    await c.mcp.acceptCatalog(c.owner, { commandId: cid("ac"), serverId: server.id, revision: snap.revision, expectedRevision: 2 });
+    const coder = await c.agent("coder", [{ action: "attempt.work", project: c.project }, { action: "mcp.use", project: c.project }, { action: "history.read", project: c.project }]);
+    const t = await c.work("many calls", "coder"); await c.seen(t);
+    const ids: string[] = [];
+    for (let i = 0; i < 10; i++) ids.push((await c.mcp.authorizeCall(coder, { commandId: cid("cl"), serverId: server.id, kind: "tool", name: "write_file", taskId: t })).callId);
+    // Budget is 3 x 2 = 6 reads of work; the task itself counts one, so at most five calls may be read.
+    const small = c.rebuild({ scanPageSize: 3, scanPages: 2 });
+    const first = await small.attention(c.owner, { taskId: t, kind: "uncertain_tool_result" });
+    assert.equal(first.scanLimited, true);
+    assert.equal(first.items.length, 5);
+    const seen = new Set(first.items.map((i) => String(i.detail["callId"])));
+    let cursor = first.next;
+    for (let i = 0; i < 10 && cursor !== undefined; i++) {
+      const more = await small.attention(c.owner, { taskId: t, kind: "uncertain_tool_result", afterId: cursor });
+      for (const x of more.items) seen.add(String(x.detail["callId"]));
+      cursor = more.next;
+    }
+    assert.deepEqual([...seen].sort(), [...ids].sort(), "the cursors still reach every call");
+  });
+
   suite("the overview filters by project, agent and state and shows observation time, freshness and uncertainty", async (c) => {
     const w1 = await c.work("ann working", "ann"); await c.seen(w1);
     const w2 = await c.work("ann silent", "ann");

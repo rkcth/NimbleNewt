@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import type { AssignmentService } from "../domain/assignments.js";
 import type { ActivityBody, AssignmentBody, AttemptBody, GenerationBody } from "../domain/assignment-model.js";
 import { defaultBasis, type BlockerBasis, type BlockerBody, type BlockerService, type BlockerType } from "../domain/blockers.js";
@@ -294,6 +294,8 @@ export class StatusService {
   readonly #options: StatusOptions;
   readonly #pageSize: number;
   readonly #pages: number;
+  /** Seals scan-position cursors so that a cursor left by a scan that ran out of budget reveals nothing about tasks the caller may not read (the position can be on any task the scan merely walked past). */
+  readonly #cursorKey = randomBytes(32);
 
   private constructor(runner: CommandRunner, deps: StatusDeps, options: StatusOptions) {
     this.#runner = runner;
@@ -307,6 +309,25 @@ export class StatusService {
 
   static withEpoch(storage: ControllerStorage, epoch: number, deps: StatusDeps, options: StatusOptions = {}): StatusService {
     return new StatusService(new CommandRunner(storage, epoch, options), deps, options);
+  }
+
+  #seal(plain: string): string {
+    const iv = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", this.#cursorKey, iv);
+    const body = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
+    return `~${Buffer.concat([iv, cipher.getAuthTag(), body]).toString("base64url")}`;
+  }
+
+  /** The position inside a sealed cursor; a cursor that is not sealed is returned as it is, and one that fails to open is refused. */
+  #unseal(field: string, cursor: string): string {
+    if (!cursor.startsWith("~")) return cursor;
+    try {
+      const raw = Buffer.from(cursor.slice(1), "base64url");
+      if (raw.length < 29) throw new Error("short");
+      const decipher = createDecipheriv("aes-256-gcm", this.#cursorKey, raw.subarray(0, 12));
+      decipher.setAuthTag(raw.subarray(12, 28));
+      return Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString("utf8");
+    } catch { return invalid(field, "is not a cursor from an earlier page"); }
   }
 
   /** One question in one object, for the coordinator and the chat. Returns the plain lines (each with its records) of whichever view the request names, or undefined when the subject is missing or unreadable. */
@@ -708,7 +729,7 @@ export class StatusService {
     const now = this.#runner.now();
     const nowMs = Date.parse(now);
     const items: OverviewRow[] = [];
-    let after = query.afterId;
+    let after = query.afterId === undefined ? undefined : this.#unseal("afterId", query.afterId);
     let next: string | undefined;
     let partial = false;
     scan: {
@@ -728,7 +749,7 @@ export class StatusService {
         if (page.length < this.#pageSize) { after = undefined; break scan; }
       }
       partial = true;
-      next = after;
+      next = after === undefined ? undefined : this.#seal(after);
     }
     const counts = { byState: {} as Record<string, number>, stale: 0, uncertain: 0, blocked: 0 };
     for (const r of items) { counts.byState[r.state] = (counts.byState[r.state] ?? 0) + 1; if (r.stale) counts.stale++; if (r.uncertain.length > 0) counts.uncertain++; if (r.blockers > 0 || r.state === "blocked") counts.blocked++; }
@@ -811,7 +832,8 @@ export class StatusService {
     const limit = query.limit === undefined ? 50 : typeof query.limit === "number" && Number.isSafeInteger(query.limit) && query.limit >= 1 && query.limit <= 100 ? query.limit : invalid("limit", "must be a whole number from 1 to 100");
     let cursor: { taskId: string; rank: number; id: string } | undefined;
     if (query.afterId !== undefined) {
-      const m = typeof query.afterId === "string" && query.afterId.length <= 400 ? /^(task-[a-z2-7]{20})\|([0-9])\|(.*)$/s.exec(query.afterId) : null;
+      const plain = typeof query.afterId === "string" && query.afterId.length <= 400 ? this.#unseal("afterId", query.afterId) : undefined;
+      const m = plain === undefined ? null : /^(task-[a-z2-7]{20})\|([0-9])\|(.*)$/s.exec(plain);
       if (m === null) return invalid("afterId", "is not a cursor from an earlier page");
       cursor = { taskId: checkTaskId(m[1]!), rank: Number(m[2]), id: m[3]! };
       if (taskFilter !== undefined && cursor.taskId !== taskFilter) invalid("afterId", "is not a cursor for this task");
@@ -853,14 +875,16 @@ export class StatusService {
         const attempt = await this.#deps.assignments.getAttempt(assignment.activeAttemptId);
         const facts = await this.#execution(body, taskId, assignment, attempt, nowMs, false);
         const host = facts.observation?.by;
-        const problem = facts.state === "unknown" && host !== undefined && host.startsWith("host:") ? await this.#hostProblem(host, nowMs) : undefined;
+        const problem = host !== undefined && host.startsWith("host:") ? await this.#hostProblem(host, nowMs) : undefined;
         if (problem !== undefined && inRange(facts.observation!.at)) push(1, "", { kind: "unreachable_worker", ...base, agentId: agentId!, at: facts.observation!.at, summary: `${base.title}: the host ${shown(host!, 80)} that reported the work ${problem === "revoked" ? "has been revoked" : "has not been heard from lately"}, so it is not known whether the work goes on.`, detail: { hostId: shown(host!, 80), reason: problem }, cite: cite("task", taskId, revision) });
       }
       if (want("uncertain_tool_result") && this.#mayReadTools(by, body.projectId, taskId) && (floor === undefined || floor.rank <= 2)) {
         let from = floor !== undefined && floor.rank === 2 ? floor.id : undefined;
         for (let reads = 0; ; reads++) {
-          if (reads >= this.#pages) { scanLimited = true; resume = `${taskId}|2|${from ?? ""}`; break; }
-          const page = await this.#runner.list(`mcp-call-${taskId}`, { ...(from === undefined ? {} : { afterId: from }), limit: this.#pageSize });
+          // The budget is checked before every read, not only between tasks; the first read of a visit always goes ahead, so each call moves the cursor on.
+          if (reads >= this.#pages || (reads > 0 && examined >= budget)) { scanLimited = true; resume = `${taskId}|2|${from ?? ""}`; break; }
+          const take = Math.max(1, Math.min(this.#pageSize, budget - examined));
+          const page = await this.#runner.list(`mcp-call-${taskId}`, { ...(from === undefined ? {} : { afterId: from }), limit: take });
           for (const a of page) {
             from = a.id;
             examined++;
@@ -871,7 +895,7 @@ export class StatusService {
             push(2, a.id, { kind: "uncertain_tool_result", ...base, agentId: shown(c.by.replace(/^agent:/, ""), 80), at: c.at, summary: `${shown(c.serverName, 80)} ${cap} was called on ${base.title}; ${c.state === "started" && c.outcome === undefined ? "it has not reported an outcome" : "it is not known whether it took effect"}.`, detail: { callId: a.id, server: shown(c.serverName, 80), capability: cap, outcome: c.outcome ?? "not finished", protocolRevision: c.protocolRevision, catalogRevision: c.catalogRevision }, cite: cite(`mcp-call-${taskId}`, a.id) });
             if (found.length > limit) return;
           }
-          if (page.length < this.#pageSize) break;
+          if (page.length < take) break;
         }
       }
     };
@@ -902,7 +926,7 @@ export class StatusService {
     let next: string | undefined;
     if (found.length > limit) next = found[limit - 1]!.key;
     else if (resume !== undefined) next = resume;
-    else if (scanLimited && lastDone !== undefined) next = `${lastDone}|9|`;
+    else if (scanLimited && lastDone !== undefined) next = this.#seal(`${lastDone}|9|`);
     return { observedAt: now, items: found.slice(0, limit).map((f) => f.item), ...(next === undefined ? {} : { next }), ...(scanLimited ? { scanLimited: true as const } : {}) };
   }
 
