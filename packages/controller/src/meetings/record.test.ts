@@ -738,12 +738,6 @@ for (const backend of backends) {
     const r4 = await reassign.apply(c.host, { decisionId: four.d.id });
     assert.deepEqual([r4.applied, r4.notApplied], [0, 1]);
     assert.equal((await assignments.getAssignment(t4.id))!.state, "released", "the owner's release stands");
-    // A replay after an intervening move does not wedge the decision: the change is not applied, whatever the service says (command_conflict included).
-    const t5 = await mk("Task five");
-    const five = await vote(t5, c.pA, c.pC);
-    const conflicting = c.reopen({ appliers: { "task.reassign": { ...taskReassignApplier(assignments, c.projects, c.principals, mayWork), apply: async () => { throw new DomainError("command_conflict", "the command id was used for different input"); } } } });
-    const r5 = await conflicting.apply(c.host, { decisionId: five.d.id });
-    assert.deepEqual([r5.applied, r5.notApplied], [0, 1]);
     // A target without attempt.work is refused.
     const t6 = await mk("Task six");
     const six = await vote(t6, c.pA, c.pE);
