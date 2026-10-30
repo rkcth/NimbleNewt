@@ -91,7 +91,7 @@ export interface Context {
   readonly policyForward?: Pick<PolicyEditService, "forward">;
   readonly backups?: Pick<BackupService, "backUpNow" | "backUpFor" | "list" | "status">;
   readonly improvements?: Pick<ImprovementService, "propose" | "group" | "decide" | "bringToStandup" | "get" | "open">;
-  readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep">;
+  readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep" | "readiness">;
 
   readonly commands?: CommandService;
   /** Runs another operation as the same principal (card T09b); its answer, success or not, comes back whole. */
@@ -351,6 +351,8 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, ["intentId"]); return asJson({ item: await stopsOf(c).advance(c.principal, { intentId: a["intentId"] as string }) }); } },
   { name: "lifecycle.get", kind: "query", summary: "A suspension or stop request: its phase, mode, inventory, what blocks it, its outcome (graceful or forced) and history.", args: { intentId: "the request" }, result: "`{ item }` or not found.", completion: { kind: "completed" },
     run: async (c, a) => { only(a, ["intentId"]); const item = await stopsOf(c).get(c.principal, a["intentId"] as string); if (item === undefined) throw new DomainError("not_found", "no such request"); return asJson({ item }); } },
+  { name: "lifecycle.readiness", kind: "query", summary: "Whether a stop of a task, an agent, a team or the installation could finish now, without starting one: what is still running or unknown for the scope. A look that fails is reported as unknown, never as ready.", args: { scope: "{ kind, id }" }, result: "`{ scope, ready, paused, unsettled: [{ kind, ref, state }], truncated }`.",
+    run: async (c, a) => { only(a, ["scope"]); return asJson(await stopsOf(c).readiness(c.principal, a["scope"] as never) as never); } },
   { name: "lifecycle.sweep", kind: "command", summary: "Carries every unfinished suspension or stop on (owner only; nothing runs it by itself after a restart yet).", args: {}, result: "`{ advanced, failed }`.", completion: { kind: "completed" },
     run: async (c, a) => { only(a, []); if (c.principal.kind !== "owner") throw new DomainError("forbidden", "only the owner sweeps lifecycle requests"); return asJson(await stopsOf(c).sweep(c.principal)); } },
   { name: "routing.disable", kind: "command", summary: "The owner stops new work from reaching a model, endpoint, account, provider or local service. Running work is left alone; only the owner lifts it (routing.reenable).", args: { level: "model, endpoint, account, provider or service", name: "which one", reason: "why", commandId: "required" },

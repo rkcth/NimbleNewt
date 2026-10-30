@@ -178,6 +178,16 @@ Result: `{ item }` or not found.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `lifecycle.readiness`
+
+Whether a stop of a task, an agent, a team or the installation could finish now, without starting one: what is still running or unknown for the scope. A look that fails is reported as unknown, never as ready.
+
+Arguments:
+
+- `scope`: { kind, id }
+
+Result: `{ scope, ready, paused, unsettled: [{ kind, ref, state }], truncated }`.
+
 #### `routing.controls`
 
 The controls in force (disabled, draining, cut over) and the failback policy. Owner only.

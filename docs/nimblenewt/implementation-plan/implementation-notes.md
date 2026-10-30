@@ -2702,3 +2702,8 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## M04f (part 2): the exception says what it means
 
 - The line shown for `meeting.invite-direct` now says first: "(this meeting only, then the agent is back as it was; no long-running work in it)", ahead of the details, so a long topic cannot push it off the line. Remaining in M04f: a wake path for agents the host reports stopped.
+
+## L06 (part 1): shutdown readiness
+
+- `StopService.readiness(by, scope)` and the query `lifecycle.readiness` say whether a stop of a task, agent, team or the installation could finish now, without pausing or recording anything: it lists what the stop inventory finds that is not settled (`{ kind, ref, state }`), says whether the scope is paused, and says when the list was cut at its limit. A look that fails is one unknown item (`runtime:inventory`), never "ready". The caller needs the right to control the scope; an unsupported scope is `unavailable`.
+- Remaining in L06: a team and installation report that also lists permitted remote jobs as tracked exceptions, the reboot procedure, resume conditions, the authenticated non-chat Stop command, and a chat view of the report.

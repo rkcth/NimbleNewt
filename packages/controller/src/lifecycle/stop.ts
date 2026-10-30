@@ -304,6 +304,20 @@ export class StopService {
     return { advanced, failed };
   }
 
+  /**
+   * Whether a stop of the scope could finish now, without starting one (card L06): everything the stop inventory finds for the scope that is not settled, as it is today. A look that fails is not "ready": it is reported as one unknown item.
+   * `truncated` says the inventory was cut at its limit, so the list is not all of it. Nothing is paused, recorded or changed.
+   */
+  async readiness(by: Principal, scope: PauseScope): Promise<{ scope: PauseScope; ready: boolean; paused: boolean; unsettled: readonly InventoryItem[]; truncated: boolean }> {
+    await this.#pauses.authorizeControl(by, scope);
+    const clean = { kind: scope.kind, id: scope.id } as PauseScope;
+    const cannot = this.#ports.unsupported?.(clean);
+    if (cannot !== undefined) throw new DomainError("unavailable", cannot, { field: "scope" });
+    const found = await this.#ports.inventory(clean).catch(() => [{ kind: "process", ref: "runtime:inventory", state: "unknown" } as InventoryItem]);
+    const unsettled = found.filter((i) => i.state !== "settled");
+    return { scope: clean, ready: unsettled.length === 0, paused: (await this.#pauses.gate(by, clean))?.intent === "pause", unsettled: unsettled.slice(0, STOP_LIMITS.inventory), truncated: unsettled.length > STOP_LIMITS.inventory };
+  }
+
   async get(viewer: Principal, intentId: string): Promise<View<StopIntentBody> | undefined> {
     const found = await this.#runner.get(KIND, String(intentId));
     if (found === undefined) return undefined;

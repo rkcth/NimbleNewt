@@ -318,3 +318,34 @@ for (const backend of backends) {
     assert.equal(c.rt.count("terminate-force"), 0);
   });
 }
+
+for (const backend of backends) {
+  test(`${backend.name}: readiness says whether a stop could finish now without starting one, and a failed look is never ready (card L06)`, async () => {
+    const world = await backend.open();
+    try {
+      const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
+      const epoch = projects.epoch;
+      const principals = PrincipalService.withEpoch(world.storage, epoch, options);
+      GrantService.withEpoch(world.storage, epoch, options);
+      const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+      await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: "bob", grants: [] });
+      const bob = await principals.authenticate((await principals.issueCredential(owner, "agent:bob")).token);
+      const rt = new Runtime();
+      const stops = StopService.withEpoch(world.storage, epoch, PauseService.withEpoch(world.storage, epoch, {}, options), rt, options);
+      const scope = { kind: "installation", id: "installation" } as const;
+      assert.deepEqual(await stops.readiness(owner, scope), { scope, ready: true, paused: false, unsettled: [], truncated: false });
+      rt.items = [{ kind: "job", ref: "job-1", state: "running" }, { kind: "process", ref: "pid-2", state: "settled" }];
+      const busy = await stops.readiness(owner, scope);
+      assert.equal(busy.ready, false);
+      assert.deepEqual(busy.unsettled, [{ kind: "job", ref: "job-1", state: "running" }], "settled items are not listed");
+      rt.inventory = async () => { throw new Error("worker unreachable"); };
+      const failed = await stops.readiness(owner, scope);
+      assert.equal(failed.ready, false);
+      assert.deepEqual(failed.unsettled, [{ kind: "process", ref: "runtime:inventory", state: "unknown" }]);
+      await refuses("forbidden", () => stops.readiness(bob, scope));
+      rt.unsupportedWith = "not here";
+      await refuses("unavailable", () => stops.readiness(owner, scope));
+      assert.equal(rt.count("cleanup"), 0, "nothing was started");
+    } finally { await world.close(); }
+  });
+}

@@ -118,7 +118,7 @@ export interface StateApiDeps {
   readonly policyForward?: Pick<PolicyEditService, "forward">;
   readonly backups?: Pick<BackupService, "backUpNow" | "backUpFor" | "list" | "status">;
   readonly improvements?: Pick<ImprovementService, "propose" | "group" | "decide" | "bringToStandup" | "get" | "open">;
-  readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep">;
+  readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep" | "readiness">;
 
   /** Typed commands (card T09b). Absent: `command.run` answers as unavailable. */
   readonly commands?: CommandService;
