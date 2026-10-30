@@ -288,12 +288,38 @@ test("a machine that slept loses the lease as 'wake' before any turn runs; the l
   await h.next("ready");
   k.sleep(60_000); await dog!.tick();
   assert.equal(dog!.reason, "wake");
-  const told = await h.next("result");
-  assert.match(told.error ?? "", /^lease lost \(wake\)/);
+  const told = await h.next("lease.lost");
+  assert.equal(told.reason, "wake");
   h.send({ t: "run", requestId: "req-1", content: "work" });
   const second = await h.next("result", h.seen.indexOf(told) + 1);
   assert.match(second.error ?? "", /^lease lost \(wake\)/);
   assert.equal(h.seen.some((m) => m.t === "bridge"), false);
+  h.send({ t: "close" });
+  await h.done;
+});
+
+test("H08b3: after the loss no model call, compact, tell or checkpoint leaves the process; a clean turn does not disarm termination, and a loss with no turn is a lease.lost message", async () => {
+  const { offline, hooks } = scripted();
+  offline.faux.setResponses([fauxAssistantMessage("done")]);
+  const k = fakeClock(); let dog: LeaseWatchdog | undefined; let quiets = 0;
+  const h = host({ ...hooks, lease: { clock: k, tickMs: 0, onWatchdog: (d) => { dog = d; const q = d.quiet.bind(d); d.quiet = () => { quiets++; q(); }; }, terminate: () => undefined } });
+  h.send({ t: "start", v: 1, start: leased });
+  await h.next("ready");
+  h.send({ t: "run", requestId: "req-1", content: "work" });
+  assert.equal((await h.next("result")).status, "completed");
+  assert.equal(quiets, 0, "a clean turn under a live lease does not say the process is quiet");
+  k.advance(25_000); await dog!.tick();
+  assert.equal((await h.next("lease.lost")).reason, "silent");
+  assert.equal(quiets, 1, "quiet once the loss is told");
+  const before = h.seen.length;
+  await assert.rejects(fetch(`${leased.relayBase}/${leased.model.alias}/chat/completions`, { method: "POST", body: "{}" }), /lease ended/);
+  for (const [i, t] of (["compact", "tell", "checkpoint"] as const).entries()) {
+    const from = h.seen.length;
+    h.send(t === "tell" ? { t, id: 10 + i, text: "x" } : { t, id: 10 + i });
+    const f = await h.next("fault", from);
+    assert.equal(f.id, 10 + i); assert.match(f.message, /lease ended \(silent\)/);
+  }
+  assert.equal(h.seen.slice(before).some((m) => m.t === "fetch" || m.t === "compact.ok" || m.t === "tell.ok" || m.t === "checkpoint.ok"), false);
   h.send({ t: "close" });
   await h.done;
 });

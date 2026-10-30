@@ -99,6 +99,8 @@ export type FromChild =
   | { readonly t: "checkpoint.ok"; readonly id: number; readonly checkpoint: Obj; readonly contextTokens?: number }
   | { readonly t: "tell.ok"; readonly id: number }
   | { readonly t: "compact.ok"; readonly id: number; readonly contextTokens?: number }
+  /** The lease ended (card H08b3): told on its own so the host sees it whether or not a turn is open (an unsolicited `result` has no waiter). `reason` is a `LossReason`. */
+  | { readonly t: "lease.lost"; readonly reason: string }
   /** The process could not do what it was asked (`id` names the request when there is one). */
   | { readonly t: "fault"; readonly id?: number; readonly message: string };
 
@@ -192,6 +194,7 @@ export function parseFromChild(value: unknown): FromChild {
       const contextTokens = value["contextTokens"] === undefined ? undefined : int(value, "contextTokens");
       return { t: "checkpoint.ok", id: int(value, "id"), checkpoint: obj(value, "checkpoint"), ...(contextTokens === undefined ? {} : { contextTokens }) };
     }
+    case "lease.lost": return { t: "lease.lost", reason: str(value, "reason", 40) };
     case "tell.ok": return { t: "tell.ok", id: int(value, "id") };
     case "compact.ok": { const contextTokens = value["contextTokens"] === undefined ? undefined : int(value, "contextTokens"); return { t: "compact.ok", id: int(value, "id"), ...(contextTokens === undefined ? {} : { contextTokens }) }; }
     case "fault": return { t: "fault", ...(value["id"] === undefined ? {} : { id: int(value, "id") }), message: str(value, "message", 4000) };

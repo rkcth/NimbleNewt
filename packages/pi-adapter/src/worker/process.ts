@@ -119,12 +119,14 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
 
   /** Authority is gone (card H08b): the turn is aborted, no further call leaves the process, and the reason is the turn's recorded result. */
   const authorityLost = async (reason: LossReason): Promise<void> => {
+    relay?.refuse(`the lease ended (${reason})`);
     relay?.closeAll(`the lease ended (${reason})`);
     for (const resolve of bridgeWaiting.values()) resolve({ ok: false, code: "unavailable", message: `the lease ended (${reason})` });
     bridgeWaiting.clear();
     try { await adapter?.root().abort(); } catch { /* the turn's result below is what is reported */ }
     // A turn that is running reports in its own `finally`-path; with none running the loss is told here. Either way the process is quiet once it has told the host.
-    if (!turnOpen) { send({ t: "result", status: "failed", error: `lease lost (${reason}): the attempt's authority ended before a turn ran` }); dog?.quiet(); }
+    // With none running the loss is told as its own message: an unsolicited `result` has no waiter on the host and would be dropped.
+    if (!turnOpen) { send({ t: "lease.lost", reason }); dog?.quiet(); }
   };
 
   const begin = async (start: ChannelStart): Promise<void> => {
@@ -178,8 +180,11 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
       else send({ t: "result", status: "failed", error: result.status === "unanswered" ? `the model did not answer (${result.reason}${"detail" in result && typeof result.detail === "string" ? `: ${result.detail}` : ""})` : `the turn ended as ${result.status}` });
     } catch (error) {
       send({ t: "result", status: "failed", error: dog !== undefined && !dog.productive ? `lease lost (${dog.reason}): the turn was stopped` : String((error as Error)?.message ?? error).slice(0, 2000) });
-    } finally { turnOpen = false; bridge?.declarations.closeRequest(requestIdText); dog?.quiet(); }
+    } finally { turnOpen = false; bridge?.declarations.closeRequest(requestIdText); if (dog !== undefined && !dog.productive) dog.quiet(); }
   };
+
+  /** After the lease is gone nothing that could call the model (or change the stored conversation) is done (card H08b3). */
+  const lostFault = (id: number): boolean => { if (dog === undefined || dog.productive) return false; fault(`the lease ended (${dog.reason}): refused`, id); return true; };
 
   const handle = async (message: ToChild): Promise<void> => {
     if (relay?.accept(message) === true) return;
@@ -195,10 +200,12 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
         return;
       case "checkpoint":
         if (adapter === undefined) return fault("the process was not started", message.id);
+        if (lostFault(message.id)) return;
         try { const checkpoint = JSON.parse(JSON.stringify(await adapter.root().checkpoint())) as never; const tokens = await contextTokens(adapter); send({ t: "checkpoint.ok", id: message.id, checkpoint, ...(tokens === undefined ? {} : { contextTokens: tokens }) }); } catch (error) { fault(`checkpoint failed: ${String((error as Error)?.message ?? error)}`, message.id); }
         return;
       case "tell":
         if (adapter === undefined || started === undefined) return fault("the process was not started", message.id);
+        if (lostFault(message.id)) return;
         // The host is answered when the update is placed, not when the turn it landed in ends: a turn can run for minutes and the host's pause observation and further messages wait on this answer. What happens to the
         // placed update afterwards is not reported (a fault with no ID would fail the running turn, and one with the ID has no one waiting).
         try {
@@ -209,6 +216,7 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
         return;
       case "compact":
         if (adapter === undefined) return fault("the process was not started", message.id);
+        if (lostFault(message.id)) return;
         try { await adapter.root().compact(); const tokens = await contextTokens(adapter); send({ t: "compact.ok", id: message.id, ...(tokens === undefined ? {} : { contextTokens: tokens }) }); } catch (error) { fault(`compact failed: ${String((error as Error)?.message ?? error)}`, message.id); }
         return;
       case "bridge.reply": { const waiting = bridgeWaiting.get(message.id); bridgeWaiting.delete(message.id); waiting?.(message.reply as BridgeReply); return; }

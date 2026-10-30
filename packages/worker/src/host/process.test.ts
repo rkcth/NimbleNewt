@@ -67,3 +67,17 @@ test("H12j: modelCallsInFlight counts relay calls from the request until they en
   assert.equal(process.modelCallsInFlight, 0);
   process.kill("done");
 });
+
+test("H08b3: a lease.lost from the process is observed by the host with no turn open", async () => {
+  const f = fake();
+  const process = await launch(f);
+  assert.equal(process.leaseLost, undefined);
+  const waiting = process.whenLeaseLost();
+  f.send({ t: "lease.lost", reason: "wake" });
+  assert.equal(await waiting, "wake");
+  assert.equal(process.leaseLost, "wake");
+  assert.equal(await process.whenLeaseLost(), "wake");
+  f.send({ t: "lease.lost", reason: "silent" });
+  assert.equal(process.leaseLost, "wake", "the first reason stands");
+  f.exit();
+});

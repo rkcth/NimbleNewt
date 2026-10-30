@@ -18,6 +18,8 @@ export interface RelayFetch {
   readonly fetch: typeof globalThis.fetch;
   /** Feeds a message from the host that belongs to a call in flight. Returns false for any other message. */
   accept(message: ToChild): boolean;
+  /** Latches the relay closed (the lease ended): every later call fails before anything is sent. Does not touch calls in flight; `closeAll` does. */
+  refuse(reason: string): void;
   /** Fails every call in flight (the channel ended). */
   closeAll(reason: string): void;
 }
@@ -29,8 +31,10 @@ export function relayFetch(relayBase: string, send: (message: FromChild) => void
   const base = relayBase.replace(/\/+$/, "");
   const pending = new Map<number, Pending>();
   let next = 0;
+  let refusing: string | undefined;
 
   const call = async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit): Promise<Response> => {
+    if (refusing !== undefined) throw new TypeError(`fetch failed: ${refusing}`);
     const request = typeof input === "object" && "url" in input && "method" in input ? (input as Request) : undefined;
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;
     if (!url.startsWith(`${base}/`)) throw new TypeError(`fetch failed: there is no network here; only ${base}/ can be reached`);
@@ -99,6 +103,7 @@ export function relayFetch(relayBase: string, send: (message: FromChild) => void
         default: return false;
       }
     },
+    refuse(reason) { refusing ??= reason; },
     closeAll(reason) {
       for (const [id, entry] of [...pending]) {
         pending.delete(id);

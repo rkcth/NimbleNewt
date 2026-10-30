@@ -38,6 +38,8 @@ export class WorkerProcess {
   #next = 0;
   #endedWith: Error | undefined;
   #exit: RunResult | undefined;
+  #leaseLost: string | undefined;
+  readonly #leaseWaiters: ((reason: string) => void)[] = [];
 
   private constructor(handlers: ProcessHandlers) { this.#handlers = handlers; }
 
@@ -100,6 +102,7 @@ export class WorkerProcess {
         for (const w of this.#readyWaiters.splice(0)) w.resolve();
         return;
       case "result": { const w = this.#resultWaiter; this.#resultWaiter = undefined; w?.resolve(m); return; }
+      case "lease.lost": if (this.#leaseLost === undefined) { this.#leaseLost = m.reason; for (const w of this.#leaseWaiters.splice(0)) w(m.reason); } return;
       case "checkpoint.ok": case "tell.ok": case "compact.ok": { const w = this.#asked.get(m.id); this.#asked.delete(m.id); w?.resolve(m); return; }
       case "fault": {
         if (m.id !== undefined) { const w = this.#asked.get(m.id); this.#asked.delete(m.id); w?.reject(new Error(m.message)); return; }
@@ -164,6 +167,11 @@ export class WorkerProcess {
       await ready;
     } finally { clearTimeout(timer); }
   }
+
+  /** The reason the process told the host its lease ended (H08b3), or undefined. Observable whether or not a turn is open. */
+  get leaseLost(): string | undefined { return this.#leaseLost; }
+  /** Resolves with the reason when the process says its lease ended (at once if it already has). Never rejects; it stays pending if the process ends without saying so. */
+  whenLeaseLost(): Promise<string> { return this.#leaseLost !== undefined ? Promise.resolve(this.#leaseLost) : new Promise((resolve) => { this.#leaseWaiters.push(resolve); }); }
 
   get ready(): boolean { return this.#isReady; }
   /** Model calls the process has open through the relay right now. */
