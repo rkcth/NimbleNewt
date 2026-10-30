@@ -49,7 +49,12 @@ export interface SubmissionBody {
   readonly artifactDigest?: string;
   readonly artifactId?: string;
   readonly evidence: readonly Evidence[];
+  /** Only on a code submission, when the controller can judge it: whether a review is required of it. `required: false` always carries its reason, so a skipped review is on the record. */
+  readonly review?: { readonly required: boolean; readonly reason?: typeof REVIEW_DISABLED_SINGLE_AGENT };
 }
+
+/** The recorded reason a review is not required: the project has no agent besides the worker that could review. */
+export const REVIEW_DISABLED_SINGLE_AGENT = "review_disabled_single_agent" as const;
 
 /** The roles a principal holds in one project, and for one task of it: roles are not global (an agent that is director in project X is not director in Y). */
 export type RolesOf = (principalId: string, scope: { readonly projectId: string; readonly taskId: string }, by: Principal) => Promise<readonly string[]>;
@@ -69,10 +74,11 @@ export interface SubmissionOptions extends RunnerOptions {
   /** When given, a code submission must come from the owner of the task's current attempt. */
   readonly attemptOf?: AttemptOf;
   /**
-   * PROVISIONAL POLICY (owner question): a review or qa report on a submission made by the same principal is refused by default. A one-agent project, which has no second agent to review, may set this to accept it.
-   * A sign-off on one's own work is always refused.
+   * Who in the project could review work by `workerId`: the project's agents that may review, never the worker itself (see `AgentService.reviewersAvailableIn`). When it names no one the project has
+   * fewer than two agents able to review, review is DISABLED for it and a code submission records `review_disabled_single_agent` instead of requiring a review. Without it the requirement is not judged.
+   * There is no option to let an agent review its own work: that is always refused (owner decision, final).
    */
-  readonly allowSelfReview?: boolean;
+  readonly reviewersAvailableIn?: (projectId: string, workerId: string) => Promise<readonly string[]>;
 }
 
 export interface RecordSubmission {
@@ -117,8 +123,8 @@ export class SubmissionService {
   readonly #runner: CommandRunner;
   readonly #roles: RolesOf;
   readonly #attemptOf: AttemptOf | undefined;
-  readonly #allowSelfReview: boolean;
-  private constructor(runner: CommandRunner, roles: RolesOf, options: SubmissionOptions) { this.#runner = runner; this.#roles = roles; this.#attemptOf = options.attemptOf; this.#allowSelfReview = options.allowSelfReview === true; }
+  readonly #reviewers: SubmissionOptions["reviewersAvailableIn"];
+  private constructor(runner: CommandRunner, roles: RolesOf, options: SubmissionOptions) { this.#runner = runner; this.#roles = roles; this.#attemptOf = options.attemptOf; this.#reviewers = options.reviewersAvailableIn; }
 
   static withEpoch(storage: ControllerStorage, epoch: number, roles: RolesOf, options: SubmissionOptions = {}): SubmissionService {
     return new SubmissionService(new CommandRunner(storage, epoch, options), roles, options);
@@ -161,7 +167,9 @@ export class SubmissionService {
     for (const e of evidence) if (e.boundTo !== bound) throw new DomainError("invalid_command", `evidence: ${e.check} is bound to ${e.boundTo}, not to the submitted ${fields.artifactDigest === undefined ? "tree" : "artifact"} ${String(bound)}`, { field: "evidence" });
 
     const id = derivedId("sbm", scopedCommandId(by.id, commandId));
-    const body: SubmissionBody = { taskId, projectId: task.projectId, kind, role, submittedBy: by.id, submittedAt: this.#runner.now(), makesCommit: false, ...fields, evidence };
+    const review: SubmissionBody["review"] | undefined = kind !== "code" || this.#reviewers === undefined ? undefined
+      : (await this.#reviewers(task.projectId, by.id)).filter((r) => r !== by.id).length === 0 ? { required: false, reason: REVIEW_DISABLED_SINGLE_AGENT } : { required: true };
+    const body: SubmissionBody = { taskId, projectId: task.projectId, kind, role, submittedBy: by.id, submittedAt: this.#runner.now(), makesCommit: false, ...fields, evidence, ...(review === undefined ? {} : { review }) };
     const result = await this.#runner.command("submission.record", { commandId: scopedCommandId(by.id, commandId), actor: by.id }, async () => ({
       payload: { ...(body as unknown as JsonObject), submittedAt: null },
       build: async () => {
@@ -190,9 +198,9 @@ export class SubmissionService {
     return { ...body, id };
   }
 
-  /** A reviewer or QA agent may not judge work its own principal submitted (card Q01b); a one-agent project may opt in with `allowSelfReview`. */
+  /** A reviewer or QA agent may not judge work its own principal submitted (card Q01b); there is no override. */
   #notOwn(by: Principal, subject: SubmissionBody): void {
-    if (subject.submittedBy === by.id && !this.#allowSelfReview) throw new DomainError("forbidden", "a review or qa report cannot be given on the reviewer's own submission");
+    if (subject.submittedBy === by.id) throw new DomainError("forbidden", "a review or qa report cannot be given on the reviewer's own submission");
   }
 
   #evidence(raw: unknown): Evidence[] {

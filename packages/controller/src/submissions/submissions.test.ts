@@ -122,15 +122,33 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.svc.record(ann, { ...cmd, commandId: cid("s"), bogus: 1 } as never), /bogus/);
     await refuses("not_found", () => c.svc.record(ann, { ...cmd, commandId: cid("s"), taskId: "task-aaaaaaaaaaaaaaaaaaaa" }));
   });
-  suite("a reviewer or qa agent cannot judge its own submission, unless the provisional flag is set", async (c) => {
+  suite("a reviewer or qa agent cannot judge its own submission, and there is no flag to allow it", async (c) => {
     const ann = await c.agent("ann", ["author", "reviewer", "qa"]);
     const bob = await c.agent("bob", ["reviewer", "qa"]);
     const mine = await c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH });
     await refuses("forbidden", () => c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "review", role: "reviewer", subject: mine.id, verdict: "approve" }), /own submission/);
     await refuses("forbidden", () => c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "qa", role: "qa", subject: mine.id, report: "fine" }), /own submission/);
     await c.svc.record(bob, { commandId: cid("s"), taskId: c.task, kind: "review", role: "reviewer", subject: mine.id, verdict: "approve" });
-    const lax = c.open(async (id) => c.roles.get(id) ?? [], { allowSelfReview: true });
-    await lax.record(ann, { commandId: cid("s"), taskId: c.task, kind: "review", role: "reviewer", subject: mine.id, verdict: "approve" });
+    // Even a service built to know of no other reviewer refuses it: there is no override.
+    const solo = c.open(async (id) => c.roles.get(id) ?? [], { reviewersAvailableIn: async () => [] });
+    await refuses("forbidden", () => solo.record(ann, { commandId: cid("s"), taskId: c.task, kind: "review", role: "reviewer", subject: mine.id, verdict: "approve" }), /own submission/);
+  });
+
+  suite("review is required of a code submission only while another agent could review it; otherwise the reason is recorded", async (c) => {
+    const ann = await c.agent("ann", ["author", "reviewer"]);
+    let others: string[] = [];
+    const seen: string[] = [];
+    const svc = c.open(async (id) => c.roles.get(id) ?? [], { reviewersAvailableIn: async (project, worker) => { seen.push(`${project}/${worker}`); return others; } });
+    const code = (tree: string) => ({ taskId: c.task, kind: "code" as const, role: "author", base: BASE, tree, patchId: PATCH });
+    const one = await svc.record(ann, { commandId: cid("s"), ...code(T1) });
+    assert.deepEqual((await svc.get(ann, one.id))?.review, { required: false, reason: "review_disabled_single_agent" });
+    assert.match(seen[0]!, new RegExp(`/${ann.id}$`));
+    others = [ann.id]; // the worker never counts, even if a port names it
+    assert.deepEqual((await svc.get(ann, (await svc.record(ann, { commandId: cid("s"), ...code(T2) })).id))?.review, { required: false, reason: "review_disabled_single_agent" });
+    others = ["agent:bob"];
+    const two = await svc.record(ann, { commandId: cid("s"), ...code("f".repeat(40)) });
+    assert.deepEqual((await svc.get(ann, two.id))?.review, { required: true });
+    assert.equal((await svc.get(ann, one.id))?.review?.required, false, "an earlier submission keeps what was recorded");
   });
 
   suite("roles are looked up for the task's project, so a role in one project is none in another", async (c) => {

@@ -3418,3 +3418,12 @@ The owner saw no reason to ignore built-in events. `tasks` (task completion) is 
 - Emit takes a controller-only `level`; `levelOf` is an exhaustive kind map (maintenance and unnamed/missing level = needs-you; only presence is notice). All emit sites classified: budget request, incident to owner, stall concern, stall-detection-off, dispatcher-off, subscription expiry = needs-you; untold improvement = notice. `#escalateStale` covers every needs-you item.
 - Notices are counted in a separate index list, exempt from the 1000 open-item limit, capped at 500 (oldest closed), and closed after `noticeRetentionDays` (default 7, `notifications.configure`). Quiet-counted Notices are carried into the next digest message (`mentionedAt`); the digest marks all Notices of the pass (changes chunked at 100 per command).
 - Owner setting `levelByKind` (kind -> level, null = default) overrides the kind default; a safety stop stays urgent.
+
+### No self-review, and review disabled for a one-agent project (owner decision, final)
+
+- An agent never reviews its own work and there is no per-project override: the `allowSelfReview` option of `SubmissionService` is removed; `forbidden` on a review or qa report over one's own submission is unconditional (the sign-off self-check was already).
+- `AgentService.reviewersAvailableIn(projectId, workerPrincipalId, now)` is the one helper: active agents with the `reviewer` role and a live effective grant in the project, never the worker. `SubmissionService` takes it as the `reviewersAvailableIn` port (wired in `startController`).
+- A code submission now records `review: { required }`; when no other agent could review, `{ required: false, reason: "review_disabled_single_agent" }`. Nothing waits on a reviewer and no review request is created for it. The reason is on the submission record, so it is not silent. Adding a second reviewer-capable agent makes NEW submissions `required: true`; earlier records keep what they recorded.
+- Not changed: tool/commit-gate reviews (`ReviewService`, `CommitGateService`) are owner/policy approvals of operations, not peer review of work, and still route as before. The landing check that reads `review.required` (integration policy `requiredChecks`) is not built yet; it must honor `review.required === false`.
+- The earlier PROVISIONAL note on `allowSelfReview` (Q01b) is superseded by this entry.
+

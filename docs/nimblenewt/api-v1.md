@@ -3661,7 +3661,7 @@ Result: `{ id, replayed }`.
 
 #### `submission.record`
 
-An agent records one submission in the role it holds: a code submission (author) names the base, tree and patch ID of its work, a review (reviewer), qa report (qa), document (docs) or sign-off (director) names the submission it is about. Evidence must be bound to the submitted tree or artifact. A code submission must come from the owner of the task's current attempt; a review or qa report on one's own submission is refused. Agents only. Repeating the same command ID records once.
+An agent records one submission in the role it holds: a code submission (author) names the base, tree and patch ID of its work, a review (reviewer), qa report (qa), document (docs) or sign-off (director) names the submission it is about. Evidence must be bound to the submitted tree or artifact. A code submission must come from the owner of the task's current attempt; a review or qa report on one's own submission is always refused; a code submission records whether review is required, and `review_disabled_single_agent` when no other agent of the project could review. Agents only. Repeating the same command ID records once.
 
 Arguments:
 
