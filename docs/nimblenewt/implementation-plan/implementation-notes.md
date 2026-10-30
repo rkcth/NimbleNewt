@@ -2784,3 +2784,8 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 
 - A job of kind `remote` that is a permitted background job (`background`) with `remote_tracked` resumability and is running appears in the stop inventory as state `tracked`: a stop does not wait for it, `readiness` stays ready and names it under `tracked`, and the owner's shutdown view lists it as a permitted remote job that keeps running through a stop. A remote job that is not background, a local job, or one whose outcome is unknown is still counted as before. `JobService.unfinishedOf` now returns each job's kind, background flag and resumability.
 - Still remaining in L06: bookkeeping when the last model fails mid-preparation, resume only on a recorded authorized condition, a non-chat Stop/Force Stop command with every route down.
+
+## L06 (part 5): last model lost at installation scope; stop with no model
+
+- Test at installation scope: the cleanup model and its backup are lost; the request stays blocked, the pause holds, nothing is claimed done, and the owner's Force Stop still ends it as not graceful. Stop and Force Stop already work with no model route at all, through the state API (`lifecycle.stop` with no routing table: card L02 test) and typed in chat (card U06).
+- L06 remainder (L06b): resume only on a recorded authorized condition. Today only an explicit owner or authorized-manager resume lifts a gate.

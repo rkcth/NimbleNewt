@@ -175,6 +175,19 @@ for (const backend of backends) {
     assert.equal((await c.stops.advance(c.mgr, { intentId: d.intentId })).blocked?.reason, "the cleanup budget is used up with work still running");
   });
 
+  suite("losing the last model while the whole installation is being prepared leaves the pause held and a recoverable request, names what is missing, and the owner can still Force Stop (card L06)", async (c) => {
+    const whole = { kind: "installation", id: "installation" } as const;
+    c.rt.cleanups = [{ remaining: [], modelLost: true }, { remaining: [], modelLost: true }];
+    const r = await c.stops.request(c.owner, { commandId: cid("wi"), scope: whole, mode: "suspend", reason: "reboot tonight" });
+    const stuck = await c.stops.advance(c.owner, { intentId: r.intentId });
+    assert.equal(stuck.phase, "blocked");
+    assert.match(stuck.blocked?.reason ?? "", /cleanup model was lost and the backup model could not finish/);
+    assert.equal((await c.pauses.gate(c.owner, whole))?.intent, "pause", "the pause still holds");
+    assert.equal(stuck.outcome, undefined, "nothing is claimed as done");
+    const forced = await c.stops.force(c.owner, { commandId: cid("wf"), scope: whole, reason: "the models are down" });
+    assert.equal(forced.outcome.graceful, false);
+  });
+
   suite("who may ask: an agent without the grant is refused, a second request is refused, stop after suspend reuses the preparation, and the request is recorded once", async (c) => {
     await refuses("forbidden", () => c.stops.request(c.ann, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "r" }));
     assert.notEqual((await c.pauses.gate(c.owner, scopeOf(c.task)))?.intent, "pause", "a refused request paused nothing");
