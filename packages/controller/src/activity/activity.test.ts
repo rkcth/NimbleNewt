@@ -45,6 +45,13 @@ for (const backend of backends) {
       // `tail` asks for the last steps only.
       assert.deepEqual((await svc.steps(auditor, task, { tail: true, limit: 2 })).steps.map((s) => s.seq), [2, 3]);
       assert.deepEqual((await svc.steps(auditor, task, { tail: true, limit: 50 })).steps.map((s) => s.seq), [1, 2, 3]);
+      // A secret that straddles the cut at 300 characters is redacted whole before the cut, so no half of it is kept; a longer summary is clipped, not refused.
+      const straddle = await svc.record(worker, { commandId: cid("r"), taskId: task, kind: "tool-call", summary: `${"x".repeat(285)} key sk-live-ABCDEFGHIJKLMNOPQRSTUVWX1234 and more words after it` });
+      const stored = (await svc.steps(auditor, task, { after: straddle.seq - 1, limit: 1 })).steps[0] as { summary: string };
+      assert.ok(stored.summary.length <= 300);
+      assert.ok(!/sk-live|sk-li|ABCDEF/.test(stored.summary), stored.summary.slice(270));
+      assert.equal((await svc.record(worker, { commandId: cid("r"), taskId: task, kind: "tool-call", summary: "y".repeat(3000) })).replayed, false);
+      await refuses("invalid_command", () => svc.record(worker, { commandId: cid("r"), taskId: task, kind: "tool-call", summary: "z".repeat(4001) }));
       const s1 = listed.steps[0] as { manifest: { missing: boolean; refs?: unknown[]; summaryId?: string } };
       assert.deepEqual([s1.manifest.missing, s1.manifest.refs?.length, s1.manifest.summaryId], [false, 2, "sum-1"]);
       const s2 = listed.steps[1] as { manifest: { missing: boolean }; payload: { state: string; redactions: number } };

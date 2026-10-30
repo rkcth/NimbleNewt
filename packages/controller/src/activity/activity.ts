@@ -46,7 +46,7 @@ export interface ExplanationBody {
 }
 export interface CorrectionBody { readonly taskId: string; readonly projectId: string; readonly seq: number; readonly note: string; readonly by: string; readonly at: string; readonly stepDigest: string }
 
-export const ACTIVITY_LIMITS = { summary: 300, payload: 8000, refs: 100, alternatives: 10, evidence: 10, statement: 500, page: 100, ranges: 200 } as const;
+export const ACTIVITY_LIMITS = { summary: 300, summaryInput: 4000, payload: 8000, refs: 100, alternatives: 10, evidence: 10, statement: 500, page: 100, ranges: 200 } as const;
 const KIND_OF = { step: "activity-step", head: "activity-head", payload: "activity-payload", explanation: "activity-explanation", correction: "activity-correction" } as const;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const REF = /^[a-z][a-z0-9-]{0,30}$/;
@@ -84,7 +84,8 @@ export class ActivityService {
     const task = await this.#task(taskId);
     if (!(by.kind === "owner" || by.kind === "host" || by.kind === "service" || allows(by, "history.append", task.projectId) || allows(by, "attempt.work", task.projectId, { resource: { kind: "task", id: taskId } }))) throw new DomainError("forbidden", `${by.id} may not record activity for that task`);
     if (!ACTIVITY_KINDS.includes(command.kind)) invalid("kind", `must be one of ${ACTIVITY_KINDS.join(", ")}`);
-    const summary = statement(command.summary, "summary", ACTIVITY_LIMITS.summary);
+    // The whole text is redacted first and only then cut to what is kept, so a secret that straddles the cut is never left half-hidden.
+    const summary = statement(command.summary, "summary", ACTIVITY_LIMITS.summaryInput).slice(0, ACTIVITY_LIMITS.summary);
     const manifest = this.#manifest(command.manifest);
     const cmd = scopedCommandId(by.id, command.commandId);
     const stepIdAt = (seq: number): string => derivedId("act", `${taskId}\0${seq}`);

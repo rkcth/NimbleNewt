@@ -351,7 +351,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     const holder: { dispatcher?: DispatcherService } = {};
     if (i.options.remote !== undefined) {
       blobs = await FileBlobStore.open({ directory: i.options.remote.blobDirectory });
-      const artifacts = ArtifactService.withEpoch(storage, epoch, blobs, { ...ro, onPublished: async (e) => { await ActivityService.withEpoch(storage, epoch, ro).record(principal, { commandId: `artv:${e.artifactId}`, taskId: e.taskId, kind: "artifact-version", summary: `Recorded artifact ${e.name} (${e.files} file${e.files === 1 ? "" : "s"}).`.slice(0, 300), manifest: { refs: [{ kind: "artifact", id: e.artifactId }] } } as never); } });
+      const artifacts = ArtifactService.withEpoch(storage, epoch, blobs, { ...ro, onPublished: async (e) => { await ActivityService.withEpoch(storage, epoch, ro).record(principal, { commandId: `artv:${e.artifactId}`, taskId: e.taskId, kind: "artifact-version", summary: `Recorded artifact ${e.name} (${e.files} file${e.files === 1 ? "" : "s"}).`, manifest: { refs: [{ kind: "artifact", id: e.artifactId }] } } as never); } });
       const d = (): DispatcherService => holder.dispatcher!;
       remote = RemoteWorkerService.withEpoch(storage, epoch, {
         principal, hosts, artifacts,

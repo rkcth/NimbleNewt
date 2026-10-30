@@ -390,7 +390,7 @@ export class DispatcherService {
     if (this.#deps.activity === undefined) return;
     try {
       const taskId = (await this.#load(attemptId))?.body.taskId;
-      if (taskId !== undefined) await this.#deps.activity({ commandId: `dpa-act:${attemptId}:${key}`.slice(0, 120), taskId, kind, summary: summary.slice(0, 300), refs });
+      if (taskId !== undefined) await this.#deps.activity({ commandId: `dpa-act:${attemptId}:${key}`.slice(0, 120), taskId, kind, summary: summary.slice(0, 4000), refs });
     } catch { /* the record of a step never changes what happened */ }
   }
 

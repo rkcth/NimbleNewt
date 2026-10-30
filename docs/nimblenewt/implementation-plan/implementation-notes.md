@@ -2676,3 +2676,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 
 - `controllerHandoffSources` fills `nextAction`, `unfinishedWork`, `completedWork`, `backgroundOperations`, `risks` and `versions` from the task's latest complete continuation: the next step as written, the pending effects (with "none pending at the last checkpoint" said as a fact about the checkpoint, not as "nothing is left"), the decisions and artifacts, the tools whose effects a resume does not reproduce, and the runtime, routing and environment revisions; each says which continuation it is from. The task's own contract wins where it has the section (versions and risks are joined); a source given by the caller has the last word; with no continuation nothing is added and the required sections are reported missing as before. The existing redaction and length limits apply.
 - Remaining in L03g: locks, drafts and responsibilities in the package.
+
+### Activity summaries are redacted before they are cut (a known gap since C09)
+
+- `ActivityService.record` takes a summary of up to 4000 characters, redacts all of it, and only then keeps the first 300; a secret that straddles the cut is no longer left half-hidden, and a longer summary is clipped instead of refused. The controller's own callers (artifact, review, message, hand-off and meeting-decision steps, and the dispatcher's steps) no longer cut the text before handing it over.
