@@ -75,7 +75,7 @@ export interface Context {
 
   readonly pauses?: Pick<PauseService, "pause" | "resume" | "gate">;
   readonly cutover?: Pick<CutoverService, "disable" | "drain" | "cutover" | "reenable" | "setFailbackPolicy" | "controls" | "report" | "topology" | "tick">;
-  readonly handoffs?: Pick<HandoffService, "prepare" | "complete" | "takeover" | "choose" | "cancel" | "advance" | "get" | "sweep">;
+  readonly handoffs?: Pick<HandoffService, "prepare" | "complete" | "takeover" | "choose" | "cancel" | "advance" | "get" | "forTask" | "sweep">;
   readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep">;
   readonly activity?: Pick<ActivityService, "record" | "explain" | "explainLater" | "correct" | "markUnavailable" | "steps" | "payload" | "explanations" | "corrections">;
   readonly policyContext?: Pick<PolicyService, "contextFor">;
@@ -391,6 +391,8 @@ export const OPERATIONS: readonly Operation[] = [
   { name: "handoff.advance", kind: "command", summary: "Takes a hand-off as far as it can go now (safe to repeat).", args: { handoffId: "the hand-off", commandId: "required" },
     result: "`{ item }`.",
     run: async (c, a) => { only(a, ["handoffId"]); return asJson({ item: await handoffsOf(c).advance(c.principal, { handoffId: a["handoffId"] as string }) }); } },
+  { name: "handoff.for-task", kind: "query", summary: "The hand-off of a task that is still going (prepared, ready, blocked or being completed), or `not_found` when none is.", args: { taskId: "the task" }, result: "`{ item }`.",
+    run: async (c, a) => { only(a, ["taskId"]); const item = await handoffsOf(c).forTask(c.principal, a["taskId"] as string); if (item === undefined) throw new DomainError("not_found", "that task has no hand-off going"); return asJson({ item }); } },
   { name: "handoff.get", kind: "query", summary: "A hand-off, with its package, readiness and history.", args: { handoffId: "the hand-off" }, result: "`{ item }`.",
     run: async (c, a) => { only(a, ["handoffId"]); const item = await handoffsOf(c).get(c.principal, a["handoffId"] as string); if (item === undefined) throw new DomainError("not_found", "no such hand-off"); return asJson({ item }); } },
   { name: "handoff.sweep", kind: "command", summary: "Owner only: carries unfinished hand-offs on after a restart.", args: { commandId: "required" }, result: "`{ advanced: [id], failed: [id] }`.",

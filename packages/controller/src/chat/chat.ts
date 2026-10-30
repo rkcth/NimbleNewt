@@ -646,6 +646,29 @@ export class ChatService {
         labels[String(args["agent"])] = agentName.trim();
       }
     }
+    // A hand-off: the recipient named by the agent's name (exactly one active agent), and, for completing or cancelling, the hand-off itself found as the one going on for the named task.
+    if (intent.op === "handoff.prepare" || intent.op === "handoff.takeover") {
+      const named = args["toAgentName"];
+      delete args["toAgentName"];
+      if (named !== undefined && args["to"] !== undefined) return refuse("invalid_command", "give either to or toAgentName, not both");
+      if (args["to"] === undefined) {
+        if (typeof named !== "string" || named.trim() === "") return refuse("invalid_command", "say which agent should take the task");
+        const agents = await this.#listAll(token, "agent.list", { state: "active" });
+        const found = agents.filter((a) => String(a["friendlyName"]).trim().toLowerCase() === named.trim().toLowerCase());
+        if (found.length !== 1) return refuse(found.length === 0 ? "not_found" : "invalid_command", found.length === 0 ? `no active agent called "${named.slice(0, 80)}"` : `more than one agent is called "${named.slice(0, 80)}"`);
+        args["to"] = { kind: "agent", id: String(found[0]!["id"]) };
+        labels[String(found[0]!["id"])] = named.trim();
+      }
+    }
+    if (intent.op === "handoff.complete" || intent.op === "handoff.cancel") {
+      if (args["handoffId"] === undefined) {
+        if (typeof args["taskId"] !== "string") return refuse("invalid_command", "say which task's hand-off you mean");
+        const going = await this.#get(token, "handoff.for-task", { taskId: args["taskId"] });
+        if (going === undefined) return refuse("not_found", "that task has no hand-off going");
+        args["handoffId"] = String(going["id"]);
+      }
+      delete args["taskId"];
+    }
     // A project argument belongs only to the operations that take one (the others only used it to find the task).
     if ("projectId" in args && !acceptedForOp(intent.op).includes("projectId")) delete args["projectId"];
 

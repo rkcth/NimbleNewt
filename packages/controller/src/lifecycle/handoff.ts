@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
-import { onlyKnown, text, type View } from "../domain/model.js";
+import { onlyKnown, taskId as checkTaskId, text, type View } from "../domain/model.js";
 import type { Owner } from "../domain/assignment-model.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
@@ -339,6 +339,12 @@ export class HandoffService {
       if (page.length < 100) break;
     }
     return { advanced, failed };
+  }
+
+  /** The hand-off of a task that is still going (not finished, failed or cancelled), for a caller who may control the task; undefined otherwise. */
+  async forTask(by: Principal, taskId: string): Promise<View<TaskHandoffBody> | undefined> {
+    const id = await this.#activeId(checkTaskId(taskId));
+    return id === undefined ? undefined : this.get(by, id);
   }
 
   async get(by: Principal, handoffId: string): Promise<View<TaskHandoffBody> | undefined> {

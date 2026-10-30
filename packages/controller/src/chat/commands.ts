@@ -53,6 +53,11 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "decision.record": { verb: "Record decision", mode: "apply", revision: "decision", needsProject: true },
   // An answer to a question an agent put to the owner (card U12e): the answer is the owner's own words; the question is named by its words or, when only one waits, needs no name.
   "owner.answer": { verb: "Answer question", mode: "apply" },
+  // Handing a task to another agent (card L03f). Preparing suspends the task at a checkpoint and moves nothing, and cancelling gives it back, so both apply at once; the move itself follows the profile like other explicit orders; a forced takeover (Force Stop) is always shown first.
+  "handoff.prepare": { verb: "Prepare hand-off of task", mode: "apply", needsProject: true },
+  "handoff.complete": { verb: "Complete hand-off of task", mode: "profile", needsProject: true },
+  "handoff.cancel": { verb: "Cancel hand-off of task", mode: "apply", needsProject: true },
+  "handoff.takeover": { verb: "Take task over by force", mode: "propose", needsProject: true },
   // The owner's exception for a paused, suspended or stopped agent to attend one meeting (card M04f): it widens who may be in the room, so an explicit order applies directly only where the profile lets rights widen, and is shown first in the strict one.
   "meeting.invite-direct": { verb: "Let an agent attend a meeting", mode: "profile", needsProject: true },
 };
@@ -73,7 +78,7 @@ export function acceptedArgs(op: string): readonly string[] | undefined {
   const operation = OPERATION_BY_NAME.get(op);
   if (operation === undefined || operation.kind !== "command") return undefined;
   // `agendaTopic` names an agenda item by its words; the chat resolves it to the item (exactly one open item of the project, else it asks).
-  return [...Object.keys(operation.args).map((k) => k.replace(/\?$/, "")), ...Object.keys(TITLE_KEYS), "projectName", ...(op === "agenda.correct" ? ["agendaTopic"] : []), ...(op === "owner.answer" ? ["questionTopic"] : []), ...(op === "meeting.invite-direct" ? ["meetingTopic", "agentName"] : [])];
+  return [...Object.keys(operation.args).map((k) => k.replace(/\?$/, "")), ...Object.keys(TITLE_KEYS), "projectName", ...(op === "agenda.correct" ? ["agendaTopic"] : []), ...(op === "owner.answer" ? ["questionTopic"] : []), ...(op === "meeting.invite-direct" ? ["meetingTopic", "agentName"] : []), ...(op === "handoff.prepare" || op === "handoff.takeover" ? ["toAgentName"] : []), ...(op === "handoff.complete" || op === "handoff.cancel" ? ["taskId"] : [])];
 }
 
 /**
@@ -161,7 +166,7 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
 }
 
 /** Keys whose values name records or fixed choices; every other text in a command must be in the owner's own words. */
-const EXEMPT = new Set(["taskId", "projectId", "project", "prerequisiteId", "agentId", "supervisorId", "teamId", "parentTeamId", "repositoryId", "resourceId", "responsibilityId", "ownerId", "managed", "access", "landing", "integrator", "requiredChecks", "integration", "refreshRounds", "expectedRevision", "expectedVersion", "to", "state", "workClass", "difficulty", "recovery", "kind", "priority", "itemId", "inquiryId", "occurrenceId", "sourceTurnId", "intent", "urgency", "category", "participants"]);
+const EXEMPT = new Set(["taskId", "projectId", "project", "prerequisiteId", "agentId", "supervisorId", "teamId", "parentTeamId", "repositoryId", "resourceId", "responsibilityId", "ownerId", "managed", "access", "landing", "integrator", "requiredChecks", "integration", "refreshRounds", "expectedRevision", "expectedVersion", "to", "state", "workClass", "difficulty", "recovery", "kind", "priority", "itemId", "inquiryId", "occurrenceId", "returnAt", "sourceTurnId", "intent", "urgency", "category", "participants"]);
 
 /** The first text value of a command's arguments that is not the owner's own words (and not a record reference or fixed choice), or undefined. */
 export function foreignValue(args: Readonly<Record<string, unknown>>, ownText: string, path = ""): string | undefined {

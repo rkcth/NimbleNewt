@@ -2614,3 +2614,9 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 
 - Chat command `meeting.invite-direct` (mode profile: an explicit order applies where the profile lets rights widen and is shown first in the strict one). The meeting is named by words in its title (`meetingTopic`; the project in focus; one planned meeting needs no name, several ask) and the agent by its name (`agentName`, exactly one active agent); both are resolved from the records, and an id typed or guessed by the model that is not in the owner's message is not accepted. Unknown names are refused.
 - Not built yet (remains in M04f): the wake path for agents the host's availability hook reports stopped (they stay out of the meeting unless the owner made the exception), and the chat's explanation of what the exception does when it is shown first.
+
+## L03f (part 1): hand-offs by chat
+
+- New read `handoff.for-task` (`HandoffService.forTask`): the hand-off of a task that is still going, for a caller who may control the task; `not_found` when none.
+- Chat commands `handoff.prepare` (applies at once: it suspends the task at a checkpoint and moves nothing), `handoff.complete` (follows the profile: it moves the task), `handoff.cancel` (applies: the old owner keeps the task) and `handoff.takeover` (always shown first: it force-stops). The task is named by its title, the recipient by the agent's name (`toAgentName`, exactly one active agent, resolved to its agent ID); complete and cancel find the hand-off as the one going on for the named task, and refuse when none is. The reason must be in the owner's own words; `returnAt` is a time the assistant works out from the owner's words and is shown back with the reply.
+- Not built yet (remains in L03f): richer package sections from continuation, locks and drafts in the package, chat wording of a blocked hand-off's choices (`handoff.choose`).

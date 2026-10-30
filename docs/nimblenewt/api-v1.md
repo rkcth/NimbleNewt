@@ -199,6 +199,16 @@ Arguments:
 
 Result: `{ report: { routingApplied, inFlightRemaining, safeToStop, routesAffected, drainUntil?, possibleCharges, … } }`.
 
+#### `handoff.for-task`
+
+The hand-off of a task that is still going (prepared, ready, blocked or being completed), or `not_found` when none is.
+
+Arguments:
+
+- `taskId`: the task
+
+Result: `{ item }`.
+
 #### `handoff.get`
 
 A hand-off, with its package, readiness and history.
