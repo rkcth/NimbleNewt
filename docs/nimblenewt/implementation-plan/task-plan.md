@@ -39,7 +39,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N09 / AII-259 | U03, U03d, U03e, U05b, U04, U05, U06, U06b, U03b, U03c, U07, U09, U08, U10, U11, U11b |
 | N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H07b, H07c, H07d, H07e, H02e, H09, H09b, H10, H11, H12, H12a, H12b, H12c, H12d, H12q, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H13b, H13c, H13d, H13e, H13f, H02b, H02c, H02d, H11b, H12n, H12p, H12o |
 | N11 / AII-261 | V01, V01b, V01c, V02, V02b, V02c |
-| N12 / AII-262 | M01b, M01c, M01d, M00, M01, M02, M02b, M02c, M02d, M02e, M03, M03b, M03c, M03d, M03e, M03f, M04, M04b, M04c, M04d, M04e, M04f, M05, M05b, M06 |
+| N12 / AII-262 | M01b, M01c, M01d, M00, M01, M02, M02b, M02c, M02d, M02e, M02f, M03, M03b, M03c, M03d, M03e, M03f, M04, M04b, M04c, M04d, M04e, M04f, M05, M05b, M06 |
 | N13 / AII-263 | U04b, U04c, U04d, T01, T02, T02b, T03, T06, T06b, T07, T07b, T08, T09, T09b, T09c, T09d |
 | N14 / AII-264 | P01b, P01c, P01, P02, P02b, P03, P04, P05, P06, P07, P08, P08b, P08c, P09, P10, P10b, P10c |
 | N15 / AII-265 | Q01, Q02, Q03, Q04, Q01b |
@@ -2062,12 +2062,22 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** A decision that changes more than a task applies once.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
-### M02e — Finish meeting records: grant, budget and ownership appliers, decision log, steward
+### M02e — Meeting records: grant, budget and ownership appliers, shareable-notes check
 
 - **Parent:** N12 / AII-262.
+- **Status:** implemented; commits `a2171b2`, `1cf495d`, `f8dc148`, `895d510`, `b2d6ccb`, `4876fb5`, `7ba269e`, `b0b586a`; CI runs 41090230779; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Grant, budget and ownership changes from a meeting are carried out under the owner-authorized path (or the widening setting), with the acting principal recorded; shared records pass the shareable check.
 - **Blockers:** M02d.
-- **Deliverable:** Split from M02d (2026-10-29): appliers for a grant, a budget raise and an ownership change run under the owner-authorized path, recording each decision and its outcome so safe patterns can be found, the steward agent for decisions no coded rule covers, the narrator, chat commands; the meeting record is given a shareable-notes check so shared records count as verifiable (start.ts passes none today).
+- **Deliverable:** Split from M02d (2026-10-29): appliers for a grant, a budget raise and an ownership change run under the owner-authorized path and record each decision and its outcome; the meeting record is given a shareable-notes check so shared records count as verifiable. The decision log, steward agent, narrator and chat commands moved to M02f (2026-10-30)..
 - **Acceptance and verification:** A decision that widens rights or spend is carried out only with the owner's agreement or the policy's leave.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### M02f — Finish meeting records: decision log, steward agent, narrator, chat commands
+
+- **Parent:** N12 / AII-262.
+- **Blockers:** M02e.
+- **Deliverable:** Split from M02e (2026-10-30): the log of each meeting decision and its outcome so safe patterns can be found later, the steward agent for decisions no coded rule covers, the narrator, and the chat commands for meetings. Open items from the applier work are in implementation-notes.md (no per-decision limit on grants or raises, the aggregate cap, unguarded refuse saves)..
+- **Acceptance and verification:** Unforeseen decisions go to a capable agent under the same widening policy; each decision and outcome is recorded; the commands are reachable through chat..
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### M03 — Implement stand-up preparation, briefs and agenda items
@@ -2881,7 +2891,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q.
+- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q.
 - **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
 - **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

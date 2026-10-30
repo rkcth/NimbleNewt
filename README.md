@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **202 of 307 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **203 of 308 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -118,7 +118,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Workers, dispatch and teams | `▓▓▓▓▓▓▓░░░░░` 65% | 31 of 47 |
 | Agent messaging | `▓▓▓▓▓▓▓▓▓▓░░` 87% | 7 of 8 |
 | Health and recovery | `▓▓▓▓▓▓▓▓▓▓░░` 83% | 5 of 6 |
-| Meetings | `▓▓▓▓▓▓▓▓░░░░` 72% | 18 of 25 |
+| Meetings | `▓▓▓▓▓▓▓▓░░░░` 73% | 19 of 26 |
 | Tools and skills | `▓▓▓▓▓▓▓▓▓░░░` 75% | 12 of 16 |
 | Projects, repositories and workspaces | `▓▓▓▓░░░░░░░░` 35% | 6 of 17 |
 | Quality: deliverables, QA and defects | `░░░░░░░░░░░░` 0% | 0 of 5 |
@@ -436,7 +436,7 @@ Stall detection and bounded supervisor recovery.
 </details>
 
 <details>
-<summary><strong>Meetings</strong> — ▓▓▓▓▓▓▓▓░░░░ 18 of 25</summary>
+<summary><strong>Meetings</strong> — ▓▓▓▓▓▓▓▓░░░░ 19 of 26</summary>
 
 Scheduling, votes and decisions, stand-ups, attendance and return to work, and facilitation.
 
@@ -458,9 +458,10 @@ Scheduling, votes and decisions, stand-ups, attendance and return to work, and f
 - [x] **M03c** · P32 · Finish stand-ups: sinks, improvements, real occurrences, chat _(needs M03b)_
 - [x] **M04c** · P32 · Finish meeting attendance: sinks, dispatcher hints, chat _(needs M04b)_
 - [ ] **M05b** · P32 · Prove meeting desk reads are read-only and recorded per file _(needs M05, C01b)_
-- [ ] **M02e** · P33 · Finish meeting records: grant, budget and ownership appliers, decision log, steward _(needs M02d)_
+- [x] **M02e** · P33 · Meeting records: grant, budget and ownership appliers, shareable-notes check _(needs M02d)_
 - [x] **M03d** · P33 · Finish stand-ups: sinks, real occurrences, chat _(needs M03c)_
 - [x] **M04d** · P33 · Finish meeting attendance: wake sinks, chat, stand-up link _(needs M04c)_
+- [ ] **M02f** · P34 · Finish meeting records: decision log, steward agent, narrator, chat commands _(needs M02e)_
 - [x] **M03e** · P34 · Finish stand-ups: other sinks, untold decisions shown to the owner, chat _(needs M03d)_
 - [x] **M04e** · P34 · Finish meeting attendance: keep no long-running work during a meeting, stopped agents, chat _(needs M04d)_
 - [ ] **M03f** · P35 · Finish stand-ups: agenda outcomes to chat turns and inquiries, other sinks, chat _(needs M03e)_
@@ -609,7 +610,7 @@ Installation, documentation, QA on real machines, the release decision and closi
 - [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, C07e, H07e, T09b, H07, H07b, H02e, T09, A07d, A07e, H07c, H07d, H11b, Q01b, A07f, P08, P08b, H12n, H12p, H12o, P09, P10, P10b, P10c, T09c, T09d)_
 - [ ] **D04** · P50 · Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
 - [ ] **D04b** · P51 · Measure code-navigation aids on real coding tasks (optional, after the first release) _(needs D04)_
-- [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q)_
+- [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q)_
 
 </details>
 

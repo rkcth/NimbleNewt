@@ -5813,12 +5813,47 @@
       "id": "M02e",
       "parent": "N12",
       "existing_issue": "AII-262",
-      "title": "Finish meeting records: grant, budget and ownership appliers, decision log, steward",
+      "title": "Meeting records: grant, budget and ownership appliers, shareable-notes check",
       "depends_on": [
         "M02d"
       ],
-      "deliverable": "Split from M02d (2026-10-29): appliers for a grant, a budget raise and an ownership change run under the owner-authorized path, recording each decision and its outcome so safe patterns can be found, the steward agent for decisions no coded rule covers, the narrator, chat commands; the meeting record is given a shareable-notes check so shared records count as verifiable (start.ts passes none today)",
+      "deliverable": "Split from M02d (2026-10-29): appliers for a grant, a budget raise and an ownership change run under the owner-authorized path and record each decision and its outcome; the meeting record is given a shareable-notes check so shared records count as verifiable. The decision log, steward agent, narrator and chat commands moved to M02f (2026-10-30).",
       "acceptance_and_verification": "A decision that widens rights or spend is carried out only with the owner's agreement or the policy's leave",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "a2171b2",
+          "1cf495d",
+          "f8dc148",
+          "895d510",
+          "b2d6ccb",
+          "4876fb5",
+          "7ba269e",
+          "b0b586a"
+        ],
+        "ci_runs": [
+          "41090230779"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Grant, budget and ownership changes from a meeting are carried out under the owner-authorized path (or the widening setting), with the acting principal recorded; shared records pass the shareable check.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "M02f",
+      "parent": "N12",
+      "existing_issue": "AII-262",
+      "title": "Finish meeting records: decision log, steward agent, narrator, chat commands",
+      "depends_on": [
+        "M02e"
+      ],
+      "deliverable": "Split from M02e (2026-10-30): the log of each meeting decision and its outcome so safe patterns can be found later, the steward agent for decisions no coded rule covers, the narrator, and the chat commands for meetings. Open items from the applier work are in implementation-notes.md (no per-decision limit on grants or raises, the aggregate cap, unguarded refuse saves).",
+      "acceptance_and_verification": "Unforeseen decisions go to a capable agent under the same widening policy; each decision and outcome is recorded; the commands are reachable through chat.",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -8148,6 +8183,7 @@
         "M04e",
         "M03e",
         "M02e",
+        "M02f",
         "K01h",
         "M04f",
         "M03f",
