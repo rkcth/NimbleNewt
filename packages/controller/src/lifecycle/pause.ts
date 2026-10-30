@@ -139,6 +139,9 @@ const AGENT_ID = /^agt-[a-z2-7]{20}$/;
 const TEAM_ID = /^team-[a-z2-7]{20}$/;
 /** Index of the gates that were given a resume time (card L06b): one small entry per scope, so the tick never reads gates that have none. */
 const TIMED_KIND = "pause-timed";
+/** One record saying the `pause-timed` index is complete: gates timed before the index existed (or restored from an older backup) have been given their entries. While it is absent the tick builds the index first. */
+const INDEX_STATE_KIND = "pause-index-state";
+const INDEX_STATE_ID = "index-built";
 const gateIdOf = (scope: PauseScope): string => derivedId("pgt", `${scope.kind}\0${scope.id}`);
 const requestIdOf = (gateId: string, seq: number): string => derivedId("prq", `${gateId}\0${seq}`);
 const sameScope = (a: PauseScope, b: PauseScope): boolean => a.kind === b.kind && a.id === b.id;
@@ -312,6 +315,7 @@ export class PauseService implements PauseGuard, PauseLookup {
     const lifted: PauseScope[] = [];
     let failure: unknown;
     const now = Date.parse(this.#runner.now());
+    await this.#ensureIndex(by);
     let after: string | undefined;
     for (;;) {
       // Only the index of gates that were given a time is listed; a gate with none is never read.
@@ -332,9 +336,9 @@ export class PauseService implements PauseGuard, PauseLookup {
         try {
           await this.#hooks?.beforeLift?.(gate.scope);
           await this.#request(by, `cond-${gate.requestId ?? entry.id}`, "resume", gate.scope, `the owner's recorded condition (set by ${gate.resumeAt.setBy} at ${gate.resumeAt.setAt}): not before ${gate.resumeAt.at}`, undefined, gate.projectId, { requestId: gate.requestId, at: gate.resumeAt.at });
+          // The resume retired the index entry in the same operation.
           lifted.push(gate.scope);
           onLifted?.(gate.scope);
-          await this.#retire(by, entry.id, entry.revision, hint.at, undefined);
         } catch (error) {
           // A gate resumed, paused again or given another time since it was read is no longer this condition's to lift. One gate that cannot be lifted does not hold up the others.
           if (error instanceof DomainError && error.code === "invalid_command") continue;
@@ -361,7 +365,43 @@ export class PauseService implements PauseGuard, PauseLookup {
         };
       });
     } catch (error) {
-      if (!(error instanceof DomainError)) throw error;
+      if (!(error instanceof DomainError) || !(error.code === "invalid_command" || error.code === "stale_revision" || error.code === "command_conflict" || error.code === "not_found")) throw error;
+    }
+  }
+
+  /**
+   * One-time backfill of the `pause-timed` index. Until the marker exists, every `pause-gate` is read (paged) and a gate with a recorded time that is not taken over gets the entry an older version never wrote;
+   * then the marker is created. Creates are guarded, so two ticks building at once agree: the loser's create fails and is ignored.
+   */
+  async #ensureIndex(by: Principal): Promise<void> {
+    if ((await this.#runner.get(INDEX_STATE_KIND, INDEX_STATE_ID)) !== undefined) return;
+    let after: string | undefined;
+    for (;;) {
+      const page = await this.#runner.list("pause-gate", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const found of page) {
+        after = found.id;
+        const gate = found.body as unknown as PauseGateBody;
+        if (gate.intent !== "pause" || gate.resumeAt === undefined || gate.takenOver === true) continue;
+        if ((await this.#runner.get(TIMED_KIND, found.id)) !== undefined) continue;
+        const ref: AggregateRef = { kind: TIMED_KIND, id: found.id };
+        await this.#guarded(() => this.#runner.command("pause.condition-backfill", { commandId: `idx-build-${found.id}-${found.revision}`, actor: by.id }, async () => ({
+          payload: { gateId: found.id, at: gate.resumeAt!.at },
+          build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: { scope: gate.scope as unknown as JsonObject, at: gate.resumeAt!.at, active: true } }], detail: { gateId: found.id, backfilled: true } }),
+        })));
+      }
+      if (page.length < 200) break;
+    }
+    const marker: AggregateRef = { kind: INDEX_STATE_KIND, id: INDEX_STATE_ID };
+    await this.#guarded(() => this.#runner.command("pause.condition-index-built", { commandId: "idx-built", actor: by.id }, async () => ({
+      payload: {},
+      build: async () => ({ ref: marker, creates: true, changes: [{ type: "create", ref: marker, body: { complete: true } }], detail: {} }),
+    })));
+  }
+
+  /** Runs a guarded create; losing the race to another tick that made the same record is not a failure. */
+  async #guarded(run: () => Promise<unknown>): Promise<void> {
+    try { await run(); } catch (error) {
+      if (!(error instanceof DomainError) || !(error.code === "stale_revision" || error.code === "command_conflict")) throw error;
     }
   }
 
