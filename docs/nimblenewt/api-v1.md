@@ -3424,7 +3424,7 @@ Arguments:
 - `eventSources` (optional): names of event sources
 - `permittedActions` (optional): action names its work may use at most
 - `maintenanceWindows` (optional): list of `{ days, start, end }` (UTC)
-- `escalation` (optional): `{ to, afterMinutes?, note? }`
+- `escalation` (optional): `{ to, afterMinutes?, afterAlerts?, note? }`
 
 Result: `{ id, revision, replayed }`.
 
