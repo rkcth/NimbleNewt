@@ -23,6 +23,8 @@ export interface IncidentBody {
   /** Set once, when the responsibility's escalation time has passed with the incident still open. */
   readonly escalatedAt?: string;
   readonly escalatedTo?: string;
+  /** When the escalation was passed on as a notice (the loop retries until it is). */
+  readonly notifiedAt?: string;
   readonly resolvedAt?: string;
   readonly resolvedBy?: string;
   readonly evidence?: string;
@@ -147,6 +149,28 @@ export class IncidentService {
       if (result !== undefined && !result.replayed) { const again = await this.#runner.get(INCIDENT, a.id); if (again !== undefined) out.push(view<IncidentBody>(again)); }
     }
     return out;
+  }
+
+  /** Escalated incidents of a project whose notice has not been recorded as sent, oldest escalation first. Owner, service, or `responsibility.write`. */
+  async untold(by: Principal, projectId: string): Promise<View<IncidentBody>[]> {
+    if (!(by.kind === "owner" || by.kind === "service" || may(by, "responsibility.write", projectId))) throw hidden(by, "read incidents of that project");
+    return (await scanAll(this.#runner, INCIDENT, 50_000, (x) => { const b = x.body as unknown as IncidentBody; return b.projectId === projectId && b.state === "open" && b.escalatedAt !== undefined && b.notifiedAt === undefined; }))
+      .map((a) => view<IncidentBody>(a)).sort((a, b) => ((a.escalatedAt ?? "") < (b.escalatedAt ?? "") ? -1 : 1));
+  }
+
+  /** Records that an escalation's notice was sent (once; repeating changes nothing). */
+  async markNotified(by: Principal, incidentId: string): Promise<void> {
+    if (!(by.kind === "owner" || by.kind === "service")) throw hidden(by, "record notices");
+    await this.#runner.command("responsibility.incident.notified", { commandId: `rinn-${incidentId}`, actor: by.id }, async () => ({
+      payload: { incidentId },
+      build: async (): Promise<Built> => {
+        const found = await this.#runner.get(INCIDENT, incidentId);
+        const b = found?.body as unknown as IncidentBody | undefined;
+        if (found === undefined || b === undefined) throw new DomainError("not_found", "no such incident");
+        const next: IncidentBody = { ...b, notifiedAt: this.#runner.now() };
+        return { ref: { kind: INCIDENT, id: incidentId }, creates: false, changes: [{ type: "update", ref: { kind: INCIDENT, id: incidentId }, expectedRevision: found.revision, body: next as unknown as JsonObject }], detail: {} };
+      },
+    }));
   }
 
   /** The incidents of a project, open first then newest, optionally only the open ones. `undefined` for a project the caller may not read. */

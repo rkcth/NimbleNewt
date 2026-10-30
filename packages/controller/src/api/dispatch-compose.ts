@@ -176,7 +176,7 @@ export interface ComposeInput {
   /** Meeting records are swept for votes past their time and records nobody finished (card M02c). */
   readonly records?: Pick<MeetingRecordService, "sweep">;
   /** Responsibility checks are recorded when due and incidents past their escalation time are escalated (card P04). */
-  readonly responsibilities?: { readonly checks: Pick<ResponsibilityChecks, "generate">; readonly incidents: Pick<IncidentService, "escalate">; readonly notify?: (escalated: { id: string; projectId: string; escalatedTo?: string; signature: string; responsibilityId: string; count: number }) => Promise<void> };
+  readonly responsibilities?: { readonly checks: Pick<ResponsibilityChecks, "generate">; readonly incidents: Pick<IncidentService, "escalate" | "untold" | "markNotified">; readonly notify?: (escalated: { id: string; projectId: string; escalatedTo?: string; signature: string; responsibilityId: string; count: number }) => Promise<void> };
   /** The nightly backup is started by the tick when the newest one is older than a day (card K01). */
   readonly backups?: Pick<BackupService, "runScheduled">;
   /** External event sources polled each tick (card H13d). None are built in. */

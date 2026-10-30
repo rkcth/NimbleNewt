@@ -258,14 +258,16 @@ export function recordLoops(records: Pick<MeetingRecordService, "sweep">, projec
 }
 
 /** P04: checks that came due are recorded and open incidents past their escalation time are escalated, for every project, on each tick. */
-export function responsibilityLoops(checks: { generate(by: Principal, projectId: string): Promise<unknown> }, incidents: { escalate(by: Principal, projectId: string): Promise<readonly { id: string; projectId: string; escalatedTo?: string; signature: string; responsibilityId: string; count: number }[]> }, projects: () => Promise<readonly string[]>, notify?: (escalated: { id: string; projectId: string; escalatedTo?: string; signature: string; responsibilityId: string; count: number }) => Promise<void>): DispatcherLoop[] {
+export function responsibilityLoops(checks: { generate(by: Principal, projectId: string): Promise<unknown> }, incidents: { escalate(by: Principal, projectId: string): Promise<unknown>; untold(by: Principal, projectId: string): Promise<readonly { id: string; projectId: string; escalatedTo?: string; signature: string; responsibilityId: string; count: number }[]>; markNotified(by: Principal, incidentId: string): Promise<void> }, projects: () => Promise<readonly string[]>, notify?: (escalated: { id: string; projectId: string; escalatedTo?: string; signature: string; responsibilityId: string; count: number }) => Promise<void>): DispatcherLoop[] {
   // One project's failure does not skip the others this tick; the first error is raised after all have been tried.
   return [{ name: "responsibilities.checks", run: async (by) => {
     let failure: unknown;
     for (const projectId of await projects()) {
       try {
         await checks.generate(by, projectId);
-        for (const e of await incidents.escalate(by, projectId)) await notify?.(e);
+        await incidents.escalate(by, projectId);
+        // A notice that could not be sent is offered again next tick: an escalation is told once it has been told, not once it was recorded.
+        if (notify !== undefined) for (const e of await incidents.untold(by, projectId)) { await notify(e); await incidents.markNotified(by, e.id); }
       } catch (error) { failure ??= error; }
     }
     if (failure !== undefined) throw failure;

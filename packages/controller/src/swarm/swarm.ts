@@ -95,7 +95,7 @@ export class SwarmService {
 
   /**
    * Stops every descendant of a task, deepest first, takes back what each did not use and cancels it. Returns the tasks settled and the ones still being stopped (call again to carry on).
-   * Whoever may stop a task may stop its swarm; taking back budget needs `budget.manage` on the parent, as for any reclaim.
+   * The caller must hold the parent's budget (the owner, or its holder with `budget.manage`); a child whose own parent they do not hold is left untouched and reported pending, for someone who does.
    */
   async cancel(by: Principal, command: NoActor & { parentTaskId: string; reason: string }): Promise<{ settled: string[]; pending: string[] }> {
     onlyKnown(command, ["commandId", "parentTaskId", "reason"]);
@@ -112,6 +112,9 @@ export class SwarmService {
     for (const childId of order) {
       const task = await this.#deps.projects.getTask(childId);
       if (task === undefined || task.state === "cancelled" || task.state === "done") { settled.push(childId); continue; }
+      // Authority over the child's allowance is checked before anything is stopped, so a child is never left stopped but uncancelled.
+      const parentOfChild = links.find((l) => l.id === childId)?.parentTaskId;
+      if (parentOfChild === undefined || !(await this.#deps.budgets.canManage(by, parentOfChild))) { pending.push(childId); continue; }
       const stop = await this.#deps.stops.request(by, { commandId: `swc-${command.commandId}-${childId}`, scope: { kind: "task", id: childId }, mode: "stop", reason });
       const advanced = await this.#deps.stops.advance(by, { intentId: stop.intentId });
       if (advanced.outcome === undefined || advanced.outcome.state === "recovery-required") { pending.push(childId); continue; }

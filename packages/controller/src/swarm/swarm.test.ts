@@ -64,6 +64,14 @@ test("a child task is made with its parent's outcome and criteria and an allowan
     // A refused spawn is not completed by asking again with the same command ID after room was made.
     await assert.rejects(swarm.spawn(rob, { commandId: "s5", parentTaskId: root, title: "One too many", costMicros: 1, computeMs: 1 }), (e: unknown) => e instanceof DomainError && /new command ID|live children/.test(e.message));
 
+    // Someone who holds only the root's allowance cannot stop (and so half-cancel) a child under a node they do not hold.
+    await c.services.principals.enroll(rob, { commandId: "e2", kind: "agent", name: "ann", grants: [{ action: "task.create", project }, { action: "budget.manage", project }, { action: "task.stop", project }, { action: "lifecycle.pause", project }] });
+    // (The root and its children have no holder, so ann holds nothing: cancelling is refused before anything is stopped.)
+    const ann = await c.services.principals.authenticate((await c.services.principals.issueCredential(rob, "agent:ann")).token);
+    const stoppedBefore = stopped.length;
+    await assert.rejects(swarm.cancel(ann, { commandId: "x3", parentTaskId: root, reason: "not mine" }), (e: unknown) => e instanceof DomainError && e.code === "forbidden");
+    assert.equal(stopped.length, stoppedBefore, "nothing was stopped");
+
     // Cancelling the parent stops the whole swarm, deepest first, and gives the allowance back.
     const result = await swarm.cancel(rob, { commandId: "x1", parentTaskId: root, reason: "plans changed" });
     assert.deepEqual(result.pending, []);

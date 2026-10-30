@@ -123,7 +123,7 @@ test("the meeting record sweep runs for every project, as the tick's principal (
 
 test("each tick records the checks that came due and escalates incidents, for every project, as the tick's principal (card P04)", async () => {
   const seen: string[] = [];
-  const [loop] = responsibilityLoops({ generate: async (by, p) => { seen.push(`check:${by.id}:${p}`); return []; } }, { escalate: async (by, p) => { seen.push(`escalate:${by.id}:${p}`); return []; } }, async () => ["proj-a", "proj-b"]);
+  const [loop] = responsibilityLoops({ generate: async (by, p) => { seen.push(`check:${by.id}:${p}`); return []; } }, { escalate: async (by, p) => { seen.push(`escalate:${by.id}:${p}`); return []; }, untold: async () => [], markNotified: async () => undefined }, async () => ["proj-a", "proj-b"]);
   assert.equal(loop!.name, "responsibilities.checks");
   await loop!.run({ id: "service:dispatcher", kind: "service" } as never);
   assert.deepEqual(seen, ["check:service:dispatcher:proj-a", "escalate:service:dispatcher:proj-a", "check:service:dispatcher:proj-b", "escalate:service:dispatcher:proj-b"]);
@@ -133,10 +133,17 @@ test("an escalated incident is passed on for a notice, and one project failing d
   const seen: string[] = [];
   const told: string[] = [];
   const e = { id: "rinc-1", projectId: "proj-b", escalatedTo: "owner", signature: "disk", responsibilityId: "rsp-1", count: 2 };
-  const [loop] = responsibilityLoops({ generate: async (_by, p) => { seen.push(p); if (p === "proj-a") throw new Error("boom"); return []; } }, { escalate: async (_by, p) => (p === "proj-b" ? [e] : []) }, async () => ["proj-a", "proj-b"], async (x) => { told.push(x.id); });
-  await assert.rejects(loop!.run({ id: "service:dispatcher", kind: "service" } as never), /boom/);
+  const marked: string[] = [];
+  let failNotice = true;
+  const [loop] = responsibilityLoops({ generate: async (_by, p) => { seen.push(p); if (p === "proj-a") throw new Error("boom"); return []; } }, { escalate: async () => [], untold: async (_by, p) => (p === "proj-b" && !marked.includes(e.id) ? [e] : []), markNotified: async (_by, id) => { marked.push(id); } }, async () => ["proj-a", "proj-b"], async (x) => { if (failNotice) throw new Error("owner has too many open items"); told.push(x.id); });
+  await assert.rejects(loop!.run({ id: "service:dispatcher", kind: "service" } as never), /boom|too many/);
   assert.deepEqual(seen, ["proj-a", "proj-b"], "the second project was still tried");
-  assert.deepEqual(told, ["rinc-1"]);
+  assert.deepEqual([told, marked], [[], []], "a notice that could not be sent is not recorded as sent");
+  failNotice = false;
+  await assert.rejects(loop!.run({ id: "service:dispatcher", kind: "service" } as never), /boom/);
+  assert.deepEqual([told, marked], [["rinc-1"], ["rinc-1"]], "it is offered again next tick, sent, and then marked");
+  await assert.rejects(loop!.run({ id: "service:dispatcher", kind: "service" } as never), /boom/);
+  assert.deepEqual(told, ["rinc-1"], "and not told twice");
 });
 
 test("a watched event wakes the agent only when its attempt will read the inbox, and the wake loop asks every tick (card H13c)", async () => {

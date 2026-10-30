@@ -73,6 +73,11 @@ for (const backend of backends) {
     assert.deepEqual(first.map((i) => [i.signature, i.escalatedTo, i.escalatedAt]), [["a", "owner", "2026-10-22T10:31:00.000Z"]]);
     assert.deepEqual(await inc.escalate(owner, project), []);
     assert.deepEqual(await again().escalate(owner, project), [], "nor after a restart");
+    // The notice is separate from the escalation: it stays to be told until it is marked as told.
+    assert.deepEqual((await inc.untold(owner, project)).map((i) => i.signature), ["a"]);
+    await inc.markNotified(owner, first[0]!.id);
+    await inc.markNotified(owner, first[0]!.id);
+    assert.deepEqual(await again().untold(owner, project), []);
   });
 
   suite("the observed state is unknown without a recent check and never healthy by default; open incidents show as attention or failed", async ({ owner, duties, inc, setNow, make }) => {
