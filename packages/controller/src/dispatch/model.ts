@@ -27,7 +27,12 @@ export interface DispatchRevisions {
   readonly contract: number;
 }
 
-export interface Frozen { readonly reason: string; readonly at: string }
+export interface Frozen {
+  readonly reason: string;
+  readonly at: string;
+  /** The freeze of the agent's own ending (card H12n, `work.end`): `release`, `relocate` and a recipe change keep it (only a release that asks for it, after the ending was dropped, lifts it). */
+  readonly ending?: true;
+}
 
 export interface DispatchBody {
   readonly attemptId: string;
@@ -61,6 +66,8 @@ export interface DispatchBody {
   readonly heartbeats: number;
   readonly lastHeartbeatAt?: string;
   readonly frozen?: Frozen;
+  /** Set when the attempt was stopped (card L02), by whom, before it was ended; the agent's ending reads it to tell an owner's stop from an attempt that merely ended. */
+  readonly stopped?: { readonly by: "owner" | "emergency"; readonly reason: string };
   /** For a parked or resuming attempt: the conversation checkpoint to continue from, and what to tell the agent when it does. */
   readonly resumeFrom?: JsonObject;
   readonly resumeNote?: string;

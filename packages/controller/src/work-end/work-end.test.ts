@@ -23,6 +23,9 @@ for (const backend of backends) {
     landings?: Landed[];
     finishCrashOnce?: boolean; freezeFailsOnce?: boolean;
     onSettle?: () => Promise<void> | void; onSubmit?: () => Promise<void> | void;
+    /** Runs after the guard and before the dispatcher ends the attempt (a drop landing in that gap). */
+    finishRace?: () => Promise<void> | void;
+    settleFails?: string; settleGone?: boolean;
   }
   const rig = async (opts: RigOpts = {}) => {
     const store = await backend.open();
@@ -32,22 +35,24 @@ for (const backend of backends) {
     await w.principals.enroll(w.owner, { commandId: "en-bob", kind: "agent", name: "bob", grants: [] });
     const bob: Principal = await w.principals.authenticate((await w.principals.issueCredential(w.owner, "agent:bob")).token);
     const { taskId } = await w.task("t", { aid: "ann" });
-    const state: { attempt: EndingAttempt; frozen: string[]; freezeCalls: number; finished: unknown[]; settled: number; submits: number; told: string[]; keys: string[]; blockerIds: string[]; landingCalls: number; crashed: boolean } = {
-      attempt: { attemptId: "att-1", taskId, projectId: w.project, agentId: "agent:ann", live: true }, frozen: [], freezeCalls: 0, finished: [], settled: 0, submits: 0, told: [], keys: [], blockerIds: [], landingCalls: 0, crashed: false,
+    const state: { attempt: EndingAttempt; frozen: string[]; freezeCalls: number; finished: unknown[]; settled: number; submits: number; told: string[]; keys: string[]; blockerIds: string[]; landingCalls: number; crashed: boolean; paused: boolean; live2: boolean } = {
+      attempt: { attemptId: "att-1", taskId, projectId: w.project, agentId: "agent:ann", live: true }, frozen: [], freezeCalls: 0, finished: [], settled: 0, submits: 0, told: [], keys: [], blockerIds: [], landingCalls: 0, crashed: false, paused: false, live2: true,
     };
     const landed: Landed = opts.landed ?? { base: "h1", head: "h1", mine: ["a.ts"], landed: [] };
     const deps: WorkEndDeps = {
       attempts: {
-        get: async (id) => (id === "att-1" ? state.attempt : undefined),
+        get: async (id) => (id === "att-1" ? state.attempt : id === "att-2" ? { ...state.attempt, attemptId: "att-2", live: state.live2 } : undefined),
         freeze: async (_id, reason) => { state.freezeCalls++; if (opts.freezeFailsOnce && state.freezeCalls === 1) throw new Error("freeze hiccup"); state.frozen.push(reason); },
-        settle: async () => { state.settled++; await opts.onSettle?.(); return opts.settle ?? { killed: [] }; },
-        finish: async (id, result, key) => {
+        settle: async (id) => { state.settled++; if (opts.settleFails === id) throw new Error("settle exploded"); if (opts.settleGone) throw new DomainError("not_found", "gone"); await opts.onSettle?.(); return opts.settle ?? { killed: [] }; },
+        finish: async (id, result, key, confirm) => {
+          if (opts.finishRace !== undefined) { await opts.finishRace(); if (confirm !== undefined && !(await confirm())) return false; }
           state.keys.push(key);
           // Replay-safe by key, as a real port must be.
-          if (!state.finished.some((f) => (f as { key: string }).key === key)) { state.finished.push({ id, key, ...result }); state.attempt = { ...state.attempt, live: false }; }
+          if (!state.finished.some((f) => (f as { key: string }).key === key)) { state.finished.push({ id, key, ...result }); if (id === "att-1") state.attempt = { ...state.attempt, live: false }; else state.live2 = false; }
           if (opts.finishCrashOnce && !state.crashed) { state.crashed = true; throw new Error("crash after finish"); }
         },
       },
+      paused: async () => state.paused,
       landing: async () => { const ls = opts.landings; const i = state.landingCalls++; return ls ? ls[Math.min(i, ls.length - 1)]! : landed; },
       ...(opts.noSubmit ? {} : { submit: async (_a: EndingAttempt, _b: string, key: string) => { state.keys.push(key); await opts.onSubmit?.(); state.submits++; if (opts.submitFails) throw new Error("git said no"); return { submissionId: "sub-1" }; } }),
       blockers: { openBlocker: async (c) => { state.blockerIds.push(c.commandId ?? ""); return w.blockers.openBlocker(c); } },
@@ -269,5 +274,81 @@ for (const backend of backends) {
       await refuses("command_conflict", () => r.service.request(r.ann, { commandId: "e2", attemptId: "att-1", submit: true, note: "n", message: "m" }));
       assert.equal((await r.service.request(r.ann, { commandId: "e3", attemptId: "att-1", submit: true, note: "n" })).replayed, true);
     } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: a drop that lands between the guard and the end stops the end: the attempt is not finished (H12n review 3a)`, async () => {
+    let r!: Awaited<ReturnType<typeof rig>>;
+    r = await rig({ finishRace: async () => { await r.service.drop("att-1", "owner_stop", "the owner stopped it"); } });
+    try {
+      await r.service.request(r.ann, { commandId: "e1", attemptId: "att-1", result: "done" });
+      const answer = await r.service.complete("att-1");
+      assert.equal(answer.state, "dropped"); assert.equal(answer.typed, "owner_stop");
+      assert.equal(r.state.finished.length, 0, "the attempt was not ended on the agent's say-so");
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: one failing ending does not stop the others, a settle for an attempt that is gone counts as settled, and closed endings leave the index (H12n review 5)`, async () => {
+    const r = await rig({ settleFails: "att-1" });
+    try {
+      await r.service.request(r.ann, { commandId: "e1", attemptId: "att-1" });
+      await r.service.request(r.ann, { commandId: "e2", attemptId: "att-2" });
+      await assert.rejects(r.service.recover(), /1 ending\(s\) could not be completed \(1 were\).*att-1/);
+      assert.equal((await r.service.get("att-2"))?.state, "done", "the other ending was completed");
+      assert.notEqual((await r.service.get("att-1"))?.state, "done");
+      const index = async () => ((await r.w.storage.getAggregate({ kind: "work-end-open", id: "open" }))?.body as unknown as { attempts: string[] }).attempts;
+      assert.deepEqual(await index(), ["att-1", "att-2"]);
+      await assert.rejects(r.service.recover(), /att-1/);
+      assert.deepEqual(await index(), ["att-1"], "the closed one left the index");
+    } finally { await r.store.close(); }
+    const g = await rig({ settleGone: true });
+    try {
+      await g.service.request(g.ann, { commandId: "e1", attemptId: "att-1" });
+      assert.equal((await g.service.complete("att-1")).state, "done");
+    } finally { await g.store.close(); }
+  });
+
+  test(`${backend.name}: a credential scoped to another task cannot end the attempt; a paused task refuses the request and the completion waits (H12n review 6, 2)`, async () => {
+    const r = await rig();
+    try {
+      const other = { ...r.ann, taskScope: { taskId: "task-zzzzzzzzzzzzzzzzzzzz", projectId: r.w.project } } as Principal;
+      await refuses("not_found", () => r.service.request(other, { commandId: "e0", attemptId: "att-1" }));
+      r.state.paused = true;
+      await refuses("unavailable", () => r.service.request(r.ann, { commandId: "e1", attemptId: "att-1" }));
+      r.state.paused = false;
+      const own = { ...r.ann, taskScope: { taskId: r.state.attempt.taskId, projectId: r.w.project } } as Principal;
+      assert.equal((await r.service.request(own, { commandId: "e2", attemptId: "att-1" })).state, "requested");
+      r.state.paused = true;
+      assert.equal((await r.service.complete("att-1")).state, "ending", "nothing is settled or finished while the task is paused");
+      assert.equal(r.state.settled, 0); assert.equal(r.state.finished.length, 0);
+      r.state.paused = false;
+      assert.equal((await r.service.complete("att-1")).state, "done");
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: when the attempt ends on its own the ending is completed, or dropped with the true reason (H12n review 1)`, async () => {
+    const r = await rig();
+    try {
+      // The turn completes after work.end: the ending is completed and the attempt records the agent's result.
+      await r.service.request(r.ann, { commandId: "e1", attemptId: "att-1", result: "blocked", note: "no seeds", message: "tell the lead" });
+      assert.deepEqual(await r.service.resolveOnEnd("att-1", { outcome: "succeeded", summary: "the turn completed" }), { handled: true });
+      assert.deepEqual([r.state.finished.length, (r.state.finished[0] as { result: string }).result, r.state.told], [1, "blocked", ["tell the lead"]]);
+      assert.equal((await r.service.get("att-1"))?.state, "done");
+      // A stop: dropped with the stop's reason.
+      await r.service.request(r.ann, { commandId: "e2", attemptId: "att-2", result: "partial" });
+      assert.equal(await r.service.resolveOnEnd("att-2", { outcome: "abandoned", summary: "stop", stopped: { by: "owner", reason: "the owner stopped it" } }), undefined);
+      assert.deepEqual([(await r.service.get("att-2"))?.state, (await r.service.get("att-2"))?.typed], ["dropped", "owner_stop"]);
+    } finally { await r.store.close(); }
+    const f = await rig();
+    try {
+      // A worker that failed: the end stays a failure, the request is in its summary, and the drop says the attempt ended (not an owner's stop).
+      await f.service.request(f.ann, { commandId: "e1", attemptId: "att-1", result: "done", note: "finished the beds" });
+      const told = await f.service.resolveOnEnd("att-1", { outcome: "failed", summary: "the turn failed" });
+      assert.match(told?.summary ?? "", /the turn failed.*done: finished the beds/);
+      assert.deepEqual([(await f.service.get("att-1"))?.state, (await f.service.get("att-1"))?.typed], ["dropped", "attempt_ended"]);
+      // An attempt that is gone when the sweep comes is also not an owner's stop.
+      await f.service.request(f.ann, { commandId: "e2", attemptId: "att-2" });
+      f.state.live2 = false;
+      assert.equal((await f.service.complete("att-2")).typed, "attempt_ended");
+    } finally { await f.store.close(); }
   });
 }

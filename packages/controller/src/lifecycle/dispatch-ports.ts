@@ -1,3 +1,4 @@
+import { DomainError } from "../domain/errors.js";
 import { clipText } from "../activity/activity.js";
 import { redactText } from "../security/redact.js";
 import type { ControllerStorage } from "../storage/types.js";
@@ -103,11 +104,13 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
     return out;
   };
   return {
+    // The stop is recorded: the agent's ending is dropped now (the owner's stop wins), so nothing in preparation can complete it (card H12n).
+    begin: async (scope, options) => { if (ending === undefined) return; for (const id of await attemptsOf(scope)) await ending.dropEnding(id, options.force ? "emergency_stop" : "owner_stop", options.force ? "force stop" : "stop requested"); },
     attempts: (scope) => [...(seen.get(`${scope.kind}:${scope.id}`) ?? [])],
     remember: (scope, attempts) => { if (attempts.length === 0) return; const key = `${scope.kind}:${scope.id}`; const all = seen.get(key) ?? new Set<string>(); for (const a of attempts) all.add(a); seen.set(key, all); },
     unsupported: (scope) => (scope.kind === "task" || scope.kind === "agent" || members !== undefined ? undefined : `stopping a whole ${scope.kind} is not supported yet; stop its tasks or agents one by one (Force Stop works on each)`),
     inventory: async (scope, options) => inFlight(await attemptsOf(scope), scope, options?.lookOnly === true),
-    release: async (scope) => { seen.delete(`${scope.kind}:${scope.id}`); const h = dispatch(); if (h === undefined) return; for (const id of await attemptsOf(scope)) await h.dispatcher.release(h.principal, id).catch(() => undefined); },
+    release: async (scope) => { seen.delete(`${scope.kind}:${scope.id}`); const h = dispatch(); if (h === undefined) return; for (const id of await attemptsOf(scope)) await h.dispatcher.release(h.principal, id, { includeEnding: true }).catch(() => undefined); },
     cleanup: async (scope, options) => {
       const h = dispatch();
       const attempts = await attemptsOf(scope);
@@ -140,7 +143,8 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
       for (const id of attempts) {
         // The owner's stop wins over an agent's ending (card H12n): the intent is dropped before the attempt is stopped, so nothing is staged or submitted for it afterwards.
         await ending?.dropEnding(id, options.force ? "emergency_stop" : "owner_stop", options.force ? "force stop" : "stop after preparation");
-        await h!.dispatcher.stop(h!.principal, id, { reason: options.force ? "force stop" : "stop after preparation", ...(options.force ? { emergency: true } : {}) });
+        // The attempt may have ended by itself meanwhile (the agent's ending finished it): that one is over, and the others are still stopped.
+        try { await h!.dispatcher.stop(h!.principal, id, { reason: options.force ? "force stop" : "stop after preparation", ...(options.force ? { emergency: true } : {}) }); } catch (error) { if (error instanceof DomainError && error.code === "not_found") continue; throw error; }
         for (const op of (await h!.dispatcher.operations(h!.principal, id)) ?? []) if (op.state === "uncertain") unresolved.push(`${id}/${op.callId}`.slice(0, 120));
       }
       // A job whose outcome is not known, or that was asked to stop and has not, is named as unresolved too.

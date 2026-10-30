@@ -24,6 +24,8 @@ export interface StopPorts {
   inventory(scope: PauseScope, options?: { lookOnly?: boolean }): Promise<readonly InventoryItem[]>;
   /** Lets go of what preparation froze, when the request is cancelled because the scope was resumed. Best effort. */
   release?(scope: PauseScope): Promise<void>;
+  /** A stop or suspension was recorded for the scope: whatever the runtime had in hand for it that a stop must win over (the agent's own ending, card H12n) is dropped now, not when the attempt is finally terminated. Best effort. */
+  begin?(scope: PauseScope, options: { force: boolean }): Promise<void>;
   /** Why a stop cannot be done for this scope at all (so it is refused before anything is paused or recorded), or undefined. */
   unsupported?(scope: PauseScope): string | undefined;
   /** Scoped cleanup only (finish or checkpoint what is running, nothing new). `backup` asks for an eligible backup model after the first one was lost. */
@@ -151,6 +153,7 @@ export class StopService {
         };
       },
     }));
+    await this.#ports.begin?.(scope, { force: false }).catch(() => undefined);
     // A replay of a request that upgraded an earlier one has no intent of its own: it answers with the one it upgraded.
     const own = await this.#runner.get(KIND, intentId);
     return { intentId: own !== undefined ? intentId : (await this.#activeId(scope)) ?? intentId, replayed: run.replayed };
@@ -177,6 +180,7 @@ export class StopService {
     }
     if ((await this.#pauses.gate(by, scope))?.intent !== "pause") await this.#pauses.pause(by, { commandId: `${String(command.commandId)}-pause`, scope, reason: `force stop: ${reason}`.slice(0, 500) });
     await this.#pauses.dropResumeCondition(by, scope);
+    await this.#ports.begin?.(scope, { force: true }).catch(() => undefined);
     let id = await this.#activeId(scope);
     const existing = id === undefined ? undefined : await this.#runner.get(KIND, id);
     if (existing === undefined || TERMINAL.includes((existing.body as unknown as StopIntentBody).phase)) {

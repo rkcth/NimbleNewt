@@ -46,6 +46,16 @@ const LIVE_MAX = 600;
 const CURSOR: AggregateRef = { kind: "dispatch-cursor", id: "scan" };
 const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 3)}...` : s);
 const ATTEMPT = /^att-[a-z2-7]{20}$/;
+
+/** A freeze lifted; the agent's own ending's freeze stays unless asked for (card H12n). */
+function withoutFreeze(b: DispatchBody, includeEnding: boolean): DispatchBody {
+  if (b.frozen === undefined || (b.frozen.ending === true && !includeEnding)) return b;
+  const { frozen: _f, ...rest } = b; void _f;
+  return rest;
+}
+
+/** What the dispatcher tells the agent's ending (`work.end`, card H12n) when it is about to end an attempt for another reason: `handled` means the ending completed the attempt itself; a `summary` replaces the end's own. */
+export type EndHook = (attemptId: string, how: { readonly outcome: "succeeded" | "failed" | "abandoned"; readonly summary: string; readonly stopped?: { readonly by: "owner" | "emergency"; readonly reason: string } }) => Promise<{ readonly handled?: true; readonly summary?: string } | undefined>;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 
 /** What a route resolver says: the route and harness for a task, or why there is none. The resolver is the owner's configuration read at the moment of dispatch (R03). */
@@ -219,6 +229,7 @@ export class DispatcherService {
   /** Usage reports made per attempt by this dispatcher, so two turns with identical figures are two records. */
   readonly #usageSeq = new Map<string, number>();
   readonly #ending = new Set<Promise<unknown>>();
+  #endHook: EndHook | undefined;
   readonly #endingBy = new Map<string, Promise<{ readmitted?: string }>>();
   /** Consecutive ticks an attempt pinned to a host has waited for it (in memory: a restart starts the count again). */
   readonly #pinnedWaits = new Map<string, number>();
@@ -437,17 +448,17 @@ export class DispatcherService {
   // ---- control: freeze, settle, restart the sandbox, stop ------------------------------------------------------------------------
 
   /** New calls are refused until `release`. Calls already running are not touched (`settle` waits for them). */
-  async freeze(by: Principal, attemptId: string, reason: string): Promise<void> {
+  async freeze(by: Principal, attemptId: string, reason: string, options: { readonly ending?: boolean } = {}): Promise<void> {
     const d = await this.#controlled(by, attemptId);
     if (typeof reason !== "string" || reason.length < 1 || reason.length > 300) invalid("reason", "must be 1 to 300 characters");
-    const frozen: Frozen = { reason, at: this.#runner.now() };
+    const frozen: Frozen = { reason, at: this.#runner.now(), ...(options.ending === true ? { ending: true as const } : {}) };
     await this.#update(d.body.attemptId, (b) => ({ ...b, frozen: b.frozen ?? frozen }));
   }
 
   /** Lifts a freeze. */
-  async release(by: Principal, attemptId: string): Promise<void> {
+  async release(by: Principal, attemptId: string, options: { readonly includeEnding?: boolean } = {}): Promise<void> {
     const d = await this.#controlled(by, attemptId);
-    await this.#update(d.body.attemptId, (b) => { const { frozen: _f, ...rest } = b; void _f; return rest; });
+    await this.#update(d.body.attemptId, (b) => withoutFreeze(b, options.includeEnding === true));
   }
 
   /**
@@ -486,7 +497,7 @@ export class DispatcherService {
     const checkpoint = await this.#checkpoint(attemptId, `recipe ${change.kind}`);
     await live.handle.restart(change.recipe, checkpoint ?? {});
     if (change.kind === "widen") await live.handle.tell?.(change.tell);
-    await this.#update(d.body.attemptId, (b) => { const { frozen: _f, ...rest } = b; void _f; return { ...rest, recipeRevision: change.recipe.revision }; });
+    await this.#update(d.body.attemptId, (b) => ({ ...withoutFreeze(b, false), recipeRevision: change.recipe.revision }));
     return { restarted: true, recipeRevision: change.recipe.revision };
   }
 
@@ -497,24 +508,29 @@ export class DispatcherService {
   async stop(by: Principal, attemptId: string, options: { emergency?: boolean; reason: string }): Promise<void> {
     const d = await this.#controlled(by, attemptId);
     if (typeof options.reason !== "string" || options.reason.length < 1 || options.reason.length > 300) invalid("reason", "must be 1 to 300 characters");
+    // Recorded first: the agent's ending reads it, so an owner's stop is told from an attempt that merely ended (card H12n).
+    const stopped = { by: options.emergency === true ? "emergency" as const : "owner" as const, reason: options.reason };
+    await this.#update(d.body.attemptId, (b) => ({ ...b, stopped: b.stopped ?? stopped }));
     if (options.emergency !== true) {
       await this.freeze(by, attemptId, options.reason);
       await this.settle(by, attemptId, { cancel: true });
       await this.#checkpoint(attemptId, options.reason);
     }
-    await this.#end(d.body.attemptId, "abandoned", options.reason, { readmit: false });
+    await this.#end(d.body.attemptId, "abandoned", options.reason, { readmit: false, stopped });
   }
 
   /**
    * Ends an attempt with the agent's own result (card H12n, `work.end`): `done` and `partial` end it `succeeded`, `blocked` and `abandoned` end it `abandoned`; the summary carries the result and the note.
    * The task itself is not touched. Repeating it, or ending an attempt that is already over, does nothing (the end is derived from the attempt, so a repeat reuses its command IDs).
    */
-  async finishWith(by: Principal, attemptId: string, end: { readonly result: "done" | "blocked" | "partial" | "abandoned"; readonly note?: string; readonly submissionId?: string }): Promise<void> {
+  async finishWith(by: Principal, attemptId: string, end: { readonly result: "done" | "blocked" | "partial" | "abandoned"; readonly note?: string; readonly submissionId?: string; /** Asked once more right before the end; false: something (a stop dropping the ending) took the end back, and nothing is ended. */ readonly confirm?: () => Promise<boolean> }): Promise<boolean> {
     const d = typeof attemptId === "string" && ATTEMPT.test(attemptId) ? await this.#load(attemptId) : undefined;
-    if (d === undefined || d.body.state === "finished") return;
+    if (d === undefined || d.body.state === "finished") return true;
     await this.#controlled(by, attemptId);
+    if (end.confirm !== undefined && !(await end.confirm())) return false;
     const summary = `ended by the agent: ${end.result}${end.note === undefined ? "" : `: ${end.note}`}${end.submissionId === undefined ? "" : ` (submission ${end.submissionId})`}`;
-    await this.#end(attemptId, end.result === "done" || end.result === "partial" ? "succeeded" : "abandoned", summary, { readmit: false });
+    await this.#end(attemptId, end.result === "done" || end.result === "partial" ? "succeeded" : "abandoned", summary, { readmit: false, skipHook: true, ...(end.result === "partial" ? { partial: true } : {}) });
+    return true;
   }
 
   /**
@@ -537,7 +553,8 @@ export class DispatcherService {
     if (fresh.requestId !== undefined) await this.#deps.admission.release({ commandId: `dpa-move:${attemptId}:${fresh.requests ?? 0}`, actor: DISPATCHER_ACTOR, requestId: fresh.requestId, reason: `the attempt moves to ${move.hostId}` }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
     const old = this.#live.get(attemptId);
     await this.#update(attemptId, (x) => {
-      const { requestId: _r, lease: _l, frozen: _f, ...rest } = x; void _r; void _l; void _f;
+      const { requestId: _r, lease: _l, ...kept } = x; void _r; void _l;
+      const rest = withoutFreeze(kept, false);
       return { ...rest, state: x.state === "parked" ? "parked" : "waiting", pinnedHost: move.hostId, ...(move.checkpoint === undefined ? {} : { resumeFrom: move.checkpoint }), resumeNote: move.note };
     });
     if (old !== undefined) {
@@ -1220,11 +1237,21 @@ export class DispatcherService {
    * Ends an attempt, whatever the reason: the worker is stopped, the calls still in flight are settled from the ledger, the attempt is finished in the assignment (the task itself is not touched),
    * the place is given back, the credential ends and the dispatch is closed. A lost attempt (not an expired or stopped one) may be admitted again by the dispatcher, within the attempts allowed.
    */
-  async #end(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean; lost?: boolean }): Promise<{ readmitted?: string }> {
+  /** Binds the agent's ending: asked before an attempt ends for any reason (the turn completing, a stop, a lost worker), so an ending the agent asked for is completed or dropped with its true reason. */
+  onEnd(hook: EndHook | undefined): void { this.#endHook = hook; }
+
+  async #end(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean; lost?: boolean; stopped?: { readonly by: "owner" | "emergency"; readonly reason: string }; skipHook?: boolean; partial?: boolean }): Promise<{ readmitted?: string }> {
     // `idle()` waits for every end in progress, not only for the turns: an attempt leaves the live list part-way through its end, and the blocker for a failure is opened after that.
     // Two paths can end the same attempt at once (the worker's result and the lease scan): the second joins the first, whose outcome stands. Its own would reuse the first's command IDs with a different summary.
     const already = this.#endingBy.get(attemptId);
     if (already !== undefined) return already;
+    if (this.#endHook !== undefined && options.skipHook !== true) {
+      try {
+        const told = await this.#endHook(attemptId, { outcome, summary, ...(options.stopped === undefined ? {} : { stopped: options.stopped }) });
+        if (told?.handled === true) return {};
+        if (told?.summary !== undefined) summary = told.summary;
+      } catch (error) { this.#options.onError?.(error); }
+    }
     // The reason may be a worker's or a model's error text, which the records refuse if it holds control characters or half a character: an attempt must always be able to end.
     const clean = Array.from(summary.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ").replace(/[\ud800-\udfff]/g, "?")).slice(0, 1000).join("").trim();
     const ending = this.#endInner(attemptId, outcome, clean === "" ? `the attempt ${outcome}` : clean, options);
@@ -1233,7 +1260,7 @@ export class DispatcherService {
     try { return await ending; } finally { this.#ending.delete(ending); if (this.#endingBy.get(attemptId) === ending) this.#endingBy.delete(attemptId); }
   }
 
-  async #endInner(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean; lost?: boolean }): Promise<{ readmitted?: string }> {
+  async #endInner(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean; lost?: boolean; partial?: boolean }): Promise<{ readmitted?: string }> {
     const d = await this.#load(attemptId);
     if (d === undefined || d.body.state === "finished") return {};
     const live = this.#live.get(attemptId);
@@ -1252,7 +1279,7 @@ export class DispatcherService {
     if (b.requestId !== undefined) await this.#deps.admission.release({ commandId: `dpa-end-rel:${attemptId}`, actor: DISPATCHER_ACTOR, requestId: b.requestId, reason: summary.slice(0, 280) }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
     await this.#deps.credentials.endForAttempt(this.#deps.principal, { commandId: `dpa-end-cred:${attemptId}`, attemptId, reason: summary.slice(0, 280) }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
     // Before the attempt is marked finished, so a crash in between leaves the end to be done again (every command here is derived from the task and the attempt). A superseded attempt does not count against the task or take the hand-off head.
-    if (active) await this.#contextAtEnd(b, outcome, summary);
+    if (active) await this.#contextAtEnd(b, outcome, summary, options.partial === true);
     await this.#update(attemptId, (x) => ({ ...x, state: "finished", inFlight: [], parked: [], outcome: { status: outcome, summary: summary.slice(0, 500), at: this.#runner.now() } }), () => this.#liveChange(attemptId, false));
     this.#live.delete(attemptId);
     this.#usageSeq.delete(attemptId);
@@ -1283,14 +1310,15 @@ export class DispatcherService {
   }
 
   /** The context bookkeeping of an ended attempt (card C07b). It never keeps the attempt from ending: a failure here is reported and the end goes on. */
-  async #contextAtEnd(b: DispatchBody, outcome: "succeeded" | "failed" | "abandoned", summary: string): Promise<void> {
+  /** `partial`: the agent ended with part of the work done; the attempt is `succeeded` for the task but did not run within budget as a whole, so the overflow count is not reset (only a `done` does). */
+  async #contextAtEnd(b: DispatchBody, outcome: "succeeded" | "failed" | "abandoned", summary: string, partial = false): Promise<void> {
     const context = this.#deps.context;
     if (context === undefined) return;
     // The reason comes from the worker or the model: control characters become spaces, the cut is on whole characters, and a blank one gets a plain sentence (the context service refuses text it cannot store).
     const clip = (n: number): string => { const t = Array.from(summary.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ").replace(/[\ud800-\udfff]/g, "?")).slice(0, n).join("").trim(); return t === "" ? `the attempt ${outcome}` : t; };
     const guarded = async (step: () => Promise<unknown>): Promise<void> => { try { await step(); } catch (error) { this.#options.onError?.(error); } };
     // An attempt that ran within budget starts the count again; one that failed for want of context is counted. Each step stands on its own: a refusal of one must not skip the hand-off.
-    if (outcome === "succeeded") await guarded(() => context.resetOverflow(this.#deps.principal, { taskId: b.taskId, attemptId: b.attemptId }));
+    if (outcome === "succeeded" && !partial) await guarded(() => context.resetOverflow(this.#deps.principal, { taskId: b.taskId, attemptId: b.attemptId }));
     if (outcome === "failed") await guarded(() => context.reportOverflow(this.#deps.principal, { taskId: b.taskId, attemptId: b.attemptId, failure: clip(500) }));
     const ended = clip(280);
     await guarded(async () => {

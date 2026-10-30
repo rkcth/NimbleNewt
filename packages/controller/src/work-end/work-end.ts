@@ -78,8 +78,11 @@ export interface WorkEndDeps {
     settle(attemptId: string): Promise<SettleReport>;
     /** Ends the attempt with the agent's result; the task outcome is the submission's, not this call's. */
     /** `key` is stable per attempt (`workend:<attempt>:finished`): a repeat with it must be harmless. */
-    finish(attemptId: string, result: { readonly result: WorkEndResult; readonly note?: string; readonly submissionId?: string }, key: string): Promise<void>;
+    /** `confirm` is asked once more right before the end; false means the ending was dropped in between and the attempt must not be ended (the answer is then `false`). */
+    finish(attemptId: string, result: { readonly result: WorkEndResult; readonly note?: string; readonly submissionId?: string }, key: string, confirm?: () => Promise<boolean>): Promise<boolean | void>;
   };
+  /** True while the task is paused, stopped or suspended (any gate on its chain): the ending is not asked for or completed then, and a stop drops it. Absent: nothing is known to be paused. */
+  readonly paused?: (taskId: string) => Promise<boolean>;
   /** The files the agent changed against the base and what the landing branch changed since (only asked for a submit). `undefined`: the checkout is unknown, which refuses the submit. */
   readonly landing: (taskId: string) => Promise<Landed | undefined>;
   /** Stages the agent's tree and opens a submission for it; returns its id. Absent: a submit cannot be completed and ends plainly with a blocker. */
@@ -108,7 +111,7 @@ export interface WorkEndRecord {
   readonly outcome?: "submitted" | "ended" | "dropped";
   readonly submissionId?: string;
   /** Typed reason a submit became a plain end or a stop dropped the intent. */
-  readonly typed?: "release_failed" | "submit_unavailable" | "submit_refused" | "owner_stop" | "emergency_stop";
+  readonly typed?: "release_failed" | "submit_unavailable" | "submit_refused" | "owner_stop" | "emergency_stop" | "attempt_ended";
   readonly blocker?: string;
   readonly summary?: string;
   /** True once the attempt was frozen (a replayed request retries the freeze while this is missing). */
@@ -130,6 +133,11 @@ const json = (v: object): JsonObject => v as unknown as JsonObject;
 const clean = <T>(v: object): T => Object.fromEntries(Object.entries(v).filter(([, x]) => x !== undefined)) as T;
 const idOf = (attemptId: string): string => `wend-${createHash("sha256").update(attemptId).digest("hex").slice(0, 32)}`;
 const OPEN_STATES: readonly WorkEndState[] = ["requested", "ending"];
+const INDEX = "work-end-open";
+const INDEX_ID = "open";
+/** At most this many open endings are completed in one `recover` (the rest wait for the next tick). */
+const RECOVER_PER_TICK = 50;
+interface OpenIndex { readonly attempts: readonly string[]; /** True once the records written before the index existed were scanned in. */ readonly scanned?: boolean }
 
 /** Thrown inside `complete` when the intent was dropped before a side effect; carries the dropped record. */
 class Stopped extends Error { constructor(readonly rec: { body: WorkEndRecord; revision: number }) { super("dropped"); } }
@@ -169,6 +177,8 @@ export class WorkEndService {
     const attempt = await this.#deps.attempts.get(attemptId);
     // The same answer for an unknown attempt and another agent's.
     if (attempt === undefined || attempt.agentId !== by.id) throw new DomainError("not_found", `attempt ${attemptId} does not exist or is not yours`);
+    // A credential scoped to one task cannot end the same agent's attempt on another (the same answer as an attempt that is not yours).
+    if (by.taskScope !== undefined && by.taskScope.taskId !== attempt.taskId) throw new DomainError("not_found", `attempt ${attemptId} does not exist or is not yours`);
     const id = idOf(attemptId);
     // A repeat finds the one ending (whatever its command ID), if it asks for the same thing.
     const existing = await this.#get(id);
@@ -183,7 +193,8 @@ export class WorkEndService {
       }
       return { ...b, replayed: true };
     }
-    if (!attempt.live) throw new DomainError("invalid_transition", `attempt ${attemptId} is no longer running`);
+    if (!attempt.live || attempt.stopped !== undefined) throw new DomainError("invalid_transition", `attempt ${attemptId} is no longer running`);
+    if (await this.#deps.paused?.(attempt.taskId)) throw new DomainError("unavailable", `the task of attempt ${attemptId} is paused, stopped or suspended; it cannot be ended by the agent now`);
 
     let base: string | undefined; let head: string | undefined;
     if (submit) {
@@ -195,6 +206,8 @@ export class WorkEndService {
     }
     const body: WorkEndRecord = clean({ attemptId, taskId: attempt.taskId, projectId: attempt.projectId, agentId: attempt.agentId, state: "requested" as const, submit, result, note, message, base, head, requestedAt: this.#runner.now() });
     const scoped = scopedCommandId(by.id, command.commandId);
+    // Indexed first: a crash between the two leaves an index entry without an intent (skipped), never an intent no sweep knows of.
+    await this.#index(attemptId, undefined);
     try { await this.#create(by.id, scoped, id, body); } catch (error) {
       // Two requests at once: the loser reads the winner's.
       const won = await this.#get(id);
@@ -261,14 +274,18 @@ export class WorkEndService {
     if (body.steps?.finished !== true) {
       // The owner's stop wins over the agent's ending; an emergency stop drops it. Nothing more is staged or submitted.
       if (attempt === undefined || attempt.stopped !== undefined || (!attempt.live && !started)) {
+        // The true reason: an owner's (or emergency) stop only when the attempt was stopped; otherwise the attempt ended by itself before the ending could be completed.
         const by = attempt?.stopped?.by;
-        return this.#drop(attemptId, by === "emergency" ? "emergency_stop" : "owner_stop", attempt?.stopped?.reason ?? "the attempt ended before the ending was completed");
+        return this.#drop(attemptId, by === "emergency" ? "emergency_stop" : by === "owner" || by === "other" ? "owner_stop" : "attempt_ended", attempt?.stopped?.reason ?? "the attempt ended before the ending was completed");
       }
+      // A task that is paused, stopped or suspended makes no progress on the agent's ending; a stop drops it (begin), a plain pause leaves it for after the resume.
+      if (attempt !== undefined && await this.#deps.paused?.(attempt.taskId)) return { ...body, replayed: false };
     }
     const step = (name: keyof WorkEndSteps, v: WorkEndSteps[typeof name]) => this.#mutate(attemptId, `workend.${name}`, (b) => ({ ...b, steps: { ...b.steps, [name]: v } }));
     // settled
     if (body.steps?.settled === undefined) {
-      const settled = await this.#deps.attempts.settle(attemptId);
+      // The attempt finished meanwhile (its turn ended, a stop): nothing is in flight any more, so the settle is as good as done.
+      const settled = await this.#deps.attempts.settle(attemptId).catch((error: unknown) => { if (error instanceof DomainError && error.code === "not_found") return { killed: [] } as SettleReport; throw error; });
       const wrote = settled.killed.filter((k) => k.write);
       let value: NonNullable<WorkEndSteps["settled"]> = {};
       if (body.submit && wrote.length > 0) {
@@ -309,7 +326,10 @@ export class WorkEndService {
     // finished
     if (body.steps?.finished !== true) {
       await this.#guard(attemptId);
-      await this.#deps.attempts.finish(attemptId, clean({ result: body.result, note: body.note, submissionId: body.steps?.submitted?.submissionId }), stepKey(attemptId, "finished"));
+      // Conditional: a drop that lands between the guard and the end is seen by the dispatcher right before it ends the attempt.
+      const confirm = async (): Promise<boolean> => { const r = await this.#get(idOf(attemptId)); return r !== undefined && r.body.state !== "dropped" && r.body.claim?.instance === this.#instance; };
+      const ended = await this.#deps.attempts.finish(attemptId, clean({ result: body.result, note: body.note, submissionId: body.steps?.submitted?.submissionId }), stepKey(attemptId, "finished"), confirm);
+      if (ended === false) { await this.#guard(attemptId); throw busy(); }
       body = (await step("finished", true)).body;
     }
     const written = await this.#mutate(attemptId, "workend.finish", (b) => {
@@ -338,20 +358,88 @@ export class WorkEndService {
     return this.#drop(attemptId, why, reason);
   }
 
-  /** After a restart: every ending still open is completed once, from its first undone step. Returns the answers; one another instance is running is skipped. */
+  /**
+   * The endings still open are completed once each, from the first undone step: after a restart, and by the sweep every tick. Only the open ones are looked at (an index of them, like the pause times of L06b; the records written before it are scanned in once), at most
+   * `RECOVER_PER_TICK` per call. One that fails does not stop the others: the rest are completed and the failures are reported together at the end. One another instance is running is skipped.
+   */
   async recover(): Promise<WorkEndAnswer[]> {
+    await this.#backfill();
     const out: WorkEndAnswer[] = [];
+    const failed: string[] = [];
+    const gone: string[] = [];
+    const open = ((await this.#runner.get(INDEX, INDEX_ID))?.body as unknown as OpenIndex | undefined)?.attempts ?? [];
+    let handled = 0;
+    for (const attemptId of open) {
+      const b = (await this.#get(idOf(attemptId)))?.body;
+      if (b === undefined || !OPEN_STATES.includes(b.state)) { gone.push(attemptId); continue; }
+      if (handled >= RECOVER_PER_TICK) continue;
+      handled++;
+      try { out.push(await this.complete(attemptId)); } catch (error) {
+        if (error instanceof DomainError && error.code === "unavailable" && /^busy/.test(error.message)) continue;
+        failed.push(`${attemptId}: ${redactText(String((error as Error)?.message ?? error)).slice(0, 150)}`);
+      }
+    }
+    if (gone.length > 0) await this.#index(undefined, gone);
+    if (failed.length > 0) throw new DomainError("unavailable", `${failed.length} ending(s) could not be completed (${out.length} were): ${failed.slice(0, 5).join("; ")}`);
+    return out;
+  }
+
+  /** The records written before the index existed: scanned in once. */
+  async #backfill(): Promise<void> {
+    if (((await this.#runner.get(INDEX, INDEX_ID))?.body as unknown as OpenIndex | undefined)?.scanned === true) return;
+    const found: string[] = [];
     for (let after: string | undefined;;) {
       const page = await this.#runner.list(RECORD, { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
-      for (const a of page) {
-        after = a.id;
-        const b = a.body as unknown as WorkEndRecord;
-        if (OPEN_STATES.includes(b.state)) {
-          try { out.push(await this.complete(b.attemptId)); } catch (error) { if (!(error instanceof DomainError && error.code === "unavailable" && /^busy/.test(error.message))) throw error; }
-        }
-      }
-      if (page.length < 100) return out;
+      for (const a of page) { after = a.id; const b = a.body as unknown as WorkEndRecord; if (OPEN_STATES.includes(b.state)) found.push(b.attemptId); }
+      if (page.length < 100) break;
     }
+    await this.#index(undefined, undefined, found, true);
+  }
+
+  /** Adds and removes attempts in the index of open endings (re-read and written again when it moved). */
+  async #index(add: string | undefined, remove: readonly string[] | undefined, addMany: readonly string[] = [], scanned = false): Promise<void> {
+    for (let n = 0; n < 8; n++) {
+      const rec = await this.#runner.get(INDEX, INDEX_ID);
+      const cur = rec?.body as unknown as OpenIndex | undefined;
+      const set = new Set(cur?.attempts ?? []);
+      if (add !== undefined) set.add(add);
+      for (const a of addMany) set.add(a);
+      for (const r of remove ?? []) set.delete(r);
+      const next: OpenIndex = { attempts: [...set], ...(cur?.scanned === true || scanned ? { scanned: true } : {}) };
+      if (cur !== undefined && JSON.stringify(cur) === JSON.stringify(next)) return;
+      const ref: AggregateRef = { kind: INDEX, id: INDEX_ID };
+      const digest = createHash("sha256").update(JSON.stringify(next)).digest("hex").slice(0, 16);
+      try {
+        await this.#runner.command("workend.index", { commandId: `wend-idx:${rec?.revision ?? 0}:${digest}`, actor: "controller" }, async () => ({
+          payload: { revision: rec?.revision ?? 0 },
+          build: async () => ({ ref, creates: rec === undefined, changes: [rec === undefined ? { type: "create" as const, ref, body: json(next) } : { type: "update" as const, ref, expectedRevision: rec.revision, body: json(next) }], detail: {}, contention: async () => new DomainError("stale_revision", "the index changed at the same moment") }),
+        }));
+        return;
+      } catch (error) { if (!(error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict"))) throw error; }
+    }
+    throw new DomainError("stale_revision", "the index of open endings kept changing");
+  }
+
+  /**
+   * The dispatcher is about to end the attempt for its own reason (the turn completed, a stop, a lost worker). An ending the agent asked for is not lost: a stop drops it with its true reason; the turn completing after `work.end` completes it (settle, submit, tell,
+   * and the attempt ends with the agent's result, which is what `handled` says); any other end drops it as `attempt_ended`, after the tell, with the agent's request written into the end's summary.
+   */
+  async resolveOnEnd(attemptId: string, how: { readonly outcome: "succeeded" | "failed" | "abandoned"; readonly summary: string; readonly stopped?: { readonly by: "owner" | "emergency"; readonly reason: string } }): Promise<{ readonly handled?: true; readonly summary?: string } | undefined> {
+    const found = await this.#get(idOf(attemptId));
+    if (found === undefined || !OPEN_STATES.includes(found.body.state)) return undefined;
+    if (how.stopped !== undefined) { await this.#drop(attemptId, how.stopped.by === "emergency" ? "emergency_stop" : "owner_stop", how.stopped.reason); return undefined; }
+    if (how.outcome === "succeeded") {
+      try { const answer = await this.complete(attemptId); return answer.state === "done" ? { handled: true } : undefined; } catch (error) {
+        if (error instanceof DomainError && error.code === "unavailable") return undefined;
+        throw error;
+      }
+    }
+    const b = found.body;
+    const attempt = await this.#deps.attempts.get(attemptId);
+    if (b.message !== undefined && b.steps?.told !== true && attempt !== undefined) await this.#deps.tell?.(attempt, b.message, stepKey(attemptId, "told")).catch(() => undefined);
+    const asked = `the agent had asked to end it: ${b.result}${b.note === undefined ? "" : `: ${b.note}`}`;
+    await this.#drop(attemptId, "attempt_ended", `the attempt ended first (${how.summary}); ${asked}`.slice(0, 300));
+    return { summary: `${how.summary}; ${asked}`.slice(0, 1000) };
   }
 
   async get(attemptId: string): Promise<WorkEndAnswer | undefined> {
@@ -359,7 +447,7 @@ export class WorkEndService {
     return f === undefined ? undefined : { ...f.body, replayed: false };
   }
 
-  async #drop(attemptId: string, typed: "owner_stop" | "emergency_stop", reason: string): Promise<WorkEndAnswer> {
+  async #drop(attemptId: string, typed: "owner_stop" | "emergency_stop" | "attempt_ended", reason: string): Promise<WorkEndAnswer> {
     const written = await this.#mutate(attemptId, "workend.drop", (b) => !OPEN_STATES.includes(b.state) ? b : clean<WorkEndRecord>({ ...b, state: "dropped" as const, outcome: "dropped" as const, typed, summary: redactText(reason).slice(0, 300), finishedAt: this.#runner.now() }));
     return { ...written.body, replayed: false };
   }

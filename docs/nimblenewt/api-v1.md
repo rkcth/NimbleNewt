@@ -1388,7 +1388,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `work.end`
 
-An agent ends its own attempt: it is frozen at once, the calls in flight settle, and the controller then finishes the attempt with the result. With `submit` the attempt's changes are offered for landing (refused when the landing branch moved and changed files you changed). Only the attempt's own agent may call it; asking again for the same ending returns the recorded one.
+An agent ends its own attempt: it is frozen at once, the calls in flight settle, and the controller then finishes the attempt with the result. With `submit` the attempt's changes are offered for landing (refused when the landing branch moved and changed files you changed). Only the attempt's own agent may call it (a credential scoped to another task cannot); it is unavailable while the task is paused, stopped or suspended, and an owner's stop drops it. Asking again for the same ending returns the recorded one. If your turn ends first, the ending is completed with your result.
 
 Arguments:
 

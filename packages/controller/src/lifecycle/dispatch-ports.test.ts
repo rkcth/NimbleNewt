@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { DomainError } from "../domain/errors.js";
 import type { Principal } from "../security/principals.js";
 import { agentsUnder, dispatchStopPorts, type LocalWork } from "./dispatch-ports.js";
 
@@ -168,4 +169,21 @@ test("the stop inventory lists the local processes and child work a runtime repo
   const bare = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), () => "pending");
   assert.deepEqual(await bare.inventory(task), []);
   assert.equal((await bare.cleanup(task, { deadlineAt: new Date(Date.now() + 1000).toISOString(), backup: false })).spent, undefined);
+});
+
+test("a stop goes on for the other attempts when one has ended meanwhile, and a begun stop drops the agent's ending at once (H12n review 2, 3b)", async () => {
+  const stops: string[] = [];
+  const dropped: string[] = [];
+  const dispatcher = {
+    liveAttemptsOf: async () => ["att-1", "att-2"],
+    stop: async (_by: Principal, id: string) => { if (id === "att-1") throw Object.assign(new DomainError("not_found", "finished meanwhile"), {}); stops.push(id); },
+    operations: async () => [] as never,
+    get: async () => undefined, quiesce: async () => ({}), release: async () => undefined,
+  };
+  const ports = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), () => "pending", undefined, undefined, undefined, { dropEnding: async (id, why) => { dropped.push(`${id}:${why}`); } });
+  const task = { kind: "task", id: "task-x" } as const;
+  await ports.begin!(task, { force: false });
+  assert.deepEqual(dropped, ["att-1:owner_stop", "att-2:owner_stop"]);
+  assert.deepEqual(await ports.terminate(task, { force: false }), { ended: true, unresolved: [] });
+  assert.deepEqual(stops, ["att-2"]);
 });
