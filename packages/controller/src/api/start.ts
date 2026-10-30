@@ -55,7 +55,7 @@ import { JobService } from "../jobs/index.js";
 import { ContinuationService, ResumeCheckService, controllerResumePorts } from "../continuation/index.js";
 import { DependencyService } from "../dependencies/index.js";
 import { ActivityService } from "../activity/index.js";
-import { HandoffService, PauseService, StopService, agentsUnder, controllerHandoffSources, dispatchStopPorts } from "../lifecycle/index.js";
+import { HandoffService, PauseService, StopService, agentsUnder, controllerHandoffSources, dispatchStopPorts, type LocalWork } from "../lifecycle/index.js";
 import { ReviewService } from "../review/index.js";
 import { CutoverService, DifficultyService, FallbackService, RoutingService } from "../routing/index.js";
 import { WorkspaceOpService } from "../workspace-ops/index.js";
@@ -125,6 +125,8 @@ export interface StartOptions {
    */
   /** External event sources polled by the dispatcher each tick (card H13d). By default the built-in one, which reports tasks seen done or cancelled in the last week (card H13e); pass an empty list for none. The sources reach out, so any others are only the ones the caller chooses. */
   readonly eventSources?: readonly EventSource[];
+  /** What the runtime knows about an attempt's local processes and delegated child work, and what the stop cleanup cost it (card L02d). Absent: the stop inventory does not list them. */
+  readonly localWork?: LocalWork;
   readonly routeProbes?: { readonly run: RouteProbes["run"]; readonly intervalMs?: number; readonly enabled?: boolean };
   readonly backup?: { readonly directory: string; readonly everyMs?: number; readonly retention?: { readonly daily: number; readonly weekly: number }; readonly version?: string; readonly now?: () => Date };
   /**
@@ -329,7 +331,7 @@ export async function startController(options: StartOptions): Promise<Controller
     const commands = CommandService.withEpoch(storage, epoch, BUILTIN_COMMANDS.source(catalogSource(CatalogService.withEpoch(storage, epoch, desks))));
     const integration = IntegrationPolicyService.withEpoch(storage, epoch);
     const notes = WorkingNoteService.withEpoch(storage, epoch);
-    const stops = StopService.withEpoch(storage, epoch, pauses, dispatchStopPorts(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal }), () => (options.dispatch === undefined ? "none" : "pending"), (scope) => agentsUnder(storage, scope), (_by, taskId) => jobs.unfinishedOf(taskId)), { onSettled: async (by, e) => { if (e.scope.kind !== "task") return; await activity.record(by, { commandId: `${e.intentId}-act`, taskId: e.scope.id, kind: "lifecycle", summary: `${e.mode === "suspend" ? "Suspension" : "Stop"} ${e.outcome.state}${e.outcome.graceful ? "" : " (not graceful)"}${e.outcome.unresolved.length > 0 ? `; unresolved: ${e.outcome.unresolved.slice(0, 5).join(", ")}` : ""}.`, manifest: { refs: [{ kind: "stop-intent", id: e.intentId }] } } as never); } });
+    const stops = StopService.withEpoch(storage, epoch, pauses, dispatchStopPorts(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal }), () => (options.dispatch === undefined ? "none" : "pending"), (scope) => agentsUnder(storage, scope), (_by, taskId) => jobs.unfinishedOf(taskId), options.localWork), { onSettled: async (by, e) => { if (e.scope.kind !== "task") return; await activity.record(by, { commandId: `${e.intentId}-act`, taskId: e.scope.id, kind: "lifecycle", summary: `${e.mode === "suspend" ? "Suspension" : "Stop"} ${e.outcome.state}${e.outcome.graceful ? "" : " (not graceful)"}${e.outcome.unresolved.length > 0 ? `; unresolved: ${e.outcome.unresolved.slice(0, 5).join(", ")}` : ""}.`, manifest: { refs: [{ kind: "stop-intent", id: e.intentId }] } } as never); } });
 
     // Provider drain and cutover (card R04b): the owner's controls gate every route choice made through the fallback service, which the cutover cancels running calls on.
     const cutover = CutoverService.withEpoch(storage, epoch, routing, {});

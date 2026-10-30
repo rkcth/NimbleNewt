@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Principal } from "../security/principals.js";
-import { agentsUnder, dispatchStopPorts } from "./dispatch-ports.js";
+import { agentsUnder, dispatchStopPorts, type LocalWork } from "./dispatch-ports.js";
 
 const staff = { id: "service:dispatcher", kind: "service" } as unknown as Principal;
 
@@ -94,4 +94,29 @@ test("the stop inventory counts a task's running jobs, names one asked to stop a
   assert.deepEqual(await ports.terminate(task, { force: true }), { ended: true, unresolved: ["job-b", "job-c"] });
   jobStates = [];
   assert.deepEqual(await ports.inventory(task), []);
+});
+
+test("the stop inventory lists the local processes and child work a runtime reports, an uncooperative or unknown one is unresolved, a runtime that cannot say is itself unknown, and the cleanup spend comes from the runtime (card L02d)", async () => {
+  const dispatcher = { liveAttemptsOf: async () => ["att-1"], get: async () => ({ taskId: "task-x" }) as never, operations: async () => [] as never, stop: async () => undefined, quiesce: async () => ({}), release: async () => undefined };
+  let report: Awaited<ReturnType<NonNullable<LocalWork["processes"]>>> | "down" = [{ ref: "pid-41", kind: "process", state: "running" }, { ref: "child-7", kind: "child", state: "uncooperative" }, { ref: "pid-42", kind: "process", state: "unknown" }];
+  const asked: (readonly string[])[] = [];
+  const ports = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), () => "pending", undefined, undefined, {
+    processes: async (attempts) => { asked.push(attempts); if (report === "down") throw new Error("worker unreachable"); return report; },
+    spent: async () => 12,
+  });
+  const task = { kind: "task", id: "task-x" } as const;
+  assert.deepEqual(await ports.inventory(task), [
+    { kind: "process", ref: "pid-41", state: "running" }, { kind: "child", ref: "child-7", state: "uncooperative" }, { kind: "process", ref: "pid-42", state: "unknown" },
+  ]);
+  assert.deepEqual(asked, [["att-1"]], "asked about the scope's attempts only");
+  assert.deepEqual(await ports.terminate(task, { force: true }), { ended: true, unresolved: ["child-7", "pid-42"] });
+  const cleaned = await ports.cleanup(task, { deadlineAt: new Date(Date.now() + 1000).toISOString(), backup: false });
+  assert.equal(cleaned.spent, 12);
+  assert.equal(cleaned.remaining.length, 3);
+  report = "down";
+  assert.deepEqual(await ports.inventory(task), [{ kind: "process", ref: "runtime:processes", state: "unknown" }]);
+  // Without the hook nothing is listed and nothing is charged.
+  const bare = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), () => "pending");
+  assert.deepEqual(await bare.inventory(task), []);
+  assert.equal((await bare.cleanup(task, { deadlineAt: new Date(Date.now() + 1000).toISOString(), backup: false })).spent, undefined);
 });

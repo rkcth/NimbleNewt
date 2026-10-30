@@ -2680,3 +2680,8 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ### Activity summaries are redacted before they are cut (a known gap since C09)
 
 - `ActivityService.record` takes a summary of up to 4000 characters, redacts all of it, and only then keeps the first 300; a secret that straddles the cut is no longer left half-hidden, and a longer summary is clipped instead of refused. The controller's own callers (artifact, review, message, hand-off and meeting-decision steps, and the dispatcher's steps) no longer cut the text before handing it over.
+
+## L02d (part 1): the stop inventory takes local processes and child work from the runtime
+
+- `dispatchStopPorts` takes a `LocalWork` source (`start` option `localWork`): `processes(attempts)` lists the local processes and delegated child work of the scope's attempts (running, uncooperative, or unknown) and `spent(attempts)` says what the cleanup cost. They appear in the stop inventory as `process` and `child` items; an uncooperative or unknown one is named as unresolved when the stop ends (so Force Stop is offered and the result is reported as recovery-required if it stays); a runtime that cannot answer is shown as one unknown item (`runtime:processes`) instead of a clean stop; the cleanup spend is the runtime's figure, and nothing is charged when it says nothing.
+- The controller keeps no registry of processes or child work, and no runtime reports them yet: the source is not wired by default (the sandbox backend in `worker/src/sandbox` can list a confinement's processes, but nothing carries that to the controller). Remaining in L02d: that report from the worker, and charging the spend to the budget.

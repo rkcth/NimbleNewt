@@ -40,7 +40,16 @@ export async function agentsUnder(storage: Pick<ControllerStorage, "listAggregat
  * ledger call is never cut), and a checkpoint is taken; the checkpoint counts as durable when the checkpoint hook returned one. Whether the artifacts a checkpoint names are durable is not known here, so it is
  * taken from the hook's answer when it says (`artifactsDurable`), and otherwise assumed durable only when the checkpoint came back.
  */
-export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; principal: Principal } | undefined, runtime: () => "none" | "pending" = () => "pending", members?: (scope: PauseScope) => Promise<readonly string[]>, jobs?: (by: Principal, taskId: string) => Promise<readonly { readonly id: string; readonly state: string }[]>): StopPorts {
+/**
+ * What only the runtime knows (card L02d): the local processes an attempt started and the work it delegated to children, each running, asked to stop and not stopped ("uncooperative", so Force Stop is offered), or of unknown state; and what the cleanup cost.
+ * The controller keeps no registry of either, so a runtime that reports them passes this in; without it the inventory simply does not list them (nothing is claimed about what is not known).
+ */
+export interface LocalWork {
+  processes?(attempts: readonly string[]): Promise<readonly { readonly ref: string; readonly kind: "process" | "child"; readonly state: "running" | "uncooperative" | "unknown" }[]>;
+  spent?(attempts: readonly string[]): Promise<number | undefined>;
+}
+
+export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; principal: Principal } | undefined, runtime: () => "none" | "pending" = () => "pending", members?: (scope: PauseScope) => Promise<readonly string[]>, jobs?: (by: Principal, taskId: string) => Promise<readonly { readonly id: string; readonly state: string }[]>, local?: LocalWork): StopPorts {
   const attemptsOf = async (scope: PauseScope): Promise<string[]> => {
     const h = dispatch();
     // No dispatcher exists in this controller: nothing can be running. A dispatcher that should exist but is not up (a restart in progress, a failed start) is not the same, and nothing is claimed about it.
@@ -52,7 +61,15 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
     for (const agentId of await members(scope)) for (const id of await h.dispatcher.liveAttemptsOf(h.principal, { agentId: principalForm(agentId) })) out.add(id);
     return [...out];
   };
+  const localOf = async (attempts: readonly string[]): Promise<InventoryItem[]> => {
+    if (local?.processes === undefined) return [];
+    const found = await local.processes(attempts).catch(() => undefined);
+    // A runtime that cannot say what is running is itself unknown: one item says so, so a stop is never reported clean on silence.
+    if (found === undefined) return [{ kind: "process", ref: "runtime:processes", state: "unknown" }];
+    return found.map((p) => ({ kind: p.kind, ref: p.ref.slice(0, 120), state: p.state }));
+  };
   const inFlight = async (attempts: readonly string[], scope: PauseScope): Promise<InventoryItem[]> => {
+    const localItems = attempts.length === 0 ? [] : await localOf(attempts);
     const h = dispatch();
     const out: InventoryItem[] = [];
     for (const attemptId of attempts) {
@@ -69,6 +86,7 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
         }
       }
     }
+    out.push(...localItems);
     return out;
   };
   return {
@@ -82,7 +100,9 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
         const strictMs = Math.max(1, Math.min(60_000, Date.parse(options.deadlineAt) - Date.now()));
         await h!.dispatcher.quiesce(h!.principal, id, "suspend or stop preparation", { strictMs });
       }
-      return { remaining: await inFlight(attempts, scope) };
+      // What the preparation cost, as the runtime counts it (a hook that is absent or fails says nothing, so nothing is charged on a guess).
+      const spent = local?.spent === undefined ? undefined : await local.spent(attempts).catch(() => undefined);
+      return { remaining: await inFlight(attempts, scope), ...(spent === undefined ? {} : { spent }) };
     },
     checkpoint: async (scope) => {
       const h = dispatch();
@@ -106,7 +126,7 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
         for (const op of (await h!.dispatcher.operations(h!.principal, id)) ?? []) if (op.state === "uncertain") unresolved.push(`${id}/${op.callId}`.slice(0, 120));
       }
       // A job whose outcome is not known, or that was asked to stop and has not, is named as unresolved too.
-      for (const item of await inFlight(attempts, scope).catch(() => [] as InventoryItem[])) if (item.kind === "job" && (item.state === "unknown" || item.state === "uncooperative")) unresolved.push(item.ref);
+      for (const item of await inFlight(attempts, scope).catch(() => [] as InventoryItem[])) if ((item.kind === "job" || item.kind === "process" || item.kind === "child") && (item.state === "unknown" || item.state === "uncooperative")) unresolved.push(item.ref);
       return { ended: true, unresolved };
     },
   };
