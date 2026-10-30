@@ -404,6 +404,20 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `meeting.decisions.log`
+
+The log of what happened to each change a meeting decided (applied, not applied, refused, declined, overridden), who allowed it and under which setting; owner only, a page at a time in ID order. It holds a digest of each change and safe counters, never its words.
+
+Arguments:
+
+- `kind` (optional): a kind of change, such as budget.raise
+- `outcome` (optional): applied, not-applied, refused, declined or overridden
+- `projectId` (optional): the project
+- `after` (optional): the `next` of the previous page
+- `limit` (optional): 1 to 100, default 50
+
+Result: `{ item: { entries, next? } }`.
+
 #### `meeting.record.plan`
 
 The project's latest plan from a meeting.

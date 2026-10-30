@@ -102,7 +102,7 @@ export interface Context {
   readonly deliverables?: Pick<DeliverableService, "list" | "get">;
   readonly activity?: Pick<ActivityService, "record" | "explain" | "explainLater" | "correct" | "markUnavailable" | "steps" | "payload" | "explanations" | "explanationsPage" | "corrections" | "timeline">;
   readonly policyContext?: Pick<PolicyService, "contextFor">;
-  readonly records?: Pick<MeetingRecordService, "open" | "setChair" | "join" | "leave" | "append" | "move" | "amend" | "table" | "openVote" | "castBallot" | "closeVote" | "castingVote" | "apply" | "ownerRespond" | "finish" | "summarize" | "returnOutcomes" | "sweep" | "record" | "recordFor" | "discussion" | "motion" | "ballots" | "decision" | "why" | "summary" | "latestPlan">;
+  readonly records?: Pick<MeetingRecordService, "open" | "setChair" | "join" | "leave" | "append" | "move" | "amend" | "table" | "openVote" | "castBallot" | "closeVote" | "castingVote" | "apply" | "ownerRespond" | "finish" | "summarize" | "returnOutcomes" | "sweep" | "record" | "recordFor" | "discussion" | "motion" | "ballots" | "decision" | "why" | "summary" | "latestPlan" | "decisionLog">;
   readonly attendance?: Pick<AttendanceService, "admission" | "openRoom" | "callNow" | "status" | "beginDiscussion" | "prepare" | "reportBlocked" | "join" | "joinAsOwner" | "authorizeWake" | "leave" | "keepPaused" | "deferReturn" | "endMeeting" | "returnToWork" | "acknowledge" | "revalidation" | "saveBrief" | "briefOf">;
   readonly standups?: Pick<StandupService, "configure" | "update" | "standup" | "prepare" | "prepared" | "brief" | "briefs" | "addStatement" | "agenda" | "deliverOutcomes">;
   readonly watchControl?: {
@@ -528,6 +528,12 @@ export const OPERATIONS: readonly Operation[] = [
   recordOp("decision", "query", "A decision record.", "decision", ["decisionId"], "`{ item }`.", "id", ["decisionId"]),
   recordOp("why", "query", "Why a decision was taken, from the record, with links to the discussion; conclusions from records you may not see are marked unverifiable.", "why", ["decisionId"], "`{ item: { decision, lines } }`.", "id", ["decisionId"]),
   recordOp("summary", "query", "The meeting summary: attendance, updates, decisions with reasons, dissent, open questions, actions, plan; adopted kept apart from applied.", "summary", ["recordId"], "`{ item }`.", "id", ["recordId"]),
+  { name: "meeting.decisions.log", kind: "query", summary: "The log of what happened to each change a meeting decided (applied, not applied, refused, declined, overridden), who allowed it and under which setting; owner only, a page at a time in ID order. It holds a digest of each change and safe counters, never its words.", args: { "kind?": "a kind of change, such as budget.raise", "outcome?": "applied, not-applied, refused, declined or overridden", "projectId?": "the project", "after?": "the `next` of the previous page", "limit?": "1 to 100, default 50" }, result: "`{ item: { entries, next? } }`.",
+    run: async (c, a) => {
+      only(a, ["kind", "outcome", "projectId", "after", "limit"]);
+      const svc = c.records ?? unavailable("meeting records");
+      return asJson({ item: await svc.decisionLog(c.principal, a as never) } as object);
+    } },
   recordOp("plan", "query", "The project's latest plan from a meeting.", "latestPlan", ["projectId"], "`{ item }`.", "id", ["projectId"]),
   attendOp("admission", "query", "Whether work an agent is about to start would collide with a nearby meeting (long work that cannot yield is advised against; safe long-running operations continue).", "admission", ["agent", "expectedMinutes", "yieldsAtBoundary", "safeLongRunning"], "`{ item }`."),
   attendOp("open-room", "command", "Opens the room for a planned meeting: a bounded meeting task under a task-scoped pause for each attendee.", "openRoom", ["occurrenceId", "requireAll"], "`{ roomId, replayed }`."),

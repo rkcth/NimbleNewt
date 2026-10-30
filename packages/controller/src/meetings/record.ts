@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { canonicalJson } from "../storage/json.js";
 import type { Aggregate, AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { DecisionService, RecordDecision } from "../decisions/decisions.js";
@@ -19,7 +20,7 @@ import { ATTENDANCE_LIMITS, type MeetingDecision } from "./attendance.js";
 import { authorityOf, type AgendaBody, type MeetingService, type OccurrenceBody } from "./meetings.js";
 import {
   ENTRY_TAGS, FINAL_MOTION_STATES,
-  type BallotBody, type ChangeRecord, type DecisionRecordBody, type MeetingEntryBody, type EntryKind, type EntryTag, type MotionBody, type MotionState, type OpenIndexBody, type OwnerResponse,
+  type BallotBody, type ChangeRecord, type DecisionLogBody, type DecisionLogOutcome, type DecisionRecordBody, type MeetingEntryBody, type EntryKind, type EntryTag, type MotionBody, type MotionState, type OpenIndexBody, type OwnerResponse,
   type PlanBody, type ProposedChange, type RecordBody, type SourceCite, type MeetingSummaryBody, type SummaryContent,
 } from "./record-types.js";
 import { buildSummary } from "./summary.js";
@@ -201,6 +202,16 @@ const TASK_ID = /^task-[a-z2-7]{20}$/;
 const NEVER = /^(?:\*|principal\.|grant|restriction|budget\.|config\.|routing\.|review\.policy|catalog\.|environment\.|mcp\.|agent\.manage|recovery\.|resource\.scope|project\.participants|events\.)/;
 
 const OPEN_KIND = "meeting-record-open";
+const LOG_KIND = "meeting-decision-log";
+/** Counters for the decision log that carry no content: amounts of a budget raise, the action a grant names, otherwise only how many fields the patch has. */
+function logCounters(c: ChangeRecord): { [key: string]: number | string } {
+  const p = c.patch as Record<string, unknown>;
+  const out: { [key: string]: number | string } = { fields: Object.keys(p).length };
+  if (c.kind === "budget.raise") { if (typeof p["costMicros"] === "number") out["costMicros"] = p["costMicros"]; if (typeof p["computeMs"] === "number") out["computeMs"] = p["computeMs"]; }
+  else if (c.kind === "grant.add" && typeof p["action"] === "string") out["action"] = p["action"].slice(0, 80);
+  return out;
+}
+
 const isService = (p: Principal): boolean => (p.kind === "owner" || p.kind === "host" || p.kind === "service") && p.taskScope === undefined;
 const ms = (iso: string): number => Date.parse(iso);
 const addMinutes = (iso: string, minutes: number): string => new Date(ms(iso) + minutes * 60_000).toISOString();
@@ -913,7 +924,7 @@ export class MeetingRecordService {
       });
       if (d.outcome !== "adopted" || d.scope !== "in-scope" || d.ownerResponse === "pending") return tally();
       const change = d.changes.find((c) => c.state === "adopted" || c.state === "applying");
-      if (change === undefined) { await this.#announceChanges(decisionId); return tally(); }
+      if (change === undefined) { await this.#announceChanges(decisionId); await this.#logChanges(decisionId); return tally(); }
       // `agreement` is set for the save that starts a change: it holds only while the change is still adopted and the owner's response is still the one the agreement was worked out from.
       const save = async (next: ChangeRecord, agreement?: string): Promise<boolean> => {
         let lost = false;
@@ -957,8 +968,10 @@ export class MeetingRecordService {
       const applier = this.#options.appliers?.[change.kind];
       if (applier === undefined) { await refuse("failed", `no applier is registered for ${change.kind}`); continue; }
       try {
-        const done = await applier.apply({ commandId: `mtg:${decisionId}:${change.id}`, actor: change.actedAs ?? by.id, actedAs: change.actedAs ?? by.id, target: change.target, expectedRevision: change.expectedRevision, patch: change.patch, agreedBy: change.agreedBy ?? (d.ownerResponse === "agreed" ? "owner:agreed" : `policy:${applier.widens ?? "none"}`) });
-        await save({ ...change, state: "applied", ...(done.revision === undefined ? {} : { appliedRevision: done.revision }) });
+        const agreedBy = change.agreedBy ?? (d.ownerResponse === "agreed" ? "owner:agreed" : `policy:${applier.widens ?? "none"}`);
+        const done = await applier.apply({ commandId: `mtg:${decisionId}:${change.id}`, actor: change.actedAs ?? by.id, actedAs: change.actedAs ?? by.id, target: change.target, expectedRevision: change.expectedRevision, patch: change.patch, agreedBy });
+        // The final record keeps who allowed it and who acted (the decision log reads them from here).
+        await save({ ...change, agreedBy, actedAs: change.actedAs ?? by.id, state: "applied", ...(done.revision === undefined ? {} : { appliedRevision: done.revision }) });
       } catch (error) {
         if (error instanceof DomainError && error.code === "stale_revision") await refuse("conflict", `${change.target.kind} ${change.target.id} changed meanwhile: ${error.message}`);
         else if (error instanceof DomainError && ["invalid_command", "forbidden", "not_found", "invalid_transition"].includes(error.code)) await refuse("failed", error.message);
@@ -966,7 +979,66 @@ export class MeetingRecordService {
       }
     }
     await this.#announceChanges(decisionId);
+    await this.#logChanges(decisionId);
     return this.#applyDecisionTally(decisionId);
+  }
+
+  /**
+   * The decision log (card M02f): one append-only line per change that has reached a final state, written once (the line's ID and command ID come from the decision, the change and the outcome, so a repeat of the apply, a replay after a
+   * restart and a late sweep all find it already there). Best effort like the observer: a failure to log never changes the decision, and the next repeat fills the gap. It keeps no words of the change: a digest of the patch and safe counters.
+   */
+  async #logChanges(decisionId: string): Promise<void> {
+    const d = known<DecisionRecordBody>(await this.#runner.get("meeting-decision", decisionId));
+    if (d === undefined) return;
+    for (const c of d.changes) {
+      if (c.state !== "applied" && c.state !== "not-applied") continue;
+      try {
+        const outcome: DecisionLogOutcome = c.state === "applied" ? "applied" : c.code === "owner" ? (d.ownerResponse === "alternative" ? "overridden" : "declined") : c.code === "unauthorized" || c.code === "gate" ? "refused" : "not-applied";
+        const widens = this.#options.appliers?.[c.kind]?.widens;
+        const policy = c.agreedBy?.startsWith("policy:") === true;
+        const decidedBy: DecisionLogBody["decidedBy"] = c.agreedBy === undefined ? (outcome === "declined" || outcome === "overridden" ? "owner" : "none") : c.agreedBy.startsWith("owner:") ? "owner" : policy ? "policy" : c.agreedBy.startsWith("steward:") ? "steward" : "none";
+        // The cell that decided: a change let through by the policy was allowed by its cell; one the owner agreed to was asked about; for a refusal the cell is looked up as it is now.
+        let setting: "allow" | "ask" | undefined;
+        if (widens !== undefined) setting = policy ? "allow" : c.agreedBy !== undefined ? "ask" : this.#options.widening === undefined ? "ask" : await this.#options.widening(widens, d.projectId).catch(() => "ask" as const);
+        const body: DecisionLogBody = {
+          decisionId, changeId: c.id, projectId: d.projectId, kind: c.kind, targetKind: c.target.kind, outcome, ...(c.code === undefined ? {} : { code: c.code }), decidedBy,
+          ...(c.agreedBy === undefined ? {} : { agreedBy: c.agreedBy }), ...(c.actedAs === undefined ? {} : { actedAs: c.actedAs }), ...(widens === undefined ? {} : { widens }), ...(setting === undefined ? {} : { setting }),
+          ownerResponse: d.ownerResponse, patchHash: createHash("sha256").update(canonicalJson(c.patch)).digest("hex"), counters: logCounters(c), changedAt: c.at ?? d.concludedAt, loggedAt: this.#runner.now(),
+        };
+        const id = derivedId("mdl", `${decisionId}:${c.id}:${outcome}`);
+        const ref: AggregateRef = { kind: LOG_KIND, id };
+        await this.#retrying(() => this.#runner.command("meeting.decision.log", { commandId: `mdl:${decisionId}:${c.id}:${outcome}`.slice(0, 120), actor: "service:meeting-records" }, async () => ({
+          payload: { decisionId, changeId: c.id, outcome },
+          build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: json(body) }], detail: { projectId: d.projectId, outcome } }),
+        })));
+      } catch { /* the log never changes the decision; the next repeat of the apply writes what is missing */ }
+    }
+  }
+
+  /**
+   * The decision log, newest-agnostic in ID order, a page at a time (owner only): `limit` 1 to 100 (default 50), `after` the cursor a page returned as `next`; filters `kind`, `outcome`, `projectId`. Read-only.
+   */
+  async decisionLog(by: Principal, query: { kind?: string; outcome?: string; projectId?: string; after?: string; limit?: number } = {}): Promise<{ entries: View<DecisionLogBody>[]; next?: string }> {
+    onlyKnown(query, ["kind", "outcome", "projectId", "after", "limit"]);
+    if (by.kind !== "owner") throw forbidden(by, "read the decision log");
+    const limit = query.limit === undefined ? 50 : Number.isInteger(query.limit) && query.limit >= 1 && query.limit <= 100 ? query.limit : invalid("limit", "must be 1 to 100");
+    if (query.kind !== undefined && (typeof query.kind !== "string" || query.kind.length === 0 || query.kind.length > 80)) invalid("kind", "must be a kind of change");
+    if (query.outcome !== undefined && !(["applied", "not-applied", "refused", "declined", "overridden"] as unknown[]).includes(query.outcome)) invalid("outcome", "must be applied, not-applied, refused, declined or overridden");
+    if (query.projectId !== undefined && (typeof query.projectId !== "string" || query.projectId.length === 0 || query.projectId.length > 80)) invalid("projectId", "must be a project ID");
+    if (query.after !== undefined && (typeof query.after !== "string" || !/^mdl-[a-z2-7]{20}$/.test(query.after))) invalid("after", "must be a cursor from an earlier page");
+    const out: View<DecisionLogBody>[] = [];
+    let after = query.after;
+    for (;;) {
+      const page = await this.#runner.list(LOG_KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const a of page) {
+        after = a.id;
+        const b = a.body as unknown as DecisionLogBody;
+        if ((query.kind !== undefined && b.kind !== query.kind) || (query.outcome !== undefined && b.outcome !== query.outcome) || (query.projectId !== undefined && b.projectId !== query.projectId)) continue;
+        if (out.length === limit) return { entries: out, next: out[out.length - 1]!.id };
+        out.push(view<DecisionLogBody>(a));
+      }
+      if (page.length < 200) return { entries: out };
+    }
   }
 
   /** Tells the observer of every change that has reached a final state; each is told again on a repeat of the apply, which the observer's stable command IDs make harmless. */
@@ -1023,6 +1095,7 @@ export class MeetingRecordService {
       },
     }));
     if (command.response === "agree") return { applied: (await this.#applyDecision(by, decisionId)).applied };
+    await this.#logChanges(decisionId);
     return { ...(ownerDecisionId === undefined ? {} : { ownerDecisionId }) };
   }
 

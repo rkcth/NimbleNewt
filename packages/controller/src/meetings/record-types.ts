@@ -259,3 +259,31 @@ export interface MeetingSummaryBody {
 export interface PlanBody { readonly projectId: string; readonly occurrenceId: string; readonly recordId: string; readonly at: string; readonly items: readonly SummaryItem[] }
 
 export interface OpenIndexBody { readonly projectId: string; readonly ids: readonly string[] }
+
+/** How a change of a meeting decision ended, as the decision log (card M02f) names it: carried out; not carried out (the target moved or vanished, no applier, a failure); refused by a rule (rights, a gate, the approval policy); declined or overridden by the owner. */
+export type DecisionLogOutcome = "applied" | "not-applied" | "refused" | "declined" | "overridden";
+
+/** One line of the meeting decision log: written once when a change reaches a final state, never changed. It holds no words of the change, only a digest of its patch and counters that are safe to keep (an amount, an action name). */
+export interface DecisionLogBody {
+  readonly decisionId: string;
+  readonly changeId: string;
+  readonly projectId: string;
+  readonly kind: string;
+  readonly targetKind: string;
+  readonly outcome: DecisionLogOutcome;
+  readonly code?: NotAppliedCode;
+  /** Who allowed it: the owner, the approval policy, a steward agent (reserved), or nobody (the change did not start). */
+  readonly decidedBy: "owner" | "policy" | "steward" | "none";
+  readonly agreedBy?: string;
+  readonly actedAs?: string;
+  /** For a change that widens rights or spend: the class, and what the approval policy's cell said (`allow` lets it through without the owner, `ask` leaves it to the owner). */
+  readonly widens?: "access-change" | "spend";
+  readonly setting?: "allow" | "ask";
+  readonly ownerResponse: OwnerResponse;
+  /** SHA-256 of the canonical patch. */
+  readonly patchHash: string;
+  /** Kind-specific counters that carry no content: budget raise amounts, the action a grant names, how many fields any other patch has. */
+  readonly counters: { readonly [key: string]: number | string };
+  readonly changedAt: string;
+  readonly loggedAt: string;
+}
