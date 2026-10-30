@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { BUILTIN_COMMANDS, OPERATION_BY_NAME } from "../api/operations.js";
+import { expandShorthand } from "./shorthand.js";
 import { parseInvocation } from "../commands/resolve.js";
 import { API_VERSION, type StateApi } from "../api/state-api.js";
 import { GATE_TOPIC, normalTopic, notADecisionIn } from "../decisions/records.js";
@@ -168,7 +169,7 @@ export interface ChatDeps {
  * Typed orders that work without the assistant and run as typed (card U06): pause and resume, suspend, stop and Force Stop, and taking a right back. The owner typing the exact command is the order, so they are not shown first;
  * every other command that changes things still is. They need nothing from the model, so a provider outage does not stand between the owner and a stop.
  */
-const RECOVERY_OPS: ReadonlySet<string> = new Set(["lifecycle.pause", "lifecycle.resume", "lifecycle.stop", "lifecycle.force", "lifecycle.choose", "lifecycle.advance", "grant.revoke"]);
+const RECOVERY_OPS: ReadonlySet<string> = new Set(["lifecycle.pause", "lifecycle.resume", "lifecycle.stop", "lifecycle.force", "lifecycle.choose", "lifecycle.advance", "grant.revoke", "routing.disable", "routing.drain", "routing.cutover", "routing.reenable"]);
 
 const MESSAGE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const PROJECT_ID = /^proj-[a-z2-7]{20}$/;
@@ -244,9 +245,13 @@ export class ChatService {
       // A message that is a typed command (`/nimblenewt.grant-list`) is not read by the assistant: it is the command, as the owner typed it.
       const typed = split.text.trim();
       const isCommand = quoted.length === 0 && parseInvocation(typed) !== undefined;
-      const interpreted = isCommand ? { intents: [] as never[], problem: "" } : await this.#interpret({ text: split.text, quoted: safeQuoted, focus, now: this.#runner.now(), proposals: [...(await this.#openProposals(owner.id)), ...(await this.#openEdits(owner))].slice(0, 10), ...(context.awaiting === undefined ? {} : { awaiting: context.awaiting }) });
+      // A short form of a routing order is expanded and shown, not run (card U06b): the exact line it stands for is what runs.
+      const short = isCommand || quoted.length > 0 ? undefined : expandShorthand(typed);
+      const interpreted = isCommand || short !== undefined ? { intents: [] as never[], problem: "" } : await this.#interpret({ text: split.text, quoted: safeQuoted, focus, now: this.#runner.now(), proposals: [...(await this.#openProposals(owner.id)), ...(await this.#openEdits(owner))].slice(0, 10), ...(context.awaiting === undefined ? {} : { awaiting: context.awaiting }) });
       if ("unavailable" in interpreted) return { turnId, replayed: false, outcomes: [], reply: ["The assistant that reads free-form messages is unavailable right now. Nothing was done; the commands of the API and the proposals you already have work as usual."] };
-      const planned = isCommand
+      const planned = short !== undefined
+        ? { items: [{ i: 0, kind: "refused", code: "needs_confirmation", message: "typed" in short ? `That short form stands for this order. It has not run; send the line as it is to run it:\n${short.typed}` : short.error } as PlanItem], projectId: context.focusProjectId, held: undefined, resumes: undefined }
+        : isCommand
         ? { items: [{ i: 0, kind: "command", typed } as PlanItem], projectId: context.focusProjectId, held: undefined, resumes: undefined }
         : interpreted.intents === undefined
         ? { items: [{ i: 0, kind: "refused", code: "interpreter_invalid", message: interpreted.problem } as PlanItem], projectId: context.focusProjectId, held: undefined, resumes: undefined }
@@ -1062,7 +1067,9 @@ export class ChatService {
           : answer.outcome !== undefined ? `Effected: ${String(answer.outcome.state)}${answer.outcome.graceful === false ? " (not graceful)" : ""}.`
             : answer.phase === "cancelled" ? "Effected: no; the request was cancelled because the scope was resumed."
               : answer.phase === "done" || answer.phase === "recovery-required" ? `Effected: ${answer.phase}.`
-                : answer.phase !== undefined ? `Effected: not yet (${answer.phase}).` : "Effected: recorded.",
+                : answer.phase !== undefined ? `Effected: not yet (${answer.phase}).`
+                  : op?.name.startsWith("routing.") === true ? (Array.isArray(whole["cancelled"]) ? `Effected: new work no longer reaches the target; ${(whole["cancelled"] as unknown[]).length} running attempt(s) cancelled so their calls move on.` : op.name === "routing.reenable" ? "Effected: the target may be used again." : "Effected: new work no longer reaches the target (running work is left to finish).")
+                    : "Effected: recorded.",
       ];
       return { i: item.i, status: "applied", op: String(r["command"]), commandId: `${turnId}-c${item.i}`, shown: [`Ran ${String(r["command"])}:`, ...stages, ...text.split("\n").slice(0, 40)] } as Outcome;
     }
