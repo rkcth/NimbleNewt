@@ -49,7 +49,7 @@ for (const backend of backends) {
     status: StatusService; owner: Principal; project: string; other: string; storage: ControllerStorage; epoch: number;
     projects: ProjectService; assignments: AssignmentService; waits: WaitService; blockers: BlockerService; contracts: ContractService; stall: StallService; pauses: PauseService;
     desks: DeskService; mcp: McpService; artifacts: ArtifactService; blobs: FileBlobStore; watches: WatchService; events: EventService; hosts: HostService; principals: PrincipalService; agents: AgentService;
-    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; handoffs?: NonNullable<StatusDeps["handoffs"]> }): StatusService;
+    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; handoffs?: NonNullable<StatusDeps["handoffs"]>; shutdown?: NonNullable<StatusDeps["shutdown"]> }): StatusService;
     agent(name: string, grants?: AGrant[]): Promise<Principal>;
     host(name: string, project?: string): Promise<Principal>;
     /** A ready task in `project` (default: the main one), created by the owner. */
@@ -89,7 +89,8 @@ for (const backend of backends) {
         const other = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "Q" })).id;
         const rebuild: Ctx["rebuild"] = (extra = {}, deps = {}) => StatusService.withEpoch(world.storage, epoch, {
           assignments, waits, blockers, contracts, stall, pauses,
-          ...(deps.watch === false ? {} : { watch: watches }), ...(deps.ownerQuestions === undefined ? {} : { ownerQuestions: deps.ownerQuestions }), ...(deps.activity === undefined ? {} : { activity: deps.activity }), ...(deps.agenda === undefined ? {} : { agenda: deps.agenda }), ...(deps.meetings === undefined ? {} : { meetings: deps.meetings }), ...(deps.handoffs === undefined ? {} : { handoffs: deps.handoffs }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
+          ...(deps.watch === false ? {} : { watch: watches }), ...(deps.ownerQuestions === undefined ? {} : { ownerQuestions: deps.ownerQuestions }), ...(deps.activity === undefined ? {} : { activity: deps.activity }), ...(deps.agenda === undefined ? {} : { agenda: deps.agenda }), ...(deps.meetings === undefined ? {} : { meetings: deps.meetings }), ...(deps.handoffs === undefined ? {} : { handoffs: deps.handoffs }),
+          ...(deps.shutdown === undefined ? {} : { shutdown: deps.shutdown }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
         }, { ...options, ...extra });
         const status = rebuild();
         const grantService = GrantService.withEpoch(world.storage, epoch, options);
@@ -1043,5 +1044,16 @@ for (const backend of backends) {
     const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
     assert.equal(await status.ask(reader, { kind: "handoff", taskId: t.id }), undefined);
     assert.equal(await c.rebuild().ask(c.owner, { kind: "handoff", taskId: t.id }), undefined);
+  });
+
+  suite("whether the installation could be stopped now is told to the owner only: ready, or what is still running or unknown (card L06)", async (c) => {
+    let answer = { ready: true, paused: false, unsettled: [] as { kind: string; ref: string; state: string }[], truncated: false };
+    const status = c.rebuild({}, { shutdown: { readiness: async () => answer } });
+    assert.deepEqual((await status.ask(c.owner, { kind: "shutdown" }))!.lines.map((l) => l.text), ["Nothing is running or unknown; the installation could be stopped now."]);
+    answer = { ready: false, paused: true, unsettled: [{ kind: "job", ref: "job-1", state: "running" }], truncated: true };
+    assert.deepEqual((await status.ask(c.owner, { kind: "shutdown" }))!.lines.map((l) => l.text), ["The installation could not be stopped cleanly yet: 1 or more thing(s) are still running or not known.", "job job-1: running."]);
+    const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
+    assert.equal(await status.ask(reader, { kind: "shutdown" }), undefined);
+    assert.equal(await c.rebuild().ask(c.owner, { kind: "shutdown" }), undefined);
   });
 }

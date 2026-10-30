@@ -179,6 +179,7 @@ export type StatusRequest =
   | { readonly kind: "failed_event"; readonly handlingId: string }
   | { readonly kind: "owner_questions"; readonly limit?: number }
   | { readonly kind: "handoff"; readonly taskId: string }
+  | { readonly kind: "shutdown" }
   | { readonly kind: "meetings"; readonly projectId: string; readonly limit?: number }
   | { readonly kind: "agenda"; readonly projectId: string; readonly limit?: number }
   | { readonly kind: "explanations"; readonly taskId: string; readonly seq?: number; readonly limit?: number }
@@ -198,6 +199,8 @@ export interface StatusDeps {
   /** The failed event queue (card H13). Absent: the queue cannot be listed. */
   readonly watch?: Pick<WatchService, "failures" | "inspect">;
   /** The hand-off going on for a task (card L03f). Absent: the view is not offered. */
+  /** Whether the installation could be stopped now (card L06). Absent: the view is not offered. */
+  readonly shutdown?: { readiness(by: Principal): Promise<{ readonly ready: boolean; readonly paused: boolean; readonly unsettled: readonly { readonly kind: string; readonly ref: string; readonly state: string }[]; readonly truncated: boolean }> };
   readonly handoffs?: { forTask(by: Principal, taskId: string): Promise<View<TaskHandoffBody> | undefined> };
   /** The planned meetings of a project (card M04f). Absent: the view is not offered. */
   readonly meetings?: { planned(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { id: string; revision: number; title: string; kind: string; startsAt: string; endsAt: string; mode: string; state: string; participants: readonly { id: string; status?: string; availability?: string }[] }[]; next?: string } | undefined> };
@@ -287,6 +290,7 @@ export class StatusService {
       case "noticeboard": { onlyKnown(request, ["kind", "projectId"]); return this.noticeboard(by, request.projectId); }
       case "failed_events": { const { kind: _k, ...rest } = request; return this.failedEvents(by, rest); }
       case "failed_event": { onlyKnown(request, ["kind", "handlingId"]); return this.inspectFailedEvent(by, request.handlingId); }
+      case "shutdown": { onlyKnown(request, ["kind"]); return this.shutdownLines(by); }
       case "handoff": { onlyKnown(request, ["kind", "taskId"]); return this.handoffLines(by, request.taskId); }
       case "meetings": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.meetingLines(by, request); }
       case "agenda": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.agendaLines(by, request); }
@@ -333,6 +337,20 @@ export class StatusService {
   }
 
   /** The hand-off going on for a task: from whom to whom, why and who asked, how far it is, whether the package is complete (and what is missing), what blocks it and how, when it will be returned if it is temporary. Nothing when the task cannot be read; a plain line when no hand-off is going. */
+  async shutdownLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.shutdown === undefined || by.kind !== "owner") return undefined;
+    let r;
+    try { r = await this.#deps.shutdown.readiness(by); } catch (error) {
+      if (error instanceof DomainError && (error.code === "forbidden" || error.code === "unavailable")) return undefined;
+      throw error;
+    }
+    const at = this.#runner.now();
+    if (r.ready) return { observedAt: at, lines: [line(r.paused ? "Nothing is running or unknown; the installation could be stopped now, and it is paused." : "Nothing is running or unknown; the installation could be stopped now.", cite("installation", "installation"))] };
+    const lines: Line[] = [line(`The installation could not be stopped cleanly yet: ${r.unsettled.length}${r.truncated ? " or more" : ""} thing(s) are still running or not known.`, cite("installation", "installation"))];
+    for (const i of r.unsettled.slice(0, 20)) lines.push(line(`${shown(i.kind)} ${shown(i.ref)}: ${shown(i.state)}.`, cite("installation", "installation")));
+    return { observedAt: at, lines };
+  }
+
   async handoffLines(by: Principal, taskIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     if (this.#deps.handoffs === undefined) return undefined;
     const taskId = checkTaskId(taskIdValue);
