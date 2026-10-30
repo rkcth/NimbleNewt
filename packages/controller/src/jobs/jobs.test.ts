@@ -118,6 +118,20 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.jobs.requestCancel(c.boss, { commandId: cid("cx"), jobId: id, reason: "late" }), (e) => assert.match(e.message, /nothing to stop/));
   });
 
+  suite("long-running work is asked of the host's gate before it is admitted; short work is not (card M04e)", async (c) => {
+    const asked: string[] = [];
+    const jobs = c.reopen({ longRunningGate: async (_p, taskId) => { asked.push(taskId); return taskId === c.t2 ? "in a meeting" : undefined; } });
+    const go = (taskId: string, extra: object) => jobs.admit(c.worker, { commandId: cid("a"), taskId, kind: "tool", label: "x", operationId: cid("op"), ...extra } as never);
+    await go(c.t2, {});
+    assert.deepEqual(asked, [], "short work is not asked about");
+    await refuses("invalid_command", () => go(c.t2, { longRunning: true }), (e) => assert.match(e.message, /in a meeting/));
+    await refuses("invalid_command", () => go(c.t2, { background: true }));
+    await go(c.t1, { longRunning: true });
+    await go(c.t1, { background: true });
+    assert.deepEqual(asked, [c.t2, c.t2, c.t1, c.t1]);
+    await refuses("invalid_command", () => go(c.t1, { longRunning: "yes" }));
+  });
+
   suite("the controller's own list of a task's unfinished jobs needs no viewer's rights, skips ended jobs and reads past one page (card L02c)", async (c) => {
     await c.admit(c.t1);
     for (let i = 0; i < JOB_LIMITS.page + 5; i++) await c.admit(c.t1);

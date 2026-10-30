@@ -467,6 +467,25 @@ export class AttendanceService {
   }
 
   /** The agent principals (active agents only) among the given ones, sorted and without repeats. Records of other kinds and retired agents are left out. */
+  /**
+   * Whether `taskId` is the bounded meeting task of `agent` while that agent is present in a live meeting: the meeting it is in, or `undefined`. The jobs service asks this before it admits long-running work (card M04e), so the rule
+   * "no long-running work during a meeting" is kept by the controller and not only told to the agent. Looks at the meetings waiting to be held (M01's cap), like `admission`.
+   */
+  async meetingOfTask(taskId: string, agent: string): Promise<{ occurrenceId: string; endsAt: string } | undefined> {
+    if (!AGENT.test(agent)) return undefined;
+    const global = (await this.#runner.get("meeting-open", "all"))?.body as unknown as { projects?: string[] } | undefined;
+    for (const projectId of global?.projects ?? []) {
+      const open = (await this.#runner.get("meeting-open", projectId))?.body as unknown as { ids?: string[] } | undefined;
+      for (const id of open?.ids ?? []) {
+        const att = await this.#attendance(id, agent);
+        if (att === undefined || att.body.state !== "present" || att.body.leftAt !== undefined || att.body.meetingTaskId !== taskId) continue;
+        const occ = (await this.#runner.get("meeting-occurrence", id))?.body as unknown as OccurrenceBody | undefined;
+        if (occ !== undefined && occ.state === "planned") return { occurrenceId: id, endsAt: occ.endsAt };
+      }
+    }
+    return undefined;
+  }
+
   async #activeAgents(principals: readonly string[]): Promise<string[]> {
     const out: string[] = [];
     for (const p of [...new Set(principals)].sort()) {

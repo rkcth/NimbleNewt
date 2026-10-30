@@ -253,6 +253,11 @@ for (const backend of backends) {
     // Joining again is the same join.
     const again = await c.attendance.join(c.asA, { commandId: cid("jn2"), occurrenceId: id, agent: c.pA });
     assert.deepEqual([again.joined, again.meetingTaskId, again.replayed], [true, meetingTask, true]);
+    // The controller can tell the meeting task of an attending agent (card M04e): only its own meeting task, only while it is present.
+    assert.deepEqual(await c.attendance.meetingOfTask(meetingTask, c.pA), { occurrenceId: id, endsAt: (await c.attendance.status(c.owner, id))!.occurrence.endsAt });
+    assert.equal(await c.attendance.meetingOfTask(t1, c.pA), undefined, "another task of the agent is not the meeting task");
+    assert.equal(await c.attendance.meetingOfTask(meetingTask, c.pB), undefined, "nor is it the meeting task of another agent");
+    assert.equal(await c.attendance.meetingOfTask(meetingTask, "not-an-agent"), undefined);
     // The durable join event.
     const s = await c.status(id);
     assert.equal(state(s, c.pA).state, "present");

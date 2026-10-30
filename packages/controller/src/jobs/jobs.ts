@@ -107,6 +107,11 @@ export interface JobOptions extends RunnerOptions {
    * Told once a job has ended, with the wall-clock time from its admission to its end, so the host can charge it (card R05f). Called after the job is recorded as ended and again if the ending is repeated, so the
    * host's charge must be keyed by `commandId` (`job-use:<job>`). A failure here is for the host to handle: it does not undo the ending.
    */
+  /**
+   * Asked before long-running work (a background job, or one the caller says is long-running) is admitted: a reason to refuse it, or `undefined` to admit. The host binds it to the meeting the task is the bounded task of (card M04e), so an
+   * agent attending a meeting is held to short work. Not asked for short work, and not asked when the task is not a meeting task (the host's answer is then `undefined`).
+   */
+  readonly longRunningGate?: (principal: Principal, taskId: string) => Promise<string | undefined>;
   readonly onUsage?: (usage: { readonly commandId: string; readonly taskId: string; readonly jobId: string; readonly background: boolean; readonly computeMs: number }) => Promise<void>;
 }
 
@@ -117,6 +122,8 @@ export interface AdmitJob extends NoActor {
   readonly operationId: string;
   readonly resumability?: Resumability;
   readonly background?: boolean;
+  /** The work will run for long (more than a short exchange): refused while the agent attends a meeting. A background job counts as long-running whether or not this is set. */
+  readonly longRunning?: boolean;
   readonly attemptId?: string;
   readonly host?: string;
   readonly serverId?: string;
@@ -176,6 +183,7 @@ export class JobService {
   readonly #connections: JobConnections | undefined;
   readonly #background: BackgroundRecorder | undefined;
   readonly #onUsage: JobOptions["onUsage"];
+  readonly #longRunningGate: JobOptions["longRunningGate"];
 
   private constructor(runner: CommandRunner, pauses: PauseService | undefined, options: JobOptions) {
     this.#runner = runner;
@@ -183,6 +191,7 @@ export class JobService {
     this.#connections = options.connections;
     this.#background = options.background;
     this.#onUsage = options.onUsage;
+    this.#longRunningGate = options.longRunningGate;
   }
 
   static withEpoch(storage: ConstructorParameters<typeof CommandRunner>[0], epoch: number, deps: { pauses?: PauseService } = {}, options: JobOptions = {}): JobService {
@@ -194,7 +203,7 @@ export class JobService {
   // ---- writing ----------------------------------------------------------------------------------------------------------------
 
   async admit(principal: Principal, command: AdmitJob): Promise<{ id: string; replayed: boolean }> {
-    onlyKnown(command, ["commandId", "taskId", "kind", "label", "operationId", "resumability", "background", "attemptId", "host", "serverId"]);
+    onlyKnown(command, ["commandId", "taskId", "kind", "label", "operationId", "resumability", "background", "longRunning", "attemptId", "host", "serverId"]);
     const taskId = checkTaskId(command.taskId);
     if (!(JOB_KINDS as readonly string[]).includes(command.kind)) invalid("kind", `must be one of ${JOB_KINDS.join(", ")}`);
     const kind = command.kind;
@@ -206,12 +215,14 @@ export class JobService {
     if (resumability === "remote_tracked" && kind !== "remote" && kind !== "mcp") invalid("resumability", "only a remote job or an MCP operation can be tracked remotely");
     if (command.background !== undefined && typeof command.background !== "boolean") invalid("background", "must be true or false");
     const background = command.background === true;
+    if (command.longRunning !== undefined && typeof command.longRunning !== "boolean") invalid("longRunning", "must be true or false");
+    const longRunning = command.longRunning === true;
     const attemptId = command.attemptId === undefined ? undefined : plain(command.attemptId, "attemptId", 120);
     const host = command.host === undefined ? undefined : plain(command.host, "host", JOB_LIMITS.host);
     if (kind === "mcp") { if (typeof command.serverId !== "string" || !SERVER_ID.test(command.serverId)) invalid("serverId", "an MCP operation names its server (mcs-...)"); } else if (command.serverId !== undefined) invalid("serverId", "only an MCP operation has a server");
     const serverId = command.serverId;
     const id = JobService.jobIdOf(taskId, operationId);
-    return this.#command("job.admit", principal, command.commandId, { taskId, kind, label, operationId, resumability, background, ...(attemptId === undefined ? {} : { attemptId }), ...(host === undefined ? {} : { host }), ...(serverId === undefined ? {} : { serverId }) }, async () => {
+    return this.#command("job.admit", principal, command.commandId, { taskId, kind, label, operationId, resumability, background, ...(longRunning ? { longRunning } : {}), ...(attemptId === undefined ? {} : { attemptId }), ...(host === undefined ? {} : { host }), ...(serverId === undefined ? {} : { serverId }) }, async () => {
       // Checked here, not before the command: a repeated command is answered from its record whatever has changed since (the task is paused or done, the server was revoked).
       const task = await this.#task(taskId);
       this.#requireWrite(principal, task, taskId);
@@ -225,6 +236,11 @@ export class JobService {
           if (!background) throw new DomainError("invalid_command", `task ${taskId} is paused; only a permitted background job is admitted`, { field: "pause" });
           if (await this.#pauses.backgroundDenied(taskId)) throw new DomainError("invalid_command", `task ${taskId} is paused with background work denied`, { field: "pause" });
         }
+      }
+      // Checked on every first admit, whatever the pause state: a meeting is a context switch, so the agent keeps to short work while it attends.
+      if ((background || longRunning) && this.#longRunningGate !== undefined) {
+        const refusal = await this.#longRunningGate(principal, taskId);
+        if (refusal !== undefined) throw new DomainError("invalid_command", refusal, { field: "longRunning" });
       }
       if (kind === "mcp") {
         if (this.#connections === undefined) invalid("serverId", "cannot be checked: this service has no MCP connection check");

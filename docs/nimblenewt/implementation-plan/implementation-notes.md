@@ -2543,3 +2543,10 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - **Decisions told only in the brief leave the pending list:** `ImprovementService.markTold` (service principals only) and `StandupService`'s `onBriefed`: once a stored brief carries a decision and every proposer it concerns has it in their brief, the proposal is marked told, so rejected, deferred and stopped proposals (which have no task for a notice) no longer fill the 200-item open list. A decision whose proposer is not in the stand-up stays pending.
 - **Widening gate:** `classMode` also says whether the cell was set by hand. The engine keeps a change of rights the owner's decision whatever the profile says, so a vote widens rights without the owner only where the owner set that cell by hand; spend follows the profile (strict asks; derived and autonomous let it through in development). The comment that said otherwise is corrected.
 - **"Meeting over" warning** goes to the meeting task, not to a task the agent may have kept paused or handed on.
+
+## M04e (part 1): no long-running work during a meeting
+
+- `JobOptions.longRunningGate(principal, taskId)` returns a reason to refuse or `undefined`. `JobService.admit` asks it only for background jobs and jobs the caller marks `longRunning: true`, on the first admit (a repeat is answered from its record). Short work is never asked about.
+- `AttendanceService.meetingOfTask(taskId, agent)` answers with the meeting when `taskId` is that agent's bounded meeting task and the agent is present (not left) in a still-planned occurrence.
+- `api/start.ts` binds the two: an agent principal on its meeting task cannot start long-running work until the meeting ends. Its other tasks are paused already, and a permitted background job there is unchanged.
+- Not built yet (remains in M04e): the wake sink that admits a Stopped agent after the owner's exception, and chat wording.
