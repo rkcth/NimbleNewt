@@ -3463,6 +3463,34 @@ Arguments:
 
 Result: `{ id, replayed }`.
 
+#### `swarm.spawn`
+
+Makes a child task of a task you hold the budget of: it gets the outcome and acceptance criteria you give and part of the parent's allowance (it can spend only that). Refused when the parent has nothing to give, is three levels deep, or already has four live children.
+
+Arguments:
+
+- `parentTaskId`: the parent task
+- `title`: the child's title
+- `expectedResult` (optional): what the child must deliver
+- `acceptanceCriteria` (optional): list of checks
+- `costMicros` (optional): allowance to hand over
+- `computeMs` (optional): compute allowance to hand over
+- `commandId`: required
+
+Result: `{ taskId, replayed }`.
+
+#### `swarm.cancel`
+
+Cancels a task's whole swarm: every child and grandchild is stopped (deepest first), what each did not use goes back to its parent, and the tasks are cancelled. Repeat it to carry on if some are still being stopped.
+
+Arguments:
+
+- `parentTaskId`: the parent task
+- `reason`: why
+- `commandId`: required
+
+Result: `{ settled, pending }`.
+
 #### `agenda.capture`
 
 Saves a topic for a later stand-up or meeting, linked to the conversation it came from, and returns it as it will appear so it can be checked and corrected. The request type sets its authority: `discussion` and `recommendation` never execute anything; `delegated-decision` and `owner-instruction` can be recorded by the owner only. Needs `meeting.agenda` in the project (or the owner).
