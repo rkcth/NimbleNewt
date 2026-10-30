@@ -143,6 +143,12 @@ const gateIdOf = (scope: PauseScope): string => derivedId("pgt", `${scope.kind}\
 const requestIdOf = (gateId: string, seq: number): string => derivedId("prq", `${gateId}\0${seq}`);
 const sameScope = (a: PauseScope, b: PauseScope): boolean => a.kind === b.kind && a.id === b.id;
 const clean = (body: object): JsonObject => Object.fromEntries(Object.entries(body).filter(([, v]) => v !== undefined)) as unknown as JsonObject;
+/** The change that makes a gate's index entry inactive, in the same operation that ends or takes over its condition; none when there is no live entry. */
+const retireChange = (indexed: { revision: number; body: unknown } | undefined, gateId: string): Change[] => {
+  const entry = indexed?.body as { scope: JsonObject; at: string; active: boolean } | undefined;
+  if (indexed === undefined || entry === undefined || entry.active !== true) return [];
+  return [{ type: "update", ref: { kind: TIMED_KIND, id: gateId }, expectedRevision: indexed.revision, body: { scope: entry.scope, at: entry.at, active: false } }];
+};
 const pad = (n: number): string => String(n).padStart(10, "0");
 
 function checkScope(value: unknown): PauseScope {
@@ -289,7 +295,10 @@ export class PauseService implements PauseGuard, PauseLookup {
       const { resumeAt: _dropped, ...rest } = current; void _dropped;
       await this.#runner.command("pause.condition-drop", { commandId: `drop-cond-${gateId}-${found.revision}`, actor: principal.id }, async () => ({
         payload: { scope: checked as unknown as JsonObject },
-        build: async () => ({ ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: clean({ ...rest, takenOver: true }) }], detail: { scope: checked as unknown as JsonObject, resumeAt: null } }),
+        build: async () => {
+          const indexed = await this.#runner.get(TIMED_KIND, gateId);
+          return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: clean({ ...rest, takenOver: true }) }, ...retireChange(indexed, gateId)], detail: { scope: checked as unknown as JsonObject, resumeAt: null } };
+        },
       }));
     });
   }
@@ -319,7 +328,7 @@ export class PauseService implements PauseGuard, PauseLookup {
         if (gate.resumeAt.at !== hint.at) { await this.#retire(by, entry.id, entry.revision, hint.at, gate.resumeAt.at); continue; }
         if (Date.parse(gate.resumeAt.at) > now) continue;
         // A pause that has gone on to be suspended or stopped is not an ordinary pause any more.
-        if (gate.observed !== undefined && ["preparing-to-suspend", "suspended", "stopping", "stopped", "recovery-required"].includes(gate.observed.state)) continue;
+        if (gate.observed !== undefined && ["preparing-to-suspend", "suspended", "stopping", "stopped", "recovery-required"].includes(gate.observed.state)) { await this.#retire(by, entry.id, entry.revision, hint.at, undefined); continue; }
         try {
           await this.#hooks?.beforeLift?.(gate.scope);
           await this.#request(by, `cond-${gate.requestId ?? entry.id}`, "resume", gate.scope, `the owner's recorded condition (set by ${gate.resumeAt.setBy} at ${gate.resumeAt.setAt}): not before ${gate.resumeAt.at}`, undefined, gate.projectId, { requestId: gate.requestId, at: gate.resumeAt.at });
@@ -379,9 +388,11 @@ export class PauseService implements PauseGuard, PauseLookup {
           ? { ...base, background: background!, intent: "pause", mode: "pause", owner: principal.id, pausedAt: at, reason, observed: { state: "pausing", at, by: principal.id, evidence: "requested: ordinary foreground ingress is closed; the safe boundary has not been reported" } }
           : { ...base, intent: "active" };
         const requestRef: AggregateRef = { kind: "pause-request", id: requestId };
+        // A resumed gate no longer holds a time: its index entry goes inactive in the same operation.
+        const retire = action === "resume" ? retireChange(await this.#runner.get(TIMED_KIND, gateId), gateId) : [];
         return {
           ref: requestRef, creates: true,
-          changes: [{ type: "create", ref: requestRef, body: clean(request) }, found === undefined ? { type: "create", ref, body: clean(next) } : { type: "update", ref, expectedRevision: found.revision, body: clean(next) }],
+          changes: [{ type: "create", ref: requestRef, body: clean(request) }, found === undefined ? { type: "create", ref, body: clean(next) } : { type: "update", ref, expectedRevision: found.revision, body: clean(next) }, ...retire],
           detail: { scope: scope as unknown as JsonObject, action, mode: "pause", seq, operationId: String(commandId), policyRevision: policy as unknown as JsonObject },
         };
       },

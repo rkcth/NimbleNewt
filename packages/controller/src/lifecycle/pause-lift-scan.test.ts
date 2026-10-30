@@ -77,4 +77,54 @@ for (const backend of backends) {
       assert.deepEqual(await pauses.liftDue(owner), [], "and the stale entry is retired, not retried forever");
     } finally { await world.close(); }
   });
+
+  test(`${backend.name}: an index entry follows its gate: resume, takeover and a stopped gate all retire it (card L06b)`, async () => {
+    now = Date.parse("2026-10-22T10:00:00.000Z");
+    const world = await backend.open();
+    try {
+      const gateReads: string[] = [];
+      const storage = new Proxy(world.storage, {
+        get(target, prop, receiver) {
+          const value = Reflect.get(target, prop, receiver);
+          if (typeof value !== "function") return value;
+          if (prop === "getAggregate") return (ref: { kind: string; id: string }) => { if (ref.kind === "pause-gate") gateReads.push(ref.id); return value.call(target, ref); };
+          return value.bind(target);
+        },
+      }) as typeof world.storage;
+      const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
+      const epoch = projects.epoch;
+      const principals = PrincipalService.withEpoch(world.storage, epoch, options);
+      const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+      const project = (await projects.createProject({ commandId: cid("pa"), actor: owner.id, name: "A" })).id;
+      const assignments = AssignmentService.withEpoch(world.storage, epoch, projects, options);
+      const waits = WaitService.withEpoch(world.storage, epoch, assignments, options);
+      const pauses = PauseService.withEpoch(storage, epoch, { waits }, options);
+      const mk = async (): Promise<{ kind: "task"; id: string }> => {
+        const id = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "x" })).id;
+        await projects.transitionTask({ commandId: cid("r"), actor: owner.id, taskId: id, expectedRevision: 1, to: "ready" });
+        const scope = { kind: "task", id } as const;
+        await pauses.pause(owner, { commandId: cid("pz"), scope, reason: "hold" });
+        await pauses.setResumeCondition(owner, { commandId: cid("rc"), scope, at: new Date(now + 3_600_000).toISOString() });
+        return scope;
+      };
+      const entryOf = async (scope: { kind: "task"; id: string }) => (await world.storage.getAggregate({ kind: "pause-timed", id: PauseService.gateIdOf(scope) }))?.body as unknown as { active: boolean };
+      const resumed = await mk(), taken = await mk(), stopped = await mk();
+      assert.equal((await entryOf(resumed)).active, true);
+
+      await pauses.resume(owner, { commandId: cid("rs"), scope: resumed, reason: "back" });
+      assert.equal((await entryOf(resumed)).active, false, "resume retires the entry in the same operation");
+
+      await pauses.dropResumeCondition(owner, taken);
+      assert.equal((await entryOf(taken)).active, false, "a takeover retires the entry");
+
+      await pauses.observe(owner, { commandId: cid("ob"), scope: stopped, state: "stopped", evidence: "stopped" });
+      assert.equal((await entryOf(stopped)).active, true, "an observation alone does not touch the index");
+      now += 3_600_001;
+      assert.deepEqual(await pauses.liftDue(owner), [], "a stopped gate is not lifted");
+      assert.equal((await entryOf(stopped)).active, false, "and its entry is retired after one tick");
+      gateReads.length = 0;
+      assert.deepEqual(await pauses.liftDue(owner), []);
+      assert.deepEqual(gateReads, [], "later ticks read nothing");
+    } finally { await world.close(); }
+  });
 }
