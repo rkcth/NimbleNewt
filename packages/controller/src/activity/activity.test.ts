@@ -45,6 +45,22 @@ for (const backend of backends) {
       // `tail` asks for the last steps only.
       assert.deepEqual((await svc.steps(auditor, task, { tail: true, limit: 2 })).steps.map((s) => s.seq), [2, 3]);
       assert.deepEqual((await svc.steps(auditor, task, { tail: true, limit: 50 })).steps.map((s) => s.seq), [1, 2, 3]);
+      // The project's recent steps across its tasks, newest first; by actor or time; read only; the history right is needed.
+      const other = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "two" })).id;
+      const elsewhere = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "B" })).id;
+      const foreign = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: elsewhere, title: "three" })).id;
+      await svc.record(owner, { commandId: cid("r"), taskId: other, kind: "owner-message", summary: "second task note" });
+      await svc.record(owner, { commandId: cid("r"), taskId: foreign, kind: "owner-message", summary: "another project" });
+      const tl = await svc.timeline(auditor, project, { limit: 100 });
+      assert.ok(tl.steps.some((x) => x.taskId === other && x.summary === "second task note"));
+      assert.ok(tl.steps.every((x) => x.taskId !== foreign), "another project's steps are not in it");
+      assert.ok(tl.steps.every((x, i) => i === 0 || tl.steps[i - 1]!.at >= x.at), "newest first");
+      assert.deepEqual((await svc.timeline(auditor, project, { agent: "no-such", limit: 5 })).steps, []);
+      assert.ok((await svc.timeline(auditor, project, { agent: owner.id })).steps.every((x) => x.actor === owner.id));
+      assert.deepEqual((await svc.timeline(auditor, project, { since: "2999-01-01T00:00:00Z" })).steps, []);
+      assert.equal((await svc.timeline(auditor, project, { limit: 1 })).steps.length, 1);
+      await refuses("not_found", () => svc.timeline(stranger, project));
+      await refuses("invalid_command", () => svc.timeline(auditor, project, { since: "not a time" }));
       // A secret that straddles the cut at 300 characters is redacted whole before the cut, so no half of it is kept; a longer summary is clipped, not refused.
       const straddle = await svc.record(worker, { commandId: cid("r"), taskId: task, kind: "tool-call", summary: `${"x".repeat(285)} key sk-live-ABCDEFGHIJKLMNOPQRSTUVWX1234 and more words after it` });
       const stored = (await svc.steps(auditor, task, { after: straddle.seq - 1, limit: 1 })).steps[0] as { summary: string };

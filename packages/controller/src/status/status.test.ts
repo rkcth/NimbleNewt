@@ -1056,4 +1056,25 @@ for (const backend of backends) {
     assert.equal(await status.ask(reader, { kind: "shutdown" }), undefined);
     assert.equal(await c.rebuild().ask(c.owner, { kind: "shutdown" }), undefined);
   });
+
+  suite("a project's recent steps across its tasks are told newest first, with the task each belongs to; what the caller may not read reads as missing (card U09)", async (c) => {
+    const calls: unknown[] = [];
+    const activity = {
+      steps: async () => ({ steps: [] }), explanations: async () => [],
+      timeline: async (by: Principal, projectId: string, filter: unknown) => {
+        calls.push(filter);
+        if (by.kind !== "owner") throw new DomainError("not_found", "no such project");
+        return { steps: [{ taskId: "tsk-1", seq: 4, kind: "tool-call", summary: "ran the tests", actor: "agent:ann", at: "2026-10-22T10:00:00.000Z" }], scanned: 1, truncated: projectId === c.project };
+      },
+    };
+    const status = c.rebuild({}, { activity: activity as never });
+    const got = (await status.ask(c.owner, { kind: "timeline", projectId: c.project, agent: "agent:ann", limit: 5 }))!.lines.map((l) => l.text);
+    assert.equal(got[0], "2026-10-22T10:00:00.000Z, agent:ann: tool-call - ran the tests");
+    assert.match(got[1]!, /more tasks than were looked at/);
+    assert.deepEqual(calls[0], { limit: 5, agent: "agent:ann" });
+    const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
+    assert.equal(await status.ask(reader, { kind: "timeline", projectId: c.project }), undefined);
+    await assert.rejects(status.ask(c.owner, { kind: "timeline", projectId: c.project, limit: 51 }));
+    assert.equal(await c.rebuild().ask(c.owner, { kind: "timeline", projectId: c.project }), undefined);
+  });
 }

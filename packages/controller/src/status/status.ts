@@ -180,6 +180,7 @@ export type StatusRequest =
   | { readonly kind: "owner_questions"; readonly limit?: number }
   | { readonly kind: "handoff"; readonly taskId: string }
   | { readonly kind: "shutdown" }
+  | { readonly kind: "timeline"; readonly projectId: string; readonly agent?: string; readonly since?: string; readonly limit?: number }
   | { readonly kind: "meetings"; readonly projectId: string; readonly limit?: number }
   | { readonly kind: "agenda"; readonly projectId: string; readonly limit?: number }
   | { readonly kind: "explanations"; readonly taskId: string; readonly seq?: number; readonly limit?: number }
@@ -207,7 +208,7 @@ export interface StatusDeps {
   /** The open agenda of a project (card M03f). Absent: the view is not offered. */
   readonly agenda?: { openAgenda(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { id: string; revision: number; topic: string; question?: string; requestedOutcome?: string; urgency: string; intent: string; state: string; requestedBy: string; timeboxMinutes?: number }[]; next?: string } | undefined> };
   /** The steps of a task's activity record (card C09h). Absent: the view is not offered. */
-  readonly activity?: Pick<ActivityService, "steps" | "explanations">;
+  readonly activity?: Pick<ActivityService, "steps" | "explanations"> & Partial<Pick<ActivityService, "timeline">>;
   /** Questions agents have put to the owner (card U12e). Absent: none are listed. */
   readonly ownerQuestions?: { ownerQuestions(owner: Principal, page?: { afterId?: string; limit?: number }): Promise<{ items: readonly { inquiryId: string; asker: string; question: string; askedAt: string; revision: number; task: { id: string; title: string; projectName: string }; wait?: { summary: string; nextAction: string; deadline?: string } }[]; next?: string }> };
   /** Checks an artifact against its files (card S06). Absent: artifacts are listed as `not_checked`, never as verified. */
@@ -290,6 +291,7 @@ export class StatusService {
       case "noticeboard": { onlyKnown(request, ["kind", "projectId"]); return this.noticeboard(by, request.projectId); }
       case "failed_events": { const { kind: _k, ...rest } = request; return this.failedEvents(by, rest); }
       case "failed_event": { onlyKnown(request, ["kind", "handlingId"]); return this.inspectFailedEvent(by, request.handlingId); }
+      case "timeline": { onlyKnown(request, ["kind", "projectId", "agent", "since", "limit"]); return this.timelineLines(by, request); }
       case "shutdown": { onlyKnown(request, ["kind"]); return this.shutdownLines(by); }
       case "handoff": { onlyKnown(request, ["kind", "taskId"]); return this.handoffLines(by, request.taskId); }
       case "meetings": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.meetingLines(by, request); }
@@ -337,6 +339,21 @@ export class StatusService {
   }
 
   /** The hand-off going on for a task: from whom to whom, why and who asked, how far it is, whether the package is complete (and what is missing), what blocks it and how, when it will be returned if it is temporary. Nothing when the task cannot be read; a plain line when no hand-off is going. */
+  /** A project's recent steps across its tasks, newest first, one line each (card U09). Read only. What the caller may not read reads as missing. */
+  async timelineLines(by: Principal, request: { projectId: string; agent?: string; since?: string; limit?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.activity?.timeline === undefined) return undefined;
+    const limit = request.limit === undefined ? 20 : Number.isSafeInteger(request.limit) && request.limit >= 1 && request.limit <= 50 ? request.limit : invalid("limit", "must be 1 to 50");
+    let got;
+    try { got = await this.#deps.activity.timeline(by, request.projectId, { limit, ...(request.agent === undefined ? {} : { agent: request.agent }), ...(request.since === undefined ? {} : { since: request.since }) }); } catch (error) {
+      if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) return undefined;
+      throw error;
+    }
+    const lines: Line[] = got.steps.map((s) => line(`${s.at}, ${shown(s.actor)}: ${s.kind} - ${shown(s.summary)}`, cite("task", s.taskId)));
+    if (lines.length === 0) lines.push(line("No steps match.", cite("project", request.projectId)));
+    else if (got.truncated) lines.push(line("The project has more tasks than were looked at; this is a part of its recent activity.", cite("project", request.projectId)));
+    return { observedAt: this.#runner.now(), lines };
+  }
+
   async shutdownLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     if (this.#deps.shutdown === undefined || by.kind !== "owner") return undefined;
     let r;

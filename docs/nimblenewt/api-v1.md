@@ -251,6 +251,19 @@ Arguments:
 
 Result: `{ steps: [...], next? }`.
 
+#### `activity.timeline`
+
+A project's recent steps across its tasks, newest first (a summary to start from: each task contributes its latest ten). Read only. Needs the project's history right.
+
+Arguments:
+
+- `projectId`: the project
+- `agent` (optional): only this actor's steps
+- `since` (optional): only steps at or after this time
+- `limit` (optional): at most 100
+
+Result: `{ steps: [{ taskId, seq, kind, summary, actor, at }], scanned, truncated }`.
+
 #### `activity.payload`
 
 The stored content of one step (redacted). Sensitive content needs the owner or a history grant.
@@ -600,7 +613,7 @@ Result: `{ item }`.
 
 #### `status.ask`
 
-A status view from the records, each line citing its records: `task`, `overview`, `noticeboard`, `changes`, `tools`, `delivered` (artifacts are checked against their files when the controller keeps them), `failed_events`, `failed_event`, `handoff` (the hand-off going on for a task: `{ kind: "handoff", taskId }`), `shutdown` (whether the installation could be stopped now, owner only: `{ kind: "shutdown" }`), `meetings` (a project's planned meetings with their rosters: `{ kind: "meetings", projectId, limit? }`), `agenda` (a project's open stand-up topics in meeting order: `{ kind: "agenda", projectId, limit? }`), `explanations` (what agents wrote about their choices on a task: `{ kind: "explanations", taskId, seq?, limit? }`), `activity` (a task's recorded steps in plain lines: `{ kind: "activity", taskId, latest?, after?, limit? }`) and `owner_questions` (owner only: the questions agents have put to the owner, `{ kind: "owner_questions", limit? }`). What the caller may not read reads as missing.
+A status view from the records, each line citing its records: `task`, `overview`, `noticeboard`, `changes`, `tools`, `delivered` (artifacts are checked against their files when the controller keeps them), `failed_events`, `failed_event`, `handoff` (the hand-off going on for a task: `{ kind: "handoff", taskId }`), `timeline` (a project's recent steps across its tasks: `{ kind: "timeline", projectId, agent?, since?, limit? }`), `shutdown` (whether the installation could be stopped now, owner only: `{ kind: "shutdown" }`), `meetings` (a project's planned meetings with their rosters: `{ kind: "meetings", projectId, limit? }`), `agenda` (a project's open stand-up topics in meeting order: `{ kind: "agenda", projectId, limit? }`), `explanations` (what agents wrote about their choices on a task: `{ kind: "explanations", taskId, seq?, limit? }`), `activity` (a task's recorded steps in plain lines: `{ kind: "activity", taskId, latest?, after?, limit? }`) and `owner_questions` (owner only: the questions agents have put to the owner, `{ kind: "owner_questions", limit? }`). What the caller may not read reads as missing.
 
 Arguments:
 

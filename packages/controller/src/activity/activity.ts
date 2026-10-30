@@ -1,6 +1,6 @@
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
-import { onlyKnown, taskId as checkTaskId, text, type TaskBody } from "../domain/model.js";
+import { onlyKnown, projectId as checkProjectId, taskId as checkTaskId, text, type TaskBody } from "../domain/model.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import { allows } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
@@ -56,6 +56,7 @@ const forbiddenWords = ["thinking", "reasoning", "chainOfThought", "thoughts", "
 /** A user-facing statement: text, with credentials removed. Provider thinking is not a statement and is refused by name wherever it could arrive. */
 /** The first `max` characters, never leaving half of a surrogate pair at the end. */
 export const clipText = (value: string, max: number): string => { const cut = value.slice(0, max); return value.length > max && /[\ud800-\udbff]$/.test(cut) ? cut.slice(0, -1) : cut; };
+const TIMELINE_PER_TASK = 10;
 const statement = (value: unknown, field: string, max: number = ACTIVITY_LIMITS.statement): string => redactText(text(value, field, { min: 1, max, multiline: true }));
 const checkRef = (value: unknown, field: string): ManifestRef => {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return invalid(field, "must be { kind, id, version? }");
@@ -232,6 +233,41 @@ export class ActivityService {
       out.push({ ...step!, corrections: (await this.#corrections(tid, seq)).length });
     }
     return { steps: out, ...(seq < head.next ? { next: seq - 1 } : {}) };
+  }
+
+  /**
+   * A project's recent steps across its tasks, newest first (card U09): read only, nothing is recorded, run or sent. Each task contributes its latest steps (at most `perTask`, 10), so this is a summary to start from, not the whole history;
+   * `agent` keeps one actor's steps and `since` keeps those at or after a time. A step in an unavailable range is left out. The caller needs the project's history right (or to be the owner, a host or a service).
+   */
+  async timeline(by: Principal, projectIdValue: string, filter: { agent?: string; since?: string; limit?: number } = {}): Promise<{ steps: { taskId: string; seq: number; kind: ActivityKind; summary: string; actor: string; at: string }[]; scanned: number; truncated: boolean }> {
+    onlyKnown(filter, ["agent", "since", "limit"]);
+    const projectId = checkProjectId(projectIdValue);
+    if (!(by.kind === "owner" || by.kind === "host" || by.kind === "service" || allows(by, "history.read", projectId))) throw new DomainError("not_found", "no such project");
+    const limit = Math.min(Math.max(1, filter.limit ?? 30), ACTIVITY_LIMITS.page);
+    const agent = filter.agent === undefined ? undefined : text(filter.agent, "agent", { min: 1, max: 120 });
+    const sinceMs = filter.since === undefined ? undefined : Date.parse(text(filter.since, "since", { min: 1, max: 40 }));
+    if (sinceMs !== undefined && Number.isNaN(sinceMs)) invalid("since", "must be a time");
+    const found: { taskId: string; seq: number; kind: ActivityKind; summary: string; actor: string; at: string }[] = [];
+    let scanned = 0;
+    let truncated = false;
+    for (let after: string | undefined, pages = 0; ; pages++) {
+      if (pages >= 8) { truncated = true; break; }
+      const chunk = await this.#runner.list(KIND_OF.head, { ...(after === undefined ? {} : { afterId: after }), limit: 500 });
+      for (const rec of chunk) {
+        after = rec.id;
+        const head = rec.body as unknown as HeadBody;
+        if (head.projectId !== projectId) continue;
+        scanned++;
+        for (let seq = Math.max(1, head.next - TIMELINE_PER_TASK); seq < head.next; seq++) {
+          const { step } = await this.#stepView(rec.id, seq, head);
+          if (step === undefined || (agent !== undefined && step.actor !== agent) || (sinceMs !== undefined && Date.parse(step.at) < sinceMs)) continue;
+          found.push({ taskId: rec.id, seq, kind: step.kind, summary: step.summary, actor: step.actor, at: step.at });
+        }
+      }
+      if (chunk.length < 500) break;
+    }
+    found.sort((a, b) => (a.at === b.at ? (a.taskId < b.taskId ? 1 : a.taskId > b.taskId ? -1 : b.seq - a.seq) : a.at < b.at ? 1 : -1));
+    return { steps: found.slice(0, limit), scanned, truncated };
   }
 
   /** The stored content of a step. Sensitive content needs the owner or a history grant; ordinary content is also open to those working the task. */
