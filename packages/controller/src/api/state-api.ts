@@ -27,6 +27,7 @@ import { SecureApi } from "../security/secured.js";
 import type { GrantService } from "../security/grants.js";
 import type { PlacementSettingsService } from "../remote/placement-settings.js";
 import type { ProtectedBranchService } from "../policy/protected-branches.js";
+import type { EventSourceSettingsService } from "../events/source-settings.js";
 import type { PolicyService } from "../policy/policy.js";
 import type { WorkingNoteService } from "../context/notes.js";
 import type { WorkEndService } from "../work-end/index.js";
@@ -110,6 +111,8 @@ export interface StateApiDeps {
   /** When present, the owner can say which hosts may hold local-only data through the API (card H07c). */
   readonly placement?: Pick<PlacementSettingsService, "get" | "set" | "change">;
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set">;
+  /** Which event sources are watched (card H13f). */
+  readonly eventSourceSettings?: Pick<EventSourceSettingsService, "get" | "set" | "change">;
   /** Absent when the controller runs without the agent's ending (card H12n). */
   readonly workEnd?: Pick<WorkEndService, "request" | "get">;
   readonly notes?: Pick<WorkingNoteService, "write" | "revise" | "setVisibility" | "read" | "versions" | "list">;
@@ -225,6 +228,7 @@ export class StateApi {
         ...(this.#deps.grants === undefined ? {} : { grants: this.#deps.grants }),
         ...(this.#deps.placement === undefined ? {} : { placement: this.#deps.placement }),
         ...(this.#deps.branchSettings === undefined ? {} : { branchSettings: this.#deps.branchSettings }),
+        ...(this.#deps.eventSourceSettings === undefined ? {} : { eventSourceSettings: this.#deps.eventSourceSettings }),
         ...(this.#deps.integration === undefined ? {} : { integration: this.#deps.integration }),
         ...(this.#deps.notes === undefined ? {} : { notes: this.#deps.notes }),
         ...(this.#deps.workEnd === undefined ? {} : { workEnd: this.#deps.workEnd }),

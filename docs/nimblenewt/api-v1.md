@@ -88,6 +88,18 @@ Result: `{ item }`: `revision`, `protected` (branch names, or prefixes such as `
 
 Completion: finished when accepted (`completed: true`).
 
+#### `events.sources.get`
+
+Which event sources the controller watches (owner only): every source the host configured with its type and whether the owner left it on, and the list of those turned off.
+
+Arguments:
+
+- none
+
+Result: `{ item }`: `revision`, `disabled` (source IDs), and `sources` (`id`, `type`, `enabled`).
+
+Completion: finished when accepted (`completed: true`).
+
 #### `integration.get`
 
 How finished work lands in a project (owner only): `landing` (`integration-branch`, `main-automatic` or `human-promotes`), who integrates, the checks required, and how many times an author refreshes before the integrator takes over. A project made without a setting gets the installation default, else the approval profile's.
@@ -1366,6 +1378,32 @@ Arguments:
 - `protected` (optional): branch names or prefixes such as `release/*`
 - `landing` (optional): the landing branch, or null to clear it
 - `expectedRevision` (optional): the revision you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `events.sources.set`
+
+The owner names the event sources to leave off (owner only); the list replaces the earlier one and an empty list turns all on. Each must be a source this controller has. A source not listed, including one added later, is watched. A turned-off source is not polled from the next tick and keeps its saved position, so what happened meanwhile is reported when it is turned on again.
+
+Arguments:
+
+- `disabled`: source IDs to leave off, for example `["service-health"]`
+- `expectedRevision` (optional): the revision of the setting you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `events.sources.change`
+
+The owner turns event sources off or on, leaving the others as they are (owner only). `disable` must name sources this controller has; `enable` may also clear an old entry. This is the form the chat uses, so a request that waits to be accepted does only what it says.
+
+Arguments:
+
+- `disable` (optional): source IDs to turn off
+- `enable` (optional): source IDs to turn on
 
 Result: `{ revision }`.
 

@@ -227,10 +227,14 @@ export function watchLoops(watches: { activeOf(by: Principal): Promise<string[]>
  * H13d: polls the external event sources the controller was given, once per tick, and publishes what they found. A source that fails is reported after the rest, so the loop shows as failing and one bad source does not stop the others.
  * Sources are given by the caller; none is built in, so without any there is no loop and nothing is polled.
  */
-export function sourceLoops(sources: Pick<SourceService, "run">, list: readonly EventSource[]): DispatcherLoop[] {
+export function sourceLoops(sources: Pick<SourceService, "run">, list: readonly EventSource[], disabled?: () => Promise<ReadonlySet<string>>): DispatcherLoop[] {
   if (list.length === 0) return [];
   return [{ name: "events.sources", run: async (by) => {
-    const failed = (await sources.run(by, list)).filter((r) => r.error !== undefined);
+    // H13f: the owner's choice is read at every tick; when it cannot be read nothing is polled (the loop shows as failing) instead of polling a source that was turned off.
+    const off = disabled === undefined ? undefined : await disabled();
+    const chosen = off === undefined || off.size === 0 ? list : list.filter((s) => !off.has(s.id));
+    if (chosen.length === 0) return;
+    const failed = (await sources.run(by, chosen)).filter((r) => r.error !== undefined);
     if (failed.length > 0) throw new Error(`${failed.length} event source(s) could not be polled: ${failed.slice(0, 3).map((f) => `${f.source}: ${f.error}`).join("; ")}`);
   } }];
 }

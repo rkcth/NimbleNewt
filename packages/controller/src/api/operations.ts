@@ -33,6 +33,7 @@ import type { AgentMessageService } from "../messaging/index.js";
 import { shownLines } from "../standups/standups.js";
 import type { GrantService } from "../security/grants.js";
 import type { PlacementSettingsService } from "../remote/placement-settings.js";
+import type { EventSourceSettingsService } from "../events/source-settings.js";
 import type { ProtectedBranchService } from "../policy/protected-branches.js";
 import type { PolicyService } from "../policy/policy.js";
 
@@ -88,6 +89,7 @@ export interface Context {
   /** Absent when the controller runs without remote workers (card H07c). */
   readonly placement?: Pick<PlacementSettingsService, "get" | "set" | "change">;
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set">;
+  readonly eventSourceSettings?: Pick<EventSourceSettingsService, "get" | "set" | "change">;
   /** Absent when the controller runs without the agent's ending (card H12n). */
   readonly workEnd?: Pick<WorkEndService, "request" | "get">;
   readonly notes?: Pick<WorkingNoteService, "write" | "revise" | "setVisibility" | "read" | "versions" | "list">;
@@ -205,6 +207,7 @@ const activityOf = (c: Context): NonNullable<Context["activity"]> => c.activity 
 const policyContextOf = (c: Context): NonNullable<Context["policyContext"]> => c.policyContext ?? unavailable("policy context");
 const stopsOf = (c: Context): NonNullable<Context["stops"]> => c.stops ?? unavailable("suspend and stop");
 const integrationOf = (c: Context): NonNullable<Context["integration"]> => c.integration ?? unavailable("integration policy");
+const eventSourceSettingsOf = (c: Context): NonNullable<Context["eventSourceSettings"]> => c.eventSourceSettings ?? unavailable("event source settings");
 const branchSettingsOf = (c: Context): NonNullable<Context["branchSettings"]> => c.branchSettings ?? unavailable("branch settings");
 
 const commandsOf = (c: Context): CommandService => c.commands ?? unavailable("typed commands");
@@ -341,6 +344,13 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, ["project"]); return asJson({ item: await branchSettingsOf(c).get(c.principal, a["project"] as string) }); } },
   { name: "project.branches.set", kind: "command", summary: "The owner says which branches of a project are protected and, optionally, which branch finished work lands on (owner only). The list replaces the earlier one; the controller, not the worker, decides from it whether a push or merge touches a protected branch.", args: { project: "the project ID", "protected?": "branch names or prefixes such as `release/*`", "landing?": "the landing branch, or null to clear it", "expectedRevision?": "the revision you read" }, result: "`{ revision }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["project", "protected", "landing", "expectedRevision"]); const { project, ...rest } = a as { project: string }; return asJson({ ...(await branchSettingsOf(c).set(c.principal, { commandId: need(id), projectId: project, ...rest } as never)) }); } },
+
+  { name: "events.sources.get", kind: "query", summary: "Which event sources the controller watches (owner only): every source the host configured with its type and whether the owner left it on, and the list of those turned off.", args: {}, result: "`{ item }`: `revision`, `disabled` (source IDs), and `sources` (`id`, `type`, `enabled`).", completion: { kind: "completed" },
+    run: async (c, a) => { only(a, []); return asJson({ item: await eventSourceSettingsOf(c).get(c.principal) }); } },
+  { name: "events.sources.set", kind: "command", summary: "The owner names the event sources to leave off (owner only); the list replaces the earlier one and an empty list turns all on. Each must be a source this controller has. A source not listed, including one added later, is watched. A turned-off source is not polled from the next tick and keeps its saved position, so what happened meanwhile is reported when it is turned on again.", args: { disabled: "source IDs to leave off, for example `[\"service-health\"]`", "expectedRevision?": "the revision of the setting you read" }, result: "`{ revision }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["disabled", "expectedRevision"]); return asJson({ ...(await eventSourceSettingsOf(c).set(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
+  { name: "events.sources.change", kind: "command", summary: "The owner turns event sources off or on, leaving the others as they are (owner only). `disable` must name sources this controller has; `enable` may also clear an old entry. This is the form the chat uses, so a request that waits to be accepted does only what it says.", args: { "disable?": "source IDs to turn off", "enable?": "source IDs to turn on" }, result: "`{ revision }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["disable", "enable"]); return asJson({ ...(await eventSourceSettingsOf(c).change(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
 
   { name: "command.run", kind: "command", summary: "Runs a typed command as the caller (card T09b). `/nimblenewt.<operation>` names a state-API operation with its dots written as hyphens, for example `/nimblenewt.grant-list {\"grantee\": \"service:dispatcher\"}`: the arguments are a JSON object after the name, and the operation runs under the caller's own rights, so it refuses what the caller may not do. The command is queued with what it resolved to and runs once; sending the same command ID again answers from the record. A name that is unknown, ambiguous or needs a context is answered in words and nothing runs. Toolbox and agent commands are queued and answered as not runnable yet.", args: { typed: "the command text, starting with `/`", "context?": "`{ agent?, scope?, version? }` for `/agent.` and `/custom.` shortcuts" }, result: "`{ status }`: `done` (with `answer`), `failed` (with `error`), `unsupported`, or, when nothing was queued, `ambiguous`, `needs_context`, `unknown` or `refused` with the reason. `command` names the operation and `queued` the record.", completion: { kind: "completed" },
     run: async (c, a, id) => {
