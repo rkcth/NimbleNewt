@@ -131,6 +131,11 @@ export interface MeetingDecision {
 
 /** Wakes or recovers a suspended or stopped agent (L02 and L03 supply it). Called only after the owner authorized it, once per key. */
 export interface WakeSink { wake(request: { readonly key: string; readonly agent: string; readonly occurrenceId: string; readonly projectId: string }): Promise<void> }
+/**
+ * Warns an agent about the meeting's quick-answer period (owner decision 2026-10-29): a meeting is a context switch for quick answers with the agent's tools and desk, not for long-running work. `ahead` is sent when the agent is
+ * asked to prepare, `begins` when it joins, `ends` when it is returned to its work. Idempotent by `key`; best effort (a failure never changes the attendance).
+ */
+export interface WindowSink { notify(event: { readonly key: string; readonly phase: "ahead" | "begins" | "ends"; readonly agent: string; readonly occurrenceId: string; readonly taskId: string }): Promise<void> }
 /** Tells an absent agent what a meeting decided (a conversation message). Must be idempotent by `key`. */
 export interface NoticeSink { notify(notice: { readonly key: string; readonly agent: string; readonly occurrenceId: string; readonly projectId: string; readonly decisions: readonly string[]; readonly taskIds: readonly string[]; readonly dueAt: string }): Promise<void> }
 
@@ -139,6 +144,8 @@ export interface AttendanceOptions extends RunnerOptions {
   readonly availability: (principalId: string) => Promise<Availability>;
   readonly wake?: WakeSink;
   readonly notices?: NoticeSink;
+  /** Warnings about the no-long-running-work period of a meeting. */
+  readonly window?: WindowSink;
 }
 
 export const ATTENDANCE_LIMITS = {
@@ -231,6 +238,7 @@ export class AttendanceService {
   readonly #availability: AttendanceOptions["availability"];
   readonly #wake: WakeSink | undefined;
   readonly #notices: NoticeSink | undefined;
+  readonly #window: WindowSink | undefined;
 
   private constructor(runner: CommandRunner, deps: AttendanceDeps, options: AttendanceOptions) {
     this.#runner = runner;
@@ -246,6 +254,7 @@ export class AttendanceService {
     this.#availability = options.availability;
     this.#wake = options.wake;
     this.#notices = options.notices;
+    this.#window = options.window;
   }
 
   static withEpoch(storage: ConstructorParameters<typeof CommandRunner>[0], epoch: number, deps: AttendanceDeps, options: AttendanceOptions): AttendanceService {
@@ -616,6 +625,7 @@ export class AttendanceService {
       interrupted: [...b.interrupted.filter((x) => !done.some((d) => d.taskId === x.taskId)), ...done.map((d) => b.interrupted.find((x) => x.taskId === d.taskId && x.pauseRequestId !== undefined) ?? d)],
     }), "preparing");
     const after = (await this.#attendance(occurrenceId, agent))!;
+    if (tasks[0] !== undefined) await this.#warn("ahead", after.id, agent, occurrenceId, tasks[0]);
     const waitingOn = await this.#waiting(after.body);
     return { state: this.#effective(after.body, waitingOn).state, waitingOn: waitingOn.map((x) => ({ taskId: x.taskId, observed: x.observed })) };
   }
@@ -655,7 +665,11 @@ export class AttendanceService {
     const room = await this.#roomFor(occurrenceId);
     const first = room === undefined ? undefined : await this.#attendance(occurrenceId, agent);
     if (room === undefined || first === undefined || !(this.#mayRun(by, room.body.projectId) || this.#isSelf(by, agent, room.body.projectId))) throw forbidden(by, "join that meeting for that agent");
-    if (first.body.state === "present") return { joined: true, state: "present", ...(first.body.meetingTaskId === undefined ? {} : { meetingTaskId: first.body.meetingTaskId }), waitingOn: [], replayed: true };
+    if (first.body.state === "present") {
+      // A join that was cut off before its warning was sent still gets it on the repeat (same key, filed once).
+      if (first.body.meetingTaskId !== undefined) await this.#warn("begins", first.id, agent, occurrenceId, first.body.meetingTaskId);
+      return { joined: true, state: "present", ...(first.body.meetingTaskId === undefined ? {} : { meetingTaskId: first.body.meetingTaskId }), waitingOn: [], replayed: true };
+    }
     if (first.body.leftAt !== undefined) throw new DomainError("invalid_command", `${agent} has left that meeting`, { field: "agent" });
     if (room.body.state !== "open") throw new DomainError("invalid_command", `the room of meeting ${occurrenceId} has ended`, { field: "occurrenceId" });
     const attId = first.id;
@@ -732,6 +746,7 @@ export class AttendanceService {
         return { ref, creates: false, changes, detail: { occurrenceId, agent, meetingTaskId: taskId, bounded: decidedNow.bounded, late } };
       },
     })));
+    await this.#warn("begins", attId, agent, occurrenceId, taskId);
     return { joined: true, state: "present", meetingTaskId: taskId, waitingOn: [], replayed: result.replayed };
   }
 
@@ -1012,6 +1027,12 @@ export class AttendanceService {
     return this.#return(by, occurrenceId, agent);
   }
 
+  /** Sends one warning of the quick-answer period, once per attendance and phase; a failure is dropped (the warning is a courtesy, the controller enforces the limit itself). */
+  async #warn(phase: "ahead" | "begins" | "ends", attId: string, agent: string, occurrenceId: string, taskId: string): Promise<void> {
+    if (this.#window === undefined) return;
+    try { await this.#window.notify({ key: `${attId}:${phase}`, phase, agent, occurrenceId, taskId }); } catch { /* best effort */ }
+  }
+
   async #return(by: Principal, occurrenceId: string, agent: string): Promise<{ taskId: string; outcome: ReturnKind; detail?: string }[]> {
     const attId = attendanceIdOf(occurrenceId, agent);
     const agentId = agentIdOf(agent);
@@ -1069,6 +1090,8 @@ export class AttendanceService {
       else await set("resumed", note, { stillPausedBy });
     }
     if (items.length === 0) await this.#update(by, "returned", attId, (b) => (b.returned ? b : { ...b, returned: true }), "returned");
+    const was = att0?.body as unknown as AttendanceBody | undefined;
+    if (was?.meetingTaskId !== undefined) await this.#warn("ends", attId, agent, occurrenceId, items[0]?.taskId ?? was.meetingTaskId);
     // Waiting returns are listed so the sweep finds them; settled ones leave the list.
     await this.#syncPending(by, attId);
     return out;

@@ -38,7 +38,7 @@ for (const backend of backends) {
     owner: Principal; host: Principal; mgr: Principal; reader: Principal; eve: Principal; asA: Principal; asB: Principal; asC: Principal;
     a: string; b: string; agentA: string; agentB: string; agentC: string; pA: string; pB: string; pC: string; team: string;
     meetings: MeetingService; pauses: PauseService; attendance: AttendanceService; assignments: AssignmentService; projects: ProjectService; histories: HistoryService;
-    other: Map<string, Availability>; invitations: Invitation[]; wakes: Wake[]; notices: Notice[]; failNotice: { next: boolean };
+    other: Map<string, Availability>; invitations: Invitation[]; wakes: Wake[]; notices: Notice[]; failNotice: { next: boolean }; windows: { key: string; phase: string; taskId: string }[];
     storage: ConstructorParameters<typeof CommandRunner>[0]; epoch: number; principals: PrincipalService;
     /** A ready task in project A assigned to the agent. */
     task(agent: string): Promise<string>;
@@ -101,10 +101,12 @@ for (const backend of backends) {
         const wakes: Wake[] = [];
         const notices: Notice[] = [];
         const failNotice = { next: false };
+        const windows: { key: string; phase: string; taskId: string }[] = [];
         const make = (extra: { assignments?: AssignmentService; pauses?: PauseService; charge?: AttendanceDeps["charge"]; onChargeError?: (e: unknown) => void; leadMinutes?: AttendanceDeps["leadMinutes"] } = {}): AttendanceService =>
           AttendanceService.withEpoch(world.storage, epoch, { meetings, pauses: extra.pauses ?? pauses, projects, assignments: extra.assignments ?? assignments, agents, histories, ...(extra.charge === undefined ? {} : { charge: extra.charge }), ...(extra.onChargeError === undefined ? {} : { onChargeError: extra.onChargeError }), ...(extra.leadMinutes === undefined ? {} : { leadMinutes: extra.leadMinutes }) }, {
             availability: pauses.availability, ...options,
             wake: { wake: async (w) => { wakes.push(w); } },
+            window: { notify: async (x) => { windows.push({ key: x.key, phase: x.phase, taskId: x.taskId }); } },
             notices: { notify: async (x) => { if (failNotice.next) { failNotice.next = false; throw new Error("the delivery died"); } notices.push({ ...x }); } },
           });
         const attendance = make();
@@ -134,7 +136,7 @@ for (const backend of backends) {
         const gateIntent = async (taskId: string): Promise<string> => (await pauses.gate(owner, { kind: "task", id: taskId }))?.intent ?? "none";
         const agentGate = async (agentId: string): Promise<string> => (await pauses.gate(owner, { kind: "agent", id: agentId }))?.intent ?? "none";
         await body({
-          agentGate, owner, host, mgr, reader, eve, asA, asB, asC, a, b, agentA, agentB, agentC, pA, pB, pC, team, meetings, pauses, attendance, assignments, projects, histories, other, invitations, wakes, notices, failNotice,
+          agentGate, owner, host, mgr, reader, eve, asA, asB, asC, a, b, agentA, agentB, agentC, pA, pB, pC, team, meetings, pauses, attendance, assignments, projects, histories, other, invitations, wakes, notices, failNotice, windows,
           storage: world.storage, epoch, principals, task, urgent, room, boundary, prep, attend, status, att, occ, gateIntent, make,
         });
       } finally { await world.close(); }
@@ -261,6 +263,24 @@ for (const backend of backends) {
     assert.equal(await c.gateIntent(t1), "pause");
     assert.equal(state(await c.status(id), c.pA).state, "unavailable");
     await refuses("invalid_command", () => c.attendance.join(c.asA, { commandId: cid("jn3"), occurrenceId: id, agent: c.pA }));
+  });
+
+  suite("an agent is warned ahead of a meeting, when its no-long-running-work period begins and when it is over, once each (owner decision 2026-10-29)", async (c) => {
+    const t1 = await c.task(c.agentA);
+    const id = await c.urgent([c.pA, c.pB]);
+    await c.room(id);
+    await c.attendance.prepare(c.owner, { commandId: cid("pr"), occurrenceId: id, agent: c.pA, interrupted: [t1] });
+    assert.deepEqual(c.windows.map((w) => [w.phase, w.taskId]), [["ahead", t1]]);
+    await c.boundary(t1);
+    const joined = await c.attendance.join(c.asA, { commandId: cid("jn"), occurrenceId: id, agent: c.pA });
+    await c.attendance.join(c.asA, { commandId: cid("jn2"), occurrenceId: id, agent: c.pA });
+    assert.deepEqual(c.windows.map((w) => w.phase), ["ahead", "begins", "begins"], "the repeat reports the same key, which the sink files once");
+    assert.equal(c.windows[1]!.taskId, joined.meetingTaskId);
+    assert.equal(c.windows[1]!.key, c.windows[2]!.key);
+    await c.attendance.leave(c.asA, { commandId: cid("lv"), occurrenceId: id, agent: c.pA });
+    await c.attendance.returnToWork(c.owner, { commandId: cid("rt"), occurrenceId: id, agent: c.pA });
+    const ends = c.windows.filter((w) => w.phase === "ends");
+    assert.ok(ends.length >= 1 && ends.every((e) => e.key === ends[0]!.key && e.taskId === t1), JSON.stringify(c.windows));
   });
 
   suite("the status shows each invited agent as preparing, present, unavailable or blocked, and a blocked agent is one that cannot safely interrupt", async (c) => {
