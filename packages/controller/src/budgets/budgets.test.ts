@@ -5,6 +5,7 @@ import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Grant, type Principal } from "../security/index.js";
 import { BUDGET_ENFORCEMENT, BudgetService } from "./index.js";
+import { POLICY_RAISE_CAP_MICROS, POLICY_RAISE_CAP_MS } from "./budgets.js";
 
 after(stopServer);
 
@@ -156,6 +157,11 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.svc.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, costMicros: 1, decisionId: "d", agreedBy: "the agent said so" }));
     await refuses("invalid_command", () => c.svc.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, costMicros: 1, decisionId: "d", agreedBy: "owner:agreed", extra: 1 } as never));
     assert.equal((await rep(c, c.root)).available.costMicros, before + 10, "nothing refused changed the budget");
+    // A raise carried out by policy is capped; one the owner agreed to is not (beyond the usual limits).
+    await refuses("invalid_command", () => c.svc.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, costMicros: POLICY_RAISE_CAP_MICROS + 1, decisionId: "d", agreedBy: "policy:spend" }));
+    await refuses("invalid_command", () => c.svc.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, computeMs: POLICY_RAISE_CAP_MS + 1, decisionId: "d", agreedBy: "policy:spend" }));
+    await c.svc.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, costMicros: POLICY_RAISE_CAP_MICROS, computeMs: POLICY_RAISE_CAP_MS, decisionId: "d", agreedBy: "policy:spend" });
+    await c.svc.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, costMicros: POLICY_RAISE_CAP_MICROS + 1, decisionId: "d", agreedBy: "owner:agreed" });
   });
 
   suite("uncertain and in-flight amounts are held and shown until reconciled", async (c) => {

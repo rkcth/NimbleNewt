@@ -4,7 +4,7 @@ import { derivedId } from "../domain/ids.js";
 import { onlyKnown, revision as checkRevision, text, type View } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
-import { allows, covers, mayHold } from "./access.js";
+import { ACTIONS, allows, covers, mayHold } from "./access.js";
 import { scopedCommandId } from "./credentials.js";
 import type { NoActor, Principal, Restriction } from "./principals.js";
 import { redactText } from "./redact.js";
@@ -147,6 +147,8 @@ const PRINCIPAL = /^(?:owner|agent|host|client|service):[a-z0-9][a-z0-9-]{0,39}$
 const GRANT_ID = /^grt-[a-z2-7]{20}$/;
 const RESTRICTION_ID = /^rst-[a-z2-7]{20}$/;
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+/** The longest an agreed (meeting-decided) grant may last. Provisional; the owner may change it. */
+export const AGREED_GRANT_MAX_MS = 30 * 24 * 3600 * 1000;
 const KIND = /^[a-z][a-z0-9-]{0,39}$/;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 
@@ -221,7 +223,21 @@ export class GrantService {
     if (typeof command.decisionId !== "string" || command.decisionId.length < 1 || command.decisionId.length > 120) invalid("decisionId", "must name the decision");
     if (typeof command.agreedBy !== "string" || !/^(owner:[a-z0-9-]{1,60}|policy:[a-z0-9.-]{1,60})$/.test(command.agreedBy)) invalid("agreedBy", "must be the owner or the policy that let it through");
     if (command.project === "*") invalid("project", "an agreed grant is for one project, not all of them");
-    if (checkTime(command.expiresAt, "expiresAt") === undefined) invalid("expiresAt", "an agreed grant ends: give the time it expires");
+    const expires = checkTime(command.expiresAt, "expiresAt");
+    if (expires === undefined) invalid("expiresAt", "an agreed grant ends: give the time it expires");
+    // Only one exact, named action: never `*`, a prefix like `task.*`, or an approval grant (waiving a question stays the owner's, as in `derive`). A decision may not hand out the power to carry out more decisions.
+    const action = command.action;
+    if (typeof action !== "string") invalid("action", "must be an action name");
+    if (action === "principal.manage" || action === "budget.manage") invalid("action", `${action} cannot be granted by a decision: the power to carry out decisions is not handed out by one`);
+    if (action.startsWith("approve.") || action.startsWith("tool.")) invalid("action", "an approval grant is the owner's to give, not a decision's");
+    if (!(ACTIONS as readonly string[]).includes(action)) invalid("action", "must be one exact action name (not * or a prefix such as task.*)");
+    const now = this.#runner.now();
+    if (expires! <= now) invalid("expiresAt", "is already past");
+    if (Date.parse(expires!) > Date.parse(now) + AGREED_GRANT_MAX_MS) invalid("expiresAt", "an agreed grant lasts at most 30 days");
+    const grantee = command.grantee;
+    if (typeof grantee !== "string" || !grantee.startsWith("agent:")) invalid("grantee", "an agreed grant is for an agent (not a host, service, client or the owner)");
+    const who = await this.#runner.get("principal", grantee);
+    if (who === undefined || (who.body as { kind?: string; state?: string }).kind !== "agent" || (who.body as { state?: string }).state !== "active") invalid("grantee", "must be an existing, active agent");
     const { decisionId, agreedBy, ...rest } = command;
     const basis = `meeting decision ${decisionId}, allowed by ${agreedBy}: ${String(rest.basis ?? "").slice(0, Math.max(0, GRANT_LIMITS.basis - decisionId.length - agreedBy.length - 40))}`;
     return this.#grant(by, { ...rest, basis, source: "direct" } as GrantInput);

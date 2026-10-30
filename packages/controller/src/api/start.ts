@@ -358,7 +358,7 @@ export async function startController(options: StartOptions): Promise<Controller
       shareable: shareableCite(storage),
       // A meeting may retitle or reword a task; the change is made by the project service as the agent that holds the right, and only once (card M02c).
       appliers: { "task.update": taskUpdateApplier(projects), "budget.raise": budgetRaiseApplier(budgets, meetingController, projects), "grant.add": grantApplier(grants, meetingController) },
-      // Changes that widen rights or spend (a budget raise is registered; a grant is not yet) are carried out without the owner only when the approval policy lets their class through: the profile, with a specific setting overriding it (owner decision 2026-10-29).
+      // Changes that widen rights or spend (a budget raise and a grant are both registered) are carried out without the owner only when the approval policy lets their class through: the profile, with a specific setting overriding it (owner decision 2026-10-29).
       widening: async (cls, projectId) => {
         const cell = await PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }).classMode(projectId, cls);
         // The engine keeps a change of rights a decision for the owner whatever the profile says, so a vote widens rights without the owner only where the owner set that cell by hand (a specific setting overrides the profile).

@@ -880,12 +880,13 @@ export class MeetingRecordService {
         const target = await this.#runner.get(change.target.kind, change.target.id);
         if (target === undefined) { await refuse("missing", `${change.target.kind} ${change.target.id} no longer exists`); continue; }
         if (target.revision !== change.expectedRevision) { await refuse("conflict", `${change.target.kind} ${change.target.id} is at revision ${target.revision}, not ${change.expectedRevision} as proposed`); continue; }
-        await save({ ...change, state: "applying" });
+        // Who allowed it is fixed now and kept: a replay after a crash uses it (the grant basis is part of the command digest), and a later owner decline does not cancel a change already started.
+        await save({ ...change, state: "applying", agreedBy: d.ownerResponse === "agreed" ? "owner:agreed" : `policy:${applier.widens ?? "none"}` });
       }
       const applier = this.#options.appliers?.[change.kind];
       if (applier === undefined) { await refuse("failed", `no applier is registered for ${change.kind}`); continue; }
       try {
-        const done = await applier.apply({ commandId: `mtg:${decisionId}:${change.id}`, actor: by.id, target: change.target, expectedRevision: change.expectedRevision, patch: change.patch, agreedBy: d.ownerResponse === "agreed" ? "owner:agreed" : `policy:${applier.widens ?? "none"}` });
+        const done = await applier.apply({ commandId: `mtg:${decisionId}:${change.id}`, actor: by.id, target: change.target, expectedRevision: change.expectedRevision, patch: change.patch, agreedBy: change.agreedBy ?? (d.ownerResponse === "agreed" ? "owner:agreed" : `policy:${applier.widens ?? "none"}`) });
         await save({ ...change, state: "applied", ...(done.revision === undefined ? {} : { appliedRevision: done.revision }) });
       } catch (error) {
         if (error instanceof DomainError && error.code === "stale_revision") await refuse("conflict", `${change.target.kind} ${change.target.id} changed meanwhile: ${error.message}`);

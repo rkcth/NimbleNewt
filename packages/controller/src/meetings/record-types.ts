@@ -150,6 +150,8 @@ export interface ChangeRecord extends ProposedChange {
   readonly code?: NotAppliedCode;
   readonly reason?: string;
   readonly appliedRevision?: number;
+  /** Who allowed the change, recorded when it enters `applying` so a replay uses the same basis. */
+  readonly agreedBy?: string;
   readonly at?: string;
 }
 

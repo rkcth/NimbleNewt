@@ -62,13 +62,14 @@ for (const backend of backends) {
   suite("an agreed grant is carried out by the controller as one direct, ending grant for one project, with the decision and who allowed it in its basis; nothing wider and nobody else may use it (card M02e)", async ({ grants, owner, a, b, ta, tb, api, agent, at }) => {
     const ann = await agent("ann");
     const controller = { id: "service:meeting-records", kind: "service", name: "meeting-records", grants: [] } as unknown as Principal;
-    const end = "2099-01-01T00:00:00.000Z";
+    const end = SOON;
     const base = { commandId: cid("ag"), grantee: "agent:ann", action: "task.read", project: a, expiresAt: end, basis: "to read the plan", decisionId: "mtg:dec-1:chg-1", agreedBy: "owner:agreed" };
     const made = await grants.grantAgreed(controller, base);
     assert.equal((await grants.grantAgreed(controller, base)).replayed, true, "a repeat after a crash grants once");
     const now = await at(ann, T);
-    assert.equal((await api(now).getTask(ta))!.id, ta, "it covers what it names");
-    await refuses("forbidden", () => api(now).getTask(tb), undefined);
+    // Judged at the test clock (the secured API reads the wall clock, which is past this fixed time).
+    assert.equal(allows(now, "task.read", a, { now: T }), true, "it covers what it names");
+    assert.equal(allows(now, "task.read", b, { now: T }), false);
     const record = (await grants.list(owner, { grantee: "agent:ann" })).items.find((g) => g.id === made.id);
     assert.match(String(record?.basis), /meeting decision mtg:dec-1:chg-1, allowed by owner:agreed: to read the plan/);
     assert.equal(record?.source, "direct");
@@ -77,6 +78,15 @@ for (const backend of backends) {
     await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), expiresAt: undefined } as never));
     await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), agreedBy: "the agent said so" }));
     await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), source: "standing" } as never));
+    for (const action of ["*", "task.*", "approve.effect", "approve.*", "tool.run", "principal.manage", "budget.manage", "task.nonsense"]) {
+      await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), action }), (e) => assert.equal(e.field, "action"));
+    }
+    await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), expiresAt: "2026-10-21T09:00:00.000Z" }), (e) => assert.match(e.message, /past/));
+    await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), expiresAt: "2026-12-31T00:00:00.000Z" }), (e) => assert.match(e.message, /30 days/));
+    await grants.grantAgreed(controller, { ...base, commandId: cid("ag"), expiresAt: "2026-11-20T10:00:00.000Z" });
+    for (const grantee of ["host:h1", "service:s1", "client:c1", "owner:rob", "agent:nobody"]) {
+      await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), grantee }));
+    }
     void b;
   });
 
