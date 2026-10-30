@@ -4,7 +4,7 @@ import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Grant } from "../security/index.js";
-import { ActivityService } from "./index.js";
+import { ACTIVITY_LIMITS, ActivityService } from "./index.js";
 
 after(stopServer);
 
@@ -79,6 +79,12 @@ for (const backend of backends) {
       assert.equal((await svc.timeline(auditor, project, { limit: 1 })).steps.length, 1);
       await refuses("not_found", () => svc.timeline(stranger, project));
       await refuses("invalid_command", () => svc.timeline(auditor, project, { since: "not a time" }));
+      // Retrospective explanations asked for by a reader have a lower cap of their own, so they cannot use up the room for the worker's own.
+      const capped = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "capped" })).id;
+      const first = await svc.record(worker, { commandId: cid("r"), taskId: capped, kind: "tool-call", summary: "a step" });
+      for (let i = 0; i < ACTIVITY_LIMITS.indexedLater; i++) await svc.explainLater(auditor, { commandId: cid("l"), taskId: capped, seq: first.seq });
+      await refuses("invalid_command", () => svc.explainLater(auditor, { commandId: cid("l"), taskId: capped, seq: first.seq }));
+      await svc.explain(worker, { commandId: cid("x"), taskId: capped, seq: first.seq, choice: "keep going", alternatives: [{ option: "stop", whyNot: "not needed" }], evidence: [{ statement: "the step ran" }], uncertainty: "none" });
       // A secret that straddles the cut at 300 characters is redacted whole before the cut, so no half of it is kept; a longer summary is clipped, not refused.
       const straddle = await svc.record(worker, { commandId: cid("r"), taskId: task, kind: "tool-call", summary: `${"x".repeat(285)} key sk-live-ABCDEFGHIJKLMNOPQRSTUVWX1234 and more words after it` });
       const stored = (await svc.steps(auditor, task, { after: straddle.seq - 1, limit: 1 })).steps[0] as { summary: string };

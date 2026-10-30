@@ -120,7 +120,9 @@ export class FallbackService {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner sets a spending budget`);
     onlyKnown(command, ["commandId", "taskId", "maxCostMicros", "maxTokens", "maxFailedAttempts"]);
     const taskId = checkTaskId(command.taskId);
-    const body: BudgetBody = { ...(command.maxFailedAttempts === undefined ? {} : { maxFailedAttempts: count(command.maxFailedAttempts, "maxFailedAttempts") }), ...(command.maxCostMicros === undefined ? {} : { maxCostMicros: count(command.maxCostMicros, "maxCostMicros") }), ...(command.maxTokens === undefined ? {} : { maxTokens: count(command.maxTokens, "maxTokens") }), setBy: owner.id };
+    // A field left out keeps what the owner set before (raising one limit does not clear the others).
+    const previous = (await this.#runner.get("model-budget", taskId))?.body as unknown as BudgetBody | undefined;
+    const body: BudgetBody = { ...(previous?.maxCostMicros === undefined ? {} : { maxCostMicros: previous.maxCostMicros }), ...(previous?.maxTokens === undefined ? {} : { maxTokens: previous.maxTokens }), ...(previous?.maxFailedAttempts === undefined ? {} : { maxFailedAttempts: previous.maxFailedAttempts }), ...(command.maxFailedAttempts === undefined ? {} : { maxFailedAttempts: count(command.maxFailedAttempts, "maxFailedAttempts") }), ...(command.maxCostMicros === undefined ? {} : { maxCostMicros: count(command.maxCostMicros, "maxCostMicros") }), ...(command.maxTokens === undefined ? {} : { maxTokens: count(command.maxTokens, "maxTokens") }), setBy: owner.id };
     const ref: AggregateRef = { kind: "model-budget", id: taskId };
     await this.#runner.command("model.budget", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
       payload: { taskId, budget: body as unknown as JsonObject },
@@ -130,6 +132,9 @@ export class FallbackService {
       },
     }));
   }
+
+  /** The limits the owner set for a task, or undefined. */
+  async budget(taskId: string): Promise<BudgetBody | undefined> { return (await this.#runner.get("model-budget", checkTaskId(taskId)))?.body as unknown as BudgetBody | undefined; }
 
   /** What a task has spent: the sum of its calls' entries (each call writes only its own, so calls of one task never collide). */
   async spend(taskId: string): Promise<SpendBody> {

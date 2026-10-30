@@ -31,7 +31,7 @@ export interface ActivityStepBody {
   readonly payload: { readonly state: "stored"; readonly id: string; readonly chars: number; readonly redactions: number; readonly sensitive: boolean } | { readonly state: "none" } | { readonly state: "missing"; readonly reason: string };
 }
 /** What a task has been explained and corrected by, so a reader goes straight to them instead of reading every explanation and correction in the installation (card C09i). */
-interface IndexBody { readonly explanations: readonly string[]; readonly corrections: readonly { readonly seq: number; readonly id: string }[] }
+interface IndexBody { readonly explanations: readonly string[]; /** Retrospective explanations (asked for by readers), kept apart and capped lower so they cannot fill the room the worker's own need. */ readonly later?: readonly string[]; readonly corrections: readonly { readonly seq: number; readonly id: string }[] }
 interface HeadBody { readonly next: number; readonly projectId: string; /** When the latest step was recorded (absent on heads written before the timeline). */ readonly lastAt?: string; readonly unavailable: readonly { readonly from: number; readonly to: number; readonly reason: string; readonly by: string; readonly at: string }[] }
 interface PayloadBody { readonly taskId: string; readonly projectId: string; readonly seq: number; readonly sensitive: boolean; readonly text: string; readonly redactions: number }
 export interface ExplanationBody {
@@ -48,7 +48,7 @@ export interface ExplanationBody {
 }
 export interface CorrectionBody { readonly taskId: string; readonly projectId: string; readonly seq: number; readonly note: string; readonly by: string; readonly at: string; readonly stepDigest: string }
 
-export const ACTIVITY_LIMITS = { indexed: 2000, summary: 300, summaryInput: 4000, payload: 8000, refs: 100, alternatives: 10, evidence: 10, statement: 500, page: 100, ranges: 200 } as const;
+export const ACTIVITY_LIMITS = { indexed: 2000, indexedLater: 200, summary: 300, summaryInput: 4000, payload: 8000, refs: 100, alternatives: 10, evidence: 10, statement: 500, page: 100, ranges: 200 } as const;
 const KIND_OF = { step: "activity-step", head: "activity-head", payload: "activity-payload", explanation: "activity-explanation", correction: "activity-correction", index: "activity-index" } as const;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const REF = /^[a-z][a-z0-9-]{0,30}$/;
@@ -355,17 +355,19 @@ export class ActivityService {
     const ref: AggregateRef = { kind: KIND_OF.explanation, id };
     const r = await this.#runner.command("activity.explain", { commandId: scopedCommandId(by.id, commandId), actor: by.id }, async () => ({
       payload: { taskId: body.taskId, mode: body.mode, ...(body.seq === undefined ? {} : { seq: body.seq }), choice: body.choice },
-      build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }, await this.#indexChange(body.taskId, (x) => ({ ...x, explanations: [...x.explanations, id] }), "explanations")] as never, detail: { taskId: body.taskId, mode: body.mode }, contention: async () => new DomainError("stale_revision", "another explanation or correction was recorded at the same moment") }),
+      build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }, await this.#indexChange(body.taskId, (x) => (body.mode === "retrospective" ? { ...x, later: [...(x.later ?? []), id] } : { ...x, explanations: [...x.explanations, id] }), body.mode === "retrospective" ? "later" : "explanations")] as never, detail: { taskId: body.taskId, mode: body.mode }, contention: async () => new DomainError("stale_revision", "another explanation or correction was recorded at the same moment") }),
     }));
     return { id: r.id, replayed: r.replayed };
   }
 
   /** The change that adds to a task's index (created with the first entry); refused past the limit so one task cannot grow it without bound. */
-  async #indexChange(taskId: string, add: (x: IndexBody) => IndexBody, what: "explanations" | "corrections"): Promise<{ type: "create" | "update"; ref: AggregateRef; body: JsonObject; expectedRevision?: number }> {
+  async #indexChange(taskId: string, add: (x: IndexBody) => IndexBody, what: "explanations" | "later" | "corrections"): Promise<{ type: "create" | "update"; ref: AggregateRef; body: JsonObject; expectedRevision?: number }> {
     const ref: AggregateRef = { kind: KIND_OF.index, id: taskId };
     const found = await this.#runner.get(ref.kind, ref.id);
     const current = (found?.body as unknown as IndexBody | undefined) ?? { explanations: [], corrections: [] };
-    if (current[what].length >= ACTIVITY_LIMITS.indexed) invalid(what, `this task already has ${ACTIVITY_LIMITS.indexed} ${what}`);
+    const have = current[what]?.length ?? 0;
+    const cap = what === "later" ? ACTIVITY_LIMITS.indexedLater : ACTIVITY_LIMITS.indexed;
+    if (have >= cap) invalid(what, `this task already has ${cap} ${what === "later" ? "later explanations" : what}`);
     const next = clean(add(current));
     return found === undefined ? { type: "create", ref, body: next } : { type: "update", ref, expectedRevision: found.revision, body: next };
   }
@@ -373,7 +375,8 @@ export class ActivityService {
 
   async #allExplanations(taskId: string): Promise<ExplanationBody[]> {
     const out: ExplanationBody[] = [];
-    for (const id of (await this.#indexOf(taskId)).explanations) { const found = await this.#runner.get(KIND_OF.explanation, id); if (found !== undefined) out.push(found.body as unknown as ExplanationBody); }
+    const index = await this.#indexOf(taskId);
+    for (const id of [...index.explanations, ...(index.later ?? [])]) { const found = await this.#runner.get(KIND_OF.explanation, id); if (found !== undefined) out.push(found.body as unknown as ExplanationBody); }
     return out.sort((a, b) => a.at.localeCompare(b.at));
   }
   async #explanationsFor(taskId: string, seq: number): Promise<ExplanationBody[]> { return (await this.#allExplanations(taskId)).filter((e) => e.seq === seq && e.mode === "contemporaneous"); }

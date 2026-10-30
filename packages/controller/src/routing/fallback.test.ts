@@ -93,6 +93,10 @@ for (const backend of backends) {
     // The owner raises it; only the owner can.
     await refuses("forbidden", () => c.fb.setBudget(c.host, { commandId: cid("bud"), taskId: c.task, maxFailedAttempts: 10 }));
     await c.fb.setBudget(c.owner, { commandId: cid("bud"), taskId: c.task, maxFailedAttempts: 10 });
+    // Raising one limit leaves the others as they were.
+    await c.fb.setBudget(c.owner, { commandId: cid("bud"), taskId: c.task, maxCostMicros: 5000 });
+    await c.fb.setBudget(c.owner, { commandId: cid("bud"), taskId: c.task, maxFailedAttempts: 11 });
+    assert.deepEqual(Object.entries((await c.fb.budget(c.task))!).filter(([k]) => k !== "setBy").sort(), [["maxCostMicros", 5000], ["maxFailedAttempts", 11]]);
     route(await c.fb.begin(c.host, { commandId: cid("b"), taskId: c.task, request }));
   });
 

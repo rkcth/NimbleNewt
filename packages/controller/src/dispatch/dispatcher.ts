@@ -1196,9 +1196,9 @@ export class DispatcherService {
     const assignment = await this.#deps.assignments.getAssignment(b.taskId);
     if (assignment === undefined || assignment.state !== "assigned" || assignment.generation !== b.generation || assignment.activeAttemptId !== undefined || assignment.owner === undefined) return {};
     // A call of the ended attempt whose outcome is not known could be repeated by a new attempt (it would ask for the same effect under new IDs): no replacement is admitted until a person has settled what happened.
-    const unsure = (await this.#path.list(b.attemptId)).filter((o) => o.state === "uncertain");
+    const unsure = (await this.#path.list(b.attemptId)).filter((o) => o.state === "uncertain" || o.state === "in-progress");
     if (unsure.length > 0) {
-      const opened = await this.#deps.blockers.openBlocker({ commandId: `dpa-blk:uncertain:${b.attemptId}`, actor: DISPATCHER_ACTOR, type: "dispatch_blocked", subject: { kind: "task", id: b.taskId }, summary: `Attempt ${b.attemptId} ended with ${unsure.length} call(s) whose outcome is not known (${unsure.slice(0, 5).map((o) => o.callId).join(", ")}). A new attempt could repeat them, so none was started; settle what happened to them first.`.slice(0, 500), resolver: "owner" });
+      const opened = await this.#deps.blockers.openBlocker({ commandId: `dpa-blk:uncertain:${b.attemptId}`, actor: DISPATCHER_ACTOR, type: "dispatch_blocked", subject: { kind: "task", id: b.taskId }, summary: `Attempt ${b.attemptId} ended with ${unsure.length} call(s) whose outcome is not known or not settled (${unsure.slice(0, 5).map((o) => o.callId).join(", ")}). A new attempt could repeat them, so none was started. Find out what happened to them; then assign the task again (nothing starts a new attempt by itself).`.slice(0, 500), resolver: "owner" });
       await this.#deps.notifications?.emitFromController({ commandId: `dpa-ntf:${opened.id}`, kind: "blocker", ref: { kind: "blocker", id: opened.id }, projectId: b.projectId }).catch(() => undefined);
       return {};
     }
