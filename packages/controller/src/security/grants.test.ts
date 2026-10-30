@@ -101,7 +101,7 @@ for (const backend of backends) {
     void b;
   });
 
-  suite("an agreed grant of task.update or task.transition is allowed only for exactly one task and covers only that task (card M02e)", async ({ grants, a, ta, ta2, agent, at }) => {
+  suite("an agreed grant of task.update or task.transition is allowed only for exactly one task and covers only that task (card M02e)", async ({ grants, a, ta, ta2, tb, agent, at }) => {
     const ann = await agent("ann");
     const controller = { id: "service:meeting-records", kind: "service", name: "meeting-records", grants: [] } as unknown as Principal;
     const base = { grantee: "agent:ann", project: a, expiresAt: SOON, basis: "to edit one task", decisionId: "mtg:dec-1:chg-1", agreedBy: "owner:agreed" };
@@ -111,6 +111,9 @@ for (const backend of backends) {
       await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), action, resource: { kind: "task", id: ta, extra: 1 } } as never));
     }
     await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), action: "principal.manage", resource: { kind: "task", id: ta } }), (e) => assert.equal(e.field, "action"));
+    // The named task must belong to the grant's project (tb is project b's task; base.project is a), and must exist.
+    await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), action: "task.update", resource: { kind: "task", id: tb } }), (e) => assert.match(e.message, /must be a task of the grant's project/));
+    await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), action: "task.read", resource: { kind: "task", id: "tsk-doesnotexist" } }));
     await grants.grantAgreed(controller, { ...base, commandId: cid("ag"), action: "task.update", resource: { kind: "task", id: ta } });
     const now = await at(ann, T);
     assert.equal(allows(now, "task.update", a, { now: T, resource: { kind: "task", id: ta } }), true);
