@@ -74,18 +74,18 @@ for (const backend of backends) {
   });
 
   suite("the policy's answer for a class of action in a project follows the profile and the project's environment, and a specific setting overrides the profile (card M02d)", async (c) => {
-    assert.equal(await c.policy.classMode(c.a, "spend"), "owner", "a new installation is strict");
-    assert.equal(await c.policy.classMode(c.a, "access-change"), "owner");
+    assert.deepEqual(await c.policy.classMode(c.a, "spend"), { mode: "owner", explicit: false }, "a new installation is strict");
+    assert.equal((await c.policy.classMode(c.a, "access-change")).mode, "owner");
     await c.policy.set(c.owner, { commandId: cid("p"), scope: "installation", profile: "autonomous" });
-    assert.equal(await c.policy.classMode(c.a, "spend"), "allow", "autonomous lets spend through in development");
-    assert.equal(await c.policy.classMode(c.a, "access-change"), "owner", "but rights are still the owner's");
+    assert.deepEqual(await c.policy.classMode(c.a, "spend"), { mode: "allow", explicit: false }, "autonomous lets spend through in development");
+    assert.equal((await c.policy.classMode(c.a, "access-change")).mode, "owner", "but rights are still the owner's");
     // A specific setting overrides the profile, in either direction.
     await c.policy.set(c.owner, { commandId: cid("p"), scope: "installation", expectedRevision: 1, overrides: { "spend.free": "owner", "access-change.free": "allow" } });
-    assert.equal(await c.policy.classMode(c.a, "spend"), "owner");
-    assert.equal(await c.policy.classMode(c.a, "access-change"), "allow");
+    assert.deepEqual(await c.policy.classMode(c.a, "spend"), { mode: "owner", explicit: true });
+    assert.deepEqual(await c.policy.classMode(c.a, "access-change"), { mode: "allow", explicit: true });
     // The project's environment picks the tier: a customer-live project reads the live cell.
     await c.policy.set(c.owner, { commandId: cid("p"), scope: c.a, environment: "customer-live" });
-    assert.equal(await c.policy.classMode(c.a, "access-change"), "owner");
+    assert.equal((await c.policy.classMode(c.a, "access-change")).mode, "owner");
   });
 
   suite("a project can tighten or loosen cells, but not make loose what the installation locked; the lock also holds against a looser setting stored earlier", async (c) => {

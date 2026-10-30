@@ -90,7 +90,12 @@ export function attendanceLoops(attendance: Pick<AttendanceService, "sweepReturn
 
 /** M03d: the stand-up's decisions on improvements go back to the agents that proposed them, project by project; one that cannot be filed yet stays pending. */
 export function improvementOutcomeLoops(improvements: { deliverOutcomes(by: Principal, projectId: string): Promise<unknown> }, projects: () => Promise<readonly string[]>): DispatcherLoop[] {
-  return [{ name: "improvements.outcomes", run: async (by) => { for (const projectId of await projects()) await improvements.deliverOutcomes(by, projectId); } }];
+  return [{ name: "improvements.outcomes", run: async (by) => {
+    // One project's trouble does not hold up the others; the failures are named after the rest.
+    const failed: string[] = [];
+    for (const projectId of await projects()) { try { await improvements.deliverOutcomes(by, projectId); } catch (error) { failed.push(`${projectId}: ${error instanceof Error ? error.message : String(error)}`); } }
+    if (failed.length > 0) throw new Error(`improvement outcomes could not be delivered for ${failed.length} project(s): ${failed.slice(0, 3).join("; ")}`);
+  } }];
 }
 
 /** M03: for each project, the preparation of every planned occurrence (briefs, notices) and the delivery of agenda outcomes to the conversations they came from. */

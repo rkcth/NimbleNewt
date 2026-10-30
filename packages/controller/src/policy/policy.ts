@@ -296,12 +296,13 @@ export class PolicyService {
    * What the approval policy says to a class of action in a project right now (card M02d): the installation's profile, with the project's environment and any specific setting that overrides the profile. Used by the controller
    * to decide whether something an agent group decided (a meeting vote) may be carried out at once or waits for the owner; it is not a tool call and executes nothing.
    */
-  async classMode(projectId: string, cls: ActionClass): Promise<Mode> {
+  async classMode(projectId: string, cls: ActionClass): Promise<{ readonly mode: Mode; /** Whether the owner set this cell by hand (the installation's or the project's own setting) instead of it coming from the profile. */ readonly explicit: boolean }> {
     const project = checkProjectId(projectId);
     const inst = await this.#installationRecord();
     const proj = (await this.#runner.get("approval-policy", project))?.body as unknown as PolicyBody | undefined;
     const tier = tierOf(proj?.environment ?? "development");
-    return this.#view(inst.body, proj, await this.#reserved(project)).cells[`${cls}.${tier}` as CellKey];
+    const key = `${cls}.${tier}` as CellKey;
+    return { mode: this.#view(inst.body, proj, await this.#reserved(project)).cells[key], explicit: inst.body.overrides[key] !== undefined || proj?.overrides[key] !== undefined };
   }
 
   /**

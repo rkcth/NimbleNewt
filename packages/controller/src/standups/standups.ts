@@ -122,6 +122,8 @@ export interface StandupOptions extends RunnerOptions {
   readonly availability: (principalId: string) => Promise<Availability>;
   readonly notices?: PreparationSink;
   readonly outcomes?: OutcomeSink;
+  /** Told when a brief that carries a decision on an improvement proposal has been stored, so the proposal can be marked told (it was told in the brief, having no task to file a notice on). Best effort. */
+  readonly onBriefed?: (by: Principal, itemId: string, revision: number) => Promise<unknown>;
   /** The configured P/PC allocation (floor, target, ceiling in percent), for the balance review (see `allocationFrom`). */
   readonly allocation?: () => Promise<Allocation | undefined>;
   /** Actual use on the allocation basis (worker-slot time) when something measures it; absent: the review says so and falls back to counting tasks. */
@@ -308,7 +310,15 @@ export class StandupService {
       // The briefs, from records.
       const facts = await this.#facts(occurrence.projectId, coversFrom, nowIso);
       const briefs: { agent: string; briefId: string; change: "created" | "updated" | "unchanged" }[] = [];
-      for (const p of occurrence.participants) briefs.push(await this.#brief(by, id, occurrence, p.id, coversFrom, nowIso, facts));
+      const briefed = new Map<string, { revision: number; agents: Set<string> }>();
+      for (const p of occurrence.participants) { const made = await this.#brief(by, id, occurrence, p.id, coversFrom, nowIso, facts); briefs.push({ agent: made.agent, briefId: made.briefId, change: made.change }); for (const [item, revision] of made.briefed) { const e = briefed.get(item) ?? { revision, agents: new Set<string>() }; e.agents.add(p.id); briefed.set(item, e); } }
+      // A decision counts as told once every proposer it concerns has it in a stored brief; one that could not be written (the meeting has started) is told next time.
+      if (this.#options.onBriefed !== undefined) for (const [item, e] of briefed) {
+        const body = facts.improvements.find((x) => x.id === item)?.body as unknown as ImprovementBody | undefined;
+        const proposers = body === undefined ? [] : [body.proposedBy, ...(body.duplicates ?? []).map((d) => (facts.improvements.find((x) => x.id === d)?.body as unknown as ImprovementBody | undefined)?.proposedBy)];
+        if (proposers.length === 0 || !proposers.every((a) => a === undefined || e.agents.has(a))) continue;
+        try { await this.#options.onBriefed(by, item, e.revision); } catch { /* told again next time */ }
+      }
 
       const review = await this.#review(occurrence.projectId, coversFrom, nowIso, facts);
       const needsOwner = this.#options.ownerItems === undefined ? undefined : await this.#options.ownerItems(occurrence.projectId).then((lines) => lines.slice(0, STANDUP_LIMITS.ownerLines).map((l) => ({ text: cut(l.text, 300), cites: l.cites.slice(0, 5) })), (): ReviewLine[] => [{ text: "The list of what needs you could not be read just now; it is in your inbox.", cites: [{ kind: "project", id: occurrence.projectId }] }]);
@@ -538,7 +548,7 @@ export class StandupService {
   }
 
   /** Makes, refreshes or leaves a participant's brief. The agent is only looked at (its availability is recorded), never asked or started. */
-  async #brief(by: Principal, occurrenceId: string, occurrence: OccurrenceBody, agent: string, since: string, until: string, facts: Facts): Promise<{ agent: string; briefId: string; change: "created" | "updated" | "unchanged" }> {
+  async #brief(by: Principal, occurrenceId: string, occurrence: OccurrenceBody, agent: string, since: string, until: string, facts: Facts): Promise<{ agent: string; briefId: string; change: "created" | "updated" | "unchanged"; briefed: [string, number][] }> {
     const briefId = derivedId("sbr", `standup-brief:${occurrenceId}:${agent}`);
     const mine = facts.tasks.filter((t) => t.owner === agent);
     const sections: Record<BriefSection, BriefEntry[]> = { accomplishments: [], unfinished: [], blockers: [], advice: [], priorities: [] };
@@ -567,11 +577,13 @@ export class StandupService {
       const body = q.body as unknown as InquiryBody;
       if (body.asker === agent) sections.advice.push({ text: `Asked another agent a question (${body.askedAt}).`, detail: `Asked ${cut(body.to, 60)}: ${cut(body.question, 200)}`, cites: [{ kind: "inquiry", id: q.id, revision: q.revision }] });
     }
+    const briefedItems: [string, number][] = [];
     // A decision on the agent's improvement proposal that it has not been told yet (the notice could not be filed on a task of its own): told here, in the brief it reads.
     for (const u of facts.improvements) {
       const body = u.body as unknown as ImprovementBody;
       if (!body.returnPending) continue;
       const proposers = [body.proposedBy, ...(body.duplicates ?? []).map((d) => (facts.improvements.find((x) => x.id === d)?.body as unknown as ImprovementBody | undefined)?.proposedBy)];
+      if (proposers.includes(agent)) briefedItems.push([u.id, u.revision]);
       if (proposers.includes(agent)) sections.advice.push({ text: cut(outcomeText(body), 400), cites: [{ kind: "improvement-item", id: u.id, revision: u.revision }] });
     }
     const next = open.filter((t) => t.body.state !== "blocked").sort((a, b) => b.priority - a.priority || (a.id < b.id ? -1 : 1)).slice(0, STANDUP_LIMITS.priorities);
@@ -583,9 +595,9 @@ export class StandupService {
     const digest = sha256(canonicalJson(content as unknown as JsonObject));
     const existing = await this.#runner.get("standup-brief", briefId);
     const old = existing?.body as unknown as BriefBody | undefined;
-    if (old !== undefined && old.digest === digest) return { agent, briefId, change: "unchanged" };
+    if (old !== undefined && old.digest === digest) return { agent, briefId, change: "unchanged", briefed: briefedItems };
     // A brief is not rewritten once the meeting has started: it stays what the meeting saw.
-    if (old !== undefined && occurrence.mode === "live" && Date.parse(until) >= Date.parse(occurrence.startsAt)) return { agent, briefId, change: "unchanged" };
+    if (old !== undefined && occurrence.mode === "live" && Date.parse(until) >= Date.parse(occurrence.startsAt)) return { agent, briefId, change: "unchanged", briefed: [] };
     const body: BriefBody = { occurrenceId, projectId: occurrence.projectId, agent, coversFrom: since, coversTo: until, agentState, ...sections, more, statements: old?.statements ?? [], partial: facts.partial, digest, assembledAt: until };
     await this.#runner.command("standup.brief.assemble", { commandId: `sba:${briefId}:${existing?.revision ?? 0}:${digest.slice(0, 16)}`, actor: by.id }, async () => ({
       payload: { briefId, revision: existing?.revision ?? 0, digest },
@@ -594,7 +606,7 @@ export class StandupService {
         return { ref, creates: existing === undefined, changes: [existing === undefined ? { type: "create", ref, body: clean(body) } : { type: "update", ref, expectedRevision: existing.revision, body: clean(body) }], detail: { projectId: occurrence.projectId, occurrenceId } };
       },
     }));
-    return { agent, briefId, change: existing === undefined ? "created" : "updated" };
+    return { agent, briefId, change: existing === undefined ? "created" : "updated", briefed: briefedItems };
   }
 
   /** The short P/PC balance review: delivered and pending production, capacity work attempted and evaluated, the allocation against actual use, deferred PC work and the next protected improvement window. */

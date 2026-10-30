@@ -617,6 +617,11 @@ for (const backend of backends) {
     assert.equal(mine.length, 1);
     assert.match(mine[0]!.text, /was rejected: Hides real failures/);
     assert.ok(!byAgent[c.pB]!.advice.some((e) => e.cites.some((x) => x.id === id)), "another agent's brief does not carry it");
+    // Once the brief is stored with it, the service says so, and only for the proposer's decision (at the revision the brief carried).
+    const told: [string, number][] = [];
+    const tracking = c.make({ onBriefed: async (_by: unknown, item: string, revision: number) => { told.push([item, revision]); } });
+    await tracking.prepare(c.host, w.occ);
+    assert.deepEqual(told, [[id, 1]]);
   });
 
   suite("a full list of waiting outcomes never blocks a state change: the outcome goes on an overflow list, is listed again when there is room, is mentioned on the next agenda, and one that fits nowhere is marked", async (c) => {

@@ -280,7 +280,7 @@ for (const backend of backends) {
     await c.attendance.leave(c.asA, { commandId: cid("lv"), occurrenceId: id, agent: c.pA });
     await c.attendance.returnToWork(c.owner, { commandId: cid("rt"), occurrenceId: id, agent: c.pA });
     const ends = c.windows.filter((w) => w.phase === "ends");
-    assert.ok(ends.length >= 1 && ends.every((e) => e.key === ends[0]!.key && e.taskId === t1), JSON.stringify(c.windows));
+    assert.ok(ends.length >= 1 && ends.every((e) => e.key === ends[0]!.key && e.taskId === joined.meetingTaskId), JSON.stringify(c.windows));
   });
 
   suite("the status shows each invited agent as preparing, present, unavailable or blocked, and a blocked agent is one that cannot safely interrupt", async (c) => {

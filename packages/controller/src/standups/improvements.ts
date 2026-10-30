@@ -265,27 +265,43 @@ export class ImprovementService {
         if (sent === false) filed = false;
       }
       if (!filed) { waiting.push(id); continue; } // not told yet: it stays pending, and is tried again
-      await this.#retrying(async () => {
-        const cur = await this.#runner.get("improvement-item", id);
-        const b = cur?.body as unknown as ImprovementBody | undefined;
-        if (cur === undefined || b === undefined || !b.returnPending) return;
-        if (cur.revision !== found.revision) { waiting.push(id); return; }
-        await this.#runner.command("improvement.returned", { commandId: `imr:${id}:${cur.revision}`, actor: by.id }, async () => ({
-          payload: { itemId: id, revision: cur.revision },
-          build: async () => {
-            const idx = await this.#index(project);
-            const ref: AggregateRef = { kind: "improvement-item", id };
-            const { returnPending: _p, ...rest } = b;
-            void _p;
-            const changes: Change[] = [{ type: "update", ref, expectedRevision: cur.revision, body: clean({ ...rest, returnPending: false, returnedAt: this.#runner.now() }) }];
-            if (FINAL.includes(b.disposition) && idx.ids.includes(id)) changes.push(this.#indexChange(project, idx, idx.ids.filter((x) => x !== id)));
-            return { ref, creates: false, changes, detail: { projectId: project } };
-          },
-        }));
-        delivered.push(id);
-      });
+      if (await this.#markTold(by, project, id, found.revision)) delivered.push(id); else waiting.push(id);
     }
     return { delivered, waiting };
+  }
+
+  /** Marks one pending decision told (at the revision that was delivered); `false` when it changed meanwhile or is not pending. */
+  async #markTold(by: Principal, project: string, id: string, revision: number): Promise<boolean> {
+    let done = false;
+    await this.#retrying(async () => {
+      const cur = await this.#runner.get("improvement-item", id);
+      const b = cur?.body as unknown as ImprovementBody | undefined;
+      if (cur === undefined || b === undefined || !b.returnPending) return;
+      if (cur.revision !== revision) return;
+      await this.#runner.command("improvement.returned", { commandId: `imr:${id}:${cur.revision}`, actor: by.id }, async () => ({
+        payload: { itemId: id, revision: cur.revision },
+        build: async () => {
+          const idx = await this.#index(project);
+          const ref: AggregateRef = { kind: "improvement-item", id };
+          const { returnPending: _p, ...rest } = b;
+          void _p;
+          const changes: Change[] = [{ type: "update", ref, expectedRevision: cur.revision, body: clean({ ...rest, returnPending: false, returnedAt: this.#runner.now() }) }];
+          if (FINAL.includes(b.disposition) && idx.ids.includes(id)) changes.push(this.#indexChange(project, idx, idx.ids.filter((x) => x !== id)));
+          return { ref, creates: false, changes, detail: { projectId: project } };
+        },
+      }));
+      done = true;
+    });
+    return done;
+  }
+
+  /** The proposer has been given the decision another way (in its stand-up brief): marks it told, at the revision the brief carried. Service principals only. */
+  async markTold(by: Principal, itemId: string, revision: number): Promise<boolean> {
+    if ((by.kind !== "owner" && by.kind !== "host" && by.kind !== "service") || by.taskScope !== undefined) throw new DomainError("forbidden", `${by.id} may not mark improvement outcomes told`);
+    const found = await this.#runner.get("improvement-item", itemId);
+    const body = found?.body as unknown as ImprovementBody | undefined;
+    if (found === undefined || body === undefined) return false;
+    return this.#markTold(by, body.projectId, itemId, revision);
   }
 
   /** One proposal: the owner, a manager or reader of the project's meetings, or its proposer (and the proposers grouped under it). Anyone else gets `undefined`, as for one that does not exist. */

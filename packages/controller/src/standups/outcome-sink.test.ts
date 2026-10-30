@@ -11,4 +11,7 @@ test("an improvement's outcome is filed against its own task once per key; one w
   assert.equal(await sink.deliver(base), false, "no task of its own: not filed on an unrelated task");
   assert.equal(await sink.deliver({ ...base, kind: "agenda-outcome", to: { kind: "chat-turn", id: "t" }, taskId: "task-9" }), false, "only improvement outcomes to agents are filed here");
   assert.equal(sent.length, 1);
+  // A notice that cannot be filed leaves the outcome waiting; it does not throw into the delivery of the others.
+  const refusing = improvementOutcomeSink({ noticeFromController: async () => { throw new Error("x may not read that task"); } });
+  assert.equal(await refusing.deliver({ ...base, taskId: "task-9" }), false);
 });

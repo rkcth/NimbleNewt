@@ -1091,7 +1091,7 @@ export class AttendanceService {
     }
     if (items.length === 0) await this.#update(by, "returned", attId, (b) => (b.returned ? b : { ...b, returned: true }), "returned");
     const was = att0?.body as unknown as AttendanceBody | undefined;
-    if (was?.meetingTaskId !== undefined) await this.#warn("ends", attId, agent, occurrenceId, items[0]?.taskId ?? was.meetingTaskId);
+    if (was?.meetingTaskId !== undefined) await this.#warn("ends", attId, agent, occurrenceId, was.meetingTaskId);
     // Waiting returns are listed so the sweep finds them; settled ones leave the list.
     await this.#syncPending(by, attId);
     return out;

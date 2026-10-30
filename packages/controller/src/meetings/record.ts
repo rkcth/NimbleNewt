@@ -69,7 +69,7 @@ export interface RecordOptions extends RunnerOptions {
    * command ID from the decision and the change); a failure never changes the decision.
    */
   readonly onChange?: (event: { decisionId: string; index: number; projectId: string; target: { kind: string; id: string }; state: "applied" | "not-applied"; summary: string; reason?: string }) => Promise<void>;
-  /** Whether the approval policy lets a class of widening change be carried out without asking the owner (strict: no; autonomous: spend only; a specific setting overrides the profile). Missing: always ask the owner. */
+  /** Whether the approval policy lets a class of widening change be carried out without asking the owner (spend follows the profile: strict asks, derived and autonomous let it through in development; rights are the owner's unless the owner set that cell by hand). Missing: always ask the owner. */
   readonly widening?: (cls: "access-change" | "spend", projectId: string) => Promise<"allow" | "ask">;
   /** Minutes a vote stays open (default 10), unless the vote names its own. */
   readonly voteMinutes?: number;
