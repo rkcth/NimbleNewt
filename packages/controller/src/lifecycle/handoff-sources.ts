@@ -36,7 +36,8 @@ export function controllerHandoffSources(deps: {
     const at = `continuation ${c.seq}, captured ${c.capturedAt}`;
     if (c.continuation.nextStep.trim() !== "") out["nextAction"] = `${c.continuation.nextStep.trim()} (from ${at})`;
     const pending = c.continuation.pendingEffects;
-    out["unfinishedWork"] = pending.length === 0 ? `No effect was pending at the last checkpoint (${at}); other unfinished work is not recorded there.` : `Effects pending at the last checkpoint (${at}): ${pending.map((e) => `${e.effectId} (${e.state})`).join(", ")}.`;
+    // With nothing pending the section stays unset: "no effect pending" does not say there is no other unfinished work, and a package must not read as ready on that.
+    if (pending.length > 0) out["unfinishedWork"] = `Effects pending at the last checkpoint (${at}): ${pending.map((e) => `${e.effectId} (${e.state})`).join(", ")}.`;
     if (pending.length > 0) out["backgroundOperations"] = pending.map((e) => `${e.effectId}: ${e.state}`).join("\n");
     const done = [...c.continuation.decisions.map((d) => `Decision: ${d}`), ...c.continuation.artifacts.map((a) => `Artifact: ${a}`)];
     if (done.length > 0) out["completedWork"] = done.join("\n");

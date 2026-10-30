@@ -54,6 +54,8 @@ const clean = (body: object): JsonObject => JSON.parse(JSON.stringify(body)) as 
 const forbiddenWords = ["thinking", "reasoning", "chainOfThought", "thoughts", "scratchpad"];
 
 /** A user-facing statement: text, with credentials removed. Provider thinking is not a statement and is refused by name wherever it could arrive. */
+/** The first `max` characters, never leaving half of a surrogate pair at the end. */
+export const clipText = (value: string, max: number): string => { const cut = value.slice(0, max); return value.length > max && /[\ud800-\udbff]$/.test(cut) ? cut.slice(0, -1) : cut; };
 const statement = (value: unknown, field: string, max: number = ACTIVITY_LIMITS.statement): string => redactText(text(value, field, { min: 1, max, multiline: true }));
 const checkRef = (value: unknown, field: string): ManifestRef => {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return invalid(field, "must be { kind, id, version? }");
@@ -85,7 +87,7 @@ export class ActivityService {
     if (!(by.kind === "owner" || by.kind === "host" || by.kind === "service" || allows(by, "history.append", task.projectId) || allows(by, "attempt.work", task.projectId, { resource: { kind: "task", id: taskId } }))) throw new DomainError("forbidden", `${by.id} may not record activity for that task`);
     if (!ACTIVITY_KINDS.includes(command.kind)) invalid("kind", `must be one of ${ACTIVITY_KINDS.join(", ")}`);
     // The whole text is redacted first and only then cut to what is kept, so a secret that straddles the cut is never left half-hidden.
-    const summary = statement(command.summary, "summary", ACTIVITY_LIMITS.summaryInput).slice(0, ACTIVITY_LIMITS.summary);
+    const summary = clipText(statement(command.summary, "summary", ACTIVITY_LIMITS.summaryInput), ACTIVITY_LIMITS.summary);
     const manifest = this.#manifest(command.manifest);
     const cmd = scopedCommandId(by.id, command.commandId);
     const stepIdAt = (seq: number): string => derivedId("act", `${taskId}\0${seq}`);

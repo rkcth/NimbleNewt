@@ -702,10 +702,14 @@ export class ChatService {
     // A watch to end: found as the one that tells the named task's owner (exactly one, else the owner is asked); an ID given directly must be an active watch.
     if (intent.op === "watch.cancel") {
       const active = await this.#listItems(token, "watch.describe");
-      if (typeof args["watchId"] === "string") { if (!active.some((w) => w["id"] === args["watchId"])) return refuse("not_found", "that watch is not active"); }
+      const inScope = (w: Record<string, unknown>): boolean => focus.projectId === undefined || w["projectId"] === focus.projectId;
+      if (typeof args["watchId"] === "string") {
+        if (!active.some((w) => w["id"] === args["watchId"] && inScope(w))) return refuse("not_found", "that watch is not active");
+        showFirst = "the watch comes from an ID, not from the task you named, so it is shown first";
+      }
       else {
         if (typeof args["taskId"] !== "string") return refuse("invalid_command", "say which task's watch should end");
-        const mine = active.filter((w) => w["taskId"] === args["taskId"]);
+        const mine = active.filter((w) => w["taskId"] === args["taskId"] && inScope(w));
         if (mine.length === 0) return refuse("not_found", "no watch is active for that task");
         if (mine.length > 1) return { ok: false, kind: "ask", question: "More than one watch tells that task's owner. Which one?", options: mine.slice(0, CHAT_LIMITS.options).map((w) => `${String(w["id"])} (${String(w["stream"])})`), field: "watchId", choices: mine.slice(0, CHAT_LIMITS.options).map((w) => String(w["id"])) };
         args["watchId"] = String(mine[0]!["id"]);
@@ -955,7 +959,6 @@ export class ChatService {
     return response.ok ? ((response.result["items"] ?? []) as Record<string, unknown>[]) : [];
   }
 
-  /** Every item of a list operation, bounded (five pages). */
   /** A list the operation returns whole (it takes no paging arguments). */
   async #listItems(token: string, op: string): Promise<Record<string, unknown>[]> {
     const response = await this.#deps.api.handle(token, { v: API_VERSION, op, args: {} });
@@ -963,6 +966,7 @@ export class ChatService {
     return (response.result["items"] ?? []) as Record<string, unknown>[];
   }
 
+  /** Every item of a list operation, bounded (five pages). */
   async #listAll(token: string, op: string, args: Record<string, unknown>): Promise<Record<string, unknown>[]> {
     const items: Record<string, unknown>[] = [];
     let after: string | undefined;

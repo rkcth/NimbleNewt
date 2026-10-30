@@ -29,6 +29,7 @@ import type { ReviewService } from "../review/index.js";
 import { selectRoute, type RoutingService } from "../routing/index.js";
 import { allows } from "../security/access.js";
 import { redactText } from "../security/redact.js";
+import { clipText } from "../activity/activity.js";
 import type { Principal } from "../security/principals.js";
 import { DISPATCHER_PRINCIPAL, type TaskCredentialService } from "../security/task-credentials.js";
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
@@ -390,7 +391,7 @@ export class DispatcherService {
     if (this.#deps.activity === undefined) return;
     try {
       const taskId = (await this.#load(attemptId))?.body.taskId;
-      if (taskId !== undefined) await this.#deps.activity({ commandId: `dpa-act:${attemptId}:${key}`.slice(0, 120), taskId, kind, summary: summary.slice(0, 4000), refs });
+      if (taskId !== undefined) await this.#deps.activity({ commandId: `dpa-act:${attemptId}:${key}`.slice(0, 120), taskId, kind, summary: clipText(redactText(summary), 300), refs });
     } catch { /* the record of a step never changes what happened */ }
   }
 

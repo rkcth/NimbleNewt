@@ -1,3 +1,4 @@
+import { redactText } from "../security/redact.js";
 import type { ControllerStorage } from "../storage/types.js";
 import type { DispatcherService } from "../dispatch/dispatcher.js";
 import { TERMINAL } from "../dispatch/model.js";
@@ -46,6 +47,7 @@ export async function agentsUnder(storage: Pick<ControllerStorage, "listAggregat
  */
 export interface LocalWork {
   processes?(attempts: readonly string[]): Promise<readonly { readonly ref: string; readonly kind: "process" | "child"; readonly state: "running" | "uncooperative" | "unknown" }[]>;
+  /** What this cleanup pass cost (not a running total: the stop adds each pass). A figure that is not a finite number of zero or more is ignored. */
   spent?(attempts: readonly string[]): Promise<number | undefined>;
 }
 
@@ -61,15 +63,23 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
     for (const agentId of await members(scope)) for (const id of await h.dispatcher.liveAttemptsOf(h.principal, { agentId: principalForm(agentId) })) out.add(id);
     return [...out];
   };
-  const localOf = async (attempts: readonly string[]): Promise<InventoryItem[]> => {
+  // The attempts seen for a scope, so a process of one that ended during preparation is still asked about when the stop ends.
+  const seen = new Map<string, Set<string>>();
+  const localOf = async (attempts: readonly string[], scope: PauseScope): Promise<InventoryItem[]> => {
     if (local?.processes === undefined) return [];
-    const found = await local.processes(attempts).catch(() => undefined);
+    const key = `${scope.kind}:${scope.id}`;
+    const all = seen.get(key) ?? new Set<string>();
+    for (const a of attempts) all.add(a);
+    seen.set(key, all);
+    if (all.size === 0) return [];
+    const found = await local.processes([...all]).catch(() => undefined);
     // A runtime that cannot say what is running is itself unknown: one item says so, so a stop is never reported clean on silence.
     if (found === undefined) return [{ kind: "process", ref: "runtime:processes", state: "unknown" }];
-    return found.map((p) => ({ kind: p.kind, ref: p.ref.slice(0, 120), state: p.state }));
+    // What the runtime says is checked: an entry that is not shaped as promised is itself unknown. A ref (it may be a command line) is redacted before it is cut.
+    return found.map((p) => (typeof p?.ref === "string" && (p.kind === "process" || p.kind === "child") && ["running", "uncooperative", "unknown"].includes(p.state) ? { kind: p.kind, ref: redactText(p.ref).slice(0, 120), state: p.state } : { kind: "process" as const, ref: "runtime:processes", state: "unknown" as const }));
   };
   const inFlight = async (attempts: readonly string[], scope: PauseScope): Promise<InventoryItem[]> => {
-    const localItems = attempts.length === 0 ? [] : await localOf(attempts);
+    const localItems = await localOf(attempts, scope);
     const h = dispatch();
     const out: InventoryItem[] = [];
     for (const attemptId of attempts) {
@@ -101,7 +111,8 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
         await h!.dispatcher.quiesce(h!.principal, id, "suspend or stop preparation", { strictMs });
       }
       // What the preparation cost, as the runtime counts it (a hook that is absent or fails says nothing, so nothing is charged on a guess).
-      const spent = local?.spent === undefined ? undefined : await local.spent(attempts).catch(() => undefined);
+      const figure = local?.spent === undefined ? undefined : await local.spent(attempts).catch(() => undefined);
+      const spent = typeof figure === "number" && Number.isFinite(figure) && figure >= 0 ? figure : undefined;
       return { remaining: await inFlight(attempts, scope), ...(spent === undefined ? {} : { spent }) };
     },
     checkpoint: async (scope) => {
@@ -126,7 +137,9 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
         for (const op of (await h!.dispatcher.operations(h!.principal, id)) ?? []) if (op.state === "uncertain") unresolved.push(`${id}/${op.callId}`.slice(0, 120));
       }
       // A job whose outcome is not known, or that was asked to stop and has not, is named as unresolved too.
-      for (const item of await inFlight(attempts, scope).catch(() => [] as InventoryItem[])) if ((item.kind === "job" || item.kind === "process" || item.kind === "child") && (item.state === "unknown" || item.state === "uncooperative")) unresolved.push(item.ref);
+      // Looking again can fail; that is not a clean stop. A process or child still running after the stop did not end either.
+      const after = await inFlight(attempts, scope).catch(() => [{ kind: "process", ref: "runtime:inventory", state: "unknown" } as InventoryItem]);
+      for (const item of after) if (((item.kind === "process" || item.kind === "child") && item.state !== "settled") || (item.kind === "job" && (item.state === "unknown" || item.state === "uncooperative"))) unresolved.push(item.ref);
       return { ended: true, unresolved };
     },
   };

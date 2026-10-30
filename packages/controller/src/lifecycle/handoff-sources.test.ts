@@ -33,7 +33,7 @@ test("the package takes the sections only the run knows from the task's latest c
   // Nothing pending is said as a fact about the checkpoint, not as "all work is done".
   records.set("continuation:con-2", { ...(records.get("continuation:con-2") as object), continuation: { artifacts: [], decisions: [], pendingEffects: [], nextStep: "  " } });
   const quiet = (await sources().collect({ taskId: "task-1", from, to })).sections;
-  assert.match(quiet["unfinishedWork"]!, /^No effect was pending at the last checkpoint/);
+  assert.equal(quiet["unfinishedWork"], undefined, "nothing pending does not say nothing is unfinished, so the section stays a gap");
   assert.equal(quiet["nextAction"], undefined, "an empty next step is not a next action");
   assert.equal(quiet["backgroundOperations"], undefined);
   // A source given by the caller still has the last word.

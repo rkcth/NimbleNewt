@@ -109,12 +109,25 @@ test("the stop inventory lists the local processes and child work a runtime repo
     { kind: "process", ref: "pid-41", state: "running" }, { kind: "child", ref: "child-7", state: "uncooperative" }, { kind: "process", ref: "pid-42", state: "unknown" },
   ]);
   assert.deepEqual(asked, [["att-1"]], "asked about the scope's attempts only");
-  assert.deepEqual(await ports.terminate(task, { force: true }), { ended: true, unresolved: ["child-7", "pid-42"] });
+  assert.deepEqual(await ports.terminate(task, { force: true }), { ended: true, unresolved: ["pid-41", "child-7", "pid-42"] }, "a process still running after the stop did not end");
   const cleaned = await ports.cleanup(task, { deadlineAt: new Date(Date.now() + 1000).toISOString(), backup: false });
   assert.equal(cleaned.spent, 12);
   assert.equal(cleaned.remaining.length, 3);
   report = "down";
   assert.deepEqual(await ports.inventory(task), [{ kind: "process", ref: "runtime:processes", state: "unknown" }]);
+  // An entry not shaped as promised is unknown, a command line is redacted, a bad figure is not charged, and an attempt that ended during preparation is still asked about.
+  report = [{ ref: "run sk-live-ABCDEFGHIJKLMNOPQRSTUVWX1234", kind: "process", state: "running" }, { ref: 7 as never, kind: "process", state: "running" }];
+  assert.deepEqual((await ports.inventory(task)).map((i) => i.ref), ["run [redacted]", "runtime:processes"]);
+  const odd = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), () => "pending", undefined, undefined, { spent: async () => Number.NaN });
+  assert.equal((await odd.cleanup(task, { deadlineAt: new Date(Date.now() + 1000).toISOString(), backup: false })).spent, undefined);
+  let live = ["att-1"];
+  const asked2: (readonly string[])[] = [];
+  const ending = { ...dispatcher, liveAttemptsOf: async () => live };
+  const p2 = dispatchStopPorts(() => ({ dispatcher: ending as never, principal: staff }), () => "pending", undefined, undefined, { processes: async (a) => { asked2.push(a); return [{ ref: "pid-5", kind: "process", state: "uncooperative" }]; } });
+  await p2.inventory(task);
+  live = [];
+  assert.deepEqual(await p2.terminate(task, { force: false }), { ended: true, unresolved: ["pid-5"] });
+  assert.deepEqual(asked2.at(-1), ["att-1"]);
   // Without the hook nothing is listed and nothing is charged.
   const bare = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), () => "pending");
   assert.deepEqual(await bare.inventory(task), []);

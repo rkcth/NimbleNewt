@@ -2690,3 +2690,10 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 
 - New query `watch.describe` (owner only) lists the active watches with `id`, `stream`, `taskId`, `projectId` (`WatchService.describeActive`); `watchControl` gains `describe`.
 - Chat op `watch.cancel` (apply): the owner names the task whose owner the watch tells (`taskTitle`, resolved as for other ops) or a `watchId`. One matching watch ends it; none is refused ("no watch is active for that task"); several ask which (options carry the watch ID and stream). A given `watchId` must be an active watch. The task ID is dropped before the call.
+
+## Batch 10 review fixes
+
+- **Stop inventory (L02d).** The runtime's entries are checked (an entry not shaped as promised becomes one unknown item), process refs are redacted before they are cut, a failed look after the stop is an unknown item (`runtime:inventory`) not an empty list, a process or child still running after the stop is unresolved, the attempts seen for a scope are remembered so a process of one that ended during preparation is still asked about (in memory; lost on restart), and a `spent` figure that is not a finite number of zero or more is ignored (it is the cost of one pass, which the stop adds).
+- **Activity.** The cut never leaves half of a surrogate pair (`clipText`); the dispatcher's steps are redacted, then cut.
+- **Watch cancel.** A `watchId` given directly is shown first and must be in the focused project; the task path is filtered by project too.
+- **Hand-off.** `unfinishedWork` is left unset when no effect was pending, so a package is not ready on "nothing known".

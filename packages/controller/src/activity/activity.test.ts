@@ -51,6 +51,8 @@ for (const backend of backends) {
       assert.ok(stored.summary.length <= 300);
       assert.ok(!/sk-live|sk-li|ABCDEF/.test(stored.summary), stored.summary.slice(270));
       assert.equal((await svc.record(worker, { commandId: cid("r"), taskId: task, kind: "tool-call", summary: "y".repeat(3000) })).replayed, false);
+      const emoji = await svc.record(worker, { commandId: cid("r"), taskId: task, kind: "tool-call", summary: `${"e".repeat(299)}😀 after` });
+      assert.ok(!/[\ud800-\udbff]$/.test(((await svc.steps(auditor, task, { after: emoji.seq - 1, limit: 1 })).steps[0] as { summary: string }).summary), "a cut never leaves half of a character");
       await refuses("invalid_command", () => svc.record(worker, { commandId: cid("r"), taskId: task, kind: "tool-call", summary: "z".repeat(4001) }));
       const s1 = listed.steps[0] as { manifest: { missing: boolean; refs?: unknown[]; summaryId?: string } };
       assert.deepEqual([s1.manifest.missing, s1.manifest.refs?.length, s1.manifest.summaryId], [false, 2, "sum-1"]);

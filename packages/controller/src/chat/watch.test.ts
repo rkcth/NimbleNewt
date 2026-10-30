@@ -54,6 +54,12 @@ for (const backend of backends) {
       assert.deepEqual(two.options!.map((o) => o.split(" ")[0]), ["watch-1", "watch-3"]);
       script["Stop watching, watch-9."] = [cmd("watch.cancel", { watchId: "watch-9" }, "watch-9")];
       assert.equal((await say("Stop watching, watch-9.")).status, "refused", "an ID that is not an active watch");
+      // A watch given by ID is shown first (it came from the model, not from the owner's words), and one in another project is not found.
+      script["Stop watching, watch-1."] = [cmd("watch.cancel", { watchId: "watch-1" }, "Stop watching, watch-1")];
+      const one = await say("Stop watching, watch-1."); assert.equal(one.status, "proposed", JSON.stringify(one).slice(0, 300));
+      described.push({ id: "watch-8", stream: "task:x", taskId: deploy, projectId: "prj-other" });
+      script["Stop watching, watch-8."] = [cmd("watch.cancel", { watchId: "watch-8" }, "Stop watching, watch-8")];
+      assert.equal((await say("Stop watching, watch-8.")).status, "refused");
       assert.equal(cancelled.length, 1);
     } finally { await w.close(); }
   });

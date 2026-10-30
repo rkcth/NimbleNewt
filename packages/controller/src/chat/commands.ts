@@ -81,7 +81,7 @@ export function acceptedArgs(op: string): readonly string[] | undefined {
   const operation = OPERATION_BY_NAME.get(op);
   if (operation === undefined || operation.kind !== "command") return undefined;
   // `agendaTopic` names an agenda item by its words; the chat resolves it to the item (exactly one open item of the project, else it asks).
-  return [...Object.keys(operation.args).map((k) => k.replace(/\?$/, "")), ...Object.keys(TITLE_KEYS), "projectName", ...(op === "agenda.correct" ? ["agendaTopic"] : []), ...(op === "owner.answer" ? ["questionTopic"] : []), ...(op === "meeting.invite-direct" ? ["meetingTopic", "agentName"] : []), ...(op === "watch.create" ? ["watchedTaskTitle", "watchedTaskId"] : []), ...(op === "watch.cancel" ? ["taskId"] : []), ...(op === "handoff.prepare" || op === "handoff.takeover" ? ["toAgentName"] : []), ...(op === "handoff.complete" || op === "handoff.cancel" ? ["taskId"] : [])];
+  return [...Object.keys(operation.args).map((k) => k.replace(/\?$/, "")), ...Object.keys(TITLE_KEYS), "projectName", ...(op === "agenda.correct" ? ["agendaTopic"] : []), ...(op === "owner.answer" ? ["questionTopic"] : []), ...(op === "meeting.invite-direct" ? ["meetingTopic", "agentName"] : []), ...(op === "watch.create" ? ["watchedTaskTitle", "watchedTaskId"] : []), ...(op === "watch.cancel" ? ["taskId", "watchId"] : []), ...(op === "handoff.prepare" || op === "handoff.takeover" ? ["toAgentName"] : []), ...(op === "handoff.complete" || op === "handoff.cancel" ? ["taskId"] : [])];
 }
 
 /**
