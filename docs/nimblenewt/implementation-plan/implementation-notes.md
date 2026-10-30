@@ -2644,3 +2644,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## U12e (part 2): the count of waiting questions in every chat reply
 
 - `ChatDeps.waiting` (composed from the owner's question list, at most 50 counted): every chat reply ends with "N questions from agents are waiting for your answer. Ask what is waiting to see them." when there are any. It is counted live (a replayed turn shows the count at replay time), and a failure to count adds nothing. This is the chat's part of the "Needs you" count; levels and escalation remain U11b.
+
+### C09h: the activity view reads only the last steps (batch 8 review finding)
+
+- `ActivityService.steps` takes `tail: true`: the last `limit` steps, without reading the earlier ones. The `latest` view of a task's activity uses it, so a long record costs the same as a short one and is never cut off silently.

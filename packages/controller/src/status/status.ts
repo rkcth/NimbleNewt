@@ -299,13 +299,7 @@ export class StatusService {
     let next: number | undefined;
     try {
       if (request.latest === true) {
-        let after: number | undefined;
-        for (let page = 0; page < 20; page++) {
-          const got = await activity.steps(by, taskId, { ...(after === undefined ? {} : { after }), limit: 50 });
-          steps = [...steps, ...got.steps].slice(-limit);
-          if (got.next === undefined) break;
-          after = got.next;
-        }
+        steps = (await activity.steps(by, taskId, { tail: true, limit })).steps;
       } else {
         const got = await activity.steps(by, taskId, { ...(request.after === undefined ? {} : { after: request.after }), limit });
         steps = got.steps;

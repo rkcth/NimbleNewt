@@ -953,10 +953,10 @@ for (const backend of backends) {
     const step = (seq: number) => ({ taskId: t.id, projectId: c.project, seq, kind: "tool", summary: `step ${seq} summary`, actor: "agent:ann", at: "2026-10-22T10:00:00.000Z", manifest: {}, payload: { state: "none" }, corrections: seq === 2 ? 1 : 0 });
     const all = Array.from({ length: 7 }, (_, i) => (i === 2 ? { seq: 3, unavailable: "archived" } : step(i + 1))) as never[];
     const calls: { taskId: string; after?: number; limit?: number }[] = [];
-    const activity = { steps: async (by: Principal, taskId: string, page: { after?: number; limit?: number } = {}) => {
+    const activity = { steps: async (by: Principal, taskId: string, page: { after?: number; limit?: number; tail?: boolean } = {}) => {
       calls.push({ taskId, ...page });
       if (by.kind !== "owner") throw new DomainError("forbidden", "no");
-      const from = (page.after ?? 0), limit = page.limit ?? 50;
+      const limit = page.limit ?? 50, from = page.tail === true ? Math.max(0, all.length - limit) : (page.after ?? 0);
       return { steps: all.slice(from, from + limit), ...(from + limit < all.length ? { next: from + limit } : {}) };
     } };
     const status = c.rebuild({}, { activity });
@@ -968,6 +968,7 @@ for (const backend of backends) {
     const last = (await status.ask(c.owner, { kind: "activity", taskId: t.id, latest: true, limit: 2 }))!;
     assert.deepEqual(last.lines.map((l) => l.text.slice(0, 7)), ["Step 6,", "Step 7,"]);
     assert.ok(calls.every((x) => x.taskId === t.id));
+    assert.deepEqual(calls.at(-1), { taskId: t.id, tail: true, limit: 2 }, "only the last steps are asked for");
     const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
     assert.equal(await status.ask(reader, { kind: "activity", taskId: t.id }), undefined, "unreadable reads as missing");
     assert.equal(await c.rebuild().ask(c.owner, { kind: "activity", taskId: t.id }), undefined, "no source wired: not offered");

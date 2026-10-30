@@ -42,6 +42,9 @@ for (const backend of backends) {
       assert.equal(three.seq, 3);
       const listed = await svc.steps(auditor, task);
       assert.deepEqual(listed.steps.map((s) => ("kind" in s ? s.kind : "gone")), ["model-selected", "tool-call", "owner-message"]);
+      // `tail` asks for the last steps only.
+      assert.deepEqual((await svc.steps(auditor, task, { tail: true, limit: 2 })).steps.map((s) => s.seq), [2, 3]);
+      assert.deepEqual((await svc.steps(auditor, task, { tail: true, limit: 50 })).steps.map((s) => s.seq), [1, 2, 3]);
       const s1 = listed.steps[0] as { manifest: { missing: boolean; refs?: unknown[]; summaryId?: string } };
       assert.deepEqual([s1.manifest.missing, s1.manifest.refs?.length, s1.manifest.summaryId], [false, 2, "sum-1"]);
       const s2 = listed.steps[1] as { manifest: { missing: boolean }; payload: { state: string; redactions: number } };

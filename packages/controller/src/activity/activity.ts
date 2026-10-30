@@ -212,14 +212,15 @@ export class ActivityService {
   }
 
   /** The steps of a task in order, from `after`. Steps in an unavailable range show only that they were there. */
-  async steps(by: Principal, taskId: string, page: { after?: number; limit?: number } = {}): Promise<{ steps: (ActivityStepView)[]; next?: number }> {
+  async steps(by: Principal, taskId: string, page: { after?: number; limit?: number; tail?: boolean } = {}): Promise<{ steps: (ActivityStepView)[]; next?: number }> {
     const tid = checkTaskId(taskId);
     const task = await this.#task(tid);
     this.#mayRead(by, task.projectId, tid);
     const head = (await this.#runner.get(KIND_OF.head, tid))?.body as unknown as HeadBody | undefined;
     if (head === undefined) return { steps: [] };
     const limit = Math.min(Math.max(1, page.limit ?? 50), ACTIVITY_LIMITS.page);
-    const start = Math.max(1, (page.after ?? 0) + 1);
+    // `tail`: the last steps (the ones before them are not read).
+    const start = page.tail === true ? Math.max(1, head.next - limit) : Math.max(1, (page.after ?? 0) + 1);
     const out: ActivityStepView[] = [];
     let seq = start;
     for (; seq < head.next && out.length < limit; seq++) {
