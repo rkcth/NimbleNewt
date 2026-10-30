@@ -49,6 +49,7 @@ import type { StopChoice, StopService } from "../lifecycle/stop.js";
 import type { ActivityService } from "../activity/activity.js";
 import type { DeliverableService } from "../artifacts/deliverables.js";
 import type { ResumeCheckService } from "../continuation/resume.js";
+import type { ResumeSettingsService } from "../continuation/resume-settings.js";
 import type { HandoffService } from "../lifecycle/handoff.js";
 import type { IntegrationPolicyService } from "../policy/integration-policy.js";
 import type { Principal } from "../security/principals.js";
@@ -94,6 +95,7 @@ export interface Context {
   readonly workerLimits?: Pick<WorkerLimitsSettingsService, "get" | "set" | "change">;
   readonly escalationLadder?: Pick<EscalationLadderService, "get" | "set">;
   readonly agreedLimits?: Pick<AgreedLimitsSettingsService, "get" | "change">;
+  readonly resumeSettings?: Pick<ResumeSettingsService, "get" | "set">;
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set">;
   readonly eventSourceSettings?: Pick<EventSourceSettingsService, "get" | "set" | "change">;
   /** Absent when the controller runs without the agent's ending (card H12n). */
@@ -218,6 +220,7 @@ const branchSettingsOf = (c: Context): NonNullable<Context["branchSettings"]> =>
 
 const commandsOf = (c: Context): CommandService => c.commands ?? unavailable("typed commands");
 const escalationLadderOf = (c: Context): NonNullable<Context["escalationLadder"]> => c.escalationLadder ?? unavailable("the escalation ladder");
+const resumeSettingsOf = (c: Context): NonNullable<Context["resumeSettings"]> => c.resumeSettings ?? unavailable("resume settings");
 const workerLimitsOf = (c: Context): NonNullable<Context["workerLimits"]> => c.workerLimits ?? unavailable("worker limits");
 const agreedLimitsOf = (c: Context): NonNullable<Context["agreedLimits"]> => c.agreedLimits ?? unavailable("agreed limits");
 const placementOf = (c: Context): NonNullable<Context["placement"]> => c.placement ?? unavailable("placement settings");
@@ -362,6 +365,10 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, []); return asJson({ item: await agreedLimitsOf(c).get(c.principal) }); } },
   { name: "agreed.limits.change", kind: "command", summary: "The owner sets or clears ceilings on agreed raises and grants (owner only; none by default). `set` has any of `raiseMaxCostMicros` (most money one raise carried out by the approval policy may add, in millionths, 1 to 1e15), `raiseMaxComputeMs` (most compute time one such raise may add, 1 to 1e12 ms) and `grantMaxDays` (longest a right granted by a decision may last, 1 to 3650); `unset` lists ceilings to remove. A ceiling counts from the next carry-out; the rights re-check at carry-out and every other check stay.", args: { "set?": "for example `{ \"grantMaxDays\": 90 }`", "unset?": "ceiling names to remove", "expectedRevision?": "the revision of the setting you read" }, result: "`{ revision }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["set", "unset", "expectedRevision"]); return asJson({ ...(await agreedLimitsOf(c).change(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
+  { name: "resume.settings.get", kind: "query", summary: "How many blocked rounds a stalled resume check retries before the owner is told (owner only): the owner's figure, the default and the effective one.", args: {}, result: "`{ item }`: `revision`, `maxRounds` (the owner's, or null), `default`, `effective`.", completion: { kind: "completed" },
+    run: async (c, a) => { only(a, []); return asJson({ item: await resumeSettingsOf(c).get(c.principal) }); } },
+  { name: "resume.settings.set", kind: "command", summary: "The owner sets how many blocked rounds a stalled resume check retries before the owner is told (owner only): `maxRounds` is a whole number from 1 to 10, or null to clear it so the default (3) applies. It counts for checks started afterwards; a check already running keeps the figure it started with. This is the form the chat uses.", args: { maxRounds: "1 to 10, or null to clear", "expectedRevision?": "the revision of the setting you read" }, result: "`{ revision }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["maxRounds", "expectedRevision"]); return asJson({ ...(await resumeSettingsOf(c).set(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
   { name: "workers.limits.get", kind: "query", summary: "What one local agent may use (owner only): the figures the owner set, the ones from the controller's start-up configuration, and the effective limits (the owner's win per figure).", args: {}, result: "`{ item }`: `revision`, `limits` (the owner's), `startup`, `effective`; each has any of `cpus`, `memoryMb`, `diskMb`, `processes`.", completion: { kind: "completed" },
     run: async (c, a) => { only(a, []); return asJson({ item: await workerLimitsOf(c).get(c.principal) }); } },
   { name: "workers.limits.set", kind: "command", summary: "The owner sets what one local agent may use (owner only): `limits` has any of `cpus` (1 to 256), `memoryMb` (16 to 4194304), `diskMb` (1 to 16777216) and `processes` (1 to 100000), whole numbers. The object replaces the earlier setting; an empty object clears it so the start-up figures apply. It counts from the next agent launched; agents already running keep their limits. The host enforces the limits or refuses to launch.", args: { limits: "for example `{ \"memoryMb\": 4096, \"processes\": 256 }`", "expectedRevision?": "the revision of the setting you read" }, result: "`{ revision }`.", completion: { kind: "completed" },

@@ -45,6 +45,7 @@ import type { StandupService } from "../standups/standups.js";
 import type { ActivityService } from "../activity/activity.js";
 import type { DeliverableService } from "../artifacts/deliverables.js";
 import type { ResumeCheckService } from "../continuation/resume.js";
+import type { ResumeSettingsService } from "../continuation/resume-settings.js";
 import type { HandoffService } from "../lifecycle/handoff.js";
 import type { IntegrationPolicyService } from "../policy/integration-policy.js";
 
@@ -117,6 +118,7 @@ export interface StateApiDeps {
   /** How long an undecided stall concern waits at each level of the supervisor ladder (owner decision 2026-10-30, supervisor ladder). */
   readonly escalationLadder?: Pick<EscalationLadderService, "get" | "set">;
   readonly agreedLimits?: Pick<AgreedLimitsSettingsService, "get" | "change">;
+  readonly resumeSettings?: Pick<ResumeSettingsService, "get" | "set">;
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set">;
   /** Which event sources are watched (card H13f). */
   readonly eventSourceSettings?: Pick<EventSourceSettingsService, "get" | "set" | "change">;
@@ -235,6 +237,7 @@ export class StateApi {
         ...(this.#deps.grants === undefined ? {} : { grants: this.#deps.grants }),
         ...(this.#deps.placement === undefined ? {} : { placement: this.#deps.placement }),
         ...(this.#deps.agreedLimits === undefined ? {} : { agreedLimits: this.#deps.agreedLimits }),
+        ...(this.#deps.resumeSettings === undefined ? {} : { resumeSettings: this.#deps.resumeSettings }),
         ...(this.#deps.workerLimits === undefined ? {} : { workerLimits: this.#deps.workerLimits }),
         ...(this.#deps.escalationLadder === undefined ? {} : { escalationLadder: this.#deps.escalationLadder }),
         ...(this.#deps.branchSettings === undefined ? {} : { branchSettings: this.#deps.branchSettings }),

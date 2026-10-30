@@ -63,6 +63,7 @@ export const STALE_CANCEL = "stale-by-dispatcher" as const;
 /** A blocked check without a blocker is retried no sooner than this many milliseconds times its number of blocks after it blocked. */
 export const RETRY_BACKOFF_MS = 5 * 60_000;
 export const RESUME_LIMITS = { rounds: 3, advances: 10, history: 40, note: 300, limits: 10 } as const;
+const validRounds = (n: unknown): n is number => typeof n === "number" && Number.isSafeInteger(n) && n >= 1 && n <= 10;
 const KIND = "resume-check";
 const ACTIVE = "resume-active";
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
@@ -91,16 +92,16 @@ export class ResumeCheckService {
   readonly #dependencies: Pick<DependencyService, "check">;
   readonly #blockers: Pick<BlockerService, "openBlocker" | "getBlocker">;
   readonly #ports: ResumePorts;
-  readonly #rounds: number;
+  readonly #rounds: number | (() => Promise<number>);
 
-  private constructor(runner: CommandRunner, deps: { continuations: Pick<ContinuationService, "latest" | "resume">; dependencies: Pick<DependencyService, "check">; blockers: Pick<BlockerService, "openBlocker" | "getBlocker">; ports: ResumePorts }, rounds: number) {
+  private constructor(runner: CommandRunner, deps: { continuations: Pick<ContinuationService, "latest" | "resume">; dependencies: Pick<DependencyService, "check">; blockers: Pick<BlockerService, "openBlocker" | "getBlocker">; ports: ResumePorts }, rounds: number | (() => Promise<number>)) {
     this.#runner = runner; this.#continuations = deps.continuations; this.#dependencies = deps.dependencies; this.#blockers = deps.blockers; this.#ports = deps.ports; this.#rounds = rounds;
   }
 
-  static withEpoch(storage: ControllerStorage, epoch: number, deps: { continuations: Pick<ContinuationService, "latest" | "resume">; dependencies: Pick<DependencyService, "check">; blockers: Pick<BlockerService, "openBlocker" | "getBlocker">; ports: ResumePorts }, options: RunnerOptions & { maxRounds?: number } = {}): ResumeCheckService {
+  static withEpoch(storage: ControllerStorage, epoch: number, deps: { continuations: Pick<ContinuationService, "latest" | "resume">; dependencies: Pick<DependencyService, "check">; blockers: Pick<BlockerService, "openBlocker" | "getBlocker">; ports: ResumePorts }, options: RunnerOptions & { maxRounds?: number; /** Read once per new check (the owner's setting); wins over `maxRounds`. */ rounds?: () => Promise<number> } = {}): ResumeCheckService {
     const rounds = options.maxRounds ?? RESUME_LIMITS.rounds;
-    if (!Number.isSafeInteger(rounds) || rounds < 1 || rounds > 10) throw new RangeError("maxRounds must be a whole number from 1 to 10");
-    return new ResumeCheckService(new CommandRunner(storage, epoch, options), deps, rounds);
+    if (!validRounds(rounds)) throw new RangeError("maxRounds must be a whole number from 1 to 10");
+    return new ResumeCheckService(new CommandRunner(storage, epoch, options), deps, options.rounds ?? rounds);
   }
 
   // ---- requests ------------------------------------------------------------------------------------------------------------
@@ -119,6 +120,8 @@ export class ResumeCheckService {
       payload: { taskId, model: model as unknown as JsonObject, previousModel: (previousModel ?? null) as unknown as JsonObject, after: command.after },
       build: async () => {
         const at = this.#runner.now();
+        const maxRounds = typeof this.#rounds === "number" ? this.#rounds : await this.#rounds();
+        if (!validRounds(maxRounds)) throw new DomainError("invalid_command", "the resume retry limit is not a whole number from 1 to 10", { field: "maxRounds" });
         const active = await this.#runner.get(ACTIVE, activeRef.id);
         const current = (active?.body as unknown as { checkId?: string } | undefined)?.checkId;
         if (current !== undefined && current !== id) {
@@ -127,7 +130,7 @@ export class ResumeCheckService {
         }
         const ref: AggregateRef = { kind: KIND, id };
         const body: ResumeCheckBody = {
-          taskId, projectId, phase: "collecting", round: 0, blocks: 0, maxRounds: this.#rounds, model, ...(previousModel === undefined ? {} : { previousModel }), after: command.after, verdicts: {},
+          taskId, projectId, phase: "collecting", round: 0, blocks: 0, maxRounds, model, ...(previousModel === undefined ? {} : { previousModel }), after: command.after, verdicts: {},
           requestedBy: by.id, requestedAt: at, history: [{ phase: "collecting", at, by: by.id, note: "resume check started" }],
         };
         const pointer = clean({ checkId: id });
