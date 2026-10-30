@@ -1268,6 +1268,19 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `submission.list`
+
+The submissions recorded for a task, in ID order: the owner sees all, an agent only the ones it made. A task the caller may not read is `not_found`.
+
+Arguments:
+
+- `taskId`: the task
+- `kind` (optional): `code`, `review`, `qa`, `document` or `signoff`
+- `limit` (optional): 1 to 100, default 50
+- `after` (optional): the `next` of the previous page
+
+Result: `{ items, next?, scanLimited? }`; `scanLimited` means the search stopped before the end: ask again with `next`.
+
 #### `submission.get`
 
 One submission record (the owner, or the agent that made it; anyone else gets not found).

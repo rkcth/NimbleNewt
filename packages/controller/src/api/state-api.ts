@@ -93,7 +93,7 @@ export interface StateApiDeps {
   readonly swarm?: Pick<SwarmService, "spawn" | "cancel" | "children">;
   readonly incidents?: Pick<IncidentService, "report" | "resolve" | "list" | "observed">;
   /** Submissions by role (card Q01b). */
-  readonly submissions?: Pick<SubmissionService, "record" | "get">;
+  readonly submissions?: Pick<SubmissionService, "record" | "get" | "list">;
   /** When present, agenda items can be captured, corrected and listed through the API (cards M01 and M03). */
   readonly meetings?: MeetingService;
   /** When present, integration, checkout refresh and quarantine of a task's work can be requested (cards H12l, H12d). */

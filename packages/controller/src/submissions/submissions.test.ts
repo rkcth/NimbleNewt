@@ -20,7 +20,7 @@ const OWN = /^agent:/;
 const pass = (boundTo: string) => [{ check: "tests", result: "pass" as const, boundTo }];
 
 for (const backend of backends) {
-  const suite = (name: string, body: (c: { open(roles: (id: string, scope: { projectId: string; taskId: string }) => Promise<readonly string[]>, extra?: SubmissionOptions): SubmissionService; other: { task: string }; rawBody(id: string): Promise<unknown>; svc: SubmissionService; roles: Map<string, string[]>; agent(name: string, roles: string[]): Promise<Principal>; owner: Principal; task: string }) => Promise<void>) =>
+  const suite = (name: string, body: (c: { open(roles: (id: string, scope: { projectId: string; taskId: string }) => Promise<readonly string[]>, extra?: SubmissionOptions): SubmissionService; other: { task: string }; rawBody(id: string): Promise<unknown>; svc: SubmissionService; roles: Map<string, string[]>; agent(name: string, roles: string[], granted?: boolean): Promise<Principal>; owner: Principal; task: string }) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
       const world = await backend.open();
       try {
@@ -32,8 +32,8 @@ for (const backend of backends) {
         const project2 = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "Q" })).id;
         const task2 = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project2, title: "T2" })).id;
         const roles = new Map<string, string[]>();
-        const agent = async (nm: string, held: string[]): Promise<Principal> => {
-          await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: nm, grants: [{ action: "task.read", project }, { action: "task.read", project: project2 }] });
+        const agent = async (nm: string, held: string[], granted = true): Promise<Principal> => {
+          await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: nm, grants: granted ? [{ action: "task.read", project }, { action: "task.read", project: project2 }] : [] });
           const p = await principals.authenticate((await principals.issueCredential(owner, `agent:${nm}`)).token);
           roles.set(p.id, held);
           return p;
@@ -207,4 +207,39 @@ for (const backend of backends) {
     for (const bad of [undefined, "", 7, null]) await refuses("invalid_command", () => c.svc.record(ann, { commandId: bad, taskId: c.task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH } as never), /commandId/);
   });
 
+
+  suite("listing a task's submissions: owner sees all, an agent its own, other tasks and projects are hidden, paged and filtered by kind", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const bob = await c.agent("bob", ["reviewer"]);
+    const ids: string[] = [];
+    for (let i = 0; i < 3; i++) ids.push((await c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH, refreshRound: i })).id);
+    const rev = await c.svc.record(bob, { commandId: cid("s"), taskId: c.task, kind: "review", role: "reviewer", subject: ids[0]!, verdict: "changes" });
+    await c.svc.record(ann, { commandId: cid("s"), taskId: c.other.task, kind: "code", role: "author", base: BASE, tree: T2, patchId: PATCH });
+    const all = await c.svc.list(c.owner, c.task, { limit: 50 });
+    assert.deepEqual(all.items.map((x) => x.id), [...ids, rev.id].sort(), "the owner sees every record of this task and none of another task");
+    assert.equal(all.next, undefined);
+    // paging: pages are disjoint, ordered, and the cursor ends
+    const seen: string[] = [];
+    let after: string | undefined;
+    for (let n = 0; n < 5; n++) {
+      const p = await c.svc.list(c.owner, c.task, { limit: 2, ...(after === undefined ? {} : { afterId: after }) });
+      assert.ok(p.items.length <= 2);
+      seen.push(...p.items.map((x) => x.id));
+      if (p.next === undefined) break;
+      after = p.next;
+    }
+    assert.deepEqual(seen, all.items.map((x) => x.id));
+    assert.deepEqual((await c.svc.list(c.owner, c.task, { kind: "review", limit: 50 })).items.map((x) => x.id), [rev.id]);
+    // visibility: an agent sees only what it submitted
+    assert.deepEqual((await c.svc.list(bob, c.task, { limit: 50 })).items.map((x) => x.id), [rev.id]);
+    assert.equal((await c.svc.list(ann, c.task, { limit: 50 })).items.length, 3);
+    // an agent without task.read in a task's project gets not_found, as does an unknown task
+    const lone = await c.agent("lone", ["author"], false);
+    await refuses("not_found", () => c.svc.list(lone, c.task, { limit: 5 }));
+    await refuses("not_found", () => c.svc.list(c.owner, "task-aaaaaaaaaaaaaaaaaaaa", { limit: 5 }));
+    await refuses("invalid_command", () => c.svc.list(c.owner, c.task, { limit: 0 }));
+    await refuses("invalid_command", () => c.svc.list(c.owner, c.task, { limit: 101 }));
+    await refuses("invalid_command", () => c.svc.list(c.owner, c.task, { limit: 5, kind: "nope" }));
+    await refuses("invalid_command", () => c.svc.list(c.owner, c.task, { limit: 5, afterId: "zzz" }));
+  });
 }

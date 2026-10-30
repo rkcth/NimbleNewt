@@ -110,6 +110,8 @@ const ALLOWED: Readonly<Record<SubmissionKind, readonly string[]>> = {
   document: ["artifactDigest", "artifactId", "report"],
   signoff: ["subject", "decision"],
 };
+const LIST_PAGE = 200;
+const LIST_READS = 10;
 const MAX_EVIDENCE = 50;
 const MAX_REPORT = 8000;
 
@@ -188,6 +190,39 @@ export class SubmissionService {
     const body = found.body as unknown as SubmissionBody;
     if (by.kind !== "owner" && body.submittedBy !== by.id) return undefined;
     return { ...body, ...(body.report === undefined ? {} : { report: redactText(body.report) }), id: found.id, revision: found.revision };
+  }
+
+  /**
+   * The submissions of one task in ID order from `afterId`, filtered the way `get` is: the owner sees all, an agent only its own (PROVISIONAL; owner question: should a reviewer see the submission it was asked to review?).
+   * A task the caller cannot read is `not_found`, so listing does not show which tasks exist. Work is bounded: at most LIST_READS pages are scanned; `scanLimited` says the scan stopped before the end and `next` continues.
+   */
+  async list(by: Principal, taskIdValue: string, query: { kind?: string; afterId?: string; limit: number }): Promise<{ items: (SubmissionBody & { id: string; revision: number })[]; next?: string; scanLimited?: boolean }> {
+    const taskId = checkTaskId(taskIdValue);
+    if (!Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > 100) bad("limit", "must be a whole number from 1 to 100");
+    if (query.kind !== undefined && !SUBMISSION_KINDS.includes(query.kind as SubmissionKind)) bad("kind", `must be one of ${SUBMISSION_KINDS.join(", ")}`);
+    if (query.afterId !== undefined && (typeof query.afterId !== "string" || query.afterId.length > 40 || !ID.test(query.afterId))) bad("after", "is not a submission ID");
+    const task = (await this.#runner.get("task", taskId))?.body as unknown as TaskBody | undefined;
+    const hidden = (): never => { throw new DomainError("not_found", "no such task"); };
+    if (task === undefined) return hidden();
+    if (by.kind !== "owner") {
+      if (by.kind !== "agent") return hidden();
+      if ((by.taskScope !== undefined && (!inTaskScope(by, task.projectId) || by.taskScope.taskId !== taskId)) || !allows(by, "task.read", task.projectId, { resource: { kind: "task", id: taskId } })) return hidden();
+    }
+    const items: (SubmissionBody & { id: string; revision: number })[] = [];
+    let after = query.afterId;
+    for (let reads = 0; reads < LIST_READS; reads++) {
+      const chunk = await this.#runner.list("submission", { ...(after === undefined ? {} : { afterId: after }), limit: LIST_PAGE });
+      for (const row of chunk) {
+        after = row.id;
+        const body = row.body as unknown as SubmissionBody;
+        if (body.taskId !== taskId || (query.kind !== undefined && body.kind !== query.kind)) continue;
+        if (by.kind !== "owner" && body.submittedBy !== by.id) continue;
+        items.push({ ...body, ...(body.report === undefined ? {} : { report: redactText(body.report) }), id: row.id, revision: row.revision });
+        if (items.length >= query.limit) return { items, next: row.id };
+      }
+      if (chunk.length < LIST_PAGE) return { items };
+    }
+    return { items, ...(after === undefined ? {} : { next: after }), scanLimited: true };
   }
 
   async #subject(id: unknown, taskId: string): Promise<SubmissionBody & { id: string }> {

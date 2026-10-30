@@ -68,6 +68,12 @@ test("submissions by role go through the state API: the author submits code tied
     assert.equal((await call(stranger.token, "submission.get", { submissionId: id })).error.code, "not_found");
     assert.equal((await call(far.token, "submission.get", { submissionId: id })).error.code, "not_found");
     assert.equal((await call(boot.token, "submission.get", { submissionId: id, extra: 1 })).error.code, "invalid_command");
+    const listed = await call(boot.token, "submission.list", { taskId: task });
+    assert.deepEqual(listed.result.items.map((x: any) => x.id).sort(), [id, reviewId].sort(), "the owner lists both");
+    assert.deepEqual((await call(rev.token, "submission.list", { taskId: task })).result.items.map((x: any) => x.id), [reviewId], "an agent lists only its own");
+    assert.deepEqual((await call(boot.token, "submission.list", { taskId: task, kind: "code", limit: 1 })).result.items.map((x: any) => x.id), [id]);
+    assert.equal((await call(far.token, "submission.list", { taskId: task })).error.code, "not_found", "another project's agent");
+    assert.equal((await call(boot.token, "submission.list", { taskId: task, limit: 0 })).error.code, "invalid_command");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
