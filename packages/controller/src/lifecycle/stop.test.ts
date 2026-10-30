@@ -115,6 +115,22 @@ for (const backend of backends) {
     assert.equal((await c.pauses.gate(c.owner, scope))?.intent, "pause");
   });
 
+  suite("Force Stop also takes an ordinary pause over, and a pause whose runtime says suspended or stopped is not lifted by an old time (card L06b)", async (c) => {
+    const scope = scopeOf(c.task);
+    await c.pauses.pause(c.owner, { commandId: cid("pz"), scope, reason: "for the weekend" });
+    await c.pauses.setResumeCondition(c.owner, { commandId: cid("rc"), scope, at: "2026-01-01T00:00:00Z" });
+    await c.stops.force(c.owner, { commandId: cid("f"), scope, reason: "it is on fire" });
+    const gate = (await c.pauses.gate(c.owner, scope))!;
+    assert.deepEqual([gate.intent, gate.resumeAt, gate.takenOver], ["pause", undefined, true], "force dropped the time and marked the pause taken over");
+    assert.deepEqual(await c.pauses.liftDue(c.owner), []);
+    // A pause nobody took over, but whose runtime reports it stopped, is not lifted either.
+    const other = { kind: "agent", id: c.agentA } as const;
+    await c.pauses.pause(c.owner, { commandId: cid("pz"), scope: other, reason: "for the weekend" });
+    await c.pauses.setResumeCondition(c.owner, { commandId: cid("rc"), scope: other, at: "2026-01-01T00:00:00Z" });
+    await c.pauses.observe(c.owner, { commandId: cid("ob"), scope: other, state: "stopped" as never });
+    assert.deepEqual(await c.pauses.liftDue(c.owner), [], "a stopped runtime is not lifted by a time");
+  });
+
   suite("a kill in the middle resumes the intent after a restart and reuses the finished preparation", async (c) => {
     c.rt.crashOnTerminate = true;
     const { intentId } = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "stop" });

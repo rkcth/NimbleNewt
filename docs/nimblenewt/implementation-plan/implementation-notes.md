@@ -2919,3 +2919,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 
 - A responsibility's `escalation` may carry `afterAlerts` (2 to 1000) besides `afterMinutes`: `IncidentService.escalate` escalates an open incident once its count of alerts (same signature) reaches it, or once the time has passed; either rule is enough. A rule the owner did not set applies to nothing, so there is no default retry count and nothing changes for existing responsibilities. Tested: two alerts do not escalate, the third does at once and only once, a duty with only the time rule is not escalated by count, a value of 1 is refused.
 - Provisional: the owner has not chosen a default count; it is opt-in per responsibility until they do. Still open in P04c: turning a due check into a bounded task, maintenance leases, event-driven checks, the coverage gap from an event-source outage, the chat/status view.
+
+## L06b: two review gaps covered by tests
+
+- Force Stop drops a recorded time and marks the pause taken over; a pause whose runtime reports it `stopped` is not lifted by an old time. (The re-pause race guard and the deferred per-gate failure still have no test of their own.)
