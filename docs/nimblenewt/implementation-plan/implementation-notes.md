@@ -2838,3 +2838,9 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - No model is involved anywhere in submitting, issuing, reporting or gating.
 - **Not here (X09b):** delivering the payload to a remote worker over the worker transport and collecting logs and artifact hashes from it (H12a), who notices a lost worker and interrupts the attempt (the owner does it by hand for now), the outer test supervisor for reboot and partition tests with an external effect sink (X10), and a chat wording for these orders.
 - Provisional: log and artifact bytes are not stored, only the log digest and the artifact hashes the worker reports; a worker reports once per attempt.
+
+## L03g (part 2): drafts and responsibilities in the hand-off package
+
+- `controllerHandoffSources` takes three optional sources. **Drafts:** the sender's shared draft desk records on this task (status `draft`, visibility `shared`; private scratch, other tasks' drafts and accepted notes are left out), read as the sender, because a recipient could not otherwise read another agent's draft; each is `id "title": first 300 characters`. **Responsibilities** (a new fixed section name, `responsibilities`): the active responsibilities in the task's project that the sender answers for, with a line saying they stay with the sender until reassigned. **Locks:** a hook for what the sender holds locked or leased; no service keeps such holds yet (the integrator lease is P10, workspace holds H12m), so none is wired and the section stays unset rather than claiming "no locks".
+- A failing source leaves its section missing; it never fails the package. The recipient's eligibility checks (L03d) are unchanged. Responsibilities are not transferred by a hand-off; moving them is a separate, deliberate reassignment (owner decision to confirm).
+- **Remainder (L03h):** the `locks` source once something holds locks, and offering to reassign the sender's responsibilities with the task.

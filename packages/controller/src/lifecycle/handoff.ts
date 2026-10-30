@@ -18,7 +18,7 @@ import type { StopService } from "./stop.js";
  */
 export const HANDOFF_SECTIONS = [
   "brief", "acceptanceCriteria", "versions", "outstandingQuestions", "audience", "completedWork", "unfinishedWork", "drafts", "uncommittedChanges", "results",
-  "backgroundOperations", "locks", "risks", "nextAction",
+  "backgroundOperations", "locks", "responsibilities", "risks", "nextAction",
 ] as const;
 export type HandoffSection = (typeof HANDOFF_SECTIONS)[number];
 /** Without these a recipient cannot carry on; a package missing one is not ready (and can still be handed over, with the gap accepted and recorded). */

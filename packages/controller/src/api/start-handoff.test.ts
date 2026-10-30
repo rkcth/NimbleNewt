@@ -94,3 +94,38 @@ test("a hand-off left mid-transfer when the controller stopped is finished by th
     assert.equal(owner.result.item.owner.id, b, "moved to the new owner");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+test("the package carries the sender's shared drafts on the task and the responsibilities it answers for, never private scratch (card L03g)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-handoff-extra-"));
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [] });
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const call = async (token: string, op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    const project = (await call(boot.token, "project.create", { name: "Garden" }, "p1")).result.id as string;
+    const task = (await call(boot.token, "task.create", { projectId: project, title: "weed the beds", description: "Clear the north beds." }, "t1")).result.id as string;
+    const other = (await call(boot.token, "task.create", { projectId: project, title: "water", description: "Water." }, "t2")).result.id as string;
+    const a = (await c.services.agents.create(rob, { commandId: "ag-a", friendlyName: "A" })).id;
+    const b = (await c.services.agents.create(rob, { commandId: "ag-b", friendlyName: "B" })).id;
+    for (const [who, action] of [[a, "desk.write"], [a, "desk.read"], [a, "responsibility.read"], [a, "attempt.work"], [b, "attempt.work"]] as const) await c.services.grants.grant(rob, { commandId: `g-${who}-${action}`, grantee: `agent:${who}`, action, project, source: "direct", basis: "test" });
+    await call(boot.token, "task.transition", { taskId: task, to: "ready", expectedRevision: 1 }, "tr1");
+    assert.ok((await call(boot.token, "task.assign", { taskId: task, owner: { kind: "agent", id: a } }, "as1")).ok);
+    const aToken = (await c.services.principals.issueCredential(rob, `agent:${a}`)).token;
+    const asA = await c.services.principals.authenticate(aToken);
+    const write = (commandId: string, extra: Record<string, unknown>) => c.services.desks.write(asA, { commandId, projectId: project, kind: "note", title: "work", body: "text", visibility: "shared", status: "draft", ...extra } as never);
+    await write("d1", { taskId: task, title: "Bed plan", body: "North bed:\n  carrots first" });
+    await write("d2", { taskId: task, title: "Private thought", body: "do not share", visibility: "private" });
+    await write("d3", { taskId: other, title: "Other task draft" });
+    await write("d4", { taskId: task, title: "Accepted note", status: "accepted" });
+    await c.services.responsibilities.create(rob, { commandId: "r1", projectId: project, title: "Keep the compost turned", objective: "Compost stays healthy", desiredCondition: "Turned weekly", ownerId: `agent:${a}` } as never);
+    await c.services.responsibilities.create(rob, { commandId: "r2", projectId: project, title: "Someone else's", objective: "x", desiredCondition: "y" } as never);
+    const prepared = await call(boot.token, "handoff.prepare", { taskId: task, to: { kind: "agent", id: b }, reason: "leave" }, "h1");
+    assert.ok(prepared.ok, JSON.stringify(prepared));
+    const sections = prepared.result.item.package.sections;
+    assert.match(sections.drafts, /"Bed plan": North bed: carrots first/);
+    assert.ok(!/Private thought|do not share|Other task draft|Accepted note/.test(sections.drafts), sections.drafts);
+    assert.match(sections.responsibilities, /Keep the compost turned/);
+    assert.ok(!/Someone else's/.test(sections.responsibilities));
+    assert.equal(sections.locks, undefined, "nothing keeps locks yet, so none is claimed");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
