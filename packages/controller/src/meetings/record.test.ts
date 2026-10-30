@@ -8,6 +8,7 @@ import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import type { Availability } from "../conversations/index.js";
 import { PauseService } from "../lifecycle/index.js";
+import { allows } from "../security/access.js";
 import { GrantService, PrincipalService, type Principal } from "../security/index.js";
 import { MeetingRecordService, MeetingService, budgetRaiseApplier, grantApplier, taskUpdateApplier, taskReassignApplier, type ChangeApplier, type DecisionRecordBody, type MotionBody, type RecordBody, type SourceCite } from "./index.js";
 
@@ -692,18 +693,26 @@ for (const backend of backends) {
     await refuses("forbidden", () => motionOf(c, rec, c.asE));
   });
 
-  suite("a vote reassigns a task through the assignment service when the carrying agent holds assignment.manage, and does nothing without it (card M02e)", async (c) => {
+  suite("a vote reassigns a task through the assignment service when the carrying agent holds assignment.manage, does nothing without it, and never overrides a later move by the owner (card M02e)", async (c) => {
     const assignments = AssignmentService.withEpoch(c.storage, c.projects.epoch, c.projects, options);
-    const reassign = c.reopen({ appliers: { "task.reassign": taskReassignApplier(assignments, c.projects, c.principals) } });
+    const mayWork = async (id: string, project: string, taskId: string) => {
+      const p = await c.principals.get(id);
+      if (p === undefined) return false;
+      const eff = await c.grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString());
+      return allows(eff as never, "attempt.work", project, { resource: { kind: "task", id: taskId } }) && allows(eff as never, "task.read", project, { resource: { kind: "task", id: taskId } });
+    };
+    const reassign = c.reopen({ appliers: { "task.reassign": taskReassignApplier(assignments, c.projects, c.principals, mayWork) } });
     const idOf = (p: string): string => p.slice("agent:".length);
     const mk = async (title: string) => { const t = await c.task(title); await assignments.assignTask({ commandId: cid("as"), actor: c.owner.id, taskId: t.id, owner: { kind: "agent", id: idOf(c.pD) } }); return t; };
     const vote = async (t: { id: string; revision: number }, carrier: string, to: string) => {
+      const a = (await assignments.getAssignment(t.id))!;
       const { rec } = await c.meet({ chair: c.pD });
-      const m = await adopt({ ...c, records: reassign } as Ctx, rec, c.asB, { topic: "unrelated topic", changes: [{ kind: "task.reassign", agent: carrier, target: { kind: "task", id: t.id }, expectedRevision: t.revision, patch: { toAgent: to }, summary: "hand the task over" }] });
+      const m = await adopt({ ...c, records: reassign } as Ctx, rec, c.asB, { topic: "unrelated topic", changes: [{ kind: "task.reassign", agent: carrier, target: { kind: "task", id: t.id }, expectedRevision: t.revision, patch: { toAgent: to, from: a.owner === undefined ? null : `agent:${a.owner.id}`, generation: a.generation, revision: a.revision }, summary: "hand the task over" }] });
       return { d: await decisionOf({ ...c, records: reassign } as Ctx, m) };
     };
-    const ownerOf = async (id: string) => (await assignments.getAssignment(id))!.owner!.id;
+    const ownerOf = async (id: string) => (await assignments.getAssignment(id))!.owner?.id;
     await c.grants.grant(c.owner, { commandId: cid("g"), grantee: c.pA, action: "assignment.manage", project: c.project, source: "direct", basis: "may reassign" } as never);
+    for (const action of ["attempt.work", "task.read"]) await c.grants.grant(c.owner, { commandId: cid("g"), grantee: c.pC, action, project: c.project, source: "direct", basis: "may work" } as never);
     const t1 = await mk("Task one");
     const one = await vote(t1, c.pA, c.pC);
     const r1 = await reassign.apply(c.host, { decisionId: one.d.id });
@@ -715,6 +724,32 @@ for (const backend of backends) {
     const r2 = await reassign.apply(c.host, { decisionId: two.d.id });
     assert.deepEqual([r2.applied, r2.notApplied], [0, 1]);
     assert.equal(await ownerOf(t2.id), idOf(c.pD));
+    // The owner transfers the task between the decision and its carrying out: the decision does not override that.
+    const t3 = await mk("Task three");
+    const three = await vote(t3, c.pA, c.pC);
+    await assignments.transferTask({ commandId: cid("tr"), actor: c.owner.id, taskId: t3.id, expectedRevision: (await assignments.getAssignment(t3.id))!.revision, to: { kind: "agent", id: idOf(c.pB) } });
+    const r3 = await reassign.apply(c.host, { decisionId: three.d.id });
+    assert.deepEqual([r3.applied, r3.notApplied], [0, 1]);
+    assert.equal(await ownerOf(t3.id), idOf(c.pB), "the owner's transfer stands");
+    // ... or releases it.
+    const t4 = await mk("Task four");
+    const four = await vote(t4, c.pA, c.pC);
+    await assignments.releaseTask({ commandId: cid("rl"), actor: c.owner.id, taskId: t4.id, expectedRevision: (await assignments.getAssignment(t4.id))!.revision });
+    const r4 = await reassign.apply(c.host, { decisionId: four.d.id });
+    assert.deepEqual([r4.applied, r4.notApplied], [0, 1]);
+    assert.equal((await assignments.getAssignment(t4.id))!.state, "released", "the owner's release stands");
+    // A replay after an intervening move does not wedge the decision: the change is not applied, whatever the service says (command_conflict included).
+    const t5 = await mk("Task five");
+    const five = await vote(t5, c.pA, c.pC);
+    const conflicting = c.reopen({ appliers: { "task.reassign": { ...taskReassignApplier(assignments, c.projects, c.principals, mayWork), apply: async () => { throw new DomainError("command_conflict", "the command id was used for different input"); } } } });
+    const r5 = await conflicting.apply(c.host, { decisionId: five.d.id });
+    assert.deepEqual([r5.applied, r5.notApplied], [0, 1]);
+    // A target without attempt.work is refused.
+    const t6 = await mk("Task six");
+    const six = await vote(t6, c.pA, c.pE);
+    const r6 = await reassign.apply(c.host, { decisionId: six.d.id });
+    assert.deepEqual([r6.applied, r6.notApplied], [0, 1]);
+    assert.equal(await ownerOf(t6.id), idOf(c.pD));
   });
 
   suite("a kind of change that widens spend or rights may be moved, and waits for the owner unless the approval policy lets its class through; the owner's agreement is what carries it out (owner decision 2026-10-29)", async (c) => {
@@ -1077,35 +1112,53 @@ for (const backend of backends) {
 
 }
 
-test("a reassignment decided in a meeting names one active agent and nothing else, goes through the assignment service, and is repeatable (card M02e)", async () => {
+test("a reassignment decided in a meeting names one active agent and the assignment it observed, goes through the assignment service, and is repeatable (card M02e)", async () => {
   const calls: [string, Record<string, unknown>][] = [];
   let current: Record<string, unknown> | undefined;
   const assignments = {
     getAssignment: async () => current,
-    transferTask: async (c: Record<string, unknown>) => { calls.push(["transfer", c]); current = { ...current, owner: c["to"] }; return { revision: 5 }; },
-    assignTask: async (c: Record<string, unknown>) => { calls.push(["assign", c]); current = { state: "assigned", revision: 1, owner: c["owner"] }; return { revision: 1 }; },
+    transferTask: async (c: Record<string, unknown>) => { calls.push(["transfer", c]); current = { ...current, owner: c["to"], generation: (current!["generation"] as number) + 1 }; return { revision: 50 }; },
+    assignTask: async (c: Record<string, unknown>) => { calls.push(["assign", c]); current = { state: "assigned", revision: 60, generation: ((current?.["generation"] as number | undefined) ?? 0) + 1, owner: c["owner"] }; return { revision: 60 }; },
   };
-  const states: Record<string, string> = { "agent:ann": "active", "agent:old": "disabled" };
-  const applier = taskReassignApplier(assignments as never, { getTask: async (id: string) => (id === "task-a" ? { projectId: "proj-a" } : undefined) } as never, { get: async (id: string) => (states[id] === undefined ? undefined : { state: states[id]! }) });
+  const states: Record<string, string> = { "agent:ann": "active", "agent:bob": "active", "agent:old": "disabled" };
+  const works = new Set(["agent:ann", "agent:bob"]);
+  const applier = taskReassignApplier(assignments as never, { getTask: async (id: string) => (id === "task-a" ? { projectId: "proj-a" } : undefined) } as never, { get: async (id: string) => (states[id] === undefined ? undefined : { state: states[id]! }) }, async (id) => works.has(id));
   assert.deepEqual([applier.action, applier.widens], ["assignment.manage", undefined]);
   assert.equal(await applier.project({ kind: "task", id: "task-a" }), "proj-a");
   assert.equal(await applier.project({ kind: "project", id: "task-a" }), undefined);
   const base = { commandId: "mtg:d1:c1", actor: "agent:x", target: { kind: "task", id: "task-a" }, expectedRevision: 1, agreedBy: "policy:none" };
-  for (const patch of [{}, { toAgent: "ann" }, { toAgent: "agent:ann", extra: 1 }, { toAgent: "agent:old" }, { toAgent: "agent:nobody" }, { toAgent: 7 }]) {
-    await assert.rejects(() => applier.apply({ ...base, patch: patch as never }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
+  const never = { from: null };
+  const refused = (patch: unknown, code = "invalid_command", b: object = base) => assert.rejects(() => applier.apply({ ...b, patch: patch as never } as never), (e: unknown) => e instanceof DomainError && e.code === code);
+  for (const patch of [{}, { toAgent: "agent:ann" }, { toAgent: "ann", ...never }, { toAgent: "agent:ann", ...never, extra: 1 }, { toAgent: "agent:old", ...never }, { toAgent: "agent:nobody", ...never }, { toAgent: 7, ...never },
+    { toAgent: "agent:ann", from: "ann", generation: 1, revision: 1 }, { toAgent: "agent:ann", from: null, generation: 0, revision: 1 }, { toAgent: "agent:ann", from: null, generation: 1 }, { toAgent: "agent:ann", from: null, revision: 1.5, generation: 1 }, { toAgent: "agent:ann", from: "agent:bob" }]) {
+    await refused(patch);
   }
-  await assert.rejects(() => applier.apply({ ...base, target: { kind: "project", id: "p" }, patch: { toAgent: "agent:ann" } }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
+  await refused({ toAgent: "agent:ann", ...never }, "invalid_command", { ...base, target: { kind: "project", id: "p" } });
   assert.equal(calls.length, 0);
-  await applier.apply({ ...base, patch: { toAgent: "agent:ann" } });
+  await applier.apply({ ...base, patch: { toAgent: "agent:ann", ...never } });
   assert.deepEqual([calls[0]![0], calls[0]![1]["owner"], calls[0]![1]["expectedRevision"]], ["assign", { kind: "agent", id: "ann" }, undefined], "never assigned: a plain assignment");
-  await applier.apply({ ...base, patch: { toAgent: "agent:ann" } });
-  assert.equal(calls.length, 1, "a replay finds the owner already in place");
-  states["agent:bob"] = "active";
-  await applier.apply({ ...base, patch: { toAgent: "agent:bob" } });
-  assert.deepEqual([calls[1]![0], calls[1]![1]["commandId"], calls[1]![1]["expectedRevision"], calls[1]![1]["to"]], ["transfer", "mtg:d1:c1", 1, { kind: "agent", id: "bob" }]);
-  current = { state: "released", revision: 7 };
-  await applier.apply({ ...base, patch: { toAgent: "agent:ann" } });
-  assert.deepEqual([calls[2]![0], calls[2]![1]["expectedRevision"]], ["assign", 7], "released: assigned again at its revision");
+  await applier.apply({ ...base, patch: { toAgent: "agent:ann", ...never } });
+  assert.equal(calls.length, 1, "a replay finds the owner already in place at a later generation");
+  // Assigned to ann at generation 1, revision 60: the decision observed that; the transfer carries the observed revision, not the live one.
+  current = { ...current, revision: 99 };
+  await applier.apply({ ...base, patch: { toAgent: "agent:bob", from: "agent:ann", generation: 1, revision: 60 } });
+  assert.deepEqual([calls[1]![0], calls[1]![1]["commandId"], calls[1]![1]["expectedRevision"], calls[1]![1]["to"]], ["transfer", "mtg:d1:c1", 60, { kind: "agent", id: "bob" }]);
+  await applier.apply({ ...base, patch: { toAgent: "agent:bob", from: "agent:ann", generation: 1, revision: 60 } });
+  assert.equal(calls.length, 2, "a replay after the transfer does nothing");
+  // The owner moved the task meanwhile: the decision does not override that.
+  await refused({ toAgent: "agent:ann", from: "agent:old", generation: 2, revision: 70 }, "stale_revision");
+  await refused({ toAgent: "agent:ann", from: "agent:bob", generation: 1, revision: 70 }, "stale_revision");
+  current = { state: "released", revision: 7, generation: 2 };
+  await refused({ toAgent: "agent:ann", from: "agent:bob", generation: 2, revision: 6 }, "stale_revision");
+  await applier.apply({ ...base, patch: { toAgent: "agent:ann", from: null, generation: 2, revision: 7 } });
+  assert.deepEqual([calls[2]![0], calls[2]![1]["expectedRevision"]], ["assign", 7], "released: assigned again at its observed revision");
+  // A running attempt: use a hand-off. A target without the rights to work: refused.
+  current = { state: "assigned", revision: 8, generation: 3, owner: { kind: "agent", id: "ann" }, activeAttemptId: "att-1" };
+  await assert.rejects(() => applier.apply({ ...base, patch: { toAgent: "agent:bob", from: "agent:ann", generation: 3, revision: 8 } as never }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command" && /hand-off/.test(e.message));
+  current = { state: "assigned", revision: 8, generation: 3, owner: { kind: "agent", id: "ann" } };
+  works.delete("agent:bob");
+  await assert.rejects(() => applier.apply({ ...base, patch: { toAgent: "agent:bob", from: "agent:ann", generation: 3, revision: 8 } as never }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command" && /may not work/.test(e.message));
+  assert.equal(calls.length, 3);
 });
 
 test("a budget raise decided in a meeting widens spend, names a task and positive amounts only, and is carried out as the controller with who allowed it (card M02e)", async () => {

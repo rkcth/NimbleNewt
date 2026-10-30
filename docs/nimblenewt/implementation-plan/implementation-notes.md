@@ -3073,3 +3073,10 @@ The chat's catalog (`CHAT_OPS` in `packages/controller/src/chat/commands.ts`) is
 - Not a widening (`widens` unset): assignment only changes who is dispatched on the task; the new owner's access still comes from its own grants and per-attempt task credentials (A10b/H12), nothing is added. If a later change makes assignment confer access, set `widens: 'access-change'` here.
 - Idempotent: if the task is already assigned to that agent the change is a no-op, so a replay after a crash does not conflict on the changed assignment revision; the command id is the stable `mtg:<decision>:<change>`.
 - Tests: applier unit test with fakes, and `record.test.ts` through the real `MeetingRecordService` on every backend (vote reassigns; carrier without `assignment.manage` is not applied).
+
+## M02e review fixes: task.reassign applier
+
+- The reassignment patch carries the assignment as observed at decision time: `from` (agent id or null), and `generation` plus `revision` of the assignment record when one exists. The task revision check does not cover assignment writes, so the applier itself refuses (`stale_revision`, so the change is "not applied") unless the live assignment still matches; an owner's later transfer or release stands. If the new owner already holds the task at a later generation, the change is a replay and does nothing. Unknown keys are refused.
+- The transfer/assign command is built from the patch's observed revision only, so a replay has an identical payload. The apply loop now also records `command_conflict` as "not applied", so a conflicting replay cannot wedge a decision.
+- A task with a running attempt (`activeAttemptId`) is refused ("use a hand-off"). Routing a running task through `HandoffService` is left to a later card.
+- The new owner must hold `attempt.work` and `task.read` on the task (effective grants, checked through the `mayWork` callback wired in api/start.ts). An assignee receives auto admission, title/description in the work order, budget draw and coordinator inquiries; the old comment claiming nothing is added was wrong.

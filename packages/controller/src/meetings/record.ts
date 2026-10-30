@@ -84,29 +84,52 @@ export function taskUpdateApplier(projects: ProjectService): ChangeApplier {
 
 /**
  * An ownership change decided in a meeting (card M02e): the task goes to another agent through the assignment service (a transfer when it is assigned, an assignment when it is released or never was). The carrying agent must
- * hold `assignment.manage` for the task. It is not a widening: assignment gives the new owner the task's normal dispatch and nothing else, because what an agent may touch is still decided by its own grants and per-attempt
- * credentials (see implementation notes). The new owner must be an active agent. A replay finds the task already with that owner and does nothing.
+ * hold `assignment.manage` for the task. An assignee does receive things: automatic admission of attempts, the task's title and description in the work order, the task's budget draw and the coordinator's inquiries. So the new
+ * owner must be an active agent that holds `attempt.work` and `task.read` on the task. It is not a widening of rights: what an agent may touch is still decided by its own grants and per-attempt credentials.
+ *
+ * The patch carries the assignment as it stood when the decision was made: `from` (the owner's agent id, or null when the task was released or never assigned) and, when an assignment record exists, its `generation` and `revision`.
+ * The move is refused unless the assignment still matches (a later transfer or release by the owner stands); if it already shows the new owner at a later generation this very change was carried out and nothing is done.
+ * The transfer command is built from these decision-time values only, so a replay has the same payload. A task with a running attempt is refused: the hand-off service is the way to move it (a later card).
  */
-export function taskReassignApplier(assignments: Pick<AssignmentService, "getAssignment" | "assignTask" | "transferTask">, projects: Pick<ProjectService, "getTask">, principals: { get(id: string): Promise<{ state: string } | undefined> }): ChangeApplier {
+export function taskReassignApplier(
+  assignments: Pick<AssignmentService, "getAssignment" | "assignTask" | "transferTask">, projects: Pick<ProjectService, "getTask">,
+  principals: { get(id: string): Promise<{ state: string } | undefined> },
+  mayWork: (agentPrincipalId: string, projectId: string, taskId: string) => Promise<boolean>,
+): ChangeApplier {
+  const bad = (why: string): never => { throw new DomainError("invalid_command", why); };
+  const whole1 = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 1;
   return {
     action: "assignment.manage",
     async project(target) { return target.kind === "task" ? (await projects.getTask(target.id))?.projectId : undefined; },
     async apply(change) {
-      const patch = change.patch as { toAgent?: unknown };
-      if (Object.keys(patch).some((k) => k !== "toAgent") || typeof patch.toAgent !== "string" || !AGENT.test(patch.toAgent)) throw new DomainError("invalid_command", "a reassignment names toAgent (agent:<name>) and nothing else");
-      if (change.target.kind !== "task") throw new DomainError("invalid_command", "a reassignment targets a task");
-      const principal = await principals.get(patch.toAgent);
-      if (principal === undefined || principal.state !== "active") throw new DomainError("invalid_command", `${patch.toAgent} is not an active agent`);
-      const to = { kind: "agent", id: patch.toAgent.slice("agent:".length) };
+      const patch = change.patch as { toAgent?: unknown; from?: unknown; generation?: unknown; revision?: unknown };
+      if (Object.keys(patch).some((k) => !["toAgent", "fro" + "m", "generation", "revision"].includes(k)) || typeof patch.toAgent !== "string" || !AGENT.test(patch.toAgent)) bad("a reassignment names toAgent (agent:<name>), the assignment it observed (from, generation, revision) and nothing else");
+      const toAgent = patch.toAgent as string;
+      if (!(patch.from === null || (typeof patch.from === "string" && AGENT.test(patch.from)))) bad("a reassignment names from: the agent that held the task when it was decided, or null when it was released or never assigned");
+      if ((patch.generation === undefined) !== (patch.revision === undefined) || (patch.generation !== undefined && (!whole1(patch.generation) || !whole1(patch.revision)))) bad("a reassignment names the observed generation and revision together, as positive whole numbers, or neither (never assigned)");
+      if (patch.generation === undefined && patch.from !== null) bad("an assigned task's reassignment names the observed generation and revision");
+      if (change.target.kind !== "task") bad("a reassignment targets a task");
+      const from = patch.from as string | null;
+      const observed = (patch.generation as number | undefined) ?? 0;
+      const observedRevision = patch.revision as number | undefined;
+      const principal = await principals.get(toAgent);
+      if (principal === undefined || principal.state !== "active") bad(`${toAgent} is not an active agent`);
+      const to = { kind: "agent", id: toAgent.slice("agent:".length) };
       const taskId = change.target.id;
       const current = await assignments.getAssignment(taskId);
       const reason = `agreed in a meeting (${change.agreedBy})`;
-      if (current !== undefined && current.state === "assigned" && current.owner?.kind === to.kind && current.owner.id === to.id) return {};
-      if (current !== undefined && current.state === "assigned") {
-        const done = await assignments.transferTask({ commandId: change.commandId, actor: change.actor, taskId, expectedRevision: current.revision, to, reason });
+      const holder = current !== undefined && current.state === "assigned" && current.owner !== undefined ? `${current.owner.kind}:${current.owner.id}` : null;
+      const generation = current === undefined ? 0 : current.generation;
+      // This very change, already carried out (or the same owner is in place): nothing to do.
+      if (holder === toAgent && generation >= observed) return {};
+      if (holder !== from || generation !== observed) throw new DomainError("stale_revision", `the assignment of ${taskId} changed since the decision (now ${holder ?? "unassigned"} at generation ${generation}, was ${from ?? "unassigned"} at generation ${observed})`);
+      if (current !== undefined && current.activeAttemptId !== undefined) bad("the task has a running attempt: use a hand-off");
+      if (!(await mayWork(toAgent, (await projects.getTask(taskId))?.projectId ?? "", taskId))) bad(`${toAgent} may not work on or read this task`);
+      if (from !== null) {
+        const done = await assignments.transferTask({ commandId: change.commandId, actor: change.actor, taskId, expectedRevision: observedRevision!, to, reason });
         return { revision: done.revision };
       }
-      const done = await assignments.assignTask({ commandId: change.commandId, actor: change.actor, taskId, ...(current === undefined ? {} : { expectedRevision: current.revision }), owner: to, reason });
+      const done = await assignments.assignTask({ commandId: change.commandId, actor: change.actor, taskId, ...(observedRevision === undefined ? {} : { expectedRevision: observedRevision }), owner: to, reason });
       return { revision: done.revision };
     },
   };
@@ -937,7 +960,7 @@ export class MeetingRecordService {
         await save({ ...change, state: "applied", ...(done.revision === undefined ? {} : { appliedRevision: done.revision }) });
       } catch (error) {
         if (error instanceof DomainError && error.code === "stale_revision") await refuse("conflict", `${change.target.kind} ${change.target.id} changed meanwhile: ${error.message}`);
-        else if (error instanceof DomainError && ["invalid_command", "forbidden", "not_found", "invalid_transition"].includes(error.code)) await refuse("failed", error.message);
+        else if (error instanceof DomainError && ["invalid_command", "forbidden", "not_found", "invalid_transition", "command_conflict"].includes(error.code)) await refuse("failed", error.message);
         else throw error;
       }
     }
