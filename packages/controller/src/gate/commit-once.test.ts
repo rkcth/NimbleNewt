@@ -80,6 +80,56 @@ for (const backend of backends) {
     assert.deepEqual([second.commitId, second.alreadyRecorded, state.made], [first.commitId, true, 1]);
   });
 
+  suite("H12o: two concurrent calls for one request make one commit", async (c) => {
+    const { id, reviewId } = await c.ask(); await c.decide(reviewId);
+    const { state, port } = fake();
+    const slow: CommitPort = { ...port, commit: async (p) => { await new Promise((r) => setTimeout(r, 30)); return port.commit(p); } };
+    const [x, y] = await Promise.all([commitOnce(c.gate, c.ann, slow, present(id)), commitOnce(c.gate, c.ann, slow, present(id))]);
+    assert.equal(state.made, 1);
+    assert.equal(x.commitId, y.commitId);
+    assert.deepEqual([x.alreadyRecorded, y.alreadyRecorded].sort(), [false, true]);
+  });
+
+  suite("H12o: a commit made before HEAD moved is found by the request marker and not made again", async (c) => {
+    const { id, reviewId } = await c.ask(); await c.decide(reviewId);
+    const { state, port } = fake(); state.crashAfterCommit = true;
+    const moved: CommitPort = { ...port, find: async () => undefined, findByRequest: async () => state.commits[0] }; // reachable history no longer has it; the made record does
+    await assert.rejects(() => commitOnce(c.gate, c.ann, moved, present(id)), /crash between/);
+    now += 2 * 60 * 60 * 1000;
+    const again = await commitOnce(c.gate, c.ann, moved, present(id));
+    assert.deepEqual([again.commitId, again.recovered, state.made], [ID("c"), true, 1]);
+    // without findByRequest the miss would make a second commit; the port's intent hook is called before the commit
+    const intents: string[] = [];
+    const { id: id2, reviewId: r2 } = await c.ask(); await c.decide(r2);
+    const f2 = fake();
+    await commitOnce(c.gate, c.ann, { ...f2.port, intend: async (rid, tree) => { intents.push(`${rid}:${tree}`); } }, present(id2));
+    assert.deepEqual(intents, [`${id2}:${ID("b")}`]);
+  });
+
+  suite("H12o: recovery records a found commit only while the approval stands", async (c) => {
+    const { id, reviewId } = await c.ask(); await c.decide(reviewId);
+    assert.equal((await c.gate.approvalStands(c.ann, id)).stands, true);
+    const { state, port } = fake(); state.crashAfterCommit = true;
+    await assert.rejects(() => commitOnce(c.gate, c.ann, port, present(id)), /crash between/);
+    assert.equal((await c.gate.approvalStands(c.ann, id)).stands, true, "used still stands");
+    const withdrawn = { get: c.gate.get.bind(c.gate), recordCommit: c.gate.recordCommit.bind(c.gate), authorize: c.gate.authorize.bind(c.gate), approvalStands: async () => ({ stands: false, reason: "the review is withdrawn" }) } as unknown as CommitGateService;
+    await refuses("review_invalid", () => commitOnce(withdrawn, c.ann, port, present(id)), (e) => assert.match(e.message, /withdrawn/));
+    assert.equal((await c.gate.get(c.ann, id))!.state, "authorized");
+    // a different request whose review was withdrawn does not stand
+    const q = await c.ask(); await c.decide(q.reviewId);
+    const v = (await c.reviews.get(c.owner, q.reviewId))!;
+    await c.reviews.withdraw(c.owner, { commandId: cid("wd"), requestId: q.reviewId, expectedRevision: v.revision, reason: "changed my mind" });
+    assert.equal((await c.gate.approvalStands(c.ann, q.id)).stands, false);
+  });
+
+  suite("H12o: a commit made with another tree than the approved one is refused and not recorded", async (c) => {
+    const { id, reviewId } = await c.ask(); await c.decide(reviewId);
+    const { port } = fake();
+    const odd: CommitPort = { ...port, commit: async () => ({ commitId: ID("c"), parent: ID("a"), tree: ID("f") }) };
+    await refuses("review_invalid", () => commitOnce(c.gate, c.ann, odd, present(id)), (e) => assert.match(e.message, /not the approved tree|not recorded/));
+    assert.equal((await c.gate.get(c.ann, id))!.state, "authorized");
+  });
+
   suite("H12o: a changed tree or base needs a new approval, and a found commit of another tree or base is never recorded", async (c) => {
     const { id, reviewId } = await c.ask(); await c.decide(reviewId);
     const { state, port } = fake();

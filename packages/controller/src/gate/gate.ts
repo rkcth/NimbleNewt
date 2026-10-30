@@ -220,6 +220,20 @@ export class CommitGateService {
     await this.#update(by, "gate.commit", command.commandId, id, { commitId }, (b) => ({ ...b, state: "committed" as const, commitId, committedBy: by.id }));
   }
 
+  /**
+   * Whether the approval behind a request still stands, for recovering a commit that was made earlier (H12o). An external approval stands; a review stands unless it was denied or withdrawn
+   * (an approval that was used up by the authorization still stands). By the requester or the owner. Contributor withdrawal (H05) takes a review back before it is used, so it shows here as withdrawn.
+   */
+  async approvalStands(by: Principal, requestId: string): Promise<{ readonly stands: boolean; readonly reason?: string }> {
+    const id = this.#id(requestId);
+    const body = (await this.#runner.get("commit-request", id))?.body as unknown as CommitRequestBody | undefined;
+    if (body === undefined || !(by.kind === "owner" || by.id === body.requester)) throw new DomainError("forbidden", `${by.id} has no such commit request`);
+    if (body.external !== undefined) return { stands: true };
+    const review = (await this.#runner.get("review", body.reviewId))?.body as unknown as ReviewBody | undefined;
+    if (review === undefined) return { stands: false, reason: "the review is missing" };
+    return ["approved", "used"].includes(review.state) ? { stands: true } : { stands: false, reason: `the review is ${review.state}` };
+  }
+
   /** Appends to the commit's integration history (a branch, a merge, a push). By the requester or the owner. */
   async recordIntegration(by: Principal, command: NoActor & { requestId: string; branch: string; commitId: string }): Promise<void> {
     onlyKnown(command, ["commandId", "requestId", "branch", "commitId"]);
