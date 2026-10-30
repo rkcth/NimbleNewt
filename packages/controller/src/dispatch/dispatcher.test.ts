@@ -492,6 +492,38 @@ for (const backend of backends) {
     assert.equal((await c.assignments.getAttempt(attemptId!))!.state, "abandoned");
   });
 
+  suite("a lost attempt with a call of unknown outcome is not replaced: a blocker names the owner and no new attempt starts (card H09)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["git-push"]));
+    const { taskId, attemptId } = await c.task("push", ann);
+    await c.policy.set(c.owner, { scope: "installation", commandId: "pol", profile: "autonomous" });
+    const log = { applied: 0, reconciled: 0 };
+    const started = deferred();
+    const never = new Promise<never>(() => undefined);
+    c.worker.script = async ({ gateway }) => {
+      await gateway.call(effectCall("push1", pushBridge(log)), { kind: "effect", effectKind: "git-push", target: "repo", input: { branch: "main" }, bridge: pushBridge(log, { started: started.resolve, never }) });
+      return { status: "completed", text: "x" };
+    };
+    await c.dispatcher.tick();
+    await started.promise;
+    // The controller dies; the new one cannot learn from the target whether the push happened.
+    c.clock.advance(6 * 60_000);
+    const { EffectService } = await import("../domain/effects.js");
+    const effects2 = EffectService.withEpoch(c.storage, c.epoch, c.assignments, { ...c.options, holder: "dispatcher-2" });
+    const unknown = { idempotent: false, execute: async () => ({ receipt: "r" }), reconcile: async () => ({ state: "unknown" as const }) };
+    const second = c.restart({ effects: effects2 }, { bridges: { "git-push": unknown } });
+    const report = await second.tick();
+    assert.deepEqual(report.lost, [attemptId]);
+    assert.equal((await c.ops(attemptId!))[0]!.state, "uncertain");
+    assert.deepEqual(report.readmitted, [], "no replacement while a call's outcome is not known");
+    assert.equal(log.applied, 1);
+    const task = await c.assignments.getAssignment(taskId!);
+    assert.equal(task!.activeAttemptId, undefined);
+    const again = await second.tick();
+    assert.deepEqual(again.started, [], "later ticks do not start one either");
+    const blocker = await c.blockers.openFor("dispatch_blocked", { kind: "task", id: taskId! });
+    assert.ok(blocker !== undefined, "a blocker names the owner");
+  });
+
   suite("a gated step parks that task's change; the attempt gives its place back; with twenty asks pending unrelated tasks still dispatch and run", async (c) => {
     const calls = new Map<string, ToolResult>();
     const finished: string[] = [];

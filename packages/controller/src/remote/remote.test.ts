@@ -233,6 +233,23 @@ for (const backend of backends) {
     await wireRefuses("fenced", () => next.heartbeat(), 409);
   });
 
+  suite("a controller that no longer holds the epoch cannot renew a worker's lease or take its result: the worker gets an unavailable answer and the stored lease does not move (card H09)", async (c) => {
+    const r1 = await c.host("r1");
+    const { attemptId, attempt } = await c.started(r1);
+    assert.equal((await attempt.call(READ("c1"), local("one"))).state, "confirmed");
+    const ref = { kind: "dispatch", id: (await c.current.get(c.owner, attemptId))!.id };
+    const before = (await c.storage.getAggregate(ref))!;
+    // Another controller takes the epoch; this one is now an old primary.
+    await c.storage.acquireEpoch({ holder: "controller-2", at: c.clock.now() });
+    c.clock.advance(5_000);
+    await wireRefuses("stale_epoch", () => attempt.heartbeat(), 503);
+    await wireRefuses("stale_epoch", () => attempt.complete({ status: "completed" }), 503);
+    // Nothing was written by the old primary: the lease is where it was.
+    const after = (await c.storage.getAggregate(ref))!;
+    assert.equal(after.revision, before.revision, "the record was not written");
+    assert.deepEqual((after.body as { lease?: unknown }).lease, (before.body as { lease?: unknown }).lease);
+  });
+
   suite("an attempt whose worker falls silent is lost when its lease ends: the worker is fenced and the dispatcher admits the next attempt", async (c) => {
     const r1 = await c.host("r1");
     const { attemptId, attempt } = await c.started(r1);
