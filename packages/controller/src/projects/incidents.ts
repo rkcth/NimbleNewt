@@ -133,8 +133,8 @@ export class IncidentService {
     const now = Date.parse(this.#runner.now());
     for (const a of await scanAll(this.#runner, INCIDENT, 50_000, (x) => { const b = x.body as unknown as IncidentBody; return b.projectId === projectId && b.state === "open" && b.escalatedAt === undefined; })) {
       const b = a.body as unknown as IncidentBody;
-      const duty = await this.#duties.get(by, b.responsibilityId);
-      const esc = duty?.escalation;
+      // The caller's right to escalate in the project was checked above; the dispatcher's service principal holds no responsibility.read, so the rule is read from the record itself.
+      const esc = ((await this.#runner.get("responsibility", b.responsibilityId))?.body as unknown as { escalation?: { to: string; afterMinutes?: number; afterAlerts?: number } } | undefined)?.escalation;
       if (esc === undefined) continue;
       // Either rule is enough: the time since it opened, or the number of times the same trouble alerted (only a rule the owner set applies).
       const late = esc.afterMinutes !== undefined && now - Date.parse(b.firstAt) >= esc.afterMinutes * 60_000;
