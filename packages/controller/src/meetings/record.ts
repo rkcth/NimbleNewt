@@ -20,7 +20,7 @@ import { ATTENDANCE_LIMITS, type MeetingDecision } from "./attendance.js";
 import { authorityOf, type AgendaBody, type MeetingService, type OccurrenceBody } from "./meetings.js";
 import {
   ENTRY_TAGS, FINAL_MOTION_STATES,
-  type BallotBody, type ChangeRecord, type DecisionLogBody, type DecisionLogOutcome, type DecisionRecordBody, type MeetingEntryBody, type EntryKind, type EntryTag, type MotionBody, type MotionState, type OpenIndexBody, type OwnerResponse,
+  type BallotBody, type ChangeRecord, type DecisionLogBody, type DecisionLogOutcome, type DecisionRecordBody, type MeetingEntryBody, type EntryKind, type EntryTag, type MotionBody, type MotionState, type OpenIndexBody, type UnloggedIndexBody, type OwnerResponse,
   type PlanBody, type ProposedChange, type RecordBody, type SourceCite, type MeetingSummaryBody, type SummaryContent,
 } from "./record-types.js";
 import { buildSummary } from "./summary.js";
@@ -181,6 +181,8 @@ export interface RecordOptions extends RunnerOptions {
   readonly onChange?: (event: { decisionId: string; index: number; projectId: string; target: { kind: string; id: string }; state: "applied" | "not-applied"; summary: string; reason?: string }) => Promise<void>;
   /** Whether the approval policy lets a class of widening change be carried out without asking the owner (spend follows the profile: strict asks, derived and autonomous let it through in development; rights are the owner's unless the owner set that cell by hand). Missing: always ask the owner. */
   readonly widening?: (cls: "access-change" | "spend", projectId: string) => Promise<"allow" | "ask">;
+  /** How much of the decision log one read scans: entries per storage read and the most reads per call (default 100 and 20). */
+  readonly logScan?: { readonly pageSize: number; readonly reads: number };
   /** Minutes a vote stays open (default 10), unless the vote names its own. */
   readonly voteMinutes?: number;
 }
@@ -203,6 +205,11 @@ const NEVER = /^(?:\*|principal\.|grant|restriction|budget\.|config\.|routing\.|
 
 const OPEN_KIND = "meeting-record-open";
 const LOG_KIND = "meeting-decision-log";
+/** Per project: the decisions that may still lack log lines (see `UnloggedIndexBody`). */
+const UNLOGGED_KIND = "meeting-decision-unlogged";
+/** How many decisions one sweep call looks at for missing log lines, and how many storage reads the log reader makes. */
+const LOG_SWEEP_DECISIONS = 20;
+const LOG_READ_PAGES = 20;
 /** Counters for the decision log that carry no content: amounts of a budget raise, the action a grant names, otherwise only how many fields the patch has. */
 function logCounters(c: ChangeRecord): { [key: string]: number | string } {
   const p = c.patch as Record<string, unknown>;
@@ -847,9 +854,16 @@ export class MeetingRecordService {
     const { castingDeadline: _c, ...closed } = next;
     void _c;
     report(outcome, decisionId);
+    // A decision the team may carry out is entered in the project's unlogged index in the same save, so a lost log line is found again by the sweep.
+    const unlogged: Change[] = [];
+    if (adopted && scope.scope === "in-scope" && changeRecords.length > 0) {
+      const idx = await this.#runner.get(UNLOGGED_KIND, motion.projectId);
+      const body: UnloggedIndexBody = { projectId: motion.projectId, ids: [...(known<UnloggedIndexBody>(idx)?.ids ?? []), decisionId], ...(known<UnloggedIndexBody>(idx)?.from === undefined ? {} : { from: known<UnloggedIndexBody>(idx)!.from! }) };
+      unlogged.push(idx === undefined ? { type: "create", ref: { kind: UNLOGGED_KIND, id: motion.projectId }, body: json(body) } : { type: "update", ref: { kind: UNLOGGED_KIND, id: motion.projectId }, expectedRevision: idx.revision, body: json(body) });
+    }
     return {
       ref: { kind: "meeting-motion", id: motionId }, creates: false,
-      changes: [{ type: "update", ref: { kind: "meeting-motion", id: motionId }, expectedRevision: found.revision, body: json(closed) } as Change, { type: "create", ref: { kind: "meeting-decision", id: decisionId }, body: json(decision) } as Change, ...done.changes],
+      changes: [{ type: "update", ref: { kind: "meeting-motion", id: motionId }, expectedRevision: found.revision, body: json(closed) } as Change, { type: "create", ref: { kind: "meeting-decision", id: decisionId }, body: json(decision) } as Change, ...unlogged, ...done.changes],
       detail: { projectId: motion.projectId, outcome },
     };
   }
@@ -913,7 +927,12 @@ export class MeetingRecordService {
     return this.#applyDecision(by, decisionId);
   }
 
+  /** Whatever happens while changes are carried out (a thrown error included), the lines of the changes that have already reached a final state are written; a log failure never changes the result. */
   async #applyDecision(by: Principal, decisionId: string): Promise<{ applied: number; notApplied: number; pending: number; waitingFor?: "owner" }> {
+    try { return await this.#applyChanges(by, decisionId); } finally { await this.#logChanges(decisionId); }
+  }
+
+  async #applyChanges(by: Principal, decisionId: string): Promise<{ applied: number; notApplied: number; pending: number; waitingFor?: "owner" }> {
     for (let index = 0; index < RECORD_LIMITS.changes; index++) {
       const found = await this.#runner.get("meeting-decision", decisionId);
       const d = known<DecisionRecordBody>(found);
@@ -924,7 +943,7 @@ export class MeetingRecordService {
       });
       if (d.outcome !== "adopted" || d.scope !== "in-scope" || d.ownerResponse === "pending") return tally();
       const change = d.changes.find((c) => c.state === "adopted" || c.state === "applying");
-      if (change === undefined) { await this.#announceChanges(decisionId); await this.#logChanges(decisionId); return tally(); }
+      if (change === undefined) { await this.#announceChanges(decisionId); return tally(); }
       // `agreement` is set for the save that starts a change: it holds only while the change is still adopted and the owner's response is still the one the agreement was worked out from.
       const save = async (next: ChangeRecord, agreement?: string): Promise<boolean> => {
         let lost = false;
@@ -944,12 +963,15 @@ export class MeetingRecordService {
         }))); } catch (error) { if (lost) return false; throw error; }
         return true;
       };
-      const refuse = async (code: ChangeRecord["code"], reason: string): Promise<void> => { await save({ ...change, state: "not-applied", ...(code === undefined ? {} : { code }), reason }); };
+      // The policy's cell for the change's widening class, read once when the change is started or refused and kept on the change (the decision log reads it from there).
+      let cell: "allow" | "ask" | undefined;
+      const refuse = async (code: ChangeRecord["code"], reason: string): Promise<void> => { await save({ ...change, state: "not-applied", ...(code === undefined ? {} : { code }), ...((cell ?? change.setting) === undefined ? {} : { setting: cell ?? change.setting }), reason }); };
       if (change.state === "adopted") {
         const applier = this.#options.appliers?.[change.kind];
         if (applier === undefined) { await refuse("failed", `no applier is registered for ${change.kind}`); continue; }
+        if (applier.widens !== undefined) cell = this.#options.widening === undefined ? "ask" : await this.#options.widening(applier.widens, d.projectId).catch(() => "ask" as const);
         // The policy may have tightened since the vote: a widening change goes ahead without the owner's agreement only while the policy still lets its class through.
-        if (applier.widens !== undefined && d.ownerResponse !== "agreed" && (this.#options.widening === undefined || (await this.#options.widening(applier.widens, d.projectId).catch(() => "ask" as const)) !== "allow")) { await refuse("unauthorized", `the approval policy asks the owner before ${applier.widens} changes are carried out, and the owner has not agreed`); continue; }
+        if (applier.widens !== undefined && d.ownerResponse !== "agreed" && cell !== "allow") { await refuse("unauthorized", `the approval policy asks the owner before ${applier.widens} changes are carried out, and the owner has not agreed`); continue; }
         if (change.target.kind === "task" && this.#deps.decisions !== undefined) {
           const blocked = (await this.#deps.decisions.guard(change.target.id, "start")).blockedBy;
           if (blocked.length > 0) { await refuse("gate", `an owner gate or a superseded decision blocks work on the task (${blocked.join(", ")})`); continue; }
@@ -963,7 +985,7 @@ export class MeetingRecordService {
         const agreedBy = d.ownerResponse === "agreed" ? "owner:agreed" : `policy:${applier.widens ?? "none"}`;
         // The owner may have declined since this was read: then the change is not started, and the decline's own record stands.
         // The actor of the effect is fixed the same way: the command digest includes it, and a replay may run under another principal (the owner agreed, the service recovers).
-        if (!(await save({ ...change, state: "applying", agreedBy, actedAs: by.id }, agreedBy))) continue;
+        if (!(await save({ ...change, state: "applying", agreedBy, actedAs: by.id, ...(cell === undefined ? {} : { setting: cell }) }, agreedBy))) continue;
       }
       const applier = this.#options.appliers?.[change.kind];
       if (applier === undefined) { await refuse("failed", `no applier is registered for ${change.kind}`); continue; }
@@ -971,7 +993,7 @@ export class MeetingRecordService {
         const agreedBy = change.agreedBy ?? (d.ownerResponse === "agreed" ? "owner:agreed" : `policy:${applier.widens ?? "none"}`);
         const done = await applier.apply({ commandId: `mtg:${decisionId}:${change.id}`, actor: change.actedAs ?? by.id, actedAs: change.actedAs ?? by.id, target: change.target, expectedRevision: change.expectedRevision, patch: change.patch, agreedBy });
         // The final record keeps who allowed it and who acted (the decision log reads them from here).
-        await save({ ...change, agreedBy, actedAs: change.actedAs ?? by.id, state: "applied", ...(done.revision === undefined ? {} : { appliedRevision: done.revision }) });
+        await save({ ...change, agreedBy, actedAs: change.actedAs ?? by.id, ...((cell ?? change.setting) === undefined ? {} : { setting: cell ?? change.setting }), state: "applied", ...(done.revision === undefined ? {} : { appliedRevision: done.revision }) });
       } catch (error) {
         if (error instanceof DomainError && error.code === "stale_revision") await refuse("conflict", `${change.target.kind} ${change.target.id} changed meanwhile: ${error.message}`);
         else if (error instanceof DomainError && ["invalid_command", "forbidden", "not_found", "invalid_transition"].includes(error.code)) await refuse("failed", error.message);
@@ -979,48 +1001,88 @@ export class MeetingRecordService {
       }
     }
     await this.#announceChanges(decisionId);
-    await this.#logChanges(decisionId);
     return this.#applyDecisionTally(decisionId);
   }
 
   /**
    * The decision log (card M02f): one append-only line per change that has reached a final state, written once (the line's ID and command ID come from the decision, the change and the outcome, so a repeat of the apply, a replay after a
-   * restart and a late sweep all find it already there). Best effort like the observer: a failure to log never changes the decision, and the next repeat fills the gap. It keeps no words of the change: a digest of the patch and safe counters.
+   * restart and a late sweep all find it already there). Best effort like the observer: a failure to log never changes the decision, and the sweep fills the gap (the unlogged index lists the decisions that may still lack a line). It keeps no words of the change: a digest of the patch and safe counters.
    */
   async #logChanges(decisionId: string): Promise<void> {
-    const d = known<DecisionRecordBody>(await this.#runner.get("meeting-decision", decisionId));
-    if (d === undefined) return;
-    for (const c of d.changes) {
-      if (c.state !== "applied" && c.state !== "not-applied") continue;
+    try {
+      const d = known<DecisionRecordBody>(await this.#runner.get("meeting-decision", decisionId));
+      if (d === undefined) return;
+      let complete = true;
+      for (const c of d.changes) {
+        if (c.state !== "applied" && c.state !== "not-applied") { complete = false; continue; }
+        try {
+          const outcome: DecisionLogOutcome = c.state === "applied" ? "applied" : c.code === "owner" ? (d.ownerResponse === "alternative" ? "overridden" : "declined") : c.code === "unauthorized" || c.code === "gate" ? "refused" : "not-applied";
+          const id = derivedId("mdl", `${decisionId}:${c.id}:${outcome}`);
+          const ref: AggregateRef = { kind: LOG_KIND, id };
+          if (await this.#runner.get(LOG_KIND, id) !== undefined) continue;
+          const widens = this.#options.appliers?.[c.kind]?.widens;
+          // Rights that were withdrawn after the owner agreed: the owner allowed it, the rights check refused it.
+          const withdrawn = outcome === "refused" && c.code === "unauthorized" && c.agreedBy === undefined && d.ownerResponse === "agreed";
+          const agreedBy = c.agreedBy ?? (withdrawn ? "owner:agreed" : undefined);
+          const decidedBy: DecisionLogBody["decidedBy"] = agreedBy === undefined ? (outcome === "declined" || outcome === "overridden" ? "owner" : "none")
+            : agreedBy.startsWith("owner:") ? "owner" : agreedBy === "policy:none" ? "vote" : agreedBy.startsWith("policy:") ? "policy" : agreedBy.startsWith("steward:") ? "steward" : "none";
+          const code = withdrawn ? "rights_withdrawn" as const : c.code;
+          const body: DecisionLogBody = {
+            decisionId, changeId: c.id, projectId: d.projectId, kind: c.kind, targetKind: c.target.kind, outcome, ...(code === undefined ? {} : { code }), decidedBy,
+            ...(agreedBy === undefined ? {} : { agreedBy }), ...(c.actedAs === undefined ? {} : { actedAs: c.actedAs }), ...(widens === undefined ? {} : { widens }), ...(widens === undefined || c.setting === undefined ? {} : { setting: c.setting }),
+            ownerResponse: d.ownerResponse, patchHash: createHash("sha256").update(canonicalJson(c.patch)).digest("hex"), counters: logCounters(c), changedAt: c.at ?? d.concludedAt, loggedAt: this.#runner.now(),
+          };
+          await this.#retrying(() => this.#runner.command("meeting.decision.log", { commandId: `mdl:${decisionId}:${c.id}:${outcome}`.slice(0, 120), actor: "service:meeting-records" }, async () => ({
+            payload: { decisionId, changeId: c.id, outcome },
+            build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: json(body) }], detail: { projectId: d.projectId, outcome } }),
+          })));
+        } catch { complete = false; /* the log never changes the decision; the sweep writes what is missing */ }
+      }
+      if (complete && d.scope === "in-scope" && d.ownerResponse !== "pending") await this.#unindex(d.projectId, decisionId);
+    } catch { /* the log never changes the decision */ }
+  }
+
+  /** Takes a decision whose lines are all written out of the project's unlogged index. */
+  async #unindex(projectId: string, decisionId: string): Promise<void> {
+    if (!known<UnloggedIndexBody>(await this.#runner.get(UNLOGGED_KIND, projectId))?.ids.includes(decisionId)) return;
+    await this.#retrying(() => this.#runner.command("meeting.decision.logged", { commandId: `mdl-done:${decisionId}`.slice(0, 120), actor: "service:meeting-records" }, async () => ({
+      payload: { decisionId },
+      build: async () => {
+        const idx = (await this.#runner.get(UNLOGGED_KIND, projectId))!;
+        const cur = known<UnloggedIndexBody>(idx)!;
+        const ids = cur.ids.filter((x) => x !== decisionId);
+        return { ref: { kind: UNLOGGED_KIND, id: projectId }, creates: false, changes: [{ type: "update", ref: { kind: UNLOGGED_KIND, id: projectId }, expectedRevision: idx.revision, body: json({ ...cur, ids, from: cur.from === undefined || cur.from >= ids.length ? 0 : cur.from }) }], detail: { projectId } };
+      },
+    })));
+  }
+
+  /** The sweep's part of the log: looks at up to 20 decisions of the project from the unlogged index (round-robin, so a decision that waits for the owner does not starve the rest) and writes the lines that are missing. Returns the decisions it saw. */
+  async #sweepLog(projectId: string): Promise<string[]> {
+    const idx = known<UnloggedIndexBody>(await this.#runner.get(UNLOGGED_KIND, projectId));
+    if (idx === undefined || idx.ids.length === 0) return [];
+    const start = (idx.from ?? 0) % idx.ids.length;
+    const take = Math.min(LOG_SWEEP_DECISIONS, idx.ids.length);
+    const picked = Array.from({ length: take }, (_, i) => idx.ids[(start + i) % idx.ids.length]!);
+    for (const id of picked) await this.#logChanges(id);
+    if (idx.ids.length > take) {
       try {
-        const outcome: DecisionLogOutcome = c.state === "applied" ? "applied" : c.code === "owner" ? (d.ownerResponse === "alternative" ? "overridden" : "declined") : c.code === "unauthorized" || c.code === "gate" ? "refused" : "not-applied";
-        const widens = this.#options.appliers?.[c.kind]?.widens;
-        const policy = c.agreedBy?.startsWith("policy:") === true;
-        const decidedBy: DecisionLogBody["decidedBy"] = c.agreedBy === undefined ? (outcome === "declined" || outcome === "overridden" ? "owner" : "none") : c.agreedBy.startsWith("owner:") ? "owner" : policy ? "policy" : c.agreedBy.startsWith("steward:") ? "steward" : "none";
-        // The cell that decided: a change let through by the policy was allowed by its cell; one the owner agreed to was asked about; for a refusal the cell is looked up as it is now.
-        let setting: "allow" | "ask" | undefined;
-        if (widens !== undefined) setting = policy ? "allow" : c.agreedBy !== undefined ? "ask" : this.#options.widening === undefined ? "ask" : await this.#options.widening(widens, d.projectId).catch(() => "ask" as const);
-        const body: DecisionLogBody = {
-          decisionId, changeId: c.id, projectId: d.projectId, kind: c.kind, targetKind: c.target.kind, outcome, ...(c.code === undefined ? {} : { code: c.code }), decidedBy,
-          ...(c.agreedBy === undefined ? {} : { agreedBy: c.agreedBy }), ...(c.actedAs === undefined ? {} : { actedAs: c.actedAs }), ...(widens === undefined ? {} : { widens }), ...(setting === undefined ? {} : { setting }),
-          ownerResponse: d.ownerResponse, patchHash: createHash("sha256").update(canonicalJson(c.patch)).digest("hex"), counters: logCounters(c), changedAt: c.at ?? d.concludedAt, loggedAt: this.#runner.now(),
-        };
-        const id = derivedId("mdl", `${decisionId}:${c.id}:${outcome}`);
-        const ref: AggregateRef = { kind: LOG_KIND, id };
-        await this.#retrying(() => this.#runner.command("meeting.decision.log", { commandId: `mdl:${decisionId}:${c.id}:${outcome}`.slice(0, 120), actor: "service:meeting-records" }, async () => ({
-          payload: { decisionId, changeId: c.id, outcome },
-          build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: json(body) }], detail: { projectId: d.projectId, outcome } }),
-        })));
-      } catch { /* the log never changes the decision; the next repeat of the apply writes what is missing */ }
+        const fresh = await this.#runner.get(UNLOGGED_KIND, projectId);
+        const cur = known<UnloggedIndexBody>(fresh);
+        if (fresh !== undefined && cur !== undefined && cur.ids.length > 0) await this.#runner.command("meeting.decision.log-cursor", { commandId: `mdl-cursor:${projectId}:${fresh.revision}`.slice(0, 120), actor: "service:meeting-records" }, async () => ({
+          payload: { projectId, revision: fresh.revision },
+          build: async () => ({ ref: { kind: UNLOGGED_KIND, id: projectId }, creates: false, changes: [{ type: "update", ref: { kind: UNLOGGED_KIND, id: projectId }, expectedRevision: fresh.revision, body: json({ ...cur, from: (start + take) % cur.ids.length }) }], detail: { projectId } }),
+        }));
+      } catch { /* a moved cursor is only a delay */ }
     }
+    return picked;
   }
 
   /**
    * The decision log, newest-agnostic in ID order, a page at a time (owner only): `limit` 1 to 100 (default 50), `after` the cursor a page returned as `next`; filters `kind`, `outcome`, `projectId`. Read-only.
    */
-  async decisionLog(by: Principal, query: { kind?: string; outcome?: string; projectId?: string; after?: string; limit?: number } = {}): Promise<{ entries: View<DecisionLogBody>[]; next?: string }> {
+  async decisionLog(by: Principal, query: { kind?: string; outcome?: string; projectId?: string; after?: string; limit?: number } = {}): Promise<{ entries: View<DecisionLogBody>[]; next?: string; scanLimited?: true }> {
     onlyKnown(query, ["kind", "outcome", "projectId", "after", "limit"]);
-    if (by.kind !== "owner") throw forbidden(by, "read the decision log");
+    if (by.kind !== "owner" || by.taskScope !== undefined) throw forbidden(by, "read the decision log");
     const limit = query.limit === undefined ? 50 : Number.isInteger(query.limit) && query.limit >= 1 && query.limit <= 100 ? query.limit : invalid("limit", "must be 1 to 100");
     if (query.kind !== undefined && (typeof query.kind !== "string" || query.kind.length === 0 || query.kind.length > 80)) invalid("kind", "must be a kind of change");
     if (query.outcome !== undefined && !(["applied", "not-applied", "refused", "declined", "overridden"] as unknown[]).includes(query.outcome)) invalid("outcome", "must be applied, not-applied, refused, declined or overridden");
@@ -1028,8 +1090,12 @@ export class MeetingRecordService {
     if (query.after !== undefined && (typeof query.after !== "string" || !/^mdl-[a-z2-7]{20}$/.test(query.after))) invalid("after", "must be a cursor from an earlier page");
     const out: View<DecisionLogBody>[] = [];
     let after = query.after;
-    for (;;) {
-      const page = await this.#runner.list(LOG_KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+    const pageSize = this.#options.logScan?.pageSize ?? 100;
+    const maxReads = this.#options.logScan?.reads ?? LOG_READ_PAGES;
+    // At most LOG_READ_PAGES storage reads a call: a filter that matches little stops early with `scanLimited` and a cursor to go on from.
+    for (let reads = 0; ; reads++) {
+      if (reads === maxReads) return { entries: out, ...(after === undefined ? {} : { next: after }), scanLimited: true };
+      const page = await this.#runner.list(LOG_KIND, { ...(after === undefined ? {} : { afterId: after }), limit: pageSize });
       for (const a of page) {
         after = a.id;
         const b = a.body as unknown as DecisionLogBody;
@@ -1037,7 +1103,7 @@ export class MeetingRecordService {
         if (out.length === limit) return { entries: out, next: out[out.length - 1]!.id };
         out.push(view<DecisionLogBody>(a));
       }
-      if (page.length < 200) return { entries: out };
+      if (page.length < pageSize) return { entries: out };
     }
   }
 
@@ -1150,7 +1216,7 @@ export class MeetingRecordService {
    * The lease: closes votes whose time is up (`tied` lists those that came to a tie and now wait for the chair's casting vote), fails ties whose casting window is over, and ends records nobody finished (two hours past the meeting's end), so nothing stays open for ever. Owner, host or service. Each step has a
    * command ID derived from the record, so repeating the sweep, or running it on several processes, does each step once.
    */
-  async sweep(by: Principal, command: { projectId: string }): Promise<{ closed: string[]; tied: string[]; failedTies: string[]; interrupted: string[] }> {
+  async sweep(by: Principal, command: { projectId: string }): Promise<{ closed: string[]; tied: string[]; failedTies: string[]; interrupted: string[]; logChecked: string[] }> {
     onlyKnown(command, ["projectId"]);
     if (!isService(by)) throw forbidden(by, "sweep meeting records");
     const projectId = typeof command.projectId === "string" ? command.projectId : invalid("projectId", "is not a project ID");
@@ -1181,7 +1247,9 @@ export class MeetingRecordService {
         interrupted.push(recordId);
       }
     }
-    return { closed, tied, failedTies, interrupted };
+    // A log line lost to a crash or a failed write is written here (bounded per call).
+    const logChecked = await this.#sweepLog(projectId);
+    return { closed, tied, failedTies, interrupted, logChecked };
   }
 
   // ---- summary ---------------------------------------------------------------------------------------------------------------------------------

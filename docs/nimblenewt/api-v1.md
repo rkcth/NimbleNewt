@@ -406,7 +406,7 @@ Result: `{ item }`.
 
 #### `meeting.decisions.log`
 
-The log of what happened to each change a meeting decided (applied, not applied, refused, declined, overridden), who allowed it and under which setting; owner only, a page at a time in ID order. It holds a digest of each change and safe counters, never its words.
+The log of what happened to each change a meeting decided (applied, not applied, refused, declined, overridden), who allowed it and under which setting; owner only (not a task-scoped credential), a page at a time in ID order, at most 20 storage reads a call: a scan that stops early says `scanLimited: true` and gives `next`. `decidedBy` is owner, policy (a widening class the approval policy let through), vote (the team alone, nothing widened), steward or none; `setting` is the policy cell when the change was decided; `code` may be `rights_withdrawn` (the owner agreed, the carrying agent no longer held the right). It holds a digest of each change and safe counters, never its words.
 
 Arguments:
 
@@ -416,7 +416,7 @@ Arguments:
 - `after` (optional): the `next` of the previous page
 - `limit` (optional): 1 to 100, default 50
 
-Result: `{ item: { entries, next? } }`.
+Result: `{ item: { entries, next?, scanLimited? } }`.
 
 #### `meeting.record.plan`
 

@@ -154,6 +154,8 @@ export interface ChangeRecord extends ProposedChange {
   readonly agreedBy?: string;
   /** The principal id the effect is carried out as, recorded when the change enters `applying`: the command digest includes the actor, so a replay by someone else (the service after the owner's agreement) must reuse it. */
   readonly actedAs?: string;
+  /** The approval policy's cell for this change's widening class as it was when the change was started or refused (the decision log keeps it; absent for a kind that widens nothing and for an owner's decline). */
+  readonly setting?: "allow" | "ask";
   readonly at?: string;
 }
 
@@ -260,6 +262,9 @@ export interface PlanBody { readonly projectId: string; readonly occurrenceId: s
 
 export interface OpenIndexBody { readonly projectId: string; readonly ids: readonly string[] }
 
+/** The decisions of a project that may still lack a decision log line: added in the save that creates an in-scope adopted decision, removed once every change has reached a final state and its line exists. `from` is where the next sweep starts. */
+export interface UnloggedIndexBody { readonly projectId: string; readonly ids: readonly string[]; readonly from?: number }
+
 /** How a change of a meeting decision ended, as the decision log (card M02f) names it: carried out; not carried out (the target moved or vanished, no applier, a failure); refused by a rule (rights, a gate, the approval policy); declined or overridden by the owner. */
 export type DecisionLogOutcome = "applied" | "not-applied" | "refused" | "declined" | "overridden";
 
@@ -271,12 +276,13 @@ export interface DecisionLogBody {
   readonly kind: string;
   readonly targetKind: string;
   readonly outcome: DecisionLogOutcome;
-  readonly code?: NotAppliedCode;
-  /** Who allowed it: the owner, the approval policy, a steward agent (reserved), or nobody (the change did not start). */
-  readonly decidedBy: "owner" | "policy" | "steward" | "none";
+  /** Why it was not carried out; `rights_withdrawn` is a refusal because the carrying agent no longer holds the right, after the owner had agreed. */
+  readonly code?: NotAppliedCode | "rights_withdrawn";
+  /** Who allowed it: the owner, the approval policy (a class of widening it let through), the team's vote alone (a change that widens nothing), a steward agent (reserved), or nobody (the change did not start). */
+  readonly decidedBy: "owner" | "policy" | "vote" | "steward" | "none";
   readonly agreedBy?: string;
   readonly actedAs?: string;
-  /** For a change that widens rights or spend: the class, and what the approval policy's cell said (`allow` lets it through without the owner, `ask` leaves it to the owner). */
+  /** For a change that widens rights or spend: the class, and what the approval policy's cell said when the change was decided, not as it is now (`allow` lets it through without the owner, `ask` leaves it to the owner). */
   readonly widens?: "access-change" | "spend";
   readonly setting?: "allow" | "ask";
   readonly ownerResponse: OwnerResponse;

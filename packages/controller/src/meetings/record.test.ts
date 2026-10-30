@@ -31,7 +31,7 @@ for (const backend of backends) {
     asA: Principal; asB: Principal; asC: Principal; asD: Principal; asE: Principal;
     pA: string; pB: string; pC: string; pD: string; pE: string; project: string;
     meetings: MeetingService; records: MeetingRecordService; decisions: DecisionService; grants: GrantService; principals: PrincipalService; projects: ProjectService;
-    other: Map<string, Availability>; shared: Set<string>; calls: { applied: string[]; failOnce: boolean; narrate: "ok" | "throw" };
+    other: Map<string, Availability>; shared: Set<string>; calls: { applied: string[]; failOnce: boolean; failLog: boolean; narrate: "ok" | "throw" };
     reopen(extra?: Partial<{ appliers: Record<string, ChangeApplier>; shareable: (c: SourceCite) => Promise<boolean>; widening: (cls: "access-change" | "spend", projectId: string) => Promise<"allow" | "ask"> }>): MeetingRecordService;
     task(title?: string): Promise<{ id: string; revision: number }>;
     grantUpdate(agent: string): Promise<{ id: string; revision: number }>;
@@ -66,7 +66,15 @@ for (const backend of backends) {
         const meetings = MeetingService.withEpoch(world.storage, epoch, {}, { availability: pauses.availability, ...options });
         const decisions = DecisionService.withEpoch(world.storage, epoch, {}, options);
         const shared = new Set<string>();
-        const calls = { applied: [] as string[], failOnce: false, narrate: "ok" as "ok" | "throw" };
+        const calls = { applied: [] as string[], failOnce: false, failLog: false, narrate: "ok" as "ok" | "throw" };
+        // The record service writes through this: with `failLog` set, the next write of a decision log line fails once (a lost log write).
+        const flaky = new Proxy(world.storage, { get(target, name, receiver) {
+          if (name !== "applyOperation") { const v = Reflect.get(target, name, receiver) as unknown; return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v; }
+          return async (input: Parameters<typeof target.applyOperation>[0]) => {
+            if (calls.failLog && input.changes.some((x) => x.type === "create" && x.ref.kind === "meeting-decision-log")) { calls.failLog = false; throw new Error("the disk is full"); }
+            return target.applyOperation(input);
+          };
+        } });
         const base = taskUpdateApplier(projects);
         const counting: ChangeApplier = {
           ...base,
@@ -80,7 +88,7 @@ for (const backend of backends) {
           const p = await principals.get(id);
           return p === undefined ? undefined : grants.effective({ id, kind: p.kind, name: p.name, grants: p.grants }, clock());
         };
-        const make = (extra: Partial<{ appliers: Record<string, ChangeApplier>; shareable: (c: SourceCite) => Promise<boolean>; widening: (cls: "access-change" | "spend", projectId: string) => Promise<"allow" | "ask"> }> = {}) => MeetingRecordService.withEpoch(world.storage, epoch, { meetings, decisions }, {
+        const make = (extra: Partial<{ appliers: Record<string, ChangeApplier>; shareable: (c: SourceCite) => Promise<boolean>; widening: (cls: "access-change" | "spend", projectId: string) => Promise<"allow" | "ask"> }> = {}) => MeetingRecordService.withEpoch(flaky, epoch, { meetings, decisions }, {
           ...options, authority, appliers: extra.appliers ?? { "task.update": counting }, shareable: extra.shareable ?? (async (c) => shared.has(`${c.kind}:${c.id}`)), ...(extra.widening === undefined ? {} : { widening: extra.widening }),
           narrate: async ({ summary }) => { if (calls.narrate === "throw") throw new Error("the model is down"); return `A meeting with ${summary.decisions.length} decision(s).`; },
         });
@@ -1162,6 +1170,105 @@ for (const backend of backends) {
     await refuses("invalid_command", () => log({ limit: 101 }));
     await refuses("invalid_command", () => log({ outcome: "bogus" }));
     for (const p of [c.asA, c.host, c.mgr, c.reader]) await refuses("forbidden", () => svc.decisionLog(p, {}));
+  });
+
+
+  suite("a lost decision log line is written by the sweep, a log failure never changes the decision, and a failing change does not hide the lines of those that finished (card M02f)", async (c) => {
+    const widens = { ...taskUpdateApplier(c.projects), widens: "spend" as const };
+    const boom: ChangeApplier = { ...taskUpdateApplier(c.projects), async apply() { throw new Error("plain failure"); } };
+    const svc = c.reopen({ appliers: { "task.update": taskUpdateApplier(c.projects), "task.boom": boom, "task.retitle-widening": widens }, widening: async () => "ask" });
+    const ctx = { ...c, records: svc } as Ctx;
+    await c.grantUpdate(c.pA);
+    const itemOf = async (rec: string) => (await c.meetings.occurrence(c.owner, (await recordOf(c, rec)).occurrenceId))!.agenda.find((a) => a.intent === "delegated-decision")!.id;
+    const decide = async (changes: Record<string, unknown>[]): Promise<{ id: string }> => {
+      const meeting = await c.meet({ chair: c.pD, item: "delegated-decision" });
+      return decisionOf(ctx, await adopt(ctx, meeting.rec, c.asB, { agendaItemId: await itemOf(meeting.rec), changes }));
+    };
+    const lines = async () => (await svc.decisionLog(c.owner)).entries;
+    // 1. The owner declines, the log write fails: the decision stands, the line is missing, the sweep writes it once.
+    const t1 = await c.task("Lost one");
+    const one = await decide([{ ...change(c, t1, c.pA, "x"), kind: "task.retitle-widening" }]);
+    c.calls.failLog = true;
+    await svc.ownerRespond(c.owner, { commandId: cid("or"), decisionId: one.id, response: "decline" });
+    assert.equal(c.calls.failLog, false, "the log write was attempted and failed");
+    assert.equal((await decisionOf(ctx, (await c.records.decision(c.owner, one.id) as never as { motionId: string }).motionId)).changes[0]!.state, "not-applied", "the decision is unchanged by the failed log write");
+    assert.equal((await lines()).length, 0, "the line is missing");
+    const first = await svc.sweep(c.host, { projectId: c.project });
+    assert.ok(first.logChecked.includes(one.id));
+    assert.deepEqual((await lines()).map((e) => [e.decisionId, e.outcome]), [[one.id, "declined"]]);
+    assert.deepEqual((await svc.sweep(c.host, { projectId: c.project })).logChecked, [], "once written, the decision leaves the index");
+    assert.equal((await lines()).length, 1, "and the sweep does not write it twice");
+    // 2. The last change is applied, the log write fails: the apply result is the same, the sweep fills the gap.
+    const t2 = await c.task("Lost two");
+    const two = await decide([change(c, t2, c.pA, "Lost two, retitled")]);
+    c.calls.failLog = true;
+    assert.deepEqual(await svc.apply(c.host, { decisionId: two.id }), { applied: 1, notApplied: 0, pending: 0 });
+    assert.equal((await lines()).length, 1);
+    await svc.sweep(c.host, { projectId: c.project });
+    assert.deepEqual((await lines()).filter((e) => e.decisionId === two.id).map((e) => e.outcome), ["applied"]);
+    // 3. c1 applies, c2 throws a plain error: c1's applied line exists, and the error still reaches the caller.
+    const t3 = await c.task("Finished");
+    const t4 = await c.task("Broken");
+    const three = await decide([change(c, t3, c.pA, "Finished, retitled"), { ...change(c, t4, c.pA, "y"), kind: "task.boom" }]);
+    await assert.rejects(() => svc.apply(c.host, { decisionId: three.id }), /plain failure/);
+    assert.deepEqual((await lines()).filter((e) => e.decisionId === three.id).map((e) => e.outcome), ["applied"], "the finished change is logged although the next one threw");
+    // 4. A target that moved is not-applied (code conflict); an owner alternative is overridden.
+    const t5 = await c.task("Moved");
+    const five = await decide([change(c, t5, c.pA, "z")]);
+    await c.projects.updateTask({ commandId: cid("u"), actor: c.owner.id, taskId: t5.id, expectedRevision: t5.revision, title: "Moved by someone" });
+    await svc.apply(c.host, { decisionId: five.id });
+    const t6 = await c.task("Overridden");
+    const six = await decide([{ ...change(c, t6, c.pA, "w"), kind: "task.retitle-widening" }]);
+    await svc.ownerRespond(c.owner, { commandId: cid("or"), decisionId: six.id, response: "alternative", alternative: { commandId: cid("alt"), projectId: c.project, category: "decision", topic: "task titles", statement: "Keep the title.", wording: "Keep the title.", source: { channel: "direct" }, basedOn: 0 } });
+    const all = await lines();
+    const of = (id: string) => all.find((e) => e.decisionId === id)!;
+    assert.deepEqual([of(five.id).outcome, of(five.id).code, of(five.id).decidedBy], ["not-applied", "conflict", "none"]);
+    assert.deepEqual([of(six.id).outcome, of(six.id).decidedBy], ["overridden", "owner"]);
+    // The plain team vote that widens nothing is labelled "vote", not "policy".
+    assert.equal(of(two.id).decidedBy, "vote");
+  });
+
+  suite("the decision log records the policy cell as it was when the change was decided, an owner-agreed change refused for withdrawn rights as the owner's with rights_withdrawn, and the reader refuses a task-scoped owner credential and bounds its scan (card M02f)", async (c) => {
+    const widens = { ...taskUpdateApplier(c.projects), widens: "spend" as const };
+    let answer: "allow" | "ask" = "ask";
+    const svc = c.reopen({ appliers: { "task.retitle-widening": widens }, widening: async () => answer });
+    const ctx = { ...c, records: svc } as Ctx;
+    const grant = await c.grantUpdate(c.pA);
+    const decide = async (title: string): Promise<{ id: string }> => {
+      const task = await c.task(title);
+      const meeting = await c.meet({ chair: c.pD, item: "delegated-decision" });
+      const agenda = (await c.meetings.occurrence(c.owner, (await recordOf(c, meeting.rec)).occurrenceId))!.agenda.find((a) => a.intent === "delegated-decision")!.id;
+      return decisionOf(ctx, await adopt(ctx, meeting.rec, c.asB, { agendaItemId: agenda, changes: [{ ...change(c, task, c.pA, title), kind: "task.retitle-widening" }] }));
+    };
+    // Refused while the policy asks; then the policy loosens: the line still says "ask", the cell of that moment.
+    answer = "allow";
+    const one = await decide("Cell one");
+    answer = "ask";
+    await svc.apply(c.host, { decisionId: one.id });
+    answer = "allow";
+    await svc.sweep(c.host, { projectId: c.project });
+    const entries = (await svc.decisionLog(c.owner)).entries;
+    assert.deepEqual(entries.map((e) => [e.outcome, e.setting, e.decidedBy]), [["refused", "ask", "none"]]);
+    // The owner agreed, then the agent's right was revoked: refused, but the owner is the one who allowed it.
+    answer = "ask";
+    const two = await decide("Cell two");
+    await c.grants.revoke(c.owner, { commandId: cid("rv"), grantId: grant.id, expectedRevision: grant.revision, reason: "rights withdrawn" });
+    await svc.ownerRespond(c.owner, { commandId: cid("or"), decisionId: two.id, response: "agree" });
+    const withdrawn = (await svc.decisionLog(c.owner)).entries.find((e) => e.decisionId === two.id);
+    assert.ok(withdrawn !== undefined);
+    assert.deepEqual([withdrawn.outcome, withdrawn.code, withdrawn.decidedBy, withdrawn.agreedBy], ["refused", "rights_withdrawn", "owner", "owner:agreed"]);
+    // A task-scoped owner credential is refused like a plain agent.
+    await refuses("forbidden", () => svc.decisionLog({ ...c.owner, taskScope: { taskId: "task-aaaaaaaaaaaaaaaaaaaa" } } as never, {}));
+    // The scan is bounded: a filter that matches nothing stops with a cursor.
+    const small = MeetingRecordService.withEpoch(c.storage, await c.storage.currentEpoch(), {}, { ...options, logScan: { pageSize: 1, reads: 1 } });
+    const bounded = await small.decisionLog(c.owner, { kind: "nothing" });
+    assert.equal(bounded.scanLimited, true, "the scan stopped early");
+    assert.deepEqual(bounded.entries, []);
+    assert.match(bounded.next ?? "", /^mdl-/, "with a cursor to go on from");
+    const rest = await small.decisionLog(c.owner, { kind: "nothing", after: bounded.next! });
+    assert.equal(rest.scanLimited, true);
+    assert.notEqual(rest.next, bounded.next, "and the cursor moves on");
+    assert.equal((await svc.decisionLog(c.owner, { kind: "nothing" })).scanLimited, undefined, "a short log is read to its end");
   });
 
   suite("outcomes go back to the agenda item and so to its conversation, through M03's path, once", async (c) => {

@@ -115,7 +115,7 @@ test("a request that cannot be told does not hold back the ones after it, and it
 
 test("the meeting record sweep runs for every project, as the tick's principal (card M02c)", async () => {
   const seen: string[] = [];
-  const [loop] = recordLoops({ sweep: async (by, c) => { seen.push(`${by.id}:${c.projectId}`); return { closed: [], tied: [], failedTies: [], interrupted: [] }; } }, async () => ["proj-a", "proj-b"]);
+  const [loop] = recordLoops({ sweep: async (by, c) => { seen.push(`${by.id}:${c.projectId}`); return { closed: [], tied: [], failedTies: [], interrupted: [], logChecked: [] }; } }, async () => ["proj-a", "proj-b"]);
   assert.equal(loop!.name, "meeting-records.sweep");
   await loop!.run({ id: "service:dispatcher", kind: "service" } as never);
   assert.deepEqual(seen, ["service:dispatcher:proj-a", "service:dispatcher:proj-b"]);
