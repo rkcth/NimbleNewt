@@ -15,7 +15,7 @@ import type { PauseService, PauseStatus } from "../lifecycle/pause.js";
 import type { CallBody } from "../mcp/mcp.js";
 import type { ContractBody, ContractService, DependencyBody, Difficulty } from "../planning/contracts.js";
 import { canRead as deskCanRead, type DeskRecordBody } from "../context/desks.js";
-import type { ActivityService } from "../activity/activity.js";
+import type { ActivityService, ExplanationBody } from "../activity/activity.js";
 import type { ArtifactBody } from "../artifacts/service.js";
 import { allows, inTaskScope } from "../security/access.js";
 import type { Principal, PrincipalBody } from "../security/principals.js";
@@ -177,6 +177,7 @@ export type StatusRequest =
   | { readonly kind: "failed_events"; readonly projectId?: string; readonly taskId?: string; readonly afterId?: string; readonly limit?: number }
   | { readonly kind: "failed_event"; readonly handlingId: string }
   | { readonly kind: "owner_questions"; readonly limit?: number }
+  | { readonly kind: "explanations"; readonly taskId: string; readonly seq?: number; readonly limit?: number }
   | { readonly kind: "activity"; readonly taskId: string; readonly latest?: boolean; readonly after?: number; readonly limit?: number };
 
 // ---- service -------------------------------------------------------------------------------------------------------------------
@@ -193,7 +194,7 @@ export interface StatusDeps {
   /** The failed event queue (card H13). Absent: the queue cannot be listed. */
   readonly watch?: Pick<WatchService, "failures" | "inspect">;
   /** The steps of a task's activity record (card C09h). Absent: the view is not offered. */
-  readonly activity?: Pick<ActivityService, "steps">;
+  readonly activity?: Pick<ActivityService, "steps" | "explanations">;
   /** Questions agents have put to the owner (card U12e). Absent: none are listed. */
   readonly ownerQuestions?: { ownerQuestions(owner: Principal, page?: { afterId?: string; limit?: number }): Promise<{ items: readonly { inquiryId: string; asker: string; question: string; askedAt: string; revision: number; task: { id: string; title: string; projectName: string }; wait?: { summary: string; nextAction: string; deadline?: string } }[]; next?: string }> };
   /** Checks an artifact against its files (card S06). Absent: artifacts are listed as `not_checked`, never as verified. */
@@ -276,6 +277,7 @@ export class StatusService {
       case "noticeboard": { onlyKnown(request, ["kind", "projectId"]); return this.noticeboard(by, request.projectId); }
       case "failed_events": { const { kind: _k, ...rest } = request; return this.failedEvents(by, rest); }
       case "failed_event": { onlyKnown(request, ["kind", "handlingId"]); return this.inspectFailedEvent(by, request.handlingId); }
+      case "explanations": { onlyKnown(request, ["kind", "taskId", "seq", "limit"]); return this.explanationLines(by, request); }
       case "activity": { onlyKnown(request, ["kind", "taskId", "latest", "after", "limit"]); return this.activityLines(by, request); }
       case "owner_questions": { onlyKnown(request, ["kind", "limit"]); return this.ownerQuestionLines(by, request.limit); }
       default: return invalid("kind", "is not a kind of status request");
@@ -314,6 +316,33 @@ export class StatusService {
       : line(`Step ${s.seq}, ${s.at}, ${shown(s.actor)}: ${s.kind} - ${shown(s.summary)}${s.corrections > 0 ? ` (corrected ${s.corrections} time${s.corrections === 1 ? "" : "s"})` : ""}`, cite("task", taskId))));
     if (lines.length === 0) lines.push(line("No steps are recorded for this task yet.", cite("task", taskId)));
     else if (next !== undefined) lines.push(line(`There are more steps; ask again after step ${next}.`, cite("task", taskId)));
+    return { observedAt: this.#runner.now(), lines };
+  }
+
+  /** The explanations agents wrote for their choices on a task (or one step), the latest first: what was chosen, what else was considered and why not, the evidence and what is uncertain; a retrospective one says so and says when the records could not explain the step. */
+  async explanationLines(by: Principal, request: { taskId: string; seq?: number; limit?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const activity = this.#deps.activity;
+    if (activity === undefined) return undefined;
+    const taskId = checkTaskId(request.taskId);
+    const limit = request.limit === undefined ? 5 : Number.isSafeInteger(request.limit) && request.limit >= 1 && request.limit <= 20 ? request.limit : invalid("limit", "must be 1 to 20");
+    if (request.seq !== undefined && (!Number.isSafeInteger(request.seq) || request.seq < 1)) invalid("seq", "must be a whole number from 1");
+    let all: readonly ExplanationBody[];
+    try { all = await activity.explanations(by, taskId, request.seq); } catch (error) {
+      if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) return undefined;
+      throw error;
+    }
+    const latest = [...all].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0)).slice(0, limit);
+    const lines: Line[] = [];
+    for (const e of latest) {
+      const where = e.seq === undefined ? "on the task" : `at step ${e.seq}`;
+      const how = e.mode === "retrospective" ? (e.grounded === false ? "Written afterwards, and the records could not explain it" : "Written afterwards, from the records") : "Written at the time";
+      lines.push(line(`${how} by ${shown(e.by)} ${where}, ${e.at}: chose ${shown(e.choice)}.`, cite("task", taskId)));
+      for (const a of e.alternatives) lines.push(line(`Not ${shown(a.option)}: ${shown(a.whyNot)}`, cite("task", taskId)));
+      for (const ev of e.evidence) lines.push(line(`Evidence: ${shown(ev.statement)}`, cite("task", taskId)));
+      if (e.uncertainty !== "") lines.push(line(`Uncertain: ${shown(e.uncertainty)}`, cite("task", taskId)));
+    }
+    if (lines.length === 0) lines.push(line("No explanations are written for this task yet.", cite("task", taskId)));
+    else if (all.length > latest.length) lines.push(line(`${all.length - latest.length} older explanation${all.length - latest.length === 1 ? " is" : "s are"} not shown.`, cite("task", taskId)));
     return { observedAt: this.#runner.now(), lines };
   }
 

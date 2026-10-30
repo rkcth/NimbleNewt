@@ -2648,3 +2648,8 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ### C09h: the activity view reads only the last steps (batch 8 review finding)
 
 - `ActivityService.steps` takes `tail: true`: the last `limit` steps, without reading the earlier ones. The `latest` view of a task's activity uses it, so a long record costs the same as a short one and is never cut off silently.
+
+## C09h (part 2): the explanation index in chat
+
+- `StatusService` view `explanations` (`{ kind: "explanations", taskId, seq?, limit? }`, default 5, at most 20, newest first): what an agent chose, what else it considered and why not, the evidence and what is uncertain, with how it was written (at the time; or afterwards, from the records, and whether the records could explain it). An agent's words are shown as its words; an unreadable task reads as missing. In chat the task is named by its title.
+- Not built yet (remains in C09h): artifact steps for local workers.

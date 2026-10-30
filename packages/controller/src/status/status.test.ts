@@ -953,7 +953,7 @@ for (const backend of backends) {
     const step = (seq: number) => ({ taskId: t.id, projectId: c.project, seq, kind: "tool", summary: `step ${seq} summary`, actor: "agent:ann", at: "2026-10-22T10:00:00.000Z", manifest: {}, payload: { state: "none" }, corrections: seq === 2 ? 1 : 0 });
     const all = Array.from({ length: 7 }, (_, i) => (i === 2 ? { seq: 3, unavailable: "archived" } : step(i + 1))) as never[];
     const calls: { taskId: string; after?: number; limit?: number }[] = [];
-    const activity = { steps: async (by: Principal, taskId: string, page: { after?: number; limit?: number; tail?: boolean } = {}) => {
+    const activity = { explanations: async () => [] as never[], steps: async (by: Principal, taskId: string, page: { after?: number; limit?: number; tail?: boolean } = {}) => {
       calls.push({ taskId, ...page });
       if (by.kind !== "owner") throw new DomainError("forbidden", "no");
       const limit = page.limit ?? 50, from = page.tail === true ? Math.max(0, all.length - limit) : (page.after ?? 0);
@@ -975,5 +975,25 @@ for (const backend of backends) {
     await assert.rejects(status.ask(c.owner, { kind: "activity", taskId: t.id, limit: 99 }));
     await assert.rejects(status.ask(c.owner, { kind: "activity", taskId: t.id, latest: true, after: 2 }));
     await assert.rejects(status.ask(c.owner, { kind: "activity", taskId: t.id, extra: 1 } as never));
+  });
+
+  suite("agents' explanations of their choices are told in plain lines, newest first, saying how each was written; unreadable reads as missing (card C09h)", async (c) => {
+    const t = await c.projects.createTask({ commandId: cid("t"), actor: c.owner.id, projectId: c.project, title: "Build" });
+    const e = (at: string, mode: "contemporaneous" | "retrospective", extra: Record<string, unknown> = {}) => ({ taskId: t.id, projectId: c.project, mode, choice: `choice at ${at}`, alternatives: [{ option: "plan B", whyNot: "slower" }], evidence: [{ statement: "the tests passed" }], uncertainty: "the load is unknown", by: "agent:ann", at, ...extra });
+    const list = [e("2026-10-22T09:00:00.000Z", "contemporaneous", { seq: 2 }), e("2026-10-22T10:00:00.000Z", "retrospective", { seq: 3, grounded: false }), e("2026-10-22T08:00:00.000Z", "contemporaneous")];
+    const asked: (number | undefined)[] = [];
+    const activity = { steps: async () => ({ steps: [] }), explanations: async (by: Principal, _t: string, seq?: number) => { asked.push(seq); if (by.kind !== "owner") throw new DomainError("forbidden", "no"); return list as never[]; } };
+    const status = c.rebuild({}, { activity });
+    const got = (await status.ask(c.owner, { kind: "explanations", taskId: t.id, limit: 2 }))!;
+    assert.match(got.lines[0]!.text, /^Written afterwards, and the records could not explain it by agent:ann at step 3, 2026-10-22T10:00:00.000Z: chose choice at 2026-10-22T10:00:00.000Z\./);
+    assert.ok(got.lines.some((l) => l.text === "Not plan B: slower"));
+    assert.ok(got.lines.some((l) => l.text === "Uncertain: the load is unknown"));
+    assert.match(got.lines.at(-1)!.text, /1 older explanation is not shown/);
+    await status.ask(c.owner, { kind: "explanations", taskId: t.id, seq: 2 });
+    assert.deepEqual(asked, [undefined, 2]);
+    const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
+    assert.equal(await status.ask(reader, { kind: "explanations", taskId: t.id }), undefined);
+    assert.equal(await c.rebuild().ask(c.owner, { kind: "explanations", taskId: t.id }), undefined);
+    await assert.rejects(status.ask(c.owner, { kind: "explanations", taskId: t.id, limit: 99 }));
   });
 }
