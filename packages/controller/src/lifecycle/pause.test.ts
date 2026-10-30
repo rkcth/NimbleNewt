@@ -48,7 +48,7 @@ for (const backend of backends) {
     t1: string; t2: string; t3: string; t4: string; /** t1 and t2: agent A (team child), t3: agent B (no team), t4: agent C (team parent) */
     agentA: string; agentB: string; agentC: string; teamParent: string; teamChild: string;
     pauses: PauseService; reopen(): { pauses: PauseService; gen: GenerationService };
-    gen: GenerationService; hooked(hooks: { afterGuardRead?: () => Promise<void>; afterPauseRead?: () => Promise<void> }): GenerationService; hookedPauses(hooks: { afterBackgroundRead?: () => Promise<void> }): PauseService; effects: EffectService; assignments: AssignmentService; projects: ProjectService; waits: WaitService; inbox: InboxService; blockers: BlockerService;
+    gen: GenerationService; hooked(hooks: { afterGuardRead?: () => Promise<void>; afterPauseRead?: () => Promise<void> }): GenerationService; hookedPauses(hooks: { afterBackgroundRead?: () => Promise<void>; beforeLift?: (scope: PauseScope) => Promise<void> }): PauseService; effects: EffectService; assignments: AssignmentService; projects: ProjectService; waits: WaitService; inbox: InboxService; blockers: BlockerService;
     conv: ConversationService; config: ConfigurationService; policy: PolicyService; stall: StallService; reconciler(): Reconciler;
     ann: Principal; mgr: Principal; amgr: Principal; pat: Principal; eve: Principal; asA: Principal; asB: Principal;
     pauseTask(taskId: string, extra?: { background?: "permit" | "deny" }): Promise<{ gateId: string; requestId: string; replayed: boolean }>;
@@ -214,6 +214,41 @@ for (const backend of backends) {
     assert.deepEqual(await c.pauses.liftDue(dispatcher), [], "a condition belongs to the pause it was set for");
     assert.equal(await c.pauses.isPaused(c.t2), true);
     await c.pauses.resume(c.mgr, { commandId: cid("rs"), scope: sibling, reason: "done" });
+    await c.pauses.resume(c.mgr, { commandId: cid("rs"), scope: task, reason: "done" });
+  });
+
+  suite("a lift loses to a pause changed after the tick read it, and one gate failing does not stop the others (card L06b)", async (c) => {
+    const task = { kind: "task", id: c.t1 } as const;
+    const other = { kind: "task", id: c.t2 } as const;
+    const due = () => new Date(now + 1000).toISOString();
+    const at = (t: typeof task) => c.pauses.setResumeCondition(c.owner, { commandId: cid("rc"), scope: t, at: due() });
+    // The gate is read as due, then resumed by hand and paused again (a new request, no time): the tick must leave the new pause alone.
+    await c.pauseTask(c.t1);
+    await at(task);
+    now += 5000;
+    let fired = false;
+    const again = c.hookedPauses({ beforeLift: async () => { if (!fired) { fired = true; await c.pauses.resume(c.mgr, { commandId: cid("rs"), scope: task, reason: "by hand" }); await c.pauseTask(c.t1); } } });
+    assert.deepEqual(await again.liftDue(c.owner), [], "a pause made again is not lifted by the old condition");
+    assert.equal(fired, true);
+    assert.equal(await c.pauses.isPaused(c.t1), true);
+    // The same when the owner gave the same pause a later time meanwhile.
+    await at(task);
+    now += 5000;
+    fired = false;
+    const later = c.hookedPauses({ beforeLift: async () => { if (!fired) { fired = true; await c.pauses.setResumeCondition(c.owner, { commandId: cid("rc"), scope: task, at: new Date(now + 3_600_000).toISOString() }); } } });
+    assert.deepEqual(await later.liftDue(c.owner), [], "a later time is not this condition's to lift");
+    assert.equal(await c.pauses.isPaused(c.t1), true);
+    // One gate that cannot be lifted does not hold up the other; the first failure is raised after the scan, and the lifted scopes come through the callback.
+    await c.pauseTask(c.t2);
+    await at(task);
+    await at(other);
+    now += 5000;
+    const broken = c.hookedPauses({ beforeLift: async (scope) => { if (scope.id === c.t1) throw new Error("lift broke"); } });
+    const got: PauseScope[] = [];
+    await assert.rejects(() => broken.liftDue(c.owner, (s) => got.push(s)), /lift broke/);
+    assert.deepEqual(got, [other], "the other gate was lifted");
+    assert.equal(await c.pauses.isPaused(c.t2), false);
+    assert.equal(await c.pauses.isPaused(c.t1), true, "the failing gate stays paused");
     await c.pauses.resume(c.mgr, { commandId: cid("rs"), scope: task, reason: "done" });
   });
 

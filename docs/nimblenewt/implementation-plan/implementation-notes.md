@@ -2922,7 +2922,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 
 ## L06b: two review gaps covered by tests
 
-- Force Stop drops a recorded time and marks the pause taken over; a pause whose runtime reports it `stopped` is not lifted by an old time. (The re-pause race guard and the deferred per-gate failure still have no test of their own.)
+- Force Stop drops a recorded time and marks the pause taken over; a pause whose runtime reports it `stopped` is not lifted by an old time. (The re-pause race guard and the deferred per-gate failure are covered in the next section.)
 
 ## M02e (part 1): a meeting can decide a budget raise or a grant
 
@@ -2953,3 +2953,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - `SwarmService.spawn` counted live children and then created the child, so spawns sent at the same moment for one parent could all pass the check (5 of 5 got through a limit of 3 in the new test).
 - Now each child claims a place on a per-parent `swarm-gate` record (`{ children: [...] }`) after it is made: the live count (linked plus claimed, minus finished) and the claim commit as one `create`/`update` with `expectedRevision`; a spawn that loses the race re-counts and retries (up to 50 times). A refused one cancels its child as before. Finished claims are dropped when the record is next written.
 - Test: `spawns sent at the same moment cannot take a parent over its live-children limit` in `packages/controller/src/swarm/swarm.test.ts` (fails before the fix, passes after). The swarm suite only runs on SQLite; the PostgreSQL path was not exercised (no server here).
+## L06b: the re-pause race and the per-gate failure of `liftDue` are tested
+
+- New test hook `beforeLift(scope)` (runs after `liftDue` decided a gate is due, before it lifts it). Tested: a gate resumed by hand and paused again, or given a later time, between the read and the lift is not lifted; a gate whose lift throws a non-`invalid_command` error does not stop the others, and the first failure is thrown after the scan.
+- `liftDue` does not return the lifted scopes when it throws; it takes an optional `onLifted(scope)` callback, called as each is lifted, for a caller that needs them.

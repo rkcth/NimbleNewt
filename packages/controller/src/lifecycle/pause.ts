@@ -122,7 +122,7 @@ export interface PauseLookup { isPaused(taskId: string): Promise<boolean> }
 
 export interface PauseOptions extends RunnerOptions {
   /** Test seam: runs between reading the gates for a background result and committing it. */
-  readonly testHooks?: { readonly afterBackgroundRead?: () => Promise<void> };
+  readonly testHooks?: { readonly afterBackgroundRead?: () => Promise<void>; /** Runs after `liftDue` read a gate and decided it is due, before it lifts it; a throw counts as that gate failing to lift. */ readonly beforeLift?: (scope: PauseScope) => Promise<void> };
   /** Reports suspended and stopped agents (L02, L03 will supply it) for `availability`; consulted only when no pause applies. Default: available. */
   readonly otherAvailability?: (principalId: string) => Promise<Availability>;
 }
@@ -289,9 +289,9 @@ export class PauseService implements PauseGuard, PauseLookup {
 
   /**
    * The controller's tick: lifts every pause whose recorded condition has come, and only that scope, with the reason naming the condition. A gate with no recorded condition is never touched, and a repeat of the tick
-   * (or a restart) lifts nothing twice. The caller is the dispatcher (owner, host or service). Answers the scopes it lifted.
+   * (or a restart) lifts nothing twice. The caller is the dispatcher (owner, host or service). Answers the scopes it lifted. When a gate fails to lift (any error but a lost race) the others are still lifted and the first failure is thrown after the scan; the scopes lifted by then are not returned, so a caller that needs them passes `onLifted`, called for each one as it is lifted.
    */
-  async liftDue(by: Principal): Promise<PauseScope[]> {
+  async liftDue(by: Principal, onLifted?: (scope: PauseScope) => void): Promise<PauseScope[]> {
     if (!(by.kind === "owner" || by.kind === "host" || by.kind === "service")) throw new DomainError("forbidden", `${by.id} is not the dispatcher; recorded conditions are carried out by the controller`);
     const lifted: PauseScope[] = [];
     let failure: unknown;
@@ -306,8 +306,10 @@ export class PauseService implements PauseGuard, PauseLookup {
         // A pause that has gone on to be suspended or stopped is not an ordinary pause any more.
         if (gate.observed !== undefined && ["preparing-to-suspend", "suspended", "stopping", "stopped", "recovery-required"].includes(gate.observed.state)) continue;
         try {
+          await this.#hooks?.beforeLift?.(gate.scope);
           await this.#request(by, `cond-${gate.requestId ?? a.id}`, "resume", gate.scope, `the owner's recorded condition (set by ${gate.resumeAt.setBy} at ${gate.resumeAt.setAt}): not before ${gate.resumeAt.at}`, undefined, gate.projectId, { requestId: gate.requestId, at: gate.resumeAt.at });
           lifted.push(gate.scope);
+          onLifted?.(gate.scope);
         } catch (error) {
           // A gate resumed, paused again or given another time since it was read is no longer this condition's to lift. One gate that cannot be lifted does not hold up the others.
           if (error instanceof DomainError && error.code === "invalid_command") continue;
