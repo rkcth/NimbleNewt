@@ -3380,3 +3380,9 @@ Remains for U13: deliverable read operations (list/get with revision and provena
 - Tests (all four stores): policy finish / cancel / unreadable, a later call refused in each case.
 - **Remains:** the composer does not yet pass `revocationPolicy` from a chat-settable policy key (the dependency is optional, so default is finish); `pause` as a third policy; cancellation of runs on other hosts (remote workers cannot run catalogue tools yet) and of runs in other processes (the listener is in-process; a restart already ends the run); retention of old and stale referenced versions (K06); promotion, state API and migration of paused tasks (as listed under T02 part 1).
 - **Owner questions:** (1) Is `finish` the right default, or should a revocation cancel by default? (2) Which settings key should carry the policy, and should it differ per tool layer (system, shared, personal)?
+
+### T02b review (2026-10-30): open items before wiring
+
+- The revoke listener set lives on each `CatalogService` instance, and `start.ts` builds ad-hoc instances: when the revocation is wired, one shared instance (or a storage-level signal) must be used, or a revoke through another instance cancels nothing without failing. `ToolExecutionService` subscribes in its constructor and never unsubscribes: build it once.
+- The test "replay" of a revoke uses a new command id; the same-command-id replay path (recorded result, listeners fire again) is untested. A runner's throwing abort listener would surface as an uncaught exception (the runner is internal).
+- Nothing composes `revocationPolicy` or exposes `CatalogService.revoke` through the API or chat yet.
