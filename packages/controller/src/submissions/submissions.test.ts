@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
+import { derivedId } from "../domain/ids.js";
+import type { JsonObject } from "../storage/types.js";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
-import { SubmissionService, type SubmissionOptions } from "./index.js";
+import { CommandRunner } from "../domain/runner.js";
+import { SubmissionService, type SubmissionBody, type SubmissionOptions } from "./index.js";
 
 after(stopServer);
 
@@ -20,7 +23,7 @@ const OWN = /^agent:/;
 const pass = (boundTo: string) => [{ check: "tests", result: "pass" as const, boundTo }];
 
 for (const backend of backends) {
-  const suite = (name: string, body: (c: { open(roles: (id: string, scope: { projectId: string; taskId: string }) => Promise<readonly string[]>, extra?: SubmissionOptions): SubmissionService; other: { task: string }; rawBody(id: string): Promise<unknown>; svc: SubmissionService; roles: Map<string, string[]>; agent(name: string, roles: string[], granted?: boolean): Promise<Principal>; owner: Principal; task: string }) => Promise<void>) =>
+  const suite = (name: string, body: (c: { open(roles: (id: string, scope: { projectId: string; taskId: string }) => Promise<readonly string[]>, extra?: SubmissionOptions): SubmissionService; other: { task: string }; rawBody(id: string): Promise<unknown>; plant(body: SubmissionBody): Promise<string>; projects: { task: string; other: string }; svc: SubmissionService; roles: Map<string, string[]>; agent(name: string, roles: string[], granted?: boolean): Promise<Principal>; owner: Principal; task: string }) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
       const world = await backend.open();
       try {
@@ -39,7 +42,7 @@ for (const backend of backends) {
           return p;
         };
         const svc = SubmissionService.withEpoch(world.storage, projects.epoch, async (id) => roles.get(id) ?? [], options);
-        await body({ svc, roles, agent, owner, task, other: { task: task2 }, rawBody: async (id) => (await world.storage.getAggregate({ kind: "submission", id }))?.body, open: (r, extra = {}) => SubmissionService.withEpoch(world.storage, projects.epoch, r, { ...options, ...extra }) });
+        await body({ svc, roles, agent, owner, task, other: { task: task2 }, projects: { task: project, other: project2 }, plant: async (b) => { const id = derivedId("sbm", `plant-${cid("x")}`); await new CommandRunner(world.storage, projects.epoch, options).command("submission.record", { commandId: cid("plant"), actor: owner.id }, async () => ({ payload: { ...(b as unknown as JsonObject), submittedAt: null, plant: id }, build: async () => { const ref = { kind: "submission", id }; return { ref, creates: true, changes: [{ type: "create" as const, ref, body: b as unknown as JsonObject }], detail: {} }; } })); return id; }, rawBody: async (id) => (await world.storage.getAggregate({ kind: "submission", id }))?.body, open: (r, extra = {}) => SubmissionService.withEpoch(world.storage, projects.epoch, r, { ...options, ...extra }) });
       } finally { await world.close(); }
     });
 
@@ -241,5 +244,129 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.svc.list(c.owner, c.task, { limit: 101 }));
     await refuses("invalid_command", () => c.svc.list(c.owner, c.task, { limit: 5, kind: "nope" }));
     await refuses("invalid_command", () => c.svc.list(c.owner, c.task, { limit: 5, afterId: "zzz" }));
+  });
+
+  const rec = (taskId: string, projectId: string, extra: Partial<SubmissionBody>): SubmissionBody => ({ taskId, projectId, kind: "qa", role: "qa", submittedBy: "agent:ann", submittedAt: "2026-10-30T10:00:00.000Z", makesCommit: false, evidence: [], ...extra });
+
+  suite("the cursor is sealed and bound to the caller and the task; the global table's other rows never leak", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const bob = await c.agent("bob", ["author"]);
+    for (let i = 0; i < 3; i++) await c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH, refreshRound: i });
+    // other tasks' records interleave in the same table
+    for (let i = 0; i < 6; i++) await c.svc.record(bob, { commandId: cid("s"), taskId: c.other.task, kind: "code", role: "author", base: BASE, tree: T2, patchId: PATCH, refreshRound: i });
+    const foreignIds = (await c.svc.list(c.owner, c.other.task, { limit: 50 })).items.map((x) => x.id);
+    const mine = new Set((await c.svc.list(c.owner, c.task, { limit: 50 })).items.map((x) => x.id));
+    // a tiny scan window so the cursor lands on rows of the other task
+    const small = c.open(async (id) => c.roles.get(id) ?? [], { listScan: { pageSize: 1, reads: 1 } });
+    let cursor: string | undefined;
+    for (let n = 0; n < 20; n++) {
+      const p = await small.list(ann, c.task, { limit: 1, ...(cursor === undefined ? {} : { afterId: cursor }) });
+      if (p.next === undefined) break;
+      assert.ok(p.next.startsWith("~"), "the cursor is sealed");
+      for (const id of [...foreignIds, ...mine]) assert.ok(!p.next.includes(id), "the cursor holds no submission ID in the clear");
+      cursor = p.next;
+    }
+    const page = await c.svc.list(ann, c.task, { limit: 1 });
+    assert.ok(page.next !== undefined && page.next.startsWith("~"));
+    // plain IDs, tampered and foreign cursors are refused
+    for (const id of [...foreignIds, ...mine]) await refuses("invalid_command", () => c.svc.list(ann, c.task, { limit: 5, afterId: id }), /cursor/);
+    await refuses("invalid_command", () => c.svc.list(ann, c.task, { limit: 5, afterId: `${page.next!.slice(0, -2)}AA` }), /cursor/);
+    await refuses("invalid_command", () => c.svc.list(ann, c.task, { limit: 5, afterId: "~" }), /cursor/);
+    // a cursor of the same task from another caller, or of another task, does not open
+    await refuses("invalid_command", () => c.svc.list(c.owner, c.task, { limit: 5, afterId: page.next! }), /cursor/);
+    const o2 = await c.svc.list(c.owner, c.other.task, { limit: 1 });
+    await refuses("invalid_command", () => c.svc.list(c.owner, c.task, { limit: 5, afterId: o2.next! }), /cursor/);
+    // another instance (other key) cannot open it either
+    await refuses("invalid_command", () => c.open(async () => []).list(ann, c.task, { limit: 5, afterId: page.next! }), /cursor/);
+    // an honest cursor continues
+    assert.ok((await c.svc.list(ann, c.task, { limit: 5, afterId: page.next! })).items.length >= 0);
+  });
+
+  suite("a scan that stops early says so, and its cursor continues the scan", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const bob = await c.agent("bob", ["author"]);
+    const wanted: string[] = [];
+    for (let i = 0; i < 2; i++) wanted.push((await c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH, refreshRound: i })).id);
+    for (let i = 0; i < 8; i++) await c.svc.record(bob, { commandId: cid("s"), taskId: c.other.task, kind: "code", role: "author", base: BASE, tree: T2, patchId: PATCH, refreshRound: i });
+    const small = c.open(async (id) => c.roles.get(id) ?? [], { listScan: { pageSize: 2, reads: 1 } });
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let limited = 0;
+    for (let n = 0; n < 20; n++) {
+      const p = await small.list(c.owner, c.task, { limit: 50, ...(cursor === undefined ? {} : { afterId: cursor }) });
+      seen.push(...p.items.map((x) => x.id));
+      if (p.scanLimited === true) limited++;
+      if (p.next === undefined) break;
+      cursor = p.next;
+    }
+    assert.ok(limited > 0, "the window of 2 rows is too small for 10 rows, so a call reported scanLimited");
+    assert.deepEqual(seen.sort(), [...wanted].sort(), "following next finds every record exactly once");
+    const whole = await c.svc.list(c.owner, c.task, { limit: 50 });
+    assert.equal(whole.scanLimited, undefined);
+  });
+
+  suite("list redacts a report on the way out", async (c) => {
+    const secret = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
+    const ann = await c.agent("ann", ["qa"]);
+    const id = await c.plant(rec(c.task, c.projects.task, { submittedBy: ann.id, report: `token ${secret} leaked` }));
+    assert.ok(JSON.stringify(await c.rawBody(id)).includes(secret), "the planted record is unredacted");
+    for (const who of [c.owner, ann]) {
+      const listed = (await c.svc.list(who, c.task, { limit: 10 })).items.find((x) => x.id === id);
+      assert.ok(listed !== undefined && !JSON.stringify(listed).includes(secret));
+      assert.ok(!JSON.stringify(await c.svc.get(who, id)).includes(secret));
+    }
+  });
+
+  suite("a task credential reads only its own task, in list and get", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const mineHere = await c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH });
+    const mineThere = await c.svc.record(ann, { commandId: cid("s"), taskId: c.other.task, kind: "code", role: "author", base: BASE, tree: T2, patchId: PATCH });
+    const scoped = (taskId: string, projectId: string): Principal => ({ ...ann, taskScope: { taskId, projectId } });
+    const here = scoped(c.task, c.projects.task);
+    assert.deepEqual((await c.svc.list(here, c.task, { limit: 10 })).items.map((x) => x.id), [mineHere.id]);
+    assert.equal((await c.svc.get(here, mineHere.id))?.id, mineHere.id);
+    await refuses("not_found", () => c.svc.list(here, c.other.task, { limit: 10 }), /no such task/);
+    assert.equal(await c.svc.get(here, mineThere.id), undefined, "the credential's task is not the submission's task");
+    // a scope naming the right task in the wrong project is also refused
+    const wrong = scoped(c.task, c.projects.other);
+    await refuses("not_found", () => c.svc.list(wrong, c.task, { limit: 10 }));
+    assert.equal(await c.svc.get(wrong, mineHere.id), undefined);
+  });
+
+  suite("get and list agree: an agent without task.read cannot read even its own submission", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const made = await c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH });
+    const revoked: Principal = { ...ann, grants: [] };
+    assert.equal(await c.svc.get(revoked, made.id), undefined);
+    await refuses("not_found", () => c.svc.list(revoked, c.task, { limit: 5 }));
+    assert.equal((await c.svc.get(ann, made.id))?.id, made.id);
+  });
+
+  suite("a reviewer reads only the submission its review request names", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const bob = await c.agent("bob", ["reviewer"]);
+    const cy = await c.agent("cy", ["reviewer"]);
+    const first = await c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH });
+    const second = await c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH, refreshRound: 1 });
+    const elsewhere = await c.svc.record(ann, { commandId: cid("s"), taskId: c.other.task, kind: "code", role: "author", base: BASE, tree: T2, patchId: PATCH });
+    // without any assignment a reviewer sees nothing of others' work
+    assert.equal(await c.svc.get(bob, first.id), undefined);
+    assert.deepEqual((await c.svc.list(bob, c.task, { limit: 10 })).items, []);
+    const assigned = new Map<string, string[]>([[`${bob.id}|${c.task}`, [first.id]], [`${bob.id}|${c.other.task}`, [elsewhere.id]], [`${cy.id}|${c.task}`, [first.id]]]);
+    const svc = c.open(async (id) => c.roles.get(id) ?? [], { reviewAssignments: async (id, taskId) => assigned.get(`${id}|${taskId}`) ?? [] });
+    assert.equal((await svc.get(bob, first.id))?.id, first.id, "the assigned submission is readable");
+    assert.equal(await svc.get(bob, second.id), undefined, "the role-wide read does not exist");
+    assert.equal((await svc.get(bob, elsewhere.id))?.id, elsewhere.id, "assigned in the other task, which bob may read");
+    assert.deepEqual((await svc.list(bob, c.other.task, { limit: 10 })).items.map((x) => x.id), [elsewhere.id]);
+    assert.deepEqual((await svc.list(bob, c.task, { limit: 10 })).items.map((x) => x.id), [first.id]);
+    assert.deepEqual((await svc.list(cy, c.task, { limit: 10 })).items.map((x) => x.id), [first.id]);
+    // a reviewer's own review stays readable beside the assigned one
+    const rev = await svc.record(bob, { commandId: cid("s"), taskId: c.task, kind: "review", role: "reviewer", subject: first.id, verdict: "approve" });
+    assert.deepEqual((await svc.list(bob, c.task, { limit: 10 })).items.map((x) => x.id).sort(), [first.id, rev.id].sort());
+    // the reviewer role must still be held, and task.read is still required
+    c.roles.set(bob.id, []);
+    assert.equal(await svc.get(bob, first.id), undefined);
+    c.roles.set(bob.id, ["reviewer"]);
+    assert.equal(await svc.get({ ...bob, grants: [] }, first.id), undefined);
   });
 }

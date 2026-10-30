@@ -1,3 +1,4 @@
+import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import { derivedId } from "../domain/ids.js";
@@ -14,7 +15,7 @@ export type SubmissionKind = (typeof SUBMISSION_KINDS)[number];
 
 /**
  * Which role may submit which kind (card Q01b). PROVISIONAL (owner question): the integrator submits no kind here because it writes no content (card P10) and its landing is not a submission;
- * a one-agent project works because one agent may hold several roles, so the rule is on the role the agent submits in, not on who the agent is.
+ * a one-agent project submits in several roles because one agent may hold several roles (the rule is on the role the agent submits in, not on who the agent is). A review of one's own work is NOT self-served there: review is disabled (refused) when only one agent exists.
  */
 export const KIND_ROLES: Readonly<Record<SubmissionKind, readonly string[]>> = {
   code: ["author"], review: ["reviewer"], qa: ["qa"], document: ["docs"], signoff: ["director"],
@@ -79,6 +80,13 @@ export interface SubmissionOptions extends RunnerOptions {
    * There is no option to let an agent review its own work: that is always refused (owner decision, final).
    */
   readonly reviewersAvailableIn?: (projectId: string, workerId: string) => Promise<readonly string[]>;
+  /**
+   * The submissions this principal has been asked to review in this task (the review request names the submission), by ID. OWNER DECISION: a reviewer reads ONLY those, never the role's other submissions.
+   * Absent: nobody is assigned. The port is asked again on every read, and the principal must still hold the reviewer role in the project.
+   */
+  readonly reviewAssignments?: (principalId: string, taskId: string) => Promise<readonly string[]>;
+  /** Scan limits for `list`, injectable so a test can shrink them (as `logScan` does for meetings). Defaults: 200 rows a page, 10 pages a call. */
+  readonly listScan?: { readonly pageSize: number; readonly reads: number };
 }
 
 export interface RecordSubmission {
@@ -112,6 +120,7 @@ const ALLOWED: Readonly<Record<SubmissionKind, readonly string[]>> = {
 };
 const LIST_PAGE = 200;
 const LIST_READS = 10;
+type Item = SubmissionBody & { id: string; revision: number };
 const MAX_EVIDENCE = 50;
 const MAX_REPORT = 8000;
 
@@ -125,8 +134,60 @@ export class SubmissionService {
   readonly #runner: CommandRunner;
   readonly #roles: RolesOf;
   readonly #attemptOf: AttemptOf | undefined;
+<<<<<<< HEAD
   readonly #reviewers: SubmissionOptions["reviewersAvailableIn"];
   private constructor(runner: CommandRunner, roles: RolesOf, options: SubmissionOptions) { this.#runner = runner; this.#roles = roles; this.#attemptOf = options.attemptOf; this.#reviewers = options.reviewersAvailableIn; }
+=======
+  readonly #allowSelfReview: boolean;
+  readonly #assigned: SubmissionOptions["reviewAssignments"];
+  readonly #scan: { readonly pageSize: number; readonly reads: number };
+  /** Per instance, never stored: a cursor from before a restart or from another instance does not open. */
+  readonly #cursorKey = randomBytes(32);
+  private constructor(runner: CommandRunner, roles: RolesOf, options: SubmissionOptions) {
+    this.#runner = runner; this.#roles = roles; this.#attemptOf = options.attemptOf; this.#allowSelfReview = options.allowSelfReview === true; this.#assigned = options.reviewAssignments;
+    this.#scan = { pageSize: options.listScan?.pageSize ?? LIST_PAGE, reads: options.listScan?.reads ?? LIST_READS };
+  }
+
+  /** AES-256-GCM like the status cursors; the sealed text names the caller and the task, so a cursor cannot be used by another caller or for another task. */
+  #seal(by: Principal, taskId: string, position: string): string {
+    const iv = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", this.#cursorKey, iv);
+    const body = Buffer.concat([cipher.update(JSON.stringify([by.id, taskId, position]), "utf8"), cipher.final()]);
+    return `~${Buffer.concat([iv, cipher.getAuthTag(), body]).toString("base64url")}`;
+  }
+
+  #unseal(by: Principal, taskId: string, cursor: unknown): string {
+    const refuse = (): never => bad("after", "is not a cursor from an earlier page of this listing");
+    if (typeof cursor !== "string" || cursor.length > 200 || !cursor.startsWith("~")) return refuse();
+    try {
+      const raw = Buffer.from(cursor.slice(1), "base64url");
+      if (raw.length < 29) return refuse();
+      const decipher = createDecipheriv("aes-256-gcm", this.#cursorKey, raw.subarray(0, 12));
+      decipher.setAuthTag(raw.subarray(12, 28));
+      const parsed = JSON.parse(Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString("utf8")) as unknown;
+      if (!Array.isArray(parsed) || parsed.length !== 3 || parsed[0] !== by.id || parsed[1] !== taskId || typeof parsed[2] !== "string" || !ID.test(parsed[2])) return refuse();
+      return parsed[2];
+    } catch { return refuse(); }
+  }
+
+  /** The task, when this caller may read it: the owner always; an agent needs task.read and, with a task credential, that very task. */
+  async #readableTask(by: Principal, taskId: string): Promise<TaskBody | undefined> {
+    const task = (await this.#runner.get("task", taskId))?.body as unknown as TaskBody | undefined;
+    if (task === undefined) return undefined;
+    if (by.kind === "owner") return task;
+    if (by.kind !== "agent") return undefined;
+    if ((by.taskScope !== undefined && (!inTaskScope(by, task.projectId) || by.taskScope.taskId !== taskId)) || !allows(by, "task.read", task.projectId, { resource: { kind: "task", id: taskId } })) return undefined;
+    return task;
+  }
+
+  /** The submissions of this task the principal was asked to review, when it still holds the reviewer role. */
+  async #assignedTo(by: Principal, task: TaskBody, taskId: string): Promise<ReadonlySet<string>> {
+    if (by.kind !== "agent" || this.#assigned === undefined) return new Set();
+    const ids = await this.#assigned(by.id, taskId);
+    if (ids.length === 0 || !(await this.#roles(by.id, { projectId: task.projectId, taskId }, by)).includes("reviewer")) return new Set();
+    return new Set(ids);
+  }
+>>>>>>> 58288b3 (Q01c fixes: sealed list cursor, get/list visibility aligned, reviewer reads assigned submission)
 
   static withEpoch(storage: ControllerStorage, epoch: number, roles: RolesOf, options: SubmissionOptions = {}): SubmissionService {
     return new SubmissionService(new CommandRunner(storage, epoch, options), roles, options);
@@ -182,47 +243,51 @@ export class SubmissionService {
     return { id: result.id, revision: result.revision, replayed: result.replayed };
   }
 
-  /** One submission, readable by the owner and by the agent that made it. */
-  async get(by: Principal, id: string): Promise<(SubmissionBody & { id: string; revision: number }) | undefined> {
+  /**
+   * One submission. The owner reads any. An agent reads it only when it may read the submission's task (task.read in the project, and with a task credential only that task) AND either made it
+   * or has been asked to review it (OWNER DECISION: a reviewer reads only the submission(s) its review request names, never the role's others). Anyone else gets `undefined` (not found).
+   */
+  async get(by: Principal, id: string): Promise<Item | undefined> {
     if (typeof id !== "string" || id.length > 40 || !ID.test(id)) bad("id", "is not a submission ID");
     const found = await this.#runner.get("submission", id);
     if (found === undefined) return undefined;
     const body = found.body as unknown as SubmissionBody;
-    if (by.kind !== "owner" && body.submittedBy !== by.id) return undefined;
+    if (by.kind !== "owner") {
+      const task = await this.#readableTask(by, body.taskId);
+      if (task === undefined) return undefined;
+      if (body.submittedBy !== by.id && !(await this.#assignedTo(by, task, body.taskId)).has(id)) return undefined;
+    }
     return { ...body, ...(body.report === undefined ? {} : { report: redactText(body.report) }), id: found.id, revision: found.revision };
   }
 
   /**
-   * The submissions of one task in ID order from `afterId`, filtered the way `get` is: the owner sees all, an agent only its own (PROVISIONAL; owner question: should a reviewer see the submission it was asked to review?).
-   * A task the caller cannot read is `not_found`, so listing does not show which tasks exist. Work is bounded: at most LIST_READS pages are scanned; `scanLimited` says the scan stopped before the end and `next` continues.
+   * The submissions of one task, filtered exactly as `get` is: the owner sees all; an agent that may read the task sees the ones it made and the ones it was asked to review. A task the caller cannot read is `not_found`.
+   * NOT A FEED: records sit in a global table in hash order of their IDs, so a new record can land before a cursor you already hold and a listing is not a stable snapshot; page through it to collect, do not poll it for news.
+   * Work is bounded (pageSize rows a read, `reads` reads a call); `scanLimited` says the scan stopped before the end. `next` is an opaque sealed cursor bound to the caller and the task; any other `after` is `invalid_command`.
    */
-  async list(by: Principal, taskIdValue: string, query: { kind?: string; afterId?: string; limit: number }): Promise<{ items: (SubmissionBody & { id: string; revision: number })[]; next?: string; scanLimited?: boolean }> {
+  async list(by: Principal, taskIdValue: string, query: { kind?: string; afterId?: string; limit: number }): Promise<{ items: Item[]; next?: string; scanLimited?: boolean }> {
     const taskId = checkTaskId(taskIdValue);
     if (!Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > 100) bad("limit", "must be a whole number from 1 to 100");
     if (query.kind !== undefined && !SUBMISSION_KINDS.includes(query.kind as SubmissionKind)) bad("kind", `must be one of ${SUBMISSION_KINDS.join(", ")}`);
-    if (query.afterId !== undefined && (typeof query.afterId !== "string" || query.afterId.length > 40 || !ID.test(query.afterId))) bad("after", "is not a submission ID");
-    const task = (await this.#runner.get("task", taskId))?.body as unknown as TaskBody | undefined;
-    const hidden = (): never => { throw new DomainError("not_found", "no such task"); };
-    if (task === undefined) return hidden();
-    if (by.kind !== "owner") {
-      if (by.kind !== "agent") return hidden();
-      if ((by.taskScope !== undefined && (!inTaskScope(by, task.projectId) || by.taskScope.taskId !== taskId)) || !allows(by, "task.read", task.projectId, { resource: { kind: "task", id: taskId } })) return hidden();
-    }
-    const items: (SubmissionBody & { id: string; revision: number })[] = [];
-    let after = query.afterId;
-    for (let reads = 0; reads < LIST_READS; reads++) {
-      const chunk = await this.#runner.list("submission", { ...(after === undefined ? {} : { afterId: after }), limit: LIST_PAGE });
+    let after = query.afterId === undefined ? undefined : this.#unseal(by, taskId, query.afterId);
+    const task = await this.#readableTask(by, taskId);
+    if (task === undefined) throw new DomainError("not_found", "no such task");
+    const assigned = by.kind === "owner" ? new Set<string>() : await this.#assignedTo(by, task, taskId);
+    const items: Item[] = [];
+    const { pageSize, reads } = this.#scan;
+    for (let read = 0; read < reads; read++) {
+      const chunk = await this.#runner.list("submission", { ...(after === undefined ? {} : { afterId: after }), limit: pageSize });
       for (const row of chunk) {
         after = row.id;
         const body = row.body as unknown as SubmissionBody;
         if (body.taskId !== taskId || (query.kind !== undefined && body.kind !== query.kind)) continue;
-        if (by.kind !== "owner" && body.submittedBy !== by.id) continue;
+        if (by.kind !== "owner" && body.submittedBy !== by.id && !assigned.has(row.id)) continue;
         items.push({ ...body, ...(body.report === undefined ? {} : { report: redactText(body.report) }), id: row.id, revision: row.revision });
-        if (items.length >= query.limit) return { items, next: row.id };
+        if (items.length >= query.limit) return { items, next: this.#seal(by, taskId, row.id) };
       }
-      if (chunk.length < LIST_PAGE) return { items };
+      if (chunk.length < pageSize) return { items };
     }
-    return { items, ...(after === undefined ? {} : { next: after }), scanLimited: true };
+    return { items, ...(after === undefined ? {} : { next: this.#seal(by, taskId, after) }), scanLimited: true };
   }
 
   async #subject(id: unknown, taskId: string): Promise<SubmissionBody & { id: string }> {

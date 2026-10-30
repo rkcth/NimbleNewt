@@ -931,7 +931,7 @@ Arguments:
 
 - `taskId`: the task
 - `limit` (optional): 1 to 100, default 50
-- `after` (optional): the `next` of the previous page
+- `after` (optional): the `next` of the previous page (an opaque cursor bound to you and this task; any other value is `invalid_command`)
 
 Result: `{ items, next?, scanLimited? }`; `scanLimited` means the search stopped before the end: ask again from `next`.
 
@@ -1270,20 +1270,20 @@ Result: `{ item }`.
 
 #### `submission.list`
 
-The submissions recorded for a task, in ID order: the owner sees all, an agent only the ones it made. A task the caller may not read is `not_found`.
+The submissions recorded for a task, in ID order, visible exactly as `submission.get`: the owner sees all; an agent that may read the task sees the ones it made and the ones it was asked to review (a reviewer sees only the submission its review request names). A task the caller may not read is `not_found`. A listing is not a feed: IDs are hash-ordered, so new records can land before a cursor you hold and pages are not a stable snapshot; page through to collect, do not poll for news.
 
 Arguments:
 
 - `taskId`: the task
 - `kind` (optional): `code`, `review`, `qa`, `document` or `signoff`
 - `limit` (optional): 1 to 100, default 50
-- `after` (optional): the `next` of the previous page
+- `after` (optional): the `next` of the previous page (an opaque cursor bound to you and this task; any other value is `invalid_command`)
 
 Result: `{ items, next?, scanLimited? }`; `scanLimited` means the search stopped before the end: ask again with `next`.
 
 #### `submission.get`
 
-One submission record (the owner, or the agent that made it; anyone else gets not found).
+One submission record. The owner reads any; an agent needs to read the submission's task (task read, and with a task credential only that task) and to have made the submission or been asked to review it; anyone else gets not found.
 
 Arguments:
 
