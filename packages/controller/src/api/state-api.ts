@@ -15,6 +15,7 @@ import type { InvitationInbox, MeetingService } from "../meetings/index.js";
 import type { AgentMessageService } from "../messaging/index.js";
 import type { EventService } from "../events/index.js";
 import type { BudgetService } from "../budgets/index.js";
+import type { NotificationService } from "../notifications/index.js";
 import type { DifficultyService } from "../routing/difficulty.js";
 import type { CutoverService } from "../routing/cutover.js";
 import type { FallbackService } from "../routing/fallback.js";
@@ -135,6 +136,8 @@ export interface StateApiDeps {
   readonly spill?: { readonly readSpill: (by: Principal, spillId: string, index: number, size?: number) => Promise<{ text: string; next?: number } | undefined> };
   /** When present, the owner can set the idle time of event subscriptions and cancel one through the API (card H06c). */
   readonly events?: Pick<EventService, "configureIdle" | "cancel">;
+  /** When present, the owner can read and set notification settings through the API (card U11b). */
+  readonly notifications?: Pick<NotificationService, "configure" | "settings">;
   /** When present, budgets can be read, asked for and decided through the API (card R05c). */
   readonly budgets?: Pick<BudgetService, "report" | "usage" | "request" | "pending" | "requestMore" | "decide">;
   /** When present, difficulty profiles, delegation and escalation can be used through the API (card R03). */
@@ -233,6 +236,7 @@ export class StateApi {
 
         ...(this.#deps.spill === undefined ? {} : { spill: this.#deps.spill }),
         ...(this.#deps.events === undefined ? {} : { events: this.#deps.events }),
+        ...(this.#deps.notifications === undefined ? {} : { notifications: this.#deps.notifications }),
         ...(this.#deps.budgets === undefined ? {} : { budgets: this.#deps.budgets }),
         ...(this.#deps.difficulty === undefined ? {} : { difficulty: this.#deps.difficulty }),
         ...(this.#deps.commands === undefined ? {} : { commands: this.#deps.commands }),

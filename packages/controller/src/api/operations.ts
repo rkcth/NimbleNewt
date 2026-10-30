@@ -3,6 +3,7 @@ import type { AssignmentService } from "../domain/assignments.js";
 import type { ProjectService } from "../domain/service.js";
 import type { AgentService } from "../agents/index.js";
 import type { BudgetService } from "../budgets/index.js";
+import type { NotificationService } from "../notifications/index.js";
 import type { WorkspaceOpService } from "../workspace-ops/index.js";
 import type { StatusService } from "../status/index.js";
 import type { DecisionService } from "../decisions/index.js";
@@ -116,6 +117,8 @@ export interface Context {
   readonly grants?: Pick<GrantService, "grant" | "revoke" | "getGrant" | "list">;
   /** Absent when the controller runs without events (card H06c). */
   readonly events?: Pick<EventService, "configureIdle" | "cancel">;
+  /** Absent when the controller runs without notifications (card U11b). */
+  readonly notifications?: Pick<NotificationService, "configure" | "settings">;
   /** Absent when the controller runs without budgets (card R05c). */
   readonly budgets?: Pick<BudgetService, "report" | "usage" | "request" | "pending" | "requestMore" | "decide">;
   /** Absent when the controller runs without difficulty profiles (card R03). */
@@ -200,6 +203,7 @@ const grantsOf = (c: Context): NonNullable<Context["grants"]> => c.grants ?? una
 const eventsOf = (c: Context): NonNullable<Context["events"]> => c.events ?? unavailable("events");
 const workspaceOf = (c: Context): NonNullable<Context["workspaceOps"]> => c.workspaceOps ?? unavailable("workspace operations");
 const statusOf = (c: Context): NonNullable<Context["status"]> => c.status ?? unavailable("status");
+const notificationsOf = (c: Context): NonNullable<Context["notifications"]> => c.notifications ?? unavailable("notification settings");
 const budgetsOf = (c: Context): NonNullable<Context["budgets"]> => c.budgets ?? unavailable("budgets");
 /** A task credential acts for its one task: an operation on another task reads as missing. */
 const ownTask = (c: Context, taskId: string): string => { if (c.principal.taskScope !== undefined && c.principal.taskScope.taskId !== taskId) throw new DomainError("not_found", "no such task"); return taskId; };
@@ -578,6 +582,10 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, ["requestId"]); const r = await budgetsOf(c).request(c.principal, str(a, "requestId")); return found("request", r !== undefined && c.principal.taskScope !== undefined && r.taskId !== c.principal.taskScope.taskId ? undefined : r); } },
   { name: "budget.request-more", kind: "command", summary: "A task asks for more budget. It goes to the holder of the parent node, or to the owner, who is told.", args: { taskId: "the task", "costMicros?": "money wanted, in millionths", "computeMs?": "compute wanted, in milliseconds", reason: "why" }, result: "`{ id, to, replayed }`: the request and who it was addressed to.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["taskId", "costMicros", "computeMs", "reason"]); const r = await budgetsOf(c).requestMore(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson(r); } },
+  { name: "notifications.settings", kind: "query", summary: "Owner only: how notifications reach the owner (channel, digest times, quiet hours, hours before an unanswered item is escalated), with the revision to quote when changing them.", args: {}, result: "`{ item }`.",
+    run: async (c, a) => { only(a, []); notFromTask(c, "read notification settings"); return found("notification settings", await notificationsOf(c).settings(c.principal)); } },
+  { name: "notifications.configure", kind: "command", summary: "Owner only: sets how notifications reach the owner; only the fields given change, and they count from the next notification.", args: { "channel?": "inbox or external", "channelName?": "the name of the external channel (needed for external)", "digestTimes?": "1 to 8 UTC times such as 09:00", "quietHours?": "{ start, end } UTC times, or null to remove them", "escalateAfterHours?": "whole hours (1 to 720) before an unanswered item is escalated", "expectedRevision?": "the settings revision you read (0 or absent when none were set yet)" }, result: "`{ revision }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["channel", "channelName", "digestTimes", "quietHours", "escalateAfterHours", "expectedRevision"]); notFromTask(c, "set notification settings"); return asJson(await notificationsOf(c).configure(c.principal, { commandId: need(id), ...(a as object) } as never)); } },
   { name: "budget.decide", kind: "command", summary: "Approves (possibly less than asked) or denies a request. The owner may add new money; the holder it was addressed to may only move allowance from its own node.", args: { requestId: "the request", approve: "true or false", "costMicros?": "money to grant, at most what was asked", "computeMs?": "compute to grant, at most what was asked", "note?": "a note" }, result: "`{ ok: true }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["requestId", "approve", "costMicros", "computeMs", "note"]); await budgetsOf(c).decide(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
   { name: "difficulty.profiles", kind: "query", summary: "The difficulty profiles and the mapping from difficulty to profile (owner, or someone with `routing.write`).", args: {}, result: "`{ item }`: the profiles, with the revision to quote when replacing them.",

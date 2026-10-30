@@ -651,6 +651,16 @@ Arguments:
 
 Result: `{ item }`: the request.
 
+#### `notifications.settings`
+
+Owner only: how notifications reach the owner (channel, digest times, quiet hours, hours before an unanswered item is escalated), with the revision to quote when changing them.
+
+Arguments:
+
+- none
+
+Result: `{ item }`.
+
 #### `difficulty.profiles`
 
 The difficulty profiles and the mapping from difficulty to profile (owner, or someone with `routing.write`).
@@ -2560,6 +2570,23 @@ Arguments:
 - `reason`: why
 
 Result: `{ id, to, replayed }`: the request and who it was addressed to.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `notifications.configure`
+
+Owner only: sets how notifications reach the owner; only the fields given change, and they count from the next notification.
+
+Arguments:
+
+- `channel` (optional): inbox or external
+- `channelName` (optional): the name of the external channel (needed for external)
+- `digestTimes` (optional): 1 to 8 UTC times such as 09:00
+- `quietHours` (optional): { start, end } UTC times, or null to remove them
+- `escalateAfterHours` (optional): whole hours (1 to 720) before an unanswered item is escalated
+- `expectedRevision` (optional): the settings revision you read (0 or absent when none were set yet)
+
+Result: `{ revision }`.
 
 Completion: finished when accepted (`completed: true`).
 
