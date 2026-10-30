@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { AssignmentService } from "../domain/assignments.js";
 import type { BlockerService } from "../domain/blockers.js";
-import type { ResumeCheckService } from "../continuation/resume.js";
+import { STALE_CANCEL, type ResumeCheckService } from "../continuation/resume.js";
 import type { EffectBridge } from "../domain/effects.js";
 import { mergeChanges } from "../domain/changes.js";
 import type { EffectService } from "../domain/effects.js";
@@ -95,7 +95,7 @@ export interface DispatcherDeps {
    * The checked resume (card L04c). An attempt that brings earlier work back (it has a checkpoint to continue from: after a restart or a move) starts only once its resume check is done: the dispatcher starts the check,
    * commits it when it is ready and waits while it is open or blocked (a blocked check has opened its own blocker). Without it such an attempt starts as before.
    */
-  readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "advance" | "retry" | "cancel" | "forTask" | "checkIdFor" | "retryable" | "get">;
+  readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "advance" | "retry" | "cancel" | "forTask" | "checkIdFor" | "retryable" | "exhausted" | "cancelledAsStale" | "get">;
   /** `GenerationService.guardFor` is handed to every effect that is started (it adds the generation hold to the pause and decision guards). */
   readonly generation?: Pick<GenerationService, "guardFor">;
   readonly reviews?: Pick<ReviewService, "request" | "admit" | "get">;
@@ -159,6 +159,8 @@ export interface AttemptDispatcherOptions extends RunnerOptions {
 
 /** How many times a cancelled resume check of an attempt is started again before the owner is told. */
 const RESUME_RESTARTS = 3;
+/** Room for checks the dispatcher cancelled as stale (route changes), which are not counted. */
+const MAX_STALE_RESTARTS = 60;
 
 export type DispatchCheck = "generation" | "checkout" | "pause" | "decision" | "revalidation" | "meeting" | "harness" | "route" | "budget" | "grant" | "host" | "place" | "expired" | "dependency" | "resume";
 
@@ -725,28 +727,37 @@ export class DispatcherService {
     const plain = (v: string): string => v.replace(/[^A-Za-z0-9._:-]/g, "_").slice(0, 80) || "unknown";
     const model = { provider: plain(slash < 0 ? "route" : route.slice(0, slash)), id: plain(slash < 0 ? route : route.slice(slash + 1)) };
     const base = `dpa-rck:${attemptId}:${derivedId("dpa", JSON.stringify([b.resumeFrom, b.resumeNote ?? null, model])).slice(4, 16)}`;
-    const keys = Array.from({ length: RESUME_RESTARTS + 1 }, (_, n) => (n === 0 ? base : `${base}-r${n}`));
+    // A check the dispatcher itself cancelled as stale (the route flapped) does not count toward the restart budget; the key list is long enough for a flapping route.
+    const keys = Array.from({ length: RESUME_RESTARTS + 1 + MAX_STALE_RESTARTS }, (_, n) => (n === 0 ? base : `${base}-r${n}`));
     try {
       const mine = new Set(keys.map((k) => resumes.checkIdFor(by, k)));
       // Another check of the task still in progress (an earlier checkpoint, another route) is stale: this attempt's is the one that counts.
       const live = await resumes.forTask(by, taskId);
       if (live !== undefined && !mine.has(live.id) && !["done", "cancelled"].includes(live.phase)) {
-        try { await resumes.cancel(by, { checkId: live.id }); } catch (error) { return `an earlier resume check ${live.id} (${live.phase}) is still in progress and could not be cancelled: ${errorText(error)}`.slice(0, 500); }
+        try { await resumes.cancel(by, { checkId: live.id, reason: STALE_CANCEL }); } catch (error) { return `an earlier resume check ${live.id} (${live.phase}) is still in progress and could not be cancelled: ${errorText(error)}`.slice(0, 500); }
       }
       let n = 0;
+      let counted = 0;
       for (; n < keys.length; n++) {
         const existing = await resumes.get(by, resumes.checkIdFor(by, keys[n]!));
         if (existing === undefined || existing.phase !== "cancelled") break;
+        if (!resumes.cancelledAsStale(existing)) counted++;
+        if (counted > RESUME_RESTARTS) { n = keys.length; break; }
       }
       if (n >= keys.length) {
-        const opened = await this.#deps.blockers.openBlocker({ commandId: `dpa-blk:resume:${attemptId}`, actor: DISPATCHER_ACTOR, type: "dispatch_blocked", subject: { kind: "task", id: taskId }, summary: `Attempt ${attemptId} cannot start: its resume check was cancelled ${keys.length} times. Look at why, then assign the task again.`, resolver: "owner" }).catch(() => undefined);
-        return `the resume check was cancelled ${keys.length} times; ${opened === undefined ? "the attempt waits" : `blocker ${opened.id} opened for the owner`}`.slice(0, 500);
+        const opened = await this.#deps.blockers.openBlocker({ commandId: `dpa-blk:resume:${attemptId}`, actor: DISPATCHER_ACTOR, type: "dispatch_blocked", subject: { kind: "task", id: taskId }, summary: `Attempt ${attemptId} cannot start: its resume check was cancelled ${counted} times. Look at why, then assign the task again.`, resolver: "owner" }).catch(() => undefined);
+        return `the resume check was cancelled ${counted} times; ${opened === undefined ? "the attempt waits" : `blocker ${opened.id} opened for the owner`}`.slice(0, 500);
       }
       const key = keys[n]!;
       let check = await resumes.start(by, { commandId: key, taskId, model, after: b.resumeNote?.includes("restarted") === true ? "restart" : "continue" });
       if (check.phase === "blocked" && await resumes.retryable(check)) check = await resumes.retry(by, { checkId: check.id });
       if (check.phase === "ready") check = await resumes.commit(by, { commandId: `${key}-commit`, checkId: check.id });
       if (check.phase === "done") return undefined;
+      if (check.phase === "blocked" && resumes.exhausted(check)) {
+        // No blocker will ever resolve and no retry is left: the owner is told once (the command ID is stable).
+        const opened = await this.#deps.blockers.openBlocker({ commandId: `dpa-blk:resume-blocked:${check.id}`, actor: DISPATCHER_ACTOR, type: "dispatch_blocked", subject: { kind: "task", id: taskId }, summary: `Attempt ${attemptId} cannot start: its resume check is blocked (${check.blocked?.type ?? "unknown"}: ${check.blocked?.reason ?? "no reason recorded"}) after ${check.blocks} tries and nothing will retry it. Look at why, then assign the task again.`.slice(0, 900), resolver: "owner" }).catch(() => undefined);
+        return `the resume check ${check.id} is blocked and retries are used up; ${opened === undefined ? "the attempt waits" : `blocker ${opened.id} opened for the owner`}`.slice(0, 500);
+      }
       if (check.phase === "blocked") return `the resume check ${check.id} is blocked: ${check.blocked?.reason ?? "see its blocker"}`.slice(0, 500);
       if (check.phase === "cancelled") return `the resume check ${check.id} was cancelled; it is started again on the next tick`;
       return `the resume check ${check.id} is ${check.phase}`;

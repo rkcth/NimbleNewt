@@ -7,6 +7,8 @@ import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.
 import type { RuntimeGuards, WorkerHost } from "../dispatch/index.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import { PI } from "../dispatch/testing/world.js";
+import { BlockerService } from "../domain/blockers.js";
+import type { TickReport } from "../dispatch/index.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -263,4 +265,53 @@ test("the tick runs the reconciler and stall detection; stall detection needs th
     await c.close();
     cleanup(d);
   }
+});
+
+test("the composed dispatcher reads prerequisites without grants: a task with an open prerequisite waits, starts once it is done, and a cancelled prerequisite opens the owner blocker (card L04c)", async () => {
+  const d = dir();
+  const timer = new ManualTimer();
+  const c = await open(join(d, "c.sqlite"), { harnesses: [PI], dispatch: { timer, intervalMs: 1000 } });
+  try {
+    assert.ok(c.dispatch !== undefined, c.dispatchProblem);
+    const s = c.services;
+    const owner = await s.principals.authenticate((await s.principals.bootstrapOwner({ name: "rob" })).token);
+    const project = (await s.projects.createProject({ commandId: "p1", actor: owner.id, name: "Garden" })).id;
+    const mk = async (n: string): Promise<string> => { const t = (await s.projects.createTask({ commandId: `t-${n}`, actor: owner.id, projectId: project, title: `Task ${n}` })).id; await s.projects.transitionTask({ commandId: `r-${n}`, actor: owner.id, taskId: t, expectedRevision: 1, to: "ready" }); return t; };
+    const admit = async (n: string, task: string): Promise<string> => {
+      const agent = `ag${n}`;
+      await s.principals.enroll(owner, { commandId: `e-${n}`, kind: "agent", name: agent, grants: [] });
+      await s.assignments.assignTask({ commandId: `as-${n}`, actor: owner.id, taskId: task, owner: { kind: "agent", id: agent } });
+      const a = (await s.assignments.getAssignment(task))!;
+      return (await s.assignments.admitAttempt({ commandId: `ad-${n}`, actor: "inbox", taskId: task, expectedRevision: a.revision, generation: a.generation, owner: { kind: "agent", id: agent }, harness: "pi" })).id;
+    };
+    const base = await mk("base");
+    const dep = await mk("dep");
+    await s.contracts.addDependency(owner, { commandId: "dep1", taskId: dep, prerequisiteId: base });
+    const attempt = await admit("1", dep);
+    const why = async () => { const t = await c.dispatch!.dispatcher.tick(); return [...t.blocked, ...t.skipped].find((x) => x.attemptId === attempt); };
+    for (let n = 0; n < 2; n++) {
+      const w = await why();
+      assert.equal(w?.check, "dependency", JSON.stringify(w));
+      assert.match((w as { reason?: string }).reason ?? "", new RegExp(base));
+    }
+    await s.projects.transitionTask({ commandId: "ip", actor: owner.id, taskId: base, expectedRevision: 2, to: "in_progress" });
+    await s.projects.transitionTask({ commandId: "dn", actor: owner.id, taskId: base, expectedRevision: 3, to: "done" });
+    const after = await why();
+    assert.notEqual(after?.check, "dependency", "with the prerequisite done the dependency check passes (a later check, here the route, answers)");
+
+    // A cancelled prerequisite: the dependent waits and the owner gets one blocker, however many ticks.
+    const base2 = await mk("base2");
+    const dep2 = await mk("dep2");
+    await s.contracts.addDependency(owner, { commandId: "dep2", taskId: dep2, prerequisiteId: base2 });
+    await s.projects.transitionTask({ commandId: "cx", actor: owner.id, taskId: base2, expectedRevision: 2, to: "cancelled" });
+    const attempt2 = await admit("2", dep2);
+    for (let n = 0; n < 2; n++) {
+      const t: TickReport = await c.dispatch.dispatcher.tick();
+      const w: { check: string; reason: string } | undefined = t.skipped.find((x) => x.attemptId === attempt2);
+      assert.equal(w?.check, "dependency", JSON.stringify(t));
+      assert.match(w!.reason, /cancelled or missing/);
+    }
+    const blockers = (await BlockerService.withEpoch(c.storage, c.epoch).list({ limit: 50, openOnly: true })).items.filter((b) => b.subject.id === dep2);
+    assert.equal(blockers.length, 1, JSON.stringify(blockers));
+  } finally { await c.close(); cleanup(d); }
 });

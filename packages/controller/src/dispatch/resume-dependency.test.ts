@@ -70,7 +70,7 @@ for (const backend of backends) {
       start: async (_by, command) => { calls.push(`start:${command.taskId}:${command.after}`); return { id: "rck-1", revision: 1, body: undefined, phase, ...(phase === "blocked" ? { blocked: { type: "missing_context", reason: "no continuation" } } : {}) } as never; },
       commit: async (_by, command) => { calls.push(`commit:${command.checkId}`); return { id: "rck-1", phase: "done" } as never; },
       advance: async () => { throw new Error("not used"); },
-      forTask: async () => undefined, get: async () => undefined, checkIdFor: (_by, k) => `rck-${k}`, retryable: async () => false,
+      forTask: async () => undefined, get: async () => undefined, checkIdFor: (_by, k) => `rck-${k}`, retryable: async () => false, exhausted: () => false, cancelledAsStale: () => false,
       retry: async () => { throw new Error("not used"); }, cancel: async () => { throw new Error("not used"); },
     };
     // A fresh attempt has nothing to resume: the check is not asked.

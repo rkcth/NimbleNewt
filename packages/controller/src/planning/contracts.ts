@@ -326,6 +326,22 @@ export class ContractService {
     return { dependsOn, dependents };
   }
 
+  /**
+   * What `taskId` depends on, read for the dispatcher with no permission check: a service principal holds no grants, so `dependencies` would answer "not readable" and the dispatcher would start every dependent
+   * without waiting. Each prerequisite carries its task state, or `undefined` when the task is gone. Returns `undefined` when the dependent task itself cannot be found (the caller must fail closed).
+   */
+  async prerequisitesOf(taskId: string): Promise<{ dependsOn: { taskId: string; state: string | undefined }[] } | undefined> {
+    const id = checkTaskId(taskId);
+    const task = (await this.#runner.get("task", id))?.body as unknown as TaskBody | undefined;
+    if (task === undefined) return undefined;
+    const dependsOn: { taskId: string; state: string | undefined }[] = [];
+    for (const e of (await this.#edgeRecords(task.projectId)).filter((x) => x.taskId === id)) {
+      const pre = (await this.#runner.get("task", e.prerequisiteId))?.body as unknown as TaskBody | undefined;
+      dependsOn.push({ taskId: e.prerequisiteId, state: pre?.state });
+    }
+    return { dependsOn };
+  }
+
   /** A per-project record that every change to the project's dependencies updates at the revision it read first. */
   async #registryFor(taskId: string): Promise<{ touch: Change }> {
     const task = await this.#runner.get("task", taskId);

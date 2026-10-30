@@ -58,6 +58,10 @@ export interface ResumeCheckBody {
   readonly history: readonly { readonly phase: ResumePhase; readonly at: string; readonly by: string; readonly note: string }[];
 }
 
+/** Reason code of a cancel the dispatcher makes when a check of another route is superseded; such a cancel does not count toward the restart budget. */
+export const STALE_CANCEL = "stale-by-dispatcher" as const;
+/** A blocked check without a blocker is retried no sooner than this many milliseconds times its number of blocks after it blocked. */
+export const RETRY_BACKOFF_MS = 5 * 60_000;
 export const RESUME_LIMITS = { rounds: 3, advances: 10, history: 40, note: 300, limits: 10 } as const;
 const KIND = "resume-check";
 const ACTIVE = "resume-active";
@@ -170,11 +174,12 @@ export class ResumeCheckService {
     return this.advance(by, { checkId: command.checkId });
   }
 
-  async cancel(by: Principal, command: { checkId: string }): Promise<View<ResumeCheckBody>> {
+  /** `reason` "stale-by-dispatcher" marks a cancel the dispatcher made because another route took over; it is not a failure of the check (see `cancelledAsStale`). */
+  async cancel(by: Principal, command: { checkId: string; reason?: typeof STALE_CANCEL }): Promise<View<ResumeCheckBody>> {
     const found = await this.#get(by, command.checkId);
     const b = found.body as unknown as ResumeCheckBody;
     if (b.phase === "executing" || b.phase === "done") throw new DomainError("invalid_command", `the resume check is ${b.phase}; it can no longer be cancelled`, { field: "checkId" });
-    if (!TERMINAL.includes(b.phase)) await this.#update(command.checkId, (x) => ({ ...x, phase: "cancelled", blocked: undefined, history: this.#push(x, "cancelled", by.id, "cancelled") }), ["collecting", "verifying", "reviewing", "ready", "blocked"]);
+    if (!TERMINAL.includes(b.phase)) await this.#update(command.checkId, (x) => ({ ...x, phase: "cancelled", blocked: undefined, history: this.#push(x, "cancelled", by.id, command.reason === STALE_CANCEL ? STALE_CANCEL : "cancelled") }), ["collecting", "verifying", "reviewing", "ready", "blocked"]);
     return view<ResumeCheckBody>((await this.#runner.get(KIND, command.checkId))!);
   }
 
@@ -270,13 +275,25 @@ export class ResumeCheckService {
   /** The ID the check started with this command ID by this principal has (or would have): lets a caller tell its own check from another one. */
   checkIdFor(by: Principal, commandId: string): string { return derivedId("rck", scopedCommandId(by.id, commandId)); }
 
-  /** Whether a blocked check can be started over now: the blocker it opened is resolved, or it opened none (a failed review, uncertain effects) and has not blocked more than the rounds allow. */
+  /** Whether the check was cancelled by the dispatcher because another route took over (not a failure). */
+  cancelledAsStale(check: View<ResumeCheckBody>): boolean { return check.phase === "cancelled" && check.history.at(-1)?.note === STALE_CANCEL; }
+
+  /**
+   * Whether a blocked check can be started over now. With a blocker: only once it is resolved. With none (a failed review, uncertain effects): while it has blocked fewer times than `maxRounds`, and
+   * not before a backoff of RETRY_BACKOFF_MS x its blocks has passed since it blocked.
+   */
   async retryable(check: View<ResumeCheckBody>): Promise<boolean> {
     if (check.phase !== "blocked") return false;
     const id = check.blocked?.blockerId;
-    if (id === undefined) return check.blocks <= RESUME_LIMITS.rounds;
-    return (await this.#blockers.getBlocker(id))?.state === "resolved";
+    if (id !== undefined) return (await this.#blockers.getBlocker(id))?.state === "resolved";
+    if (check.blocks >= check.maxRounds) return false;
+    const since = [...check.history].reverse().find((h) => h.phase === "blocked")?.at;
+    const sinceMs = since === undefined ? NaN : Date.parse(since);
+    return Number.isFinite(sinceMs) && Date.parse(this.#runner.now()) - sinceMs >= RETRY_BACKOFF_MS * check.blocks;
   }
+
+  /** A blocked check with no blocker whose retries are used up: nothing will move it, so the owner must be told. */
+  exhausted(check: View<ResumeCheckBody>): boolean { return check.phase === "blocked" && check.blocked?.blockerId === undefined && check.blocks >= check.maxRounds; }
 
   async get(by: Principal, checkId: string): Promise<View<ResumeCheckBody> | undefined> {
     try { return view<ResumeCheckBody>(await this.#get(by, checkId)); } catch (error) { if (error instanceof DomainError && error.code === "not_found") return undefined; throw error; }

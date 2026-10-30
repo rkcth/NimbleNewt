@@ -12,6 +12,7 @@ const deferred = <T>(): { promise: Promise<T>; resolve: (v: T) => void } => { le
 
 class Fakes {
   missing: string[] = [];
+  uncertain: string[] = [];
   seen = new Map<string, string>();
   resolved = new Set<string>();
   opened: string[] = [];
@@ -24,7 +25,7 @@ class Fakes {
     getBlocker: async (id: string) => ({ id, state: this.resolved.has(id) ? "resolved" : "open" }) as never,
     openBlocker: async (c: { type: string; commandId: string }) => { const old = this.seen.get(c.commandId); if (old !== undefined) return { id: old } as never; this.opened.push(c.type); const id = `blk-${this.opened.length}`; this.seen.set(c.commandId, id); return { id } as never; },
   };
-  ports: ResumePorts = { observe: async () => ({}), missingContext: async () => this.missing, uncertainEffects: async () => [], review: async () => ({}) };
+  ports: ResumePorts = { observe: async () => ({}), missingContext: async () => this.missing, uncertainEffects: async () => this.uncertain, review: async () => ({}) };
 }
 
 for (const backend of backends) {
@@ -110,5 +111,45 @@ for (const backend of backends) {
     const t = await d.tick();
     await d.idle();
     assert.deepEqual(t.started, [a.attemptId], t.skipped.map((s) => s.reason).join("; "));
+  });
+
+  const ownerBlockers = async (c: DispatchWorld, taskId: string) => (await c.blockers.list({ limit: 50, openOnly: true })).items.filter((b) => b.subject.id === taskId && b.type === "dispatch_blocked");
+
+  suite("a check blocked without a blocker is not retried at once: only after a backoff, at most maxRounds times, and then the owner gets one blocker", async (c, f, real, a, withRoute) => {
+    f.uncertain = ["call-1"];
+    const d = withRoute(() => "localp/small");
+    const blocks = async () => (await real.forTask(c.dispatcherPrincipal, a.taskId))!.blocks;
+    assert.match((await d.tick()).skipped[0]!.reason, /blocked/);
+    assert.equal(await blocks(), 1);
+    for (let n = 0; n < 3; n++) { assert.match((await d.tick()).skipped[0]!.reason, /blocked/); }
+    assert.equal(await blocks(), 1, "immediate ticks do not retry");
+    assert.equal((await ownerBlockers(c, a.taskId)).length, 0, "not exhausted yet");
+    c.clock.advance(5 * 60_000 + 1000);
+    await d.tick();
+    assert.equal(await blocks(), 2, "after the backoff it is retried once");
+    c.clock.advance(5 * 60_000 + 1000);
+    await d.tick();
+    assert.equal(await blocks(), 2, "the backoff grows with the number of blocks");
+    c.clock.advance(5 * 60_000);
+    const last = await d.tick();
+    assert.equal(await blocks(), 3);
+    assert.match(last.skipped[0]!.reason, /retries are used up; blocker .* opened for the owner/);
+    for (let n = 0; n < 2; n++) { c.clock.advance(3600_000); assert.match((await d.tick()).skipped[0]!.reason, /retries are used up/); }
+    assert.equal(await blocks(), 3, "no retry is left");
+    assert.equal((await ownerBlockers(c, a.taskId)).length, 1, "one owner blocker however many ticks");
+  });
+
+  suite("the dispatcher's own stale-cancel (a flapping route) does not use up the restart budget", async (c, f, real, a, withRoute) => {
+    f.missing = ["a decision"];
+    let route = "localp/small";
+    const d = withRoute(() => route);
+    for (let n = 0; n < 10; n++) {
+      route = n % 2 === 0 ? "localp/small" : "cloudp/big";
+      const t = await d.tick();
+      assert.doesNotMatch(t.skipped[0]?.reason ?? "", /cancelled \d+ times/, `flip ${n}: ${t.skipped[0]?.reason}`);
+      assert.deepEqual(t.failures, []);
+    }
+    assert.equal((await ownerBlockers(c, a.taskId)).length, 0, "no bogus blocker");
+    assert.match((await d.tick()).skipped[0]!.reason, /blocked/);
   });
 }
