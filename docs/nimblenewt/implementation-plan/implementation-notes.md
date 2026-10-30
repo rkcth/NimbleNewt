@@ -2969,3 +2969,9 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - `settled` is a new `ItemBody.state`. It is treated like `answered` for re-reports (a new occurrence opens), escalation, digest completion; `answerItem` on a settled item is refused (`invalid_command`).
 - A record that cannot be read (a failure other than not_found/invalid_command) is skipped, left for the next tick, and the first such error is raised after the other items were tried.
 - Tests: new suite in `notifications.test.ts` (both backends) covering close, digest omission, still-waiting untouched, and per-record failure isolation.
+
+## U11b follow-up: the Needs-you view names the sources it cut
+
+- `StatusService.needsYou` now also returns `truncated`: the sources that had more than the 50 read (`questions` when `ownerQuestions` gives a `next`, `approvals` when `ownerPending` has a 51st, `blockers` when a 51st open owner blocker is found or the 20-page scan ends). Under the cap it is `[]`. The closing line names them ("more questions, blockers than could be looked at") in place of the old blockers-only note, which also fired wrongly when there were exactly 50. `count`, ranking and the lines are otherwise unchanged. `ownerPending` is now asked for 51 and cut to 50.
+- Not done: a cursor or per-source continuation (the sources have different paging, and `ownerPending` has none); the remainder "paging beyond 50 per source" stays in U11b2.
+- Test: `the needs-you list names each source that had more than it could read...` in `status.test.ts` (exactly 50 flags nothing; over flags only the source; counts unchanged). Status suite 112/112 on four backends.

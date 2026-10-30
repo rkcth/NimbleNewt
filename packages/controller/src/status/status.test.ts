@@ -949,6 +949,38 @@ for (const backend of backends) {
     await assert.rejects(status.ask(c.owner, { kind: "owner_questions", extra: 1 } as never));
   });
 
+  suite("the needs-you list names each source that had more than it could read, and flags nothing under the cap (card U11b)", async (c) => {
+    const lone = await c.work("Alone");
+    const q = (n: number) => ({ inquiryId: `inq-${n}`, asker: "agent:ann", question: `Q${n}?`, askedAt: `2000-01-01T00:00:${String(n % 60).padStart(2, "0")}.000Z`, revision: 1, task: { id: lone, title: "Alone", projectName: "P" } });
+    const rev = (n: number) => ({ id: `rev-${n}`, taskId: lone, projectId: c.project, name: `tool.t${n}`, requestedAt: "2000-01-02T00:00:00.000Z" });
+    const wired = (nq: number, nr: number, more: boolean) => c.rebuild({}, {
+      ownerQuestions: { ownerQuestions: async () => ({ items: Array.from({ length: nq }, (_, i) => q(i)), ...(more ? { next: "x" } : {}) }) },
+      reviews: { ownerPending: async (_o: unknown, limit?: number) => Array.from({ length: Math.min(nr, limit ?? 50) }, (_, i) => rev(i)) },
+    });
+    // Under the cap (50 of each is not more than 50): nothing is flagged and no note is added.
+    for (let i = 0; i < 3; i++) await c.blockers.openBlocker({ commandId: `u-${i}`, actor: c.owner.id, type: "manual_hold", subject: { kind: "task", id: await c.work(`Hold job ${i}`) }, summary: `Hold ${i}`, resolver: "owner" });
+    const under = (await wired(50, 50, false).needsYou(c.owner, 50))!;
+    assert.deepEqual(under.truncated, []);
+    assert.equal(under.count, 103);
+    assert.doesNotMatch(under.lines.map((l) => l.text).join("\n"), /incomplete/);
+    // Over the cap: each source is named, and only that source.
+    const qs = (await wired(50, 0, true).needsYou(c.owner))!;
+    assert.deepEqual(qs.truncated, ["questions"]);
+    assert.match(qs.lines.at(-1)!.text, /may be incomplete.*questions/);
+    assert.equal(qs.count, 53, "the items found are unchanged");
+    const rs = (await wired(0, 80, false).needsYou(c.owner))!;
+    assert.deepEqual(rs.truncated, ["approvals"]);
+    assert.equal(rs.count, 53, "approvals still stop at 50");
+    // Owner blockers: 3 so far; 48 more make 51.
+    for (let i = 0; i < 48; i++) await c.blockers.openBlocker({ commandId: `o-${i}`, actor: c.owner.id, type: "manual_hold", subject: { kind: "task", id: await c.work(`More job ${i}`) }, summary: `More ${i}`, resolver: "owner" });
+    const bs = (await wired(0, 0, false).needsYou(c.owner))!;
+    assert.deepEqual(bs.truncated, ["blockers"]);
+    assert.equal(bs.count, 50);
+    const all = (await wired(50, 51, true).needsYou(c.owner))!;
+    assert.deepEqual(all.truncated, ["questions", "approvals", "blockers"]);
+    assert.deepEqual((await c.rebuild().needsYou(c.owner))!.truncated, ["blockers"]);
+  });
+
   suite("the owner sees in one list what waits for their decision, what holds up most open tasks first, then oldest; nobody else sees it (card U11b)", async (c) => {
     const a = await c.work("Root");
     const b = await c.work("Middle");

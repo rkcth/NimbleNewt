@@ -473,7 +473,8 @@ export class StatusService {
   // ---- everything waiting for the owner (card U11b) -------------------------------------------------------------------------
 
   /** What waits for the owner, unranked: agent questions, approvals only the owner can decide and blockers the owner resolves; what is about a finished or cancelled task is left out. */
-  async #needItems(by: Principal): Promise<{ items: NeedItem[]; taskOf: (id: string) => Promise<{ projectId: string; open: boolean } | undefined>; partial: boolean }> {
+  async #needItems(by: Principal): Promise<{ items: NeedItem[]; taskOf: (id: string) => Promise<{ projectId: string; open: boolean } | undefined>; truncated: string[] }> {
+    const truncated: string[] = [];
     const memo = new Map<string, { projectId: string; open: boolean } | undefined>();
     const taskOf = async (id: string): Promise<{ projectId: string; open: boolean } | undefined> => {
       if (!memo.has(id)) {
@@ -484,26 +485,32 @@ export class StatusService {
     };
     const all: NeedItem[] = [];
     if (this.#deps.ownerQuestions !== undefined) {
-      for (const q of (await this.#deps.ownerQuestions.ownerQuestions(by, { limit: 50 })).items) {
+      const asked = await this.#deps.ownerQuestions.ownerQuestions(by, { limit: 50 });
+      if (asked.next !== undefined) truncated.push("questions");
+      for (const q of asked.items) {
         all.push({ text: `${shown(q.asker)} asks about "${shown(q.task.title)}": "${shown(q.question)}" (answer the question)`, cites: [cite("inquiry", q.inquiryId, q.revision), cite("task", q.task.id)], taskId: q.task.id, since: q.askedAt, id: q.inquiryId });
       }
     }
     if (this.#deps.reviews !== undefined) {
-      for (const r of await this.#deps.reviews.ownerPending(by, 50)) {
+      // One more than the room, to tell "exactly 50" from "more".
+      const pending = await this.#deps.reviews.ownerPending(by, 51);
+      if (pending.length > 50) truncated.push("approvals");
+      for (const r of pending.slice(0, 50)) {
         all.push({ text: `An approval of "${shown(r.name)}" is waiting for you (allow or deny it)`, cites: [cite("review", r.id), cite("task", r.taskId)], taskId: r.taskId, since: r.requestedAt, id: r.id });
       }
     }
     // The owner's blockers are looked for through all the open ones (the others are the agents' to resolve), up to 50 found.
     let owned = 0;
-    let partial = false;
-    for (let after: string | undefined, pages = 0; owned < 50; pages++) {
-      if (pages >= 20) { partial = true; break; }
+    let blockersCut = false;
+    for (let after: string | undefined, pages = 0; !blockersCut; pages++) {
+      if (pages >= 20) { blockersCut = true; break; }
       const page = await this.#deps.blockers.list({ ...(after === undefined ? {} : { afterId: after }), limit: 200, openOnly: true });
       for (const b of page.items) {
-        if (b.resolver !== "owner" || owned >= 50) continue;
+        if (b.resolver !== "owner") continue;
         const onTask = b.subject.kind === "task";
         // A blocker on a finished or cancelled task does not wait for anything and does not use up the room.
         if (onTask && (await taskOf(b.subject.id))?.open === false) continue;
+        if (owned >= 50) { blockersCut = true; break; }
         owned++;
         all.push({ text: `${shown(b.summary)} (${b.type}; resolve it or give what is missing)`, cites: [cite("blocker", b.id), ...(onTask ? [cite("task", b.subject.id)] : [])], ...(onTask ? { taskId: b.subject.id } : {}), since: b.openedAt, id: b.id });
       }
@@ -512,8 +519,8 @@ export class StatusService {
     }
     const items: NeedItem[] = [];
     for (const i of all) if (i.taskId === undefined || (await taskOf(i.taskId))?.open !== false) items.push(i);
-    if (owned >= 50) partial = true;
-    return { items, taskOf, partial };
+    if (blockersCut) truncated.push("blockers");
+    return { items, taskOf, truncated };
   }
 
   /** How many things wait for the owner (for the count in a reply); no ranking is done. Owner only (anyone else: 0). */
@@ -523,12 +530,12 @@ export class StatusService {
 
   /**
    * One list of what waits for the owner's decision: agent questions, reviews only the owner can decide, and open blockers whose resolver is the owner. What other open tasks wait for comes first, then how many they are, then oldest first.
-   * `count` is the number found (each source up to 50); the lines are cut at `limit`. Owner only (anyone else: undefined).
+   * `count` is the number found (each source up to 50); `truncated` names the sources (`questions`, `approvals`, `blockers`) that had more than was read, so the list may be missing items; the lines are cut at `limit`. Owner only (anyone else: undefined).
    */
-  async needsYou(by: Principal, limit?: number): Promise<{ readonly observedAt: string; readonly lines: readonly Line[]; readonly count: number } | undefined> {
+  async needsYou(by: Principal, limit?: number): Promise<{ readonly observedAt: string; readonly lines: readonly Line[]; readonly count: number; readonly truncated: readonly string[] } | undefined> {
     if (by.kind !== "owner") return undefined;
     const cap = limit === undefined ? 20 : Number.isSafeInteger(limit) && limit >= 1 && limit <= 50 ? limit : invalid("limit", "must be 1 to 50");
-    const { items, taskOf, partial } = await this.#needItems(by);
+    const { items, taskOf, truncated } = await this.#needItems(by);
     // How many other open tasks wait, directly or through others, for the task an item is about (the edges of a project are read once).
     const reverse = new Map<string, Promise<Map<string, string[]>>>();
     const reverseOf = (projectId: string): Promise<Map<string, string[]>> => {
@@ -562,8 +569,8 @@ export class StatusService {
     const lines: Line[] = ranked.slice(0, cap).map(({ i, blocked }) => line(`${i.text}${blocked > 0 ? `; ${blocked} other open task${blocked === 1 ? " waits" : "s wait"} for it` : ""}; since ${i.since}.`, ...i.cites));
     if (lines.length === 0) lines.push(line("Nothing is waiting for you."));
     else if (ranked.length > cap) lines.push(line(`${ranked.length - cap} more are waiting; deal with these first and ask again.`));
-    if (partial) lines.push(line("This list may be incomplete: only part of the open blockers could be looked at."));
-    return { observedAt: this.#runner.now(), lines, count: ranked.length };
+    if (truncated.length > 0) lines.push(line(`This list may be incomplete: there are more ${truncated.join(", ")} than could be looked at.`));
+    return { observedAt: this.#runner.now(), lines, count: ranked.length, truncated };
   }
 
   // ---- one task ------------------------------------------------------------------------------------------------------------
