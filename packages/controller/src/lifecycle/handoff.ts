@@ -65,8 +65,8 @@ export interface TaskHandoffBody {
   readonly autoComplete?: boolean;
   /** Set once the return was made (`handoffId`) or given up (`skipped`, with the reason). */
   readonly returned?: { readonly handoffId?: string; readonly at: string; readonly skipped?: string };
-  /** The host was told that this return is stuck (blocked), at this length of history; told again only if it is blocked again later. */
-  readonly stuckTold?: number;
+  /** The host was told that this return is stuck (blocked), at the time of its last history entry (the block); told again only if it is blocked again later. */
+  readonly stuckTold?: string;
   /** On a return: the temporary reassignment it undoes (its command ID is `ret-<this>`), so a return left half-made by a crash can be finished from its own record. */
   readonly returnOf?: string;
   readonly failure?: string;
@@ -311,9 +311,9 @@ export class HandoffService {
           continue;
         }
         if (b.phase === "blocked" && b.autoComplete === true) {
-          if (b.stuckTold !== b.history.length) {
+          if (b.stuckTold !== b.history[b.history.length - 1]?.at) {
             try {
-              await this.#update(rec.id, (x) => ({ ...x, stuckTold: x.history.length }), ["blocked"]);
+              await this.#update(rec.id, (x) => ({ ...x, stuckTold: x.history[x.history.length - 1]?.at ?? "" }), ["blocked"]);
               try { await this.#onReturnGivenUp?.(by, { handoffId: rec.id, taskId: b.taskId, reason: `the hand-off back is blocked (${b.blocked?.reason ?? "preparation did not finish"}); the task stays with the temporary owner until someone decides` }); } catch { /* best effort */ }
             } catch { failed.push(rec.id); }
           }

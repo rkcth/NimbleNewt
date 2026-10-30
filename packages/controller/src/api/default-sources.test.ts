@@ -56,7 +56,9 @@ test("the built-in source records what is already closed without reporting it, t
   for (let i = 0; i < DEFAULT_SOURCE_LIMITS.remembered + 100; i++) put(`task-${String(i).padStart(5, "0")}`, "done");
   const big = await poll(undefined);
   assert.equal(Object.keys((big.state as { seen: object }).seen).length, DEFAULT_SOURCE_LIMITS.remembered);
-  put("task-x", "in_progress"); const open = await poll(big.state); void open;
+  // Everything the cap forgot is behind the floor: a second pass reports none of it again, and a later closing is still seen.
+  assert.deepEqual((await poll(big.state, 1000)).signals, []);
+  now += 1000;
   put("task-x", "done");
   const closed = await poll(big.state, 1000);
   assert.match(closed.signals.find((x) => x.ref.id === "task-x")!.dedup, /^task-x:done@\d+$/);

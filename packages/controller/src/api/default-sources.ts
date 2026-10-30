@@ -11,7 +11,7 @@ export const DEFAULT_SOURCE_LIMITS = { recentDays: 7, scan: 5000, page: 200, rem
  *
  * - **Baseline.** The first full pass over the tasks only records what is already closed; it reports nothing, so turning this on does not wake anyone for work finished long ago.
  * - **Bounded reading.** One poll reads at most `scan` tasks and keeps a cursor in the source's state, so a store with more tasks than that is read in turns instead of the same first part every time (task IDs are random).
- * - **Bounded memory.** What it remembers is only the closed tasks of the last week (each with the time it was closed), at most `remembered` of them (the most recently closed; the state record has a size limit); older entries are dropped at every poll. A task forgotten by the cap and seen again is reported again but meets its dedup key, so nobody is woken twice. A task closed again later has a new closing time and so a new key.
+ * - **Bounded memory.** What it remembers is only the closed tasks of the last week (each with the time it was closed), at most `remembered` of them (the most recently closed; the state record has a size limit); older entries are dropped at every poll. What the cap forgets is remembered as a floor (the latest closing time dropped): nothing closed at or before it is reported afterwards, so a busy store does not report the same tasks again on every pass. A task closed again later has a new closing time and so a new key.
  */
 export function defaultEventSources(projects: Pick<ProjectService, "listTasks">, clock: () => number = Date.now): EventSource[] {
   return [{
@@ -19,7 +19,8 @@ export function defaultEventSources(projects: Pick<ProjectService, "listTasks">,
     type: "task-completion",
     async poll({ state, limit }) {
       const since = clock() - DEFAULT_SOURCE_LIMITS.recentDays * 86_400_000;
-      const prev = (typeof state === "object" && state !== null ? state : {}) as { seen?: Record<string, string>; cursor?: string; baselining?: boolean };
+      const prev = (typeof state === "object" && state !== null ? state : {}) as { seen?: Record<string, string>; cursor?: string; baselining?: boolean; floor?: number };
+      let floor = typeof prev.floor === "number" ? prev.floor : 0;
       const baselining = state === undefined ? true : prev.baselining === true;
       const seen: Record<string, string> = {};
       for (const [id, mark] of Object.entries(prev.seen ?? {})) if (Number(mark.slice(mark.lastIndexOf("@") + 1)) >= since) seen[id] = mark;
@@ -36,7 +37,8 @@ export function defaultEventSources(projects: Pick<ProjectService, "listTasks">,
           read++;
           cursor = t.id;
           const closedAt = Date.parse(t.updatedAt);
-          if ((t.state !== "done" && t.state !== "cancelled") || closedAt < since) continue;
+          // At or before the floor: forgotten by the cap, so it counts as seen (otherwise the same old tasks would be reported again on every pass).
+          if ((t.state !== "done" && t.state !== "cancelled") || closedAt < since || closedAt <= floor) continue;
           const mark = `${t.state}@${closedAt}`;
           if (seen[t.id] === mark) continue;
           if (baselining) { seen[t.id] = mark; continue; }
@@ -54,9 +56,10 @@ export function defaultEventSources(projects: Pick<ProjectService, "listTasks">,
       const marks = Object.entries(seen);
       if (marks.length > DEFAULT_SOURCE_LIMITS.remembered) {
         marks.sort((a, b) => Number(b[1].slice(b[1].lastIndexOf("@") + 1)) - Number(a[1].slice(a[1].lastIndexOf("@") + 1)) || (a[0] < b[0] ? -1 : 1));
-        for (const [id] of marks.slice(DEFAULT_SOURCE_LIMITS.remembered)) delete seen[id];
+        const dropped = marks.slice(DEFAULT_SOURCE_LIMITS.remembered);
+        for (const [id, mark] of dropped) { delete seen[id]; floor = Math.max(floor, Number(mark.slice(mark.lastIndexOf("@") + 1))); }
       }
-      const next: Record<string, unknown> = { seen, baselining: baselining && !finished };
+      const next: Record<string, unknown> = { seen, baselining: baselining && !finished, ...(floor > 0 ? { floor } : {}) };
       if (!finished && cursor !== undefined) next["cursor"] = cursor;
       return { signals, state: next as JsonObject, more };
     },
