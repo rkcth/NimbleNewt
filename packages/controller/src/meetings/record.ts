@@ -9,6 +9,7 @@ import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import type { BudgetService } from "../budgets/budgets.js";
 import type { GrantService } from "../security/grants.js";
 import type { ProjectService } from "../domain/service.js";
+import type { AssignmentService } from "../domain/assignments.js";
 import { allows, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
@@ -76,6 +77,36 @@ export function taskUpdateApplier(projects: ProjectService): ChangeApplier {
         commandId: change.commandId, actor: change.actor, taskId: change.target.id, expectedRevision: change.expectedRevision,
         ...(typeof patch.title === "string" ? { title: patch.title } : {}), ...(typeof patch.description === "string" ? { description: patch.description } : {}),
       });
+      return { revision: done.revision };
+    },
+  };
+}
+
+/**
+ * An ownership change decided in a meeting (card M02e): the task goes to another agent through the assignment service (a transfer when it is assigned, an assignment when it is released or never was). The carrying agent must
+ * hold `assignment.manage` for the task. It is not a widening: assignment gives the new owner the task's normal dispatch and nothing else, because what an agent may touch is still decided by its own grants and per-attempt
+ * credentials (see implementation notes). The new owner must be an active agent. A replay finds the task already with that owner and does nothing.
+ */
+export function taskReassignApplier(assignments: Pick<AssignmentService, "getAssignment" | "assignTask" | "transferTask">, projects: Pick<ProjectService, "getTask">, principals: { get(id: string): Promise<{ state: string } | undefined> }): ChangeApplier {
+  return {
+    action: "assignment.manage",
+    async project(target) { return target.kind === "task" ? (await projects.getTask(target.id))?.projectId : undefined; },
+    async apply(change) {
+      const patch = change.patch as { toAgent?: unknown };
+      if (Object.keys(patch).some((k) => k !== "toAgent") || typeof patch.toAgent !== "string" || !AGENT.test(patch.toAgent)) throw new DomainError("invalid_command", "a reassignment names toAgent (agent:<name>) and nothing else");
+      if (change.target.kind !== "task") throw new DomainError("invalid_command", "a reassignment targets a task");
+      const principal = await principals.get(patch.toAgent);
+      if (principal === undefined || principal.state !== "active") throw new DomainError("invalid_command", `${patch.toAgent} is not an active agent`);
+      const to = { kind: "agent", id: patch.toAgent.slice("agent:".length) };
+      const taskId = change.target.id;
+      const current = await assignments.getAssignment(taskId);
+      const reason = `agreed in a meeting (${change.agreedBy})`;
+      if (current !== undefined && current.state === "assigned" && current.owner?.kind === to.kind && current.owner.id === to.id) return {};
+      if (current !== undefined && current.state === "assigned") {
+        const done = await assignments.transferTask({ commandId: change.commandId, actor: change.actor, taskId, expectedRevision: current.revision, to, reason });
+        return { revision: done.revision };
+      }
+      const done = await assignments.assignTask({ commandId: change.commandId, actor: change.actor, taskId, ...(current === undefined ? {} : { expectedRevision: current.revision }), owner: to, reason });
       return { revision: done.revision };
     },
   };
