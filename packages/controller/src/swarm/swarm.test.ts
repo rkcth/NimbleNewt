@@ -2,10 +2,15 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { startController } from "../api/index.js";
 import { BudgetService } from "../budgets/budgets.js";
 import { DomainError } from "../domain/errors.js";
+import { ProjectService } from "../domain/service.js";
+import { backends, stopServer } from "../domain/testing/backends.js";
+import { PrincipalService } from "../security/index.js";
+import { ContractService } from "../planning/index.js";
+import { PauseService } from "../lifecycle/pause.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { StopService, type StopPorts } from "../lifecycle/stop.js";
 import { SwarmService } from "./index.js";
@@ -124,3 +129,85 @@ test("spawns sent at the same moment cannot take a parent over its live-children
     assert.equal(live.length, 3, "the refused ones were cancelled");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+after(stopServer);
+
+for (const backend of backends) {
+  const world = async (limit: number, tweak?: { failDelegate?: () => boolean; failAbandon?: () => boolean }) => {
+    const w = await backend.open();
+    const options = { clock: () => "2026-10-22T21:00:00.000Z", pause: async () => undefined };
+    const projects = await ProjectService.open(w.storage, { holder: "c1", ...options });
+    const principals = PrincipalService.withEpoch(w.storage, projects.epoch, options);
+    const rob = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+    const project = (await projects.createProject({ commandId: "p1", actor: rob.id, name: "Garden" })).id;
+    const root = (await projects.createTask({ commandId: "t-root", actor: rob.id, projectId: project, title: "Plant" })).id;
+    const budgets = BudgetService.withEpoch(w.storage, projects.epoch, options);
+    await budgets.open(rob, { commandId: "b-open", taskId: root, currency: "USD", costMicros: 1_000_000, computeMs: 60_000 });
+    const contracts = ContractService.withEpoch(w.storage, projects.epoch, options);
+    const pauses = PauseService.withEpoch(w.storage, projects.epoch, {}, options);
+    // A wrapper that can make the allowance step fail and the clean-up cancel fail, as a crash between the claim and the link would leave things.
+    const wrap = <T extends object>(target: T, name: string, override: (...a: never[]) => Promise<unknown>): T => new Proxy(target, { get: (t, k) => (k === name ? override : typeof (t as never)[k] === "function" ? ((t as never)[k] as (...a: unknown[]) => unknown).bind(t) : (t as never)[k]) });
+    const flaky = wrap(budgets, "delegate", ((...a: Parameters<BudgetService["delegate"]>) => tweak?.failDelegate?.() === true ? Promise.reject(new Error("crash")) : budgets.delegate(...a)) as never);
+    const proj = wrap(projects, "transitionTask", ((...a: Parameters<ProjectService["transitionTask"]>) => tweak?.failAbandon?.() === true ? Promise.reject(new Error("crash")) : projects.transitionTask(...a)) as never);
+    const swarm = SwarmService.withEpoch(w.storage, projects.epoch, { projects: proj, contracts, budgets: flaky, stops: StopService.withEpoch(w.storage, projects.epoch, pauses, ports([])), limits: { depth: 2, children: limit } });
+    const spawn = (id: string) => swarm.spawn(rob, { commandId: id, parentTaskId: root, title: `Child ${id}`, costMicros: 1000, computeMs: 10 });
+    const gate = async () => ((await w.storage.getAggregate({ kind: "swarm-gate", id: root }))?.body as { children: string[] } | undefined)?.children ?? [];
+    const finish = async (id: string) => { const t = (await projects.getTask(id))!; await projects.transitionTask({ commandId: `fin-${id}`, actor: rob.id, taskId: id, expectedRevision: t.revision, to: "cancelled" } as never); };
+    return { w, swarm, spawn, gate, finish, root, project, rob };
+  };
+  const suite = (name: string, run: () => Promise<void>) => test(`${backend.name}: ${name}`, run);
+
+  suite("spawns sent at the same moment cannot exceed the live-children limit (card H10 follow-up)", async () => {
+    const x = await world(3);
+    try {
+      const results = await Promise.allSettled([0, 1, 2, 3, 4].map((i) => x.spawn(`race${i}`)));
+      assert.equal(results.filter((r) => r.status === "fulfilled").length, 3, JSON.stringify(results.map((r) => r.status)));
+      for (const r of results) if (r.status === "rejected") assert.ok(r.reason instanceof DomainError && /live children/.test(r.reason.message), String(r.reason));
+      assert.equal((await x.swarm.children(x.root, x.project)).length, 3);
+      assert.equal((await x.gate()).length, 3, "only the three linked children stay claimed");
+    } finally { await x.w.close(); }
+  });
+
+  suite("a refused or cancelled child's claim is dropped on the next write and does not count", async () => {
+    let fail = true;
+    const x = await world(1, { failDelegate: () => fail });
+    try {
+      await assert.rejects(() => x.spawn("a"), /crash/);
+      fail = false;
+      // The failed child was cancelled by the clean-up, so its claim does not hold the only place.
+      const ok = await x.spawn("b");
+      assert.deepEqual(await x.gate(), [ok.taskId], "the failed child's claim was dropped by the next write");
+      await assert.rejects(() => x.spawn("c"), /live children/);
+      assert.deepEqual(await x.gate(), [ok.taskId], "a refusal leaves the claim list alone");
+    } finally { await x.w.close(); }
+  });
+
+  suite("a crash between the claim and the link holds a place only until that child is finished or cancelled", async () => {
+    let crash = true;
+    const x = await world(1, { failDelegate: () => crash, failAbandon: () => crash });
+    try {
+      await assert.rejects(() => x.spawn("a"), /crash/);
+      assert.equal((await x.gate()).length, 1, "the unlinked claim is recorded");
+      crash = false;
+      await assert.rejects(() => x.spawn("b"), /live children/);
+      assert.equal((await x.gate()).length, 1, "the refused spawn made no claim");
+      const orphan = (await x.gate())[0]!;
+      await x.finish(orphan);
+      const ok = await x.spawn("c");
+      assert.deepEqual(await x.gate(), [ok.taskId], "the orphan's claim is gone");
+    } finally { await x.w.close(); }
+  });
+
+  suite("repeated spawn and finish cycles beyond the limit keep working and the claim list stays bounded", async () => {
+    const x = await world(2);
+    try {
+      for (let i = 0; i < 12; i++) {
+        const made = await x.spawn(`cyc${i}`);
+        assert.ok((await x.gate()).length <= 2, `claims stay within the limit at cycle ${i}`);
+        if (i % 2 === 1) for (const l of await x.swarm.children(x.root, x.project)) if ((await x.w.storage.getAggregate({ kind: "task", id: l.id }))?.body && (await x.gate()).includes(l.id)) { try { await x.finish(l.id); } catch { /* already final */ } }
+        assert.ok(made.taskId);
+      }
+      assert.ok((await x.gate()).length <= 2);
+    } finally { await x.w.close(); }
+  });
+}
