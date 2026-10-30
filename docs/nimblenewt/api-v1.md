@@ -188,6 +188,16 @@ Arguments:
 
 Result: `{ scope, ready, paused, unsettled: [{ kind, ref, state }], truncated }`.
 
+#### `model-budget.get`
+
+Owner only: a task's model limits and what it has used so far (cost, tokens, calls, failed attempts).
+
+Arguments:
+
+- `taskId`: the task
+
+Result: `{ budget?, spent }`.
+
 #### `routing.controls`
 
 The controls in force (disabled, draining, cut over) and the failback policy. Owner only.
@@ -1462,6 +1472,20 @@ Arguments:
 - `commandId`: required
 
 Result: `{ revision, replayed }`.
+
+#### `model-budget.set`
+
+Owner only: limits what a task may use of model calls in all: money (`maxCostMicros`), tokens (`maxTokens`) and failed attempts (`maxFailedAttempts`, counted across calls, routes and rebuilt contexts). A limit left out keeps its earlier value. When one is reached the next call waits visibly until the owner raises it.
+
+Arguments:
+
+- `taskId`: the task
+- `maxCostMicros` (optional): whole number
+- `maxTokens` (optional): whole number
+- `maxFailedAttempts` (optional): whole number
+- `commandId`: required
+
+Result: `{ ok }`.
 
 #### `routing.failback.set`
 

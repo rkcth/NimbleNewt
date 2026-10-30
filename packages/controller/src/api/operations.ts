@@ -10,6 +10,7 @@ import type { WatchService } from "../events/handling.js";
 import type { EventService } from "../events/index.js";
 import type { DifficultyService } from "../routing/difficulty.js";
 import type { CutoverService } from "../routing/cutover.js";
+import type { FallbackService } from "../routing/fallback.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
 import type { ProjectPlanService, ProjectResourceService, ResponsibilityService } from "../projects/index.js";
@@ -74,6 +75,7 @@ export interface Context {
   readonly integration?: Pick<IntegrationPolicyService, "get" | "set" | "getDefault" | "setDefault" | "ensure" | "precheck">;
 
   readonly pauses?: Pick<PauseService, "pause" | "resume" | "gate">;
+  readonly modelBudget?: Pick<FallbackService, "setBudget" | "budget" | "spend">;
   readonly cutover?: Pick<CutoverService, "disable" | "drain" | "cutover" | "reenable" | "setFailbackPolicy" | "controls" | "report" | "topology" | "tick">;
   readonly handoffs?: Pick<HandoffService, "prepare" | "complete" | "takeover" | "choose" | "cancel" | "advance" | "get" | "forTask" | "sweep">;
   readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep">;
@@ -165,6 +167,7 @@ const ownerQuestionsOf = (c: Context): NonNullable<Context["ownerQuestions"]> =>
 const branchesOf = (c: Context): ContextBranchService => c.branches ?? unavailable("context branches");
 const notesOf = (c: Context): NonNullable<Context["notes"]> => c.notes ?? unavailable("working notes");
 const pausesOf = (c: Context): NonNullable<Context["pauses"]> => c.pauses ?? unavailable("pause");
+const modelBudgetOf = (c: Context): NonNullable<Context["modelBudget"]> => c.modelBudget ?? unavailable("model budgets");
 const cutoverOf = (c: Context): NonNullable<Context["cutover"]> => c.cutover ?? unavailable("provider drain and cutover");
 const handoffsOf = (c: Context): NonNullable<Context["handoffs"]> => c.handoffs ?? unavailable("hand-off");
 const resumesOf = (c: Context): NonNullable<Context["resumes"]> => c.resumes ?? unavailable("checked resume");
@@ -367,6 +370,10 @@ export const OPERATIONS: readonly Operation[] = [
   { name: "routing.reenable", kind: "command", summary: "The owner lets a disabled, draining or cut-over target be used again. Probes and recoveries never do this.", args: { level: "model, endpoint, account, provider or service", name: "which one", reason: "why", commandId: "required" },
     result: "`{ revision, replayed }`.",
     run: async (c, a, id) => { only(a, ["level", "name", "reason"]); return asJson(await cutoverOf(c).reenable(c.principal, { commandId: need(id), ...a } as never)); } },
+  { name: "model-budget.set", kind: "command", summary: "Owner only: limits what a task may use of model calls in all: money (`maxCostMicros`), tokens (`maxTokens`) and failed attempts (`maxFailedAttempts`, counted across calls, routes and rebuilt contexts). A limit left out keeps its earlier value. When one is reached the next call waits visibly until the owner raises it.", args: { taskId: "the task", "maxCostMicros?": "whole number", "maxTokens?": "whole number", "maxFailedAttempts?": "whole number", commandId: "required" }, result: "`{ ok }`.",
+    run: async (c, a, id) => { only(a, ["taskId", "maxCostMicros", "maxTokens", "maxFailedAttempts"]); await modelBudgetOf(c).setBudget(c.principal, { commandId: need(id), ...a } as never); return asJson({ ok: true }); } },
+  { name: "model-budget.get", kind: "query", summary: "Owner only: a task's model limits and what it has used so far (cost, tokens, calls, failed attempts).", args: { taskId: "the task" }, result: "`{ budget?, spent }`.",
+    run: async (c, a) => { only(a, ["taskId"]); if (c.principal.kind !== "owner") throw new DomainError("forbidden", "only the owner reads model budgets"); const m = modelBudgetOf(c); const taskId = str(a, "taskId"); return asJson({ ...(await m.budget(taskId) === undefined ? {} : { budget: await m.budget(taskId) }), spent: await m.spend(taskId) } as never); } },
   { name: "routing.failback.set", kind: "command", summary: "Sets how a target that failed comes back: manual, or automatic after enough good probes over enough time (and never automatically if it failed soon after its last restore).", args: { policy: "{ mode: manual|automatic, minProbes, stableSeconds, holdDownSeconds }", commandId: "required" },
     result: "`{ revision, replayed }`.",
     run: async (c, a, id) => { only(a, ["policy"]); return asJson(await cutoverOf(c).setFailbackPolicy(c.principal, { commandId: need(id), ...a } as never)); } },

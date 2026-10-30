@@ -15,6 +15,7 @@ import type { EventService } from "../events/index.js";
 import type { BudgetService } from "../budgets/index.js";
 import type { DifficultyService } from "../routing/difficulty.js";
 import type { CutoverService } from "../routing/cutover.js";
+import type { FallbackService } from "../routing/fallback.js";
 import type { WorkspaceOpService } from "../workspace-ops/index.js";
 import type { StatusService } from "../status/index.js";
 import type { DecisionService } from "../decisions/index.js";
@@ -101,6 +102,7 @@ export interface StateApiDeps {
   readonly integration?: Pick<IntegrationPolicyService, "get" | "set" | "getDefault" | "setDefault" | "ensure" | "precheck">;
 
   readonly pauses?: Pick<PauseService, "pause" | "resume" | "gate">;
+  readonly modelBudget?: Pick<FallbackService, "setBudget" | "budget" | "spend">;
   readonly cutover?: Pick<CutoverService, "disable" | "drain" | "cutover" | "reenable" | "setFailbackPolicy" | "controls" | "report" | "topology" | "tick">;
   readonly handoffs?: Pick<HandoffService, "prepare" | "complete" | "takeover" | "choose" | "cancel" | "advance" | "get" | "forTask" | "sweep">;
   readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep">;
@@ -216,6 +218,7 @@ export class StateApi {
         ...(this.#deps.resumes === undefined ? {} : { resumes: this.#deps.resumes }),
         ...(this.#deps.handoffs === undefined ? {} : { handoffs: this.#deps.handoffs }),
         ...(this.#deps.cutover === undefined ? {} : { cutover: this.#deps.cutover }),
+        ...(this.#deps.modelBudget === undefined ? {} : { modelBudget: this.#deps.modelBudget }),
         ...(this.#deps.pauses === undefined ? {} : { pauses: this.#deps.pauses }),
 
         ...(this.#deps.spill === undefined ? {} : { spill: this.#deps.spill }),

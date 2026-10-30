@@ -2749,3 +2749,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - **C09i.** Retrospective explanations (asked for by readers) go in their own list capped at 200, so readers cannot use up the 2000 room of the worker's own explanations.
 - **V02.** `FallbackService.setBudget` keeps the limits it is not given (raising `maxFailedAttempts` no longer clears `maxCostMicros`/`maxTokens`); `budget(taskId)` reads them. Two calls failing at the same moment can overshoot a limit by the number of calls in flight (as for cost).
 - Known: `explanationsFor(seq)` reads every indexed explanation of the task (the index stores no step number for them).
+
+## V02 (part 2): the task's model limits through the state API
+
+- `model-budget.set` (owner only; `maxCostMicros`, `maxTokens`, `maxFailedAttempts`, a limit left out keeps its value) and `model-budget.get` (the limits and what the task has used: cost, tokens, calls, failed attempts). `FallbackService` is passed to the API as `modelBudget`. No chat command yet (the owner would ask for it by task title); the limits survive a restart.
