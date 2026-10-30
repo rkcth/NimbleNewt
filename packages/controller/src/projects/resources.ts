@@ -441,6 +441,11 @@ export class ProjectResourceService {
     return claim !== undefined && claim.state === "held" ? claim : undefined;
   }
 
+  /** The kind of a bound resource (a repository, an output, ...), or `undefined` when there is none. Takes no caller, for code that builds the services (the hand-off package gives kinds, never names, to a recipient who may not read the resource); not an API operation. */
+  async kindOf(resourceId: string): Promise<ResourceKind | undefined> {
+    return ((await this.#runner.get(RESOURCE, resourceIdOf(resourceId)))?.body as unknown as ResourceBody | undefined)?.kind;
+  }
+
   /** A project's bindings in ID order (`state` narrows). `undefined` for a project the caller may not read. Never truncated: more than the scan limit is `unavailable`. */
   async list(by: Principal, projectId: string, filter: { state?: "bound" | "unbound" } = {}): Promise<View<ResourceBody>[] | undefined> {
     const id = checkProjectId(projectId);

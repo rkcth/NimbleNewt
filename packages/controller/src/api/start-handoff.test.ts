@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
+import type { WorkerHost } from "../dispatch/index.js";
+import { PI } from "../dispatch/testing/world.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -133,5 +135,52 @@ test("the package carries the sender's shared drafts on the task and the respons
     const seen = await call(bToken, "handoff.get", { handoffId: prepared.result.item.id });
     if (seen.ok) assert.ok(seen.result.item === undefined || (seen.result.item.package.sections.drafts === undefined && seen.result.item.package.sections.responsibilities === undefined), JSON.stringify(seen.result.item?.package?.sections));
     assert.match((await call(boot.token, "handoff.get", { handoffId: prepared.result.item.id })).result?.item?.package?.sections?.drafts ?? "", /Bed plan/);
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("the real hand-off locks source: checkout holds whoever started them, claims limited to what the recipient may see, a sender who cannot read is a gap and not 'no claims', a malformed managed entry skips only itself (card L03h)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-handoff-locks-"));
+  let enter!: () => void; const entered = new Promise<void>((ok) => { enter = ok; });
+  let release!: () => void; const gate = new Promise<void>((ok) => { release = ok; });
+  const host: WorkerHost = { hostId: "host:w1", resources: { cpus: 1, memoryMb: 512 }, start: async () => { throw new Error("no attempt"); }, workspace: { run: async () => { enter(); await gate; return { ok: true, summary: "refreshed" }; } } };
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI], dispatch: { timer: new ManualTimer(), intervalMs: 1000, workers: [host] } });
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const call = async (op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    const project = (await call("project.create", { name: "Garden" }, "p1")).result.id as string;
+    const mk = async (n: string) => (await call("task.create", { projectId: project, title: n, description: n }, `t-${n}`)).result.id as string;
+    const agent = async (n: string, actions: string[]) => { const id = (await c.services.agents.create(rob, { commandId: `ag-${n}`, friendlyName: n })).id; for (const action of actions) await c.services.grants.grant(rob, { commandId: `g-${n}-${action}`, grantee: `agent:${id}`, action, project, source: "direct", basis: "test" } as never); return id; };
+    const a = await agent("A", ["responsibility.read"]);          // sender who can read responsibilities
+    const blind = await agent("Blind", []);                         // sender who cannot
+    const clean = await agent("Clean", ["responsibility.read"]);   // sender with no claims
+    const noSee = await agent("NoSee", ["attempt.work"]);          // recipient with no read rights
+    const sees = await agent("Sees", ["attempt.work", "resource.read", "responsibility.read"]);
+    const t1 = await mk("one"), t2 = await mk("two"), t3 = await mk("three"), t4 = await mk("four");
+    let n = 0;
+    for (const [t, who] of [[t1, a], [t2, a], [t3, blind], [t4, clean]] as const) { await call("task.transition", { taskId: t, to: "ready", expectedRevision: 1 }, `tr${n++}`); assert.ok((await call("task.assign", { taskId: t, owner: { kind: "agent", id: who } }, `as${n++}`)).ok); }
+    const res = await c.services.resources.bindResource(rob, { commandId: "b1", projectId: project, kind: "repository", label: "plot", locator: "/r/plot" } as never);
+    const duty = await c.services.responsibilities.create(rob, { commandId: "r1", projectId: project, title: "Keep the plot", objective: "o", desiredCondition: "tidy", ownerId: `agent:${a}`, managed: [res.id] } as never);
+    const blindDuty = await c.services.responsibilities.create(rob, { commandId: "r2", projectId: project, title: "Blind duty", objective: "o", desiredCondition: "tidy", ownerId: `agent:${blind}` } as never);
+    // A managed entry that is not a resource ID (as an older record might hold) must skip only itself.
+    void blindDuty;
+    const corrupt = async () => { const rec = await c.storage.getAggregate({ kind: "responsibility", id: duty.id }); await c.storage.applyOperation({ operationId: "corrupt", epoch: c.epoch, actor: "owner:rob", correlationId: "corrupt", at: new Date().toISOString(), changes: [{ type: "update", ref: { kind: "responsibility", id: duty.id }, expectedRevision: rec!.revision, body: { ...(rec!.body as Record<string, unknown>), managed: ["not a resource id", res.id] } }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never); };
+    const sections = async (task: string, to: string, id: string) => { const r = await call("handoff.prepare", { taskId: task, to: { kind: "agent", id: to }, reason: "leave" }, id); assert.ok(r.ok, JSON.stringify(r)); return r.result.item.package.sections as Record<string, string | undefined>; };
+
+    // Requester not the sender: the owner starts a refresh on t1 and the checkout hold shows, labelled with who started it.
+    const pending = call("workspace.request", { operation: "refresh", taskId: t1, reason: "base moved" }, "w1");
+    await entered;
+    const none = await sections(t1, noSee, "h1");
+    assert.match(none["locks"] ?? "", /checkout of .*refresh in progress, started by owner:rob/, none["locks"]);
+    assert.ok(!(none["locks"] ?? "").includes(res.id) && !(none["locks"] ?? "").includes(duty.id), "a recipient without the rights does not get the IDs");
+    assert.match(none["locks"] ?? "", /1 held by the sender's responsibilities \(repository x1\); details withheld/);
+    release(); await pending;
+    // Claim match with a recipient who may read both: named. The refresh is over, so no checkout line. A malformed managed entry skips only itself.
+    await corrupt();
+    const full = await sections(t2, sees, "h2");
+    assert.equal(full["locks"], `resource claims: 1 managed entry of the sender's responsibilities could not be checked and is missing from this section\nresource ${res.id}: claimed by responsibility ${duty.id}; the claim stays with ${duty.id} until it is reassigned`);
+    // Gap versus none: a sender who cannot read responsibilities is reported as unknown; one who can and holds nothing leaves the section empty.
+    assert.match((await sections(t3, sees, "h3"))["locks"] ?? "", /not known; the sender may not read/);
+    assert.equal((await sections(t4, sees, "h4"))["locks"], undefined);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

@@ -27,8 +27,8 @@ export function controllerHandoffSources(deps: {
   drafts?(request: { taskId: string; projectId: string; from: Owner }): Promise<readonly { readonly id: string; readonly title: string; readonly body: string }[]>;
   /** The responsibilities the sending agent answers for in the task's project, whether or not they touch this task. */
   responsibilities?(request: { projectId: string; from: Owner }): Promise<readonly { readonly id: string; readonly title: string; readonly desiredCondition: string; readonly state: string }[]>;
-  /** What the sending agent holds locked or leased for this task (workspace, branch, integrator lease), when a service keeps such holds. */
-  locks?(request: { taskId: string; projectId: string; from: Owner }): Promise<readonly string[]>;
+  /** What the sending agent holds locked or leased for this task (workspace, branch, integrator lease), when a service keeps such holds. Each line is limited to what `to` may see; a line may also say that part of the answer is missing (a gap, not an absence). */
+  locks?(request: { taskId: string; projectId: string; from: Owner; to: Owner }): Promise<readonly string[]>;
   /** Extra sections from services that hold them (continuation, locks, background operations), each already limited to what the recipient may see. */
   more?: (request: { taskId: string; from: Owner; to: Owner }) => Promise<Readonly<Record<string, string>>>;
 }): HandoffSources {
@@ -70,7 +70,7 @@ export function controllerHandoffSources(deps: {
         if (drafts !== undefined && drafts.length > 0) sections["drafts"] = drafts.map((d) => `${d.id} "${d.title}": ${d.body.replace(/\s+/g, " ").slice(0, 300)}`).join("\n");
         const owned = await deps.responsibilities?.({ projectId, from }).catch(() => undefined);
         if (owned !== undefined && owned.length > 0) sections["responsibilities"] = `${from.id} answers for these in the project; they stay with ${from.id} until reassigned, and the recipient should know of them:\n${owned.map((r) => `${r.id} "${r.title}" (${r.state}): ${r.desiredCondition.replace(/\s+/g, " ").slice(0, 200)}`).join("\n")}`;
-        const held = await deps.locks?.({ taskId, projectId, from }).catch(() => undefined);
+        const held = await deps.locks?.({ taskId, projectId, from, to }).catch(() => undefined);
         if (held !== undefined && held.length > 0) sections["locks"] = held.join("\n");
       }
       Object.assign(sections, await deps.more?.({ taskId, from, to }));

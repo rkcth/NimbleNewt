@@ -364,18 +364,39 @@ export async function startController(options: StartOptions): Promise<Controller
       // The sender's own shared drafts and the responsibilities it answers for travel with the task (card L03g), read as the sender.
       drafts: async ({ taskId, projectId, from }) => { const p = await principals.get(`agent:${from.id}`); if (p === undefined) return []; const eff = await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); const all: Awaited<ReturnType<typeof desks.list>>["items"] = []; for (let after: string | undefined, i = 0; i < 20; i++) { const page = await desks.list(eff as never, { ownerId: p.id, projectId, limit: 200, ...(after === undefined ? {} : { afterId: after }) }); all.push(...page.items); after = page.next; if (after === undefined) break; } return all.filter((r) => r.taskId === taskId && r.status === "draft" && r.visibility === "shared").map((r) => ({ id: r.id, title: r.title, body: r.body })); },
       responsibilities: async ({ projectId, from }) => { const p = await principals.get(`agent:${from.id}`); if (p === undefined) return []; const eff = await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); return ((await responsibilities.list(eff as never, projectId, { state: "active" })) ?? []).filter((r) => r.ownerId === p.id).map((r) => ({ id: r.id, title: r.title, desiredCondition: r.desiredCondition, state: r.state })); },
-      locks: async ({ taskId, projectId, from }) => {
+      locks: async ({ taskId, projectId, from, to }) => {
         const p = await principals.get(`agent:${from.id}`); if (p === undefined) return [];
         const out: string[] = [];
-        // A workspace operation open on the task's checkout that the sender asked for: the checkout is frozen for it until it ends.
+        const rightsOf = async (x: { id: string; kind: never; name: string; grants: never }) => grants.effective(x as never, new Date().toISOString());
+        // A workspace operation open on the task's checkout, whoever started it (the owner or the dispatcher as well as the sender): the checkout is frozen for the recipient too until it ends, so it is named with who started it.
         const op = await workspaceOps.openFor(taskId);
-        if (op !== undefined && op.requestedBy === p.id) out.push(`checkout of ${taskId}: ${op.operation} in progress (request ${op.requestId}, since ${op.at}); it ends or is settled by recovery, it does not pass to the recipient`);
+        if (op !== undefined) out.push(`checkout of ${taskId}: ${op.operation} in progress, started by ${op.requestedBy === p.id ? `${from.id} (the sender)` : op.requestedBy} (request ${op.requestId}, since ${op.at}); the checkout stays frozen for whoever holds the task until it ends or is settled by recovery`);
         // Resource claims held by the responsibilities the sender answers for: the claim belongs to the responsibility, so it stays with the sender until that is reassigned.
-        const eff = await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString());
-        for (const r of (await responsibilities.list(eff as never, projectId, { state: "active" })) ?? []) {
+        const eff = await rightsOf(p as never);
+        const mine = await responsibilities.list(eff as never, projectId, { state: "active" });
+        // The sender being unable to read responsibilities is a gap in what is known, not the absence of claims: say so rather than show only the checkout line as if complete.
+        if (mine === undefined) { out.push("resource claims: not known; the sender may not read the project's responsibilities, so claims it holds are missing from this section, not absent"); return out; }
+        const claims: { resourceId: string; responsibilityId: string }[] = [];
+        let unchecked = 0;
+        for (const r of mine) {
           if (r.ownerId !== p.id) continue;
-          for (const resourceId of r.managed) { const c = await resources.heldClaim(resourceId); if (c !== undefined && c.responsibilityId === r.id) out.push(`resource ${resourceId}: claimed by responsibility ${r.id}; the claim stays with ${r.id} until it is reassigned`); }
+          for (const resourceId of r.managed) { try { const c = await resources.heldClaim(resourceId); if (c !== undefined && c.responsibilityId === r.id) claims.push({ resourceId, responsibilityId: r.id }); } catch { unchecked++; } }
         }
+        if (unchecked > 0) out.push(`resource claims: ${unchecked} managed ${unchecked === 1 ? "entry" : "entries"} of the sender's responsibilities could not be checked and ${unchecked === 1 ? "is" : "are"} missing from this section`);
+        // Only what the recipient may see by name: it needs resource.read and to be able to read the responsibility; the rest is given as a count and kinds.
+        const tp = await principals.get(`agent:${to.id}`);
+        const teff = tp === undefined ? undefined : await rightsOf(tp as never);
+        const seeResources = teff !== undefined && allows(teff as never, "resource.read", projectId);
+        const theirs = teff === undefined ? undefined : await responsibilities.list(teff as never, projectId, { state: "active" });
+        const seeable = new Set((theirs ?? []).map((r) => r.id));
+        const kinds = new Map<string, number>(); let hidden = 0;
+        for (const c of claims) {
+          if (seeResources && seeable.has(c.responsibilityId)) { out.push(`resource ${c.resourceId}: claimed by responsibility ${c.responsibilityId}; the claim stays with ${c.responsibilityId} until it is reassigned`); continue; }
+          hidden++;
+          const kind = (await resources.kindOf(c.resourceId).catch(() => undefined)) ?? "unknown";
+          kinds.set(kind, (kinds.get(kind) ?? 0) + 1);
+        }
+        if (hidden > 0) out.push(`resource claims: ${hidden} held by the sender's responsibilities (${[...kinds].map(([k, n]) => `${k} x${n}`).join(", ")}); details withheld, the recipient may not read them`);
         return out;
       },
       agentState: async (id) => ((await storage.getAggregate({ kind: "agent", id }))?.body as unknown as { state?: "active" | "retired" } | undefined)?.state, canWork: async (agentId, projectId) => { const p = await principals.get(`agent:${agentId}`); if (p === undefined || p.state !== "active") return false; const eff = await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); return allows(eff as never, "attempt.work", projectId); } }) });

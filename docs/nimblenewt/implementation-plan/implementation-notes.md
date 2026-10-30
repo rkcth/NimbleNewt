@@ -3365,3 +3365,10 @@ Remains for U13: deliverable read operations (list/get with revision and provena
 - Tests: hand-off sources (locks listed, empty and failing are gaps, source gets task/project/sender), workspace-ops (`openFor` visible while the host works, gone after), projects (`heldClaim` held then freed). The `start.ts` wiring itself has no test of its own.
 - **Remains (L03h):** offering to reassign the sender's responsibilities with the hand-off (an owner question surfaced with the package; nothing is transferred by a hand-off); integrator lease (P10) and workspace holds (H12m) as lock sources once they exist; the checkout pin is not listed as a lock (it is not exclusive to the sender).
 - **Owner questions:** should a hand-off offer to reassign the sender's responsibilities (and to whom), or leave them with the sender until deliberately moved? Provisional: they stay and the package says so. Should a running workspace operation block the hand-off rather than only be named? Provisional: named only.
+
+## L03h review fixes: hand-off locks limited to the recipient, gaps told as gaps
+
+- The locks source now gets the recipient (`to`). Claims are named (resource and responsibility ID) only when the recipient holds `resource.read` and can read that responsibility; otherwise the section gives a count and kinds ("1 held by the sender's responsibilities (repository x1); details withheld"). `ProjectResourceService.kindOf` serves the kinds and, like `heldClaim`, takes no caller.
+- A sender who may not read responsibilities now yields "resource claims: not known ..." (a gap), never just the checkout line as if complete. A managed entry that cannot be checked (a malformed resource ID throws) is counted in a "could not be checked" line and skips only itself.
+- Any workspace operation open on the task's checkout is listed, with who started it (owner, dispatcher or the sender), since the checkout is frozen for the recipient too.
+- Test `start-handoff.test.ts` runs the real closure through `startController` (owner-started refresh held open in the host, claim match, recipient with and without rights, gap versus none, malformed entry).

@@ -46,7 +46,7 @@ test("locks the sender holds are listed in the package, a failing or empty sourc
   const asked: unknown[] = [];
   const held = (await sources({ locks: async (r: unknown) => { asked.push(r); return ["checkout of task-1: refresh in progress", "resource res-1: claimed by responsibility rsp-1"]; } }).collect({ taskId: "task-1", from, to })).sections;
   assert.equal(held["locks"], "checkout of task-1: refresh in progress\nresource res-1: claimed by responsibility rsp-1");
-  assert.deepEqual(asked, [{ taskId: "task-1", projectId: "prj-1", from }]);
+  assert.deepEqual(asked, [{ taskId: "task-1", projectId: "prj-1", from, to }]);
   assert.equal((await sources({ locks: async () => [] }).collect({ taskId: "task-1", from, to })).sections["locks"], undefined, "no known hold is not the claim of no locks");
   assert.equal((await sources({ locks: async () => { throw new Error("down"); } }).collect({ taskId: "task-1", from, to })).sections["locks"], undefined);
 });
