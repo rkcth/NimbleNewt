@@ -152,6 +152,11 @@ for (const backend of backends) {
     assert.deepEqual((await c.msgs.acknowledge(c.ann.p, { commandId: cid("a"), boundary: "check-in", messageIds: [info.id] })).delivered, [info.id]);
     // A stand-up: only for a participant of a live meeting occurrence.
     const info2 = await c.send(c.ben, { to: c.ann.pid, taskId: c.tAnn, class: "informational" });
+    // The controller can count what waits for the stand-up, without reading or delivering it (card U12d).
+    assert.equal(await c.msgs.waitingAtStandup(c.host, c.ann.pid), 1);
+    assert.equal(await c.msgs.waitingAtStandup(c.host, c.cat.pid), 0);
+    await refuses("forbidden", () => c.msgs.waitingAtStandup(c.ben.p, c.ann.pid));
+    assert.equal((await c.msgs.get(c.ann.p, info2.id))!.state, "accepted", "counting delivers nothing");
     const mgr = await c.agent("mgr", [{ action: "meeting.manage", project: c.a }]);
     const occ = (await c.meetings.callUrgent(mgr.p, { commandId: cid("mt"), projectId: c.a, title: "Stand-up", reason: "daily sync", roster: [c.ann.pid, c.cat.pid] })).id;
     await refuses("forbidden", () => c.msgs.readable(c.ben.p, { boundary: "stand-up", occurrenceId: occ }));

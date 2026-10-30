@@ -124,6 +124,8 @@ export interface StandupOptions extends RunnerOptions {
   readonly outcomes?: OutcomeSink;
   /** Told when a brief that carries a decision on an improvement proposal has been stored, so the proposal can be marked told (it was told in the brief, having no task to file a notice on). Best effort. */
   readonly onBriefed?: (by: Principal, itemId: string, revision: number) => Promise<unknown>;
+  /** How many messages wait for an agent at the stand-up boundary (`AgentMessageService.waitingAtStandup`): the brief says so, and the agent reads them at the stand-up. Best effort: a failure leaves the line out. */
+  readonly waitingMessages?: (by: Principal, agent: string) => Promise<number>;
   /** The configured P/PC allocation (floor, target, ceiling in percent), for the balance review (see `allocationFrom`). */
   readonly allocation?: () => Promise<Allocation | undefined>;
   /** Actual use on the allocation basis (worker-slot time) when something measures it; absent: the review says so and falls back to counting tasks. */
@@ -586,6 +588,11 @@ export class StandupService {
       const proposers = [body.proposedBy, ...(body.duplicates ?? []).map((d) => (facts.improvements.find((x) => x.id === d)?.body as unknown as ImprovementBody | undefined)?.proposedBy)];
       if (proposers.includes(agent)) briefedItems.push([u.id, u.revision]);
       if (proposers.includes(agent)) sections.advice.push({ text: cut(outcomeText(body), 400), cites: [{ kind: "improvement-item", id: u.id, revision: u.revision }] });
+    }
+    // Messages are delivered at the boundary by the agent itself (it reads and confirms them); the brief only tells it they are there.
+    if (this.#options.waitingMessages !== undefined) {
+      const waiting = await this.#options.waitingMessages(by, agent).catch(() => 0);
+      if (waiting > 0) sections.advice.push({ text: `${waiting} message${waiting === 1 ? " is" : "s are"} waiting for you. Read ${waiting === 1 ? "it" : "them"} at this stand-up (boundary stand-up, this meeting).`, cites: [] });
     }
     const next = open.filter((t) => t.body.state !== "blocked").sort((a, b) => b.priority - a.priority || (a.id < b.id ? -1 : 1)).slice(0, STANDUP_LIMITS.priorities);
     for (const t of next) sections.priorities.push({ text: `${cut(t.body.title, 120)} (priority ${t.priority}, ${STATE_WORDS[t.body.state]}).`, cites: [tcite(t)] });

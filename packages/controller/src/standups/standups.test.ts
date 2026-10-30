@@ -302,6 +302,22 @@ for (const backend of backends) {
   };
   const rev = async (c: Ctx, kind: string, id: string): Promise<number> => (await new CommandRunner(c.storage, c.epoch, options).get(kind, id))!.revision;
 
+  suite("a brief says how many messages wait for the agent at the stand-up, for that agent only, and leaves the line out when counting fails (card U12d)", async (c) => {
+    const w = await world(c);
+    const counts: Record<string, number> = { [c.pA]: 2, [c.pB]: 1 };
+    const withCounts = c.make({ waitingMessages: async (_by: unknown, agent: string) => { if (agent === c.pC) throw new Error("inbox unreadable"); return counts[agent] ?? 0; } } as never);
+    await withCounts.prepare(c.host, w.occ);
+    const byAgent = Object.fromEntries((await withCounts.briefs(c.owner, w.occ)).map((b) => [b.agent, b as unknown as BriefBody]));
+    assert.ok(byAgent[c.pA]!.advice.some((e) => /^2 messages are waiting for you\. Read them at this stand-up/.test(e.text)));
+    assert.ok(byAgent[c.pB]!.advice.some((e) => /^1 message is waiting for you\. Read it at this stand-up/.test(e.text)));
+    assert.ok(!byAgent[c.pC]!.advice.some((e) => /waiting for you/.test(e.text)), "a failed count leaves the line out");
+    // The count follows the inbox: when nothing waits any more the line goes.
+    counts[c.pA] = 0;
+    await withCounts.prepare(c.host, w.occ);
+    const again = (await withCounts.briefs(c.owner, w.occ)).find((b) => b.agent === c.pA) as unknown as BriefBody;
+    assert.ok(!again.advice.some((e) => /waiting for you/.test(e.text)));
+  });
+
   suite("a brief lists accomplishments, unfinished work, blockers, advice needed and next priorities from the records, each with its citations, for the period only and for its own agent only", async (c) => {
     const w = await world(c);
     c.other.set(c.pC, "suspended");

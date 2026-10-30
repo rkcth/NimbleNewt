@@ -247,7 +247,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     ...(i.onError === undefined ? {} : { onChargeError: i.onError }), ...(i.leadMinutes === undefined ? {} : { leadMinutes: i.leadMinutes }) }, { ...ro, availability: pauses.availability, notices: meetingNoticeSink(messages), window: meetingWindowSink(messages) });
   const watches = WatchService.withEpoch(storage, epoch, { events, inbox: InboxService.withEpoch(storage, epoch, i.assignments), assignments: i.assignments, projects: i.projects }, ro);
   const improvements = ImprovementService.withEpoch(storage, epoch, { meetings }, { ...ro, outcomes: improvementOutcomeSink(messages) });
-  const standups = StandupService.withEpoch(storage, epoch, { meetings, assignments: i.assignments }, { ...ro, availability: pauses.availability, onBriefed: (by, item, revision) => improvements.markTold(by, item, revision) });
+  const standups = StandupService.withEpoch(storage, epoch, { meetings, assignments: i.assignments }, { ...ro, availability: pauses.availability, onBriefed: (by, item, revision) => improvements.markTold(by, item, revision), waitingMessages: (by, agent) => messages.waitingAtStandup(by, agent) });
   const projects = (): Promise<string[]> => projectIds(i.projects);
   let stallNotices = 0;
   const loops: DispatcherLoop[] = [

@@ -409,6 +409,17 @@ export class AgentMessageService {
   }
 
   /**
+   * How many messages wait for an agent at the stand-up boundary (informational and advice, the classes a stand-up delivers), for the controller to say so in the agent's stand-up brief. Service principals only. Counts what
+   * is queued now; it reads nothing of the messages and delivers none: the agent reads and confirms them at the stand-up itself.
+   */
+  async waitingAtStandup(by: Principal, agent: string): Promise<number> {
+    if ((by.kind !== "owner" && by.kind !== "host" && by.kind !== "service") || by.taskScope !== undefined) throw new DomainError("forbidden", `${by.id} may not count another agent's messages`);
+    if (typeof agent !== "string" || !/^agent:[a-z0-9][a-z0-9-]{0,39}$/.test(agent)) invalid("agent", "is not an agent principal");
+    const inbox = (await this.#runner.get("agent-inbox", inboxIdOf(agent)))?.body as unknown as InboxBody | undefined;
+    return inbox === undefined ? 0 : inbox.pending.filter((p) => AT["stand-up"].includes(p.class)).length;
+  }
+
+  /**
    * The recipient confirms receiving messages read at a boundary: they become `delivered` and leave the queue. A message the boundary may not deliver (an informational one at a safe boundary, an urgent one while
    * paused, a blocking dependency) is refused and stays queued. Repeating it is safe: messages already delivered are reported as delivered.
    */

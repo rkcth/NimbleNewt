@@ -2566,3 +2566,9 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - The return is given up, with the reason on the original hand-off's `returned.skipped` and in the task's activity (`onReturnGivenUp`), when the asker is gone or lost the right, or the task is no longer with the temporary owner (moved, done). A hand-off back that cannot be made yet (another hand-off in progress, the first owner ineligible) is retried on the next sweep and shows in `failed`.
 - A crash between making the hand-off back and writing the mark is found again by its command ID (`ret-<hand-off id>`).
 - Not built yet (remains in L03e): chat commands, package sections from continuation, locks, drafts, responsibilities.
+
+## U12d (part 1): the stand-up brief says that messages are waiting
+
+- `AgentMessageService.waitingAtStandup(by, agent)` (service principals only) counts the informational and advice messages queued for an agent; it reads and delivers nothing.
+- `StandupOptions.waitingMessages` (bound in the composed controller) adds an advice line to each participant's brief: "N message(s) are waiting for you. Read them at this stand-up (boundary stand-up, this meeting)." The agent reads and confirms them itself (`message.readable` / `message.acknowledge` with the meeting), so delivery is still recorded as the recipient's own confirmation. A count that fails leaves the line out; the brief is rewritten when the count changes (until the meeting starts).
+- Not built yet (remains in U12d): the chat presentation of owner questions.
