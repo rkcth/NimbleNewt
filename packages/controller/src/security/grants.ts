@@ -147,9 +147,9 @@ const PRINCIPAL = /^(?:owner|agent|host|client|service):[a-z0-9][a-z0-9-]{0,39}$
 const GRANT_ID = /^grt-[a-z2-7]{20}$/;
 const RESTRICTION_ID = /^rst-[a-z2-7]{20}$/;
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
-/** The only actions a meeting decision may grant; everything else needs the owner. */
+/** The only actions a meeting decision may grant; everything else needs the owner. task.update and task.transition are left out: a project-wide grant of them would let the grantee move or edit any task past the review and owner gates a meeting's own change must pass. */
 export const AGREED_GRANTABLE_ACTIONS: readonly string[] = [
-  "task.read", "task.create", "task.update", "task.transition", "assignment.read", "attempt.work", "artifact.publish", "artifact.read", "desk.write", "desk.read", "history.append", "history.read",
+  "task.read", "task.create", "assignment.read", "attempt.work", "artifact.publish", "artifact.read", "desk.write", "desk.read", "history.append", "history.read",
   "review.request", "wait.manage", "blocker.manage", "conversation.send", "conversation.receive", "message.send", "job.read", "meeting.agenda", "meeting.read", "resource.read", "budget.read", "responsibility.read", "notes.chair.read",
 ];
 /** The longest an agreed (meeting-decided) grant may last. Provisional; the owner may change it. */

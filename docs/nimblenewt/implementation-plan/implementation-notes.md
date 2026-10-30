@@ -3050,3 +3050,8 @@ The chat's catalog (`CHAT_OPS` in `packages/controller/src/chat/commands.ts`) is
 - F5: `grantAgreed` looks for an existing grant record from the same scoped command id first and, if there is one, skips the clock/grantee-dependent checks so the runner answers the replay (`replayed: true`).
 - F6: `grantAgreed` uses the allowlist `AGREED_GRANTABLE_ACTIONS` (ordinary working actions only); everything else needs the owner.
 - F4 OPEN: an aggregate cap across several policy-agreed raises in one decision is not enforced. Raises leave no per-raise record apart from audit detail (`agreed.decisionId`), so summing them needs an audit scan; left for a card. Each policy raise is still capped per change.
+
+### M02e security round 3 (review of the F1/F2/F5/F6 fixes)
+
+- `task.update` and `task.transition` were removed from the actions a meeting decision may grant: the grant is project-wide (the applier passes no resource), so the grantee could move any task to a final state or edit any task past the review and owner gates that a meeting's own change must pass. Granting them stays an owner act (a one-task grant with a resource would be the narrow form; not built).
+- Open (named so they are not lost): **M02e2** — no limit on how many grants (or raises, F4) one decision may carry in total; `refuse()` saves in the apply loop are not guarded against a concurrent owner agree (fails closed: the change is marked not-applied and the decision can be moved again); a lost `applying` save uses up one turn of the per-apply change loop (the next apply picks the rest up); `notes.chair.read` in the allowlist exposes the chair's notes project-wide (confirm intended).
