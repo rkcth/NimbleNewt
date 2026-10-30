@@ -653,7 +653,7 @@ for (const backend of backends) {
     await refuses("forbidden", () => c.attendance.authorizeWake(c.asC, { commandId: cid("wk"), occurrenceId: id, agent: c.pC }));
     assert.deepEqual(c.wakes, []);
     await c.attendance.authorizeWake(c.owner, { commandId: cid("wk"), occurrenceId: id, agent: c.pC });
-    assert.deepEqual(c.wakes, [{ key: `${id}:${c.pC}`, agent: c.pC, occurrenceId: id, projectId: c.a }]);
+    assert.deepEqual(c.wakes, [{ key: `${id}:${c.pC}:1`, agent: c.pC, occurrenceId: id, projectId: c.a }]);
     assert.equal(state(await c.status(id), c.pC).state, "preparing");
     // Until the lifecycle reports it reachable it cannot join (the authorization is a request to wake, not a claim that it woke).
     const early = await c.attendance.join(c.asC, { commandId: cid("jn"), occurrenceId: id, agent: c.pC });

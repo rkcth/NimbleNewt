@@ -219,10 +219,85 @@ test("through the composed controller the owner's wake of an agent the host repo
       const wake = await call("meeting.attend.wake", { occurrenceId, agent: `agent:${ids.cat}` }, "wk1");
       if (!withHost) { assert.equal(wake.ok, false); assert.match(wake.error!.message, /no wake path/); assert.deepEqual(recovered, []); continue; }
       assert.ok(wake.ok, JSON.stringify(wake));
-      assert.deepEqual(recovered, [{ key: `${occurrenceId}:agent:${ids.cat}`, agent: `agent:${ids.cat}` }]);
+      assert.deepEqual(recovered, [{ key: `${occurrenceId}:agent:${ids.cat}:1`, agent: `agent:${ids.cat}` }]);
       // The agent that is available needs no wake, and nothing else reached the host.
-      assert.equal((await call("meeting.attend.wake", { occurrenceId, agent: `agent:${ids.ann}` }, "wk2")).ok, false);
+      const avail = await call("meeting.attend.wake", { occurrenceId, agent: `agent:${ids.ann}` }, "wk2");
+      assert.equal(avail.ok, false);
+      assert.equal(avail.error!.message, `agent:${ids.ann} is available; only a suspended or stopped agent needs the owner's wake`);
       assert.equal(recovered.length, 1);
+      // The same command sent again is a replay: it never makes a second wake.
+      assert.ok((await call("meeting.attend.wake", { occurrenceId, agent: `agent:${ids.cat}` }, "wk1")).ok);
+      assert.ok(recovered.every((r) => r.key === `${occurrenceId}:agent:${ids.cat}:1`));
     } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
   }
+});
+
+async function wakeFixture(hook: { recover: (r: { key: string; agent: string }) => Promise<void>; timeoutMs?: number }) {
+  const d = mkdtempSync(join(tmpdir(), "nn-meet-"));
+    const slot = Date.parse(`${new Date(Date.now() + 86_400_000).toISOString().slice(0, 10)}T08:00:00.000Z`);
+    let now = Date.now();
+    const stopped = new Set<string>();
+        const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], availability: async (id: string) => (stopped.has(id) ? "stopped" : "available"),
+      meetingWake: hook,
+      dispatch: { timer: new ManualTimer(), intervalMs: 1000, clock: () => new Date(now).toISOString(), invitations: { invite: async () => undefined } } } as never);
+    try {
+      const s = c.services;
+      const boot = await s.principals.bootstrapOwner({ name: "rob" });
+      const rob = await s.principals.authenticate(boot.token);
+      const project = (await s.projects.createProject({ commandId: "p1", actor: rob.id, name: "Garden" })).id;
+      const ids: Record<string, string> = {};
+      for (const n of ["ann", "cat"]) {
+        ids[n] = (await s.agents.create(rob, { commandId: `ag-${n}`, friendlyName: n })).id;
+        await s.grants.grant(rob, { commandId: `g-${n}`, grantee: `agent:${ids[n]}`, action: "task.read", project, source: "direct", basis: "test" });
+        await s.grants.grant(rob, { commandId: `h-${n}`, grantee: `agent:${ids[n]}`, action: "history.read", project, source: "direct", basis: "test" });
+      }
+      const call = (op: string, args: Record<string, unknown>, commandId?: string, token = boot.token) => c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<{ ok: boolean; result?: any; error?: { message: string } }>;
+      const made = await call("meeting.schedule", { projectId: project, title: "Stand-up", roster: ["ann", "cat"].map((n) => `agent:${ids[n]}`), time: "08:00", timeZone: "UTC", startDate: new Date(slot).toISOString().slice(0, 10), recurrence: { kind: "daily" } }, "ms1");
+      assert.ok(made.ok, JSON.stringify(made));
+      stopped.add(`agent:${ids.cat}`);
+      now = slot;
+      for (let i = 0; i < 2; i++) await c.dispatch!.dispatcher.tick();
+      const occurrenceId = (await call("meeting.schedule-get", { scheduleId: made.result.id })).result.item.lastOccurrenceId;
+      const opened = await call("meeting.attend.open-room", { occurrenceId }, "or1"); assert.ok(opened.ok, JSON.stringify(opened));
+      return { c, call, occurrenceId, ids, stopped, close: async () => { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } };
+    } catch (e) { await c.close(); throw e; }
+}
+
+test("a host that fails or times out on a wake reaches the owner as a fixed 'unavailable' message without the host's text, and the seat stays unwoken (card M04f)", async () => {
+  for (const mode of ["fail", "hang", "timeout-text"] as const) {
+    const f = await wakeFixture({ timeoutMs: 30, recover: async () => { if (mode === "fail") throw new Error("ssh root@10.0.0.7 /secret refused"); if (mode === "timeout-text") throw new Error("timed out"); await new Promise(() => undefined); } });
+    try {
+      const r = await f.call("meeting.attend.wake", { occurrenceId: f.occurrenceId, agent: `agent:${f.ids["cat"]}` }, "wkf");
+      assert.equal(r.ok, false);
+      assert.equal((r.error as unknown as { code: string }).code, "unavailable");
+      assert.match(r.error!.message, new RegExp(`^the host did not wake agent:${f.ids["cat"]}${mode === "hang" ? ": it did not answer in time" : "$"}`));
+      assert.doesNotMatch(r.error!.message, /10\.0\.0\.7|secret|request could not be completed/);
+    } finally { await f.close(); }
+  }
+});
+
+test("two wakes of the same agent in one meeting reach the host with two keys, and a replay of one wake command repeats its key (card M04f)", async () => {
+  const keys: string[] = [];
+  const f = await wakeFixture({ recover: async (r) => { keys.push(r.key); } });
+  try {
+    const agent = `agent:${f.ids["cat"]}`;
+    const w1 = await f.call("meeting.attend.wake", { occurrenceId: f.occurrenceId, agent }, "wk-a"); assert.ok(w1.ok, JSON.stringify(w1));
+    // The agent crashed again while the meeting was still open: the lifecycle still reports it stopped, and the owner wakes it again.
+    const w2 = await f.call("meeting.attend.wake", { occurrenceId: f.occurrenceId, agent }, "wk-b"); assert.ok(w2.ok, JSON.stringify(w2));
+    assert.deepEqual(keys, [`${f.occurrenceId}:${agent}:1`, `${f.occurrenceId}:${agent}:2`]);
+    // The same command again is the same wake, never a third one.
+    const again = await f.call("meeting.attend.wake", { occurrenceId: f.occurrenceId, agent }, "wk-b"); assert.ok(again.ok, JSON.stringify(again));
+    assert.deepEqual(keys.slice(0, 2), [`${f.occurrenceId}:${agent}:1`, `${f.occurrenceId}:${agent}:2`]);
+    assert.ok(keys.slice(2).every((k) => k === keys[1]), JSON.stringify(keys));
+    // A different command is a third wake.
+    assert.ok((await f.call("meeting.attend.wake", { occurrenceId: f.occurrenceId, agent }, "wk-c")).ok);
+    assert.equal(keys.at(-1), `${f.occurrenceId}:${agent}:3`);
+  } finally { await f.close(); }
+});
+
+test("a bad meetingWake.timeoutMs fails the controller start instead of turning the dispatcher off (card M04f)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-meet-"));
+  try {
+    await assert.rejects(startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], meetingWake: { recover: async () => undefined, timeoutMs: 0 } } as never), /meeting wake timeout/);
+  } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

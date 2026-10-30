@@ -61,7 +61,7 @@ export interface AttendanceBody {
   /** A paused agent the owner invited by hand: it attends this meeting only; everything else stays paused. */
   readonly bounded: boolean;
   /** The owner authorized waking or recovering a suspended or stopped agent for this meeting. */
-  readonly wake?: { readonly by: string; readonly at: string };
+  readonly wake?: { readonly by: string; readonly at: string; /** How many wakes of this agent this meeting has had (1 for the first); part of the key sent to the host. */ readonly n?: number; /** The command that made the latest wake, so a replay of it repeats the same key. */ readonly commandId?: string };
   /** The agent's runtime reported an operation it cannot safely interrupt. */
   readonly reportedBlock?: { readonly reason: string; readonly at: string };
   /** `prepare` has been called (with the tasks the agent leaves, or an explicit empty list). A join needs it. */
@@ -818,12 +818,17 @@ export class AttendanceService {
     if (att.body.state === "present") return;
     const availability = await this.#reach(agent);
     if (availability !== "suspended" && availability !== "stopped") throw new DomainError("invalid_command", `${agent} is ${availability}; only a suspended or stopped agent needs the owner's wake`, { field: "agent" });
-    await this.#wake.wake({ key: `${occurrenceId}:${agent}`, agent, occurrenceId, projectId: room.body.projectId });
+    // Each wake of the same agent in the same meeting has its own key (an agent that crashed again must be woken again), but a replay of the command that made the latest wake repeats that key.
+    const given = typeof command.commandId === "string" ? command.commandId : undefined;
+    const replay = given !== undefined && att.body.wake?.commandId === given && att.body.wake.n !== undefined;
+    const n = replay ? att.body.wake!.n! : (att.body.wake?.n ?? (att.body.wake === undefined ? 0 : 1)) + 1;
+    await this.#wake.wake({ key: `${occurrenceId}:${agent}:${n}`, agent, occurrenceId, projectId: room.body.projectId });
+    if (replay) return;
     const nowIso = this.#runner.now();
     await this.#update(by, "wake", att.id, (b) => {
       const { reason: _r, ...rest } = b;
       void _r;
-      return { ...rest, state: "preparing", wake: { by: by.id, at: nowIso } };
+      return { ...rest, state: "preparing", wake: { by: by.id, at: nowIso, n, ...(given === undefined ? {} : { commandId: given }) } };
     }, "wake-authorized", availability);
   }
 

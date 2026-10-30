@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { assignedTaskIn, type RouteProbes } from "../dispatch/loops.js";
 import { allows } from "../security/access.js";
 import { PlacementSettingsService } from "../remote/placement-settings.js";
-import { InvitationInbox, MEETING_LIMITS, MEETING_SETTINGS, MeetingService, meetingWakeSink, type HostWakeRequest } from "../meetings/index.js";
+import { InvitationInbox, MEETING_LIMITS, MEETING_SETTINGS, MeetingService, meetingWakeSink, checkMeetingWakeTimeout, type HostWakeRequest } from "../meetings/index.js";
 import { BackupService, createBackup } from "../backup/index.js";
 import { defaultEventSources } from "./default-sources.js";
 import { ImprovementService } from "../standups/improvements.js";
@@ -213,6 +213,7 @@ async function checkoutRoots(storage: ControllerStorage, already: ReadonlySet<st
  * Nothing else about behaviour changes under the override.
  */
 export async function startController(options: StartOptions): Promise<Controller> {
+  if (options.meetingWake !== undefined) checkMeetingWakeTimeout(options.meetingWake.timeoutMs);
   const print = options.print ?? ((line: string) => { process.stderr.write(`${line}\n`); });
   const override = overrideRequested(options.argv, options.env);
   const facts = options.facts ?? detectEnvironment();

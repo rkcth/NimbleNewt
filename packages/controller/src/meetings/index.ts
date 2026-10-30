@@ -11,5 +11,5 @@ export { buildSummary, isConsistent, type Shared, type SummaryInput } from "./su
 export { BALLOT_VALUES, castingOutcome, quorumOf, tallyOf, verdictOf, type BallotValue, type CountedBallot, type VoteOutcome, type Tally, type TieBreak, type VoteVerdict } from "./votes.js";
 export { INVITATION_LIMITS, InvitationInbox, withNudge, type InvitationView, type Nudge } from "./invitations.js";
 export { meetingNoticeSink, meetingWindowSink } from "./notice-sink.js";
-export { meetingWakeSink, type HostWakeRequest, type MeetingWakeOptions } from "./wake-sink.js";
+export { checkMeetingWakeTimeout, meetingWakeSink, type HostWakeRequest, type MeetingWakeOptions } from "./wake-sink.js";
 export { MeetingDeskReadService, type DeskReadBody } from "./desk-reads.js";
