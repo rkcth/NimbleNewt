@@ -159,6 +159,44 @@ for (const backend of backends) {
     for (const who of [c.ann, c.evil]) { await refuses("forbidden", () => c.svc.inbox(who)); await refuses("forbidden", () => c.svc.report(who)); await refuses("forbidden", () => c.svc.settings(who)); await refuses("forbidden", () => c.svc.configure(who, { commandId: cid("cf"), digestTimes: ["08:00"] })); }
   });
 
+  suite("an item that waits on the owner is raised to Urgent by the controller after the owner's threshold, told once, outside quiet hours, and nothing else is (card U11b)", async (c) => {
+    set("2026-10-22T08:00:00.000Z");
+    const waiting = await c.report(c.ann, "blocker", "blocker", await c.blocker("wait_overdue"));
+    const note = await c.report(c.ctl, "maintenance", "host", "host-3");
+    const hours = (n: number) => set(new Date(Date.parse("2026-10-22T08:00:00.000Z") + n * 3_600_000).toISOString());
+    const item = async (id: string) => (await c.svc.inbox(c.owner)).items.find((i) => i.id === id)!;
+    hours(23);
+    await c.svc.runDue();
+    assert.equal((await item(waiting.itemId)).urgent, false, "23 hours: not yet");
+    hours(25);
+    await c.svc.runDue();
+    const raised = await item(waiting.itemId);
+    assert.deepEqual([raised.urgent, raised.state, raised.escalatedAt], [true, "sent", new Date(now).toISOString()]);
+    assert.equal((await item(note.itemId)).urgent, false, "an item that only informs is never raised");
+    hours(30);
+    await c.svc.runDue();
+    assert.equal((await item(waiting.itemId)).escalatedAt, raised.escalatedAt, "told once: a later tick does not raise it again");
+    // The owner sets the threshold; quiet hours hold the telling until they end; an answered item is left alone.
+    set("2026-10-23T08:00:00.000Z");
+    await c.svc.configure(c.owner, { commandId: cid("cf"), expectedRevision: (await c.svc.settings(c.owner)).revision, escalateAfterHours: 2, quietHours: { start: "22:00", end: "10:00" } });
+    const second = await c.report(c.ann, "review-request", "review", await c.review());
+    set("2026-10-23T11:00:00.000Z");
+    await c.svc.runDue();
+    assert.equal((await item(second.itemId)).urgent, true, "a shorter threshold applies");
+    const third = await c.report(c.ann, "owner-question", "inquiry", await c.question());
+    set("2026-10-23T23:30:00.000Z");
+    await c.svc.runDue();
+    assert.equal((await item(third.itemId)).urgent, false, "inside quiet hours it is not raised");
+    set("2026-10-24T10:00:00.000Z");
+    const answered = await item(second.itemId);
+    await c.svc.answerItem(c.owner, { commandId: cid("an"), itemId: second.itemId, answer: "allow", revision: answered.revision });
+    await c.svc.runDue();
+    assert.equal((await item(third.itemId)).urgent, true, "raised when quiet hours end");
+    const rev = (await c.svc.settings(c.owner)).revision;
+    await refuses("invalid_command", () => c.svc.configure(c.owner, { commandId: cid("cf"), expectedRevision: rev, escalateAfterHours: 0 }));
+    await refuses("forbidden", () => c.svc.configure(c.ann, { commandId: cid("cf"), escalateAfterHours: 1 }));
+  });
+
   suite("quiet hours hold the digest and an urgent review until they end; a safety stop is never held; a settings change counts from the next notification", async (c) => {
     await c.svc.configure(c.owner, { commandId: cid("cf"), quietHours: { start: "22:00", end: "10:00" }, digestTimes: ["09:00", "18:00"] });
     set("2026-10-22T08:30:00.000Z");

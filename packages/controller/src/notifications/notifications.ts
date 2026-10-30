@@ -28,7 +28,13 @@ export interface NotificationSettings {
   readonly digestTimes: readonly string[];
   /** No digest and no urgent-review message in this span (UTC `HH:MM`, may cross midnight). A blocked critical path and a safety stop still interrupt. */
   readonly quietHours?: { readonly start: string; readonly end: string };
+  /** Hours an item that waits on the owner may stay unanswered before the controller raises it to Urgent (card U11b); default 24. */
+  readonly escalateAfterHours?: number;
 }
+
+export const DEFAULT_ESCALATE_AFTER_HOURS = 24;
+/** The kinds that wait on the owner's decision; the others (maintenance, presence) only inform, and a safety stop is Urgent from the start. */
+const WAITS_ON_OWNER: ReadonlySet<NotificationKind> = new Set<NotificationKind>(["blocker", "review-request", "owner-question"]);
 
 export interface ItemBody {
   readonly kind: NotificationKind;
@@ -42,6 +48,8 @@ export interface ItemBody {
   readonly answers: readonly string[];
   readonly immediate: boolean;
   readonly urgent: boolean;
+  /** When the controller raised this item to Urgent because it waited too long (card U11b); told once. */
+  readonly escalatedAt?: string;
   readonly state: "queued" | "sent" | "answered";
   /** How many times the same event was reported while this item was open. */
   readonly count: number;
@@ -123,9 +131,9 @@ export class NotificationService {
   }
 
   /** The owner sets how notifications reach them (owner only; counts from the next notification). */
-  async configure(owner: Principal, command: NoActor & { expectedRevision?: number; channel?: "inbox" | "external"; channelName?: string; digestTimes?: readonly string[]; quietHours?: { start: string; end: string } | null }): Promise<{ revision: number }> {
+  async configure(owner: Principal, command: NoActor & { expectedRevision?: number; channel?: "inbox" | "external"; channelName?: string; digestTimes?: readonly string[]; quietHours?: { start: string; end: string } | null; escalateAfterHours?: number }): Promise<{ revision: number }> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner sets how notifications reach them`);
-    onlyKnown(command, ["commandId", "expectedRevision", "channel", "channelName", "digestTimes", "quietHours"]);
+    onlyKnown(command, ["commandId", "expectedRevision", "channel", "channelName", "digestTimes", "quietHours", "escalateAfterHours"]);
     const current = await this.#runner.get("notification-settings", "installation");
     if ((command.expectedRevision ?? 0) !== (current?.revision ?? 0)) throw new DomainError("stale_revision", `notification settings are at revision ${current?.revision ?? 0}, not ${command.expectedRevision ?? 0}`, ...(current === undefined ? [] : [{ currentRevision: current.revision }]));
     const old = (current?.body as unknown as NotificationSettings | undefined) ?? DEFAULTS;
@@ -147,6 +155,10 @@ export class NotificationService {
         if (typeof q !== "object" || typeof q.start !== "string" || typeof q.end !== "string" || !HHMM.test(q.start) || !HHMM.test(q.end) || q.start === q.end) invalid("quietHours", "needs different UTC start and end times such as 22:00 and 07:00");
         next = { ...next, quietHours: { start: q.start, end: q.end } };
       }
+    }
+    if (command.escalateAfterHours !== undefined) {
+      if (!Number.isSafeInteger(command.escalateAfterHours) || command.escalateAfterHours < 1 || command.escalateAfterHours > 24 * 30) invalid("escalateAfterHours", "must be a whole number of hours from 1 to 720");
+      next = { ...next, escalateAfterHours: command.escalateAfterHours };
     }
     const ref: AggregateRef = { kind: "notification-settings", id: "installation" };
     const result = await this.#runner.command("notification.configure", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
@@ -249,7 +261,7 @@ export class NotificationService {
     const digestIds: string[] = [];
     let problem: unknown;
     try {
-      if (!this.#quiet(settings, now)) await this.#releaseUrgent(settings, now);
+      if (!this.#quiet(settings, now)) { await this.#escalateStale(settings, now); await this.#releaseUrgent(settings, now); }
       const state = (await this.#runner.get("notification-state", "installation"))?.body as unknown as StateBody | undefined;
       const due = this.#latestDigestTime(settings, now);
       if (due !== undefined && (state?.lastDigestAt === undefined || state.lastDigestAt < due) && !this.#quiet(settings, now)) digestIds.push(...await this.#collect(settings, now, due));
@@ -395,6 +407,30 @@ export class NotificationService {
         if (error instanceof DomainError && error.code === "not_found" && error.message === "nothing to do") return false;
         if (!(error instanceof DomainError) || error.code !== "stale_revision" || error.currentRevision !== undefined || attempt >= 8) throw error;
       }
+    }
+  }
+
+  /**
+   * An item that waits on the owner and has stayed unanswered past the owner's threshold (default 24 hours) is raised to Urgent by the controller and told once, outside quiet hours (card U11b).
+   * Nothing but this tick raises it: a producer cannot, and a repeat of the tick or a restart does not tell it again.
+   */
+  async #escalateStale(settings: NotificationSettings, now: string): Promise<void> {
+    const limit = Date.parse(now) - (settings.escalateAfterHours ?? DEFAULT_ESCALATE_AFTER_HOURS) * 3_600_000;
+    for (const item of await this.#load<ItemBody>("notification-item", (await this.#index()).body.items)) {
+      if (item.state === "answered" || item.escalatedAt !== undefined || !WAITS_ON_OWNER.has(item.kind) || Date.parse(item.firstAt) > limit) continue;
+      const hours = Math.floor((Date.parse(now) - Date.parse(item.firstAt)) / 3_600_000);
+      const delivery = this.#delivery(settings, { kind: "item", id: item.id }, `URGENT, unanswered for ${hours} hours: ${item.kind}: ${item.label}`, now, `${item.id}|${item.firstAt}|escalated`);
+      await this.#apply("notification.escalate", { commandId: `escalate-${item.id}-${item.firstAt}`, actor: "notifications" }, { id: item.id }, async (index) => {
+        const current = await this.#runner.get("notification-item", item.id);
+        const body = current?.body as unknown as ItemBody | undefined;
+        if (current === undefined || body === undefined || body.state === "answered" || body.escalatedAt !== undefined) return undefined;
+        const ref: AggregateRef = { kind: "notification-item", id: item.id };
+        return { ref, creates: false, changes: [
+          { type: "update", ref, expectedRevision: current.revision, body: { ...body, state: "sent", urgent: true, immediate: true, escalatedAt: now } as unknown as JsonObject },
+          { type: "create", ref: { kind: "notification-delivery", id: delivery.id }, body: delivery.body as unknown as JsonObject },
+          this.#indexChange(index, { deliveries: delivery.body.state === "pending" ? withId(index.body.deliveries, delivery.id) : index.body.deliveries }),
+        ], detail: { escalated: true } };
+      });
     }
   }
 
