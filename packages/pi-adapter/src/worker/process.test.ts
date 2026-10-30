@@ -72,6 +72,33 @@ test("the process starts on the host's word, runs the turn, reaches the bridge o
   await h.done;
 });
 
+test("a message told while a turn waits on the bridge is accepted at once, does not end the turn, and is in front of the model on its next call (card H12f)", async () => {
+  const { offline, hooks } = scripted();
+  const seenByModel: string[] = [];
+  offline.faux.setResponses([
+    (context) => { seenByModel.push(JSON.stringify(context.messages)); return fauxAssistantMessage(fauxToolCall("nimblenewt__desk-read", { recordId: "dsk-aaaaaaaaaaaaaaaaaaaa" }, { id: "c1" }), { stopReason: "toolUse" }); },
+    (context) => { seenByModel.push(JSON.stringify(context.messages)); return fauxAssistantMessage("carried on"); },
+  ]);
+  const h = host(hooks);
+  h.send({ t: "start", v: 1, start: offlineStart });
+  await h.next("ready");
+  h.send({ t: "run", requestId: "req-1", content: "do the thing" });
+  const bridge = await h.next("bridge");
+  // The turn is now waiting for the controller's reply; the host tells the agent something.
+  h.send({ t: "tell", id: 21, text: "INTERRUPT-X: the owner changed the plan" });
+  // It is answered while the turn is still waiting: nothing on the host side is held up until the turn ends.
+  const told = await Promise.race([h.next("tell.ok"), h.next("fault")]);
+  assert.deepEqual(told, { t: "tell.ok", id: 21 });
+  assert.equal(h.seen.some((m) => m.t === "result"), false, "the turn had not ended");
+  h.send({ t: "bridge.reply", id: bridge.id, reply: { ok: true, result: { record: { id: "dsk-aaaaaaaaaaaaaaaaaaaa" } } } });
+  const result = await h.next("result");
+  assert.equal(result.status, "completed", JSON.stringify(result));
+  assert.ok(!seenByModel[0]!.includes("INTERRUPT-X"), "it was told after the first call");
+  assert.ok(seenByModel[1]!.includes("INTERRUPT-X"), "the model sees it on its next call");
+  h.send({ t: "close" });
+  await h.done;
+});
+
 test("a refused bridge call is the model's tool result, not a crash; garbage on the channel is a fault, not a crash", async () => {
   const { offline, hooks } = scripted();
   offline.faux.setResponses([

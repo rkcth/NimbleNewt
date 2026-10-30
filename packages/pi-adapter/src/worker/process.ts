@@ -164,7 +164,13 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
         return;
       case "tell":
         if (adapter === undefined || started === undefined) return fault("the process was not started", message.id);
-        try { await (await adapter.root().submit({ kind: "update", requestId: requestId(`tell-${started.attemptId}-${message.id}`), content: message.text, run: false })).result(); send({ t: "tell.ok", id: message.id }); } catch (error) { fault(`tell failed: ${String((error as Error)?.message ?? error)}`, message.id); }
+        // The host is answered when the update is placed, not when the turn it landed in ends: a turn can run for minutes and the host's pause observation and further messages wait on this answer. A failure of the placed
+        // update after that is a fault with the same ID.
+        try {
+          const placed = await adapter.root().submit({ kind: "update", requestId: requestId(`tell-${started.attemptId}-${message.id}`), content: message.text, run: false });
+          send({ t: "tell.ok", id: message.id });
+          void placed.result().catch((error) => fault(`tell failed: ${String((error as Error)?.message ?? error)}`));
+        } catch (error) { fault(`tell failed: ${String((error as Error)?.message ?? error)}`, message.id); }
         return;
       case "bridge.reply": { const waiting = bridgeWaiting.get(message.id); bridgeWaiting.delete(message.id); waiting?.(message.reply as BridgeReply); return; }
       case "close": closed = true; return;
