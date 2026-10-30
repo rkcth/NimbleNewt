@@ -36,6 +36,7 @@ import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
 import { DISPATCHER_ACTOR, DISPATCH_KIND, DISPATCH_LIMITS, type DispatchBody, type DispatchRevisions, type Frozen, type ToolIdentity, type ToolOperationBody } from "./model.js";
 import { ToolPath, type Loaded } from "./tools.js";
 import type { HostProbe, RecipeSummary, ToolGateway, WorkerTurnResult, TurnUsage, WorkOrder, WorkerHandle, WorkerHost } from "./ports.js";
+import { chooseHost, type HostVerdict } from "../hosts/candidates.js";
 
 /** The record of live dispatches: the attempts that have a claim and have not finished. Ticks read it instead of scanning every dispatch ever made. */
 const LIVE: AggregateRef = { kind: "dispatch-live", id: "live" };
@@ -816,27 +817,26 @@ export class DispatcherService {
   }
 
   async #pickHost(harness: string | undefined, pinned: string | undefined, probe: HostProbe): Promise<{ kind: "ok"; host: WorkerHost & { hostId: string } } | { kind: "none"; reason: string; blocked: boolean; refused?: true }> {
-    const reasons: string[] = [];
-    let revoked = 0; let refused = 0;
     // An attempt pinned to a host (it was relocated there, or it parked on it and the host owns its store) goes nowhere else: it waits for that host, and the owner can move it.
     const candidates = pinned === undefined ? this.#deps.workers : this.#deps.workers.filter((w) => w.hostId === pinned);
     if (pinned !== undefined && candidates.length === 0) return { kind: "none", reason: `${pinned} is not a worker host of this dispatcher, and the attempt may run only there`, blocked: false };
-    for (const worker of candidates) {
+    const choice = await chooseHost(candidates, async (worker): Promise<HostVerdict> => {
       const status = await this.#deps.hosts.status(this.#deps.principal, worker.hostId);
-      if (status === undefined) { reasons.push(`${worker.hostId} is not an enrolled host`); continue; }
-      if (status.identity !== "active") { revoked++; reasons.push(`${worker.hostId} is revoked`); continue; }
-      if (status.freshness !== "fresh") { reasons.push(`${worker.hostId} has not been heard from recently (${status.freshness})`); continue; }
-      if (harness !== undefined && status.capabilities !== undefined && !status.capabilities.harnesses.some((h) => h.name === harness)) { reasons.push(`${worker.hostId} does not have the ${harness} harness`); continue; }
+      if (status === undefined) return { kind: "refuse", reason: `${worker.hostId} is not an enrolled host`, lasting: false };
+      if (status.identity !== "active") return { kind: "refuse", reason: `${worker.hostId} is revoked`, lasting: true, revoked: true };
+      if (status.freshness !== "fresh") return { kind: "refuse", reason: `${worker.hostId} has not been heard from recently (${status.freshness})`, lasting: false };
+      if (harness !== undefined && status.capabilities !== undefined && !status.capabilities.harnesses.some((h) => h.name === harness)) return { kind: "refuse", reason: `${worker.hostId} does not have the ${harness} harness`, lasting: false };
       // A host that would refuse the attempt (policy, what it can do, no connection) is passed over: the next one is tried, and the plan says why this one was not.
       if (worker.refuses !== undefined) {
         // A host that cannot say is tried, and the placement judges it as before; only a clear answer passes it over.
         let why: { readonly reasons: readonly string[]; readonly lasting: boolean } = { reasons: [], lasting: false };
         try { why = await worker.refuses(probe); } catch (error) { this.#options.onError?.(error); }
-        if (why.reasons.length > 0) { if (why.lasting) refused++; reasons.push(why.reasons.join('; ')); continue; }
+        if (why.reasons.length > 0) return { kind: "refuse", reason: why.reasons.join("; "), lasting: why.lasting };
       }
-      return { kind: "ok", host: worker };
-    }
-    return { kind: "none", reason: reasons.length === 0 ? "no worker host is configured" : reasons.join("; "), blocked: candidates.length === 0 || revoked === candidates.length, ...(refused > 0 && refused + revoked === candidates.length ? { refused: true as const } : {}) };
+      return { kind: "take" };
+    });
+    if (choice.kind === "chosen") return { kind: "ok", host: choice.candidate };
+    return { kind: "none", reason: choice.reason, blocked: choice.blocked, ...(choice.lastingRefusal ? { refused: true as const } : {}) };
   }
 
   async #revisions(projectId: string, taskId: string, contract: number, route: Extract<RouteChoice, { route: string }>): Promise<DispatchRevisions> {
