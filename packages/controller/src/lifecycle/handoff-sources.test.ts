@@ -13,7 +13,7 @@ const from = { kind: "agent", id: "a" }, to = { kind: "agent", id: "b" };
 
 test("the package takes the sections only the run knows from the task's latest complete continuation, and invents nothing without one (card L03g)", async () => {
   records.clear();
-  records.set("task-contract:task-1", { version: 4, acceptanceCriteria: ["Fixtures import"], requiredEvidence: ["test log"] });
+  records.set("task-contract:task-1", { version: 4, acceptanceCriteria: ["Fixtures load"], requiredEvidence: ["test log"] });
   const bare = (await sources().collect({ taskId: "task-1", from, to })).sections;
   assert.deepEqual(Object.keys(bare).sort(), ["acceptanceCriteria", "brief", "risks", "versions"]);
   records.set("continuation-head:task-1", { latestCompleteId: "con-2" });
