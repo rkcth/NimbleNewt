@@ -2671,3 +2671,8 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - `HandoffService.forTask` checks the right to control the task before looking for a hand-off, so a caller without it learns nothing (before, it could tell "none going" from "refused").
 - The `meetings` and `agenda` views give the owner nothing for a project that does not exist (as the other views do). A chat status request carrying both a task ID and a title, or a title that is not text, drops the title.
 - Known, not fixed: the explanation reader loads every explanation record of the installation before applying its limit (cost grows with the installation); `explanations` follows the activity service's own read rule for host principals.
+
+## L03g (part 1): the package takes what the run knows from the continuation
+
+- `controllerHandoffSources` fills `nextAction`, `unfinishedWork`, `completedWork`, `backgroundOperations`, `risks` and `versions` from the task's latest complete continuation: the next step as written, the pending effects (with "none pending at the last checkpoint" said as a fact about the checkpoint, not as "nothing is left"), the decisions and artifacts, the tools whose effects a resume does not reproduce, and the runtime, routing and environment revisions; each says which continuation it is from. The task's own contract wins where it has the section (versions and risks are joined); a source given by the caller has the last word; with no continuation nothing is added and the required sections are reported missing as before. The existing redaction and length limits apply.
+- Remaining in L03g: locks, drafts and responsibilities in the package.

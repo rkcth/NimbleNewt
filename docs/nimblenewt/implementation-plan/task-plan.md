@@ -972,11 +972,11 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** The owner can hand a task over, or cover it for a time, in chat.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
-### L03g — Finish hand-off: richer package, locks, drafts, responsibilities
+### L03g — Finish hand-off: locks, drafts, responsibilities in the package
 
 - **Parent:** N05 / AII-255.
 - **Blockers:** L03f.
-- **Deliverable:** Split from L03f (2026-10-30): package sections from continuation, locks, drafts and responsibilities in the package.
+- **Deliverable:** Split from L03f (2026-10-30): locks, drafts and responsibilities in the package (the sections from the latest continuation are done).
 - **Acceptance and verification:** A recipient can carry on from the package alone.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 

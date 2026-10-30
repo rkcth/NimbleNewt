@@ -2659,11 +2659,11 @@
       "id": "L03g",
       "parent": "N05",
       "existing_issue": "AII-255",
-      "title": "Finish hand-off: richer package, locks, drafts, responsibilities",
+      "title": "Finish hand-off: locks, drafts, responsibilities in the package",
       "depends_on": [
         "L03f"
       ],
-      "deliverable": "Split from L03f (2026-10-30): package sections from continuation, locks, drafts and responsibilities in the package",
+      "deliverable": "Split from L03f (2026-10-30): locks, drafts and responsibilities in the package (the sections from the latest continuation are done)",
       "acceptance_and_verification": "A recipient can carry on from the package alone",
       "status": "planned",
       "research_evidence": null,
