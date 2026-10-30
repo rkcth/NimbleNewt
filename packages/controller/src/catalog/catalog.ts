@@ -183,7 +183,15 @@ export class CatalogService {
   readonly #runner: CommandRunner;
   readonly #desks: DeskService;
 
+  readonly #revoked = new Set<(name: string, version: string) => void>();
+
   private constructor(runner: CommandRunner, desks: DeskService) { this.#runner = runner; this.#desks = desks; }
+
+  /**
+   * Tells `listener` (name, version) after a revocation has been committed (T02b: what happens to work in flight is the listener's policy). A repeat of an already-committed revoke tells again, so a listener must be idempotent;
+   * a listener that throws never undoes the revocation. Returns the way to stop listening.
+   */
+  onRevoked(listener: (name: string, version: string) => void): () => void { this.#revoked.add(listener); return () => { this.#revoked.delete(listener); }; }
 
   static withEpoch(storage: ControllerStorage, epoch: number, desks: DeskService, options: RunnerOptions = {}): CatalogService {
     return new CatalogService(new CommandRunner(storage, epoch, options), desks);
@@ -278,6 +286,7 @@ export class CatalogService {
         };
       },
     }));
+    for (const listener of [...this.#revoked]) { try { listener(command.name, command.version); } catch { /* the revocation stands whatever a listener does */ } }
   }
 
   /**

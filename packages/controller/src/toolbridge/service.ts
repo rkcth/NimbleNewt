@@ -77,7 +77,12 @@ export interface ToolExecutionDeps {
   readonly credentials: Pick<TaskCredentialService, "authenticate" | "principalOf" | "agentOf">;
   readonly dispatch: Pick<DispatcherService, "get" | "toolOperation">;
   readonly assignments: Pick<AssignmentService, "getAssignment">;
-  readonly catalog: Pick<CatalogService, "get" | "list" | "register" | "content" | "authorizeRun">;
+  readonly catalog: Pick<CatalogService, "get" | "list" | "register" | "content" | "authorizeRun"> & Partial<Pick<CatalogService, "onRevoked">>;
+  /**
+   * What happens to a catalogue tool call already running when its version is revoked (card T02b): `finish` (the provisional default: the run ends on the bytes it started with; new runs are refused either way)
+   * or `cancel` (the run's signal is aborted and the call ends as failed). Read at the moment of revocation so a setting change applies at once; if it cannot be read, or answers anything else, the run is cancelled (a revocation is a safety act).
+   */
+  readonly revocationPolicy?: () => "finish" | "cancel" | Promise<"finish" | "cancel">;
   readonly hosts: Pick<HostService, "status">;
   readonly admission: Pick<AdmissionService, "snapshot">;
   readonly runner: ScriptRunner;
@@ -118,7 +123,22 @@ export class ToolExecutionService {
   /** What each call ID of an attempt was first used for (a digest of the request), so a provider ID that repeats cannot stand for a different request. Bounded per attempt and overall. */
   readonly #calls = new Map<string, Map<string, { digest: string; inFlight: number; answered: boolean }>>();
 
-  constructor(deps: ToolExecutionDeps) { this.#deps = deps; }
+  /** Runs of the catalogue that have been handed to the runner (or are about to be), by `name|version`, so a revocation can cancel them. */
+  readonly #running = new Map<string, Set<AbortController>>();
+
+  constructor(deps: ToolExecutionDeps) {
+    this.#deps = deps;
+    deps.catalog.onRevoked?.((name, version) => { void this.#revoked(name, version); });
+  }
+
+  async #revoked(name: string, version: string): Promise<void> {
+    const live = this.#running.get(`${name}|${version}`);
+    if (live === undefined || live.size === 0) return;
+    let policy: unknown = "cancel";
+    try { policy = await (this.#deps.revocationPolicy?.() ?? "finish"); } catch { policy = "cancel"; }
+    if (policy === "finish") return;
+    for (const ctl of [...live]) ctl.abort(new Error(`${name} ${version} was revoked while it ran`));
+  }
 
   /**
    * Handles one request from the extension of an attempt. `token` is the worker's task credential; `gateway` is the dispatcher's gateway bound to the attempt. A refusal is an answer (`ok: false`
@@ -361,19 +381,26 @@ export class ToolExecutionService {
         run: async (signal) => {
           // Recorded at the moment it starts: revocation, the grants and the host are asked again, and the version must still be the one that was checked.
           // The access the tool asks for is asked again with the grants as they are now.
+          const own = new AbortController();
+          const set = this.#running.get(`${v.name}|${v.version}`) ?? new Set<AbortController>();
+          set.add(own); this.#running.set(`${v.name}|${v.version}`, set);
+          try {
           const now = await this.#deps.credentials.principalOf(this.#deps.principal, c.attemptId, { limit: false });
           const lost = v.manifest.requestedAccess.filter((action) => !allows(now, action, c.projectId, { resource: { kind: "task", id: c.taskId } }));
           if (lost.length > 0) throw new Error(`the task's credential no longer holds ${lost.slice(0, BRIDGE_LIMITS.access).join(", ")}`);
           const ready = await this.#deps.catalog.authorizeRun(c.agent, { commandId: `bridge-run:${c.attemptId}:${c.callId}`, name: v.name, version: v.version, taskId: c.taskId, projectId: c.projectId, host: facts });
           if (!ready.ready) throw new Error(ready.reasons.join("; "));
           if (ready.digest !== v.digest) throw new Error(`${v.name} ${v.version} changed after it was checked`);
-          const out = await this.#deps.runner.run(launch, signal);
+          if (own.signal.aborted) throw new Error(`${v.name} ${v.version} was revoked before it started`);
+          const out = await this.#deps.runner.run(launch, AbortSignal.any([signal, own.signal]));
+          if (own.signal.aborted) throw new Error(`${v.name} ${v.version} was revoked while it ran`);
           if (Buffer.byteLength(out.text, "utf8") > BRIDGE_LIMITS.output) throw new Error(`the tool wrote more than ${BRIDGE_LIMITS.output} bytes`);
           let parsed: unknown;
           try { parsed = JSON.parse(out.text); } catch { throw new Error("the tool's output is not JSON, as its manifest declares"); }
           const bad = checkValue(v.manifest.output, parsed);
           if (bad.length > 0) throw new Error(`the tool's output does not match its manifest: ${bad.slice(0, 3).join("; ")}`);
           return out;
+          } finally { set.delete(own); if (set.size === 0) this.#running.delete(`${v.name}|${v.version}`); }
         },
       },
     );

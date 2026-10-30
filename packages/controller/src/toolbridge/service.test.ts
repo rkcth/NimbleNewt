@@ -40,6 +40,8 @@ for (const backend of backends) {
     /** Registers a script tool through the bridge as the given session and returns its canonical name. */
     install(s: Session, name: string, version: string, extra?: Record<string, unknown>, source?: string): Promise<string>;
     tick(): Promise<void>;
+    /** What a revocation does to a call already running (T02b); the service reads it at the moment of revocation. */
+    revocation: { mode: "finish" | "cancel" | "broken" };
     /** An unclassified tool is never allowed unasked: the first ask is parked for review, the owner approves it, and the same call is made again. Returns the answer of the call that ran. */
     invoke(s: Session, args: JsonObject, callId?: string): Promise<BridgeResponse>;
     /** The ask and the approval only; the call itself is left to the caller (so it can be held while something else happens). */
@@ -60,10 +62,10 @@ for (const backend of backends) {
         const runner: ScriptRunner = { run: async (launch, signal) => { runs.push(launch); return behave.run(launch, signal); } };
         const hostFacts = { os: "linux" as const, arch: "x64" as const, interpreters: { node: "22.19.0" }, packages: {}, cpus: 8, memoryMb: 16_384 };
         const serviceOver = (dispatcher: DispatcherService, facts?: false): ToolExecutionService =>
-          new ToolExecutionService({ principal: w.dispatcherPrincipal, credentials: w.credentials, dispatch: dispatcher, assignments: w.assignments, catalog, hosts: w.hosts, admission: w.admission, runner, pauses: w.pauses, desks, ...(facts === false ? {} : { facts: async () => hostFacts }), isLocalHost: () => true });
+          new ToolExecutionService({ principal: w.dispatcherPrincipal, credentials: w.credentials, dispatch: dispatcher, assignments: w.assignments, catalog, hosts: w.hosts, admission: w.admission, runner, pauses: w.pauses, desks, revocationPolicy: () => { if (c.revocation.mode === "broken") throw new Error("setting unreadable"); return c.revocation.mode; }, ...(facts === false ? {} : { facts: async () => hostFacts }), isLocalHost: () => true });
         const svc = serviceOver({ get: (...a: Parameters<DispatcherService["get"]>) => c.dispatcher.get(...a), toolOperation: (...a: Parameters<DispatcherService["toolOperation"]>) => c.dispatcher.toolOperation(...a) } as never);
         const c: Ctx = Object.assign(w, {
-          desks, catalog, svc, runs, behave, serviceOver,
+          desks, catalog, svc, runs, behave, serviceOver, revocation: { mode: "finish" as "finish" | "cancel" | "broken" },
           agentFor: async (nm: string, extra: Grant[] = []) => {
             const p = `agent:${nm}`;
             return w.agent(nm, [...workGrants(w.project), { action: "desk.write", project: w.project }, { action: "desk.read", project: w.project }, { action: "catalog.register", project: "*" }, { action: "catalog.read", project: "*" },
@@ -328,6 +330,43 @@ for (const backend of backends) {
     assert.equal(raced["state"], "failed");
     assert.equal(c.runs.length, 1, "only the call before the race ran");
   });
+
+
+  for (const mode of ["finish", "cancel", "broken"] as const) {
+    suite(`T02b: revoking a version while a call of it runs: policy ${mode} ${mode === "finish" ? "lets it end on the bytes it started with" : "aborts it and the call ends as failed"}; a later call is refused either way`, async (c) => {
+      c.revocation.mode = mode;
+      const ann = await c.agentFor("ann");
+      await c.task("t", ann);
+      const out: Record<string, BridgeResponse> = {};
+      let aborted = false;
+      let started!: () => void; const hasStarted = new Promise<void>((r) => { started = r; });
+      let release!: () => void; const gate = new Promise<void>((r) => { release = r; });
+      c.behave.run = async (_l, signal) => {
+        started();
+        await new Promise<void>((resolve) => { signal.addEventListener("abort", () => { aborted = true; resolve(); }); void gate.then(resolve); });
+        return { text: '{"ok":true}', cpuMs: 1 };
+      };
+      c.worker.script = c.session(async (s) => {
+        const name = await c.install(s, "slow", "1.0.0");
+        await c.clear(s, { tool: name, version: "1.0.0", input: { url: "u" } }, "long-call");
+        const running = s.send("tool.invoke", { tool: name, version: "1.0.0", input: { url: "u" } }, "long-call");
+        await hasStarted;
+        await c.catalog.revoke(c.owner, { commandId: uid("rv"), name, version: "1.0.0", reason: "bad" });
+        // A repeat of the same revoke (a replay) does not change anything.
+        await c.catalog.revoke(c.owner, { commandId: uid("rv2"), name, version: "1.0.0", reason: "bad" }).catch(() => undefined);
+        await new Promise((r) => setTimeout(r, 30));
+        out["aborted-before-release"] = { ok: true, result: { aborted } };
+        release();
+        out["running"] = await running;
+        out["later"] = await s.send("tool.invoke", { tool: name, version: "1.0.0", input: { url: "u" } }, "another-call");
+      });
+      await c.tick();
+      assert.equal(good(out["aborted-before-release"]!)["aborted"], mode !== "finish");
+      const ran = good(out["running"]!);
+      assert.equal(ran["state"], mode === "finish" ? "confirmed" : "failed", JSON.stringify(ran));
+      assert.equal(bad(out["later"]!).code, "forbidden");
+    });
+  }
 
   suite("the credential decides who is asking: another agent's, a wrong, an ended or another attempt's credential is refused; a caller cannot name a principal, actor, project or task", async (c) => {
     const ann = await c.agentFor("ann");
