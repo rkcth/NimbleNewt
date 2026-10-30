@@ -129,6 +129,21 @@ test("each tick records the checks that came due and escalates incidents, for ev
   assert.deepEqual(seen, ["check:service:dispatcher:proj-a", "escalate:service:dispatcher:proj-a", "check:service:dispatcher:proj-b", "escalate:service:dispatcher:proj-b"]);
 });
 
+test("a stall concern its supervisor left undecided is told to the owner after the scan, and offered again when the notice fails (card V02b)", async () => {
+  const told: string[] = [];
+  const marked: string[] = [];
+  let fail = true;
+  const c = { id: "stl-1", taskId: "task-1", projectId: "proj-1", kind: "loop", detail: "same test again" };
+  const [, scan] = recoveryLoops({ scan: async () => ({ checked: 0, opened: 0, reopened: 0, cleared: 0, contended: 0 }), escalateUndecided: async () => (marked.includes(c.id) ? [] : [c]) as never, markEscalationNotified: async (_by, id) => { marked.push(id); } }, { runPass: async () => undefined }, async () => undefined, undefined, async (x) => { if (fail) throw new Error("full"); told.push(x.id); });
+  const by = { id: "service:dispatcher", kind: "service" } as never;
+  await assert.rejects(scan!.run(by), /full/);
+  assert.deepEqual([told, marked], [[], []]);
+  fail = false;
+  await scan!.run(by);
+  await scan!.run(by);
+  assert.deepEqual([told, marked], [["stl-1"], ["stl-1"]]);
+});
+
 test("an escalated incident is passed on for a notice, and one project failing does not stop the others being tried (card P04)", async () => {
   const seen: string[] = [];
   const told: string[] = [];

@@ -376,6 +376,34 @@ for (const backend of backends) {
     assert.equal(done.replayed, false);
   });
 
+  suite("a concern left undecided past the wait is passed on to the owner once told; a decision before then or after it still works; an unauthorized caller is refused (card V02b)", async (c) => {
+    const h = await c.host("h1");
+    const t = await c.work();
+    for (let i = 0; i < 6; i++) await c.send(h, t, step("run tests", "tests"));
+    await c.stall.scan(c.owner);
+    assert.deepEqual(await c.stall.escalateUndecided(c.owner), [], "not yet: it was only just suspected");
+    now += 29 * MIN;
+    assert.deepEqual(await c.stall.escalateUndecided(c.owner), []);
+    now += 2 * MIN;
+    const told = await c.stall.escalateUndecided(c.owner);
+    assert.equal(told.length, 1);
+    assert.ok(told[0]!.escalatedAt !== undefined);
+    // Until it is recorded as told it is offered again, and it is not escalated a second time.
+    const again = await c.stall.escalateUndecided(c.owner);
+    assert.deepEqual(again.map((x) => x.id), told.map((x) => x.id));
+    assert.equal(again[0]!.escalatedAt, told[0]!.escalatedAt);
+    await c.stall.markEscalationNotified(c.owner, told[0]!.id);
+    await c.stall.markEscalationNotified(c.owner, told[0]!.id);
+    assert.deepEqual(await c.stall.escalateUndecided(c.owner), []);
+    // A later scan keeps the marks, and the supervisor or owner can still decide it.
+    await c.stall.scan(c.owner);
+    const kept = await c.stall.get(c.owner, told[0]!.id);
+    assert.ok(kept!.escalatedAt !== undefined && kept!.notifiedAt !== undefined);
+    assert.equal((await c.stall.decide(c.owner, { commandId: cid("d"), concernId: kept!.id, expectedRevision: kept!.revision, decision: "confirm", reason: "yes" })).replayed, false);
+    await refuses("forbidden", async () => c.stall.escalateUndecided(await c.plain("ann")));
+    await refuses("forbidden", async () => c.stall.markEscalationNotified(await c.plain("ben"), told[0]!.id));
+  });
+
   suite("suspected stalls and confirmed failures are shown apart; decisions are revisioned, repeatable and survive a restart", async (c) => {
     const h = await c.host("h1");
     const t = await c.work();

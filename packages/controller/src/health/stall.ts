@@ -47,6 +47,10 @@ export interface ConcernBody {
   readonly decision?: string;
   readonly dismissedUntil?: string;
   readonly clearedBecause?: string;
+  /** When the concern had waited too long for a decision and was passed on to the owner (card V02b). */
+  readonly escalatedAt?: string;
+  /** When the owner's notice was sent; the loop offers it again until it is. */
+  readonly notifiedAt?: string;
 }
 
 export type StallEvent =
@@ -79,6 +83,8 @@ export interface StallOptions extends RunnerOptions {
   readonly hostStaleAfterMs?: number;
   /** How long a dismissal silences a concern before a signal that is still bad reopens it. Provisional default 6 hours. */
   readonly dismissForMs?: number;
+  /** How long a suspected concern may wait for its supervisor's decision before the owner is told. Provisional default 30 minutes. */
+  readonly escalateAfterMs?: number;
   /** Whether a pause gate (card L01) applies to the task. A paused task is assessed as `paused`: its silence is expected, and a concern already suspected is cleared. */
   readonly isPaused?: (taskId: string) => Promise<boolean>;
 }
@@ -249,6 +255,7 @@ export class StallService {
   readonly #thresholds: Record<Difficulty, StallThresholds>;
   readonly #hostStaleAfterMs: number;
   readonly #dismissForMs: number;
+  readonly #escalateAfterMs: number;
   readonly #isPaused: ((taskId: string) => Promise<boolean>) | undefined;
   readonly #declared: StallOptions["declaredSpeed"];
   readonly #defaultTps: number;
@@ -261,6 +268,7 @@ export class StallService {
     this.#thresholds = thresholdsFor(options);
     this.#hostStaleAfterMs = options.hostStaleAfterMs ?? DEFAULT_HOST_STALE_AFTER_MS;
     this.#dismissForMs = options.dismissForMs ?? 6 * 3_600_000;
+    this.#escalateAfterMs = options.escalateAfterMs ?? 30 * 60_000;
     this.#isPaused = options.isPaused;
     if (!Number.isSafeInteger(this.#hostStaleAfterMs) || this.#hostStaleAfterMs < 1000) throw new DomainError("invalid_command", "hostStaleAfterMs: must be a whole number of at least 1000", { field: "hostStaleAfterMs" });
     this.#declared = options.declaredSpeed;
@@ -424,7 +432,7 @@ export class StallService {
             continue;
           }
           // Cleared, or a dismissal that has run out: it came back.
-          const { dismissedUntil: _d, clearedBecause: _c, decidedBy: _b, decidedAt: _a, decision: _n, ...rest } = body;
+          const { dismissedUntil: _d, clearedBecause: _c, decidedBy: _b, decidedAt: _a, decision: _n, escalatedAt: _e, notifiedAt: _f, ...rest } = body;
           await this.#write(by, id, found.revision, { ...rest, state: "suspected", detail: concern.detail, difficulty: facts.difficulty, route: facts.route, lastChangedAt: this.#runner.now(), reopened: body.reopened + 1 });
           counts.reopened++;
         } catch (error) { if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict")) counts.contended++; else throw error; }
@@ -492,6 +500,43 @@ export class StallService {
         return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject }], detail: { taskId: body.taskId, kind: body.kind, state: next.state, generation: body.generation } };
       },
     }));
+  }
+
+  /**
+   * Passes on to the owner a concern that has waited past `escalateAfterMs` suspected and undecided (card V02b): it stays routed to its supervisor, who can still decide, and is marked escalated. Returns the
+   * concerns escalated whose notice has not been recorded as sent, oldest first, so a notice that failed is offered again. Needs the same right as the scan.
+   */
+  async escalateUndecided(by: Principal, limit = 100): Promise<(ConcernBody & { id: string; revision: number })[]> {
+    this.#mayScan(by);
+    const after = Date.parse(this.#runner.now()) - this.#escalateAfterMs;
+    for (const c of await this.#suspected(limit)) {
+      if (c.escalatedAt !== undefined || Date.parse(c.lastChangedAt) > after) continue;
+      try { await this.#write(by, c.id, c.revision, { ...c, escalatedAt: this.#runner.now() }); } catch (error) { if (!(error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict"))) throw error; }
+    }
+    return (await this.#suspected(limit)).filter((c) => c.escalatedAt !== undefined && c.notifiedAt === undefined).sort((a, b) => (a.escalatedAt! < b.escalatedAt! ? -1 : 1));
+  }
+
+  /** The suspected concerns, read as the controller (no per-reader filter: the caller is the owner or the recovery service), at most `limit`. */
+  async #suspected(limit: number): Promise<(ConcernBody & { id: string; revision: number })[]> {
+    const out: (ConcernBody & { id: string; revision: number })[] = [];
+    for (let after: string | undefined; out.length < limit;) {
+      const rows = await this.#runner.list("stall-concern", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const row of rows) { after = row.id; const b = row.body as unknown as ConcernBody; if (b.state === "suspected") out.push({ ...b, id: row.id, revision: row.revision }); }
+      if (rows.length < 200) break;
+    }
+    return out.slice(0, limit);
+  }
+
+  /** Records that an escalation's notice was sent. */
+  async markEscalationNotified(by: Principal, concernId: string): Promise<void> {
+    this.#mayScan(by);
+    const found = await this.#concern(concernId);
+    if (found === undefined || found.notifiedAt !== undefined) return;
+    try { await this.#write(by, found.id, found.revision, { ...found, notifiedAt: this.#runner.now() }); } catch (error) { if (!(error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict"))) throw error; }
+  }
+
+  #mayScan(by: Principal): void {
+    if (!(by.kind === "owner" || (by.kind === "service" && (allowsExactly(by, "recovery.stall-scan", "*") || allowsExactly(by, "recovery.read", "*"))))) throw new DomainError("forbidden", `${by.id} may not escalate stall concerns`);
   }
 
   async get(by: Principal, id: string): Promise<View<ConcernBody> | undefined> {
