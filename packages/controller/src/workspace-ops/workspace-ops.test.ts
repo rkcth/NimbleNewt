@@ -59,6 +59,8 @@ for (const backend of backends) {
     const r = await rig(async () => ({}));
     try {
       const seen: { call: WorkspaceCall; frozen: boolean; inFlight: number }[] = [];
+      const openSeen: string[] = [];
+      let svc!: WorkspaceOpService;
       let release!: () => void;
       const later = new Promise<void>((ok) => { release = ok; });
       let secondState = "";
@@ -68,10 +70,16 @@ for (const backend of backends) {
       const host: WorkspacePort = { run: async (call) => {
         const a = (await r.d.get(r.w.owner, r.attemptId))!;
         seen.push({ call, frozen: a.frozen !== undefined, inFlight: a.inFlight.length });
+        const open = await svc.openFor(r.taskId);
+        openSeen.push(open === undefined ? "none" : `${open.operation}:${open.requestedBy}`);
         return { ok: true, summary: "refreshed", detail: { files: 3 } };
       } };
-      const answer = await service(r, host).request(r.w.owner, { commandId: "ws1", operation: "refresh", taskId: r.taskId, reason: "the base moved" });
+      svc = service(r, host);
+      const answer = await svc.request(r.w.owner, { commandId: "ws1", operation: "refresh", taskId: r.taskId, reason: "the base moved" });
       release();
+      // While the host works the operation is a hold on the checkout (named in a hand-off package); afterwards it is not (card L03h).
+      assert.deepEqual(openSeen, [`refresh:${r.w.owner.id}`]);
+      assert.equal(await svc.openFor(r.taskId), undefined);
       assert.deepEqual([answer.state, answer.summary, answer.detail, answer.quietAttempts], ["done", "refreshed", { files: 3 }, [r.attemptId]]);
       assert.deepEqual(seen.map((s) => [s.frozen, s.inFlight, s.call.quietAttempts.length, s.call.operation, s.call.taskId]), [[true, 0, 1, "refresh", r.taskId]], "the call in flight settled before the host was asked");
       assert.equal((await r.d.get(r.w.owner, r.attemptId))!.frozen, undefined, "the attempt is released");

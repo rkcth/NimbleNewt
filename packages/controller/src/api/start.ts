@@ -364,6 +364,20 @@ export async function startController(options: StartOptions): Promise<Controller
       // The sender's own shared drafts and the responsibilities it answers for travel with the task (card L03g), read as the sender.
       drafts: async ({ taskId, projectId, from }) => { const p = await principals.get(`agent:${from.id}`); if (p === undefined) return []; const eff = await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); const all: Awaited<ReturnType<typeof desks.list>>["items"] = []; for (let after: string | undefined, i = 0; i < 20; i++) { const page = await desks.list(eff as never, { ownerId: p.id, projectId, limit: 200, ...(after === undefined ? {} : { afterId: after }) }); all.push(...page.items); after = page.next; if (after === undefined) break; } return all.filter((r) => r.taskId === taskId && r.status === "draft" && r.visibility === "shared").map((r) => ({ id: r.id, title: r.title, body: r.body })); },
       responsibilities: async ({ projectId, from }) => { const p = await principals.get(`agent:${from.id}`); if (p === undefined) return []; const eff = await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); return ((await responsibilities.list(eff as never, projectId, { state: "active" })) ?? []).filter((r) => r.ownerId === p.id).map((r) => ({ id: r.id, title: r.title, desiredCondition: r.desiredCondition, state: r.state })); },
+      locks: async ({ taskId, projectId, from }) => {
+        const p = await principals.get(`agent:${from.id}`); if (p === undefined) return [];
+        const out: string[] = [];
+        // A workspace operation open on the task's checkout that the sender asked for: the checkout is frozen for it until it ends.
+        const op = await workspaceOps.openFor(taskId);
+        if (op !== undefined && op.requestedBy === p.id) out.push(`checkout of ${taskId}: ${op.operation} in progress (request ${op.requestId}, since ${op.at}); it ends or is settled by recovery, it does not pass to the recipient`);
+        // Resource claims held by the responsibilities the sender answers for: the claim belongs to the responsibility, so it stays with the sender until that is reassigned.
+        const eff = await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString());
+        for (const r of (await responsibilities.list(eff as never, projectId, { state: "active" })) ?? []) {
+          if (r.ownerId !== p.id) continue;
+          for (const resourceId of r.managed) { const c = await resources.heldClaim(resourceId); if (c !== undefined && c.responsibilityId === r.id) out.push(`resource ${resourceId}: claimed by responsibility ${r.id}; the claim stays with ${r.id} until it is reassigned`); }
+        }
+        return out;
+      },
       agentState: async (id) => ((await storage.getAggregate({ kind: "agent", id }))?.body as unknown as { state?: "active" | "retired" } | undefined)?.state, canWork: async (agentId, projectId) => { const p = await principals.get(`agent:${agentId}`); if (p === undefined || p.state !== "active") return false; const eff = await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); return allows(eff as never, "attempt.work", projectId); } }) });
     const continuations = ContinuationService.withEpoch(storage, epoch);
     const resumes = ResumeCheckService.withEpoch(storage, epoch, { continuations, dependencies: DependencyService.withEpoch(storage, epoch), blockers: BlockerService.withEpoch(storage, epoch), ports: controllerResumePorts(storage) });

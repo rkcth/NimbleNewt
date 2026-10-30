@@ -725,10 +725,13 @@ for (const backend of backends) {
     const server = await resources.bindResource(owner, { commandId: cid("b"), projectId: p, kind: "service", label: "Server", locator: "ssh://host" } as never);
     const a = await duties.create(owner, { commandId: cid("r"), projectId: p, title: "A", objective: "keep it up", managed: [server.id] } as never);
     await refuses("invalid_command", () => duties.create(owner, { commandId: cid("r"), projectId: p, title: "B", objective: "also", managed: [server.id] } as never), (e) => assert.equal(e.field, "managed"));
+    // The hand-off package names the claim (card L03h): held while the responsibility manages it, and not once it is dropped.
+    assert.deepEqual([(await resources.heldClaim(server.id))?.responsibilityId], [a.id]);
     const b = await duties.create(owner, { commandId: cid("r"), projectId: p, title: "B", objective: "no resources" } as never);
     await refuses("invalid_command", () => duties.update(owner, { commandId: cid("u"), responsibilityId: b.id, expectedRevision: 1, managed: [server.id] } as never), (e) => assert.equal(e.field, "managed"));
     // release by dropping it, then the other may take it
     await duties.update(owner, { commandId: cid("u"), responsibilityId: a.id, expectedRevision: 1, managed: [] } as never);
+    assert.equal(await resources.heldClaim(server.id), undefined, "a dropped claim is not a hold");
     await duties.update(owner, { commandId: cid("u"), responsibilityId: b.id, expectedRevision: 1, managed: [server.id] } as never);
     await refuses("invalid_command", () => duties.update(owner, { commandId: cid("u"), responsibilityId: a.id, expectedRevision: 2, managed: [server.id] } as never));
     // retiring frees it and is final

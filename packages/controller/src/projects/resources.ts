@@ -435,6 +435,12 @@ export class ProjectResourceService {
     return may(by, "resource.read", body.projectId) ? view<ResourceBody>(found) : undefined;
   }
 
+  /** The claim a responsibility holds on a resource, or `undefined` when none is held. For code that builds the services (the hand-off package); takes no caller, so it is not an API operation. */
+  async heldClaim(resourceId: string): Promise<ClaimBody | undefined> {
+    const claim = (await this.#runner.get(CLAIM, resourceIdOf(resourceId)))?.body as unknown as ClaimBody | undefined;
+    return claim !== undefined && claim.state === "held" ? claim : undefined;
+  }
+
   /** A project's bindings in ID order (`state` narrows). `undefined` for a project the caller may not read. Never truncated: more than the scan limit is `unavailable`. */
   async list(by: Principal, projectId: string, filter: { state?: "bound" | "unbound" } = {}): Promise<View<ResourceBody>[] | undefined> {
     const id = checkProjectId(projectId);

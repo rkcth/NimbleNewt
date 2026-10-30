@@ -137,6 +137,18 @@ export class WorkspaceOpService {
     } finally { this.#busy.delete(taskId); }
   }
 
+  /**
+   * The operation open on a task's checkout right now, if any, for code that builds the services (the hand-off package names it as a hold): who asked, what, since when. It takes no caller, so it is not an API
+   * operation. A request that finished, or one left open by a stopped controller and not yet resolved, is told as the index has it (the latter reads as `started`; recovery settles it).
+   */
+  async openFor(taskId: string): Promise<{ readonly requestId: string; readonly operation: WorkspaceOperation; readonly requestedBy: string; readonly at: string } | undefined> {
+    const open = ((await this.#runner.get(OPEN, checkTaskId(taskId)))?.body as unknown as { requestId?: string } | undefined)?.requestId;
+    if (open === undefined) return undefined;
+    const rec = await this.#get(open);
+    if (rec === undefined || (rec.body.state !== "started" && rec.body.state !== "uncertain")) return undefined;
+    return { requestId: open, operation: rec.body.operation, requestedBy: rec.body.requestedBy, at: rec.body.at };
+  }
+
   /** One recorded request. Readable by the caller who could have asked for it. */
   async get(by: Principal, requestId: string): Promise<WorkspaceAnswer | undefined> {
     if (typeof requestId !== "string" || !WORKSPACE_ID.test(requestId)) return undefined;
