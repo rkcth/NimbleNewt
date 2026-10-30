@@ -80,6 +80,20 @@ for (const backend of backends) {
     assert.deepEqual(await again().untold(owner, project), []);
   });
 
+  suite("an incident that alerts as often as the owner set is escalated at once, with no wait for the time, and a rule the owner did not set applies to nothing (card P04c)", async ({ owner, project, inc, make }) => {
+    const often = await make({ escalation: { to: "owner", afterAlerts: 3 } });
+    const timeOnly = await make({ title: "Another duty" });
+    const alert = (r: string, n: number) => inc.report(owner, { commandId: cid(`i${n}`), responsibilityId: r, signature: "s", summary: `again ${n}`, outcome: "failed" });
+    await alert(often, 1); await alert(often, 2);
+    assert.deepEqual(await inc.escalate(owner, project), [], "two alerts are not enough");
+    await alert(often, 3);
+    assert.deepEqual((await inc.escalate(owner, project)).map((i) => [i.responsibilityId, i.count]), [[often, 3]], "the third escalates at once");
+    assert.deepEqual(await inc.escalate(owner, project), [], "once");
+    for (let n = 1; n <= 5; n++) await alert(timeOnly, n);
+    assert.deepEqual(await inc.escalate(owner, project), [], "a duty with only the time rule is not escalated by count");
+    await assert.rejects(() => make({ escalation: { to: "owner", afterAlerts: 1 } }), /afterAlerts/);
+  });
+
   suite("the observed state is unknown without a recent check and never healthy by default; open incidents show as attention or failed", async ({ owner, duties, inc, setNow, make }) => {
     const r = await make();
     assert.deepEqual((await inc.observed(owner, r))!.observed, "unknown", "never checked");

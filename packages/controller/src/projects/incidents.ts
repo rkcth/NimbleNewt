@@ -135,7 +135,11 @@ export class IncidentService {
       const b = a.body as unknown as IncidentBody;
       const duty = await this.#duties.get(by, b.responsibilityId);
       const esc = duty?.escalation;
-      if (esc?.afterMinutes === undefined || now - Date.parse(b.firstAt) < esc.afterMinutes * 60_000) continue;
+      if (esc === undefined) continue;
+      // Either rule is enough: the time since it opened, or the number of times the same trouble alerted (only a rule the owner set applies).
+      const late = esc.afterMinutes !== undefined && now - Date.parse(b.firstAt) >= esc.afterMinutes * 60_000;
+      const often = esc.afterAlerts !== undefined && b.count >= esc.afterAlerts;
+      if (!late && !often) continue;
       const result = await this.#runner.command("responsibility.incident.escalate", { commandId: `resc-${a.id}`, actor: by.id }, async () => ({
         payload: { incidentId: a.id },
         build: async (): Promise<Built> => {

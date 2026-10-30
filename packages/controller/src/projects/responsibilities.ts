@@ -17,6 +17,8 @@ export interface Escalation {
   /** `owner`, or the principal ID of an agent. */
   readonly to: string;
   readonly afterMinutes?: number;
+  /** Escalate once the same trouble has alerted this many times, whatever the time (card P04c); either rule is enough. */
+  readonly afterAlerts?: number;
   readonly note?: string;
 }
 
@@ -112,10 +114,11 @@ function parseWindows(value: unknown): MaintenanceWindow[] {
 function parseEscalation(value: unknown): Escalation {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return invalid("escalation", "must be an object");
   const e = value as Record<string, unknown>;
-  for (const k of Object.keys(e)) if (!["to", "afterMinutes", "note"].includes(k)) invalid(`escalation.${k}`, "is not a field here");
+  for (const k of Object.keys(e)) if (!["to", "afterMinutes", "afterAlerts", "note"].includes(k)) invalid(`escalation.${k}`, "is not a field here");
   return {
     to: text(e["to"], "escalation.to", { min: 1, max: 120 }),
     ...(e["afterMinutes"] === undefined ? {} : { afterMinutes: minutes(e["afterMinutes"], "escalation.afterMinutes") }),
+    ...(e["afterAlerts"] === undefined ? {} : { afterAlerts: typeof e["afterAlerts"] === "number" && Number.isSafeInteger(e["afterAlerts"]) && e["afterAlerts"] >= 2 && e["afterAlerts"] <= 1000 ? e["afterAlerts"] : invalid("escalation.afterAlerts", "must be a whole number of alerts from 2 to 1000") }),
     ...(e["note"] === undefined ? {} : { note: noCredential(text(e["note"], "escalation.note", { min: 1, max: L.note }), "escalation.note") }),
   };
 }
