@@ -2640,3 +2640,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - A stand-up outcome for an inquiry whose asker can never be told (not an agent, retired, not allowed to read the task) is closed instead of retried for ever.
 - Known, not fixed: the activity view with `latest` reads forward from the start (up to 1000 steps) and does not say when it cut off at that limit; its lines cite the task only.
 - Second pass: an answer to an owner's question is shown first unless the owner's words name the question with a word of 4 or more letters; an ID given directly or carried on from a chosen option is shown first too. An outcome whose notice is refused by rights stays waiting (a grant can come back); only a missing task or unacceptable text closes it. Completing or cancelling a hand-off given only by its hand-off ID is always shown first (conservative).
+
+## U12e (part 2): the count of waiting questions in every chat reply
+
+- `ChatDeps.waiting` (composed from the owner's question list, at most 50 counted): every chat reply ends with "N questions from agents are waiting for your answer. Ask what is waiting to see them." when there are any. It is counted live (a replayed turn shows the count at replay time), and a failure to count adds nothing. This is the chat's part of the "Needs you" count; levels and escalation remain U11b.

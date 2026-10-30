@@ -88,3 +88,23 @@ for (const backend of backends) {
     } finally { await w.close(); }
   });
 }
+
+for (const backend of backends) {
+  test(`${backend.name}: every reply ends with how many agent questions wait for the owner, and a failure to count adds nothing (card U12e)`, async () => {
+    const script: Record<string, unknown> = {};
+    const w = await openWorld(backend, script);
+    try {
+      let count: number | Error = 2;
+      const chat = w.chat({ waiting: async () => { if (count instanceof Error) throw count; return count; } });
+      const say = (text: string) => chat.submit(w.ownerToken, { messageId: cid("m"), text });
+      script["hello"] = [];
+      assert.match((await say("hello")).reply.at(-1)!, /^2 questions from agents are waiting for your answer/);
+      count = 1;
+      assert.match((await say("hello again")).reply.at(-1)!, /^1 question from an agent is waiting/);
+      count = 0;
+      assert.ok(!(await say("hello three")).reply.some((l) => /waiting for your answer/.test(l)));
+      count = new Error("down");
+      assert.ok(!(await say("hello four")).reply.some((l) => /waiting for your answer/.test(l)));
+    } finally { await w.close(); }
+  });
+}

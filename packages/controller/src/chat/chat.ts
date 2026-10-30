@@ -158,6 +158,8 @@ export interface ChatDeps {
   readonly policyEdits?: PolicyEditService;
   /** The coordinator (card U03), looked up when used, because it is built after the chat (it proposes through it). Absent, or answering undefined: what is said to the coordinator is refused as unavailable. */
   readonly coordinator?: () => CoordinatorService | undefined;
+  /** How many questions from agents wait for the owner's answer (card U12e). Shown as a last line of every reply, so the owner is never unaware of them. Absent, or failing: nothing is added. */
+  readonly waiting?: (owner: Principal) => Promise<number>;
 }
 
 /**
@@ -261,7 +263,11 @@ export class ChatService {
     }
     if (turn === undefined) throw new DomainError("unavailable", "the turn could not be recorded");
     const finished = turn.status === "done" ? turn : await this.#execute(owner, tok, turnId, turn);
-    return { turnId, replayed, outcomes: finished.outcomes ?? [], reply: replyOf(finished.outcomes ?? []) };
+    const reply = replyOf(finished.outcomes ?? []);
+    let count = 0;
+    try { count = (await this.#deps.waiting?.(owner)) ?? 0; } catch { /* the reply is still given */ }
+    if (count > 0) reply.push(`${count >= 50 ? "50 or more" : count} ${count === 1 ? "question from an agent is" : "questions from agents are"} waiting for your answer. Ask what is waiting to see ${count === 1 ? "it" : "them"}.`);
+    return { turnId, replayed, outcomes: finished.outcomes ?? [], reply };
   }
 
   /** A turn as recorded (the owner only): what was planned and what came of each part, with the command IDs that link it to the audit trail. */
