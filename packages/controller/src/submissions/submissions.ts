@@ -134,17 +134,13 @@ export class SubmissionService {
   readonly #runner: CommandRunner;
   readonly #roles: RolesOf;
   readonly #attemptOf: AttemptOf | undefined;
-<<<<<<< HEAD
   readonly #reviewers: SubmissionOptions["reviewersAvailableIn"];
-  private constructor(runner: CommandRunner, roles: RolesOf, options: SubmissionOptions) { this.#runner = runner; this.#roles = roles; this.#attemptOf = options.attemptOf; this.#reviewers = options.reviewersAvailableIn; }
-=======
-  readonly #allowSelfReview: boolean;
   readonly #assigned: SubmissionOptions["reviewAssignments"];
   readonly #scan: { readonly pageSize: number; readonly reads: number };
   /** Per instance, never stored: a cursor from before a restart or from another instance does not open. */
   readonly #cursorKey = randomBytes(32);
   private constructor(runner: CommandRunner, roles: RolesOf, options: SubmissionOptions) {
-    this.#runner = runner; this.#roles = roles; this.#attemptOf = options.attemptOf; this.#allowSelfReview = options.allowSelfReview === true; this.#assigned = options.reviewAssignments;
+    this.#runner = runner; this.#roles = roles; this.#attemptOf = options.attemptOf; this.#reviewers = options.reviewersAvailableIn; this.#assigned = options.reviewAssignments;
     this.#scan = { pageSize: options.listScan?.pageSize ?? LIST_PAGE, reads: options.listScan?.reads ?? LIST_READS };
   }
 
@@ -187,7 +183,6 @@ export class SubmissionService {
     if (ids.length === 0 || !(await this.#roles(by.id, { projectId: task.projectId, taskId }, by)).includes("reviewer")) return new Set();
     return new Set(ids);
   }
->>>>>>> 58288b3 (Q01c fixes: sealed list cursor, get/list visibility aligned, reviewer reads assigned submission)
 
   static withEpoch(storage: ControllerStorage, epoch: number, roles: RolesOf, options: SubmissionOptions = {}): SubmissionService {
     return new SubmissionService(new CommandRunner(storage, epoch, options), roles, options);
