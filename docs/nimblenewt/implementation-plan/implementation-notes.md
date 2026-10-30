@@ -2882,3 +2882,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 
 - The worker channel has a `compact` request and a `compact.ok` answer (contracts, parsed and round-trip tested). The worker process compacts its stored conversation (`adapter.root().compact()`) and answers with the new size estimate, or a fault with the same ID; the host `WorkerProcess.compact()` asks and the host runtime offers `compact` (optional on `HostRuntime`), which is what `LocalWorker` already calls when `guards.context.admit` refuses the first call (round 1), so an over-budget first call is compacted once and asked again instead of always failing the attempt. Tested in the process (a turn, then compact, then the process answers a checkpoint). Not tested against a real model's summary: the offline model scripts the summary.
 - Still open for H12f: `systemPromptChars` in `ready`, re-checking on a recipe change, a caller for `confirmUsage`, the streaming-call question for `paused`, pause against the real process.
+
+## CI fix after run 41046686337
+
+- The chat hand-off tests used a stub hand-off service without `screen` (added to the state API wrapper for the hand-off package, L03g review); the stubs now have it. Lesson: run `dist/chat` and `dist/status` tests after changing a service the state API wraps. Shard 3 on Ubuntu/Node 22 failed on two PostgreSQL K01 backup tests ("event loop has already resolved", no assertion failure), which passed locally and in earlier runs: treated as the known load flake and re-run.

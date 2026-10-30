@@ -14,6 +14,7 @@ for (const backend of backends) {
     const calls: { method: string; args: Record<string, unknown> }[] = [];
     let going: string | undefined;
     const stub = {
+      screen: (_by: unknown, v: unknown) => v,
       prepare: async (_p: unknown, c: Record<string, unknown>) => { calls.push({ method: "prepare", args: c }); going = "hnd-1"; return { id: "hnd-1", phase: "ready", revision: 1 }; },
       complete: async (_p: unknown, c: Record<string, unknown>) => { calls.push({ method: "complete", args: c }); going = undefined; return { id: c["handoffId"], phase: "transferred", revision: 2 }; },
       cancel: async (_p: unknown, c: Record<string, unknown>) => { calls.push({ method: "cancel", args: c }); going = undefined; return { id: c["handoffId"], phase: "cancelled", revision: 2 }; },
@@ -59,6 +60,7 @@ for (const backend of backends) {
     const script: Record<string, unknown> = {};
     const calls: string[] = [];
     const stub = {
+      screen: (_by: unknown, v: unknown) => v,
       prepare: async () => { calls.push("prepare"); return { id: "hnd-1", phase: "ready", revision: 1 }; },
       complete: async () => { calls.push("complete"); return { id: "hnd-1", phase: "transferred", revision: 2 }; },
       cancel: async () => { calls.push("cancel"); return { id: "hnd-1", phase: "cancelled", revision: 2 }; },
