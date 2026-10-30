@@ -511,6 +511,112 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.status.overview(c.owner, { execution: "dancing" }));
   });
 
+  suite("the attention list names paused assignees, unreachable workers and uncertain tool results, filtered, paged and bounded (card U13)", async (c) => {
+    const server = await c.mcp.register(c.owner, { commandId: cid("rg"), name: "files", mode: "local", transport: "stdio", protocolRevision: "2025-06-18", sdk: SDK, launch: { command: "/opt/mcp/files-server", args: [], env: {}, secretRefs: [] }, audience: [c.project, c.other], allowed: { tools: ["write_file"], resources: [], prompts: [] } } as never);
+    const cat = await c.host("catalog");
+    const snap = await c.mcp.recordCatalog(cat, { commandId: cid("sn"), serverId: server.id, protocolRevision: "2025-06-18", tools: [item("write_file")] });
+    await c.mcp.acceptCatalog(c.owner, { commandId: cid("ac"), serverId: server.id, revision: snap.revision, expectedRevision: 2 });
+    const coder = await c.agent("coder", [{ action: "attempt.work", project: c.project }, { action: "mcp.use", project: c.project }, { action: "history.read", project: c.project }, { action: "attempt.work", project: c.other }, { action: "mcp.use", project: c.other }, { action: "history.read", project: c.other }]);
+    const call = async (t: string, outcome?: "ok" | "uncertain") => {
+      const made = await c.mcp.authorizeCall(coder, { commandId: cid("cl"), serverId: server.id, kind: "tool", name: "write_file", taskId: t });
+      if (outcome !== undefined) await c.mcp.recordOutcome(coder, { commandId: cid("oc"), taskId: t, callId: made.callId, outcome });
+      return made.callId;
+    };
+    const paused = await c.work("paused one", "ann"); await c.seen(paused);
+    await c.pauses.pause(c.owner, { commandId: cid("pz"), scope: { kind: "task", id: paused }, reason: "look first" });
+    const lost = await c.work("lost host", "carl");
+    const h = await c.host("h1");
+    const a2 = (await c.assignments.getAssignment(lost))!;
+    await c.hosts.announce(h, { commandId: cid("an"), capabilities: { os: "linux", arch: "x64", harnesses: [], isolation: [], tools: [], workspaces: [] } });
+    await c.hosts.heartbeat(h, { commandId: cid("hb"), sequence: 1 });
+    await c.stall.report(h, { commandId: cid("rp"), taskId: lost, generation: a2.generation, event: { type: "step", label: "compile" } });
+    const tools = await c.work("tool user", "coder"); await c.seen(tools);
+    const fine = await c.work("tidy", "ann"); await c.seen(fine);
+    const otherTask = await c.work("elsewhere", "coder", c.other); await c.seen(otherTask);
+    now += MIN;
+    const c1 = await call(tools, "ok");
+    const c2 = await call(tools, "uncertain");
+    const c3 = await call(tools);
+    void c1;
+    const o2 = await call(otherTask, "uncertain");
+    now += 2 * MIN; // the host is quiet now; the owner's own sign is still recent enough not to matter to the filters
+    const view = async (q: Record<string, unknown> = {}, by: Principal = c.owner, s: StatusService = c.status) => s.attention(by, { projectId: c.project, ...q } as never);
+    const all = await view();
+    const sorted = (xs: readonly { kind: string; taskId: string }[]) => xs.map((i) => `${i.kind}:${i.taskId}`).sort();
+    assert.deepEqual(sorted(all.items), sorted([{ kind: "paused_assignee", taskId: paused }, { kind: "unreachable_worker", taskId: lost }, { kind: "uncertain_tool_result", taskId: tools }, { kind: "uncertain_tool_result", taskId: tools }]));
+    assert.equal(all.next, undefined);
+    assert.equal(all.scanLimited, undefined);
+    const p = all.items.find((i) => i.kind === "paused_assignee")!;
+    assert.deepEqual([p.agentId, p.taskState, (p.detail["gates"] as unknown[]).length], ["ann", "in_progress", 1]);
+    const u = all.items.find((i) => i.kind === "unreachable_worker")!;
+    assert.deepEqual([u.agentId, u.detail["hostId"], u.detail["reason"]], ["carl", h.id, "quiet"]);
+    const calls = all.items.filter((i) => i.kind === "uncertain_tool_result");
+    assert.deepEqual(calls.map((i) => i.detail["callId"]).sort(), [c2, c3].sort());
+    assert.ok(calls.some((i) => i.detail["outcome"] === "not finished") && calls.some((i) => i.detail["outcome"] === "uncertain"));
+    assert.ok(calls.every((i) => i.agentId === "coder"));
+    // Filters.
+    assert.deepEqual((await view({ kind: "paused_assignee" })).items.map((i) => i.taskId), [paused]);
+    assert.deepEqual((await view({ taskId: lost })).items.map((i) => i.kind), ["unreachable_worker"]);
+    assert.deepEqual((await view({ agentId: "agent:ann" })).items.map((i) => i.taskId), [paused]);
+    assert.deepEqual((await view({ agentId: "coder" })).items.map((i) => i.taskId), [tools, tools], "the agent filter matches the caller of a tool call");
+    assert.deepEqual((await view({ agentId: "carl" })).items.map((i) => i.taskId), [lost]);
+    assert.equal((await view({ state: "ready" })).items.length, 0);
+    assert.equal((await view({ state: "in_progress" })).items.length, 4);
+    assert.deepEqual((await c.status.attention(c.owner, { agentId: "coder", kind: "uncertain_tool_result" })).items.map((i) => i.taskId).sort(), [tools, tools, otherTask].sort(), "the owner may leave the project out");
+    assert.deepEqual((await c.status.attention(c.owner, { projectId: c.other })).items.map((i) => i.detail["callId"]), [o2]);
+    const callAt = calls[0]!.at!;
+    assert.equal((await view({ kind: "uncertain_tool_result", since: callAt })).items.length, 0, "since is exclusive");
+    assert.equal((await view({ kind: "uncertain_tool_result", until: callAt })).items.length, 2, "until is inclusive");
+    assert.equal((await view({ since: at() })).items.length, 0);
+    await refuses("invalid_command", () => view({ since: "2026-10-22T09:00:00.000Z", until: "2026-10-22T08:00:00.000Z" }));
+    // Paging: no item is skipped or repeated, and the cursor holds when an item resolves between pages.
+    const walked: string[] = [];
+    let page = await view({ limit: 1 });
+    for (let i = 0; i < 10; i++) { walked.push(...page.items.map((x) => `${x.kind}:${x.taskId}:${String(x.detail["callId"])}`)); if (page.next === undefined) break; page = await view({ limit: 1, afterId: page.next }); }
+    assert.equal(walked.length, 4);
+    assert.equal(new Set(walked).size, 4);
+    const toolsOnly = await view({ kind: "uncertain_tool_result", limit: 1 });
+    assert.equal(toolsOnly.items.length, 1);
+    const seenCall = String(toolsOnly.items[0]!.detail["callId"]);
+    await c.mcp.recordOutcome(coder, { commandId: cid("oc"), taskId: tools, callId: c3, outcome: "ok" });
+    const rest = await view({ kind: "uncertain_tool_result", limit: 5, afterId: toolsOnly.next! });
+    assert.ok(rest.items.every((i) => i.detail["callId"] !== seenCall), "the item handed out is not repeated");
+    assert.ok(rest.items.every((i) => i.detail["callId"] !== c3), "a call that was resolved is no longer listed");
+    // The scan is bounded: a small budget says so and the cursors still reach everything.
+    const tiny = c.rebuild({ scanPageSize: 1, scanPages: 2 });
+    const cut = await tiny.attention(c.owner, { projectId: c.project, kind: "paused_assignee" });
+    assert.equal(cut.scanLimited, true);
+    assert.ok(cut.next !== undefined);
+    const got = new Set(cut.items.map((i) => i.taskId));
+    let cursor: string | undefined = cut.next;
+    for (let i = 0; i < 30 && cursor !== undefined; i++) { const more = await tiny.attention(c.owner, { projectId: c.project, kind: "paused_assignee", afterId: cursor }); for (const x of more.items) got.add(x.taskId); cursor = more.next; }
+    assert.deepEqual([...got], [paused], "following the cursors reaches the paused task");
+    // A task whose calls exceed the per-task budget is cut with a cursor into its calls.
+    const callsCut = c.rebuild({ scanPageSize: 1, scanPages: 1 });
+    const cc = await callsCut.attention(c.owner, { taskId: tools, kind: "uncertain_tool_result" });
+    assert.equal(cc.scanLimited, true);
+    assert.ok(cc.next !== undefined);
+    // Rights follow the neighbours: task.read alone shows nothing; assignment.read shows pauses and workers; history.read shows calls.
+    const reader = await c.agent("reader", [{ action: "task.read", project: c.project }]);
+    assert.equal((await view({}, reader)).items.length, 0);
+    const assigner = await c.agent("assigner", [{ action: "task.read", project: c.project }, { action: "assignment.read", project: c.project }]);
+    assert.deepEqual(sorted((await view({}, assigner)).items), sorted([{ kind: "paused_assignee", taskId: paused }, { kind: "unreachable_worker", taskId: lost }]));
+    assert.deepEqual((await view({ agentId: "ann" }, reader)).items, [], "an agent filter never matches what the reader cannot see");
+    const historian = await c.agent("historian", [{ action: "task.read", project: c.project }, { action: "history.read", project: c.project }]);
+    assert.deepEqual((await view({}, historian)).items.map((i) => i.detail["callId"]), [c2], "only the call that is still uncertain, and no pauses or workers");
+    assert.equal((await view({ projectId: c.other }, historian)).items.length, 0, "a project the caller may not read is empty");
+    await refuses("forbidden", () => c.status.attention(reader, {}));
+    await refuses("forbidden", () => c.status.attention(reader, { agentId: "ann" }));
+    assert.equal((await c.status.attention(reader, { taskId: paused })).items.length, 0);
+    // Bad input.
+    for (const bad of [{ limit: 0 }, { limit: 101 }, { limit: 1.5 }, { limit: "5" }, { kind: "weird" }, { state: "weird" }, { since: "yesterday" }, { afterId: "nonsense" }, { taskId: paused, afterId: `${lost}|1|` }, { actor: "x" }, { projectId: "nope" }, { taskId: "nope" }]) await refuses("invalid_command", () => c.status.attention(c.owner, { ...(bad as object) } as never));
+    // It writes nothing.
+    const revs = async () => JSON.stringify([(await c.projects.getTask(paused))!.revision, (await c.assignments.getAssignment(paused))!.revision, (await c.assignments.getAssignment(lost))!.revision]);
+    const before = await revs();
+    await view();
+    assert.equal(await revs(), before);
+  });
+
   suite("a routine status question reads records only: nothing is written, nothing is woken", async (c) => {
     const t = await c.work("Quiet");
     await c.seen(t);

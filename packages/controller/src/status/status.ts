@@ -107,6 +107,31 @@ export interface Overview {
   readonly lines: readonly Line[];
 }
 
+export type AttentionKind = "paused_assignee" | "unreachable_worker" | "uncertain_tool_result";
+export const ATTENTION_KINDS: readonly AttentionKind[] = ["paused_assignee", "unreachable_worker", "uncertain_tool_result"];
+export interface AttentionItem {
+  readonly kind: AttentionKind;
+  readonly taskId: string;
+  readonly projectId: string;
+  readonly title: string;
+  readonly taskState: TaskState;
+  /** The task's owner of record (paused_assignee, unreachable_worker) or the caller of the tool (uncertain_tool_result). */
+  readonly agentId?: string;
+  /** When it started or was last seen: the pause time (the task's last change when the gate has none), the last sign of work, or the call time. */
+  readonly at?: string;
+  readonly summary: string;
+  /** paused_assignee: the gates; unreachable_worker: the host and why; uncertain_tool_result: the call. */
+  readonly detail: Readonly<Record<string, unknown>>;
+  readonly cite: Cite;
+}
+export interface Attention {
+  readonly observedAt: string;
+  readonly items: readonly AttentionItem[];
+  readonly next?: string;
+  /** The search stopped before the end (its budget ran out): some items may be missing; ask again from `next`. */
+  readonly scanLimited?: true;
+}
+
 export interface StatusChange { readonly at: string; readonly what: string; readonly summary: string; readonly cite: Cite }
 export interface Changes {
   readonly observedAt: string;
@@ -760,6 +785,127 @@ export class StatusService {
     return line(`${parts.join(", ")}.`, r.cite);
   }
 
+  // ---- what needs attention (card U13) ---------------------------------------------------------------------------------------
+
+  /**
+   * The things in the overview that need a person's eye, as a paged list: assignees whose work is paused, workers (hosts) that reported the work and can no longer be relied on, and tool calls whose result is not known.
+   * Read only, and what the caller may not read reads as missing: each kind rests on the same right as its neighbour (pauses and workers on the right to read the task's assignment, tool calls on the tool-history right),
+   * so an item the caller could not see in `task`, `overview` or `tools` is never listed here and never matched by a filter. Only the owner may leave the project and task out.
+   *
+   * Paging walks the tasks in ID order and each task's items in a fixed order (paused, unreachable, then calls in ID order). The cursor names the last item handed out, so it stays valid when other items appear or disappear
+   * between pages and nothing is skipped or repeated. The scan is bounded: when its budget runs out before the page is full, `scanLimited` is set and `next` continues from the last task that was fully read.
+   * Not included (their data has no service yet): stale artifacts.
+   */
+  async attention(by: Principal, query: { projectId?: string; taskId?: string; agentId?: string; state?: string; kind?: string; since?: string; until?: string; afterId?: string; limit?: number } = {}): Promise<Attention> {
+    onlyKnown(query, ["projectId", "taskId", "agentId", "state", "kind", "since", "until", "afterId", "limit"]);
+    const project = query.projectId === undefined ? undefined : checkProjectId(query.projectId);
+    const taskFilter = query.taskId === undefined ? undefined : checkTaskId(query.taskId);
+    if (project === undefined && taskFilter === undefined && by.kind !== "owner") throw new DomainError("forbidden", `${by.id} must name a project or a task`);
+    const agent = query.agentId === undefined ? undefined : this.#agentFilter(query.agentId);
+    const state = query.state === undefined ? undefined : (TASK_STATES as readonly string[]).includes(query.state) ? query.state as TaskState : invalid("state", `must be one of ${TASK_STATES.join(", ")}`);
+    const kind = query.kind === undefined ? undefined : (ATTENTION_KINDS as readonly string[]).includes(query.kind) ? query.kind as AttentionKind : invalid("kind", `must be one of ${ATTENTION_KINDS.join(", ")}`);
+    const stamp = (name: string, v: string | undefined): string | undefined => v === undefined ? undefined : typeof v === "string" && v.length <= STATUS_LIMITS.since && TIMESTAMP.test(v) ? v : invalid(name, "must be a UTC timestamp such as 2026-10-20T12:00:00.000Z");
+    const since = stamp("since", query.since);
+    const until = stamp("until", query.until);
+    if (since !== undefined && until !== undefined && since > until) invalid("since", "must not be after until");
+    const limit = query.limit === undefined ? 50 : typeof query.limit === "number" && Number.isSafeInteger(query.limit) && query.limit >= 1 && query.limit <= 100 ? query.limit : invalid("limit", "must be a whole number from 1 to 100");
+    let cursor: { taskId: string; rank: number; id: string } | undefined;
+    if (query.afterId !== undefined) {
+      const m = typeof query.afterId === "string" && query.afterId.length <= 400 ? /^(task-[a-z2-7]{20})\|([0-9])\|(.*)$/s.exec(query.afterId) : null;
+      if (m === null) return invalid("afterId", "is not a cursor from an earlier page");
+      cursor = { taskId: checkTaskId(m[1]!), rank: Number(m[2]), id: m[3]! };
+      if (taskFilter !== undefined && cursor.taskId !== taskFilter) invalid("afterId", "is not a cursor for this task");
+    }
+    const want = (k: AttentionKind): boolean => kind === undefined || kind === k;
+    const inRange = (at: string | undefined): boolean => (since === undefined && until === undefined) || (at !== undefined && (since === undefined || at > since) && (until === undefined || at <= until));
+    const now = this.#runner.now();
+    const nowMs = Date.parse(now);
+    const budget = this.#pages * this.#pageSize;
+    let examined = 0;
+    let scanLimited = false;
+    let resume: string | undefined;
+    const found: { item: AttentionItem; key: string }[] = [];
+
+    const visit = async (taskId: string, revision: number, updatedAt: string, body: TaskBody, floor: { rank: number; id: string } | undefined): Promise<void> => {
+      examined++;
+      if ((project !== undefined && body.projectId !== project) || (state !== undefined && body.state !== state) || !this.#mayReadTask(by, body.projectId, taskId)) return;
+      if (floor !== undefined && floor.rank >= 9) return;
+      const base = { taskId, projectId: body.projectId, title: shown(body.title), taskState: body.state } as const;
+      const push = (rank: number, id: string, item: AttentionItem): void => { found.push({ item, key: `${taskId}|${rank}|${id}` }); };
+      const after = (rank: number): boolean => floor === undefined || rank > floor.rank;
+      let assignment: AssignmentBody | undefined;
+      let owner: { kind: string; id: string } | undefined;
+      let paused = false;
+      if (want("paused_assignee") || want("unreachable_worker")) {
+        assignment = await this.#deps.assignments.getAssignment(taskId);
+        if (this.#mayReadAssignment(by, body.projectId, taskId, assignment) && assignment?.state === "assigned" && assignment.owner !== undefined) owner = { kind: assignment.owner.kind, id: assignment.owner.id };
+        paused = owner !== undefined && this.#deps.pauses !== undefined && (await this.#deps.pauses.isPaused(taskId));
+      }
+      const ownerMatches = owner !== undefined && (agent === undefined || (owner.kind === "agent" && owner.id.replace(/^agent:/, "") === agent));
+      const agentId = owner === undefined ? undefined : owner.id.replace(/^agent:/, "");
+      if (want("paused_assignee") && ownerMatches && paused && after(0)) {
+        const gates = (this.#deps.pauses === undefined ? undefined : await this.#deps.pauses.status(by, taskId))?.gates ?? [];
+        const sinces = gates.flatMap((g) => g.gate.pausedAt === undefined ? [] : [g.gate.pausedAt]).sort();
+        const at = sinces[0] ?? updatedAt;
+        if (inRange(at)) push(0, "", { kind: "paused_assignee", ...base, agentId: agentId!, at, summary: `${base.title} is paused; its owner ${agentId} is not working on it meanwhile.`, detail: { gates: gates.map((g) => ({ scope: `${g.scope.kind} ${g.scope.id}`, ...(g.gate.pausedAt === undefined ? {} : { since: g.gate.pausedAt }), ...(g.gate.owner === undefined ? {} : { by: g.gate.owner }), ...(g.gate.observed === undefined ? {} : { observed: g.gate.observed.state }) })) }, cite: cite("task", taskId, revision) });
+      }
+      if (want("unreachable_worker") && ownerMatches && !paused && assignment?.activeAttemptId !== undefined && after(1)) {
+        const attempt = await this.#deps.assignments.getAttempt(assignment.activeAttemptId);
+        const facts = await this.#execution(body, taskId, assignment, attempt, nowMs, false);
+        const host = facts.observation?.by;
+        const problem = facts.state === "unknown" && host !== undefined && host.startsWith("host:") ? await this.#hostProblem(host, nowMs) : undefined;
+        if (problem !== undefined && inRange(facts.observation!.at)) push(1, "", { kind: "unreachable_worker", ...base, agentId: agentId!, at: facts.observation!.at, summary: `${base.title}: the host ${shown(host!, 80)} that reported the work ${problem === "revoked" ? "has been revoked" : "has not been heard from lately"}, so it is not known whether the work goes on.`, detail: { hostId: shown(host!, 80), reason: problem }, cite: cite("task", taskId, revision) });
+      }
+      if (want("uncertain_tool_result") && this.#mayReadTools(by, body.projectId, taskId) && (floor === undefined || floor.rank <= 2)) {
+        let from = floor !== undefined && floor.rank === 2 ? floor.id : undefined;
+        for (let reads = 0; ; reads++) {
+          if (reads >= this.#pages) { scanLimited = true; resume = `${taskId}|2|${from ?? ""}`; break; }
+          const page = await this.#runner.list(`mcp-call-${taskId}`, { ...(from === undefined ? {} : { afterId: from }), limit: this.#pageSize });
+          for (const a of page) {
+            from = a.id;
+            examined++;
+            const c = a.body as unknown as CallBody;
+            if (!(c.uncertain === true || c.state === "started") || !inRange(c.at)) continue;
+            if (agent !== undefined && c.by.replace(/^agent:/, "") !== agent) continue;
+            const cap = `${c.capability.kind}:${shown(c.capability.name, 120)}`;
+            push(2, a.id, { kind: "uncertain_tool_result", ...base, agentId: shown(c.by.replace(/^agent:/, ""), 80), at: c.at, summary: `${shown(c.serverName, 80)} ${cap} was called on ${base.title}; ${c.state === "started" && c.outcome === undefined ? "it has not reported an outcome" : "it is not known whether it took effect"}.`, detail: { callId: a.id, server: shown(c.serverName, 80), capability: cap, outcome: c.outcome ?? "not finished", protocolRevision: c.protocolRevision, catalogRevision: c.catalogRevision }, cite: cite(`mcp-call-${taskId}`, a.id) });
+            if (found.length > limit) return;
+          }
+          if (page.length < this.#pageSize) break;
+        }
+      }
+    };
+
+    let lastDone: string | undefined;
+    let ended = false;
+    const first = taskFilter ?? cursor?.taskId;
+    if (first !== undefined) {
+      const t = await this.#runner.get("task", first);
+      if (t !== undefined) await visit(first, t.revision, t.updatedAt, t.body as unknown as TaskBody, cursor !== undefined && cursor.taskId === first ? cursor : undefined);
+      lastDone = first;
+      if (resume !== undefined) ended = true;
+      if (taskFilter !== undefined) ended = true;
+    }
+    let listAfter = taskFilter === undefined ? cursor?.taskId : undefined;
+    scan: while (!ended && found.length <= limit) {
+      const page = await this.#runner.list("task", { ...(listAfter === undefined ? {} : { afterId: listAfter }), limit: this.#pageSize });
+      for (const aggregate of page) {
+        if (found.length > limit) break scan;
+        if (examined >= budget) { scanLimited = true; break scan; }
+        listAfter = aggregate.id;
+        await visit(aggregate.id, aggregate.revision, aggregate.updatedAt, aggregate.body as unknown as TaskBody, undefined);
+        if (found.length <= limit) lastDone = aggregate.id;
+        if (resume !== undefined) break scan;
+      }
+      if (page.length < this.#pageSize) ended = true;
+    }
+    let next: string | undefined;
+    if (found.length > limit) next = found[limit - 1]!.key;
+    else if (resume !== undefined) next = resume;
+    else if (scanLimited && lastDone !== undefined) next = `${lastDone}|9|`;
+    return { observedAt: now, items: found.slice(0, limit).map((f) => f.item), ...(next === undefined ? {} : { next }), ...(scanLimited ? { scanLimited: true as const } : {}) };
+  }
+
   // ---- what changed ------------------------------------------------------------------------------------------------------------
 
   /**
@@ -1150,13 +1296,19 @@ export class StatusService {
     // A host that reported for the owner and has gone quiet, or whose identity was revoked, makes a fresh-looking sign less certain.
     const by = facts.observation?.by;
     if (by !== undefined && by.startsWith("host:") && facts.state === "working") {
-      const principal = (await this.#runner.get("principal", by))?.body as unknown as PrincipalBody | undefined;
-      const record = (await this.#runner.get("host-record", by))?.body as unknown as { lastSeenAt?: string } | undefined;
-      const hostFresh = hostFreshness(record?.lastSeenAt, new Date(nowMs).toISOString(), this.#options.hostStaleAfterMs ?? DEFAULT_HOST_STALE_AFTER_MS);
-      if (principal?.state === "disabled") return { state: "unknown", ...(facts.observation === undefined ? {} : { observation: facts.observation }), uncertainty: [...facts.uncertainty, `the host ${by} that reported the work has been revoked`] };
-      if (hostFresh !== "fresh") return { state: "unknown", ...(facts.observation === undefined ? {} : { observation: facts.observation }), uncertainty: [...facts.uncertainty, `the host ${by} that reported the work has not been heard from lately`] };
+      const problem = await this.#hostProblem(by, nowMs);
+      if (problem === "revoked") return { state: "unknown", ...(facts.observation === undefined ? {} : { observation: facts.observation }), uncertainty: [...facts.uncertainty, `the host ${by} that reported the work has been revoked`] };
+      if (problem === "quiet") return { state: "unknown", ...(facts.observation === undefined ? {} : { observation: facts.observation }), uncertainty: [...facts.uncertainty, `the host ${by} that reported the work has not been heard from lately`] };
     }
     return facts;
+  }
+
+  /** Whether a host that reported work can still be relied on: its identity revoked, or not heard from within the freshness window. */
+  async #hostProblem(hostId: string, nowMs: number): Promise<"revoked" | "quiet" | undefined> {
+    const principal = (await this.#runner.get("principal", hostId))?.body as unknown as PrincipalBody | undefined;
+    const record = (await this.#runner.get("host-record", hostId))?.body as unknown as { lastSeenAt?: string } | undefined;
+    const fresh = hostFreshness(record?.lastSeenAt, new Date(nowMs).toISOString(), this.#options.hostStaleAfterMs ?? DEFAULT_HOST_STALE_AFTER_MS);
+    return principal?.state === "disabled" ? "revoked" : fresh !== "fresh" ? "quiet" : undefined;
   }
 
   #ownerLines(taskId: string, assignment: View<AssignmentBody> | undefined, owner: TaskStatus["owner"], execution: ExecutionFacts, attempt: View<AttemptBody> | undefined, pause: PauseStatus | undefined): Line[] {

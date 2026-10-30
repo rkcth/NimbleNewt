@@ -660,6 +660,24 @@ Arguments:
 
 Result: `{ item }`: `{ observedAt, lines, ... }`, or `not_found` when the subject (a task, a failed handling) is missing or unreadable; a view of a project the caller may not read is empty.
 
+#### `status.attention`
+
+What in the overview needs a person's eye, as a paged list: assignees whose work is paused (`paused_assignee`), workers that reported the work and can no longer be relied on, a host not heard from or revoked (`unreachable_worker`), and tool calls whose result is not known (`uncertain_tool_result`). Read only. Each kind needs the same right as its neighbour (pauses and workers: the right to read the task's assignment; tool calls: the tool-history right on the task); what the caller may not see is never listed. Only the owner may leave out both `projectId` and `taskId`. Stale artifacts are not covered yet.
+
+Arguments:
+
+- `projectId` (optional): only this project
+- `taskId` (optional): only this task
+- `agentId` (optional): only this agent (the task's owner of record, or the caller of the tool)
+- `state` (optional): only tasks in this state
+- `kind` (optional): `paused_assignee`, `unreachable_worker` or `uncertain_tool_result`
+- `since` (optional): only items after this UTC time (the pause time, the last sign of work, the call time)
+- `until` (optional): only items up to this UTC time
+- `limit` (optional): 1 to 100, default 50
+- `after` (optional): the `next` of the previous page
+
+Result: `{ observedAt, items, next?, scanLimited? }`; each item has `kind`, `taskId`, `projectId`, `title`, `taskState`, `agentId?`, `at?`, `summary`, `detail` and `cite`; `scanLimited` means the search stopped before the end: ask again from `next`.
+
 #### `budget.pending`
 
 The open requests for more budget addressed to you (the owner: those that went to the owner), with whether the list may be partial.
