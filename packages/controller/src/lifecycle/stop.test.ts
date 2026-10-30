@@ -167,6 +167,17 @@ for (const backend of backends) {
     assert.equal((await reopened.get(c.owner, intentId))?.outcome?.state, "stopped");
   });
 
+  suite("when more attempts are seen than the record can hold, the newest are kept", async (c) => {
+    c.rt.crashOnTerminate = true;
+    c.rt.seenAttempts = Array.from({ length: 105 }, (_, i) => `att-${String(i).padStart(3, "0")}`);
+    const { intentId } = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "stop" });
+    void c.stops.advance(c.owner, { intentId }).catch(() => undefined);
+    for (let i = 0; i < 400 && c.rt.count("terminate") === 0; i++) await new Promise((r) => setTimeout(r, 25));
+    const kept = (await c.stops.get(c.owner, intentId) as unknown as { attempts?: string[] }).attempts!;
+    assert.equal(kept.length, 100);
+    assert.deepEqual([kept[0], kept.at(-1)], ["att-005", "att-104"], "the oldest five were dropped, not the newest");
+  });
+
   suite("work that will not settle blocks the request and is never called suspended; the owner may wait, restart from an earlier boundary or force stop", async (c) => {
     c.rt.items = [{ kind: "process", ref: "pid-7", state: "uncooperative" }];
     c.rt.cleanups = [{ remaining: [{ kind: "process", ref: "pid-7", state: "uncooperative" }] }];

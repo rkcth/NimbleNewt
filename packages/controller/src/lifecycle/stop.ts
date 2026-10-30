@@ -249,7 +249,7 @@ export class StopService {
         }
         // The attempts the runtime saw are recorded, so a restart still asks about a process of one that has ended since.
         const seenNow = this.#ports.attempts?.(b.scope) ?? [];
-        if (seenNow.some((a) => !(b.attempts ?? []).includes(a))) await this.#update(id, (x) => ({ ...x, attempts: [...new Set([...(x.attempts ?? []), ...seenNow])].slice(0, STOP_LIMITS.inventory) }), ["preparing"]);
+        if (seenNow.some((a) => !(b.attempts ?? []).includes(a))) await this.#update(id, (x) => ({ ...x, attempts: [...new Set([...(x.attempts ?? []), ...seenNow])].slice(-STOP_LIMITS.inventory) }), ["preparing"]);
         // Something else (a Force Stop, a choice, a resume) may have moved the request while the cleanup ran: then this pass is stale and does nothing more.
         if (((await this.#runner.get(KIND, id))?.body as unknown as StopIntentBody | undefined)?.phase !== "preparing") continue;
         const spent = b.spent + (result.spent ?? 0);

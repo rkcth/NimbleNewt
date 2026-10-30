@@ -485,9 +485,10 @@ export class StatusService {
     };
     const all: NeedItem[] = [];
     if (this.#deps.ownerQuestions !== undefined) {
-      const asked = await this.#deps.ownerQuestions.ownerQuestions(by, { limit: 50 });
-      if (asked.next !== undefined) truncated.push("questions");
-      for (const q of asked.items) {
+      // Ask for one beyond the room: the service reports `next` once it has `limit` items even when nothing follows, so exactly 50 must not look like more.
+      const asked = await this.#deps.ownerQuestions.ownerQuestions(by, { limit: 51 });
+      if (asked.items.length > 50) truncated.push("questions");
+      for (const q of asked.items.slice(0, 50)) {
         all.push({ text: `${shown(q.asker)} asks about "${shown(q.task.title)}": "${shown(q.question)}" (answer the question)`, cites: [cite("inquiry", q.inquiryId, q.revision), cite("task", q.task.id)], taskId: q.task.id, since: q.askedAt, id: q.inquiryId });
       }
     }

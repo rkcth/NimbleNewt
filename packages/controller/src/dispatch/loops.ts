@@ -289,7 +289,7 @@ export function responsibilityLoops(checks: { generate(by: Principal, projectId:
         await incidents.escalate(by, projectId);
         // A notice that could not be sent is offered again next tick: an escalation is told once it has been told, not once it was recorded.
         // One incident whose notice fails does not hold back the others of the project; the first error is raised after all have been tried.
-        if (notify !== undefined) for (const e of await incidents.untold(by, projectId)) { try { await notify(e); await incidents.markNotified(by, e.id); } catch (error) { failure ??= error; } }
+        if (notify !== undefined) for (const e of await incidents.untold(by, projectId)) { try { try { await notify(e); } catch (error) { if (!(error instanceof DomainError && error.code === "command_conflict")) throw error; /* the notice was already committed under this id: it is sent */ } await incidents.markNotified(by, e.id); } catch (error) { failure ??= error; } }
       } catch (error) { failure ??= error; }
     }
     if (failure !== undefined) throw failure;

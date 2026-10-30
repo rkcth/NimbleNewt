@@ -165,6 +165,8 @@ export class IncidentService {
   /** Records that an escalation's notice was sent (once; repeating changes nothing). */
   async markNotified(by: Principal, incidentId: string): Promise<void> {
     if (!(by.kind === "owner" || by.kind === "service")) throw hidden(by, "record notices");
+    for (let attempt = 0; ; attempt++) {
+      try {
     await this.#runner.command("responsibility.incident.notified", { commandId: `rinn-${incidentId}`, actor: by.id }, async () => ({
       payload: { incidentId },
       build: async (): Promise<Built> => {
@@ -175,6 +177,9 @@ export class IncidentService {
         return { ref: { kind: INCIDENT, id: incidentId }, creates: false, changes: [{ type: "update", ref: { kind: INCIDENT, id: incidentId }, expectedRevision: found.revision, body: next as unknown as JsonObject }], detail: {} };
       },
     }));
+        return;
+      } catch (error) { if (!(error instanceof DomainError) || (error.code !== "stale_revision" && error.code !== "command_conflict") || attempt >= 6) throw error; }
+    }
   }
 
   /** The incidents of a project, open first then newest, optionally only the open ones. `undefined` for a project the caller may not read. */

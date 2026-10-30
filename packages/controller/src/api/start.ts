@@ -415,7 +415,8 @@ export async function startController(options: StartOptions): Promise<Controller
     if (options.dispatch !== undefined) {
       try {
         dispatch = await composeDispatch({ storage, epoch, workspaceOps, stops, records, responsibilities: { checks: responsibilityChecks, incidents, notify: async (e) => {
-          const detail = `An incident on a responsibility (${e.signature}, ${e.count} alert${e.count === 1 ? "" : "s"}) is still open past its escalation time.`;
+          // The text must not change between ticks (no alert count): the command ids are fixed, so a retry after a failed markNotified must carry the same payload.
+          const detail = `An incident on a responsibility (${e.signature}) is still open past its escalation time.`;
           if (e.escalatedTo === "owner") await notifications.emitFromController({ commandId: `inc-esc-${e.id}`, kind: "maintenance", ref: { kind: "responsibility-incident", id: e.id }, projectId: e.projectId, detail });
           // An agent is told through its inbox, as a budget holder is: the notice is filed about a task the agent holds in the project (an incident has none), and with none it is retried each tick.
           else if (e.escalatedTo?.startsWith("agent:")) {

@@ -3014,3 +3014,11 @@ Depends on branches `wip/nn-sa-lift1793371678` (the index) and `wip/nn-sa-rt1793
 - `#retire` now swallows only lost-race outcomes (`invalid_command`, `stale_revision`, `command_conflict`, `not_found`); `stale_epoch`/`unavailable` propagate.
 - `liftDue` no longer calls `#retire` after `#request`, which already retires the entry in the same operation.
 - Tests in `pause-lift-scan.test.ts`: untimed-index gate lifted by first tick and marker set, second tick lists no gates; three concurrent ticks building the index are harmless. The existing scan test does one warm-up tick first.
+
+## Review fixes: incident notice, swarm orphan claims, settled notifications, small limits
+
+- Incident notice: the text no longer carries the alert count, so the fixed command id `inc-esc-<id>` always has the same payload; the responsibility loop treats `command_conflict` from the notice as already sent and still calls `markNotified`; `markNotified` retries on `stale_revision`/`command_conflict` (6 attempts).
+- Swarm: when `#abandon` cannot cancel the child, its claim is dropped from the parent's gate record (`swarm.release`, retried on contention), so an unlinked orphan no longer holds a place for good. Dead `#liveChildren` removed.
+- Notifications: `#closeSettled` now closes a digest whose items are all answered or settled, and drops a settled item's pending external delivery (marked failed, kept out of the failed list).
+- Status: owner questions are read with limit 51; only more than 50 items is flagged truncated, so exactly 50 is not.
+- Stop: the recorded attempt list keeps the newest 100 ids, not the oldest.

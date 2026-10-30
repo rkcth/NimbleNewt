@@ -170,6 +170,24 @@ test("an escalated incident is passed on for a notice, and one project failing d
   assert.deepEqual(told, ["rinc-1"], "and not told twice");
 });
 
+test("a notice that committed but whose marking failed is not sent twice: the repeat's command_conflict counts as already sent (card P04c)", async () => {
+  const committed = new Map<string, string>();
+  let count = 2; let marks = 0; let failMark = true; let notices = 0;
+  const marked: string[] = [];
+  const e = () => ({ id: "rinc-1", projectId: "proj-a", escalatedTo: "agent:a", signature: "disk", responsibilityId: "rsp-1", count });
+  const [loop] = responsibilityLoops({ generate: async () => [] }, { escalate: async () => [], untold: async () => (marked.includes("rinc-1") ? [] : [e()]), markNotified: async (_by, id) => { marks++; if (failMark) { failMark = false; throw new Error("storage busy"); } marked.push(id); } }, async () => ["proj-a"], async (x) => {
+    // The command id is fixed, so a changed payload is refused as a conflict (as the real notice is).
+    const text = `${x.signature}:${x.count}`;
+    const had = committed.get(`inc-esc-${x.id}`);
+    if (had !== undefined && had !== text) throw new DomainError("command_conflict", "used for a different command");
+    if (had === undefined) { committed.set(`inc-esc-${x.id}`, text); notices++; }
+  });
+  await assert.rejects(loop!.run({ id: "service:dispatcher", kind: "service" } as never), /storage busy/);
+  count = 3;
+  await loop!.run({ id: "service:dispatcher", kind: "service" } as never);
+  assert.deepEqual([notices, marks, marked], [1, 2, ["rinc-1"]], "one notice, marked on the second tick");
+});
+
 test("one incident whose notice fails does not hold back the others of its project, and each is told and marked once (card P04c)", async () => {
   const mk = (id: string) => ({ id, projectId: "proj-a", escalatedTo: "agent:a", signature: "disk", responsibilityId: "rsp-1", count: 2 });
   const marked: string[] = [];

@@ -294,7 +294,7 @@ export class NotificationService {
       try { await this.#answer(owner, { commandId: `${command.commandId}.${itemId}`, itemId, answer: given?.answer, revision: given?.revision }); answered.push(itemId); }
       catch (error) { refused.push({ itemId, reason: error instanceof Error ? redactText(error.message).slice(0, 200) : "refused" }); }
     }
-    await this.#closeDigestIfDone(owner, command.digestId, command.commandId);
+    await this.#closeDigestIfDone(owner.id, command.digestId, command.commandId);
     return { answered, refused };
   }
 
@@ -304,7 +304,7 @@ export class NotificationService {
     onlyKnown(command, ["commandId", "itemId", "answer", "revision"]);
     await this.#answer(owner, command);
     const item = (await this.#runner.get("notification-item", command.itemId))?.body as unknown as ItemBody | undefined;
-    if (item?.digestId !== undefined) await this.#closeDigestIfDone(owner, item.digestId, command.commandId);
+    if (item?.digestId !== undefined) await this.#closeDigestIfDone(owner.id, item.digestId, command.commandId);
   }
 
   /** What is waiting for the owner: unanswered items and open digests (owner only). */
@@ -454,16 +454,22 @@ export class NotificationService {
       if (item.state === "answered" || item.state === "settled" || !WAITS_ON_OWNER.has(item.kind)) continue;
       try {
         try { await this.#describe(item.kind, item.ref, item.projectId); continue; } catch (error) { if (!(error instanceof DomainError && (error.code === "not_found" || error.code === "invalid_command"))) throw error; }
+        // An urgent or immediate item may still have an external message waiting to go out: it is dropped, since the owner has nothing left to answer.
+        const waiting = (await this.#load<DeliveryBody>("notification-delivery", (await this.#index()).body.deliveries)).filter((d) => d.subject.kind === "item" && d.subject.id === item.id && d.state === "pending");
         await this.#apply("notification.settle", { commandId: `settle-${item.id}-${item.firstAt}`, actor: "notifications" }, { id: item.id }, async (index) => {
           const current = await this.#runner.get("notification-item", item.id);
           const body = current?.body as unknown as ItemBody | undefined;
           if (current === undefined || body === undefined || body.state === "answered" || body.state === "settled") return undefined;
           const ref: AggregateRef = { kind: "notification-item", id: item.id };
+          const dropped: Change[] = [];
+          for (const d of waiting) { const cur = await this.#runner.get("notification-delivery", d.id); if (cur !== undefined && (cur.body as unknown as DeliveryBody).state === "pending") dropped.push({ type: "update", ref: { kind: "notification-delivery", id: d.id }, expectedRevision: cur.revision, body: { ...(cur.body as unknown as DeliveryBody), state: "failed", lastError: "the item was settled before this was sent" } as unknown as JsonObject }); }
           return { ref, creates: false, changes: [
             { type: "update", ref, expectedRevision: current.revision, body: { ...body, state: "settled", settledAt: now } as unknown as JsonObject },
-            this.#indexChange(index, { items: without(index.body.items, item.id) }),
+            ...dropped,
+            this.#indexChange(index, { items: without(index.body.items, item.id), deliveries: index.body.deliveries.filter((id) => !waiting.some((d) => d.id === id)) }),
           ], detail: { settled: true } };
         });
+        if (item.digestId !== undefined) await this.#closeDigestIfDone("notifications", item.digestId, `settle-${item.id}`);
       } catch (error) { problem ??= error; }
     }
     if (problem !== undefined) throw problem;
@@ -578,11 +584,11 @@ export class NotificationService {
     });
   }
 
-  async #closeDigestIfDone(owner: Principal, digestId: string, commandId: string): Promise<void> {
+  async #closeDigestIfDone(actorId: string, digestId: string, commandId: string): Promise<void> {
     const digest = (await this.#runner.get("notification-digest", digestId))?.body as unknown as DigestBody | undefined;
     if (digest === undefined || digest.state === "answered") return;
     for (const id of digest.itemIds) { const state = ((await this.#runner.get("notification-item", id))?.body as unknown as ItemBody | undefined)?.state; if (state !== "answered" && state !== "settled") return; }
-    await this.#apply("notification.digest-done", { commandId: scopedCommandId(owner.id, `${commandId}.done.${digestId}`), actor: owner.id }, { digestId }, async (index) => {
+    await this.#apply("notification.digest-done", { commandId: scopedCommandId(actorId, `${commandId}.done.${digestId}`), actor: actorId }, { digestId }, async (index) => {
       const current = (await this.#runner.get("notification-digest", digestId))!;
       const ref: AggregateRef = { kind: "notification-digest", id: digestId };
       return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: { ...(current.body as unknown as DigestBody), state: "answered" } as unknown as JsonObject }, this.#indexChange(index, { digests: without(index.body.digests, digestId) })], detail: {} };

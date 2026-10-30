@@ -68,7 +68,7 @@ export class SwarmService {
     // A replay of a spawn that completed finds the child already linked and has nothing more to do.
     if (created.replayed && (await this.#runner.get(LINK, childId)) !== undefined) return { taskId: childId, replayed: true };
     // The count and the claim of a place commit together (a check on the parent's gate record), so spawns sent at the same moment cannot all pass.
-    await this.#reserve(parentId, childId, limits.children).catch(async (error: unknown) => { await this.#abandon(by, childId); throw error; });
+    await this.#reserve(parentId, childId, limits.children).catch(async (error: unknown) => { await this.#abandon(by, childId, parentId); throw error; });
     try {
       if (command.expectedResult !== undefined || (command.acceptanceCriteria?.length ?? 0) > 0) {
         await this.#deps.contracts.setContract(by, { commandId: scopedCommandId(by.id, `${command.commandId}:contract`), taskId: childId, expectedVersion: 0, ...(command.expectedResult === undefined ? {} : { expectedResult: command.expectedResult }), ...(command.acceptanceCriteria === undefined ? {} : { acceptanceCriteria: command.acceptanceCriteria }) } as never)
@@ -76,7 +76,7 @@ export class SwarmService {
       }
       await this.#deps.budgets.delegate(by, { commandId: `${command.commandId}:budget`, parentTaskId: parentId, childTaskId: childId, ...(command.costMicros === undefined ? {} : { costMicros: command.costMicros }), ...(command.computeMs === undefined ? {} : { computeMs: command.computeMs }) });
     } catch (error) {
-      await this.#abandon(by, childId);
+      await this.#abandon(by, childId, parentId);
       throw error;
     }
     const ref: AggregateRef = { kind: LINK, id: childId };
@@ -150,14 +150,6 @@ export class SwarmService {
     return depth;
   }
 
-  async #liveChildren(parentId: string): Promise<number> {
-    const parent = await this.#deps.projects.getTask(parentId);
-    if (parent === undefined) return 0;
-    let n = 0;
-    for (const l of await this.#links(parent.projectId)) if (l.parentTaskId === parentId && !FINAL.has((await this.#deps.projects.getTask(l.id))?.state ?? "cancelled")) n++;
-    return n;
-  }
-
   /** Claims one of the parent's places for the child, or refuses when its live children (linked or claimed) are at the limit; a spawn that meets another's claim at the same moment counts again. */
   async #reserve(parentId: string, childId: string, max: number): Promise<void> {
     const ref: AggregateRef = { kind: GATE, id: parentId };
@@ -190,10 +182,35 @@ export class SwarmService {
     }
   }
 
-  /** A child made before a refusal does not stay behind as a task with no allowance. */
-  async #abandon(by: Principal, childId: string): Promise<void> {
+  /** A child made before a refusal does not stay behind as a task with no allowance. When it cannot be cancelled its claim is dropped from the parent's gate record instead, so an unlinked orphan never holds a place for good. */
+  async #abandon(by: Principal, childId: string, parentId: string): Promise<void> {
     const task = await this.#deps.projects.getTask(childId);
     if (task === undefined || FINAL.has(task.state)) return;
-    await this.#deps.projects.transitionTask({ commandId: scopedCommandId(by.id, `swarm-abandon:${childId}`), actor: by.id, taskId: childId, expectedRevision: task.revision, to: "cancelled" } as never).catch(() => undefined);
+    const cancelled = await this.#deps.projects.transitionTask({ commandId: scopedCommandId(by.id, `swarm-abandon:${childId}`), actor: by.id, taskId: childId, expectedRevision: task.revision, to: "cancelled" } as never).then(() => true, () => false);
+    if (!cancelled) await this.#release(parentId, childId).catch(() => undefined);
+  }
+
+  /** Removes one child's claim from the parent's gate record. */
+  async #release(parentId: string, childId: string): Promise<void> {
+    const ref: AggregateRef = { kind: GATE, id: parentId };
+    for (let attempt = 0; ; attempt++) {
+      const gate = await this.#runner.get(GATE, parentId);
+      const claimed = ((gate?.body as { children?: string[] } | undefined)?.children) ?? [];
+      if (gate === undefined || !claimed.includes(childId)) return;
+      try {
+        await this.#runner.command("swarm.release", { commandId: `swr-${childId}`, actor: "system" }, async () => ({
+          payload: { childId, parentId },
+          build: async (): Promise<Built> => ({
+            ref, creates: false,
+            changes: [{ type: "update", ref, expectedRevision: gate.revision, body: { children: claimed.filter((id) => id !== childId) } as unknown as JsonObject }],
+            detail: { childId },
+            contention: async () => new DomainError("stale_revision", "another spawn changed the claims at the same moment"),
+          }),
+        }));
+        return;
+      } catch (error) {
+        if (!(error instanceof DomainError && error.code === "stale_revision") || attempt >= 50) throw error;
+      }
+    }
   }
 }

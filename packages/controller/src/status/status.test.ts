@@ -955,8 +955,8 @@ for (const backend of backends) {
     const lone = await c.work("Alone");
     const q = (n: number) => ({ inquiryId: `inq-${n}`, asker: "agent:ann", question: `Q${n}?`, askedAt: `2000-01-01T00:00:${String(n % 60).padStart(2, "0")}.000Z`, revision: 1, task: { id: lone, title: "Alone", projectName: "P" } });
     const rev = (n: number) => ({ id: `rev-${n}`, taskId: lone, projectId: c.project, name: `tool.t${n}`, requestedAt: "2000-01-02T00:00:00.000Z" });
-    const wired = (nq: number, nr: number, more: boolean) => c.rebuild({}, {
-      ownerQuestions: { ownerQuestions: async () => ({ items: Array.from({ length: nq }, (_, i) => q(i)), ...(more ? { next: "x" } : {}) }) },
+    const wired = (nq: number, nr: number, _more?: boolean) => c.rebuild({}, {
+      ownerQuestions: { ownerQuestions: async (_o: unknown, page?: { limit?: number }) => { const limit = page?.limit ?? 20; const items = Array.from({ length: Math.min(nq, limit) }, (_, i) => q(i)); return { items, ...(items.length >= limit ? { next: "x" } : {}) }; } },
       reviews: { ownerPending: async (_o: unknown, limit?: number) => Array.from({ length: Math.min(nr, limit ?? 50) }, (_, i) => rev(i)) },
     });
     // Under the cap (50 of each is not more than 50): nothing is flagged and no note is added.
@@ -966,7 +966,7 @@ for (const backend of backends) {
     assert.equal(under.count, 103);
     assert.doesNotMatch(under.lines.map((l) => l.text).join("\n"), /incomplete/);
     // Over the cap: each source is named, and only that source.
-    const qs = (await wired(50, 0, true).needsYou(c.owner))!;
+    const qs = (await wired(51, 0).needsYou(c.owner))!;
     assert.deepEqual(qs.truncated, ["questions"]);
     assert.match(qs.lines.at(-1)!.text, /may be incomplete.*questions/);
     assert.equal(qs.count, 53, "the items found are unchanged");
@@ -978,7 +978,7 @@ for (const backend of backends) {
     const bs = (await wired(0, 0, false).needsYou(c.owner))!;
     assert.deepEqual(bs.truncated, ["blockers"]);
     assert.equal(bs.count, 50);
-    const all = (await wired(50, 51, true).needsYou(c.owner))!;
+    const all = (await wired(51, 51).needsYou(c.owner))!;
     assert.deepEqual(all.truncated, ["questions", "approvals", "blockers"]);
     assert.deepEqual((await c.rebuild().needsYou(c.owner))!.truncated, ["blockers"]);
   });

@@ -183,6 +183,34 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.svc.answerItem(c.owner, { commandId: cid("an"), itemId: a.itemId, answer: "ok", revision: 1 }));
   });
 
+  suite("a digest whose items were all settled elsewhere is closed by the sweep, and a settled item's waiting external message is dropped", async (c) => {
+    const b1 = await c.blocker("manual_hold"); const b2 = await c.blocker("wait_overdue");
+    const i1 = await c.report(c.ann, "blocker", "blocker", b1); const i2 = await c.report(c.ann, "blocker", "blocker", b2);
+    minutes(60);
+    const ran = await c.svc.runDue();
+    assert.equal(ran.digestIds.length, 1);
+    assert.equal((await c.svc.inbox(c.owner)).digests.length, 1);
+    await c.resolveBlocker(b1); await c.resolveBlocker(b2);
+    await c.svc.runDue();
+    const inbox = await c.svc.inbox(c.owner);
+    assert.deepEqual([inbox.items.some((i) => i.id === i1.itemId || i.id === i2.itemId), inbox.digests.length], [false, 0], "the digest of settled items does not stay open");
+    // An escalation message waiting to be retried is dropped when its item is settled.
+    set("2026-10-23T08:00:00.000Z");
+    await c.svc.configure(c.owner, { commandId: cid("cf"), channel: "external", channelName: "pager", digestTimes: ["23:00"] });
+    const b3 = await c.blocker("unexplained_block");
+    await c.report(c.ann, "blocker", "blocker", b3);
+    c.failing.on = true;
+    set("2026-10-24T09:00:00.000Z");
+    assert.equal((await c.svc.runDue()).retrying, 1, "the raised item's message is waiting for a retry");
+    assert.equal((await c.svc.report(c.owner)).pending.length, 1);
+    await c.resolveBlocker(b3);
+    c.failing.on = false;
+    minutes(10);
+    assert.deepEqual(await c.svc.runDue(), { digestIds: [], delivered: 0, failed: 0, retrying: 0 });
+    assert.equal((await c.svc.report(c.owner)).pending.length, 0, "no message is left pending");
+    assert.deepEqual(c.sent, [], "nothing about the settled item was sent");
+  });
+
   suite("an item that waits on the owner is raised to Urgent by the controller after the owner's threshold, told once, outside quiet hours, and nothing else is (card U11b)", async (c) => {
     set("2026-10-22T08:00:00.000Z");
     const waiting = await c.report(c.ann, "blocker", "blocker", await c.blocker("wait_overdue"));

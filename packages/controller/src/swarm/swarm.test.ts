@@ -182,19 +182,15 @@ for (const backend of backends) {
     } finally { await x.w.close(); }
   });
 
-  suite("a crash between the claim and the link holds a place only until that child is finished or cancelled", async () => {
+  suite("a child that cannot be cancelled after a failed spawn does not hold a place for good (its claim is dropped)", async () => {
     let crash = true;
     const x = await world(1, { failDelegate: () => crash, failAbandon: () => crash });
     try {
       await assert.rejects(() => x.spawn("a"), /crash/);
-      assert.equal((await x.gate()).length, 1, "the unlinked claim is recorded");
+      assert.deepEqual(await x.gate(), [], "the orphan's claim was dropped though it could not be cancelled");
       crash = false;
-      await assert.rejects(() => x.spawn("b"), /live children/);
-      assert.equal((await x.gate()).length, 1, "the refused spawn made no claim");
-      const orphan = (await x.gate())[0]!;
-      await x.finish(orphan);
-      const ok = await x.spawn("c");
-      assert.deepEqual(await x.gate(), [ok.taskId], "the orphan's claim is gone");
+      const ok = await x.spawn("b");
+      assert.deepEqual(await x.gate(), [ok.taskId], "the place is free for a new child");
     } finally { await x.w.close(); }
   });
 
