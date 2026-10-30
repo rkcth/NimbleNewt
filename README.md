@@ -229,7 +229,7 @@ Pause, suspend, stop, release and checked resume, interrupting a model mid-gener
 - [x] **L03d** · P35 · Finish hand-off: chat, richer package, temporary reassignment, responsibilities _(needs L03c)_
 - [x] **L03e** · P36 · Finish hand-off: chat, richer package, temporary reassignment _(needs L03d)_
 - [x] **L03f** · P37 · Finish hand-off: chat, richer package, locks, drafts _(needs L03e)_
-- [ ] **L03g** · P38 · Finish hand-off: richer package, locks, drafts, responsibilities _(needs L03f)_
+- [ ] **L03g** · P38 · Finish hand-off: locks, drafts, responsibilities in the package _(needs L03f)_
 
 </details>
 
