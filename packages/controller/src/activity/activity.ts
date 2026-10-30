@@ -31,7 +31,7 @@ export interface ActivityStepBody {
   readonly payload: { readonly state: "stored"; readonly id: string; readonly chars: number; readonly redactions: number; readonly sensitive: boolean } | { readonly state: "none" } | { readonly state: "missing"; readonly reason: string };
 }
 /** What a task has been explained and corrected by, so a reader goes straight to them instead of reading every explanation and correction in the installation (card C09i). */
-interface IndexBody { readonly explanations: readonly string[]; /** Retrospective explanations (asked for by readers), kept apart and capped lower so they cannot fill the room the worker's own need. */ readonly later?: readonly string[]; readonly corrections: readonly { readonly seq: number; readonly id: string }[] }
+interface IndexBody { readonly explanations: readonly string[]; /** Retrospective explanations (asked for by readers), kept apart and capped lower so they cannot fill the room the worker's own need. */ readonly later?: readonly string[]; /** Ids of the contemporaneous explanations by step number, so one step's are read without reading the task's all. Absent on an index made before it existed (read in full then). */ readonly bySeq?: Readonly<Record<string, readonly string[]>>; readonly corrections: readonly { readonly seq: number; readonly id: string }[] }
 interface HeadBody { readonly next: number; readonly projectId: string; /** When the latest step was recorded (absent on heads written before the timeline). */ readonly lastAt?: string; readonly unavailable: readonly { readonly from: number; readonly to: number; readonly reason: string; readonly by: string; readonly at: string }[] }
 interface PayloadBody { readonly taskId: string; readonly projectId: string; readonly seq: number; readonly sensitive: boolean; readonly text: string; readonly redactions: number }
 export interface ExplanationBody {
@@ -69,6 +69,14 @@ const checkRef = (value: unknown, field: string): ManifestRef => {
   const kind = typeof o["kind"] === "string" && REF.test(o["kind"]) ? o["kind"] : invalid(`${field}.kind`, "must be a plain lowercase name");
   const id = text(o["id"], `${field}.id`, { min: 1, max: 120 });
   return { kind, id, ...(o["version"] === undefined ? {} : { version: text(o["version"], `${field}.version`, { min: 1, max: 80 }) }) };
+};
+/** Adds a contemporaneous explanation to an index; the by-step lookup is kept only where it can be complete (a new index, or one that already has it). */
+const addContemporaneous = (x: IndexBody, id: string, seq: number | undefined): IndexBody => {
+  const explanations = [...x.explanations, id];
+  if (x.bySeq === undefined && x.explanations.length > 0) return { ...x, explanations };
+  const bySeq = { ...(x.bySeq ?? {}) };
+  if (seq !== undefined) bySeq[String(seq)] = [...(bySeq[String(seq)] ?? []), id];
+  return { ...x, explanations, bySeq };
 };
 const refuseThinking = (c: object): void => { for (const w of forbiddenWords) if (w in c) throw new DomainError("invalid_command", `${w}: provider thinking and hidden reasoning are never recorded as an explanation; state the choice, alternatives, evidence and uncertainty`, { field: w }); };
 
@@ -357,7 +365,7 @@ export class ActivityService {
     const ref: AggregateRef = { kind: KIND_OF.explanation, id };
     const r = await this.#runner.command("activity.explain", { commandId: scopedCommandId(by.id, commandId), actor: by.id }, async () => ({
       payload: { taskId: body.taskId, mode: body.mode, ...(body.seq === undefined ? {} : { seq: body.seq }), choice: body.choice },
-      build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }, await this.#indexChange(body.taskId, (x) => (body.mode === "retrospective" ? { ...x, later: [...(x.later ?? []), id] } : { ...x, explanations: [...x.explanations, id] }), body.mode === "retrospective" ? "later" : "explanations")] as never, detail: { taskId: body.taskId, mode: body.mode }, contention: async () => new DomainError("stale_revision", "another explanation or correction was recorded at the same moment") }),
+      build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }, await this.#indexChange(body.taskId, (x) => (body.mode === "retrospective" ? { ...x, later: [...(x.later ?? []), id] } : addContemporaneous(x, id, body.seq)), body.mode === "retrospective" ? "later" : "explanations")] as never, detail: { taskId: body.taskId, mode: body.mode }, contention: async () => new DomainError("stale_revision", "another explanation or correction was recorded at the same moment") }),
     }));
     return { id: r.id, replayed: r.replayed };
   }
@@ -381,7 +389,13 @@ export class ActivityService {
     for (const id of [...index.explanations, ...(index.later ?? [])]) { const found = await this.#runner.get(KIND_OF.explanation, id); if (found !== undefined) out.push(found.body as unknown as ExplanationBody); }
     return out.sort((a, b) => a.at.localeCompare(b.at));
   }
-  async #explanationsFor(taskId: string, seq: number): Promise<ExplanationBody[]> { return (await this.#allExplanations(taskId)).filter((e) => e.seq === seq && e.mode === "contemporaneous"); }
+  async #explanationsFor(taskId: string, seq: number): Promise<ExplanationBody[]> {
+    const index = await this.#indexOf(taskId);
+    if (index.bySeq === undefined) return (await this.#allExplanations(taskId)).filter((e) => e.seq === seq && e.mode === "contemporaneous");
+    const out: ExplanationBody[] = [];
+    for (const id of index.bySeq[String(seq)] ?? []) { const found = await this.#runner.get(KIND_OF.explanation, id); if (found !== undefined) out.push(found.body as unknown as ExplanationBody); }
+    return out.filter((e) => e.mode === "contemporaneous").sort((a, b) => a.at.localeCompare(b.at));
+  }
   async #corrections(taskId: string, seq: number): Promise<CorrectionBody[]> {
     const out: CorrectionBody[] = [];
     for (const c of (await this.#indexOf(taskId)).corrections) if (c.seq === seq) { const found = await this.#runner.get(KIND_OF.correction, c.id); if (found !== undefined) out.push(found.body as unknown as CorrectionBody); }

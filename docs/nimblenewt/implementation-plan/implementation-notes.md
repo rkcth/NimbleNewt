@@ -2931,3 +2931,9 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - `MeetingRecordService` passes `agreedBy` to `ChangeApplier.apply` (`owner:agreed` when the owner agreed, else `policy:<class>`).
 - Tested at three levels: the services (`raiseAgreed`, `grantAgreed`: exact effect, repeat, refused callers and shapes), the appliers (shape checks, what reaches the service), and the existing widening flow of the record service (waits for the owner unless the policy lets the class through, refuses if the policy tightened).
 - **Not done (M02e stays open):** an ownership-change applier; the decision log and the steward agent; the narrator; chat commands; the `shareable` check (still none passed in `start.ts`); a test of the full meeting vote → policy leave → real budget/grant effect through `startController`; chat wording that says an access-change cell set by hand also lets a meeting decision through (today the chat text says changing access "always stays your decision", which is true for agents' tool use and not for this path).
+
+## C09i follow-up: one step's explanations without reading the task's all
+
+- The task's explanation index now also keeps `bySeq` (step number to the ids of its contemporaneous explanations), so `explanationsFor(seq)` (and so `explainLater` and the `explanations` view with a step) reads only that step's records, not up to 2000. Results are unchanged.
+- An index made before this keeps no `bySeq` and is read in full as before (and stays that way, since a partial lookup would miss the older entries). The caps (2000 / 200) are unchanged; they are a deliberate bound on the index size.
+- Test: 60 explanations on one step and one on another; both are reachable, and the call for the single one reads under 12 records (counted by wrapping `CommandRunner.get`). Not done: the listing without a step (`explanations(taskId)`) still reads every entry.
