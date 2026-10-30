@@ -147,6 +147,11 @@ const PRINCIPAL = /^(?:owner|agent|host|client|service):[a-z0-9][a-z0-9-]{0,39}$
 const GRANT_ID = /^grt-[a-z2-7]{20}$/;
 const RESTRICTION_ID = /^rst-[a-z2-7]{20}$/;
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+/** The only actions a meeting decision may grant; everything else needs the owner. */
+export const AGREED_GRANTABLE_ACTIONS: readonly string[] = [
+  "task.read", "task.create", "task.update", "task.transition", "assignment.read", "attempt.work", "artifact.publish", "artifact.read", "desk.write", "desk.read", "history.append", "history.read",
+  "review.request", "wait.manage", "blocker.manage", "conversation.send", "conversation.receive", "message.send", "job.read", "meeting.agenda", "meeting.read", "resource.read", "budget.read", "responsibility.read", "notes.chair.read",
+];
 /** The longest an agreed (meeting-decided) grant may last. Provisional; the owner may change it. */
 export const AGREED_GRANT_MAX_MS = 30 * 24 * 3600 * 1000;
 const KIND = /^[a-z][a-z0-9-]{0,39}$/;
@@ -167,9 +172,13 @@ function checkResource(value: unknown, field = "resource"): ResourceRef | undefi
   const id = typeof entry["id"] === "string" && entry["id"].length >= 1 && entry["id"].length <= 200 ? entry["id"] : invalid(`${field}.id`, "must be 1 to 200 characters");
   return { kind, id };
 }
+/** A timestamp that names a real instant (`9999-99-99T00:00:00.000Z` and `2026-11-15T25:00:00.000Z` match the shape but are not). */
+function realTime(value: string): boolean {
+  return !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value;
+}
 function checkTime(value: unknown, field: string): string | undefined {
   if (value === undefined) return undefined;
-  return typeof value === "string" && TIMESTAMP.test(value) ? value : invalid(field, "must be a UTC timestamp such as 2026-10-21T12:00:00.000Z");
+  return typeof value === "string" && TIMESTAMP.test(value) && realTime(value) ? value : invalid(field, "must be a UTC timestamp such as 2026-10-21T12:00:00.000Z");
 }
 function plain(value: unknown, field: string, max: number): string {
   const out = text(value, field, { min: 1, max, multiline: true });
@@ -228,10 +237,19 @@ export class GrantService {
     // Only one exact, named action: never `*`, a prefix like `task.*`, or an approval grant (waiving a question stays the owner's, as in `derive`). A decision may not hand out the power to carry out more decisions.
     const action = command.action;
     if (typeof action !== "string") invalid("action", "must be an action name");
-    if (action === "principal.manage" || action === "budget.manage") invalid("action", `${action} cannot be granted by a decision: the power to carry out decisions is not handed out by one`);
-    if (action.startsWith("approve.") || action.startsWith("tool.")) invalid("action", "an approval grant is the owner's to give, not a decision's");
-    if (!(ACTIONS as readonly string[]).includes(action)) invalid("action", "must be one exact action name (not * or a prefix such as task.*)");
+    if (!AGREED_GRANTABLE_ACTIONS.includes(action)) invalid("action", `${action} cannot be granted by a decision: it needs the owner (a decision may grant only ordinary working actions)`);
+    // A replay of a grant that was already made returns that result first: the time and standing checks below depend on the clock and could fail it after a crash.
+    let made = false;
+    if (typeof command.commandId === "string") {
+      try { made = (await this.#runner.get("grant-record", derivedId("grt", scopedCommandId(by.id, command.commandId)))) !== undefined; } catch { made = false; }
+    }
+    if (made) {
+      const { decisionId, agreedBy, ...rest } = command;
+      const basis = `meeting decision ${decisionId}, allowed by ${agreedBy}: ${String(rest.basis ?? "").slice(0, Math.max(0, GRANT_LIMITS.basis - decisionId.length - agreedBy.length - 40))}`;
+      return this.#grant(by, { ...rest, basis, source: "direct" } as GrantInput);
+    }
     const now = this.#runner.now();
+    if (Number.isNaN(Date.parse(expires!)) || Number.isNaN(Date.parse(now))) invalid("expiresAt", "is not a real time");
     if (expires! <= now) invalid("expiresAt", "is already past");
     if (Date.parse(expires!) > Date.parse(now) + AGREED_GRANT_MAX_MS) invalid("expiresAt", "an agreed grant lasts at most 30 days");
     const grantee = command.grantee;

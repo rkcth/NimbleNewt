@@ -842,12 +842,37 @@ for (const backend of backends) {
     assert.equal((await c.projects.getTask(task.id))!.title, "Write the guide, v2");
   });
 
+  suite("an owner decline that arrives before a change is saved as applying stops the apply", async (c) => {
+    const task = await c.task();
+    await c.grantUpdate(c.pA);
+    const { rec, item } = await c.meet({ chair: c.pD, item: "delegated-decision" });
+    const m = await adopt(c, rec, c.asB, { agendaItemId: item, changes: [change(c, task, c.pA)] });
+    const d = await decisionOf(c, m);
+    const seen: string[] = [];
+    const base = taskUpdateApplier(c.projects);
+    const widening: ChangeApplier = { ...base, widens: "spend", async apply(ch) { seen.push(ch.commandId); return base.apply(ch); } };
+    // The policy check runs after the decision was read and before the change is saved as applying: the decline lands in that gap.
+    let svc: MeetingRecordService | undefined;
+    svc = c.reopen({ appliers: { "task.update": widening }, widening: async () => { await svc!.ownerRespond(c.owner, { commandId: cid("dec"), decisionId: d.id, response: "decline" }); return "allow"; } });
+    const out = await svc.apply(c.host, { decisionId: d.id });
+    assert.deepEqual(seen, [], "a declined change is not applied");
+    assert.equal(out.applied, 0);
+    assert.equal((await decisionOf(c, m)).changes[0]!.state, "not-applied");
+    assert.equal((await c.projects.getTask(task.id))!.title, "Write the guide");
+  });
+
   suite("a meeting grant for every project is refused by the grant service, not only by the key check", async (c) => {
     const controller = { id: "service:meeting-records", kind: "service", name: "meeting-records", grants: [] } as never;
     const applier = grantApplier(c.grants, controller);
     const base = { commandId: "mtg:d1:c1", actor: "agent:x", expectedRevision: 1, patch: { grantee: c.pA, action: "task.read", expiresAt: "2026-10-21T08:00:00.000Z" }, agreedBy: "owner:agreed" };
     await assert.rejects(() => applier.apply({ ...base, target: { kind: "project", id: "*" } }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
     await assert.rejects(() => applier.apply({ ...base, target: { kind: "project", id: c.project }, patch: { ...base.patch, action: "principal.manage" } }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
+    // The same patch shape minus the bad field is accepted by the real grant service, so the refusals above are about the field and not the setup.
+    const soon = new Date(Date.parse(clock()) + 3600_000).toISOString();
+    await applier.apply({ ...base, target: { kind: "project", id: c.project }, patch: { ...base.patch, expiresAt: soon } });
+    for (const bad of ["9999-99-99T00:00:00.000Z", "2026-11-15T25:00:00.000Z"]) {
+      await assert.rejects(() => applier.apply({ ...base, commandId: "mtg:d1:c2", target: { kind: "project", id: c.project }, patch: { ...base.patch, expiresAt: bad } }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command" && e.field === "expiresAt");
+    }
   });
 
   suite("owner presence: arrival is a durable event that reports what happened; with the owner present an adopted decision waits for agreement; departure authorizes nothing; an alternative needs no re-vote", async (c) => {

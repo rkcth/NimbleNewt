@@ -853,19 +853,26 @@ export class MeetingRecordService {
       if (d.outcome !== "adopted" || d.scope !== "in-scope" || d.ownerResponse === "pending") return tally();
       const change = d.changes.find((c) => c.state === "adopted" || c.state === "applying");
       if (change === undefined) { await this.#announceChanges(decisionId); return tally(); }
-      const save = async (next: ChangeRecord): Promise<void> => {
-        await this.#retrying(() => this.#runner.command("meeting.decision.change", { commandId: `${decisionId}:${change.id}:${next.state}`.slice(0, 120), actor: by.id }, async () => ({
+      // `agreement` is set for the save that starts a change: it holds only while the change is still adopted and the owner's response is still the one the agreement was worked out from.
+      const save = async (next: ChangeRecord, agreement?: string): Promise<boolean> => {
+        let lost = false;
+        try { await this.#retrying(() => this.#runner.command("meeting.decision.change", { commandId: `${decisionId}:${change.id}:${next.state}`.slice(0, 120), actor: by.id }, async () => ({
           payload: { decisionId, changeId: change.id, to: next.state },
           build: async () => {
             const cur = await this.#runner.get("meeting-decision", decisionId);
             const body = known<DecisionRecordBody>(cur)!;
             const now = this.#runner.now();
+            if (agreement !== undefined) {
+              const here = body.changes.find((c) => c.id === change.id);
+              if (here?.state !== "adopted" || body.ownerResponse !== d.ownerResponse) { lost = true; throw new DomainError("invalid_command", "the owner answered before this change started"); }
+            }
             const changes = body.changes.map((c) => (c.id === change.id && (c.state === "adopted" || c.state === "applying") ? { ...next, at: now } : c));
             return { ref: { kind: "meeting-decision", id: decisionId }, creates: false, changes: [{ type: "update", ref: { kind: "meeting-decision", id: decisionId }, expectedRevision: cur!.revision, body: json({ ...body, changes }) }], detail: { projectId: body.projectId, change: change.id, to: next.state } };
           },
-        })));
+        }))); } catch (error) { if (lost) return false; throw error; }
+        return true;
       };
-      const refuse = (code: ChangeRecord["code"], reason: string): Promise<void> => save({ ...change, state: "not-applied", ...(code === undefined ? {} : { code }), reason });
+      const refuse = async (code: ChangeRecord["code"], reason: string): Promise<void> => { await save({ ...change, state: "not-applied", ...(code === undefined ? {} : { code }), reason }); };
       if (change.state === "adopted") {
         const applier = this.#options.appliers?.[change.kind];
         if (applier === undefined) { await refuse("failed", `no applier is registered for ${change.kind}`); continue; }
@@ -881,7 +888,9 @@ export class MeetingRecordService {
         if (target === undefined) { await refuse("missing", `${change.target.kind} ${change.target.id} no longer exists`); continue; }
         if (target.revision !== change.expectedRevision) { await refuse("conflict", `${change.target.kind} ${change.target.id} is at revision ${target.revision}, not ${change.expectedRevision} as proposed`); continue; }
         // Who allowed it is fixed now and kept: a replay after a crash uses it (the grant basis is part of the command digest), and a later owner decline does not cancel a change already started.
-        await save({ ...change, state: "applying", agreedBy: d.ownerResponse === "agreed" ? "owner:agreed" : `policy:${applier.widens ?? "none"}` });
+        const agreedBy = d.ownerResponse === "agreed" ? "owner:agreed" : `policy:${applier.widens ?? "none"}`;
+        // The owner may have declined since this was read: then the change is not started, and the decline's own record stands.
+        if (!(await save({ ...change, state: "applying", agreedBy }, agreedBy))) continue;
       }
       const applier = this.#options.appliers?.[change.kind];
       if (applier === undefined) { await refuse("failed", `no applier is registered for ${change.kind}`); continue; }
