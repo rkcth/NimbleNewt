@@ -32,20 +32,20 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N02 / AII-252 | F01, F02, F03, F04a, F04b, F04c, F04d, F04, F04f, F04g, F04h, F04i, F04j, F04k, F04e, F09 |
 | N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06, C06b |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
-| N05 / AII-255 | L05, L05b, L01, L01b, L02, L02b, L02c, L02d, L03, L03b, L03c, L03d, L03e, L03f, L03g, L04, L04b, L04c, L06, L06b, H08, H08b |
+| N05 / AII-255 | L05, L05b, L01, L01b, L02, L02b, L02c, L02d, L03, L03b, L03c, L03d, L03e, L03f, L03g, L03h, L04, L04b, L04c, L06, L06b, H08, H08b |
 | N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A07e, A08, A08b, A08c, A09, A10, A10b, A07f, A07g |
 | N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C07e, C07f, C08, C09, C09b, C09c, C09d, C09e, C09f, C09g, C09h, C08b, C08c, C08d |
 | N08 / AII-258 | R01, R02, R03, R04, R04b, R04c, R05, R05b, R05c, R05d, R05f, R05g, R05e |
 | N09 / AII-259 | U03, U03d, U03e, U05b, U04, U05, U06, U06b, U03b, U03c, U07, U09, U08, U10, U11, U11b |
-| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H07b, H07c, H07d, H07e, H02e, H09, H09b, H10, H11, H12, H12a, H12b, H12c, H12d, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H13b, H13c, H13d, H13e, H13f, H02b, H02c, H02d, H11b, H12n, H12p, H12o |
-| N11 / AII-261 | V01, V01b, V01c, V02, V02b |
+| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H07b, H07c, H07d, H07e, H02e, H09, H09b, H10, H11, H12, H12a, H12b, H12c, H12d, H12q, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H13b, H13c, H13d, H13e, H13f, H02b, H02c, H02d, H11b, H12n, H12p, H12o |
+| N11 / AII-261 | V01, V01b, V01c, V02, V02b, V02c |
 | N12 / AII-262 | M01b, M01c, M01d, M00, M01, M02, M02b, M02c, M02d, M02e, M03, M03b, M03c, M03d, M03e, M03f, M04, M04b, M04c, M04d, M04e, M04f, M05, M05b, M06 |
-| N13 / AII-263 | U04b, U04c, U04d, T01, T02, T03, T06, T06b, T07, T07b, T08, T09, T09b, T09c, T09d |
+| N13 / AII-263 | U04b, U04c, U04d, T01, T02, T02b, T03, T06, T06b, T07, T07b, T08, T09, T09b, T09c, T09d |
 | N14 / AII-264 | P01b, P01c, P01, P02, P02b, P03, P04, P05, P06, P07, P08, P08b, P08c, P09, P10, P10b, P10c |
 | N15 / AII-265 | Q01, Q02, Q03, Q04, Q01b |
 | N16 / AII-266 | B01 |
 | N17 / AII-267 | K01, K01e, K01f, K01g, K01h, K01b, K01c, K01d, K02, K03, K04, K05, K06, K06b, K07 |
-| N18 / AII-268 | G06, X11, X09, X10, X01, X02, X03, X04, X05, X06, X07, X08, Y01, Y02, Y03 |
+| N18 / AII-268 | G06, X11, X09, X09b, X10, X01, X02, X03, X04, X05, X06, X07, X08, Y01, Y02, Y03 |
 | N19 / AII-269 | D01, D02, D03, D04, D04b, D05 |
 | N07a / AII-519 | U01, U13, T04 |
 | N10a / AII-520 | U02, U02b, U12, U12b, U12c, U12d, U12e, T05 |
@@ -975,9 +975,19 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### L03g — Finish hand-off: locks, drafts, responsibilities in the package
 
 - **Parent:** N05 / AII-255.
+- **Status:** implemented; commits `6d6d44a`; CI runs 41050027996; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Hand-off package carries drafts and responsibilities, screened to the owner, sender and recipient. A locks source and reassignment are L03h.
 - **Blockers:** L03f.
 - **Deliverable:** Split from L03f (2026-10-30): locks, drafts and responsibilities in the package (the sections from the latest continuation are done).
 - **Acceptance and verification:** A recipient can carry on from the package alone.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### L03h — Finish hand-off: a locks source, offering to reassign responsibilities
+
+- **Parent:** N05 / AII-255.
+- **Blockers:** L03g.
+- **Deliverable:** Split from L03g (2026-10-30): the hand-off locks source has a service behind it, and responsibilities can be offered for reassignment with the hand-off.
+- **Acceptance and verification:** A hand-off package lists the real locks and the owner can reassign responsibilities with it.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### L04 — Implement checked resume and evidence invalidation
@@ -1267,9 +1277,19 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H12d — Quiesce attempts before integration, refresh and quarantine
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `6d6d44a`; CI runs 41050027996; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The release path runs behind the workspace quiesce. Landing and the production port are H12q.
 - **Blockers:** H12, A04, A06, H12l.
 - **Deliverable:** Call the H12 quiesce (freeze, settle, checkpoint) from the A06 release path and landing; integration, refresh and quarantine are already wrapped by H12l, and the agent-side ending is H12n.
 - **Acceptance and verification:** Integration, refresh or quarantine never runs while an attempt has an unsettled tool call; the attempt checkpoints and resumes after; a failed settle blocks the operation with a typed blocker; tested with a call in flight.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### H12q — Finish the quiesce: the landing path and the production workspace port
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H12d.
+- **Deliverable:** Split from H12d (2026-10-30): landing runs behind the quiesce and the production workspace port supplies it.
+- **Acceptance and verification:** A landing waits for running attempts to quiesce and an attempt cannot start during one.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### H12l — Give the controller integration, checkout refresh and quarantine operations
@@ -1789,6 +1809,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### U06b — Recovery chat controls for routes and providers, and shorthand
 
 - **Parent:** N09 / AII-259.
+- **Status:** implemented; commits `6d6d44a`; CI runs 41050027996; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Typed recovery controls for routes (disable, drain, cutover, re-enable) and the short forms, shown as the exact line to send.
 - **Blockers:** U06, R04.
 - **Deliverable:** Split from U06 (2026-10-28): typed orders exclude or restore a route or provider, and short forms of the typed orders are accepted.
 - **Acceptance and verification:** A typed exclusion takes effect without the assistant and reports received, accepted and effected; a short form is expanded and shown before it runs when it changes anything.
@@ -1965,9 +1987,19 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### V02b — Finish supervisor recovery: action ladder, escalation, loop recovery, carried context
 
 - **Parent:** N11 / AII-261.
+- **Status:** implemented; commits `6d6d44a`; CI runs 41050027996; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Stall concerns escalate after 30 minutes undecided with a told-once notice. The action ladder is V02c.
 - **Blockers:** V02.
 - **Deliverable:** Split from V02 (2026-10-30): escalation of an undecided concern, persisting an intervention and queued input before a stuck request is cancelled, loop recovery that keeps history and effects, the context carried on a fallback, a supervisor assessed like any agent.
 - **Acceptance and verification:** A stuck request is cancelled only after the intervention and queued input are stored; an undecided concern escalates; a supervisor stall is detected.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### V02c — Finish supervisor recovery: the action ladder
+
+- **Parent:** N11 / AII-261.
+- **Blockers:** V02b.
+- **Deliverable:** Split from V02b (2026-10-30): the ordered ladder of supervisor actions after an escalation goes unanswered.
+- **Acceptance and verification:** An unanswered escalation climbs the ladder one rung at a time and each rung is recorded.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### M00 — Prototype the meeting protocol and run meeting experiments
@@ -2189,9 +2221,19 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### T02 — Implement review/promotion/deprecation and retention
 
 - **Parent:** N13 / AII-263.
+- **Status:** implemented; commits `6d6d44a`; CI runs 41050027996; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Catalog entries can be deprecated and rolled back; latest-live skips revoked and deprecated, pinned versions still resolve. In-flight policy and retention are T02b.
 - **Blockers:** T01, A05, L04.
 - **Deliverable:** Artifact promotion and paused-task migration.
 - **Acceptance and verification:** Revoked artifact cannot execute; stale referenced artifact retained for inspection; merge/deprecation does not break silent resume; revocation applies the configured policy to in-flight operations and a personal fork of a revoked tool gains no authority; non-maintainer publication is refused and rollback to a prior release works.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### T02b — Finish catalog promotion: in-flight policy on revocation, retention
+
+- **Parent:** N13 / AII-263.
+- **Blockers:** T02.
+- **Deliverable:** Split from T02 (2026-10-30): what happens to a run in flight when its artifact is revoked (finish, cancel or pause), and retention of old versions.
+- **Acceptance and verification:** A revoked artifact's running work follows the chosen policy; old versions are kept or dropped by the retention rule.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### T03 — Implement approved MCP client connections
@@ -2563,9 +2605,19 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### X09 — Implement external release-test job protocol
 
 - **Parent:** N18 / AII-268.
+- **Status:** implemented; commits `6d6d44a`; CI runs 41050027996; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Release candidates, matrix cells, host authorization, attempts, reports with limits, interrupt, gate and owner approval. Delivery to a host, supervisor and chat wording are X09b.
 - **Blockers:** H07, H09, F03, S06.
 - **Deliverable:** Immutable release candidate matrix, deterministic job payload and result schema.
 - **Acceptance and verification:** Hash/source/suite mismatch rejected; interrupted attempt not pass; no model needed for test execution; restricted test workers cannot approve release.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### X09b — Finish release testing: job delivery to the host, outer supervisor, chat wording
+
+- **Parent:** N18 / AII-268.
+- **Blockers:** X09.
+- **Deliverable:** Split from X09 (2026-10-30): the job payload reaches a remote worker (H12a), an outer supervisor watches the release host, and chat words for the owner's release actions.
+- **Acceptance and verification:** A release job runs on a registered host end to end and the owner can drive it in chat.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### X10 — Run partition and remote-worker safety campaign
@@ -2827,7 +2879,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b.
+- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q.
 - **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
 - **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

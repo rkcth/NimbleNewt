@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **195 of 302 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **201 of 307 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -109,23 +109,23 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓▓▓░` 93% | 15 of 16 |
 | Pi runtime and inference caching | `▓▓▓▓▓▓▓▓░░░░` 72% | 8 of 11 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
-| Pause, suspend and resume | `▓▓▓▓▓▓▓▓░░░░` 72% | 16 of 22 |
+| Pause, suspend and resume | `▓▓▓▓▓▓▓▓░░░░` 73% | 17 of 23 |
 | Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓░░░` 80% | 17 of 21 |
 | Context and memory | `▓▓▓▓▓▓▓▓▓▓░░` 90% | 20 of 22 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
 | Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓▓░` 92% | 12 of 13 |
-| Owner chat and web UI | `▓▓▓▓▓▓▓░░░░░` 62% | 10 of 16 |
-| Workers, dispatch and teams | `▓▓▓▓▓▓▓░░░░░` 65% | 30 of 46 |
+| Owner chat and web UI | `▓▓▓▓▓▓▓▓░░░░` 68% | 11 of 16 |
+| Workers, dispatch and teams | `▓▓▓▓▓▓▓░░░░░` 65% | 31 of 47 |
 | Agent messaging | `▓▓▓▓▓▓▓▓▓▓░░` 87% | 7 of 8 |
-| Health and recovery | `▓▓▓▓▓▓▓▓▓░░░` 80% | 4 of 5 |
+| Health and recovery | `▓▓▓▓▓▓▓▓▓▓░░` 83% | 5 of 6 |
 | Meetings | `▓▓▓▓▓▓▓▓░░░░` 72% | 18 of 25 |
-| Tools and skills | `▓▓▓▓▓▓▓▓░░░░` 73% | 11 of 15 |
+| Tools and skills | `▓▓▓▓▓▓▓▓▓░░░` 75% | 12 of 16 |
 | Projects, repositories and workspaces | `▓▓▓▓░░░░░░░░` 35% | 6 of 17 |
 | Quality: deliverables, QA and defects | `░░░░░░░░░░░░` 0% | 0 of 5 |
 | Balancing delivery and improvement | `░░░░░░░░░░░░` 0% | 0 of 1 |
 | Learning and improvement | `░░░░░░░░░░░░` 0% | 0 of 5 |
 | Backup, updates and operations | `▓▓▓░░░░░░░░░` 26% | 4 of 15 |
-| Test campaigns and platforms | `▓░░░░░░░░░░░` 13% | 2 of 15 |
+| Test campaigns and platforms | `▓▓░░░░░░░░░░` 18% | 3 of 16 |
 | Release | `░░░░░░░░░░░░` 0% | 0 of 6 |
 
 ### The parts in detail
@@ -205,7 +205,7 @@ Project and task records, assignments, durable delivery, the effect ledger and a
 </details>
 
 <details>
-<summary><strong>Pause, suspend and resume</strong> — ▓▓▓▓▓▓▓▓░░░░ 16 of 22</summary>
+<summary><strong>Pause, suspend and resume</strong> — ▓▓▓▓▓▓▓▓░░░░ 17 of 23</summary>
 
 Pause, suspend, stop, release and checked resume, interrupting a model mid-generation, the remote watchdog, and shutdown and reboot handling.
 
@@ -230,7 +230,8 @@ Pause, suspend, stop, release and checked resume, interrupting a model mid-gener
 - [x] **L03d** · P35 · Finish hand-off: chat, richer package, temporary reassignment, responsibilities _(needs L03c)_
 - [x] **L03e** · P36 · Finish hand-off: chat, richer package, temporary reassignment _(needs L03d)_
 - [x] **L03f** · P37 · Finish hand-off: chat, richer package, locks, drafts _(needs L03e)_
-- [ ] **L03g** · P38 · Finish hand-off: locks, drafts, responsibilities in the package _(needs L03f)_
+- [x] **L03g** · P38 · Finish hand-off: locks, drafts, responsibilities in the package _(needs L03f)_
+- [ ] **L03h** · P39 · Finish hand-off: a locks source, offering to reassign responsibilities _(needs L03g)_
 
 </details>
 
@@ -326,7 +327,7 @@ Routes and capability policy, provider failure fallback, difficulty profiles, dr
 </details>
 
 <details>
-<summary><strong>Owner chat and web UI</strong> — ▓▓▓▓▓▓▓░░░░░ 10 of 16</summary>
+<summary><strong>Owner chat and web UI</strong> — ▓▓▓▓▓▓▓▓░░░░ 11 of 16</summary>
 
 Talking to your agents: the chat interpreter, policy editing, status and blocker explanations, recovery chat, notifications and the responsive web interface.
 
@@ -342,7 +343,7 @@ Talking to your agents: the chat interpreter, policy editing, status and blocker
 - [x] **U05b** · P30 · Verify artifacts and inspect failed handlings in the composed status _(needs U05, H06c)_
 - [ ] **U09** · P31 · Implement read-only activity timeline and replay views _(needs C09, U05, A10, C06b)_
 - [x] **U06** · P32 · Implement deterministic recovery chat controls _(needs U01, L02, A02)_
-- [ ] **U06b** · P33 · Recovery chat controls for routes and providers, and shorthand _(needs U06, R04)_
+- [x] **U06b** · P33 · Recovery chat controls for routes and providers, and shorthand _(needs U06, R04)_
 - [ ] **U07** · P33 · Qualify responsive web chat over private networking _(needs U03, U06, A01, R05)_
 - [ ] **U08** · P34 · Implement settings and administration views _(needs U07, U10, A07, F09, H11, R03, T03, A07b, A07c)_
 - [ ] **U11b** · P34 · Implement notification levels, the Needs you view and escalation to Urgent _(needs U11, A07b, H05, M03, H12, K01, H01, H09, A08)_
@@ -350,7 +351,7 @@ Talking to your agents: the chat interpreter, policy editing, status and blocker
 </details>
 
 <details>
-<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓▓▓░░░░░ 30 of 46</summary>
+<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓▓▓░░░░░ 31 of 47</summary>
 
 Enrolled hosts, remote workers, priority admission, the local worker runtime and dispatcher, agents, teams and roles, reviews and wait-cycle handling.
 
@@ -380,7 +381,7 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 - [x] **H02b** · P30 · Fence a remote handle's controls by placement and close every failed startup _(needs H02)_
 - [x] **H07** · P30 · Implement idle host polling and capability placement _(needs H02, H03)_
 - [ ] **H12a** · P30 · Carry the dispatch contract to remote workers _(needs H12, H02)_
-- [ ] **H12d** · P30 · Quiesce attempts before integration, refresh and quarantine _(needs H12, A04, A06, H12l)_
+- [x] **H12d** · P30 · Quiesce attempts before integration, refresh and quarantine _(needs H12, A04, A06, H12l)_
 - [ ] **H12i** · P30 · Give tasks controlled network routes through the worker relay _(needs H12b, A07, T01, T03, A03b)_
 - [ ] **H12j** · P30 · Close the H12b worker-process gaps _(needs H12b)_
 - [ ] **H12m** · P30 · Bind the workspace operations to the local host and to remote hosts _(needs H12l, A04, H12b, H02)_
@@ -389,6 +390,7 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 - [ ] **H07b** · P31 · Choose hosts by candidates, fall back on refusal and run the host poller in the worker process _(needs H07, H12a)_
 - [x] **H07d** · P31 · Limit connections per address only before login _(needs H07)_
 - [ ] **H12f** · P31 · Wire context enforcement, pause observation and message boundaries into the runtime _(needs H12, C07b, L01, U12)_
+- [ ] **H12q** · P31 · Finish the quiesce: the landing path and the production workspace port _(needs H12d)_
 - [x] **H02d** · P32 · Finish the composed-controller proofs of remote stop, checkpoint fencing and relocation refusals _(needs H02c)_
 - [x] **H07c** · P32 · Decide local-only placement by profile and let chat override it _(needs H07, C08c)_
 - [ ] **H12k** · P32 · Compose the local worker host in the controller _(needs H12b, H12c, H12d, H12f, H12g)_
@@ -420,7 +422,7 @@ Durable conversations between agents, delivery classes, and the MCP conversation
 </details>
 
 <details>
-<summary><strong>Health and recovery</strong> — ▓▓▓▓▓▓▓▓▓░░░ 4 of 5</summary>
+<summary><strong>Health and recovery</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 5 of 6</summary>
 
 Stall detection and bounded supervisor recovery.
 
@@ -428,7 +430,8 @@ Stall detection and bounded supervisor recovery.
 - [x] **V01b** · P29 · Scale stall thresholds to the prompt size and the measured speed of the model _(needs V01, H12)_
 - [x] **V01c** · P30 · Read the declared model speed from the routing table and the cache share from the cache adapter _(needs V01b)_
 - [x] **V02** · P33 · Implement bounded supervisor recovery _(needs V01, V01b, L03, L04, R02, H05)_
-- [ ] **V02b** · P34 · Finish supervisor recovery: action ladder, escalation, loop recovery, carried context _(needs V02)_
+- [x] **V02b** · P34 · Finish supervisor recovery: action ladder, escalation, loop recovery, carried context _(needs V02)_
+- [ ] **V02c** · P35 · Finish supervisor recovery: the action ladder _(needs V02b)_
 
 </details>
 
@@ -466,7 +469,7 @@ Scheduling, votes and decisions, stand-ups, attendance and return to work, and f
 </details>
 
 <details>
-<summary><strong>Tools and skills</strong> — ▓▓▓▓▓▓▓▓░░░░ 11 of 15</summary>
+<summary><strong>Tools and skills</strong> — ▓▓▓▓▓▓▓▓▓░░░ 12 of 16</summary>
 
 The immutable tool and skill catalogue, review and promotion, MCP connections, the protected agent tool bridge and background jobs.
 
@@ -483,7 +486,8 @@ The immutable tool and skill catalogue, review and promotion, MCP connections, t
 - [x] **U04d** · P31 · Put the policy in the agent context _(needs U04c)_
 - [x] **T09c** · P32 · Run queued toolbox commands through the approval gates _(needs T09b)_
 - [x] **T09d** · P32 · Run queued agent commands _(needs T09b)_
-- [ ] **T02** · P33 · Implement review/promotion/deprecation and retention _(needs T01, A05, L04)_
+- [x] **T02** · P33 · Implement review/promotion/deprecation and retention _(needs T01, A05, L04)_
+- [ ] **T02b** · P34 · Finish catalog promotion: in-flight policy on revocation, retention _(needs T02)_
 - [ ] **T08** · P35 · Implement shared toolbox audiences, personal copies and patch proposals _(needs T02, T06, M02, U08)_
 
 </details>
@@ -572,15 +576,16 @@ Backup and restore, release staging, migration recovery, maintenance windows and
 </details>
 
 <details>
-<summary><strong>Test campaigns and platforms</strong> — ▓░░░░░░░░░░░ 2 of 15</summary>
+<summary><strong>Test campaigns and platforms</strong> — ▓▓░░░░░░░░░░ 3 of 16</summary>
 
 Crash, policy, isolation and partition campaigns, QA checkpoints, Windows and macOS qualification, and the typical and exhaustive test tiers.
 
 - [x] **X11** · P2 · Split the test suite into a typical and an exhaustive tier _(needs G01)_
 - [x] **Y01** · P19 · QA checkpoint 1: durable core _(needs S09, F04h)_
 - [ ] **G06** · P24 · Qualify actual Windows implementation _(needs G02, G03, G05, F03)_
-- [ ] **X09** · P34 · Implement external release-test job protocol _(needs H07, H09, F03, S06)_
+- [x] **X09** · P34 · Implement external release-test job protocol _(needs H07, H09, F03, S06)_
 - [ ] **Y02** · P34 · QA checkpoint 2: isolation, stop and recovery _(needs G05, G06, A06, L04, H09, A03b, A08b, F04i, F04j, H06b)_
+- [ ] **X09b** · P35 · Finish release testing: job delivery to the host, outer supervisor, chat wording _(needs X09)_
 - [ ] **X01** · P38 · Run integrated crash and handoff campaign _(needs S09, V02, H02, Q02, K03, G04, H12, T07, K06, L06)_
 - [ ] **Y03** · P38 · QA checkpoint 3: first complete chat-driven workflow _(needs U07, M02, P02, P03, Q02, K03, A07d)_
 - [ ] **X10** · P42 · Run partition and remote-worker safety campaign _(needs X09, H10, K05, G08)_
@@ -604,7 +609,7 @@ Installation, documentation, QA on real machines, the release decision and closi
 - [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, C07e, H07e, T09b, H07, H07b, H02e, T09, A07d, A07e, H07c, H07d, H11b, Q01b, A07f, P08, P08b, H12n, H12p, H12o, P09, P10, P10b, P10c, T09c, T09d)_
 - [ ] **D04** · P50 · Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
 - [ ] **D04b** · P51 · Measure code-navigation aids on real coding tasks (optional, after the first release) _(needs D04)_
-- [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b)_
+- [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q)_
 
 </details>
 

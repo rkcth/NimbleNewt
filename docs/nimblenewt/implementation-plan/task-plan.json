@@ -2665,6 +2665,34 @@
       ],
       "deliverable": "Split from L03f (2026-10-30): locks, drafts and responsibilities in the package (the sections from the latest continuation are done)",
       "acceptance_and_verification": "A recipient can carry on from the package alone",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "6d6d44a"
+        ],
+        "ci_runs": [
+          "41050027996"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Hand-off package carries drafts and responsibilities, screened to the owner, sender and recipient. A locks source and reassignment are L03h.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "L03h",
+      "parent": "N05",
+      "existing_issue": "AII-255",
+      "title": "Finish hand-off: a locks source, offering to reassign responsibilities",
+      "depends_on": [
+        "L03g"
+      ],
+      "deliverable": "Split from L03g (2026-10-30): the hand-off locks source has a service behind it, and responsibilities can be offered for reassignment with the hand-off",
+      "acceptance_and_verification": "A hand-off package lists the real locks and the owner can reassign responsibilities with it",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -3504,6 +3532,34 @@
       ],
       "deliverable": "Call the H12 quiesce (freeze, settle, checkpoint) from the A06 release path and landing; integration, refresh and quarantine are already wrapped by H12l, and the agent-side ending is H12n",
       "acceptance_and_verification": "Integration, refresh or quarantine never runs while an attempt has an unsettled tool call; the attempt checkpoints and resumes after; a failed settle blocks the operation with a typed blocker; tested with a call in flight",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "6d6d44a"
+        ],
+        "ci_runs": [
+          "41050027996"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "The release path runs behind the workspace quiesce. Landing and the production port are H12q.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "H12q",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Finish the quiesce: the landing path and the production workspace port",
+      "depends_on": [
+        "H12d"
+      ],
+      "deliverable": "Split from H12d (2026-10-30): landing runs behind the quiesce and the production workspace port supplies it",
+      "acceptance_and_verification": "A landing waits for running attempts to quiesce and an attempt cannot start during one",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -5012,12 +5068,23 @@
       ],
       "deliverable": "Split from U06 (2026-10-28): typed orders exclude or restore a route or provider, and short forms of the typed orders are accepted",
       "acceptance_and_verification": "A typed exclusion takes effect without the assistant and reports received, accepted and effected; a short form is expanded and shown before it runs when it changes anything",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "6d6d44a"
+        ],
+        "ci_runs": [
+          "41050027996"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Typed recovery controls for routes (disable, drain, cutover, re-enable) and the short forms, shown as the exact line to send.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "U03b",
@@ -5526,6 +5593,34 @@
       ],
       "deliverable": "Split from V02 (2026-10-30): escalation of an undecided concern, persisting an intervention and queued input before a stuck request is cancelled, loop recovery that keeps history and effects, the context carried on a fallback, a supervisor assessed like any agent",
       "acceptance_and_verification": "A stuck request is cancelled only after the intervention and queued input are stored; an undecided concern escalates; a supervisor stall is detected",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "6d6d44a"
+        ],
+        "ci_runs": [
+          "41050027996"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Stall concerns escalate after 30 minutes undecided with a told-once notice. The action ladder is V02c.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "V02c",
+      "parent": "N11",
+      "existing_issue": "AII-261",
+      "title": "Finish supervisor recovery: the action ladder",
+      "depends_on": [
+        "V02b"
+      ],
+      "deliverable": "Split from V02b (2026-10-30): the ordered ladder of supervisor actions after an escalation goes unanswered",
+      "acceptance_and_verification": "An unanswered escalation climbs the ladder one rung at a time and each rung is recorded",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -6154,6 +6249,34 @@
       ],
       "deliverable": "Artifact promotion and paused-task migration",
       "acceptance_and_verification": "Revoked artifact cannot execute; stale referenced artifact retained for inspection; merge/deprecation does not break silent resume; revocation applies the configured policy to in-flight operations and a personal fork of a revoked tool gains no authority; non-maintainer publication is refused and rollback to a prior release works",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "6d6d44a"
+        ],
+        "ci_runs": [
+          "41050027996"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Catalog entries can be deprecated and rolled back; latest-live skips revoked and deprecated, pinned versions still resolve. In-flight policy and retention are T02b.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "T02b",
+      "parent": "N13",
+      "existing_issue": "AII-263",
+      "title": "Finish catalog promotion: in-flight policy on revocation, retention",
+      "depends_on": [
+        "T02"
+      ],
+      "deliverable": "Split from T02 (2026-10-30): what happens to a run in flight when its artifact is revoked (finish, cancel or pause), and retention of old versions",
+      "acceptance_and_verification": "A revoked artifact's running work follows the chosen policy; old versions are kept or dropped by the retention rule",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -7132,6 +7255,34 @@
       ],
       "deliverable": "Immutable release candidate matrix, deterministic job payload and result schema",
       "acceptance_and_verification": "Hash/source/suite mismatch rejected; interrupted attempt not pass; no model needed for test execution; restricted test workers cannot approve release",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "6d6d44a"
+        ],
+        "ci_runs": [
+          "41050027996"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Release candidates, matrix cells, host authorization, attempts, reports with limits, interrupt, gate and owner approval. Delivery to a host, supervisor and chat wording are X09b.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "X09b",
+      "parent": "N18",
+      "existing_issue": "AII-268",
+      "title": "Finish release testing: job delivery to the host, outer supervisor, chat wording",
+      "depends_on": [
+        "X09"
+      ],
+      "deliverable": "Split from X09 (2026-10-30): the job payload reaches a remote worker (H12a), an outer supervisor watches the release host, and chat words for the owner's release actions",
+      "acceptance_and_verification": "A release job runs on a registered host end to end and the owner can drive it in chat",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -7994,7 +8145,12 @@
         "L03g",
         "H09b",
         "V02b",
-        "L06b"
+        "L06b",
+        "T02b",
+        "X09b",
+        "L03h",
+        "V02c",
+        "H12q"
       ],
       "deliverable": "Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete",
       "acceptance_and_verification": "D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards",
