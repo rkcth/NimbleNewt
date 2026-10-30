@@ -41,6 +41,8 @@ export interface PauseGateBody {
   /** Task scope only. */
   readonly projectId?: string;
   readonly intent: LifecycleIntent;
+  /** The owner's recorded, authorized condition for lifting this pause (card L06b): the time after which the controller lifts it. It belongs to the pause it was set for; a resume or a new pause drops it. */
+  readonly resumeAt?: { readonly at: string; readonly setBy: string; readonly setAt: string };
   /** Present while paused. */
   readonly mode?: "pause";
   /** Who paused it. Kept until the gate is resumed; resuming never silently changes it to someone else. */
@@ -153,6 +155,7 @@ function checkScope(value: unknown): PauseScope {
 
 export interface PauseRequest extends NoActor { readonly scope: PauseScope; readonly reason: string; readonly background?: BackgroundPolicy }
 export interface ResumeRequest extends NoActor { readonly scope: PauseScope; readonly reason: string }
+export interface ResumeConditionRequest extends NoActor { readonly scope: PauseScope; /** UTC time (ISO 8601) after which the controller lifts this pause. */ readonly at: string }
 export interface ObserveRequest extends NoActor { readonly scope: PauseScope; readonly state: ObservedState; readonly boundary?: Boundary; readonly evidence?: string }
 export interface BackgroundRequest extends NoActor {
   readonly taskId: string;
@@ -178,7 +181,7 @@ export interface PauseStatus {
  *   Elapsed time promotes nothing.
  * - **Scopes.** Gates exist per task, agent, team (and its parent teams) and installation. A task is blocked if any gate on its chain is paused: its own, its assignee's, the assignee's team chain, the installation's.
  *   Resuming one gate lifts that gate only and reports what still holds. A task-level pause blocks that task and nothing else, so a response or meeting task of the same agent is not blocked by it; an agent-level pause blocks every task of the agent.
- * - **No automatic return.** The gate has no return condition at all; only `resume` lifts it. Time, a meeting ending, an incoming message or an applied configuration touch nothing.
+ * - **No automatic return, except one the owner recorded.** Only `resume` lifts a gate, or `liftDue` when the owner recorded a time for it (`setResumeCondition`, card L06b). Time alone, a meeting ending, an incoming message or an applied configuration touch nothing.
  * - **Enforcement in the commit.** Callers get `guard(taskId)`: the blocking gates plus revision checks of every gate on the chain (absent gates are created active in the same commit), so a pause racing an admission is strictly before or after it.
  * - **Background results.** `recordBackground` records a finished background job for a task whether or not it is paused (unless the pause said `background: deny`), optionally answers the typed wait it resolves, and lifts no gate.
  */
@@ -230,6 +233,61 @@ export class PauseService implements PauseGuard, PauseLookup {
     const stillPausedBy: PauseScope[] = [];
     for (const parent of (await this.#chain(scope)).slice(1)) if (await this.#paused(parent)) stillPausedBy.push(parent);
     return { ...done, stillPausedBy };
+  }
+
+  /**
+   * Records, ahead of time, the condition on which a pause is lifted without anyone being asked again (card L06b). Only the owner can; it names one scope and one time, and the gate must be paused now.
+   * It belongs to this pause: resuming or pausing again drops it. Setting it again replaces it. Nothing lifts a pause that has no recorded condition.
+   */
+  async setResumeCondition(principal: Principal, command: ResumeConditionRequest): Promise<{ gateId: string; replayed: boolean }> {
+    onlyKnown(command, ["commandId", "scope", "at"]);
+    if (principal.kind !== "owner") throw new DomainError("forbidden", `${principal.id} is not the owner; only the owner records a condition that lifts a pause`);
+    const scope = checkScope(command.scope);
+    const parsed = typeof command.at === "string" ? Date.parse(command.at) : Number.NaN;
+    if (!Number.isFinite(parsed) || !/^\d{4}-\d{2}-\d{2}T/.test(command.at)) invalid("at", "must be a UTC time such as 2026-11-01T08:00:00Z");
+    const at = new Date(parsed).toISOString();
+    await this.#authorize(principal, scope, "control", false);
+    const gateId = gateIdOf(scope);
+    const scoped = scopedCommandId(principal.id, command.commandId);
+    const result = await this.#retrying(() => this.#runner.command("pause.condition", { commandId: scoped, actor: principal.id }, async () => ({
+      payload: { scope: scope as unknown as JsonObject, at },
+      build: async () => {
+        const ref: AggregateRef = { kind: "pause-gate", id: gateId };
+        const found = await this.#runner.get(ref.kind, ref.id);
+        const gate = found === undefined ? undefined : (found.body as unknown as PauseGateBody);
+        if (found === undefined || gate === undefined || gate.intent !== "pause") throw new DomainError("invalid_command", `${scope.kind} ${scope.id} is not paused; a condition is recorded for a pause that is in force`, { field: "scope" });
+        const next: PauseGateBody = { ...gate, resumeAt: { at, setBy: principal.id, setAt: this.#runner.now() } };
+        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: clean(next) }], detail: { scope: scope as unknown as JsonObject, resumeAt: at } };
+      },
+    })));
+    return { gateId, replayed: result.replayed };
+  }
+
+  /**
+   * The controller's tick: lifts every pause whose recorded condition has come, and only that scope, with the reason naming the condition. A gate with no recorded condition is never touched, and a repeat of the tick
+   * (or a restart) lifts nothing twice. The caller is the dispatcher (owner, host or service). Answers the scopes it lifted.
+   */
+  async liftDue(by: Principal): Promise<PauseScope[]> {
+    if (!(by.kind === "owner" || by.kind === "host" || by.kind === "service")) throw new DomainError("forbidden", `${by.id} is not the dispatcher; recorded conditions are carried out by the controller`);
+    const lifted: PauseScope[] = [];
+    const now = Date.parse(this.#runner.now());
+    let after: string | undefined;
+    for (;;) {
+      const page = await this.#runner.list("pause-gate", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const a of page) {
+        after = a.id;
+        const gate = a.body as unknown as PauseGateBody;
+        if (gate.intent !== "pause" || gate.resumeAt === undefined || Date.parse(gate.resumeAt.at) > now) continue;
+        try {
+          await this.#request(by, `cond-${gate.requestId ?? a.id}`, "resume", gate.scope, `the owner's recorded condition (set by ${gate.resumeAt.setBy} at ${gate.resumeAt.setAt}): not before ${gate.resumeAt.at}`, undefined, gate.projectId);
+          lifted.push(gate.scope);
+        } catch (error) {
+          // A gate resumed or paused again by someone else since it was read is no longer this condition's to lift.
+          if (!(error instanceof DomainError) || error.code !== "invalid_command") throw error;
+        }
+      }
+      if (page.length < 200) return lifted;
+    }
   }
 
   async #request(principal: Principal, commandId: unknown, action: "pause" | "resume", scope: PauseScope, reason: string, background: BackgroundPolicy | undefined, projectId: string | undefined) {

@@ -1403,6 +1403,19 @@ Result: `{ gateId, requestId, stillPausedBy, replayed }`.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `lifecycle.resume-condition`
+
+Records, ahead of time, the UTC time after which the controller lifts this scope's pause without asking again. Only the owner; the scope must be paused now; a resume or a new pause drops it.
+
+Arguments:
+
+- `scope`: `{ kind, id }`
+- `at`: UTC time, such as `2026-11-01T08:00:00Z`
+
+Result: `{ gateId, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `lifecycle.stop`
 
 Suspends or stops a task, an agent, a team or the installation: it is paused at once, prepared inside a deadline (scoped cleanup only), and called suspended only after a durable checkpoint; a stop then ends execution. Assignments and the task goal are untouched and nothing is resumed. The first steps run now; the answer says where it stands, and `blocked` lists the choices when work will not settle.

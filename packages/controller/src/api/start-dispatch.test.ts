@@ -26,6 +26,23 @@ test("no dispatcher is built and no loop runs unless the operator asks for it", 
   } finally { await c.close(); cleanup(d); }
 });
 
+test("the dispatcher lifts a pause whose recorded time has come, and no other (card L06b)", async () => {
+  const d = dir();
+  const c = await open(join(d, "c.sqlite"), { harnesses: [PI], dispatch: { timer: new ManualTimer(), intervalMs: 1000 } });
+  try {
+    assert.ok(c.dispatch !== undefined, c.dispatchProblem);
+    const s = c.services;
+    const owner = await s.principals.authenticate((await s.principals.bootstrapOwner({ name: "rob" })).token);
+    const [a, b] = [(await s.agents.create(owner, { commandId: "ag-a", friendlyName: "Ann" })).id, (await s.agents.create(owner, { commandId: "ag-b", friendlyName: "Bob" })).id];
+    for (const [i, id] of [a, b].entries()) await s.pauses.pause(owner, { commandId: `pz${i}`, scope: { kind: "agent", id }, reason: "the owner asked" });
+    await s.pauses.setResumeCondition(owner, { commandId: "rc1", scope: { kind: "agent", id: a }, at: new Date(Date.now() - 1000).toISOString() });
+    const tick = await c.dispatch.dispatcher.tick();
+    assert.ok(tick.loops.some((l) => l.name === "lifecycle.resume-conditions" && l.ok), JSON.stringify(tick.loops.filter((l) => !l.ok)));
+    assert.equal((await s.pauses.gate(owner, { kind: "agent", id: a }))?.intent, "active", "the scope with a due condition was lifted");
+    assert.equal((await s.pauses.gate(owner, { kind: "agent", id: b }))?.intent, "pause", "the other stays paused");
+  } finally { await c.close(); cleanup(d); }
+});
+
 test("start builds the dispatcher and its loops under the controller's epoch; the timer drives them; close stops them gracefully", async () => {
   const d = dir();
   const timer = new ManualTimer();

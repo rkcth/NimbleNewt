@@ -173,6 +173,49 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.pauses.resume(c.mgr, { commandId: cid("rs"), scope: { kind: "task", id: c.t1 }, reason: "again" }), (e) => assert.match(e.message, /not paused/));
   });
 
+  suite("a pause is lifted by the owner's recorded time and by nothing else, and only that scope (card L06b)", async (c) => {
+    const task = { kind: "task", id: c.t1 } as const;
+    const sibling = { kind: "task", id: c.t2 } as const;
+    await c.pauseTask(c.t1);
+    await c.pauseTask(c.t2);
+    const dispatcher = c.owner;
+    // No recorded condition: time passing lifts nothing.
+    now += 3 * 86_400_000;
+    assert.deepEqual(await c.pauses.liftDue(dispatcher), []);
+    assert.equal(await c.pauses.isPaused(c.t1), true);
+    // Only the owner records one; it is a UTC time; the pause must be in force.
+    await refuses("forbidden", () => c.pauses.setResumeCondition(c.mgr, { commandId: cid("rc"), scope: task, at: new Date(now + 3_600_000).toISOString() }));
+    await refuses("invalid_command", () => c.pauses.setResumeCondition(c.owner, { commandId: cid("rc"), scope: task, at: "tomorrow morning" }));
+    await refuses("invalid_command", () => c.pauses.setResumeCondition(c.owner, { commandId: cid("rc"), scope: { kind: "task", id: c.t3 }, at: new Date(now + 3_600_000).toISOString() }));
+    const at = new Date(now + 3_600_000).toISOString();
+    const set = await c.pauses.setResumeCondition(c.owner, { commandId: "rc-fixed", scope: task, at });
+    assert.equal((await c.pauses.setResumeCondition(c.owner, { commandId: "rc-fixed", scope: task, at })).replayed, true);
+    assert.equal(set.replayed, false);
+    // Before the time: nothing. The agent cannot lift it either, nor can the tick be run by anyone but the dispatcher.
+    assert.deepEqual(await c.pauses.liftDue(dispatcher), []);
+    await refuses("forbidden", () => c.pauses.liftDue(c.mgr));
+    now += 3_600_001;
+    assert.deepEqual(await c.pauses.liftDue(dispatcher), [task], "the scope that has a condition is lifted");
+    assert.equal(await c.pauses.isPaused(c.t1), false);
+    assert.equal(await c.pauses.isPaused(c.t2), true, "a sibling with no condition stays paused");
+    assert.deepEqual(await c.pauses.liftDue(dispatcher), [], "a repeat of the tick lifts nothing twice");
+    const lift = (await c.pauses.requests(c.owner, task)).at(-1)!;
+    assert.deepEqual([lift.action, lift.actor], ["resume", dispatcher.id]);
+    assert.match(lift.reason, /recorded condition/);
+    // A pause again starts without the old condition; one resumed by hand loses it too.
+    await c.pauseTask(c.t1);
+    now += 86_400_000;
+    assert.deepEqual(await c.pauses.liftDue(dispatcher), []);
+    await c.pauses.setResumeCondition(c.owner, { commandId: cid("rc"), scope: sibling, at: new Date(now + 1000).toISOString() });
+    await c.pauses.resume(c.mgr, { commandId: cid("rs"), scope: sibling, reason: "by hand" });
+    await c.pauseTask(c.t2);
+    now += 5000;
+    assert.deepEqual(await c.pauses.liftDue(dispatcher), [], "a condition belongs to the pause it was set for");
+    assert.equal(await c.pauses.isPaused(c.t2), true);
+    await c.pauses.resume(c.mgr, { commandId: cid("rs"), scope: sibling, reason: "done" });
+    await c.pauses.resume(c.mgr, { commandId: cid("rs"), scope: task, reason: "done" });
+  });
+
   suite("the policy revision in force is recorded with the request", async (c) => {
     await c.policy.set(c.owner, { commandId: cid("pol"), scope: "installation", profile: "derived" });
     await c.pauseTask(c.t1);

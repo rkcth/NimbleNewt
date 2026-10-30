@@ -85,7 +85,7 @@ export interface Context {
   readonly notes?: Pick<WorkingNoteService, "write" | "revise" | "setVisibility" | "read" | "versions" | "list">;
   readonly integration?: Pick<IntegrationPolicyService, "get" | "set" | "getDefault" | "setDefault" | "ensure" | "precheck">;
 
-  readonly pauses?: Pick<PauseService, "pause" | "resume" | "gate">;
+  readonly pauses?: Pick<PauseService, "pause" | "resume" | "gate" | "setResumeCondition">;
   readonly modelBudget?: Pick<FallbackService, "setBudget" | "budget" | "spend">;
   readonly cutover?: Pick<CutoverService, "disable" | "drain" | "cutover" | "reenable" | "setFailbackPolicy" | "controls" | "report" | "topology" | "tick">;
   readonly handoffs?: Pick<HandoffService, "prepare" | "complete" | "takeover" | "choose" | "cancel" | "advance" | "get" | "forTask" | "sweep" | "screen">;
@@ -363,6 +363,8 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => { only(a, ["scope", "reason", "background"]); return asJson(await pausesOf(c).pause(c.principal, { commandId: need(id), ...a } as never)); } },
   { name: "lifecycle.resume", kind: "command", summary: "Lifts the pause on this scope only; the answer lists the gates that still hold it.", args: { scope: "`{ kind, id }`", reason: "why, in words" }, result: "`{ gateId, requestId, stillPausedBy, replayed }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["scope", "reason"]); return asJson(await pausesOf(c).resume(c.principal, { commandId: need(id), ...a } as never)); } },
+  { name: "lifecycle.resume-condition", kind: "command", summary: "Records, ahead of time, the UTC time after which the controller lifts this scope's pause without asking again. Only the owner; the scope must be paused now; a resume or a new pause drops it.", args: { scope: "`{ kind, id }`", at: "UTC time, such as `2026-11-01T08:00:00Z`" }, result: "`{ gateId, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["scope", "at"]); return asJson(await pausesOf(c).setResumeCondition(c.principal, { commandId: need(id), ...a } as never)); } },
   { name: "lifecycle.status", kind: "query", summary: "What a scope's pause gate says: whether it is paused, who paused it, why, and what the runtime has actually reached (pausing, paused, suspended, stopped, recovery-required), apart from what was asked.", args: { scope: "`{ kind, id }`" }, result: "`{ item }`: `intent`, `owner`, `reason`, `observed`, or `{ intent: \"active\" }` for a scope never paused.", completion: { kind: "completed" },
     run: async (c, a) => { only(a, ["scope"]); const g = await pausesOf(c).gate(c.principal, a["scope"] as never); return asJson({ item: g === undefined ? { intent: "active" } : g }); } },
   { name: "lifecycle.stop", kind: "command", summary: "Suspends or stops a task, an agent, a team or the installation: it is paused at once, prepared inside a deadline (scoped cleanup only), and called suspended only after a durable checkpoint; a stop then ends execution. Assignments and the task goal are untouched and nothing is resumed. The first steps run now; the answer says where it stands, and `blocked` lists the choices when work will not settle.", args: { scope: "`{ kind: task|agent|team|installation, id }`", mode: "`suspend` or `stop`", reason: "why, in words", "deadlineMs?": "preparation deadline in milliseconds (default 60,000; at most one hour)", "spendBudget?": "most the cleanup may spend" }, result: "`{ intentId, replayed, phase, outcome?, blocked? }`.", completion: { kind: "completed" },
