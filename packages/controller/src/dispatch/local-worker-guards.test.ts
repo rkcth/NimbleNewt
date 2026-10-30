@@ -166,3 +166,54 @@ test("overlapping beats do not tell a message twice, an acknowledgement that fai
   await running;
   assert.equal(readsAfterTurn, 0, "no message is read after the turn");
 });
+
+test("H12j: a paused attempt with a model call still open is pausing, and advice is not delivered, until the model call ends", async () => {
+  const observed: string[] = [];
+  let modelCalls = 1;
+  let beat!: () => Promise<void>;
+  let finish!: () => void;
+  const turn = new Promise<void>((ok) => { finish = ok; });
+  const local = new LocalWorker({
+    hostId: "host:local", resources: { cpus: 1, memoryMb: 1 }, version: "v", capabilities: () => ({}) as never,
+    guards: {
+      pause: { isPaused: async () => true, observe: async (_o, state) => { observed.push(state); } },
+      messages: { readable: async (_o, boundary) => { return []; }, acknowledge: async () => [] },
+    },
+    schedule: (b) => { beat = b; return () => undefined; },
+    sandbox: { open: async (r) => ({ revision: r.revision, close: async () => undefined }) },
+    runtimes: { open: async () => ({ run: async () => { await turn; return { status: "completed" }; }, checkpoint: async () => ({}), tell: async () => undefined, activeModelCalls: () => modelCalls, close: async () => undefined }) },
+  });
+  const handle = await local.start(order());
+  const running = handle.run(gateway());
+  await beat();
+  assert.deepEqual(observed, ["pausing"], "a provider call is still open, so the attempt is not paused");
+  modelCalls = 0;
+  await beat();
+  assert.deepEqual(observed, ["pausing", "paused"]);
+  finish();
+  await running;
+});
+
+test("H12j: advice waits for a safe boundary while a model call is open", async () => {
+  const asked: string[] = [];
+  let modelCalls = 1;
+  let beat!: () => Promise<void>;
+  let finish!: () => void;
+  const turn = new Promise<void>((ok) => { finish = ok; });
+  const local = new LocalWorker({
+    hostId: "host:local", resources: { cpus: 1, memoryMb: 1 }, version: "v", capabilities: () => ({}) as never,
+    guards: { messages: { readable: async (_o, boundary) => { asked.push(boundary); return []; }, acknowledge: async () => [] } },
+    schedule: (b) => { beat = b; return () => undefined; },
+    sandbox: { open: async (r) => ({ revision: r.revision, close: async () => undefined }) },
+    runtimes: { open: async () => ({ run: async () => { await turn; return { status: "completed" }; }, checkpoint: async () => ({}), tell: async () => undefined, activeModelCalls: () => modelCalls, close: async () => undefined }) },
+  });
+  const handle = await local.start(order());
+  const running = handle.run(gateway());
+  await beat();
+  assert.deepEqual(asked, ["interrupt"]);
+  modelCalls = 0;
+  await beat();
+  assert.deepEqual(asked, ["interrupt", "interrupt", "safe-boundary"]);
+  finish();
+  await running;
+});

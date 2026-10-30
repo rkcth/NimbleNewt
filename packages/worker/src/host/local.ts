@@ -55,6 +55,8 @@ export interface HostRuntime {
   /** Compacts the stored conversation once (card H12f); absent on a runtime that cannot. */
   compact?(): Promise<void>;
   refreshContext(): Promise<void>;
+  /** Model calls open right now (the controller does not call the attempt paused while one is). */
+  activeModelCalls?(): number;
   close(): Promise<void>;
 }
 export interface HostSandboxSession { readonly revision: string; close(): Promise<void> }
@@ -197,6 +199,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
         },
         async checkpoint() { return wrapCheckpoint(await process.checkpoint()); },
         tell: (text) => process.tell(text),
+        activeModelCalls: () => process.modelCallsInFlight,
         // Over the context budget at the first call: the process compacts its stored conversation once and the controller asks again (card H12f).
         async compact() { await process.compact(); },
         async refreshContext() { await process.tell(await options.refreshText?.(order) ?? DEFAULT_REFRESH); },

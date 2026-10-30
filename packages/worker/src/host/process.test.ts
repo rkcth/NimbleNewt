@@ -53,3 +53,17 @@ test("a process that keeps asking past its limits is stopped", async () => {
   for (let i = 1; i <= PROCESS_LIMITS.fetchInFlight + PROCESS_LIMITS.refusals + 5; i++) f.send({ t: "fetch", id: i, url: "http://relay.invalid/m0/chat/completions", method: "POST", headers: [] });
   assert.equal((await process.exited).killed, true);
 });
+
+test("H12j: modelCallsInFlight counts relay calls from the request until they end", async () => {
+  const f = fake();
+  let end!: () => void;
+  const gate = new Promise<void>((ok) => { end = ok; });
+  const process = await WorkerProcess.launch(f.launcher as never, { recipe: {} as never, command: ["x"], timeoutMs: 1000, maxOutputBytes: 1000 }, { bridge: handlers.bridge, relay: async () => { await gate; return { status: 200, statusText: "OK", headers: [], body: null } as never; } });
+  assert.equal(process.modelCallsInFlight, 0);
+  f.send({ t: "fetch", id: 1, url: "http://relay.invalid/m0/chat/completions", method: "POST", headers: [] });
+  assert.equal(process.modelCallsInFlight, 1);
+  end();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(process.modelCallsInFlight, 0);
+  process.kill("done");
+});

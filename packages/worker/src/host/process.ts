@@ -166,6 +166,8 @@ export class WorkerProcess {
   }
 
   get ready(): boolean { return this.#isReady; }
+  /** Model calls the process has open through the relay right now. */
+  get modelCallsInFlight(): number { return this.#fetches.size; }
   /** What the process said about itself when it was ready. */
   get info(): { readonly toolSchemaChars?: number; readonly systemPromptChars?: number } { return this.#info; }
 

@@ -25,6 +25,8 @@ export interface AttemptRuntime {
   tell?(text: string): Promise<void>;
   /** Puts the owner's current decisions in front of the agent (after a call was refused because they changed). */
   refreshContext?(): Promise<void>;
+  /** Model calls started and not yet finished (a streaming answer is one). A paused attempt is not claimed paused, and advice is not delivered, while one is open. Absent: none is known. */
+  activeModelCalls?(): number;
   close(): Promise<void>;
 }
 export type BoundCall = (request: ToolCallRequest, executor: ToolExecutor) => Promise<ToolResult>;
@@ -182,6 +184,8 @@ export class LocalWorker implements WorkerHost {
       pass = pass.then(() => observeAndDeliver(deliver), () => observeAndDeliver(deliver));
       return pass;
     };
+    // Tool calls through the gateway and model calls the runtime has open both count: either one is work still in flight.
+    const busy = (): number => inFlight + (runtime?.activeModelCalls?.() ?? 0);
     const observeAndDeliver = async (deliver: boolean): Promise<void> => {
       if (guards === undefined || runtime === undefined) return;
       let paused = false;
@@ -190,14 +194,14 @@ export class LocalWorker implements WorkerHost {
           paused = await guards.pause.isPaused(order);
           if (paused) {
             // Paused is claimed only when no call is in flight; until then the honest state is pausing.
-            const state = inFlight === 0 ? "paused" : "pausing";
+            const state = busy() === 0 ? "paused" : "pausing";
             if (state !== reported) { await guards.pause.observe(order, state, state === "paused" ? "finished" : undefined); reported = state; }
           } else reported = undefined;
         } catch (error) { report("pause observation", error); }
       }
       // Nothing is delivered to a paused attempt, or after the turn: a message told then would be marked delivered and never acted on. An interrupt reaches a running attempt at once, advice only when no call is in flight.
       if (!deliver || paused || guards.messages === undefined || runtime.tell === undefined) return;
-      for (const boundary of (inFlight === 0 ? ["interrupt", "safe-boundary"] : ["interrupt"]) as MessageBoundaryName[]) {
+      for (const boundary of (busy() === 0 ? ["interrupt", "safe-boundary"] : ["interrupt"]) as MessageBoundaryName[]) {
         try {
           const items = await guards.messages.readable(order, boundary);
           if (items.length === 0) continue;
