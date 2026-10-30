@@ -49,7 +49,7 @@ for (const backend of backends) {
     status: StatusService; owner: Principal; project: string; other: string; storage: ControllerStorage; epoch: number;
     projects: ProjectService; assignments: AssignmentService; waits: WaitService; blockers: BlockerService; contracts: ContractService; stall: StallService; pauses: PauseService;
     desks: DeskService; mcp: McpService; artifacts: ArtifactService; blobs: FileBlobStore; watches: WatchService; events: EventService; hosts: HostService; principals: PrincipalService; agents: AgentService;
-    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]> }): StatusService;
+    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; handoffs?: NonNullable<StatusDeps["handoffs"]> }): StatusService;
     agent(name: string, grants?: AGrant[]): Promise<Principal>;
     host(name: string, project?: string): Promise<Principal>;
     /** A ready task in `project` (default: the main one), created by the owner. */
@@ -89,7 +89,7 @@ for (const backend of backends) {
         const other = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "Q" })).id;
         const rebuild: Ctx["rebuild"] = (extra = {}, deps = {}) => StatusService.withEpoch(world.storage, epoch, {
           assignments, waits, blockers, contracts, stall, pauses,
-          ...(deps.watch === false ? {} : { watch: watches }), ...(deps.ownerQuestions === undefined ? {} : { ownerQuestions: deps.ownerQuestions }), ...(deps.activity === undefined ? {} : { activity: deps.activity }), ...(deps.agenda === undefined ? {} : { agenda: deps.agenda }), ...(deps.meetings === undefined ? {} : { meetings: deps.meetings }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
+          ...(deps.watch === false ? {} : { watch: watches }), ...(deps.ownerQuestions === undefined ? {} : { ownerQuestions: deps.ownerQuestions }), ...(deps.activity === undefined ? {} : { activity: deps.activity }), ...(deps.agenda === undefined ? {} : { agenda: deps.agenda }), ...(deps.meetings === undefined ? {} : { meetings: deps.meetings }), ...(deps.handoffs === undefined ? {} : { handoffs: deps.handoffs }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
         }, { ...options, ...extra });
         const status = rebuild();
         const grantService = GrantService.withEpoch(world.storage, epoch, options);
@@ -1026,5 +1026,22 @@ for (const backend of backends) {
     assert.equal(await status.ask(reader, { kind: "meetings", projectId: c.project }), undefined);
     assert.equal(await c.rebuild().ask(c.owner, { kind: "meetings", projectId: c.project }), undefined);
     await assert.rejects(status.ask(c.owner, { kind: "meetings", projectId: c.project, limit: 51 }));
+  });
+
+  suite("the hand-off going on for a task is told: who to whom, why, how far, what the package lacks, what holds it up and when a temporary one returns (card L03f)", async (c) => {
+    const t = await c.projects.createTask({ commandId: cid("t"), actor: c.owner.id, projectId: c.project, title: "Build" });
+    let going: Record<string, unknown> | undefined = { id: "hnd-1", revision: 3, taskId: t.id, from: { kind: "agent", id: "agt-a" }, to: { kind: "agent", id: "agt-b" }, phase: "blocked", mode: "prepared", reason: "Ann is leaving", requestedBy: "owner:rob", requestedAt: "2026-10-22T09:00:00.000Z", returnAt: "2026-11-01T00:00:00.000Z", package: { missing: ["next action"], ready: false }, blocked: { reason: "the task is still running a tool.", choices: ["wait", "cancel"] } };
+    const handoffs = { forTask: async (by: Principal) => { if (by.kind !== "owner") throw new DomainError("not_found", "no"); return going as never; } };
+    const status = c.rebuild({}, { handoffs });
+    const got = (await status.ask(c.owner, { kind: "handoff", taskId: t.id }))!.lines.map((l) => l.text);
+    assert.equal(got[0], "Hand-off from agt-a to agt-b, prepared: blocked. Asked by owner:rob at 2026-10-22T09:00:00.000Z: Ann is leaving");
+    assert.match(got[1]!, /temporary: the task goes back to agt-a at 2026-11-01/);
+    assert.equal(got[2], "The package is missing: next action.");
+    assert.equal(got[3], "It is held up: the task is still running a tool. You can choose: wait, cancel.");
+    going = undefined;
+    assert.deepEqual((await status.ask(c.owner, { kind: "handoff", taskId: t.id }))!.lines.map((l) => l.text), ["No hand-off is going on for this task."]);
+    const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
+    assert.equal(await status.ask(reader, { kind: "handoff", taskId: t.id }), undefined);
+    assert.equal(await c.rebuild().ask(c.owner, { kind: "handoff", taskId: t.id }), undefined);
   });
 }

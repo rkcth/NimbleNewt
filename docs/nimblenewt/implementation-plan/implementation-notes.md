@@ -2661,3 +2661,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## M04f (part 2): planned meetings and their rosters in chat
 
 - `StatusService` view `meetings` (`{ kind: "meetings", projectId, limit? }`, the project in focus when none is named): the project's planned meetings, soonest first, each with its title, kind, time, how it is held and the roster with each member's placing (status and availability, so a paused or stopped agent is visible before the owner decides on the exception). A project the caller may not read gives nothing.
+
+## L03f (part 2): the hand-off going on for a task in chat
+
+- `StatusService` view `handoff` (`{ kind: "handoff", taskId }`, the task named by its title in chat): from whom to whom, its mode and phase, why and who asked, when a temporary one returns, whether the package is complete and what it lacks, gaps accepted, what holds it up and the choices, and a failure. A task with no hand-off going gets a plain line; a task the caller may not control or read gets nothing.

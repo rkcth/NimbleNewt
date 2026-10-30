@@ -11,6 +11,7 @@ import type { HandlingBody, WatchService } from "../events/handling.js";
 import { DEFAULT_THRESHOLDS, type EvidenceBody } from "../health/assess.js";
 import type { ConcernBody, StallService } from "../health/stall.js";
 import { DEFAULT_HOST_STALE_AFTER_MS, hostFreshness, type Freshness } from "../hosts/hosts.js";
+import type { TaskHandoffBody } from "../lifecycle/handoff.js";
 import type { PauseService, PauseStatus } from "../lifecycle/pause.js";
 import type { CallBody } from "../mcp/mcp.js";
 import type { ContractBody, ContractService, DependencyBody, Difficulty } from "../planning/contracts.js";
@@ -177,6 +178,7 @@ export type StatusRequest =
   | { readonly kind: "failed_events"; readonly projectId?: string; readonly taskId?: string; readonly afterId?: string; readonly limit?: number }
   | { readonly kind: "failed_event"; readonly handlingId: string }
   | { readonly kind: "owner_questions"; readonly limit?: number }
+  | { readonly kind: "handoff"; readonly taskId: string }
   | { readonly kind: "meetings"; readonly projectId: string; readonly limit?: number }
   | { readonly kind: "agenda"; readonly projectId: string; readonly limit?: number }
   | { readonly kind: "explanations"; readonly taskId: string; readonly seq?: number; readonly limit?: number }
@@ -195,6 +197,8 @@ export interface StatusDeps {
   readonly pauses?: Pick<PauseService, "status" | "isPaused">;
   /** The failed event queue (card H13). Absent: the queue cannot be listed. */
   readonly watch?: Pick<WatchService, "failures" | "inspect">;
+  /** The hand-off going on for a task (card L03f). Absent: the view is not offered. */
+  readonly handoffs?: { forTask(by: Principal, taskId: string): Promise<View<TaskHandoffBody> | undefined> };
   /** The planned meetings of a project (card M04f). Absent: the view is not offered. */
   readonly meetings?: { planned(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { id: string; revision: number; title: string; kind: string; startsAt: string; endsAt: string; mode: string; state: string; participants: readonly { id: string; status?: string; availability?: string }[] }[]; next?: string } | undefined> };
   /** The open agenda of a project (card M03f). Absent: the view is not offered. */
@@ -283,6 +287,7 @@ export class StatusService {
       case "noticeboard": { onlyKnown(request, ["kind", "projectId"]); return this.noticeboard(by, request.projectId); }
       case "failed_events": { const { kind: _k, ...rest } = request; return this.failedEvents(by, rest); }
       case "failed_event": { onlyKnown(request, ["kind", "handlingId"]); return this.inspectFailedEvent(by, request.handlingId); }
+      case "handoff": { onlyKnown(request, ["kind", "taskId"]); return this.handoffLines(by, request.taskId); }
       case "meetings": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.meetingLines(by, request); }
       case "agenda": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.agendaLines(by, request); }
       case "explanations": { onlyKnown(request, ["kind", "taskId", "seq", "limit"]); return this.explanationLines(by, request); }
@@ -324,6 +329,25 @@ export class StatusService {
       : line(`Step ${s.seq}, ${s.at}, ${shown(s.actor)}: ${s.kind} - ${shown(s.summary)}${s.corrections > 0 ? ` (corrected ${s.corrections} time${s.corrections === 1 ? "" : "s"})` : ""}`, cite("task", taskId))));
     if (lines.length === 0) lines.push(line("No steps are recorded for this task yet.", cite("task", taskId)));
     else if (next !== undefined) lines.push(line(`There are more steps; ask again after step ${next}.`, cite("task", taskId)));
+    return { observedAt: this.#runner.now(), lines };
+  }
+
+  /** The hand-off going on for a task: from whom to whom, why and who asked, how far it is, whether the package is complete (and what is missing), what blocks it and how, when it will be returned if it is temporary. Nothing when the task cannot be read; a plain line when no hand-off is going. */
+  async handoffLines(by: Principal, taskIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.handoffs === undefined) return undefined;
+    const taskId = checkTaskId(taskIdValue);
+    let h: View<TaskHandoffBody> | undefined;
+    try { h = await this.#deps.handoffs.forTask(by, taskId); } catch (error) {
+      if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) return undefined;
+      throw error;
+    }
+    if (h === undefined) return { observedAt: this.#runner.now(), lines: [line("No hand-off is going on for this task.", cite("task", taskId))] };
+    const lines: Line[] = [line(`Hand-off from ${shown(h.from.id)} to ${shown(h.to.id)}, ${h.mode}: ${h.phase}. Asked by ${shown(h.requestedBy)} at ${h.requestedAt}: ${shown(h.reason)}`, cite("handoff", h.id, h.revision), cite("task", taskId))];
+    if (h.returnAt !== undefined) lines.push(line(`It is temporary: the task goes back to ${shown(h.from.id)} at ${h.returnAt}, if whoever asked still holds the right to control it then.`, cite("handoff", h.id)));
+    if (h.package !== undefined) lines.push(line(h.package.ready ? "The package is complete." : `The package is missing: ${h.package.missing.map((x) => shown(x)).join(", ")}.`, cite("handoff", h.id)));
+    if (h.acceptedGaps !== undefined) lines.push(line(`It was handed over with gaps accepted: ${h.acceptedGaps.missing.map((x) => shown(x)).join(", ")}.`, cite("handoff", h.id)));
+    if (h.blocked !== undefined) lines.push(line(`It is held up: ${shown(h.blocked.reason)} You can choose: ${h.blocked.choices.join(", ")}.`, cite("handoff", h.id)));
+    if (h.failure !== undefined) lines.push(line(`It failed: ${shown(h.failure)}`, cite("handoff", h.id)));
     return { observedAt: this.#runner.now(), lines };
   }
 

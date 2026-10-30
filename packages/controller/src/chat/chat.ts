@@ -407,7 +407,7 @@ export class ChatService {
           request["projectId"] = currentFocus.projectId;
         }
         // A task's activity or explanations are asked for by the task's title (the project in focus); a title that fits more than one task asks nothing and says so.
-        if ((request["kind"] === "activity" || request["kind"] === "explanations") && request["taskId"] === undefined && typeof request["taskTitle"] === "string") {
+        if ((request["kind"] === "activity" || request["kind"] === "explanations" || request["kind"] === "handoff") && request["taskId"] === undefined && typeof request["taskTitle"] === "string") {
           if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Say which project you mean." }); continue; }
           const matches = await this.#tasksByTitle(token, currentFocus.projectId, request["taskTitle"]);
           if (matches.length !== 1) { push({ i, kind: "refused", code: matches.length === 0 ? "not_found" : "invalid_command", message: matches.length === 0 ? `no task called "${request["taskTitle"].slice(0, 80)}" in that project` : `more than one task is called "${request["taskTitle"].slice(0, 80)}"; use its ID` }); continue; }
