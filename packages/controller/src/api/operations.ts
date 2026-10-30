@@ -14,6 +14,8 @@ import type { FallbackService } from "../routing/fallback.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
 import type { ReleaseService } from "../release/index.js";
+import type { TaskHandoffBody } from "../lifecycle/handoff.js";
+import type { View } from "../domain/model.js";
 import type { SwarmService } from "../swarm/index.js";
 import type { IncidentService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
 import type { RetrievalService } from "../context/index.js";
@@ -86,7 +88,7 @@ export interface Context {
   readonly pauses?: Pick<PauseService, "pause" | "resume" | "gate">;
   readonly modelBudget?: Pick<FallbackService, "setBudget" | "budget" | "spend">;
   readonly cutover?: Pick<CutoverService, "disable" | "drain" | "cutover" | "reenable" | "setFailbackPolicy" | "controls" | "report" | "topology" | "tick">;
-  readonly handoffs?: Pick<HandoffService, "prepare" | "complete" | "takeover" | "choose" | "cancel" | "advance" | "get" | "forTask" | "sweep">;
+  readonly handoffs?: Pick<HandoffService, "prepare" | "complete" | "takeover" | "choose" | "cancel" | "advance" | "get" | "forTask" | "sweep" | "screen">;
   readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep">;
   readonly activity?: Pick<ActivityService, "record" | "explain" | "explainLater" | "correct" | "markUnavailable" | "steps" | "payload" | "explanations" | "corrections" | "timeline">;
   readonly policyContext?: Pick<PolicyService, "contextFor">;
@@ -178,7 +180,13 @@ const notesOf = (c: Context): NonNullable<Context["notes"]> => c.notes ?? unavai
 const pausesOf = (c: Context): NonNullable<Context["pauses"]> => c.pauses ?? unavailable("pause");
 const modelBudgetOf = (c: Context): NonNullable<Context["modelBudget"]> => c.modelBudget ?? unavailable("model budgets");
 const cutoverOf = (c: Context): NonNullable<Context["cutover"]> => c.cutover ?? unavailable("provider drain and cutover");
-const handoffsOf = (c: Context): NonNullable<Context["handoffs"]> => c.handoffs ?? unavailable("hand-off");
+const handoffsOf = (c: Context): NonNullable<Context["handoffs"]> => {
+  const h = c.handoffs ?? unavailable("hand-off");
+  // The sender's drafts and responsibilities are not shown to everyone who may control the task (card L03g).
+  const screened = <A extends unknown[]>(run: (...a: A) => Promise<View<TaskHandoffBody>>) => async (...a: A) => h.screen(c.principal, await run(...a));
+  const screenedOpt = <A extends unknown[]>(run: (...a: A) => Promise<View<TaskHandoffBody> | undefined>) => async (...a: A) => { const v = await run(...a); return v === undefined ? v : h.screen(c.principal, v); };
+  return { ...h, prepare: screened(h.prepare.bind(h)), complete: screened(h.complete.bind(h)), takeover: screened(h.takeover.bind(h)), choose: screened(h.choose.bind(h)), cancel: screened(h.cancel.bind(h)), advance: screened(h.advance.bind(h)), get: screenedOpt(h.get.bind(h)), forTask: screenedOpt(h.forTask.bind(h)), sweep: h.sweep.bind(h), screen: h.screen.bind(h) } as NonNullable<Context["handoffs"]>;
+};
 const resumesOf = (c: Context): NonNullable<Context["resumes"]> => c.resumes ?? unavailable("checked resume");
 const activityOf = (c: Context): NonNullable<Context["activity"]> => c.activity ?? unavailable("activity records");
 const policyContextOf = (c: Context): NonNullable<Context["policyContext"]> => c.policyContext ?? unavailable("policy context");
@@ -819,8 +827,8 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => { only(a, ["hostId", "os", "arch", "active"]); await releaseOf(c).authorizeHost(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
   { name: "release.issue", kind: "command", summary: "Owner only: issues the next test attempt for one platform of a candidate to an authorized host and the worker that will report. Returns the job payload. Refused while an attempt is open or after the platform passed.", args: { candidateId: "the candidate", cell: "{ os, arch, osVersion? }", hostId: "the authorized host", workerId: "the worker principal that will report", timeoutSeconds: "whole seconds", memoryMb: "whole megabytes", commandId: "required" }, result: "`{ attemptId, payload }`.",
     run: async (c, a, id) => { only(a, ["candidateId", "cell", "hostId", "workerId", "timeoutSeconds", "memoryMb"]); return asJson(await releaseOf(c).issue(c.principal, { commandId: need(id), ...(a as object) } as never) as never); } },
-  { name: "release.report", kind: "command", summary: "A release-test worker (holding `release.report`) returns the result of its attempt: what it ran against must equal the candidate exactly, or it is refused and counts for nothing. A worker cannot approve a release.", args: { attemptId: "the attempt", sourceCommit: "commit tested", suiteRevision: "suite revision run", artifactHashes: "{name: sha256} of what was tested", environment: "{ os, arch, osVersion? }", outcome: "pass or fail", counts: "{ passed, failed, skipped }", logDigest: "sha256 of the log", summary: "short text", commandId: "required" }, result: "`{ ok }`.",
-    run: async (c, a, id) => { only(a, ["attemptId", "sourceCommit", "suiteRevision", "artifactHashes", "environment", "outcome", "counts", "logDigest", "summary"]); await releaseOf(c).report(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
+  { name: "release.report", kind: "command", summary: "A release-test worker (holding `release.report`) returns the result of its attempt: what it ran against must equal the candidate exactly, or it is refused and counts for nothing. A worker cannot approve a release.", args: { attemptId: "the attempt", sourceCommit: "commit tested", suiteRevision: "suite revision run", artifactHashes: "{name: sha256} of what was tested", dependencyLockHashes: "{name: sha256} of the locks used", environment: "{ os, arch, osVersion? }", outcome: "pass or fail", counts: "{ passed, failed, skipped }", logDigest: "sha256 of the log", summary: "short text", commandId: "required" }, result: "`{ ok }`.",
+    run: async (c, a, id) => { only(a, ["attemptId", "sourceCommit", "suiteRevision", "artifactHashes", "dependencyLockHashes", "environment", "outcome", "counts", "logDigest", "summary"]); await releaseOf(c).report(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
   { name: "release.interrupt", kind: "command", summary: "Owner only: ends an open attempt without a result (a worker was lost). It is never a pass; a retry is a new attempt.", args: { attemptId: "the attempt", reason: "why", commandId: "required" }, result: "`{ ok }`.",
     run: async (c, a, id) => { only(a, ["attemptId", "reason"]); await releaseOf(c).interrupt(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
   { name: "release.gate", kind: "query", summary: "Owner only: where each platform of a candidate stands (passed, failed, interrupted, running, missing) and whether the release is ready and approved.", args: { candidateId: "the candidate" }, result: "`{ gate }`.",

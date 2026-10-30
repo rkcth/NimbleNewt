@@ -3534,6 +3534,7 @@ Arguments:
 - `sourceCommit`: commit tested
 - `suiteRevision`: suite revision run
 - `artifactHashes`: {name: sha256} of what was tested
+- `dependencyLockHashes`: {name: sha256} of the locks used
 - `environment`: { os, arch, osVersion? }
 - `outcome`: pass or fail
 - `counts`: { passed, failed, skipped }

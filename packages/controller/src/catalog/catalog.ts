@@ -236,7 +236,7 @@ export class CatalogService {
         }
         if (prior !== undefined && compare(version, prior.latest) <= 0) throw new DomainError("invalid_command", `${canonical} is at ${prior.latest}; a new version must be higher`, { field: "version" });
         if ((prior?.versions.length ?? 0) >= CATALOG_LIMITS.versions) throw new DomainError("unavailable", `${canonical} already has ${CATALOG_LIMITS.versions} versions`);
-        const nextEntry: EntryBody = { name: canonical, layer: parsed.layer, kind: command.kind, ...(parsed.layer === "agent" ? { owner: by.id } : {}), latest: version, versions: [...(prior?.versions ?? []), version], revoked: prior?.revoked ?? [] };
+        const nextEntry: EntryBody = { name: canonical, layer: parsed.layer, kind: command.kind, ...(parsed.layer === "agent" ? { owner: by.id } : {}), latest: version, versions: [...(prior?.versions ?? []), version], revoked: prior?.revoked ?? [], ...(prior?.deprecated === undefined ? {} : { deprecated: prior.deprecated }) };
         return {
           ref: vref, creates: true,
           changes: [

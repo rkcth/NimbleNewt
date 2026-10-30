@@ -166,6 +166,12 @@ for (const backend of backends) {
     await refuses("forbidden", () => run("1.0.0"), (e) => assert.match(e.message, /revoked/));
     await c.cat.rollback(c.owner, { commandId: cid("b"), name: tool.name, toVersion: "1.1.0", reason: "back to 1.1" });
     assert.equal((await run() as { version: string }).version, "1.1.0");
+    // Publishing a new version keeps what was set aside: the version rolled back from does not come back when the new one is revoked.
+    await c.cat.rollback(c.owner, { commandId: cid("b"), name: tool.name, toVersion: "1.1.0", reason: "no change" });
+    await reg("1.3.0");
+    assert.equal((await run() as { version: string }).version, "1.3.0");
+    await c.cat.revoke(c.owner, { commandId: cid("v"), name: tool.name, version: "1.3.0", reason: "bad" });
+    assert.equal((await run() as { version: string }).version, "1.1.0", "1.2.0 stays set aside");
   });
 
   suite("a host that cannot run a tool is told why before anything starts, and a run is recorded with who, which exact version, task and project, visible only inside that project", async (c) => {

@@ -40,6 +40,7 @@ export interface AttemptBody {
   /** The only principal whose result is taken. */
   readonly workerId: string;
   readonly payloadDigest: string;
+  readonly limits: { readonly timeoutSeconds: number; readonly memoryMb: number };
   readonly state: AttemptState;
   readonly issuedAt: string;
   readonly endedAt?: string;
@@ -189,8 +190,8 @@ export class ReleaseService {
     if (!Number.isInteger(command.memoryMb) || command.memoryMb < 1 || command.memoryMb > RELEASE_LIMITS.memoryMb) bad("memoryMb", "must be a whole number of megabytes");
     const limits = { timeoutSeconds: command.timeoutSeconds, memoryMb: command.memoryMb };
     let issued: { attemptId: string; payload: JobPayload } | undefined;
-    await this.#runner.command("release.issue", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
-      payload: { candidateId: command.candidateId, cell: cellKey(cell), hostId, workerId },
+    const done = await this.#runner.command("release.issue", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
+      payload: { candidateId: command.candidateId, cell: cellKey(cell), hostId, workerId, timeoutSeconds: limits.timeoutSeconds, memoryMb: limits.memoryMb },
       build: async (): Promise<Built> => {
         const candidate = await this.#runner.get(CANDIDATE, String(command.candidateId));
         if (candidate === undefined) throw new DomainError("not_found", "no such release candidate");
@@ -207,17 +208,18 @@ export class ReleaseService {
         const attemptId = attemptIdOf(command.candidateId, cell, n);
         const payload = jobPayload(command.candidateId, manifest, cell, attemptId, limits);
         const ref: AggregateRef = { kind: ATTEMPT, id: attemptId };
-        const body: AttemptBody = { candidateId: command.candidateId, cell, n, hostId, workerId, payloadDigest: sha(canonicalJson(payload as unknown as JsonObject)), state: "issued", issuedAt: this.#runner.now() };
+        const body: AttemptBody = { candidateId: command.candidateId, cell, n, hostId, workerId, payloadDigest: sha(canonicalJson(payload as unknown as JsonObject)), limits, state: "issued", issuedAt: this.#runner.now() };
         issued = { attemptId, payload };
         return { ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { candidateId: command.candidateId, platform: cellKey(cell), attempt: n } };
       },
     }));
     if (issued === undefined) {
-      // A repeat of the same command: rebuild what was issued.
-      const found = (await this.#attempts(command.candidateId)).map((a) => ({ id: a.id, body: a.body as unknown as AttemptBody })).filter((a) => cellKey(a.body.cell) === cellKey(cell) && a.body.workerId === workerId && a.body.hostId === hostId).sort((a, b) => a.body.n - b.body.n).at(-1);
-      const candidate = (await this.#runner.get(CANDIDATE, command.candidateId))!.body as unknown as CandidateBody;
-      if (found === undefined) throw new DomainError("not_found", "that attempt is not recorded");
-      issued = { attemptId: found.id, payload: jobPayload(command.candidateId, candidate.manifest, cell, found.id, limits) };
+      // A repeat of the same command: the attempt it created, with the limits it was issued under.
+      const found = await this.#runner.get(ATTEMPT, done.id);
+      const candidate = (await this.#runner.get(CANDIDATE, command.candidateId))?.body as unknown as CandidateBody | undefined;
+      const attempt = found?.body as unknown as AttemptBody | undefined;
+      if (attempt === undefined || candidate === undefined) throw new DomainError("not_found", "that attempt is not recorded");
+      issued = { attemptId: done.id, payload: jobPayload(command.candidateId, candidate.manifest, attempt.cell, done.id, attempt.limits) };
     }
     return issued;
   }
@@ -226,9 +228,9 @@ export class ReleaseService {
    * The worker's result. Refused (and recorded as nothing) if it is not from the worker the attempt was issued to, the attempt is no longer open, or what it reports differs in any way from the candidate.
    * The worker says what happened on its platform; whether the release goes ahead is not its to say.
    */
-  async report(by: Principal, command: NoActor & { attemptId: string; sourceCommit: string; suiteRevision: string; artifactHashes: unknown; environment: unknown; outcome: "pass" | "fail"; counts: { passed: number; failed: number; skipped: number }; logDigest: string; summary: string }): Promise<void> {
+  async report(by: Principal, command: NoActor & { attemptId: string; sourceCommit: string; suiteRevision: string; artifactHashes: unknown; dependencyLockHashes: unknown; environment: unknown; outcome: "pass" | "fail"; counts: { passed: number; failed: number; skipped: number }; logDigest: string; summary: string }): Promise<void> {
     if (by.kind === "owner" || !allows(by, "release.report", undefined)) throw new DomainError("forbidden", `${by.id} may not report release test results`);
-    onlyKnown(command, ["commandId", "attemptId", "sourceCommit", "suiteRevision", "artifactHashes", "environment", "outcome", "counts", "logDigest", "summary"]);
+    onlyKnown(command, ["commandId", "attemptId", "sourceCommit", "suiteRevision", "artifactHashes", "dependencyLockHashes", "environment", "outcome", "counts", "logDigest", "summary"]);
     if (command.outcome !== "pass" && command.outcome !== "fail") bad("outcome", "must be pass or fail");
     if (typeof command.logDigest !== "string" || !SHA.test(command.logDigest)) bad("logDigest", "needs a lower-case sha256 of the log");
     const k = command.counts as Partial<Record<"passed" | "failed" | "skipped", unknown>> | undefined;
@@ -237,6 +239,7 @@ export class ReleaseService {
     const environment = checkCell(command.environment, "environment");
     const summary = redactText(text(command.summary, "summary", { min: 1, max: RELEASE_LIMITS.summary }));
     const artifactHashes = hashMap(command.artifactHashes, "artifactHashes", RELEASE_LIMITS.artifacts);
+    const lockHashes = hashMap(command.dependencyLockHashes, "dependencyLockHashes", RELEASE_LIMITS.locks);
     const ref: AggregateRef = { kind: ATTEMPT, id: String(command.attemptId) };
     await this.#runner.command("release.report", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
       payload: { attemptId: command.attemptId, outcome: command.outcome },
@@ -250,8 +253,10 @@ export class ReleaseService {
         if (command.sourceCommit !== manifest.sourceCommit) throw new DomainError("invalid_command", "the source commit is not the candidate's", { field: "sourceCommit" });
         if (command.suiteRevision !== manifest.suiteRevision) throw new DomainError("invalid_command", "the test-suite revision is not the candidate's", { field: "suiteRevision" });
         if (canonicalJson(artifactHashes as unknown as JsonObject) !== canonicalJson(manifest.artifacts as unknown as JsonObject)) throw new DomainError("invalid_command", "the artifact hashes are not the candidate's", { field: "artifactHashes" });
+        if (attempt.cell.osVersion !== undefined && environment.osVersion !== attempt.cell.osVersion) throw new DomainError("invalid_command", `the result is from OS version ${environment.osVersion ?? "unstated"}, not ${attempt.cell.osVersion}`, { field: "environment" });
+        if (canonicalJson(lockHashes as unknown as JsonObject) !== canonicalJson(manifest.dependencyLocks as unknown as JsonObject)) throw new DomainError("invalid_command", "the dependency locks are not the candidate's", { field: "dependencyLockHashes" });
         if (environment.os !== attempt.cell.os || environment.arch !== attempt.cell.arch) throw new DomainError("invalid_command", `the result is from ${cellKey(environment)}, not ${cellKey(attempt.cell)}`, { field: "environment" });
-        const result: ResultBody = { outcome: command.outcome, counts: command.counts, environment, logDigest: command.logDigest, summary };
+        const result: ResultBody = { outcome: command.outcome, counts: { passed: command.counts.passed, failed: command.counts.failed, skipped: command.counts.skipped }, environment, logDigest: command.logDigest, summary };
         const next: AttemptBody = { ...attempt, state: command.outcome === "pass" ? "passed" : "failed", endedAt: this.#runner.now(), result };
         return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: next as unknown as JsonObject }], detail: { attemptId: ref.id, state: next.state }, contention: async () => new DomainError("stale_revision", "the attempt changed at the same moment; report again") };
       },

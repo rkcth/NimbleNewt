@@ -42,7 +42,7 @@ for (const backend of backends) {
   const issue = (rel: ReleaseService, owner: Principal, candidate: string, cell: Cell, host: string, worker: Principal) =>
     rel.issue(owner, { commandId: cid("i"), candidateId: candidate, cell, hostId: host, workerId: worker.id, timeoutSeconds: 3600, memoryMb: 4096 });
   const result = (attemptId: string, extra: Record<string, unknown> = {}) => ({
-    commandId: cid("r"), attemptId, sourceCommit: "a".repeat(40), suiteRevision: "suite-7", artifactHashes: { "nimblenewt.tgz": h("1") }, environment: { os: "linux", arch: "x64" },
+    commandId: cid("r"), attemptId, sourceCommit: "a".repeat(40), suiteRevision: "suite-7", artifactHashes: { "nimblenewt.tgz": h("1") }, dependencyLockHashes: { "package-lock.json": h("2") }, environment: { os: "linux", arch: "x64" },
     outcome: "pass" as const, counts: { passed: 120, failed: 0, skipped: 2 }, logDigest: h("9"), summary: "all green", ...extra,
   });
 
@@ -82,9 +82,28 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.rel.report(c.w1, result(attemptId, { artifactHashes: { "nimblenewt.tgz": h("3") } })), /artifact hashes/);
     await refuses("invalid_command", () => c.rel.report(c.w1, result(attemptId, { environment: { os: "darwin", arch: "arm64" } })), /not linux\/x64/);
     await refuses("invalid_command", () => c.rel.report(c.w1, result(attemptId, { counts: { passed: 5, failed: 1, skipped: 0 } })), /none failing/);
+    await refuses("invalid_command", () => c.rel.report(c.w1, result(attemptId, { dependencyLockHashes: { "package-lock.json": h("4") } })), /dependency locks/);
     assert.equal((await c.rel.gate(c.owner, c.candidate)).cells.find((x) => x.cell.os === "linux")!.state, "running", "nothing counted");
     await c.rel.report(c.w1, result(attemptId));
     await refuses("invalid_command", () => c.rel.report(c.w1, result(attemptId)), /already passed/);
+  });
+
+  suite("a repeated issue returns the attempt it made, with its limits, even after a later attempt; a platform version the candidate names must match (card X09)", async (c) => {
+    const pinned = (await c.rel.submit(c.owner, { commandId: cid("s"), manifest: manifest({ matrix: [{ os: "linux", arch: "x64", osVersion: "22.04" }] }) })).candidateId;
+    await c.rel.authorizeHost(c.owner, { commandId: cid("a"), hostId: "lx1", os: "linux", arch: "x64" });
+    const cell = { os: "linux", arch: "x64", osVersion: "22.04" } as const;
+    const cmd = { commandId: "issue-fixed", candidateId: pinned, cell, hostId: "lx1", workerId: c.w1.id, timeoutSeconds: 600, memoryMb: 1024 };
+    const first = await c.rel.issue(c.owner, cmd);
+    await c.rel.interrupt(c.owner, { commandId: cid("x"), attemptId: first.attemptId, reason: "lost" });
+    const second = await c.rel.issue(c.owner, { ...cmd, commandId: "issue-second" });
+    assert.notEqual(second.attemptId, first.attemptId);
+    const replay = await c.rel.issue(c.owner, cmd);
+    assert.equal(replay.attemptId, first.attemptId, "the repeat of the first command is the first attempt");
+    assert.deepEqual(replay.payload.limits, { timeoutSeconds: 600, memoryMb: 1024 });
+    await refuses("command_conflict", () => c.rel.issue(c.owner, { ...cmd, memoryMb: 2048 }));
+    const env = (osVersion: string) => ({ environment: { os: "linux", arch: "x64", osVersion } });
+    await refuses("invalid_command", () => c.rel.report(c.w1, result(second.attemptId, env("20.04"))), /OS version 20.04, not 22.04/);
+    await c.rel.report(c.w1, result(second.attemptId, env("22.04")));
   });
 
   suite("a lost worker is never a pass; a retry is a new attempt that keeps the earlier evidence; a missing platform blocks the gate and only the owner approves (card X09)", async (c) => {

@@ -127,5 +127,11 @@ test("the package carries the sender's shared drafts on the task and the respons
     assert.match(sections.responsibilities, /Keep the compost turned/);
     assert.ok(!/Someone else's/.test(sections.responsibilities));
     assert.equal(sections.locks, undefined, "nothing keeps locks yet, so none is claimed");
+    // Someone who only controls the task does not see the sender's drafts or responsibilities; the owner and the sender do.
+    await c.services.grants.grant(rob, { commandId: "g-mgr", grantee: `agent:${b}`, action: "lifecycle.pause", project, source: "direct", basis: "test" });
+    const bToken = (await c.services.principals.issueCredential(rob, `agent:${b}`)).token;
+    const seen = await call(bToken, "handoff.get", { handoffId: prepared.result.item.id });
+    if (seen.ok) assert.ok(seen.result.item === undefined || (seen.result.item.package.sections.drafts === undefined && seen.result.item.package.sections.responsibilities === undefined), JSON.stringify(seen.result.item?.package?.sections));
+    assert.match((await call(boot.token, "handoff.get", { handoffId: prepared.result.item.id })).result?.item?.package?.sections?.drafts ?? "", /Bed plan/);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

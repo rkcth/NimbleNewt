@@ -341,6 +341,18 @@ export class HandoffService {
     return { advanced, failed };
   }
 
+  /**
+   * What the caller may see of a hand-off. The sender's drafts and responsibilities are the sender's own (a draft is unreadable to anyone but its author and the owner): they are shown to the owner and the
+   * sender, to the recipient once the task has been transferred, and to no one else who merely controls the task. The package then says they are withheld.
+   */
+  screen(by: Principal, item: View<TaskHandoffBody>): View<TaskHandoffBody> {
+    const pkg = item.package;
+    if (pkg === undefined || (pkg.sections["drafts"] === undefined && pkg.sections["responsibilities"] === undefined)) return item;
+    if (by.kind === "owner" || by.id === `agent:${item.from.id}` || (item.phase === "transferred" && by.id === `agent:${item.to.id}`)) return item;
+    const { drafts: _d, responsibilities: _r, ...rest } = pkg.sections;
+    return { ...item, package: { ...pkg, sections: { ...rest, withheld: "The sender's drafts and responsibilities are shown to the sender, the owner and, after the transfer, the recipient." } } };
+  }
+
   /** The hand-off of a task that is still going (not finished, failed or cancelled), for a caller who may control the task; undefined otherwise. */
   async forTask(by: Principal, taskId: string): Promise<View<TaskHandoffBody> | undefined> {
     const tid = checkTaskId(taskId);

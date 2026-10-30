@@ -30,7 +30,7 @@ test("release tests run through the state API: the owner submits and issues, the
     const issued = await call(boot.token, "release.issue", { candidateId, cell: { os: "linux", arch: "x64" }, hostId: "lx", workerId: tester.id, timeoutSeconds: 600, memoryMb: 2048 }, "r3");
     assert.equal(issued.ok, true, JSON.stringify(issued));
     const attemptId = issued.result.attemptId as string;
-    const report = { attemptId, sourceCommit: "c".repeat(40), suiteRevision: "s1", artifactHashes: { "a.tgz": h("1") }, environment: { os: "linux", arch: "x64" }, outcome: "pass", counts: { passed: 10, failed: 0, skipped: 0 }, logDigest: h("5"), summary: "ok" };
+    const report = { attemptId, sourceCommit: "c".repeat(40), suiteRevision: "s1", artifactHashes: { "a.tgz": h("1") }, dependencyLockHashes: { "lock": h("2") }, environment: { os: "linux", arch: "x64" }, outcome: "pass", counts: { passed: 10, failed: 0, skipped: 0 }, logDigest: h("5"), summary: "ok" };
     assert.equal((await call(testerToken, "release.report", { ...report, suiteRevision: "s0" }, "r4")).error.code, "invalid_command");
     assert.equal((await call(testerToken, "release.approve", { candidateId }, "r5")).ok, false, "a worker cannot approve");
     assert.equal((await call(testerToken, "release.report", report, "r6")).ok, true);
