@@ -2653,3 +2653,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 
 - `StatusService` view `explanations` (`{ kind: "explanations", taskId, seq?, limit? }`, default 5, at most 20, newest first): what an agent chose, what else it considered and why not, the evidence and what is uncertain, with how it was written (at the time; or afterwards, from the records, and whether the records could explain it). An agent's words are shown as its words; an unreadable task reads as missing. In chat the task is named by its title.
 - Not built yet (remains in C09h): artifact steps for local workers.
+
+## M03f (part 2): the open agenda in chat
+
+- `StatusService` view `agenda` (`{ kind: "agenda", projectId, limit? }`, default 10, at most 50; the project in focus when none is named): the project's open topics in the order the stand-up takes them, each with its urgency, kind of request and state, who asked, the question, the outcome asked for and the timebox; words that came from others are shown as theirs. A project the caller may not read, or an installation with no meeting source, gives nothing.

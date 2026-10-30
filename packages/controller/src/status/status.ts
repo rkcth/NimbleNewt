@@ -177,6 +177,7 @@ export type StatusRequest =
   | { readonly kind: "failed_events"; readonly projectId?: string; readonly taskId?: string; readonly afterId?: string; readonly limit?: number }
   | { readonly kind: "failed_event"; readonly handlingId: string }
   | { readonly kind: "owner_questions"; readonly limit?: number }
+  | { readonly kind: "agenda"; readonly projectId: string; readonly limit?: number }
   | { readonly kind: "explanations"; readonly taskId: string; readonly seq?: number; readonly limit?: number }
   | { readonly kind: "activity"; readonly taskId: string; readonly latest?: boolean; readonly after?: number; readonly limit?: number };
 
@@ -193,6 +194,8 @@ export interface StatusDeps {
   readonly pauses?: Pick<PauseService, "status" | "isPaused">;
   /** The failed event queue (card H13). Absent: the queue cannot be listed. */
   readonly watch?: Pick<WatchService, "failures" | "inspect">;
+  /** The open agenda of a project (card M03f). Absent: the view is not offered. */
+  readonly agenda?: { openAgenda(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { id: string; revision: number; topic: string; question?: string; requestedOutcome?: string; urgency: string; intent: string; state: string; requestedBy: string; timeboxMinutes?: number }[]; next?: string } | undefined> };
   /** The steps of a task's activity record (card C09h). Absent: the view is not offered. */
   readonly activity?: Pick<ActivityService, "steps" | "explanations">;
   /** Questions agents have put to the owner (card U12e). Absent: none are listed. */
@@ -277,6 +280,7 @@ export class StatusService {
       case "noticeboard": { onlyKnown(request, ["kind", "projectId"]); return this.noticeboard(by, request.projectId); }
       case "failed_events": { const { kind: _k, ...rest } = request; return this.failedEvents(by, rest); }
       case "failed_event": { onlyKnown(request, ["kind", "handlingId"]); return this.inspectFailedEvent(by, request.handlingId); }
+      case "agenda": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.agendaLines(by, request); }
       case "explanations": { onlyKnown(request, ["kind", "taskId", "seq", "limit"]); return this.explanationLines(by, request); }
       case "activity": { onlyKnown(request, ["kind", "taskId", "latest", "after", "limit"]); return this.activityLines(by, request); }
       case "owner_questions": { onlyKnown(request, ["kind", "limit"]); return this.ownerQuestionLines(by, request.limit); }
@@ -316,6 +320,21 @@ export class StatusService {
       : line(`Step ${s.seq}, ${s.at}, ${shown(s.actor)}: ${s.kind} - ${shown(s.summary)}${s.corrections > 0 ? ` (corrected ${s.corrections} time${s.corrections === 1 ? "" : "s"})` : ""}`, cite("task", taskId))));
     if (lines.length === 0) lines.push(line("No steps are recorded for this task yet.", cite("task", taskId)));
     else if (next !== undefined) lines.push(line(`There are more steps; ask again after step ${next}.`, cite("task", taskId)));
+    return { observedAt: this.#runner.now(), lines };
+  }
+
+  /** What waits for the next stand-up in a project, in the order the meeting will take it: the topic, how urgent, what kind of request, who asked, the question and the outcome asked for. Words that came from someone else are shown as theirs. Anyone who may not read the project gets nothing. */
+  async agendaLines(by: Principal, request: { projectId: string; limit?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.agenda === undefined) return undefined;
+    const projectId = checkProjectId(request.projectId);
+    const limit = request.limit === undefined ? 10 : Number.isSafeInteger(request.limit) && request.limit >= 1 && request.limit <= 50 ? request.limit : invalid("limit", "must be 1 to 50");
+    const open = await this.#deps.agenda.openAgenda(by, projectId, { limit });
+    if (open === undefined) return undefined;
+    const lines: Line[] = open.items.map((i, n) => line(
+      `${n + 1}. ${shown(i.topic)} (${i.urgency}, ${i.intent}, ${i.state}) asked by ${shown(i.requestedBy)}${i.question === undefined ? "" : `: "${shown(i.question)}"`}${i.requestedOutcome === undefined ? "" : ` Outcome asked for: ${shown(i.requestedOutcome)}.`}${i.timeboxMinutes === undefined ? "" : ` Timebox ${i.timeboxMinutes} minutes.`}`,
+      cite("agenda", i.id, i.revision), cite("project", projectId)));
+    if (lines.length === 0) lines.push(line("Nothing is waiting on the agenda of this project.", cite("project", projectId)));
+    else if (open.next !== undefined) lines.push(line("There are more topics than shown.", cite("project", projectId)));
     return { observedAt: this.#runner.now(), lines };
   }
 

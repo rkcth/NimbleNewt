@@ -402,7 +402,7 @@ export class ChatService {
       if (intent.kind === "status") {
         // A read: it changes nothing, so quoted material cannot make it do harm, but it still needs the owner's own words like everything else. The view that needs a project gets the one in focus.
         const request: Record<string, unknown> = { ...intent.request };
-        if (request["projectId"] === undefined && ["changes", "delivered", "noticeboard"].includes(String(request["kind"]))) {
+        if (request["projectId"] === undefined && ["changes", "delivered", "noticeboard", "agenda"].includes(String(request["kind"]))) {
           if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Say which project you mean." }); continue; }
           request["projectId"] = currentFocus.projectId;
         }

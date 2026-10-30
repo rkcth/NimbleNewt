@@ -49,7 +49,7 @@ for (const backend of backends) {
     status: StatusService; owner: Principal; project: string; other: string; storage: ControllerStorage; epoch: number;
     projects: ProjectService; assignments: AssignmentService; waits: WaitService; blockers: BlockerService; contracts: ContractService; stall: StallService; pauses: PauseService;
     desks: DeskService; mcp: McpService; artifacts: ArtifactService; blobs: FileBlobStore; watches: WatchService; events: EventService; hosts: HostService; principals: PrincipalService; agents: AgentService;
-    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; activity?: NonNullable<StatusDeps["activity"]> }): StatusService;
+    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]> }): StatusService;
     agent(name: string, grants?: AGrant[]): Promise<Principal>;
     host(name: string, project?: string): Promise<Principal>;
     /** A ready task in `project` (default: the main one), created by the owner. */
@@ -89,7 +89,7 @@ for (const backend of backends) {
         const other = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "Q" })).id;
         const rebuild: Ctx["rebuild"] = (extra = {}, deps = {}) => StatusService.withEpoch(world.storage, epoch, {
           assignments, waits, blockers, contracts, stall, pauses,
-          ...(deps.watch === false ? {} : { watch: watches }), ...(deps.ownerQuestions === undefined ? {} : { ownerQuestions: deps.ownerQuestions }), ...(deps.activity === undefined ? {} : { activity: deps.activity }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
+          ...(deps.watch === false ? {} : { watch: watches }), ...(deps.ownerQuestions === undefined ? {} : { ownerQuestions: deps.ownerQuestions }), ...(deps.activity === undefined ? {} : { activity: deps.activity }), ...(deps.agenda === undefined ? {} : { agenda: deps.agenda }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
         }, { ...options, ...extra });
         const status = rebuild();
         const grantService = GrantService.withEpoch(world.storage, epoch, options);
@@ -995,5 +995,23 @@ for (const backend of backends) {
     assert.equal(await status.ask(reader, { kind: "explanations", taskId: t.id }), undefined);
     assert.equal(await c.rebuild().ask(c.owner, { kind: "explanations", taskId: t.id }), undefined);
     await assert.rejects(status.ask(c.owner, { kind: "explanations", taskId: t.id, limit: 99 }));
+  });
+
+  suite("the open agenda of a project is told in the order the meeting takes it, with who asked and what outcome; unreadable reads as missing (card M03f)", async (c) => {
+    const items = [
+      { id: "agd-1", revision: 2, topic: "Flaky login tests", question: "Quarantine them?", requestedOutcome: "a decision", urgency: "urgent", intent: "decision", state: "queued", requestedBy: "agent:ann", timeboxMinutes: 5 },
+      { id: "agd-2", revision: 1, topic: "Nightly build time", urgency: "normal", intent: "discussion", state: "queued", requestedBy: "owner:rob" },
+    ];
+    const agenda = { openAgenda: async (by: Principal, _p: string, page?: { limit?: number }) => (by.kind === "owner" ? { items: items.slice(0, page?.limit ?? 10), ...((page?.limit ?? 10) < items.length ? { next: "x" } : {}) } : undefined) };
+    const status = c.rebuild({}, { agenda });
+    const got = (await status.ask(c.owner, { kind: "agenda", projectId: c.project }))!;
+    assert.equal(got.lines[0]!.text, '1. Flaky login tests (urgent, decision, queued) asked by agent:ann: "Quarantine them?" Outcome asked for: a decision. Timebox 5 minutes.');
+    assert.equal(got.lines[1]!.text, "2. Nightly build time (normal, discussion, queued) asked by owner:rob");
+    assert.deepEqual(got.lines[0]!.cites.map((x) => x.kind), ["agenda", "project"]);
+    assert.match((await status.ask(c.owner, { kind: "agenda", projectId: c.project, limit: 1 }))!.lines.at(-1)!.text, /more topics than shown/);
+    const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
+    assert.equal(await status.ask(reader, { kind: "agenda", projectId: c.project }), undefined);
+    assert.equal(await c.rebuild().ask(c.owner, { kind: "agenda", projectId: c.project }), undefined);
+    await assert.rejects(status.ask(c.owner, { kind: "agenda", projectId: c.project, limit: 0 }));
   });
 }
