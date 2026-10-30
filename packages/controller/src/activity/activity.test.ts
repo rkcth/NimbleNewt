@@ -129,6 +129,12 @@ for (const backend of backends) {
       const before = JSON.stringify((await svc.steps(auditor, task)).steps[1]);
       await svc.correct(owner, { commandId: cid("k"), taskId: task, seq: 2, note: "the tests ran on the old checkout" });
       assert.equal(JSON.stringify((await svc.steps(auditor, task)).steps[1]).replace('"corrections":1', '"corrections":0'), before);
+      // A repeat of the same correction is the same one; another task's corrections and explanations are not read.
+      const kid = cid("k");
+      await svc.correct(owner, { commandId: kid, taskId: task, seq: 1, note: "first" });
+      assert.equal((await svc.correct(owner, { commandId: kid, taskId: task, seq: 1, note: "first" })).replayed, true);
+      assert.equal((await svc.corrections(auditor, task, 1)).length, 1);
+      assert.deepEqual(await svc.explanations(auditor, (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "none" })).id), []);
       const cs = await svc.corrections(auditor, task, 2);
       assert.deepEqual([cs.length, cs[0]!.by, cs[0]!.note], [1, owner.id, "the tests ran on the old checkout"]);
       await refuses("forbidden", () => svc.correct(worker, { commandId: cid("k"), taskId: task, seq: 2, note: "x" }));

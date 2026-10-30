@@ -30,6 +30,8 @@ export interface ActivityStepBody {
   /** The sensitive part (tool inputs and results, message text) lives in its own record under access control; the step keeps only whether it is there. */
   readonly payload: { readonly state: "stored"; readonly id: string; readonly chars: number; readonly redactions: number; readonly sensitive: boolean } | { readonly state: "none" } | { readonly state: "missing"; readonly reason: string };
 }
+/** What a task has been explained and corrected by, so a reader goes straight to them instead of reading every explanation and correction in the installation (card C09i). */
+interface IndexBody { readonly explanations: readonly string[]; readonly corrections: readonly { readonly seq: number; readonly id: string }[] }
 interface HeadBody { readonly next: number; readonly projectId: string; /** When the latest step was recorded (absent on heads written before the timeline). */ readonly lastAt?: string; readonly unavailable: readonly { readonly from: number; readonly to: number; readonly reason: string; readonly by: string; readonly at: string }[] }
 interface PayloadBody { readonly taskId: string; readonly projectId: string; readonly seq: number; readonly sensitive: boolean; readonly text: string; readonly redactions: number }
 export interface ExplanationBody {
@@ -46,8 +48,8 @@ export interface ExplanationBody {
 }
 export interface CorrectionBody { readonly taskId: string; readonly projectId: string; readonly seq: number; readonly note: string; readonly by: string; readonly at: string; readonly stepDigest: string }
 
-export const ACTIVITY_LIMITS = { summary: 300, summaryInput: 4000, payload: 8000, refs: 100, alternatives: 10, evidence: 10, statement: 500, page: 100, ranges: 200 } as const;
-const KIND_OF = { step: "activity-step", head: "activity-head", payload: "activity-payload", explanation: "activity-explanation", correction: "activity-correction" } as const;
+export const ACTIVITY_LIMITS = { indexed: 2000, summary: 300, summaryInput: 4000, payload: 8000, refs: 100, alternatives: 10, evidence: 10, statement: 500, page: 100, ranges: 200 } as const;
+const KIND_OF = { step: "activity-step", head: "activity-head", payload: "activity-payload", explanation: "activity-explanation", correction: "activity-correction", index: "activity-index" } as const;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const REF = /^[a-z][a-z0-9-]{0,30}$/;
 const clean = (body: object): JsonObject => JSON.parse(JSON.stringify(body)) as JsonObject;
@@ -189,7 +191,8 @@ export class ActivityService {
     const ref: AggregateRef = { kind: KIND_OF.correction, id };
     const body: CorrectionBody = { taskId, projectId: task.projectId, seq: command.seq, note, by: by.id, at: this.#runner.now(), stepDigest: digest(step.body) };
     const r = await this.#runner.command("activity.correct", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
-      payload: { taskId, seq: command.seq, note }, build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }], detail: { taskId, seq: command.seq } }),
+      payload: { taskId, seq: command.seq, note },
+      build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }, await this.#indexChange(taskId, (x) => ({ ...x, corrections: [...x.corrections, { seq: command.seq, id }] }), "corrections")] as never, detail: { taskId, seq: command.seq }, contention: async () => new DomainError("stale_revision", "another correction or explanation was recorded at the same moment") }),
     }));
     return { id: r.id, replayed: r.replayed };
   }
@@ -352,28 +355,31 @@ export class ActivityService {
     const ref: AggregateRef = { kind: KIND_OF.explanation, id };
     const r = await this.#runner.command("activity.explain", { commandId: scopedCommandId(by.id, commandId), actor: by.id }, async () => ({
       payload: { taskId: body.taskId, mode: body.mode, ...(body.seq === undefined ? {} : { seq: body.seq }), choice: body.choice },
-      build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }], detail: { taskId: body.taskId, mode: body.mode } }),
+      build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }, await this.#indexChange(body.taskId, (x) => ({ ...x, explanations: [...x.explanations, id] }), "explanations")] as never, detail: { taskId: body.taskId, mode: body.mode }, contention: async () => new DomainError("stale_revision", "another explanation or correction was recorded at the same moment") }),
     }));
     return { id: r.id, replayed: r.replayed };
   }
 
+  /** The change that adds to a task's index (created with the first entry); refused past the limit so one task cannot grow it without bound. */
+  async #indexChange(taskId: string, add: (x: IndexBody) => IndexBody, what: "explanations" | "corrections"): Promise<{ type: "create" | "update"; ref: AggregateRef; body: JsonObject; expectedRevision?: number }> {
+    const ref: AggregateRef = { kind: KIND_OF.index, id: taskId };
+    const found = await this.#runner.get(ref.kind, ref.id);
+    const current = (found?.body as unknown as IndexBody | undefined) ?? { explanations: [], corrections: [] };
+    if (current[what].length >= ACTIVITY_LIMITS.indexed) invalid(what, `this task already has ${ACTIVITY_LIMITS.indexed} ${what}`);
+    const next = clean(add(current));
+    return found === undefined ? { type: "create", ref, body: next } : { type: "update", ref, expectedRevision: found.revision, body: next };
+  }
+  async #indexOf(taskId: string): Promise<IndexBody> { return ((await this.#runner.get(KIND_OF.index, taskId))?.body as unknown as IndexBody | undefined) ?? { explanations: [], corrections: [] }; }
+
   async #allExplanations(taskId: string): Promise<ExplanationBody[]> {
     const out: ExplanationBody[] = [];
-    for (let after: string | undefined; ;) {
-      const page = await this.#runner.list(KIND_OF.explanation, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
-      for (const rec of page) { after = rec.id; const b = rec.body as unknown as ExplanationBody; if (b.taskId === taskId) out.push(b); }
-      if (page.length < 200) break;
-    }
+    for (const id of (await this.#indexOf(taskId)).explanations) { const found = await this.#runner.get(KIND_OF.explanation, id); if (found !== undefined) out.push(found.body as unknown as ExplanationBody); }
     return out.sort((a, b) => a.at.localeCompare(b.at));
   }
   async #explanationsFor(taskId: string, seq: number): Promise<ExplanationBody[]> { return (await this.#allExplanations(taskId)).filter((e) => e.seq === seq && e.mode === "contemporaneous"); }
   async #corrections(taskId: string, seq: number): Promise<CorrectionBody[]> {
     const out: CorrectionBody[] = [];
-    for (let after: string | undefined; ;) {
-      const page = await this.#runner.list(KIND_OF.correction, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
-      for (const rec of page) { after = rec.id; const b = rec.body as unknown as CorrectionBody; if (b.taskId === taskId && b.seq === seq) out.push(b); }
-      if (page.length < 200) break;
-    }
+    for (const c of (await this.#indexOf(taskId)).corrections) if (c.seq === seq) { const found = await this.#runner.get(KIND_OF.correction, c.id); if (found !== undefined) out.push(found.body as unknown as CorrectionBody); }
     return out.sort((a, b) => a.at.localeCompare(b.at));
   }
 }
