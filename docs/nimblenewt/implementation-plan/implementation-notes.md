@@ -2753,3 +2753,4 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## V02 (part 2): the task's model limits through the state API
 
 - `model-budget.set` (owner only; `maxCostMicros`, `maxTokens`, `maxFailedAttempts`, a limit left out keeps its value) and `model-budget.get` (the limits and what the task has used: cost, tokens, calls, failed attempts). `FallbackService` is passed to the API as `modelBudget`. No chat command yet (the owner would ask for it by task title); the limits survive a restart.
+- **V02 (part 3): chat.** `model-budget.set` is a chat command (the owner names the task by its title), always a proposal shown first with its numbers, because raising a limit lets a task spend more. Reading the limits in chat is not built.
