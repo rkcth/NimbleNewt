@@ -39,12 +39,12 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N09 / AII-259 | U03, U03d, U03e, U05b, U04, U05, U06, U06b, U03b, U03c, U07, U09, U08, U10, U11, U11b |
 | N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H07b, H07c, H07d, H07e, H02e, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H13b, H13c, H13d, H13e, H02b, H02c, H02d, H11b, H12n, H12p, H12o |
 | N11 / AII-261 | V01, V01b, V01c, V02 |
-| N12 / AII-262 | M01b, M01c, M01d, M00, M01, M02, M02b, M02c, M02d, M03, M03b, M03c, M03d, M04, M04b, M04c, M04d, M05, M05b, M06 |
+| N12 / AII-262 | M01b, M01c, M01d, M00, M01, M02, M02b, M02c, M02d, M02e, M03, M03b, M03c, M03d, M03e, M04, M04b, M04c, M04d, M04e, M05, M05b, M06 |
 | N13 / AII-263 | U04b, U04c, U04d, T01, T02, T03, T06, T06b, T07, T07b, T08, T09, T09b, T09c, T09d |
 | N14 / AII-264 | P01b, P01c, P01, P02, P02b, P03, P04, P05, P06, P07, P08, P08b, P08c, P09, P10, P10b, P10c |
 | N15 / AII-265 | Q01, Q02, Q03, Q04, Q01b |
 | N16 / AII-266 | B01 |
-| N17 / AII-267 | K01, K01e, K01f, K01g, K01b, K01c, K01d, K02, K03, K04, K05, K06, K06b, K07 |
+| N17 / AII-267 | K01, K01e, K01f, K01g, K01h, K01b, K01c, K01d, K02, K03, K04, K05, K06, K06b, K07 |
 | N18 / AII-268 | G06, X11, X09, X10, X01, X02, X03, X04, X05, X06, X07, X08, Y01, Y02, Y03 |
 | N19 / AII-269 | D01, D02, D03, D04, D04b, D05 |
 | N07a / AII-519 | U01, U13, T04 |
@@ -1929,9 +1929,19 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### M02d — Finish meeting records: other appliers, narrator, chat
 
 - **Parent:** N12 / AII-262.
+- **Status:** implemented; commits `98f92c1`, `0a85c4e`; CI runs 40980936558; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** A meeting may decide a widening change; it waits for the owner unless the approval policy lets it through.
 - **Blockers:** M02c.
 - **Deliverable:** Split from M02c (2026-10-29): appliers for grants, budgets and ownership, the narrator, chat commands for meeting records.
 - **Acceptance and verification:** A decision that changes more than a task applies once.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### M02e — Finish meeting records: grant, budget and ownership appliers, decision log, steward
+
+- **Parent:** N12 / AII-262.
+- **Blockers:** M02d.
+- **Deliverable:** Split from M02d (2026-10-29): appliers for a grant, a budget raise and an ownership change run under the owner-authorized path, recording each decision and its outcome so safe patterns can be found, the steward agent for decisions no coded rule covers, the narrator, chat commands.
+- **Acceptance and verification:** A decision that widens rights or spend is carried out only with the owner's agreement or the policy's leave.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### M03 — Implement stand-up preparation, briefs and agenda items
@@ -1965,8 +1975,18 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### M03d — Finish stand-ups: sinks, real occurrences, chat
 
 - **Parent:** N12 / AII-262.
+- **Status:** implemented; commits `49988f1`, `bbe1866`, `0a85c4e`; CI runs 40980936558; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Improvement decisions reach the proposer by notice on their task or in the next stand-up brief, and then count as told.
 - **Blockers:** M03c.
 - **Deliverable:** Split from M03c (2026-10-29): the notice, outcome, allocation, usage and owner-item sinks, improvement outcome delivery, briefs for a real occurrence, chat commands.
+- **Acceptance and verification:** A stand-up runs end to end in the running controller.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### M03e — Finish stand-ups: other sinks, untold decisions shown to the owner, chat
+
+- **Parent:** N12 / AII-262.
+- **Blockers:** M03d.
+- **Deliverable:** Split from M03d (2026-10-29): agenda outcomes to chat turns and inquiries, the notice/allocation/usage/owner-item sinks, the owner told of decisions still untold after some days, chat commands.
 - **Acceptance and verification:** A stand-up runs end to end in the running controller.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
@@ -2001,9 +2021,19 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### M04d — Finish meeting attendance: wake sinks, chat, stand-up link
 
 - **Parent:** N12 / AII-262.
+- **Status:** implemented; commits `60f9b5c`, `0a85c4e`; CI runs 40980936558; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Agents are warned ahead of, at the start of and at the end of a meeting's quick-answer period.
 - **Blockers:** M04c.
 - **Deliverable:** Split from M04c (2026-10-29): wake sinks, chat commands, the stand-up link.
 - **Acceptance and verification:** An absent agent is woken and told what was decided.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### M04e — Finish meeting attendance: keep no long-running work during a meeting, stopped agents, chat
+
+- **Parent:** N12 / AII-262.
+- **Blockers:** M04d.
+- **Deliverable:** Split from M04d (2026-10-29): the controller enforces no long-running work while an agent is in a meeting (not only telling it), a wake sink that lets a Stopped agent in after the owner's exception, chat wording.
+- **Acceptance and verification:** A long-running job started during a meeting is refused; a Stopped agent the owner excepted attends and goes back to Stopped.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### M05 — Implement meeting facilitation and owner control
@@ -2319,8 +2349,18 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### K01g — Finish backup: Pi state, maintenance barrier, in-controller restore
 
 - **Parent:** N17 / AII-267.
+- **Status:** implemented; commits `ef6b9f7`; CI runs 40980936558; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** An unreadable backups folder is a recorded failed run.
 - **Blockers:** K01f.
 - **Deliverable:** Split from K01f (2026-10-29): Pi native state, a maintenance barrier across stores, an owner restore from inside the running controller.
+- **Acceptance and verification:** A restore is verified end to end including Pi state.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### K01h — Finish backup: Pi state, maintenance barrier, in-controller restore
+
+- **Parent:** N17 / AII-267.
+- **Blockers:** K01g.
+- **Deliverable:** Split from K01g (2026-10-29): Pi native state, a maintenance barrier across stores, an owner restore from inside the running controller.
 - **Acceptance and verification:** A restore is verified end to end including Pi state.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
@@ -2671,7 +2711,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e.
+- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, K01h.
 - **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
 - **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

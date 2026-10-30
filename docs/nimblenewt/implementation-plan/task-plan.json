@@ -5379,6 +5379,35 @@
       ],
       "deliverable": "Split from M02c (2026-10-29): appliers for grants, budgets and ownership, the narrator, chat commands for meeting records",
       "acceptance_and_verification": "A decision that changes more than a task applies once",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "98f92c1",
+          "0a85c4e"
+        ],
+        "ci_runs": [
+          "40980936558"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "A meeting may decide a widening change; it waits for the owner unless the approval policy lets it through.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "M02e",
+      "parent": "N12",
+      "existing_issue": "AII-262",
+      "title": "Finish meeting records: grant, budget and ownership appliers, decision log, steward",
+      "depends_on": [
+        "M02d"
+      ],
+      "deliverable": "Split from M02d (2026-10-29): appliers for a grant, a budget raise and an ownership change run under the owner-authorized path, recording each decision and its outcome so safe patterns can be found, the steward agent for decisions no coded rule covers, the narrator, chat commands",
+      "acceptance_and_verification": "A decision that widens rights or spend is carried out only with the owner's agreement or the policy's leave",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -5473,6 +5502,36 @@
         "M03c"
       ],
       "deliverable": "Split from M03c (2026-10-29): the notice, outcome, allocation, usage and owner-item sinks, improvement outcome delivery, briefs for a real occurrence, chat commands",
+      "acceptance_and_verification": "A stand-up runs end to end in the running controller",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "49988f1",
+          "bbe1866",
+          "0a85c4e"
+        ],
+        "ci_runs": [
+          "40980936558"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Improvement decisions reach the proposer by notice on their task or in the next stand-up brief, and then count as told.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "M03e",
+      "parent": "N12",
+      "existing_issue": "AII-262",
+      "title": "Finish stand-ups: other sinks, untold decisions shown to the owner, chat",
+      "depends_on": [
+        "M03d"
+      ],
+      "deliverable": "Split from M03d (2026-10-29): agenda outcomes to chat turns and inquiries, the notice/allocation/usage/owner-item sinks, the owner told of decisions still untold after some days, chat commands",
       "acceptance_and_verification": "A stand-up runs end to end in the running controller",
       "status": "planned",
       "research_evidence": null,
@@ -5572,6 +5631,35 @@
       ],
       "deliverable": "Split from M04c (2026-10-29): wake sinks, chat commands, the stand-up link",
       "acceptance_and_verification": "An absent agent is woken and told what was decided",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "60f9b5c",
+          "0a85c4e"
+        ],
+        "ci_runs": [
+          "40980936558"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Agents are warned ahead of, at the start of and at the end of a meeting's quick-answer period.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "M04e",
+      "parent": "N12",
+      "existing_issue": "AII-262",
+      "title": "Finish meeting attendance: keep no long-running work during a meeting, stopped agents, chat",
+      "depends_on": [
+        "M04d"
+      ],
+      "deliverable": "Split from M04d (2026-10-29): the controller enforces no long-running work while an agent is in a meeting (not only telling it), a wake sink that lets a Stopped agent in after the owner's exception, chat wording",
+      "acceptance_and_verification": "A long-running job started during a meeting is refused; a Stopped agent the owner excepted attends and goes back to Stopped",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -6423,6 +6511,34 @@
         "K01f"
       ],
       "deliverable": "Split from K01f (2026-10-29): Pi native state, a maintenance barrier across stores, an owner restore from inside the running controller",
+      "acceptance_and_verification": "A restore is verified end to end including Pi state",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "ef6b9f7"
+        ],
+        "ci_runs": [
+          "40980936558"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "An unreadable backups folder is a recorded failed run.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "K01h",
+      "parent": "N17",
+      "existing_issue": "AII-267",
+      "title": "Finish backup: Pi state, maintenance barrier, in-controller restore",
+      "depends_on": [
+        "K01g"
+      ],
+      "deliverable": "Split from K01g (2026-10-29): Pi native state, a maintenance barrier across stores, an owner restore from inside the running controller",
       "acceptance_and_verification": "A restore is verified end to end including Pi state",
       "status": "planned",
       "research_evidence": null,
@@ -7481,7 +7597,11 @@
         "L02d",
         "C09g",
         "K01g",
-        "H13e"
+        "H13e",
+        "M04e",
+        "M03e",
+        "M02e",
+        "K01h"
       ],
       "deliverable": "Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete",
       "acceptance_and_verification": "D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards",
