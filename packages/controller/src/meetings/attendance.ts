@@ -466,7 +466,6 @@ export class AttendanceService {
     return { status: "started", occurrenceId: called.id, roomId: room.roomId, replayed: called.replayed && room.replayed };
   }
 
-  /** The agent principals (active agents only) among the given ones, sorted and without repeats. Records of other kinds and retired agents are left out. */
   /**
    * Whether `taskId` is the bounded meeting task of `agent` while that agent is present in a live meeting: the meeting it is in, or `undefined`. The jobs service asks this before it admits long-running work (card M04e), so the rule
    * "no long-running work during a meeting" is kept by the controller and not only told to the agent. Looks at the meetings waiting to be held (M01's cap), like `admission`.
@@ -486,6 +485,7 @@ export class AttendanceService {
     return undefined;
   }
 
+  /** The agent principals (active agents only) among the given ones, sorted and without repeats. Records of other kinds and retired agents are left out. */
   async #activeAgents(principals: readonly string[]): Promise<string[]> {
     const out: string[] = [];
     for (const p of [...new Set(principals)].sort()) {

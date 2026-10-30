@@ -65,6 +65,8 @@ export interface TaskHandoffBody {
   readonly autoComplete?: boolean;
   /** Set once the return was made (`handoffId`) or given up (`skipped`, with the reason). */
   readonly returned?: { readonly handoffId?: string; readonly at: string; readonly skipped?: string };
+  /** The host was told that this return is stuck (blocked); told once. */
+  readonly stuckTold?: boolean;
   readonly failure?: string;
   readonly history: readonly { readonly phase: HandoffPhase; readonly at: string; readonly by: string; readonly note: string }[];
 }
@@ -122,7 +124,10 @@ export class HandoffService {
   /** Begins a prepared hand-off of a task to another owner. One hand-off at a time per task. Returns where it stands after one pass. */
   async prepare(by: Principal, command: NoActor & { taskId: string; to: unknown; reason: string; deadlineMs?: number; returnAt?: string }): Promise<View<TaskHandoffBody>> {
     onlyKnown(command, ["commandId", "taskId", "to", "reason", "deadlineMs", "returnAt"]);
-    return this.#prepare(by, command, command.returnAt === undefined ? {} : { returnAt: this.#returnTime(command.returnAt) });
+    const returnAt = command.returnAt === undefined ? undefined : this.#returnTime(command.returnAt);
+    // The return is made later on the asker's behalf and needs their right checked then; a service that cannot look the asker up must not promise one.
+    if (returnAt !== undefined && this.#asker === undefined) invalid("returnAt", "cannot be used here: this service cannot check later who asked");
+    return this.#prepare(by, command, returnAt === undefined ? {} : { returnAt });
   }
 
   /** `returnAt` must be a time ahead, at most `HANDOFF_LIMITS.returnDays` days away; it is kept as the exact instant. */
@@ -299,6 +304,15 @@ export class HandoffService {
           try { if (await this.#returnDue(by, rec.id, b)) advanced.push(rec.id); } catch { failed.push(rec.id); }
           continue;
         }
+        if (b.phase === "blocked" && b.autoComplete === true) {
+          if (b.stuckTold !== true) {
+            try {
+              await this.#update(rec.id, (x) => ({ ...x, stuckTold: true }), ["blocked"]);
+              try { await this.#onReturnGivenUp?.(by, { handoffId: rec.id, taskId: b.taskId, reason: `the hand-off back is blocked (${b.blocked?.reason ?? "preparation did not finish"}); the task stays with the temporary owner until someone decides` }); } catch { /* best effort */ }
+            } catch { failed.push(rec.id); }
+          }
+          continue;
+        }
         if (b.phase === "ready" && b.autoComplete === true) {
           try { if (await this.#completeReturn(by, rec.id, b)) advanced.push(rec.id); } catch { failed.push(rec.id); }
           continue;
@@ -351,18 +365,31 @@ export class HandoffService {
   /** Makes the hand-off back once the time is up, if the temporary owner still has the task and the one who asked still may. Repeating it finds the same hand-off back (its command ID follows this one's). */
   async #returnDue(by: Principal, id: string, b: TaskHandoffBody): Promise<boolean> {
     if (Date.parse(b.returnAt as string) > Date.parse(this.#runner.now())) return false;
-    // A crash after the hand-off back was made but before it was written here: find it by its command ID instead of judging the task again.
+    // A crash after the hand-off back was made but before it was written here: find it by its command ID instead of judging the task again. One made but never given its suspension (the crash fell between the two) is finished first.
     for (const who of new Set([b.requestedBy, by.id])) {
       const back = derivedId("hnd", scopedCommandId(who, `ret-${id}`));
-      if ((await this.#runner.get(KIND, back)) !== undefined) { await this.#update(id, (x) => ({ ...x, returned: { handoffId: back, at: this.#runner.now() } }), ["transferred"]); return true; }
+      const found = (await this.#runner.get(KIND, back))?.body as unknown as TaskHandoffBody | undefined;
+      if (found === undefined) continue;
+      if (found.phase === "preparing" && found.stopIntentId === undefined) {
+        const acting = await this.#actingFor(by, b.requestedBy, b.taskId);
+        if (typeof acting === "string") { await this.#fail(by, back, `${acting}, so the task was not returned`); await this.#update(id, (x) => ({ ...x, returned: { handoffId: back, at: this.#runner.now() } }), ["transferred"]); return true; }
+        await this.#prepare(acting, { commandId: `ret-${id}`, taskId: b.taskId, to: b.from, reason: "temporary reassignment ended" }, { autoComplete: true });
+      }
+      await this.#update(id, (x) => ({ ...x, returned: { handoffId: back, at: this.#runner.now() } }), ["transferred"]);
+      return true;
     }
     const { assignment } = await this.#currentOwner(b.taskId).catch(() => ({ assignment: undefined, from: undefined }));
-    if (assignment === undefined || assignment.state !== "assigned" || !sameOwner(assignment.owner, b.to)) { await this.#giveUpReturn(by, id, b.taskId, "the task is no longer with the temporary owner, so nothing was returned"); return true; }
+    if (assignment === undefined || assignment.state !== "assigned" || !sameOwner(assignment.owner, b.to) || assignment.generation !== b.generation + 1) { await this.#giveUpReturn(by, id, b.taskId, "the task has changed hands since the temporary reassignment, so nothing was returned"); return true; }
     const acting = await this.#actingFor(by, b.requestedBy, b.taskId);
     if (typeof acting === "string") { await this.#giveUpReturn(by, id, b.taskId, `${acting}, so the task stays with the temporary owner`); return true; }
-    const back = await this.#prepare(acting, { commandId: `ret-${id}`, taskId: b.taskId, to: b.from, reason: "temporary reassignment ended" }, { autoComplete: true });
+    try {
+      await this.#prepare(acting, { commandId: `ret-${id}`, taskId: b.taskId, to: b.from, reason: "temporary reassignment ended" }, { autoComplete: true });
+    } catch (error) {
+      // The first owner cannot take the task back (retired, ineligible): that will not change by trying again, so it is given up with the reason. Anything else (another hand-off in progress, storage) is tried again on the next sweep.
+      if (error instanceof DomainError && error.field === "to") { await this.#giveUpReturn(by, id, b.taskId, `the first owner cannot take the task back (${error.message}), so it stays with the temporary owner`); return true; }
+      throw error;
+    }
     await this.#update(id, (x) => ({ ...x, returned: { handoffId: derivedId("hnd", scopedCommandId(acting.id, `ret-${id}`)), at: this.#runner.now() } }), ["transferred"]);
-    void back;
     return true;
   }
 
@@ -463,8 +490,10 @@ export class HandoffService {
 
   /** The hand-off could not move the task: it ends failed, the old owner (if still the owner) keeps the task, and a hold it added is lifted. */
   async #fail(by: Principal, id: string, why: string): Promise<void> {
+    const before = (await this.#runner.get(KIND, id))?.body as unknown as TaskHandoffBody | undefined;
     await this.#update(id, (x) => ({ ...x, phase: "failed", blocked: undefined, failure: why, history: this.#push(x, "failed", by.id, why) }), LIVE);
     await this.#letGo(by, id);
+    if (before?.autoComplete === true) { try { await this.#onReturnGivenUp?.(by, { handoffId: id, taskId: before.taskId, reason: `the hand-off back failed: ${why}` }); } catch { /* best effort */ } }
   }
 
   /** The task moved: the new owner may run, so a hold this hand-off added is lifted. */

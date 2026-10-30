@@ -104,14 +104,14 @@ export interface JobOptions extends RunnerOptions {
   readonly connections?: JobConnections;
   readonly background?: BackgroundRecorder;
   /**
-   * Told once a job has ended, with the wall-clock time from its admission to its end, so the host can charge it (card R05f). Called after the job is recorded as ended and again if the ending is repeated, so the
-   * host's charge must be keyed by `commandId` (`job-use:<job>`). A failure here is for the host to handle: it does not undo the ending.
-   */
-  /**
    * Asked before long-running work (a background job, or one the caller says is long-running) is admitted: a reason to refuse it, or `undefined` to admit. The host binds it to the meeting the task is the bounded task of (card M04e), so an
    * agent attending a meeting is held to short work. Not asked for short work, and not asked when the task is not a meeting task (the host's answer is then `undefined`).
    */
   readonly longRunningGate?: (principal: Principal, taskId: string) => Promise<string | undefined>;
+  /**
+   * Told once a job has ended, with the wall-clock time from its admission to its end, so the host can charge it (card R05f). Called after the job is recorded as ended and again if the ending is repeated, so the
+   * host's charge must be keyed by `commandId` (`job-use:<job>`). A failure here is for the host to handle: it does not undo the ending.
+   */
   readonly onUsage?: (usage: { readonly commandId: string; readonly taskId: string; readonly jobId: string; readonly background: boolean; readonly computeMs: number }) => Promise<void>;
 }
 

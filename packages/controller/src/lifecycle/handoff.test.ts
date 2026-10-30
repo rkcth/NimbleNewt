@@ -139,10 +139,12 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "cover", returnAt: new Date(now - hour).toISOString() }));
     await refuses("invalid_command", () => c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "cover", returnAt: new Date(now + 31 * 24 * hour).toISOString() }));
     await refuses("invalid_command", () => c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "cover", returnAt: "soon" }));
+    // A service that cannot look the asker up later does not promise a return.
+    await refuses("invalid_command", () => c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "cover", returnAt: new Date(now + hour).toISOString() }));
     const asker = async (id: string) => (id === c.mgr.id ? c.mgr : undefined);
     const given: { handoffId: string; taskId: string; reason: string }[] = [];
     const sweeper = c.reopen(asker, given);
-    const h = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "cover for two hours", returnAt: new Date(now + 2 * hour).toISOString() });
+    const h = await sweeper.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "cover for two hours", returnAt: new Date(now + 2 * hour).toISOString() });
     await c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h.id });
     assert.equal(await ownerOf(c), `${c.b.id}@2`);
     // Not yet: nothing is done.
@@ -160,7 +162,7 @@ for (const backend of backends) {
     assert.deepEqual([back.phase, back.autoComplete, back.requestedBy], ["transferred", true, c.mgr.id]);
     assert.deepEqual(await sweeper.sweep(c.owner), { advanced: [], failed: [] }, "nothing is returned twice");
     // The asker no longer holds the right: the task stays with the temporary owner and says why.
-    const h2 = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "cover again", returnAt: new Date(now + hour).toISOString() });
+    const h2 = await sweeper.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "cover again", returnAt: new Date(now + hour).toISOString() });
     await c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h2.id });
     now += 2 * hour;
     await c.reopen(async () => undefined, given).sweep(c.owner);
@@ -171,12 +173,31 @@ for (const backend of backends) {
     assert.equal(given[0]!.handoffId, h2.id);
     // The task was moved on by someone else meanwhile: there is nothing to return.
     await c.assignments.transferTask({ commandId: cid("tt"), actor: c.owner.id, taskId: c.task, expectedRevision: (await c.assignments.getAssignment(c.task))!.revision, to: c.a, reason: "moved by hand" });
-    const h3 = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "cover a third time", returnAt: new Date(now + hour).toISOString() });
+    const h3 = await sweeper.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "cover a third time", returnAt: new Date(now + hour).toISOString() });
     await c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h3.id });
     await c.assignments.transferTask({ commandId: cid("tt"), actor: c.owner.id, taskId: c.task, expectedRevision: (await c.assignments.getAssignment(c.task))!.revision, to: c.a, reason: "moved by hand" });
     now += 2 * hour;
     await sweeper.sweep(c.owner);
-    assert.match((await c.handoffs.get(c.owner, h3.id))!.returned?.skipped ?? "", /no longer with the temporary owner/);
+    assert.match((await c.handoffs.get(c.owner, h3.id))!.returned?.skipped ?? "", /changed hands/);
+    // The task came back to the temporary owner by other hand-offs: that is not the arrangement that was asked for, so it is not returned.
+    const gen = (await c.assignments.getAssignment(c.task))!.generation;
+    const h4 = await sweeper.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "cover a fourth time", returnAt: new Date(now + hour).toISOString() });
+    await c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h4.id });
+    for (const to of [c.a, c.b]) { const x = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to, reason: "shuffle" }); await c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: x.id }); }
+    assert.equal((await c.assignments.getAssignment(c.task))!.generation, gen + 3);
+    now += 2 * hour;
+    await sweeper.sweep(c.owner);
+    assert.match((await c.handoffs.get(c.owner, h4.id))!.returned?.skipped ?? "", /changed hands/);
+    // The first owner cannot take it back: given up with the reason, once, not retried for ever.
+    await c.assignments.transferTask({ commandId: cid("tt"), actor: c.owner.id, taskId: c.task, expectedRevision: (await c.assignments.getAssignment(c.task))!.revision, to: c.a, reason: "reset" });
+    const h5 = await sweeper.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "cover a fifth time", returnAt: new Date(now + hour).toISOString() });
+    await c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h5.id });
+    c.src.ineligibleWith = "retired";
+    now += 2 * hour;
+    const last = await sweeper.sweep(c.owner);
+    assert.ok(!last.failed.includes(h5.id), JSON.stringify(last));
+    assert.match((await c.handoffs.get(c.owner, h5.id))!.returned?.skipped ?? "", /cannot take the task back \(.*retired/);
+    assert.ok(given.some((g) => g.handoffId === h5.id));
   });
 
   suite("the package holds only the named sections, without credentials; a missing required section is reported and needs the gap accepted", async (c) => {

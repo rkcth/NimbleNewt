@@ -12,17 +12,44 @@ import { startController } from "./index.js";
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
 
-test("the built-in source reports tasks closed in the last week, once each on their project's stream, and nothing older or still open (card H13e)", async () => {
+test("the built-in source records what is already closed without reporting it, then reports each later closing once, keeps a bounded memory and loses nothing past its limit (card H13e)", async () => {
   const day = 86_400_000;
-  const now = Date.parse("2026-10-29T12:00:00.000Z");
-  const row = (id: string, state: string, ageDays: number) => ({ id, state, projectId: "prj-aaaaaaaaaaaaaaaaaaaa", updatedAt: new Date(now - ageDays * day).toISOString() });
-  const tasks = [row("task-1", "done", 1), row("task-2", "cancelled", 6), row("task-3", "done", 8), row("task-4", "in_progress", 0)];
-  const [source] = defaultEventSources({ listTasks: async (q: { afterId?: string; limit: number }) => ({ items: q.afterId === undefined ? tasks.slice(0, 2) as never : tasks.slice(2) as never, ...(q.afterId === undefined ? { next: "task-2" } : {}) }) } as never, () => now);
-  assert.equal(source!.id, "tasks");
-  const first = await source!.poll({ state: undefined, now: new Date(now).toISOString(), limit: 10 });
-  assert.deepEqual(first.signals.map((s) => [s.kind, s.ref.id, s.stream]), [["task.completed", "task-1", "project:prj-aaaaaaaaaaaaaaaaaaaa"], ["task.cancelled", "task-2", "project:prj-aaaaaaaaaaaaaaaaaaaa"]]);
-  const again = await source!.poll({ state: first.state, now: new Date(now).toISOString(), limit: 10 });
-  assert.deepEqual(again.signals, [], "each is reported once");
+  let now = Date.parse("2026-10-29T12:00:00.000Z");
+  const P = "prj-aaaaaaaaaaaaaaaaaaaa";
+  const rows = new Map<string, { id: string; state: string; projectId: string; updatedAt: string }>();
+  const put = (id: string, state: string, ageDays = 0) => rows.set(id, { id, state, projectId: P, updatedAt: new Date(now - ageDays * day).toISOString() });
+  // Two tasks to a page, so reading goes across pages.
+  const listTasks = async (q: { afterId?: string; limit: number }) => {
+    const all = [...rows.values()].sort((a, b) => a.id.localeCompare(b.id));
+    const from = q.afterId === undefined ? 0 : all.findIndex((r) => r.id === q.afterId) + 1;
+    const items = all.slice(from, from + 2);
+    return { items: items as never, ...(from + 2 < all.length ? { next: items[items.length - 1]!.id } : {}) };
+  };
+  const [source] = defaultEventSources({ listTasks } as never, () => now);
+  const poll = (state: unknown, limit = 10) => source!.poll({ state: state as never, now: new Date(now).toISOString(), limit });
+  put("task-1", "done", 1); put("task-2", "in_progress"); put("task-3", "cancelled", 8); put("task-4", "done", 2);
+  const first = await poll(undefined);
+  assert.deepEqual(first.signals, [], "the first pass only records");
+  assert.deepEqual(Object.keys((first.state as { seen: object }).seen).sort(), ["task-1", "task-4"], "an older closing is not remembered at all");
+  // Later closings are reported once, on their project's stream.
+  put("task-2", "done");
+  const second = await poll(first.state);
+  assert.deepEqual(second.signals.map((s) => [s.kind, s.ref.id, s.stream]), [["task.completed", "task-2", `project:${P}`]]);
+  assert.deepEqual((await poll(second.state)).signals, [], "each is reported once");
+  // More than the limit: the rest is found by the next poll, not skipped.
+  put("task-5", "done"); put("task-6", "cancelled"); put("task-7", "done");
+  const burst = await poll(second.state, 1);
+  assert.equal(burst.signals.length, 1);
+  assert.equal(burst.more, true);
+  const rest: string[] = [burst.signals[0]!.ref.id];
+  let state = burst.state;
+  for (let i = 0; i < 5 && rest.length < 3; i++) { const r = await poll(state, 1); rest.push(...r.signals.map((x) => x.ref.id)); state = r.state; }
+  assert.deepEqual(rest.sort(), ["task-5", "task-6", "task-7"]);
+  // A week on, what it remembers shrinks to nothing.
+  now += 8 * day;
+  const later = await poll(state);
+  assert.deepEqual(later.signals, []);
+  assert.deepEqual(Object.keys((later.state as { seen: object }).seen), [], "nothing older than a week is kept");
   assert.ok(DEFAULT_SOURCE_LIMITS.scan >= 1000);
 });
 
@@ -36,6 +63,8 @@ test("a controller with no sources given polls the built-in one: a task marked d
         const rob = await s.principals.authenticate((await s.principals.bootstrapOwner({ name: "rob" })).token);
         const project = (await s.projects.createProject({ commandId: "p1", actor: rob.id, name: "Garden" })).id;
         const task = (await s.projects.createTask({ commandId: "t1", actor: rob.id, projectId: project, title: "Dig" })).id;
+        // The first pass only records what is already closed; the closing after it is reported.
+        await c.dispatch!.dispatcher.tick();
         for (const [i, to] of (["ready", "in_progress", "done"] as const).entries()) await s.projects.transitionTask({ commandId: `tr${i}`, actor: rob.id, taskId: task, expectedRevision: i + 1, to });
         for (let i = 0; i < 3; i++) await c.dispatch!.dispatcher.tick();
         const trace = await EventService.withEpoch(c.storage, c.epoch).trace(rob, `project:${project}`);
