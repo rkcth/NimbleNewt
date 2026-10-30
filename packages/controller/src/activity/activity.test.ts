@@ -61,6 +61,20 @@ for (const backend of backends) {
       assert.ok((await svc.timeline(auditor, project, { since: "2000-01-01T00:00:00Z" })).steps.length > 0, "since keeps steps at or after the time");
       assert.ok((await svc.timeline(owner, project)).scanned >= 2, "the project's tasks were counted");
       await refuses("not_found", () => svc.timeline(worker, project));
+      // Past 25 tasks only the most recently active are read, whatever their IDs; the view says it was cut.
+      const busy = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "Busy" })).id;
+      let lastTask = "";
+      for (let i = 0; i < 27; i++) {
+        lastTask = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: busy, title: `t${i}` })).id;
+        await svc.record(owner, { commandId: cid("r"), taskId: lastTask, kind: "owner-message", summary: `note ${i}` });
+        now += 1000;
+      }
+      const many = await svc.timeline(owner, busy, { limit: 100 });
+      assert.equal(many.scanned, 27);
+      assert.equal(many.truncated, true);
+      assert.equal(many.steps.length, 25, "25 tasks were read");
+      assert.equal(many.steps[0]!.taskId, lastTask, "the most recent task is first");
+      assert.ok(!many.steps.some((x) => x.summary === "note 0" || x.summary === "note 1"), "the two least recent tasks are the ones left out");
       assert.deepEqual((await svc.timeline(auditor, project, { since: "2999-01-01T00:00:00Z" })).steps, []);
       assert.equal((await svc.timeline(auditor, project, { limit: 1 })).steps.length, 1);
       await refuses("not_found", () => svc.timeline(stranger, project));
