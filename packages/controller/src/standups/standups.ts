@@ -324,10 +324,13 @@ export class StandupService {
       }
 
       const review = await this.#review(occurrence.projectId, coversFrom, nowIso, facts);
-      const needsOwner = this.#options.ownerItems === undefined ? undefined : await this.#options.ownerItems(occurrence.projectId).then((lines) => lines.slice(0, STANDUP_LIMITS.ownerLines).map((l) => ({ text: cut(l.text, 300), cites: l.cites.slice(0, 5) })), (): ReviewLine[] => [{ text: "The list of what needs you could not be read just now; it is in your inbox.", cites: [{ kind: "project", id: occurrence.projectId }] }]);
+      // The owner's list as of the first preparation stays for an occurrence that is reported (a past one) or whose start has passed: today's inbox is not what that meeting was told.
+      const closed = occurrence.state === "reported" || Date.parse(nowIso) >= Date.parse(occurrence.startsAt);
+      const needsOwner = this.#options.ownerItems === undefined ? undefined : closed && (prep?.needsOwner !== undefined || occurrence.state === "reported") ? prep?.needsOwner : await this.#options.ownerItems(occurrence.projectId).then((lines) => lines.slice(0, STANDUP_LIMITS.ownerLines).map((l) => ({ text: cut(l.text, 300), cites: l.cites.slice(0, 5) })), (): ReviewLine[] => [{ text: "The list of what needs you could not be read just now; it is in your inbox.", cites: [{ kind: "project", id: occurrence.projectId }] }]);
       const body: PrepBody = { occurrenceId: id, projectId: occurrence.projectId, notified, withheld, briefs: Object.fromEntries(briefs.map((b) => [b.agent, b.briefId])), review, ...(needsOwner === undefined ? {} : { needsOwner }), preparedAt: nowIso };
       // Nothing new since the last preparation (the same people told, withheld and briefed, the same review): nothing is written.
-      const stable = (b: PrepBody): string => canonicalJson({ ...b, preparedAt: "", ...(b.review === undefined ? {} : { review: { ...b.review, at: "" } }) } as unknown as JsonObject);
+      // The owner's list counts by the items it names, not by their counts, revisions or wording: a repeated notice does not rewrite the record every tick, a new or settled item does.
+      const stable = (b: PrepBody): string => canonicalJson({ ...b, preparedAt: "", ...(b.needsOwner === undefined ? {} : { needsOwner: b.needsOwner.map((l) => l.cites.map((c) => c.id).join(",")) }), ...(b.review === undefined ? {} : { review: { ...b.review, at: "" } }) } as unknown as JsonObject);
       if (prep !== undefined && stable(prep) === stable(body)) return { notified: sent, withheld, briefs, review: prep.review ?? review };
       try {
         await this.#runner.command("standup.prepare", { commandId: `spp:${id}:${prepFound?.revision ?? 0}:${sha256(canonicalJson(body as unknown as JsonObject)).slice(0, 16)}`, actor: by.id }, async () => ({
@@ -351,9 +354,9 @@ export class StandupService {
     if (found === undefined) return undefined;
     const body = found.body as unknown as PrepBody;
     if (!isService(viewer) && (!inTaskScope(viewer, body.projectId) || !(allows(viewer, "meeting.read", body.projectId) || allows(viewer, "meeting.manage", body.projectId)))) return undefined;
-    // The review names tasks (as briefs do) and the owner's to-do list is the owner's: each goes only to who may read it.
+    // The review names tasks (as briefs do) and the owner's to-do list (a copy of the owner-only inbox) is the owner's alone, not a host's or a service's.
     const { review, needsOwner, ...rest } = view<PrepBody>(found);
-    return { ...rest, ...(review !== undefined && this.#mayReadRecords(viewer, body.projectId) ? { review } : {}), ...(needsOwner !== undefined && isService(viewer) ? { needsOwner } : {}) } as View<PrepBody>;
+    return { ...rest, ...(review !== undefined && this.#mayReadRecords(viewer, body.projectId) ? { review } : {}), ...(needsOwner !== undefined && viewer.kind === "owner" && viewer.taskScope === undefined ? { needsOwner } : {}) } as View<PrepBody>;
   }
 
   // ---- briefs ----------------------------------------------------------------------------------------------------------------------

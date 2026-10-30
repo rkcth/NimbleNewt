@@ -489,8 +489,8 @@ for (const backend of backends) {
     await owned.prepare(c.host, occ);
     assert.deepEqual((await c.standups.agenda(c.owner, occ))!.needsOwner?.map((l) => [l.text, l.cites[0]!.id]), [["Approve the paid API key", "ntf-1"]]);
     // The owner's to-do list is the owner's: not for readers of meetings, managers of them or the agents.
-    for (const who of [c.plain, c.reader, c.mgr, c.asA]) { assert.equal((await c.standups.agenda(who, occ))?.needsOwner, undefined, who.id); assert.equal((await c.standups.prepared(who, occ))?.needsOwner, undefined, who.id); }
-    assert.ok((await c.standups.prepared(c.host, occ))!.needsOwner !== undefined);
+    for (const who of [c.plain, c.reader, c.mgr, c.asA, c.host]) { assert.equal((await c.standups.agenda(who, occ))?.needsOwner, undefined, who.id); assert.equal((await c.standups.prepared(who, occ))?.needsOwner, undefined, who.id); }
+    assert.ok((await c.standups.prepared(c.owner, occ))!.needsOwner !== undefined);
     const broken = c.make({ ownerItems: async () => { throw new Error("inbox down"); } });
     await broken.prepare(c.host, occ);
     assert.match((await c.standups.agenda(c.owner, occ))!.needsOwner![0]!.text, /could not be read just now/);
@@ -513,6 +513,45 @@ for (const backend of backends) {
   });
 
   // ---- outcomes back to the conversation --------------------------------------------------------------------------------------
+
+  suite("the owner's list is the owner's alone (not a host's or a service's), is kept as first stored for a meeting that has started or been reported, and a repeated count does not rewrite the preparation", async (c) => {
+    const occ = await c.occurrenceAt("2026-10-21T07:00:00.000Z");
+    at("2026-10-21T05:00:00.000Z");
+    const svc: Principal = { ...c.host, kind: "service" } as Principal;
+    let lines = [{ text: "Approve the key, waiting since 1.", cites: [{ kind: "notification-item", id: "ntf-1", revision: 1 }] }];
+    const s = c.make({ ownerItems: async () => lines });
+    await s.prepare(c.host, occ);
+    assert.ok((await c.standups.prepared(c.owner, occ))!.needsOwner !== undefined);
+    for (const who of [c.host, svc]) { assert.equal((await c.standups.prepared(who, occ))?.needsOwner, undefined, who.kind); assert.equal((await c.standups.agenda(who, occ))?.needsOwner, undefined, who.kind); }
+    // A repeated notice (same item, higher count and revision) does not rewrite the record; a new item does.
+    const rev = async (): Promise<number> => (await c.storage.getAggregate({ kind: "standup-prep", id: occ }))!.revision;
+    const r0 = await rev();
+    lines = [{ text: "Approve the key (reported 3 times), waiting since 1.", cites: [{ kind: "notification-item", id: "ntf-1", revision: 4 }] }];
+    at("2026-10-21T05:05:00.000Z");
+    await s.prepare(c.host, occ);
+    assert.equal(await rev(), r0, "a changed count alone writes nothing");
+    lines = [...lines, { text: "Second item", cites: [{ kind: "notification-item", id: "ntf-2", revision: 1 }] }];
+    await s.prepare(c.host, occ);
+    assert.ok(await rev() > r0, "a new item is stored");
+    assert.equal((await c.standups.prepared(c.owner, occ))!.needsOwner!.length, 2);
+    // Once the meeting has started, the stored list stays as it was.
+    at("2026-10-21T07:30:00.000Z");
+    lines = [{ text: "Only today's item", cites: [{ kind: "notification-item", id: "ntf-9", revision: 1 }] }];
+    await s.prepare(c.host, occ);
+    assert.deepEqual((await c.standups.prepared(c.owner, occ))!.needsOwner!.map((l) => l.cites[0]!.id), ["ntf-1", "ntf-2"]);
+  });
+
+  suite("a reported (catch-up) occurrence is not given today's owner list", async (c) => {
+    at("2026-10-23T08:00:00.000Z");
+    await c.schedule({ time: "09:00", windowFrom: "08:00", windowTo: "10:00" });
+    at("2026-10-29T12:00:00.000Z");
+    const made = (await c.meetings.tick(c.host)).created;
+    const occ = made[made.length - 1]!.occurrenceId;
+    assert.equal((await occurrenceOf(c, occ)).state, "reported");
+    const s = c.make({ ownerItems: async () => [{ text: "Today's item", cites: [{ kind: "notification-item", id: "ntf-t", revision: 1 }] }] });
+    await s.prepare(c.host, occ);
+    assert.equal((await c.standups.prepared(c.owner, occ))!.needsOwner, undefined);
+  });
 
   suite("an outcome goes back to the conversation the topic came from, once: a topic the meeting did not reach is told so with its reason and next step, a discussion says nothing was started, an instruction does not; a failing conversation is retried with the same key", async (c) => {
     await c.put("chat-turn", "turn-real", { projectId: c.a });
