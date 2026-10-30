@@ -99,6 +99,24 @@ test("a message told while a turn waits on the bridge is accepted at once, does 
   await h.done;
 });
 
+test("the host can ask the process to compact its stored conversation: it answers with the new size, or a fault with the same ID, and the process goes on (card H12f)", async () => {
+  const { offline, hooks } = scripted();
+  offline.faux.setResponses([fauxAssistantMessage("first answer"), fauxAssistantMessage("a summary of the conversation"), fauxAssistantMessage("second answer")]);
+  const h = host(hooks);
+  h.send({ t: "start", v: 1, start: offlineStart });
+  await h.next("ready");
+  h.send({ t: "run", requestId: "req-1", content: "say something" });
+  assert.equal((await h.next("result")).status, "completed");
+  h.send({ t: "compact", id: 31 });
+  const answer = await Promise.race([h.next("compact.ok"), h.next("fault")]);
+  assert.equal(answer.t, "compact.ok", JSON.stringify(answer));
+  assert.equal(answer.id, 31);
+  h.send({ t: "checkpoint", id: 32 });
+  assert.equal((await h.next("checkpoint.ok")).id, 32, "the process answers after compacting");
+  h.send({ t: "close" });
+  await h.done;
+});
+
 test("a refused bridge call is the model's tool result, not a crash; garbage on the channel is a fault, not a crash", async () => {
   const { offline, hooks } = scripted();
   offline.faux.setResponses([

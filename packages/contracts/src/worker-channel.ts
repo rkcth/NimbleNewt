@@ -72,6 +72,8 @@ export type ToChild =
   | { readonly t: "run"; readonly requestId: string; readonly content: string }
   | { readonly t: "checkpoint"; readonly id: number }
   | { readonly t: "tell"; readonly id: number; readonly text: string }
+  /** Compact the stored conversation once (card H12f): asked when the first call is over the context budget. */
+  | { readonly t: "compact"; readonly id: number }
   | { readonly t: "close" }
   | { readonly t: "bridge.reply"; readonly id: number; readonly reply: BridgeReplyMessage }
   | { readonly t: "fetch.head"; readonly id: number; readonly status: number; readonly statusText: string; readonly headers: HeaderList }
@@ -91,6 +93,7 @@ export type FromChild =
   /** `contextTokens`: an estimate of the stored conversation, for the resume decision (card H12f). */
   | { readonly t: "checkpoint.ok"; readonly id: number; readonly checkpoint: Obj; readonly contextTokens?: number }
   | { readonly t: "tell.ok"; readonly id: number }
+  | { readonly t: "compact.ok"; readonly id: number; readonly contextTokens?: number }
   /** The process could not do what it was asked (`id` names the request when there is one). */
   | { readonly t: "fault"; readonly id?: number; readonly message: string };
 
@@ -182,6 +185,7 @@ export function parseFromChild(value: unknown): FromChild {
       return { t: "checkpoint.ok", id: int(value, "id"), checkpoint: obj(value, "checkpoint"), ...(contextTokens === undefined ? {} : { contextTokens }) };
     }
     case "tell.ok": return { t: "tell.ok", id: int(value, "id") };
+    case "compact.ok": { const contextTokens = value["contextTokens"] === undefined ? undefined : int(value, "contextTokens"); return { t: "compact.ok", id: int(value, "id"), ...(contextTokens === undefined ? {} : { contextTokens }) }; }
     case "fault": return { t: "fault", ...(value["id"] === undefined ? {} : { id: int(value, "id") }), message: str(value, "message", 4000) };
     default: return fail(`unknown message ${String(value["t"]).slice(0, 40)}`);
   }
@@ -195,6 +199,7 @@ export function parseToChild(value: unknown): ToChild {
     case "run": return { t: "run", requestId: str(value, "requestId", 200), content: str(value, "content", 2_000_000) };
     case "checkpoint": return { t: "checkpoint", id: int(value, "id") };
     case "tell": return { t: "tell", id: int(value, "id"), text: str(value, "text", 100_000) };
+    case "compact": return { t: "compact", id: int(value, "id") };
     case "close": return { t: "close" };
     case "bridge.reply": return { t: "bridge.reply", id: int(value, "id"), reply: reply(obj(value, "reply")) };
     case "fetch.head": return { t: "fetch.head", id: int(value, "id"), status: int(value, "status"), statusText: str(value, "statusText", 200), headers: headers(value, "headers") };

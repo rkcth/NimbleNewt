@@ -52,6 +52,8 @@ export interface HostRuntime {
   run(content: string, requestId: string): Promise<HostTurnResult>;
   checkpoint(): Promise<JsonObj>;
   tell(text: string): Promise<void>;
+  /** Compacts the stored conversation once (card H12f); absent on a runtime that cannot. */
+  compact?(): Promise<void>;
   refreshContext(): Promise<void>;
   close(): Promise<void>;
 }
@@ -195,6 +197,8 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
         },
         async checkpoint() { return wrapCheckpoint(await process.checkpoint()); },
         tell: (text) => process.tell(text),
+        // Over the context budget at the first call: the process compacts its stored conversation once and the controller asks again (card H12f).
+        async compact() { await process.compact(); },
         async refreshContext() { await process.tell(await options.refreshText?.(order) ?? DEFAULT_REFRESH); },
         async close() { await process.close(); },
       };

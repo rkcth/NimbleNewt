@@ -172,6 +172,10 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
           void placed.result().catch((error) => fault(`tell failed: ${String((error as Error)?.message ?? error)}`));
         } catch (error) { fault(`tell failed: ${String((error as Error)?.message ?? error)}`, message.id); }
         return;
+      case "compact":
+        if (adapter === undefined) return fault("the process was not started", message.id);
+        try { await adapter.root().compact(); const tokens = await contextTokens(adapter); send({ t: "compact.ok", id: message.id, ...(tokens === undefined ? {} : { contextTokens: tokens }) }); } catch (error) { fault(`compact failed: ${String((error as Error)?.message ?? error)}`, message.id); }
+        return;
       case "bridge.reply": { const waiting = bridgeWaiting.get(message.id); bridgeWaiting.delete(message.id); waiting?.(message.reply as BridgeReply); return; }
       case "close": closed = true; return;
       default: return;

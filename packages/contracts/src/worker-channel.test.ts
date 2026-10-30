@@ -10,14 +10,14 @@ const start: ChannelStart = {
 
 test("every message of both directions survives a round trip through the line codec", () => {
   const toChild: ToChild[] = [
-    { t: "start", v: 1, start }, { t: "run", requestId: "req-1", content: "do it" }, { t: "checkpoint", id: 3 }, { t: "tell", id: 4, text: "hello\nworld" }, { t: "close" },
+    { t: "start", v: 1, start }, { t: "run", requestId: "req-1", content: "do it" }, { t: "checkpoint", id: 3 }, { t: "tell", id: 4, text: "hello\nworld" }, { t: "compact", id: 5 }, { t: "close" },
     { t: "bridge.reply", id: 5, reply: { ok: true, result: { a: 1 } } }, { t: "bridge.reply", id: 6, reply: { ok: false, code: "paused", message: "no" } },
     { t: "fetch.head", id: 7, status: 200, statusText: "OK", headers: [["content-type", "text/event-stream"]] }, { t: "fetch.chunk", id: 7, data: Buffer.from("data: x\n\n").toString("base64") }, { t: "fetch.end", id: 7 }, { t: "fetch.error", id: 8, message: "refused" },
   ];
   const fromChild: FromChild[] = [
     { t: "ready", v: 1 }, { t: "bridge", id: 1, token: "tok", request: { op: "desk.read", callId: "c1", args: { recordId: "x" } } }, { t: "bridge", id: 2, token: "tok", request: { op: "task.get", callId: "c2" } },
     { t: "fetch", id: 9, url: "http://relay.invalid/m0/v1/chat/completions", method: "POST", headers: [["accept", "*/*"]], body: Buffer.from("{}").toString("base64") }, { t: "fetch", id: 10, url: "http://relay.invalid/m0/x", method: "GET", headers: [] },
-    { t: "fetch.abort", id: 9 }, { t: "result", status: "completed", text: "ok" }, { t: "result", status: "failed", error: "boom" }, { t: "checkpoint.ok", id: 3, checkpoint: { n: 1 } }, { t: "tell.ok", id: 4 }, { t: "fault", message: "bad" }, { t: "fault", id: 3, message: "bad" },
+    { t: "fetch.abort", id: 9 }, { t: "result", status: "completed", text: "ok" }, { t: "result", status: "failed", error: "boom" }, { t: "compact.ok", id: 4, contextTokens: 900 }, { t: "compact.ok", id: 5 }, { t: "checkpoint.ok", id: 3, checkpoint: { n: 1 } }, { t: "tell.ok", id: 4 }, { t: "fault", message: "bad" }, { t: "fault", id: 3, message: "bad" },
   ];
   const decoder = new LineDecoder();
   for (const m of toChild) assert.deepEqual(parseToChild(decoder.push(encodeMessage(m))[0]), m);

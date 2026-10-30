@@ -100,7 +100,7 @@ export class WorkerProcess {
         for (const w of this.#readyWaiters.splice(0)) w.resolve();
         return;
       case "result": { const w = this.#resultWaiter; this.#resultWaiter = undefined; w?.resolve(m); return; }
-      case "checkpoint.ok": case "tell.ok": { const w = this.#asked.get(m.id); this.#asked.delete(m.id); w?.resolve(m); return; }
+      case "checkpoint.ok": case "tell.ok": case "compact.ok": { const w = this.#asked.get(m.id); this.#asked.delete(m.id); w?.resolve(m); return; }
       case "fault": {
         if (m.id !== undefined) { const w = this.#asked.get(m.id); this.#asked.delete(m.id); w?.reject(new Error(m.message)); return; }
         // A fault with no request is the process saying it cannot start or go on; the start waits on it, a running turn fails with it.
@@ -186,6 +186,12 @@ export class WorkerProcess {
     answer.catch(() => undefined);
     void this.#send(make(id));
     return (await answer) as T;
+  }
+
+  /** Asks the process to compact its stored conversation; resolves with the new size estimate when it says. */
+  async compact(): Promise<{ readonly contextTokens?: number }> {
+    const ok = await this.#ask<Extract<FromChild, { t: "compact.ok" }>>((id) => ({ t: "compact", id }));
+    return ok.contextTokens === undefined ? {} : { contextTokens: ok.contextTokens };
   }
 
   async checkpoint(): Promise<{ readonly checkpoint: { readonly [key: string]: never }; readonly contextTokens?: number }> {
