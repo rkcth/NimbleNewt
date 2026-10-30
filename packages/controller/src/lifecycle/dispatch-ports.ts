@@ -1,3 +1,4 @@
+import { clipText } from "../activity/activity.js";
 import { redactText } from "../security/redact.js";
 import type { ControllerStorage } from "../storage/types.js";
 import type { DispatcherService } from "../dispatch/dispatcher.js";
@@ -76,7 +77,7 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
     // A runtime that cannot say what is running is itself unknown: one item says so, so a stop is never reported clean on silence.
     if (found === undefined) return [{ kind: "process", ref: "runtime:processes", state: "unknown" }];
     // What the runtime says is checked: an entry that is not shaped as promised is itself unknown. A ref (it may be a command line) is redacted before it is cut.
-    return found.map((p) => (typeof p?.ref === "string" && (p.kind === "process" || p.kind === "child") && ["running", "uncooperative", "unknown"].includes(p.state) ? { kind: p.kind, ref: redactText(p.ref).slice(0, 120), state: p.state } : { kind: "process" as const, ref: "runtime:processes", state: "unknown" as const }));
+    return found.map((p, i) => (typeof p?.ref === "string" && (p.kind === "process" || p.kind === "child") && ["running", "uncooperative", "unknown"].includes(p.state) ? { kind: p.kind, ref: clipText(redactText(p.ref), 120), state: p.state } : { kind: "process" as const, ref: `runtime:processes#${i}`, state: "unknown" as const }));
   };
   const inFlight = async (attempts: readonly string[], scope: PauseScope): Promise<InventoryItem[]> => {
     const localItems = await localOf(attempts, scope);
@@ -102,7 +103,7 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
   return {
     unsupported: (scope) => (scope.kind === "task" || scope.kind === "agent" || members !== undefined ? undefined : `stopping a whole ${scope.kind} is not supported yet; stop its tasks or agents one by one (Force Stop works on each)`),
     inventory: async (scope) => inFlight(await attemptsOf(scope), scope),
-    release: async (scope) => { const h = dispatch(); if (h === undefined) return; for (const id of await attemptsOf(scope)) await h.dispatcher.release(h.principal, id).catch(() => undefined); },
+    release: async (scope) => { seen.delete(`${scope.kind}:${scope.id}`); const h = dispatch(); if (h === undefined) return; for (const id of await attemptsOf(scope)) await h.dispatcher.release(h.principal, id).catch(() => undefined); },
     cleanup: async (scope, options) => {
       const h = dispatch();
       const attempts = await attemptsOf(scope);
@@ -140,6 +141,8 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
       // Looking again can fail; that is not a clean stop. A process or child still running after the stop did not end either.
       const after = await inFlight(attempts, scope).catch(() => [{ kind: "process", ref: "runtime:inventory", state: "unknown" } as InventoryItem]);
       for (const item of after) if (((item.kind === "process" || item.kind === "child") && item.state !== "settled") || (item.kind === "job" && (item.state === "unknown" || item.state === "uncooperative"))) unresolved.push(item.ref);
+      // The stop is over for this scope: what was remembered about its attempts is not carried into a later one.
+      seen.delete(`${scope.kind}:${scope.id}`);
       return { ended: true, unresolved };
     },
   };

@@ -117,7 +117,7 @@ test("the stop inventory lists the local processes and child work a runtime repo
   assert.deepEqual(await ports.inventory(task), [{ kind: "process", ref: "runtime:processes", state: "unknown" }]);
   // An entry not shaped as promised is unknown, a command line is redacted, a bad figure is not charged, and an attempt that ended during preparation is still asked about.
   report = [{ ref: "run sk-live-ABCDEFGHIJKLMNOPQRSTUVWX1234", kind: "process", state: "running" }, { ref: 7 as never, kind: "process", state: "running" }];
-  assert.deepEqual((await ports.inventory(task)).map((i) => i.ref), ["run [redacted]", "runtime:processes"]);
+  assert.deepEqual((await ports.inventory(task)).map((i) => i.ref), ["run [redacted]", "runtime:processes#1"]);
   const odd = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), () => "pending", undefined, undefined, { spent: async () => Number.NaN });
   assert.equal((await odd.cleanup(task, { deadlineAt: new Date(Date.now() + 1000).toISOString(), backup: false })).spent, undefined);
   let live = ["att-1"];

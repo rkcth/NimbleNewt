@@ -59,7 +59,7 @@ for (const backend of backends) {
       const one = await say("Stop watching, watch-1."); assert.equal(one.status, "proposed", JSON.stringify(one).slice(0, 300));
       described.push({ id: "watch-8", stream: "task:x", taskId: deploy, projectId: "prj-other" });
       script["Stop watching, watch-8."] = [cmd("watch.cancel", { watchId: "watch-8" }, "Stop watching, watch-8")];
-      assert.equal((await say("Stop watching, watch-8.")).status, "refused");
+      const other = await say("Stop watching, watch-8."); assert.equal(other.status, "refused"); assert.equal((other as { code?: string }).code, "not_found");
       assert.equal(cancelled.length, 1);
     } finally { await w.close(); }
   });
