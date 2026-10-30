@@ -2758,3 +2758,9 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## U04 close-out
 
 - Audit found one uncovered acceptance clause: an edit made straight through the API shows in the next attempt's text. Added a dispatcher test (policy changed between two starts; the second attempt shows the new approval profile, the first does not). Audit also noted: `start.ts` passes no `shareable` hook to the meeting record (cited records read as unverifiable, safe but strict; add to M02e), no remainder card names a model-health event source (add to H13f), and the dispatcher never passes `safeLongRunning` (add to M04f).
+
+## U11b (part 1): the Needs-you view
+
+- `status.ask` kind `needs_you` (owner only): one list of what waits for the owner's decision. Sources: agent questions (`ownerQuestions`), reviews only the owner can decide (new `ReviewService.ownerPending`, owner only, state `owner-decision`), and open blockers whose resolver is `owner` (each source read up to 50). Sorted by how many other open tasks wait for the item's task (transitive, from the active dependency edges; finished and cancelled tasks do not count), then oldest first. Every line says how to deal with it and cites its records; the lines are cut at `limit` (default 20) with a note.
+- The chat reply counts these in place of agent questions alone ("N things need your decision. Ask what needs you to see them.") when `needing` is wired (it is, in `start.ts`).
+- **Not here** (remainder U11b2): the Notice level and the three-level model on notification items; owner-marked critical tasks and goal links; the Urgent triggers (K01, H01, H09, A08, denials, controller down); escalation to Urgent after 24 hours or when the agent has no other work, and de-escalation; the stand-up opening from this view; the 09:00 digest; level and time changes by chat; answering each item in place from the view; deferred meeting items (per-project agenda) and paging beyond 50 per source.

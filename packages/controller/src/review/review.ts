@@ -254,6 +254,23 @@ export class ReviewService {
    * only the owner may decide one that is reserved for the owner or sent to the owner. `allow` needs the essential context (tool version, authority source, expected effects); without it
    * the verdict is refused, and the reviewer can ask for it with `request-context`.
    */
+  /** The reviews only the owner can decide, oldest first (up to `limit`), for the owner alone (card U11b). */
+  async ownerPending(owner: Principal, limit = 50): Promise<{ id: string; taskId: string; projectId: string; name: string; requestedAt: string }[]> {
+    if (owner.kind !== "owner") throw new DomainError("forbidden", "only the owner lists the reviews waiting for them");
+    const out: { id: string; taskId: string; projectId: string; name: string; requestedAt: string }[] = [];
+    let after: string | undefined;
+    for (let reads = 0; reads < 20; reads++) {
+      const page = await this.#runner.list("review", { ...(after === undefined ? {} : { afterId: after }), limit: 500 });
+      for (const a of page) {
+        after = a.id;
+        const body = a.body as unknown as ReviewBody;
+        if (body.state === "owner-decision") out.push({ id: a.id, taskId: body.binding.taskId, projectId: body.binding.projectId, name: body.operation.name, requestedAt: body.requestedAt });
+      }
+      if (page.length < 500) break;
+    }
+    return out.sort((x, y) => (x.requestedAt < y.requestedAt ? -1 : x.requestedAt > y.requestedAt ? 1 : x.id < y.id ? -1 : 1)).slice(0, limit);
+  }
+
   async decide(reviewer: Principal, command: Decide): Promise<void> {
     onlyKnown(command, ["commandId", "requestId", "expectedRevision", "verdict", "reason", "expiresAt", "cost"]);
     const id = this.#id(command.requestId);

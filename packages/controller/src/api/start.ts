@@ -327,7 +327,7 @@ export async function startController(options: StartOptions): Promise<Controller
     const activity = ActivityService.withEpoch(storage, epoch);
     // The stop service is built after the status service (it uses the pause service), so the readiness view reaches it through this.
     let stopsLive: StopService | undefined;
-    const status = StatusService.withEpoch(storage, epoch, { assignments, waits, blockers: BlockerService.withEpoch(storage, epoch), contracts, pauses, stall, watch: watchService, ownerQuestions: messages, agenda: meetings, meetings, shutdown: { readiness: async (by) => { if (stopsLive === undefined) throw new DomainError("unavailable", "stop is not ready"); return stopsLive.readiness(by, { kind: "installation", id: "installation" }); } }, handoffs: { forTask: (by, taskId) => handoffs.forTask(by, taskId) }, activity, ...(checked === undefined ? {} : { verifyArtifact: async (id: string) => ({ ok: (await checked.verify(id)).ok }) }) });
+    const status = StatusService.withEpoch(storage, epoch, { assignments, waits, blockers: BlockerService.withEpoch(storage, epoch), contracts, pauses, stall, watch: watchService, reviews, ownerQuestions: messages, agenda: meetings, meetings, shutdown: { readiness: async (by) => { if (stopsLive === undefined) throw new DomainError("unavailable", "stop is not ready"); return stopsLive.readiness(by, { kind: "installation", id: "installation" }); } }, handoffs: { forTask: (by, taskId) => handoffs.forTask(by, taskId) }, activity, ...(checked === undefined ? {} : { verifyArtifact: async (id: string) => ({ ok: (await checked.verify(id)).ok }) }) });
     const branchSettings = ProtectedBranchService.withEpoch(storage, epoch);
     // Typed commands (card T09b): the `nimblenewt.` names are the state-API operations, `toolbox.` and `a_<id>.` names come from the catalog.
     const commands = CommandService.withEpoch(storage, epoch, BUILTIN_COMMANDS.source(catalogSource(CatalogService.withEpoch(storage, epoch, desks))));
@@ -389,7 +389,7 @@ export async function startController(options: StartOptions): Promise<Controller
       const policy = PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) });
       const policyEdits = PolicyEditService.withEpoch(storage, epoch, { policy, reviews, grants, configuration, conversations, interpreter: o.interpreter });
       policyEditsLive = policyEdits;
-      chat = ChatService.withEpoch(storage, epoch, { principals, api, interpreter: o.interpreter, policy, status, policyEdits, coordinator: () => coordinator, waiting: async (owner) => (await messages.ownerQuestions(owner, { limit: 50 })).items.length, ...(o.coordinator === undefined ? {} : { coordinatorToken: o.coordinator.token }) });
+      chat = ChatService.withEpoch(storage, epoch, { principals, api, interpreter: o.interpreter, policy, status, policyEdits, coordinator: () => coordinator, waiting: async (owner) => (await messages.ownerQuestions(owner, { limit: 50 })).items.length, needing: async (owner) => (await status.needsYou(owner, 1))?.count ?? 0, ...(o.coordinator === undefined ? {} : { coordinatorToken: o.coordinator.token }) });
       if (o.coordinator !== undefined) {
         const c = o.coordinator;
         coordinator = CoordinatorService.withEpoch(storage, epoch, {

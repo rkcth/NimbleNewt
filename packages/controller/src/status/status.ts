@@ -178,6 +178,7 @@ export type StatusRequest =
   | { readonly kind: "failed_events"; readonly projectId?: string; readonly taskId?: string; readonly afterId?: string; readonly limit?: number }
   | { readonly kind: "failed_event"; readonly handlingId: string }
   | { readonly kind: "owner_questions"; readonly limit?: number }
+  | { readonly kind: "needs_you"; readonly limit?: number }
   | { readonly kind: "handoff"; readonly taskId: string }
   | { readonly kind: "shutdown" }
   | { readonly kind: "timeline"; readonly projectId: string; readonly agent?: string; readonly since?: string; readonly limit?: number }
@@ -209,6 +210,8 @@ export interface StatusDeps {
   readonly agenda?: { openAgenda(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { id: string; revision: number; topic: string; question?: string; requestedOutcome?: string; urgency: string; intent: string; state: string; requestedBy: string; timeboxMinutes?: number }[]; next?: string } | undefined> };
   /** The steps of a task's activity record (card C09h). Absent: the view is not offered. */
   readonly activity?: Pick<ActivityService, "steps" | "explanations"> & Partial<Pick<ActivityService, "timeline">>;
+  /** The reviews only the owner can decide (card U11b). Absent: they are not listed. */
+  readonly reviews?: { ownerPending(owner: Principal, limit?: number): Promise<readonly { id: string; taskId: string; projectId: string; name: string; requestedAt: string }[]> };
   /** Questions agents have put to the owner (card U12e). Absent: none are listed. */
   readonly ownerQuestions?: { ownerQuestions(owner: Principal, page?: { afterId?: string; limit?: number }): Promise<{ items: readonly { inquiryId: string; asker: string; question: string; askedAt: string; revision: number; task: { id: string; title: string; projectName: string }; wait?: { summary: string; nextAction: string; deadline?: string } }[]; next?: string }> };
   /** Checks an artifact against its files (card S06). Absent: artifacts are listed as `not_checked`, never as verified. */
@@ -298,6 +301,7 @@ export class StatusService {
       case "agenda": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.agendaLines(by, request); }
       case "explanations": { onlyKnown(request, ["kind", "taskId", "seq", "limit"]); return this.explanationLines(by, request); }
       case "activity": { onlyKnown(request, ["kind", "taskId", "latest", "after", "limit"]); return this.activityLines(by, request); }
+      case "needs_you": { onlyKnown(request, ["kind", "limit"]); return this.needsYou(by, request.limit); }
       case "owner_questions": { onlyKnown(request, ["kind", "limit"]); return this.ownerQuestionLines(by, request.limit); }
       default: return invalid("kind", "is not a kind of status request");
     }
@@ -459,6 +463,70 @@ export class StatusService {
     if (lines.length === 0) lines.push(line("No agent is waiting for your answer."));
     else if (next !== undefined) lines.push(line("There are more questions than shown; answer these first and ask again."));
     return { observedAt: this.#runner.now(), lines };
+  }
+
+  // ---- everything waiting for the owner (card U11b) -------------------------------------------------------------------------
+
+  /**
+   * One list of what waits for the owner's decision: agent questions, reviews only the owner can decide, and open blockers whose resolver is the owner. What other open tasks wait for comes first, then how many they are, then oldest first.
+   * `count` is the number found (each source is read up to 50); the lines are cut at `limit`. Owner only (anyone else: undefined).
+   */
+  async needsYou(by: Principal, limit?: number): Promise<{ readonly observedAt: string; readonly lines: readonly Line[]; readonly count: number } | undefined> {
+    if (by.kind !== "owner") return undefined;
+    const cap = limit === undefined ? 20 : Number.isSafeInteger(limit) && limit >= 1 && limit <= 50 ? limit : invalid("limit", "must be 1 to 50");
+    type Item = { text: string; cites: Cite[]; taskId?: string; since: string; id: string };
+    const items: Item[] = [];
+    if (this.#deps.ownerQuestions !== undefined) {
+      for (const q of (await this.#deps.ownerQuestions.ownerQuestions(by, { limit: 50 })).items) {
+        items.push({ text: `${shown(q.asker)} asks about "${shown(q.task.title)}": "${shown(q.question)}" (answer the question)`, cites: [cite("inquiry", q.inquiryId, q.revision), cite("task", q.task.id)], taskId: q.task.id, since: q.askedAt, id: q.inquiryId });
+      }
+    }
+    if (this.#deps.reviews !== undefined) {
+      for (const r of await this.#deps.reviews.ownerPending(by, 50)) {
+        items.push({ text: `An approval of "${shown(r.name)}" is waiting for you (allow or deny it)`, cites: [cite("review", r.id), cite("task", r.taskId)], taskId: r.taskId, since: r.requestedAt, id: r.id });
+      }
+    }
+    for (const b of (await this.#deps.blockers.list({ limit: 50, openOnly: true })).items) {
+      if (b.resolver !== "owner") continue;
+      const onTask = b.subject.kind === "task";
+      items.push({ text: `${shown(b.summary)} (${b.type}; resolve it or give what is missing)`, cites: [cite("blocker", b.id), ...(onTask ? [cite("task", b.subject.id)] : [])], ...(onTask ? { taskId: b.subject.id } : {}), since: b.openedAt, id: b.id });
+    }
+    // How many other open tasks wait, directly or through others, for the task an item is about.
+    const reverse = new Map<string, Map<string, string[]>>();
+    const taskOf = async (id: string): Promise<{ projectId: string; open: boolean } | undefined> => {
+      const t = (await this.#runner.get("task", id))?.body as unknown as { projectId: string; state: TaskState } | undefined;
+      return t === undefined ? undefined : { projectId: t.projectId, open: t.state !== "done" && t.state !== "cancelled" };
+    };
+    const openMemo = new Map<string, boolean>();
+    const blockedBy = async (item: Item): Promise<number> => {
+      if (item.taskId === undefined) return 0;
+      const t = await taskOf(item.taskId);
+      if (t === undefined) return 0;
+      let rev = reverse.get(t.projectId);
+      if (rev === undefined) {
+        rev = new Map();
+        for (const e of await this.#deps.contracts.activeEdges(t.projectId)) rev.set(e.prerequisiteId, [...(rev.get(e.prerequisiteId) ?? []), e.taskId]);
+        reverse.set(t.projectId, rev);
+      }
+      const seen = new Set<string>([item.taskId]);
+      const queue = [item.taskId];
+      let n = 0;
+      while (queue.length > 0 && seen.size < 2000) {
+        for (const next of rev.get(queue.shift()!) ?? []) {
+          if (seen.has(next)) continue;
+          seen.add(next);
+          if (!openMemo.has(next)) openMemo.set(next, (await taskOf(next))?.open === true);
+          if (openMemo.get(next) === true) { n++; queue.push(next); }
+        }
+      }
+      return n;
+    };
+    const ranked = await Promise.all(items.map(async (i) => ({ i, blocked: await blockedBy(i) })));
+    ranked.sort((a, b) => b.blocked - a.blocked || (a.i.since < b.i.since ? -1 : a.i.since > b.i.since ? 1 : a.i.id < b.i.id ? -1 : 1));
+    const lines: Line[] = ranked.slice(0, cap).map(({ i, blocked }) => line(`${i.text}${blocked > 0 ? `; ${blocked} other open task${blocked === 1 ? " waits" : "s wait"} for it` : ""}; since ${i.since}.`, ...i.cites));
+    if (lines.length === 0) lines.push(line("Nothing is waiting for you."));
+    else if (ranked.length > cap) lines.push(line(`${ranked.length - cap} more are waiting; deal with these first and ask again.`));
+    return { observedAt: this.#runner.now(), lines, count: ranked.length };
   }
 
   // ---- one task ------------------------------------------------------------------------------------------------------------

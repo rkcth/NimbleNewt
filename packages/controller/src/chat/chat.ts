@@ -160,6 +160,8 @@ export interface ChatDeps {
   readonly coordinator?: () => CoordinatorService | undefined;
   /** How many questions from agents wait for the owner's answer (card U12e). Shown as a last line of every reply, so the owner is never unaware of them. Absent, or failing: nothing is added. */
   readonly waiting?: (owner: Principal) => Promise<number>;
+  /** Everything waiting for the owner's decision (card U11b); when given it is counted in place of the questions alone. */
+  readonly needing?: (owner: Principal) => Promise<number>;
 }
 
 /**
@@ -265,7 +267,10 @@ export class ChatService {
     const finished = turn.status === "done" ? turn : await this.#execute(owner, tok, turnId, turn);
     const reply = replyOf(finished.outcomes ?? []);
     let count = 0;
-    try { count = (await this.#deps.waiting?.(owner)) ?? 0; } catch { /* the reply is still given */ }
+    let needing = 0;
+    try { needing = (await this.#deps.needing?.(owner)) ?? 0; } catch { /* the reply is still given */ }
+    try { count = needing > 0 ? 0 : (await this.#deps.waiting?.(owner)) ?? 0; } catch { /* the reply is still given */ }
+    if (needing > 0) reply.push(`${needing >= 50 ? "50 or more" : needing} ${needing === 1 ? "thing needs" : "things need"} your decision. Ask what needs you to see ${needing === 1 ? "it" : "them"}.`);
     if (count > 0) reply.push(`${count >= 50 ? "50 or more" : count} ${count === 1 ? "question from an agent is" : "questions from agents are"} waiting for your answer. Ask what is waiting to see ${count === 1 ? "it" : "them"}.`);
     return { turnId, replayed, outcomes: finished.outcomes ?? [], reply };
   }

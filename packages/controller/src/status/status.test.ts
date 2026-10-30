@@ -49,7 +49,7 @@ for (const backend of backends) {
     status: StatusService; owner: Principal; project: string; other: string; storage: ControllerStorage; epoch: number;
     projects: ProjectService; assignments: AssignmentService; waits: WaitService; blockers: BlockerService; contracts: ContractService; stall: StallService; pauses: PauseService;
     desks: DeskService; mcp: McpService; artifacts: ArtifactService; blobs: FileBlobStore; watches: WatchService; events: EventService; hosts: HostService; principals: PrincipalService; agents: AgentService;
-    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; handoffs?: NonNullable<StatusDeps["handoffs"]>; shutdown?: NonNullable<StatusDeps["shutdown"]> }): StatusService;
+    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; reviews?: NonNullable<StatusDeps["reviews"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; handoffs?: NonNullable<StatusDeps["handoffs"]>; shutdown?: NonNullable<StatusDeps["shutdown"]> }): StatusService;
     agent(name: string, grants?: AGrant[]): Promise<Principal>;
     host(name: string, project?: string): Promise<Principal>;
     /** A ready task in `project` (default: the main one), created by the owner. */
@@ -90,7 +90,7 @@ for (const backend of backends) {
         const rebuild: Ctx["rebuild"] = (extra = {}, deps = {}) => StatusService.withEpoch(world.storage, epoch, {
           assignments, waits, blockers, contracts, stall, pauses,
           ...(deps.watch === false ? {} : { watch: watches }), ...(deps.ownerQuestions === undefined ? {} : { ownerQuestions: deps.ownerQuestions }), ...(deps.activity === undefined ? {} : { activity: deps.activity }), ...(deps.agenda === undefined ? {} : { agenda: deps.agenda }), ...(deps.meetings === undefined ? {} : { meetings: deps.meetings }), ...(deps.handoffs === undefined ? {} : { handoffs: deps.handoffs }),
-          ...(deps.shutdown === undefined ? {} : { shutdown: deps.shutdown }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
+          ...(deps.reviews === undefined ? {} : { reviews: deps.reviews }), ...(deps.shutdown === undefined ? {} : { shutdown: deps.shutdown }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
         }, { ...options, ...extra });
         const status = rebuild();
         const grantService = GrantService.withEpoch(world.storage, epoch, options);
@@ -947,6 +947,35 @@ for (const backend of backends) {
     assert.equal(await c.rebuild().ask(c.owner, { kind: "owner_questions" }), undefined);
     await assert.rejects(status.ask(c.owner, { kind: "owner_questions", limit: 0 }));
     await assert.rejects(status.ask(c.owner, { kind: "owner_questions", extra: 1 } as never));
+  });
+
+  suite("the owner sees in one list what waits for their decision, what holds up most open tasks first, then oldest; nobody else sees it (card U11b)", async (c) => {
+    const a = await c.work("Root");
+    const b = await c.work("Middle");
+    const d = await c.work("Leaf");
+    const lone = await c.work("Alone");
+    await c.contracts.addDependency(c.owner, { commandId: cid("d"), taskId: b, prerequisiteId: a });
+    await c.contracts.addDependency(c.owner, { commandId: cid("d"), taskId: d, prerequisiteId: b });
+    await c.blockers.openBlocker({ commandId: "ny-1", actor: c.owner.id, type: "manual_hold", subject: { kind: "task", id: lone }, summary: "Needs a decision on the lone task", resolver: "owner" });
+    await c.blockers.openBlocker({ commandId: "ny-2", actor: c.owner.id, type: "manual_hold", subject: { kind: "task", id: a }, summary: "Needs a decision on the root", resolver: "owner" });
+    await c.blockers.openBlocker({ commandId: "ny-3", actor: c.owner.id, type: "manual_hold", subject: { kind: "task", id: lone }, summary: "Not for the owner", resolver: "agent:ann" });
+    const q = { inquiryId: "inq-9", asker: "agent:ann", question: "Which one?", askedAt: "2000-01-01T00:00:00.000Z", revision: 1, task: { id: lone, title: "Alone", projectName: "P" } };
+    const review = { id: "rev-9", taskId: d, projectId: c.project, name: "tool.deploy", requestedAt: "2000-01-02T00:00:00.000Z" };
+    const status = c.rebuild({}, { ownerQuestions: { ownerQuestions: async () => ({ items: [q] }) }, reviews: { ownerPending: async () => [review] } });
+    const got = (await status.needsYou(c.owner))!;
+    assert.equal(got.count, 4, "the other agent's blocker is not the owner's to resolve");
+    assert.match(got.lines[0]!.text, /Needs a decision on the root.*2 other open tasks wait for it/, "the root holds up two tasks");
+    assert.match(got.lines[1]!.text, /Which one\?/, "then the oldest of those that hold nothing up");
+    assert.match(got.lines[2]!.text, /approval of "tool\.deploy"/);
+    assert.match(got.lines[3]!.text, /lone task/);
+    assert.deepEqual(got.lines[2]!.cites.map((x) => [x.kind, x.id]), [["review", "rev-9"], ["task", d]]);
+    // Finished tasks no longer count as waiting; a bad limit or key is refused; nobody else sees the list.
+    await c.projects.transitionTask({ commandId: cid("x"), actor: c.owner.id, taskId: d, to: "cancelled" } as never).catch(() => undefined);
+    assert.equal((await status.ask(c.owner, { kind: "needs_you", limit: 2 }))!.lines.length, 3, "two items and the note that more are waiting");
+    await assert.rejects(status.ask(c.owner, { kind: "needs_you", limit: 0 }));
+    const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
+    assert.equal(await status.ask(reader, { kind: "needs_you" }), undefined);
+    assert.match((await c.rebuild().needsYou(c.owner))!.lines[0]!.text, /Needs a decision on the root|lone task/);
   });
 
   suite("a task's activity is told step by step in plain lines, the last few on request, and what the caller may not read reads as missing (card C09h)", async (c) => {

@@ -119,8 +119,12 @@ for (const backend of backends) {
     assert.equal((await route(c, r.id)).assigned, "agent:r1");
     await decide(c, c.r1, r.id, "requires-owner-decision");
     assert.equal((await c.review.get(c.owner, r.id))!.state, "owner-decision");
+    // The owner can list what waits for them (card U11b); nobody else can.
+    assert.deepEqual((await c.review.ownerPending(c.owner)).map((x) => x.id), [r.id]);
+    await assert.rejects(c.review.ownerPending(c.r1), /only the owner/);
     await onlyOwner(c, r.id, [c.r1, c.r2]);
     await decide(c, c.owner, r.id, "request-context");
+    assert.deepEqual(await c.review.ownerPending(c.owner), [], "once it asks for context it no longer waits for a decision");
     assert.equal((await c.review.get(c.owner, r.id))!.state, "needs-context");
     await onlyOwner(c, r.id, [c.r1, c.r2]);
     // the reviewer still named on the route becomes a contributor: the review is not handed to another agent either
