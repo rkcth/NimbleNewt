@@ -7,6 +7,7 @@ import { BackupService, createBackup } from "../backup/index.js";
 import { defaultEventSources } from "./default-sources.js";
 import { ImprovementService } from "../standups/improvements.js";
 import { shareableCite } from "../meetings/shareable.js";
+import { reassignWarningSink } from "../meetings/reassign-warning.js";
 import { MeetingRecordService, budgetRaiseApplier, grantApplier, taskReassignApplier, taskUpdateApplier } from "../meetings/record.js";
 import { EventService, EventSourceSettingsService, type EventSource } from "../events/index.js";
 import { BudgetService, holderNotice } from "../budgets/index.js";
@@ -414,7 +415,11 @@ export async function startController(options: StartOptions): Promise<Controller
       // A cited record may be shown to a meeting's readers only when it is a project-visible kind and exists; desks, scratch and unknown kinds stay private (card M02e).
       shareable: shareableCite(storage),
       // A meeting may retitle or reword a task; the change is made by the project service as the agent that holds the right, and only once (card M02c).
-      appliers: { "task.update": taskUpdateApplier(projects), "task.reassign": taskReassignApplier(assignments, projects, principals, async (agentId, projectId, taskId) => { const p = await principals.get(agentId); if (p === undefined || p.state !== "active") return false; const eff = await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); return allows(eff as never, "attempt.work", projectId, { resource: { kind: "task", id: taskId } }) && allows(eff as never, "task.read", projectId, { resource: { kind: "task", id: taskId } }); }), "budget.raise": budgetRaiseApplier(budgets, meetingController, projects), "grant.add": grantApplier(grants, meetingController, projects) },
+      appliers: { "task.update": taskUpdateApplier(projects), "task.reassign": taskReassignApplier(assignments, projects, principals,
+        // The rights the work needs, checked the way the services check them (the agent's own effective grants): the ones it lacks.
+        async (agentId, projectId, taskId) => { const p = await principals.get(agentId); if (p === undefined || p.state !== "active") return ["task.read", "attempt.work"]; const eff = await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); return ["attempt.work", "task.read"].filter((a) => !allows(eff as never, a, projectId, { resource: { kind: "task", id: taskId } })); },
+        // Owner decision 2026-10-30: a reassignment is made at once; a new holder without the rights is reported to the owner (and the chair), once per change (the notification's command ID comes from the change's).
+        reassignWarningSink({ notifications, storage, messages })), "budget.raise": budgetRaiseApplier(budgets, meetingController, projects), "grant.add": grantApplier(grants, meetingController, projects) },
       // Changes that widen rights or spend (a budget raise and a grant are both registered) are carried out without the owner only when the approval policy lets their class through: the profile, with a specific setting overriding it (owner decision 2026-10-29).
       widening: async (cls, projectId) => {
         const cell = await PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }).classMode(projectId, cls);

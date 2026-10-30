@@ -10,6 +10,8 @@ import type { Availability } from "../conversations/index.js";
 import { PauseService } from "../lifecycle/index.js";
 import { allows } from "../security/access.js";
 import { GrantService, PrincipalService, type Principal } from "../security/index.js";
+import { NotificationService } from "../notifications/index.js";
+import { reassignWarningSink } from "./reassign-warning.js";
 import { MeetingRecordService, MeetingService, budgetRaiseApplier, grantApplier, taskUpdateApplier, taskReassignApplier, type ChangeApplier, type DecisionRecordBody, type MotionBody, type RecordBody, type SourceCite } from "./index.js";
 
 after(stopServer);
@@ -703,13 +705,18 @@ for (const backend of backends) {
 
   suite("a vote reassigns a task through the assignment service when the carrying agent holds assignment.manage, does nothing without it, and never overrides a later move by the owner (card M02e)", async (c) => {
     const assignments = AssignmentService.withEpoch(c.storage, c.projects.epoch, c.projects, options);
-    const mayWork = async (id: string, project: string, taskId: string) => {
+    const missingRights = async (id: string, project: string, taskId: string) => {
       const p = await c.principals.get(id);
-      if (p === undefined) return false;
+      if (p === undefined) return ["task.read", "attempt.work"];
       const eff = await c.grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString());
-      return allows(eff as never, "attempt.work", project, { resource: { kind: "task", id: taskId } }) && allows(eff as never, "task.read", project, { resource: { kind: "task", id: taskId } });
+      return ["attempt.work", "task.read"].filter((a) => !allows(eff as never, a, project, { resource: { kind: "task", id: taskId } }));
     };
-    const reassign = c.reopen({ appliers: { "task.reassign": taskReassignApplier(assignments, c.projects, c.principals, mayWork) } });
+    const warnings: { commandId: string; agent: string; taskId: string; missing: readonly string[] }[] = [];
+    // The real notification service and the real warning sink: the owner's inbox shows what was recorded.
+    const notifications = NotificationService.withEpoch(c.storage, c.projects.epoch, options);
+    const chairNotes: { commandId: string; to: string; text: string }[] = [];
+    const sink = reassignWarningSink({ notifications, storage: c.storage, messages: { noticeFromController: async (n) => { chairNotes.push(n); } } });
+    const reassign = c.reopen({ appliers: { "task.reassign": taskReassignApplier(assignments, c.projects, c.principals, missingRights, async (w) => { warnings.push(w); await sink(w); }) } });
     const idOf = (p: string): string => p.slice("agent:".length);
     const mk = async (title: string) => { const t = await c.task(title); await assignments.assignTask({ commandId: cid("as"), actor: c.owner.id, taskId: t.id, owner: { kind: "agent", id: idOf(c.pD) } }); return t; };
     const vote = async (t: { id: string; revision: number }, carrier: string, to: string) => {
@@ -726,6 +733,7 @@ for (const backend of backends) {
     const r1 = await reassign.apply(c.host, { decisionId: one.d.id });
     assert.deepEqual([r1.applied, r1.notApplied], [1, 0]);
     assert.equal(await ownerOf(t1.id), idOf(c.pC));
+    assert.equal(warnings.length, 0, "a new holder with the rights is not warned about");
     // Without the right the carrying agent holds, the vote is recorded but the task stays where it is.
     const t2 = await mk("Task two");
     const two = await vote(t2, c.pB, c.pC);
@@ -746,12 +754,23 @@ for (const backend of backends) {
     const r4 = await reassign.apply(c.host, { decisionId: four.d.id });
     assert.deepEqual([r4.applied, r4.notApplied], [0, 1]);
     assert.equal((await assignments.getAssignment(t4.id))!.state, "released", "the owner's release stands");
-    // A target without attempt.work is refused.
+    // A target without attempt.work gets the task at once (no accept-first step) and one warning names what it lacks.
     const t6 = await mk("Task six");
     const six = await vote(t6, c.pA, c.pE);
     const r6 = await reassign.apply(c.host, { decisionId: six.d.id });
-    assert.deepEqual([r6.applied, r6.notApplied], [0, 1]);
-    assert.equal(await ownerOf(t6.id), idOf(c.pD));
+    assert.deepEqual([r6.applied, r6.notApplied], [1, 0]);
+    assert.equal(await ownerOf(t6.id), idOf(c.pE));
+    assert.deepEqual(warnings.map((w) => [w.agent, w.taskId, [...w.missing]]), [[c.pE, t6.id, ["attempt.work", "task.read"]]]);
+    await reassign.apply(c.host, { decisionId: six.d.id });
+    assert.equal(warnings.length, 1, "a repeat of the apply does not warn again");
+    const inbox = (await notifications.inbox(c.owner)).items;
+    assert.equal(inbox.length, 1, "exactly one warning reaches the owner");
+    assert.equal(inbox[0]!.level, "needs-you");
+    assert.ok(inbox[0]!.detail!.includes(c.pE) && inbox[0]!.detail!.includes("attempt.work, task.read"), String(inbox[0]!.detail));
+    assert.deepEqual(chairNotes.map((n) => n.to), [c.pD], "the chair is told as well");
+    // Replaying the same change's warning (as after a crash between the move and the warning) records nothing new.
+    await sink(warnings[0]! as never);
+    assert.equal((await notifications.inbox(c.owner)).items.length, 1);
   });
 
   suite("a kind of change that widens spend or rights may be moved, and waits for the owner unless the approval policy lets its class through; the owner's agreement is what carries it out (owner decision 2026-10-29)", async (c) => {
@@ -906,7 +925,7 @@ for (const backend of backends) {
 
   suite("an apply that committed and crashed before `applied` was saved is replayed under the recorded actor, so the service's recovery finishes it (card M02e3)", async (c) => {
     const assignments = AssignmentService.withEpoch(c.storage, c.projects.epoch, c.projects, options);
-    const mayWork = async () => true;
+    const mayWork = async () => [] as string[];
     const crashing = (base: ChangeApplier, seen: string[]): ChangeApplier => {
       let crash = true;
       return { ...base, widens: "spend", async apply(ch) { seen.push(ch.actor); const done = await base.apply(ch); if (crash) { crash = false; throw new DomainError("unavailable", "went down after the effect"); } return done; } };
@@ -1332,7 +1351,8 @@ test("a reassignment decided in a meeting names one active agent and the assignm
   };
   const states: Record<string, string> = { "agent:ann": "active", "agent:bob": "active", "agent:old": "disabled" };
   const works = new Set(["agent:ann", "agent:bob"]);
-  const applier = taskReassignApplier(assignments as never, { getTask: async (id: string) => (id === "task-a" ? { projectId: "proj-a" } : undefined) } as never, { get: async (id: string) => (states[id] === undefined ? undefined : { state: states[id]! }) }, async (id) => works.has(id));
+  const warned: Record<string, unknown>[] = [];
+  const applier = taskReassignApplier(assignments as never, { getTask: async (id: string) => (id === "task-a" ? { projectId: "proj-a" } : undefined) } as never, { get: async (id: string) => (states[id] === undefined ? undefined : { state: states[id]! }) }, async (id) => (works.has(id) ? [] : ["attempt.work"]), async (w) => { warned.push(w); });
   assert.deepEqual([applier.action, applier.widens], ["assignment.manage", undefined]);
   assert.equal(await applier.project({ kind: "task", id: "task-a" }), "proj-a");
   assert.equal(await applier.project({ kind: "project", id: "task-a" }), undefined);
@@ -1367,8 +1387,12 @@ test("a reassignment decided in a meeting names one active agent and the assignm
   await assert.rejects(() => applier.apply({ ...base, patch: { toAgent: "agent:bob", from: "agent:ann", generation: 3, revision: 8 } as never }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command" && /hand-off/.test(e.message));
   current = { state: "assigned", revision: 8, generation: 3, owner: { kind: "agent", id: "ann" } };
   works.delete("agent:bob");
-  await assert.rejects(() => applier.apply({ ...base, patch: { toAgent: "agent:bob", from: "agent:ann", generation: 3, revision: 8 } as never }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command" && /may not work/.test(e.message));
-  assert.equal(calls.length, 3);
+  assert.equal(warned.length, 0);
+  await applier.apply({ ...base, patch: { toAgent: "agent:bob", from: "agent:ann", generation: 3, revision: 8 } as never });
+  assert.equal(calls.length, 4, "a target without the rights still gets the task at once");
+  assert.deepEqual(warned.map((w) => [w["commandId"], w["agent"], w["taskId"], w["projectId"], w["missing"]]), [["mtg:d1:c1", "agent:bob", "task-a", "proj-a", ["attempt.work"]]]);
+  await applier.apply({ ...base, patch: { toAgent: "agent:bob", from: "agent:ann", generation: 3, revision: 8 } as never });
+  assert.equal(calls.length, 4);
 });
 
 test("a budget raise decided in a meeting widens spend, names a task and positive amounts only, and is carried out as the controller with who allowed it (card M02e)", async () => {

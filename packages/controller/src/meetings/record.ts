@@ -86,7 +86,7 @@ export function taskUpdateApplier(projects: ProjectService): ChangeApplier {
 /**
  * An ownership change decided in a meeting (card M02e): the task goes to another agent through the assignment service (a transfer when it is assigned, an assignment when it is released or never was). The carrying agent must
  * hold `assignment.manage` for the task. An assignee does receive things: automatic admission of attempts, the task's title and description in the work order, the task's budget draw and the coordinator's inquiries. So the new
- * owner must be an active agent that holds `attempt.work` and `task.read` on the task. It is not a widening of rights: what an agent may touch is still decided by its own grants and per-attempt credentials.
+ * owner must be an active agent. If it lacks `attempt.work` or `task.read` on the task the move is still made at once (owner decision 2026-10-30, no accept-first step) and a warning names the missing rights. It is not a widening of rights: what an agent may touch is still decided by its own grants and per-attempt credentials.
  *
  * The patch carries the assignment as it stood when the decision was made: `from` (the owner's agent id, or null when the task was released or never assigned) and, when an assignment record exists, its `generation` and `revision`.
  * The move is refused unless the assignment still matches (a later transfer or release by the owner stands); if it already shows the new owner at a later generation this very change was carried out and nothing is done.
@@ -95,7 +95,8 @@ export function taskUpdateApplier(projects: ProjectService): ChangeApplier {
 export function taskReassignApplier(
   assignments: Pick<AssignmentService, "getAssignment" | "assignTask" | "transferTask">, projects: Pick<ProjectService, "getTask">,
   principals: { get(id: string): Promise<{ state: string } | undefined> },
-  mayWork: (agentPrincipalId: string, projectId: string, taskId: string) => Promise<boolean>,
+  missingRights: (agentPrincipalId: string, projectId: string, taskId: string) => Promise<readonly string[]>,
+  warn?: (event: { readonly commandId: string; readonly agent: string; readonly taskId: string; readonly projectId: string; readonly missing: readonly string[] }) => Promise<void>,
 ): ChangeApplier {
   const bad = (why: string): never => { throw new DomainError("invalid_command", why); };
   const whole1 = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 1;
@@ -122,15 +123,20 @@ export function taskReassignApplier(
       const holder = current !== undefined && current.state === "assigned" && current.owner !== undefined ? `${current.owner.kind}:${current.owner.id}` : null;
       const generation = current === undefined ? 0 : current.generation;
       // This very change, already carried out (or the same owner is in place): nothing to do.
-      if (holder === toAgent && generation >= observed) return {};
+      // The warning is repeated on a replay that finds the move done (a crash may have come between the move and the warning); its command ID is the change's own, so it is recorded once.
+      const warnOnce = async (): Promise<void> => {
+        const projectId = (await projects.getTask(taskId))?.projectId ?? "";
+        const missing = await missingRights(toAgent, projectId, taskId).catch(() => ["task.read", "attempt.work"]);
+        if (missing.length > 0 && warn !== undefined) await warn({ commandId: change.commandId, agent: toAgent, taskId, projectId, missing: [...missing].slice(0, 10) }).catch(() => undefined);
+      };
+      if (holder === toAgent && generation >= observed) { if (generation > observed) await warnOnce(); return {}; }
       if (holder !== from || generation !== observed) throw new DomainError("stale_revision", `the assignment of ${taskId} changed since the decision (now ${holder ?? "unassigned"} at generation ${generation}, was ${from ?? "unassigned"} at generation ${observed})`);
       if (current !== undefined && current.activeAttemptId !== undefined) bad("the task has a running attempt: use a hand-off");
-      if (!(await mayWork(toAgent, (await projects.getTask(taskId))?.projectId ?? "", taskId))) bad(`${toAgent} may not work on or read this task`);
-      if (from !== null) {
-        const done = await assignments.transferTask({ commandId: change.commandId, actor: change.actor, taskId, expectedRevision: observedRevision!, to, reason });
-        return { revision: done.revision };
-      }
-      const done = await assignments.assignTask({ commandId: change.commandId, actor: change.actor, taskId, ...(observedRevision === undefined ? {} : { expectedRevision: observedRevision }), owner: to, reason });
+      // Owner decision 2026-10-30: the move is made at once, with no accept-first step; a new holder that lacks rights for the work is reported in a warning after the move.
+      const done = from !== null
+        ? await assignments.transferTask({ commandId: change.commandId, actor: change.actor, taskId, expectedRevision: observedRevision!, to, reason })
+        : await assignments.assignTask({ commandId: change.commandId, actor: change.actor, taskId, ...(observedRevision === undefined ? {} : { expectedRevision: observedRevision }), owner: to, reason });
+      await warnOnce();
       return { revision: done.revision };
     },
   };
