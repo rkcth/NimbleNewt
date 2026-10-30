@@ -13,6 +13,7 @@ import type { CutoverService } from "../routing/cutover.js";
 import type { FallbackService } from "../routing/fallback.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
+import type { ReleaseService } from "../release/index.js";
 import type { SwarmService } from "../swarm/index.js";
 import type { IncidentService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
 import type { RetrievalService } from "../context/index.js";
@@ -62,6 +63,8 @@ export interface Context {
   readonly responsibilities?: ResponsibilityService;
   /** Checks that came due and incidents for responsibilities (card P04). */
   readonly responsibilityChecks?: Pick<ResponsibilityChecks, "pending">;
+  /** External release testing (card X09). */
+  readonly release?: Pick<ReleaseService, "submit" | "authorizeHost" | "issue" | "report" | "interrupt" | "gate" | "approve" | "attempts">;
   /** Child tasks with delegated allowances, and cancelling a whole swarm (card H10). */
   readonly swarm?: Pick<SwarmService, "spawn" | "cancel" | "children">;
   readonly incidents?: Pick<IncidentService, "report" | "resolve" | "list" | "observed">;
@@ -195,6 +198,7 @@ const ownTask = (c: Context, taskId: string): string => { if (c.principal.taskSc
 const difficultyOf = (c: Context): NonNullable<Context["difficulty"]> => c.difficulty ?? unavailable("difficulty profiles");
 const decisionsOf = (c: Context): NonNullable<Context["decisions"]> => c.decisions ?? unavailable("owner decision records");
 const meetingsOf = (c: Context): MeetingService => c.meetings ?? unavailable("meetings");
+const releaseOf = (c: Context): NonNullable<Context["release"]> => c.release ?? unavailable("release testing");
 const swarmOf = (c: Context): NonNullable<Context["swarm"]> => c.swarm ?? unavailable("child tasks");
 const incidentsOf = (c: Context): NonNullable<Context["incidents"]> => c.incidents ?? unavailable("responsibility incidents");
 const checksOf = (c: Context): NonNullable<Context["responsibilityChecks"]> => c.responsibilityChecks ?? unavailable("responsibility checks");
@@ -809,6 +813,22 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => written(await incidentsOf(c).report(c.principal, { commandId: need(id), ...(a as object) } as never)) },
   { name: "incident.resolve", kind: "command", summary: "Resolves an open incident with the evidence that it is over.", args: { incidentId: "the incident", evidence: "what shows it is resolved", commandId: "required" }, result: "`{ id, replayed }`.",
     run: async (c, a, id) => written(await incidentsOf(c).resolve(c.principal, { commandId: need(id), ...(a as object) } as never)) },
+  { name: "release.submit", kind: "command", summary: "Owner only: submits an immutable release candidate: source commit, built artifact hashes, dependency lock hashes, test-suite revision and the platforms (os, arch) it must pass on. The same manifest is the same candidate.", args: { manifest: "{ sourceCommit, suiteRevision, artifacts: {name: sha256}, dependencyLocks: {name: sha256}, matrix: [{os, arch, osVersion?}] }", commandId: "required" }, result: "`{ candidateId, replayed }`.",
+    run: async (c, a, id) => { only(a, ["manifest"]); return asJson(await releaseOf(c).submit(c.principal, { commandId: need(id), ...(a as object) } as never) as never); } },
+  { name: "release.host", kind: "command", summary: "Owner only: allows (or with active=false stops allowing) a host to run destructive release tests for one platform. A machine used for production work is not authorized by that.", args: { hostId: "the host", os: "linux, darwin or win32", arch: "x64 or arm64", "active?": "false to withdraw", commandId: "required" }, result: "`{ ok }`.",
+    run: async (c, a, id) => { only(a, ["hostId", "os", "arch", "active"]); await releaseOf(c).authorizeHost(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
+  { name: "release.issue", kind: "command", summary: "Owner only: issues the next test attempt for one platform of a candidate to an authorized host and the worker that will report. Returns the job payload. Refused while an attempt is open or after the platform passed.", args: { candidateId: "the candidate", cell: "{ os, arch, osVersion? }", hostId: "the authorized host", workerId: "the worker principal that will report", timeoutSeconds: "whole seconds", memoryMb: "whole megabytes", commandId: "required" }, result: "`{ attemptId, payload }`.",
+    run: async (c, a, id) => { only(a, ["candidateId", "cell", "hostId", "workerId", "timeoutSeconds", "memoryMb"]); return asJson(await releaseOf(c).issue(c.principal, { commandId: need(id), ...(a as object) } as never) as never); } },
+  { name: "release.report", kind: "command", summary: "A release-test worker (holding `release.report`) returns the result of its attempt: what it ran against must equal the candidate exactly, or it is refused and counts for nothing. A worker cannot approve a release.", args: { attemptId: "the attempt", sourceCommit: "commit tested", suiteRevision: "suite revision run", artifactHashes: "{name: sha256} of what was tested", environment: "{ os, arch, osVersion? }", outcome: "pass or fail", counts: "{ passed, failed, skipped }", logDigest: "sha256 of the log", summary: "short text", commandId: "required" }, result: "`{ ok }`.",
+    run: async (c, a, id) => { only(a, ["attemptId", "sourceCommit", "suiteRevision", "artifactHashes", "environment", "outcome", "counts", "logDigest", "summary"]); await releaseOf(c).report(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
+  { name: "release.interrupt", kind: "command", summary: "Owner only: ends an open attempt without a result (a worker was lost). It is never a pass; a retry is a new attempt.", args: { attemptId: "the attempt", reason: "why", commandId: "required" }, result: "`{ ok }`.",
+    run: async (c, a, id) => { only(a, ["attemptId", "reason"]); await releaseOf(c).interrupt(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
+  { name: "release.gate", kind: "query", summary: "Owner only: where each platform of a candidate stands (passed, failed, interrupted, running, missing) and whether the release is ready and approved.", args: { candidateId: "the candidate" }, result: "`{ gate }`.",
+    run: async (c, a) => { only(a, ["candidateId"]); return asJson({ gate: await releaseOf(c).gate(c.principal, str(a, "candidateId")) } as never); } },
+  { name: "release.attempts", kind: "query", summary: "Owner only: the attempts of a candidate with their evidence, oldest first.", args: { candidateId: "the candidate" }, result: "`{ attempts }`.",
+    run: async (c, a) => { only(a, ["candidateId"]); return asJson({ attempts: await releaseOf(c).attempts(c.principal, str(a, "candidateId")) } as never); } },
+  { name: "release.approve", kind: "command", summary: "Owner only: approves a candidate for release; refused unless every platform's latest attempt passed. A worker cannot.", args: { candidateId: "the candidate", commandId: "required" }, result: "`{ ok }`.",
+    run: async (c, a, id) => { only(a, ["candidateId"]); await releaseOf(c).approve(c.principal, { commandId: need(id), ...(a as object) } as never); return asJson({ ok: true }); } },
   { name: "swarm.spawn", kind: "command", summary: "Makes a child task of a task you hold the budget of: it gets the outcome and acceptance criteria you give and part of the parent's allowance (it can spend only that). Refused when the parent has nothing to give, is three levels deep, or already has four live children.", args: { parentTaskId: "the parent task", title: "the child's title", "expectedResult?": "what the child must deliver", "acceptanceCriteria?": "list of checks", "costMicros?": "allowance to hand over", "computeMs?": "compute allowance to hand over", commandId: "required" }, result: "`{ taskId, replayed }`.",
     run: async (c, a, id) => { only(a, ["parentTaskId", "title", "expectedResult", "acceptanceCriteria", "costMicros", "computeMs"]); return asJson(await swarmOf(c).spawn(c.principal, { commandId: need(id), ...(a as object) } as never) as never); } },
   { name: "swarm.cancel", kind: "command", summary: "Cancels a task's whole swarm: every child and grandchild is stopped (deepest first), what each did not use goes back to its parent, and the tasks are cancelled. Repeat it to carry on if some are still being stopped.", args: { parentTaskId: "the parent task", reason: "why", commandId: "required" }, result: "`{ settled, pending }`.",

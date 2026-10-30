@@ -7,6 +7,7 @@ import type { AgentService } from "../agents/index.js";
 import type { WatchService } from "../events/handling.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
+import type { ReleaseService } from "../release/index.js";
 import type { SwarmService } from "../swarm/index.js";
 import type { IncidentService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
 import type { ContextBranchService } from "../branches/index.js";
@@ -83,6 +84,7 @@ export interface StateApiDeps {
   readonly plans?: ProjectPlanService;
   readonly responsibilities?: ResponsibilityService;
   readonly responsibilityChecks?: Pick<ResponsibilityChecks, "pending">;
+  readonly release?: Pick<ReleaseService, "submit" | "authorizeHost" | "issue" | "report" | "interrupt" | "gate" | "approve" | "attempts">;
   readonly swarm?: Pick<SwarmService, "spawn" | "cancel" | "children">;
   readonly incidents?: Pick<IncidentService, "report" | "resolve" | "list" | "observed">;
   /** When present, agenda items can be captured, corrected and listed through the API (cards M01 and M03). */
@@ -198,6 +200,7 @@ export class StateApi {
         ...(this.#deps.responsibilities === undefined ? {} : { responsibilities: this.#deps.responsibilities }),
         ...(this.#deps.responsibilityChecks === undefined ? {} : { responsibilityChecks: this.#deps.responsibilityChecks }),
         ...(this.#deps.incidents === undefined ? {} : { incidents: this.#deps.incidents }),
+        ...(this.#deps.release === undefined ? {} : { release: this.#deps.release }),
         ...(this.#deps.swarm === undefined ? {} : { swarm: this.#deps.swarm }),
         ...(this.#deps.meetings === undefined ? {} : { meetings: this.#deps.meetings }),
         ...(this.#deps.workspaceOps === undefined ? {} : { workspaceOps: this.#deps.workspaceOps }),

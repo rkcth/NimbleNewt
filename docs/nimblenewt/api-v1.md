@@ -1177,6 +1177,26 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `release.gate`
+
+Owner only: where each platform of a candidate stands (passed, failed, interrupted, running, missing) and whether the release is ready and approved.
+
+Arguments:
+
+- `candidateId`: the candidate
+
+Result: `{ gate }`.
+
+#### `release.attempts`
+
+Owner only: the attempts of a candidate with their evidence, oldest first.
+
+Arguments:
+
+- `candidateId`: the candidate
+
+Result: `{ attempts }`.
+
 #### `agenda.get`
 
 One agenda item with its state, owner, deferral and outcome link.
@@ -3462,6 +3482,89 @@ Arguments:
 - `commandId`: required
 
 Result: `{ id, replayed }`.
+
+#### `release.submit`
+
+Owner only: submits an immutable release candidate: source commit, built artifact hashes, dependency lock hashes, test-suite revision and the platforms (os, arch) it must pass on. The same manifest is the same candidate.
+
+Arguments:
+
+- `manifest`: { sourceCommit, suiteRevision, artifacts: {name: sha256}, dependencyLocks: {name: sha256}, matrix: [{os, arch, osVersion?}] }
+- `commandId`: required
+
+Result: `{ candidateId, replayed }`.
+
+#### `release.host`
+
+Owner only: allows (or with active=false stops allowing) a host to run destructive release tests for one platform. A machine used for production work is not authorized by that.
+
+Arguments:
+
+- `hostId`: the host
+- `os`: linux, darwin or win32
+- `arch`: x64 or arm64
+- `active` (optional): false to withdraw
+- `commandId`: required
+
+Result: `{ ok }`.
+
+#### `release.issue`
+
+Owner only: issues the next test attempt for one platform of a candidate to an authorized host and the worker that will report. Returns the job payload. Refused while an attempt is open or after the platform passed.
+
+Arguments:
+
+- `candidateId`: the candidate
+- `cell`: { os, arch, osVersion? }
+- `hostId`: the authorized host
+- `workerId`: the worker principal that will report
+- `timeoutSeconds`: whole seconds
+- `memoryMb`: whole megabytes
+- `commandId`: required
+
+Result: `{ attemptId, payload }`.
+
+#### `release.report`
+
+A release-test worker (holding `release.report`) returns the result of its attempt: what it ran against must equal the candidate exactly, or it is refused and counts for nothing. A worker cannot approve a release.
+
+Arguments:
+
+- `attemptId`: the attempt
+- `sourceCommit`: commit tested
+- `suiteRevision`: suite revision run
+- `artifactHashes`: {name: sha256} of what was tested
+- `environment`: { os, arch, osVersion? }
+- `outcome`: pass or fail
+- `counts`: { passed, failed, skipped }
+- `logDigest`: sha256 of the log
+- `summary`: short text
+- `commandId`: required
+
+Result: `{ ok }`.
+
+#### `release.interrupt`
+
+Owner only: ends an open attempt without a result (a worker was lost). It is never a pass; a retry is a new attempt.
+
+Arguments:
+
+- `attemptId`: the attempt
+- `reason`: why
+- `commandId`: required
+
+Result: `{ ok }`.
+
+#### `release.approve`
+
+Owner only: approves a candidate for release; refused unless every platform's latest attempt passed. A worker cannot.
+
+Arguments:
+
+- `candidateId`: the candidate
+- `commandId`: required
+
+Result: `{ ok }`.
 
 #### `swarm.spawn`
 

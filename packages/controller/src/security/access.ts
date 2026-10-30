@@ -30,6 +30,7 @@ export const ACTIONS = [
   "message.send", "message.urgent",
   "job.write", "job.read", "job.control",
   "workspace.manage",
+  "release.report",
 ] as const;
 export type Action = (typeof ACTIONS)[number];
 
