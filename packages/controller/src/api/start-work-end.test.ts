@@ -13,8 +13,8 @@ import { startController } from "./index.js";
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
 const CAPS = { os: "linux", arch: "x64", harnesses: [{ name: "pi", version: "1.3.0" }], isolation: ["bubblewrap"], tools: [], workspaces: [] };
-const open = (file: string, blobs: string) => startController({
-  storage: { kind: "sqlite", path: file }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+const open = (file: string, blobs: string, extra: Partial<Parameters<typeof startController>[0]> = {}) => startController({
+  ...extra, storage: { kind: "sqlite", path: file }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
   dispatch: {
     timer: new ManualTimer(), manual: true,
     route: async () => ({ route: "cloud/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: true } }),
@@ -24,10 +24,11 @@ const open = (file: string, blobs: string) => startController({
 type C = Awaited<ReturnType<typeof open>>;
 const call = async (c: C, token: string, op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
 
-async function attemptFor(c: C, owner: Awaited<ReturnType<C["services"]["principals"]["authenticate"]>>, project: string, n: number): Promise<{ attempt: string; task: string; token: string; agent: string }> {
+async function attemptFor(c: C, owner: Awaited<ReturnType<C["services"]["principals"]["authenticate"]>>, project: string, n: number, roles?: string[]): Promise<{ attempt: string; task: string; token: string; agent: string }> {
   const s = c.services;
-  const agent = `agt-${String.fromCharCode(96 + n).repeat(20)}`;
-  await s.principals.enroll(owner, { commandId: `e-${n}`, kind: "agent", name: agent, grants: workGrants(project, ["read-file"]) });
+  const agent = roles === undefined ? `agt-${String.fromCharCode(96 + n).repeat(20)}` : ((await s.agents.create(owner, { commandId: `mk-${n}`, friendlyName: `Ann${n}`, roles })) as { id: string }).id;
+  if (roles === undefined) await s.principals.enroll(owner, { commandId: `e-${n}`, kind: "agent", name: agent, grants: workGrants(project, ["read-file"]) });
+  else for (const g of workGrants(project, ["read-file"])) await s.grants.grant(owner, { commandId: `g-${n}-${g.action}`, grantee: `agent:${agent}`, action: g.action, project, source: "direct", basis: "test" } as never);
   const token = (await s.principals.issueCredential(owner, `agent:${agent}`)).token;
   const task = (await s.projects.createTask({ commandId: `t${n}`, actor: owner.id, projectId: project, title: `Order seeds ${n}` })).id;
   await s.projects.transitionTask({ commandId: `r${n}`, actor: owner.id, taskId: task, expectedRevision: 1, to: "ready" });
@@ -112,8 +113,8 @@ test("work.end through the controller: the attempt ends with the result, a stran
 });
 
 /** A controller with the host connected and the project's owner, for the tests of the ending against the dispatcher. */
-async function world(d: string) {
-  const c = await open(join(d, "c.sqlite"), join(d, "blobs"));
+async function world(d: string, extra: Partial<Parameters<typeof startController>[0]> = {}) {
+  const c = await open(join(d, "c.sqlite"), join(d, "blobs"), extra);
   assert.ok(c.dispatch !== undefined, c.dispatchProblem);
   const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
   const owner = await c.services.principals.authenticate(boot.token);
@@ -235,5 +236,60 @@ test("an emergency stop of an attempt with an open ending drops the intent as em
     const after = await state(one.attempt);
     assert.equal(after.state, "finished");
     assert.equal(after.outcome?.status, "abandoned");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+const B = "a".repeat(40);
+test("work.end { submit: true } records one code submission tied to the attempt when the host provides stage and landing; a stale base with overlap ends plainly with a typed reason and blocker; without stage it stays unavailable (card H12n, submit binding)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-workend-"));
+  let landed: { base: string; head: string; mine: string[]; landed: string[] } = { base: B, head: B, mine: ["beds.txt"], landed: [] };
+  const staged: string[] = [];
+  const { c, owner, project, state } = await world(d, {
+    landing: async () => landed,
+    stage: async (a) => { staged.push(a.attemptId); return { base: B, tree: "b".repeat(40), patchId: "c".repeat(40), files: ["beds.txt"] }; },
+  });
+  try {
+    const one = await attemptFor(c, owner, project, 1, ["author"]);
+    const two = await attemptFor(c, owner, project, 2, ["author"]);
+    await c.dispatch!.dispatcher.tick();
+    const r1 = await call(c, one.token, "work.end", { attemptId: one.attempt, submit: true, result: "done" }, "s1");
+    assert.ok(r1.ok, JSON.stringify(r1));
+    assert.equal((await call(c, one.token, "work.end", { attemptId: one.attempt, submit: true, result: "done" }, "s1")).result.item.replayed, true);
+    await c.dispatch!.dispatcher.tick();
+    const rec = await c.services.workEnd.get(one.attempt);
+    assert.deepEqual([rec?.state, rec?.outcome], ["done", "submitted"], JSON.stringify(rec));
+    const sub = await call(c, one.token, "submission.get", { submissionId: rec!.submissionId });
+    assert.deepEqual([sub.result.item.kind, sub.result.item.role, sub.result.item.base, sub.result.item.tree, sub.result.item.patchId, sub.result.item.taskId], ["code", "author", B, "b".repeat(40), "c".repeat(40), one.task]);
+    assert.equal((await state(one.attempt)).state, "finished");
+    await c.dispatch!.dispatcher.tick();
+    assert.deepEqual(staged, [one.attempt], "staged and submitted once, however often the sweep runs");
+
+    // The landing branch moves into the agent's files while the ending settles: a plain end, a typed reason and a blocker; nothing staged.
+    const r2 = await call(c, two.token, "work.end", { attemptId: two.attempt, submit: true, result: "done" }, "s2");
+    assert.ok(r2.ok, JSON.stringify(r2));
+    landed = { base: B, head: "d".repeat(40), mine: ["beds.txt"], landed: ["beds.txt"] };
+    await c.dispatch!.dispatcher.tick();
+    const rec2 = await c.services.workEnd.get(two.attempt);
+    assert.deepEqual([rec2?.state, rec2?.outcome, rec2?.typed], ["done", "ended", "submit_refused"], JSON.stringify(rec2));
+    assert.ok(rec2?.blocker !== undefined);
+    assert.deepEqual(staged, [one.attempt]);
+    // Asked after it moved, the request itself is refused.
+    const three = await attemptFor(c, owner, project, 3, ["author"]);
+    await c.dispatch!.dispatcher.tick();
+    assert.equal((await call(c, three.token, "work.end", { attemptId: three.attempt, submit: true }, "s3")).error.code, "invalid_command");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("with landing but no stage the submit still ends plainly as submit_unavailable with a blocker (card H12n, submit binding)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-workend-"));
+  const { c, owner, project } = await world(d, { landing: async () => ({ base: B, head: B, mine: [], landed: [] }) });
+  try {
+    const one = await attemptFor(c, owner, project, 1, ["author"]);
+    await c.dispatch!.dispatcher.tick();
+    assert.ok((await call(c, one.token, "work.end", { attemptId: one.attempt, submit: true }, "s1")).ok);
+    await c.dispatch!.dispatcher.tick();
+    const rec = await c.services.workEnd.get(one.attempt);
+    assert.deepEqual([rec?.outcome, rec?.typed], ["ended", "submit_unavailable"]);
+    assert.ok(rec?.blocker !== undefined);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

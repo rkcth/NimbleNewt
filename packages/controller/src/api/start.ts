@@ -59,7 +59,7 @@ import { JobService } from "../jobs/index.js";
 import { ContinuationService, ResumeCheckService, controllerResumePorts } from "../continuation/index.js";
 import { DependencyService } from "../dependencies/index.js";
 import { ActivityService } from "../activity/index.js";
-import { WorkEndService, dispatcherEndingPorts } from "../work-end/index.js";
+import { WorkEndService, dispatcherEndingPorts, stagedSubmit, type EndingAttempt, type Landed, type StagedWork } from "../work-end/index.js";
 import { HandoffService, PauseService, StopService, agentsUnder, controllerHandoffSources, dispatchStopPorts, type LocalWork } from "../lifecycle/index.js";
 import { SubmissionService, attemptOfAssignments } from "../submissions/index.js";
 import { ReviewService } from "../review/index.js";
@@ -134,6 +134,12 @@ export interface StartOptions {
   readonly eventSources?: readonly EventSource[];
   /** What the runtime knows about an attempt's local processes and delegated child work, and what the stop cleanup cost it (card L02d). Absent: the stop inventory does not list them. */
   readonly localWork?: LocalWork;
+  /**
+   * Stages an attempt's work and reports it (card H12n): the commit its checkout is based on, the tree and patch id of what is staged and the files changed. Provided by the workspace host (not composed yet, H12k). Absent: `work.end { submit: true }` is refused as unavailable, as before.
+   */
+  readonly stage?: (attempt: EndingAttempt) => Promise<StagedWork>;
+  /** What the task's checkout changed against its base and what the landing branch changed since (card H12n). Absent: the checkout is unknown, so a submit cannot be checked. */
+  readonly landing?: (taskId: string) => Promise<Landed | undefined>;
   readonly routeProbes?: { readonly run: RouteProbes["run"]; readonly intervalMs?: number; readonly enabled?: boolean };
   readonly backup?: { readonly directory: string; readonly everyMs?: number; readonly retention?: { readonly daily: number; readonly weekly: number }; readonly version?: string; readonly now?: () => Date };
   /**
@@ -345,8 +351,9 @@ export async function startController(options: StartOptions): Promise<Controller
     const commands = CommandService.withEpoch(storage, epoch, BUILTIN_COMMANDS.source(catalogSource(CatalogService.withEpoch(storage, epoch, desks))));
     const integration = IntegrationPolicyService.withEpoch(storage, epoch);
     const notes = WorkingNoteService.withEpoch(storage, epoch);
-    // The agent's ending (card H12n). The submission and the landing check are not bound yet (Q01b), so a submit is refused as unavailable and nothing is submitted.
-    const workEnd = WorkEndService.withEpoch(storage, epoch, { attempts: dispatcherEndingPorts(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal })), landing: async () => undefined, blockers: BlockerService.withEpoch(storage, epoch), paused: (taskId) => pauses.isPaused(taskId) });
+    // The agent's ending (card H12n). The submission is bound to the submission service through the optional `stage` (and the landing check to `landing`) of the start options: without them a submit is refused as unavailable and nothing is submitted.
+    const submissions = SubmissionService.withEpoch(storage, epoch, (_id, scope, by) => agents.rolesOfPrincipalIn(by, scope.projectId, new Date().toISOString()), { attemptOf: (() => { const of = attemptOfAssignments(assignments); /* the dispatcher names an attempt's owner by its bare agent id, the principals by `agent:<id>`: the same identity either way */ return async (taskId: string) => { const a = await of(taskId); return a === undefined ? undefined : { ...a, ownerId: a.ownerId.startsWith("agent:") ? a.ownerId : `agent:${a.ownerId}` }; }; })() });
+    const workEnd = WorkEndService.withEpoch(storage, epoch, { attempts: dispatcherEndingPorts(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal })), landing: options.landing === undefined ? async () => undefined : (taskId) => options.landing!(taskId), ...(options.stage === undefined ? {} : { submit: stagedSubmit({ stage: options.stage, submissions, principalOf: async (agentId) => { const p = await principals.get(agentId.startsWith("agent:") ? agentId : `agent:${agentId}`); return p === undefined || p.state !== "active" ? undefined : ((await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString())) as Principal); } }) }), blockers: BlockerService.withEpoch(storage, epoch), paused: (taskId) => pauses.isPaused(taskId) });
     const stops = stopsLive = StopService.withEpoch(storage, epoch, pauses, dispatchStopPorts(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal }), () => (options.dispatch === undefined ? "none" : "pending"), (scope) => agentsUnder(storage, scope), (_by, taskId) => jobs.unfinishedOf(taskId), options.localWork, { dropEnding: (id, why, reason) => workEnd.drop(id, why, reason) }), { onSettled: async (by, e) => { if (e.scope.kind !== "task") return; await activity.record(by, { commandId: `${e.intentId}-act`, taskId: e.scope.id, kind: "lifecycle", summary: `${e.mode === "suspend" ? "Suspension" : "Stop"} ${e.outcome.state}${e.outcome.graceful ? "" : " (not graceful)"}${e.outcome.unresolved.length > 0 ? `; unresolved: ${e.outcome.unresolved.slice(0, 5).join(", ")}` : ""}.`, manifest: { refs: [{ kind: "stop-intent", id: e.intentId }] } } as never); } });
 
     // Provider drain and cutover (card R04b): the owner's controls gate every route choice made through the fallback service, which the cutover cancels running calls on.
@@ -402,7 +409,6 @@ export async function startController(options: StartOptions): Promise<Controller
     const policyForward = { forward: async (by: Principal, request: { commandId: string; threadId: string; seq: number }) => { if (policyEditsLive === undefined) throw new DomainError("unavailable", "forwarding owner messages needs chat to be configured"); return policyEditsLive.forward(by, request); } };
     const backups = options.backup === undefined ? undefined : new BackupService(storage, { root: options.backup.directory, version: options.backup.version ?? "0.0.0", ...(options.backup.everyMs === undefined ? {} : { everyMs: options.backup.everyMs }), ...(options.backup.retention === undefined ? {} : { retention: options.backup.retention }), ...(options.backup.now === undefined ? {} : { now: options.backup.now }), ...(blobStore === undefined ? {} : { blobs: blobStore }) });
     const improvements = ImprovementService.withEpoch(storage, epoch, { meetings });
-    const submissions = SubmissionService.withEpoch(storage, epoch, (_id, scope, by) => agents.rolesOfPrincipalIn(by, scope.projectId, new Date().toISOString()), { attemptOf: attemptOfAssignments(assignments) });
     const api = new StateApi({ workEnd, submissions, deliverables: DeliverableService.withEpoch(storage, epoch), release: ReleaseService.withEpoch(storage, epoch), responsibilityChecks, incidents, swarm: SwarmService.withEpoch(storage, epoch, { projects, contracts, budgets, stops }), status, branchSettings, improvements, ...(backups === undefined ? {} : { backups }), policyForward, watchControl, standups, attendance, records, policyContext: PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }), activity, resumes, handoffs, cutover, modelBudget: fallback, commands, integration, notes, stops, pauses, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size) }, watches: watchService, events: EventService.withEpoch(storage, epoch), notifications, budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
     let chat: ChatService | undefined;
     let coordinator: CoordinatorService | undefined;
