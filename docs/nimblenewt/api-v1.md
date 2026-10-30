@@ -877,6 +877,28 @@ Arguments:
 
 Result: `{ items, next? }`.
 
+#### `deliverable.list`
+
+The deliverables recorded for a task: its artifacts, with each one's revision, who recorded it and when, its manifest digest, size and file list (names redacted). Needs the right to read the task; anyone else gets `not_found`.
+
+Arguments:
+
+- `taskId`: the task
+- `limit` (optional): 1 to 100, default 50
+- `after` (optional): the `next` of the previous page
+
+Result: `{ items, next?, scanLimited? }`; `scanLimited` means the search stopped before the end: ask again from `next`.
+
+#### `deliverable.get`
+
+One deliverable by its artifact ID, with the same fields as `deliverable.list`. An artifact that belongs to no task, or to a task the caller may not read, is `not_found`.
+
+Arguments:
+
+- `id`: the artifact's ID
+
+Result: `{ item }`.
+
 #### `agent.get`
 
 One agent record. The owner, a holder of `agent.read` or `agent.manage`, and the agent itself may ask; anyone else gets `not_found`.

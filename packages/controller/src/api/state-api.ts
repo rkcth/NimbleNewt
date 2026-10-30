@@ -37,6 +37,7 @@ import type { AttendanceService } from "../meetings/attendance.js";
 import type { PolicyEditService } from "../chat/policy-edit.js";
 import type { StandupService } from "../standups/standups.js";
 import type { ActivityService } from "../activity/activity.js";
+import type { DeliverableService } from "../artifacts/deliverables.js";
 import type { ResumeCheckService } from "../continuation/resume.js";
 import type { HandoffService } from "../lifecycle/handoff.js";
 import type { IntegrationPolicyService } from "../policy/integration-policy.js";
@@ -125,6 +126,7 @@ export interface StateApiDeps {
     describe(owner: Principal): Promise<{ id: string; stream: string; taskId: string; projectId: string }[]>;
   };
   readonly policyForward?: Pick<PolicyEditService, "forward">;
+  readonly deliverables?: Pick<DeliverableService, "list" | "get">;
   readonly backups?: Pick<BackupService, "backUpNow" | "backUpFor" | "list" | "status">;
   readonly improvements?: Pick<ImprovementService, "propose" | "group" | "decide" | "bringToStandup" | "get" | "open">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep" | "readiness">;
@@ -227,6 +229,7 @@ export class StateApi {
         ...(this.#deps.attendance === undefined ? {} : { attendance: this.#deps.attendance }),
         ...(this.#deps.records === undefined ? {} : { records: this.#deps.records }),
         ...(this.#deps.policyContext === undefined ? {} : { policyContext: this.#deps.policyContext }),
+        ...(this.#deps.deliverables === undefined ? {} : { deliverables: this.#deps.deliverables }),
         ...(this.#deps.activity === undefined ? {} : { activity: this.#deps.activity }),
         ...(this.#deps.resumes === undefined ? {} : { resumes: this.#deps.resumes }),
         ...(this.#deps.handoffs === undefined ? {} : { handoffs: this.#deps.handoffs }),

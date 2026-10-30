@@ -41,6 +41,7 @@ import type { WorkingNoteService } from "../context/notes.js";
 import type { PauseService } from "../lifecycle/pause.js";
 import type { StopChoice, StopService } from "../lifecycle/stop.js";
 import type { ActivityService } from "../activity/activity.js";
+import type { DeliverableService } from "../artifacts/deliverables.js";
 import type { ResumeCheckService } from "../continuation/resume.js";
 import type { HandoffService } from "../lifecycle/handoff.js";
 import type { IntegrationPolicyService } from "../policy/integration-policy.js";
@@ -91,6 +92,8 @@ export interface Context {
   readonly cutover?: Pick<CutoverService, "disable" | "drain" | "cutover" | "reenable" | "setFailbackPolicy" | "controls" | "report" | "topology" | "tick">;
   readonly handoffs?: Pick<HandoffService, "prepare" | "complete" | "takeover" | "choose" | "cancel" | "advance" | "get" | "forTask" | "sweep" | "screen">;
   readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep">;
+  /** Absent when the controller runs without deliverable reads (card U13). */
+  readonly deliverables?: Pick<DeliverableService, "list" | "get">;
   readonly activity?: Pick<ActivityService, "record" | "explain" | "explainLater" | "correct" | "markUnavailable" | "steps" | "payload" | "explanations" | "corrections" | "timeline">;
   readonly policyContext?: Pick<PolicyService, "contextFor">;
   readonly records?: Pick<MeetingRecordService, "open" | "setChair" | "join" | "leave" | "append" | "move" | "amend" | "table" | "openVote" | "castBallot" | "closeVote" | "castingVote" | "apply" | "ownerRespond" | "finish" | "summarize" | "returnOutcomes" | "sweep" | "record" | "recordFor" | "discussion" | "motion" | "ballots" | "decision" | "why" | "summary" | "latestPlan">;
@@ -191,6 +194,7 @@ const handoffsOf = (c: Context): NonNullable<Context["handoffs"]> => {
   return { ...h, prepare: screened(h.prepare.bind(h)), complete: screened(h.complete.bind(h)), takeover: screened(h.takeover.bind(h)), choose: screened(h.choose.bind(h)), cancel: screened(h.cancel.bind(h)), advance: screened(h.advance.bind(h)), get: screenedOpt(h.get.bind(h)), forTask: screenedOpt(h.forTask.bind(h)), sweep: h.sweep.bind(h), screen: h.screen.bind(h) } as NonNullable<Context["handoffs"]>;
 };
 const resumesOf = (c: Context): NonNullable<Context["resumes"]> => c.resumes ?? unavailable("checked resume");
+const deliverablesOf = (c: Context): NonNullable<Context["deliverables"]> => c.deliverables ?? unavailable("deliverable reads");
 const activityOf = (c: Context): NonNullable<Context["activity"]> => c.activity ?? unavailable("activity records");
 const policyContextOf = (c: Context): NonNullable<Context["policyContext"]> => c.policyContext ?? unavailable("policy context");
 const stopsOf = (c: Context): NonNullable<Context["stops"]> => c.stops ?? unavailable("suspend and stop");
@@ -683,6 +687,10 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, ["taskId"]); return found("task", await c.secure.getTask(str(a, "taskId"))); } },
   { name: "task.list", kind: "query", summary: "Tasks the caller may read. Only the installation owner may list across projects; anyone else names the project.", args: { "projectId?": "the project (required unless the caller is the owner)", "limit?": `1 to ${PAGE.max}, default ${PAGE.default}`, "after?": "the `next` of the previous page" }, result: "`{ items, next? }`.",
     run: async (c, a) => { only(a, ["projectId", "limit", "after"]); return page(await c.secure.listTasks({ limit: limitOf(a), ...(optStr(a, "projectId") === undefined ? {} : { projectId: optStr(a, "projectId")! }), ...(optStr(a, "after") === undefined ? {} : { afterId: optStr(a, "after")! }) })); } },
+  { name: "deliverable.list", kind: "query", summary: "The deliverables recorded for a task: its artifacts, with each one's revision, who recorded it and when, its manifest digest, size and file list (names redacted). Needs the right to read the task; anyone else gets `not_found`.", args: { taskId: "the task", "limit?": "1 to 100, default 50", "after?": "the `next` of the previous page" }, result: "`{ items, next?, scanLimited? }`; `scanLimited` means the search stopped before the end: ask again from `next`.",
+    run: async (c, a) => { only(a, ["taskId", "limit", "after"]); const v = a["limit"]; if (v !== undefined && !(typeof v === "number" && Number.isSafeInteger(v) && v >= 1 && v <= 100)) invalid("args.limit", "must be a whole number from 1 to 100"); return page(await deliverablesOf(c).list(c.principal, ownTask(c, str(a, "taskId")), { limit: (v as number | undefined) ?? 50, ...(optStr(a, "after") === undefined ? {} : { afterId: optStr(a, "after")! }) })); } },
+  { name: "deliverable.get", kind: "query", summary: "One deliverable by its artifact ID, with the same fields as `deliverable.list`. An artifact that belongs to no task, or to a task the caller may not read, is `not_found`.", args: { id: "the artifact's ID" }, result: "`{ item }`.",
+    run: async (c, a) => { only(a, ["id"]); return found("deliverable", await deliverablesOf(c).get(c.principal, str(a, "id"))); } },
   { name: "agent.get", kind: "query", summary: "One agent record. The owner, a holder of `agent.read` or `agent.manage`, and the agent itself may ask; anyone else gets `not_found`.", args: { agentId: "the agent's ID" }, result: "`{ item }`: the agent (friendly name, roles, team, supervisor, state, identity), with its revision.",
     run: async (c, a) => { only(a, ["agentId"]); return found("agent", await c.agents.get(c.principal, str(a, "agentId"))); } },
   { name: "agent.list", kind: "query", summary: "Agent records (needs `agent.read` or `agent.manage`).", args: { "teamId?": "only this team's members", "state?": "`active` or `retired`", "limit?": `1 to ${PAGE.max}, default ${PAGE.default}`, "after?": "the `next` of the previous page" }, result: "`{ items, next? }`.",
