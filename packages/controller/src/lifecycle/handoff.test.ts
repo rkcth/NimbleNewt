@@ -56,7 +56,7 @@ class Sources implements HandoffSources {
 for (const backend of backends) {
   interface Ctx {
     owner: Principal; mgr: Principal; ann: Principal; task: string; a: { kind: string; id: string }; b: { kind: string; id: string }; rt: Runtime; src: Sources; stops: StopService; pauses: PauseService;
-    handoffs: HandoffService; assignments: AssignmentService; failTransfer: { times: number }; reopen(asker?: (id: string) => Promise<Principal | undefined>): HandoffService;
+    handoffs: HandoffService; assignments: AssignmentService; failTransfer: { times: number }; reopen(asker?: (id: string) => Promise<Principal | undefined>, given?: { handoffId: string; taskId: string; reason: string }[]): HandoffService;
   }
   const suite = (name: string, body: (c: Ctx) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
@@ -83,10 +83,10 @@ for (const backend of backends) {
         const failTransfer = { times: 0 };
         // The transfer can be made to fail once or more before it reaches the store, as a crash before it would.
         const assignments = { getAssignment: (t: string) => real.getAssignment(t), transferTask: async (cmd: Parameters<AssignmentService["transferTask"]>[0]) => { if (failTransfer.times > 0) { failTransfer.times--; throw new Error("process died before the transfer"); } return real.transferTask(cmd); } } as unknown as AssignmentService;
-        const mk = (asker?: (id: string) => Promise<Principal | undefined>): HandoffService => {
+        const mk = (asker?: (id: string) => Promise<Principal | undefined>, given?: { handoffId: string; taskId: string; reason: string }[]): HandoffService => {
           const pauses = PauseService.withEpoch(world.storage, epoch, {}, options);
           const stops = StopService.withEpoch(world.storage, epoch, pauses, rt, options);
-          return HandoffService.withEpoch(world.storage, epoch, { pauses, stops, assignments, sources: src, ...(asker === undefined ? {} : { asker }) }, options);
+          return HandoffService.withEpoch(world.storage, epoch, { pauses, stops, assignments, sources: src, ...(asker === undefined ? {} : { asker }), ...(given === undefined ? {} : { onReturnGivenUp: async (_by: Principal, e: { handoffId: string; taskId: string; reason: string }) => { given.push(e); } }) }, options);
         };
         const pauses = PauseService.withEpoch(world.storage, epoch, {}, options);
         const stops = StopService.withEpoch(world.storage, epoch, pauses, rt, options);
@@ -132,6 +132,51 @@ for (const backend of backends) {
     const kept = await c.reopen(async (id) => (id === c.mgr.id ? c.mgr : undefined)).sweep(c.owner);
     assert.deepEqual(kept.advanced, [h2.id]);
     assert.equal(await ownerOf(c), `${c.b.id}@2`);
+  });
+
+  suite("a temporary reassignment goes back when its time is up, for the one who asked, only while they still hold the right and the task is still with the temporary owner (card L03e)", async (c) => {
+    const hour = 3_600_000;
+    await refuses("invalid_command", () => c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "cover", returnAt: new Date(now - hour).toISOString() }));
+    await refuses("invalid_command", () => c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "cover", returnAt: new Date(now + 31 * 24 * hour).toISOString() }));
+    await refuses("invalid_command", () => c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "cover", returnAt: "soon" }));
+    const asker = async (id: string) => (id === c.mgr.id ? c.mgr : undefined);
+    const given: { handoffId: string; taskId: string; reason: string }[] = [];
+    const sweeper = c.reopen(asker, given);
+    const h = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "cover for two hours", returnAt: new Date(now + 2 * hour).toISOString() });
+    await c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h.id });
+    assert.equal(await ownerOf(c), `${c.b.id}@2`);
+    // Not yet: nothing is done.
+    assert.deepEqual(await sweeper.sweep(c.owner), { advanced: [], failed: [] });
+    assert.equal(await ownerOf(c), `${c.b.id}@2`);
+    // Time is up: the hand-off back is made, then completed on the next pass, and the task is with its first owner again.
+    now += 3 * hour;
+    const first = await sweeper.sweep(c.owner);
+    assert.ok(first.advanced.includes(h.id) && first.failed.length === 0, JSON.stringify(first));
+    const marked = (await c.handoffs.get(c.owner, h.id))!;
+    assert.ok(marked.returned?.handoffId !== undefined && marked.returned.skipped === undefined);
+    await sweeper.sweep(c.owner);
+    assert.equal(await ownerOf(c), `${c.a.id}@3`);
+    const back = (await c.handoffs.get(c.owner, marked.returned!.handoffId!))!;
+    assert.deepEqual([back.phase, back.autoComplete, back.requestedBy], ["transferred", true, c.mgr.id]);
+    assert.deepEqual(await sweeper.sweep(c.owner), { advanced: [], failed: [] }, "nothing is returned twice");
+    // The asker no longer holds the right: the task stays with the temporary owner and says why.
+    const h2 = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "cover again", returnAt: new Date(now + hour).toISOString() });
+    await c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h2.id });
+    now += 2 * hour;
+    await c.reopen(async () => undefined, given).sweep(c.owner);
+    const gone = (await c.handoffs.get(c.owner, h2.id))!;
+    assert.match(gone.returned?.skipped ?? "", /gone or no longer active/);
+    assert.equal(await ownerOf(c), `${c.b.id}@4`);
+    assert.equal(given.length, 1);
+    assert.equal(given[0]!.handoffId, h2.id);
+    // The task was moved on by someone else meanwhile: there is nothing to return.
+    await c.assignments.transferTask({ commandId: cid("tt"), actor: c.owner.id, taskId: c.task, expectedRevision: (await c.assignments.getAssignment(c.task))!.revision, to: c.a, reason: "moved by hand" });
+    const h3 = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "cover a third time", returnAt: new Date(now + hour).toISOString() });
+    await c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h3.id });
+    await c.assignments.transferTask({ commandId: cid("tt"), actor: c.owner.id, taskId: c.task, expectedRevision: (await c.assignments.getAssignment(c.task))!.revision, to: c.a, reason: "moved by hand" });
+    now += 2 * hour;
+    await sweeper.sweep(c.owner);
+    assert.match((await c.handoffs.get(c.owner, h3.id))!.returned?.skipped ?? "", /no longer with the temporary owner/);
   });
 
   suite("the package holds only the named sections, without credentials; a missing required section is reported and needs the gap accepted", async (c) => {

@@ -59,11 +59,17 @@ export interface TaskHandoffBody {
   /** A forced takeover is a visible exception: what was missing and what may be uncertain. */
   readonly exception?: { readonly by: string; readonly reason: string; readonly at: string; readonly missingCleanup: readonly string[]; readonly uncertainEffects: readonly string[] };
   readonly transferredAt?: string;
+  /** A temporary reassignment: when the task goes back to `from` (card L03e). The return is a hand-off of its own, made on this time, as the one who asked, if they still hold the right. */
+  readonly returnAt?: string;
+  /** This hand-off is a return: when it is ready the controller completes it (accepting gaps, which are recorded) for the one who asked, if they still hold the right. */
+  readonly autoComplete?: boolean;
+  /** Set once the return was made (`handoffId`) or given up (`skipped`, with the reason). */
+  readonly returned?: { readonly handoffId?: string; readonly at: string; readonly skipped?: string };
   readonly failure?: string;
   readonly history: readonly { readonly phase: HandoffPhase; readonly at: string; readonly by: string; readonly note: string }[];
 }
 
-export const HANDOFF_LIMITS = { reason: 500, section: 4000, history: 40, advances: 8 } as const;
+export const HANDOFF_LIMITS = { reason: 500, section: 4000, history: 40, advances: 8, returnDays: 30 } as const;
 const KIND = "handoff";
 const ACTIVE = "handoff-active";
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
@@ -98,22 +104,38 @@ export class HandoffService {
   readonly #sources: HandoffSources;
   readonly #asker: ((principalId: string) => Promise<Principal | undefined>) | undefined;
   readonly #onTransferred: ((by: Principal, event: { handoffId: string; taskId: string; from: Owner; to: Owner }) => Promise<void>) | undefined;
+  readonly #onReturnGivenUp: ((by: Principal, event: { handoffId: string; taskId: string; reason: string }) => Promise<void>) | undefined;
 
-  private constructor(runner: CommandRunner, pauses: PauseService, stops: Pick<StopService, "request" | "advance" | "force" | "get">, assignments: Pick<AssignmentService, "getAssignment" | "transferTask">, sources: HandoffSources, onTransferred?: (by: Principal, event: { handoffId: string; taskId: string; from: Owner; to: Owner }) => Promise<void>, asker?: (principalId: string) => Promise<Principal | undefined>) {
+  private constructor(runner: CommandRunner, pauses: PauseService, stops: Pick<StopService, "request" | "advance" | "force" | "get">, assignments: Pick<AssignmentService, "getAssignment" | "transferTask">, sources: HandoffSources, onTransferred?: (by: Principal, event: { handoffId: string; taskId: string; from: Owner; to: Owner }) => Promise<void>, asker?: (principalId: string) => Promise<Principal | undefined>, onReturnGivenUp?: (by: Principal, event: { handoffId: string; taskId: string; reason: string }) => Promise<void>) {
+    this.#onReturnGivenUp = onReturnGivenUp;
     this.#onTransferred = onTransferred;
     this.#asker = asker;
     this.#runner = runner; this.#pauses = pauses; this.#stops = stops; this.#assignments = assignments; this.#sources = sources;
   }
 
-  static withEpoch(storage: ControllerStorage, epoch: number, deps: { pauses: PauseService; stops: Pick<StopService, "request" | "advance" | "force" | "get">; assignments: Pick<AssignmentService, "getAssignment" | "transferTask">; sources: HandoffSources; /** Told once a task has moved, so the move can be put in the task's activity record (best effort: a failure here never undoes or holds back the hand-off). */ onTransferred?: (by: Principal, event: { handoffId: string; taskId: string; from: Owner; to: Owner }) => Promise<void>; /** The principal that asked for a hand-off, with the rights it holds now (undefined when it is gone or not active): a hand-off carried on after a restart is dropped when the asker no longer holds the right to control the task. */ asker?: (principalId: string) => Promise<Principal | undefined> }, options: RunnerOptions = {}): HandoffService {
-    return new HandoffService(new CommandRunner(storage, epoch, options), deps.pauses, deps.stops, deps.assignments, deps.sources, deps.onTransferred, deps.asker);
+  static withEpoch(storage: ControllerStorage, epoch: number, deps: { pauses: PauseService; stops: Pick<StopService, "request" | "advance" | "force" | "get">; assignments: Pick<AssignmentService, "getAssignment" | "transferTask">; sources: HandoffSources; /** Told once a task has moved, so the move can be put in the task's activity record (best effort: a failure here never undoes or holds back the hand-off). */ onTransferred?: (by: Principal, event: { handoffId: string; taskId: string; from: Owner; to: Owner }) => Promise<void>; /** The principal that asked for a hand-off, with the rights it holds now (undefined when it is gone or not active): a hand-off carried on after a restart is dropped when the asker no longer holds the right to control the task. */ asker?: (principalId: string) => Promise<Principal | undefined>; /** Told once when a temporary reassignment could not be returned (the asker lost the right, the task moved on, the hand-off back failed): best effort, so the task's activity can say why it stayed. */ onReturnGivenUp?: (by: Principal, event: { handoffId: string; taskId: string; reason: string }) => Promise<void> }, options: RunnerOptions = {}): HandoffService {
+    return new HandoffService(new CommandRunner(storage, epoch, options), deps.pauses, deps.stops, deps.assignments, deps.sources, deps.onTransferred, deps.asker, deps.onReturnGivenUp);
   }
 
   // ---- requests ------------------------------------------------------------------------------------------------------------
 
   /** Begins a prepared hand-off of a task to another owner. One hand-off at a time per task. Returns where it stands after one pass. */
-  async prepare(by: Principal, command: NoActor & { taskId: string; to: unknown; reason: string; deadlineMs?: number }): Promise<View<TaskHandoffBody>> {
-    onlyKnown(command, ["commandId", "taskId", "to", "reason", "deadlineMs"]);
+  async prepare(by: Principal, command: NoActor & { taskId: string; to: unknown; reason: string; deadlineMs?: number; returnAt?: string }): Promise<View<TaskHandoffBody>> {
+    onlyKnown(command, ["commandId", "taskId", "to", "reason", "deadlineMs", "returnAt"]);
+    return this.#prepare(by, command, command.returnAt === undefined ? {} : { returnAt: this.#returnTime(command.returnAt) });
+  }
+
+  /** `returnAt` must be a time ahead, at most `HANDOFF_LIMITS.returnDays` days away; it is kept as the exact instant. */
+  #returnTime(value: unknown): string {
+    const when = typeof value === "string" ? Date.parse(value) : Number.NaN;
+    const now = Date.parse(this.#runner.now());
+    if (!Number.isFinite(when)) return invalid("returnAt", "must be a date and time");
+    if (when <= now) return invalid("returnAt", "must be in the future");
+    if (when > now + HANDOFF_LIMITS.returnDays * 86_400_000) return invalid("returnAt", `must be within ${HANDOFF_LIMITS.returnDays} days`);
+    return new Date(when).toISOString();
+  }
+
+  async #prepare(by: Principal, command: NoActor & { taskId: string; to: unknown; reason: string; deadlineMs?: number }, extra: { returnAt?: string; autoComplete?: boolean }): Promise<View<TaskHandoffBody>> {
     const reason = plain(command.reason, "reason");
     const to = checkOwner(command.to, "to");
     const scope: PauseScope = { kind: "task", id: String(command.taskId) };
@@ -124,7 +146,7 @@ export class HandoffService {
     if (why !== undefined) throw new DomainError("invalid_command", `${to.kind}:${to.id} cannot take the task: ${why}`, { field: "to" });
     const id = derivedId("hnd", scopedCommandId(by.id, command.commandId));
     const heldBefore = (await this.#pauses.gate(by, scope))?.intent === "pause";
-    await this.#create(by, command.commandId, id, scope.id, target.projectId, from, to, assignment.generation, "prepared", reason, heldBefore);
+    await this.#create(by, command.commandId, id, scope.id, target.projectId, from, to, assignment.generation, "prepared", reason, heldBefore, undefined, extra);
     // The suspension that prepares the hand-off. Its command ID follows the hand-off's, so repeating the request repeats it.
     const stop = await this.#stops.request(by, { commandId: `${String(command.commandId)}-suspend`, scope, mode: "suspend", reason: `hand-off: ${reason}`.slice(0, 500), ...(command.deadlineMs === undefined ? {} : { deadlineMs: command.deadlineMs }) });
     await this.#update(id, (b) => ({ ...b, stopIntentId: b.stopIntentId ?? stop.intentId }), LIVE);
@@ -272,6 +294,15 @@ export class HandoffService {
       for (const rec of page) {
         after = rec.id;
         const b = rec.body as unknown as TaskHandoffBody;
+        // A temporary reassignment that has run its time goes back, and a return that is ready is completed (card L03e).
+        if (b.phase === "transferred" && b.returnAt !== undefined && b.returned === undefined) {
+          try { if (await this.#returnDue(by, rec.id, b)) advanced.push(rec.id); } catch { failed.push(rec.id); }
+          continue;
+        }
+        if (b.phase === "ready" && b.autoComplete === true) {
+          try { if (await this.#completeReturn(by, rec.id, b)) advanced.push(rec.id); } catch { failed.push(rec.id); }
+          continue;
+        }
         if (TERMINAL.includes(b.phase) || b.phase === "ready") continue;
         try {
           // A hand-off finished after a restart is finished for whoever asked, but only while they still hold the right to control the task (owner decision 2026-10-29); otherwise it is dropped and says why.
@@ -301,6 +332,46 @@ export class HandoffService {
 
   async #mayControl(by: Principal, taskId: string): Promise<void> {
     try { await this.#pauses.authorizeControl(by, { kind: "task", id: taskId }); } catch (error) { if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) throw new DomainError("not_found", "no such hand-off"); throw error; }
+  }
+
+  /** The principal to act as for a hand-off back: the one who asked for the first, if it is still active and still holds the right to control the task; otherwise the reason it cannot be. Without an asker lookup, the caller. */
+  async #actingFor(by: Principal, requestedBy: string, taskId: string): Promise<Principal | string> {
+    if (this.#asker === undefined) return by;
+    const asker = await this.#asker(requestedBy);
+    if (asker === undefined) return `${requestedBy} is gone or no longer active`;
+    const still = await this.#pauses.authorizeControl(asker, { kind: "task", id: taskId }).then(() => true, (e: unknown) => { if (e instanceof DomainError && (e.code === "forbidden" || e.code === "not_found")) return false; throw e; });
+    return still ? asker : `${requestedBy} no longer holds the right to control the task`;
+  }
+
+  async #giveUpReturn(by: Principal, id: string, taskId: string, reason: string): Promise<void> {
+    await this.#update(id, (x) => ({ ...x, returned: { at: this.#runner.now(), skipped: reason.slice(0, 300) } }), ["transferred"]);
+    try { await this.#onReturnGivenUp?.(by, { handoffId: id, taskId, reason }); } catch { /* telling the task's record is best effort */ }
+  }
+
+  /** Makes the hand-off back once the time is up, if the temporary owner still has the task and the one who asked still may. Repeating it finds the same hand-off back (its command ID follows this one's). */
+  async #returnDue(by: Principal, id: string, b: TaskHandoffBody): Promise<boolean> {
+    if (Date.parse(b.returnAt as string) > Date.parse(this.#runner.now())) return false;
+    // A crash after the hand-off back was made but before it was written here: find it by its command ID instead of judging the task again.
+    for (const who of new Set([b.requestedBy, by.id])) {
+      const back = derivedId("hnd", scopedCommandId(who, `ret-${id}`));
+      if ((await this.#runner.get(KIND, back)) !== undefined) { await this.#update(id, (x) => ({ ...x, returned: { handoffId: back, at: this.#runner.now() } }), ["transferred"]); return true; }
+    }
+    const { assignment } = await this.#currentOwner(b.taskId).catch(() => ({ assignment: undefined, from: undefined }));
+    if (assignment === undefined || assignment.state !== "assigned" || !sameOwner(assignment.owner, b.to)) { await this.#giveUpReturn(by, id, b.taskId, "the task is no longer with the temporary owner, so nothing was returned"); return true; }
+    const acting = await this.#actingFor(by, b.requestedBy, b.taskId);
+    if (typeof acting === "string") { await this.#giveUpReturn(by, id, b.taskId, `${acting}, so the task stays with the temporary owner`); return true; }
+    const back = await this.#prepare(acting, { commandId: `ret-${id}`, taskId: b.taskId, to: b.from, reason: "temporary reassignment ended" }, { autoComplete: true });
+    await this.#update(id, (x) => ({ ...x, returned: { handoffId: derivedId("hnd", scopedCommandId(acting.id, `ret-${id}`)), at: this.#runner.now() } }), ["transferred"]);
+    void back;
+    return true;
+  }
+
+  /** A return that is ready is completed for the one who asked, accepting gaps in the package (recorded). If they no longer hold the right, it ends failed and says why. */
+  async #completeReturn(by: Principal, id: string, b: TaskHandoffBody): Promise<boolean> {
+    const acting = await this.#actingFor(by, b.requestedBy, b.taskId);
+    if (typeof acting === "string") { await this.#fail(by, id, `${acting}, so the task was not returned`); try { await this.#onReturnGivenUp?.(by, { handoffId: id, taskId: b.taskId, reason: acting }); } catch { /* best effort */ } return true; }
+    await this.complete(acting, { commandId: `rc-${id}`, handoffId: id, acceptGaps: true });
+    return true;
   }
 
   async #get(id: string) {
@@ -335,10 +406,10 @@ export class HandoffService {
     return { collectedAt: this.#runner.now(), sections, missing, ready: missing.length === 0 };
   }
 
-  async #create(by: Principal, commandId: unknown, id: string, taskId: string, projectId: string | undefined, from: Owner, to: Owner, generation: number, mode: "prepared" | "forced", reason: string, heldBefore: boolean, replaces?: string): Promise<void> {
+  async #create(by: Principal, commandId: unknown, id: string, taskId: string, projectId: string | undefined, from: Owner, to: Owner, generation: number, mode: "prepared" | "forced", reason: string, heldBefore: boolean, replaces?: string, extra: { returnAt?: string; autoComplete?: boolean } = {}): Promise<void> {
     const activeRef: AggregateRef = { kind: ACTIVE, id: derivedId("hnd", `active\0${taskId}`) };
     await this.#runner.command("handoff.create", { commandId: scopedCommandId(by.id, commandId), actor: by.id }, async () => ({
-      payload: { taskId, to: to as unknown as JsonObject, mode, reason },
+      payload: { taskId, to: to as unknown as JsonObject, mode, reason, ...(extra.returnAt === undefined ? {} : { returnAt: extra.returnAt }), ...(extra.autoComplete === true ? { autoComplete: true } : {}) },
       build: async () => {
         const at = this.#runner.now();
         const active = await this.#runner.get(ACTIVE, activeRef.id);
@@ -349,7 +420,7 @@ export class HandoffService {
         }
         const ref: AggregateRef = { kind: KIND, id };
         const body: TaskHandoffBody = {
-          taskId, ...(projectId === undefined ? {} : { projectId }), from, to, generation, phase: "preparing", mode, reason, requestedBy: by.id, requestedAt: at, heldBefore, ...(replaces === undefined ? {} : { replaces }),
+          taskId, ...(projectId === undefined ? {} : { projectId }), from, to, generation, phase: "preparing", mode, reason, requestedBy: by.id, requestedAt: at, heldBefore, ...(replaces === undefined ? {} : { replaces }), ...(extra.returnAt === undefined ? {} : { returnAt: extra.returnAt }), ...(extra.autoComplete === true ? { autoComplete: true } : {}),
           history: [{ phase: "preparing", at, by: by.id, note: mode === "forced" ? "takeover requested" : "hand-off requested" }],
         };
         const pointer = clean({ handoffId: id });

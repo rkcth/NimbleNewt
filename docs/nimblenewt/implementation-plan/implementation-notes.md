@@ -2558,3 +2558,11 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - `ImprovementService.untold(by, projectId, olderThanMs)` (service principals only) lists decisions still `returnPending` whose last decision is at least that old, with the revision decided at.
 - `untoldImprovementLoops` (dispatcher loop `improvements.untold`, 7 days by default) hands each to a `tell` callback keyed `imu:<item>:<revision>`, so the owner is told once per decision; one project's failure is named after the rest. The composed controller files it as a `maintenance` notification (detail cut to the 200-character limit, the title to 60) on the improvement record.
 - Not built yet (remains in M03e): agenda outcomes to chat turns and inquiries, the notice/allocation/usage/owner-item sinks, and chat commands.
+
+## L03e (part 1): temporary reassignment with automatic return
+
+- `handoff.prepare` takes `returnAt` (a time ahead, within 30 days). It is kept on the hand-off; nothing changes until the hand-off is completed as before.
+- The hand-off sweep (the dispatcher's `handoffs.sweep` loop) does two new things. A transferred hand-off whose `returnAt` has passed and that has no `returned` mark gets a hand-off back to the first owner, made **as the one who asked** and only if that principal is still active and still holds the right to control the task (the owner's rule for anything done later on someone's behalf); the hand-off back is marked `autoComplete`. A ready hand-off with `autoComplete` is completed on the next pass for the same asker, with gaps in the package accepted (recorded as for any hand-off).
+- The return is given up, with the reason on the original hand-off's `returned.skipped` and in the task's activity (`onReturnGivenUp`), when the asker is gone or lost the right, or the task is no longer with the temporary owner (moved, done). A hand-off back that cannot be made yet (another hand-off in progress, the first owner ineligible) is retried on the next sweep and shows in `failed`.
+- A crash between making the hand-off back and writing the mark is found again by its command ID (`ret-<hand-off id>`).
+- Not built yet (remains in L03e): chat commands, package sections from continuation, locks, drafts, responsibilities.

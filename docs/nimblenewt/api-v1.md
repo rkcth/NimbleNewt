@@ -1441,6 +1441,7 @@ Arguments:
 - `to`: { kind: "agent", id }
 - `reason`: why
 - `deadlineMs`: optional deadline for the suspension
+- `returnAt` (optional): a temporary reassignment: when the task goes back to its current owner (a time ahead, within 30 days); the return is made if you still hold the right to control the task then
 - `commandId`: required
 
 Result: `{ id, phase, package: { sections, missing, ready }, blocked? }`.
