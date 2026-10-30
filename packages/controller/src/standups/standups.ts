@@ -17,7 +17,7 @@ import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { canonicalJson, sha256 } from "../storage/json.js";
 import type { Aggregate, AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
-import type { ImprovementBody } from "./improvements.js";
+import { outcomeText, type ImprovementBody } from "./improvements.js";
 import { clean, cut, invalid, plain, whole, type Cite, type OutcomeSink } from "./shared.js";
 
 // ---- records --------------------------------------------------------------------------------------------------------------------
@@ -150,6 +150,8 @@ interface Facts {
   readonly waits: Aggregate[];
   readonly inquiries: Aggregate[];
   readonly artifacts: Aggregate[];
+  /** The project's improvement proposals (the briefs tell proposers of decisions they have not been told yet). */
+  readonly improvements: Aggregate[];
   partial: boolean;
 }
 
@@ -511,7 +513,7 @@ export class StandupService {
 
   /** The records a brief and the review rest on, read once for the whole occurrence. Each scan is bounded; a cut scan marks everything built from it `partial`. */
   async #facts(projectId: string, since: string, until: string): Promise<Facts> {
-    const facts: Facts = { tasks: [], blockers: [], waits: [], inquiries: [], artifacts: [], partial: false };
+    const facts: Facts = { tasks: [], blockers: [], waits: [], inquiries: [], artifacts: [], improvements: [], partial: false };
     await this.#scan("task", facts, async (a) => {
       const body = a.body as unknown as TaskBody;
       if (body.projectId !== projectId || body.state === "cancelled" || body.state === "proposed") return;
@@ -527,6 +529,7 @@ export class StandupService {
     await this.#scan("wait", facts, (a) => { const w = a.body as unknown as WaitBody; if (w.state === "open" && inProject.has(w.taskId)) facts.waits.push(a); });
     await this.#scan("inquiry", facts, (a) => { const q = a.body as unknown as InquiryBody; if (q.projectId === projectId && q.state === "open") facts.inquiries.push(a); });
     await this.#scan("artifact", facts, (a) => { const art = a.body as unknown as ArtifactBody; if (art.projectId === projectId && art.taskId !== undefined && inProject.has(art.taskId) && a.createdAt > since && a.createdAt <= until) facts.artifacts.push(a); });
+    await this.#scan("improvement-item", facts, (a) => { const b = a.body as unknown as ImprovementBody; if (b.projectId === projectId) facts.improvements.push(a); });
     return facts;
   }
 
@@ -563,6 +566,13 @@ export class StandupService {
     for (const q of facts.inquiries) {
       const body = q.body as unknown as InquiryBody;
       if (body.asker === agent) sections.advice.push({ text: `Asked another agent a question (${body.askedAt}).`, detail: `Asked ${cut(body.to, 60)}: ${cut(body.question, 200)}`, cites: [{ kind: "inquiry", id: q.id, revision: q.revision }] });
+    }
+    // A decision on the agent's improvement proposal that it has not been told yet (the notice could not be filed on a task of its own): told here, in the brief it reads.
+    for (const u of facts.improvements) {
+      const body = u.body as unknown as ImprovementBody;
+      if (!body.returnPending) continue;
+      const proposers = [body.proposedBy, ...(body.duplicates ?? []).map((d) => (facts.improvements.find((x) => x.id === d)?.body as unknown as ImprovementBody | undefined)?.proposedBy)];
+      if (proposers.includes(agent)) sections.advice.push({ text: cut(outcomeText(body), 400), cites: [{ kind: "improvement-item", id: u.id, revision: u.revision }] });
     }
     const next = open.filter((t) => t.body.state !== "blocked").sort((a, b) => b.priority - a.priority || (a.id < b.id ? -1 : 1)).slice(0, STANDUP_LIMITS.priorities);
     for (const t of next) sections.priorities.push({ text: `${cut(t.body.title, 120)} (priority ${t.priority}, ${STATE_WORDS[t.body.state]}).`, cites: [tcite(t)] });

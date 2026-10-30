@@ -607,6 +607,18 @@ for (const backend of backends) {
     assert.deepEqual((await c.standups.deliverOutcomes(c.host, c.a)).delivered, []);
   });
 
+  suite("a decision on an improvement the proposer has not been told yet is in its next brief and only its own (card M03d)", async (c) => {
+    const w = await world(c);
+    const id = "imp-aaaaaaaaaaaaaaaaaaaa";
+    await c.put("improvement-item", id, { projectId: c.a, title: "Retry flaky builds once", observation: "o", proposedBy: c.pA, owner: c.pA, disposition: "rejected", reason: "Hides real failures", timeboxMinutes: 10, brought: 0, returnPending: true, history: [] });
+    await c.standups.prepare(c.host, w.occ);
+    const byAgent = Object.fromEntries((await c.standups.briefs(c.owner, w.occ)).map((b) => [b.agent, b])) as Record<string, unknown> as Record<string, BriefBody>;
+    const mine = byAgent[c.pA]!.advice.filter((e) => e.cites.some((x) => x.kind === "improvement-item" && x.id === id));
+    assert.equal(mine.length, 1);
+    assert.match(mine[0]!.text, /was rejected: Hides real failures/);
+    assert.ok(!byAgent[c.pB]!.advice.some((e) => e.cites.some((x) => x.id === id)), "another agent's brief does not carry it");
+  });
+
   suite("a full list of waiting outcomes never blocks a state change: the outcome goes on an overflow list, is listed again when there is room, is mentioned on the next agenda, and one that fits nowhere is marked", async (c) => {
     const small = c.meetingsWith({ returnsListed: 2, returnsMore: 1 });
     const quiet = c.make({ meetings: small });
