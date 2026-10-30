@@ -155,6 +155,15 @@ test("the stop inventory lists the local processes and child work a runtime repo
   live2 = [];
   await p3.terminate(task, { force: false });
   assert.deepEqual(asked3, [["att-7"]], "only the look itself asked; terminate had nothing remembered to ask about");
+  // A restart empties the seen map; the attempts recorded on the stop request are given back, so a process of an attempt that ended before the restart is still asked about.
+  const before = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), () => "pending", undefined, undefined, { processes: async () => [] });
+  await before.inventory(task);
+  assert.deepEqual(before.attempts!(task), ["att-1"]);
+  const asked4: (readonly string[])[] = [];
+  const restarted = dispatchStopPorts(() => ({ dispatcher: { ...dispatcher, liveAttemptsOf: async () => [] } as never, principal: staff }), () => "pending", undefined, undefined, { processes: async (a) => { asked4.push(a); return [{ ref: "pid-9", kind: "process", state: "running" }]; } });
+  restarted.remember!(task, before.attempts!(task));
+  assert.deepEqual(await restarted.terminate(task, { force: false }), { ended: true, unresolved: ["pid-9"] });
+  assert.deepEqual(asked4.at(-1), ["att-1"]);
   // Without the hook nothing is listed and nothing is charged.
   const bare = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), () => "pending");
   assert.deepEqual(await bare.inventory(task), []);

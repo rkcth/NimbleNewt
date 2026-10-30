@@ -32,6 +32,10 @@ export interface StopPorts {
   checkpoint(scope: PauseScope): Promise<{ checkpointId: string; durable: boolean; artifactsDurable: boolean }>;
   /** Ends execution. `force` skips waiting. `unresolved` names what could not be settled (effects of unknown outcome, children still running). */
   terminate(scope: PauseScope, options: { force: boolean }): Promise<{ ended: boolean; unresolved: readonly string[] }>;
+  /** The attempt IDs the runtime has seen for the scope in this stop (so the request can record them and a restart still asks about one that ended during preparation). */
+  attempts?(scope: PauseScope): readonly string[];
+  /** Gives the runtime the attempt IDs recorded on the request, after a restart lost its memory. */
+  remember?(scope: PauseScope, attempts: readonly string[]): void;
 }
 
 export type StopSettled = (by: Principal, event: { intentId: string; scope: PauseScope; mode: StopMode; outcome: StopOutcome }) => Promise<void>;
@@ -51,6 +55,8 @@ export interface StopIntentBody {
   readonly backupUsed: boolean;
   readonly prepared?: { readonly at: string; readonly checkpointId: string };
   readonly inventory: readonly InventoryItem[];
+  /** The attempts the runtime saw for the scope while preparing (so a process of one that ended meanwhile is still asked about after a restart). */
+  readonly attempts?: readonly string[];
   readonly blocked?: { readonly reason: string; readonly choices: readonly StopChoice[]; /** The phase `wait` goes back to. */ readonly resume?: StopPhase } | undefined;
   /** The pause request that held the scope when this request was made: a later stop reuses this request's checkpoint only if the same hold is still in place. */
   readonly gateRequestId?: string;
@@ -229,6 +235,7 @@ export class StopService {
       }
       if (b.phase === "blocked") return view<StopIntentBody>(found);
       const now = this.#runner.now();
+      this.#ports.remember?.(b.scope, b.attempts ?? []);
       if (b.phase === "preparing") {
         await this.#observe(by, b.scope, id, "preparing-to-suspend", "preparing to suspend");
         let inventory = b.inventory;
@@ -240,6 +247,9 @@ export class StopService {
           await this.#block(id, by.id, `cleanup could not run: ${redactText(error instanceof Error ? error.message : String(error)).slice(0, 200)}`, ["preparing"]);
           continue;
         }
+        // The attempts the runtime saw are recorded, so a restart still asks about a process of one that has ended since.
+        const seenNow = this.#ports.attempts?.(b.scope) ?? [];
+        if (seenNow.some((a) => !(b.attempts ?? []).includes(a))) await this.#update(id, (x) => ({ ...x, attempts: [...new Set([...(x.attempts ?? []), ...seenNow])].slice(0, STOP_LIMITS.inventory) }), ["preparing"]);
         // Something else (a Force Stop, a choice, a resume) may have moved the request while the cleanup ran: then this pass is stale and does nothing more.
         if (((await this.#runner.get(KIND, id))?.body as unknown as StopIntentBody | undefined)?.phase !== "preparing") continue;
         const spent = b.spent + (result.spent ?? 0);

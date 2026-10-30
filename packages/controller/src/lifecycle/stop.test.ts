@@ -33,6 +33,11 @@ class Runtime implements StopPorts {
   throwOnTerminate = false;
   unsupportedWith: string | undefined;
   unsupported(): string | undefined { return this.unsupportedWith; }
+  /** The attempts this runtime says it has seen, and what the controller gave back to it (a restart empties the runtime's memory). */
+  seenAttempts: string[] = [];
+  remembered: string[] = [];
+  attempts(): string[] { return this.seenAttempts; }
+  remember(_s: unknown, a: readonly string[]): void { this.remembered.push(...a); }
   throwOnCheckpoint = false;
   /** Runs inside cleanup, so a test can make something else happen while preparation is in progress. */
   duringCleanup: (() => Promise<void>) | undefined;
@@ -145,6 +150,21 @@ for (const backend of backends) {
     assert.equal(c.rt.count("cleanup"), 1, "preparation was not done again");
     assert.equal(c.rt.count("checkpoint"), 1);
     assert.deepEqual((await reopened.sweep(c.owner)).advanced, [], "nothing is left to do");
+  });
+
+  suite("the attempts the runtime saw while preparing are recorded on the request, so after a restart the runtime is told them again (the in-memory seen map is not lost)", async (c) => {
+    c.rt.crashOnTerminate = true;
+    c.rt.seenAttempts = ["att-1", "att-2"];
+    const { intentId } = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "stop" });
+    void c.stops.advance(c.owner, { intentId }).catch(() => undefined);
+    for (let i = 0; i < 400 && c.rt.count("terminate") === 0; i++) await new Promise((r) => setTimeout(r, 25));
+    assert.deepEqual((await c.stops.get(c.owner, intentId) as unknown as { attempts?: string[] }).attempts, ["att-1", "att-2"], "recorded on the request");
+    // The controller restarts: the runtime's memory is empty and the new service gives it back what the request recorded.
+    c.rt.crashOnTerminate = false; c.rt.seenAttempts = []; c.rt.remembered = [];
+    const reopened = c.reopen();
+    assert.deepEqual((await reopened.sweep(c.owner)).advanced, [intentId]);
+    assert.deepEqual([...new Set(c.rt.remembered)], ["att-1", "att-2"]);
+    assert.equal((await reopened.get(c.owner, intentId))?.outcome?.state, "stopped");
   });
 
   suite("work that will not settle blocks the request and is never called suspended; the owner may wait, restart from an earlier boundary or force stop", async (c) => {

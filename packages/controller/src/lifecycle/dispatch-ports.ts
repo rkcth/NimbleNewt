@@ -103,6 +103,8 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
     return out;
   };
   return {
+    attempts: (scope) => [...(seen.get(`${scope.kind}:${scope.id}`) ?? [])],
+    remember: (scope, attempts) => { if (attempts.length === 0) return; const key = `${scope.kind}:${scope.id}`; const all = seen.get(key) ?? new Set<string>(); for (const a of attempts) all.add(a); seen.set(key, all); },
     unsupported: (scope) => (scope.kind === "task" || scope.kind === "agent" || members !== undefined ? undefined : `stopping a whole ${scope.kind} is not supported yet; stop its tasks or agents one by one (Force Stop works on each)`),
     inventory: async (scope, options) => inFlight(await attemptsOf(scope), scope, options?.lookOnly === true),
     release: async (scope) => { seen.delete(`${scope.kind}:${scope.id}`); const h = dispatch(); if (h === undefined) return; for (const id of await attemptsOf(scope)) await h.dispatcher.release(h.principal, id).catch(() => undefined); },
