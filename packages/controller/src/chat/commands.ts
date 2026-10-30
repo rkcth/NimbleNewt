@@ -215,6 +215,8 @@ export function describe(op: string, args: Readonly<Record<string, unknown>>, la
     const label = typeof value === "string" ? labels[value] : undefined;
     parts.push(`${key}=${label === undefined ? short(value) : `"${label}"`}`);
   }
-  const line = `${spec?.verb ?? op}${parts.length === 0 ? "" : `: ${parts.join(", ")}`}${op === "grant.create" ? " (permanent: no end time)" : ""}`;
+  // What the exception means is said before the details, so a long topic can never push it off the line.
+  const meaning = op === "meeting.invite-direct" ? " (this meeting only, then the agent is back as it was; no long-running work in it)" : "";
+  const line = `${spec?.verb ?? op}${meaning}${parts.length === 0 ? "" : `: ${parts.join(", ")}`}${op === "grant.create" ? " (permanent: no end time)" : ""}`;
   return line.length > CHAT_LIMITS.line ? `${line.slice(0, CHAT_LIMITS.line - 3)}...` : line;
 }

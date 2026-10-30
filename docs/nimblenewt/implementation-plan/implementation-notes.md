@@ -2698,3 +2698,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - **Watch cancel.** A `watchId` given directly is shown first and must be in the focused project; the task path is filtered by project too.
 - **Hand-off.** `unfinishedWork` is left unset when no effect was pending, so a package is not ready on "nothing known".
 - **Second pass.** The remembered attempts of a scope are dropped when its stop ends or is released (not kept for later stops); malformed runtime entries get distinct refs; refs are cut surrogate-safely. Decision kept: `unfinishedWork` is filled only from recorded pending effects, so a package of a task with a clean checkpoint is not "ready" without `acceptGaps` until a run-side source for unfinished work exists (pending effects are known unfinished work; silence is not). Still open: the remembered attempts are in memory, so a restart in the middle of a stop forgets one that ended during preparation.
+
+## M04f (part 2): the exception says what it means
+
+- The line shown for `meeting.invite-direct` now says first: "(this meeting only, then the agent is back as it was; no long-running work in it)", ahead of the details, so a long topic cannot push it off the line. Remaining in M04f: a wake path for agents the host reports stopped.

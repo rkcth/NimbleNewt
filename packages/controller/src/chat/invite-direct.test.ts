@@ -37,7 +37,9 @@ for (const backend of backends) {
       // The strict profile shows it first instead of doing it.
       w.profile.value = "strict";
       script["Please let Ann attend the build meeting."] = [cmd("meeting.invite-direct", { meetingTopic: "build", agentName: "Ann" }, "let Ann attend the build meeting")];
-      assert.equal((await say("Please let Ann attend the build meeting.")).status, "proposed");
+      const proposed = await say("Please let Ann attend the build meeting.");
+      assert.equal(proposed.status, "proposed");
+      assert.match(JSON.stringify(proposed), /this meeting only, then the agent is back as it was/);
       void made;
     } finally { await w.close(); }
   });
