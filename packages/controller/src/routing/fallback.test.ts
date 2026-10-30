@@ -69,8 +69,31 @@ for (const backend of backends) {
     const s3 = await fail(c, s2, "overloaded_error", 529, { usage: usage(200) });
     assert.deepEqual([route(s3), (s3 as { attempt: number }).attempt], ["gamma/three", 3]);
     await c.fb.succeeded(c.host, { commandId: cid("s"), callId: s1.callId, usage: usage(0) });
-    assert.deepEqual(await c.fb.spend(c.task), { costMicros: 700, tokens: 450, calls: 3 });
+    assert.deepEqual(await c.fb.spend(c.task), { costMicros: 700, tokens: 450, calls: 3, failures: 2 });
     await refuses("invalid_transition", () => c.fb.succeeded(c.host, { commandId: cid("s"), callId: s1.callId, usage: usage(0) }));
+  });
+
+  suite("switching route or rebuilding the context never resets the task's retry limit: failed attempts are counted across calls, and raising the limit lets it go on (card V02)", async (c) => {
+    await c.fb.setBudget(c.owner, { commandId: cid("bud"), taskId: c.task, maxFailedAttempts: 3 });
+    // The first call fails on two routes (an outage each).
+    const s1 = await c.fb.begin(c.host, { commandId: cid("b"), taskId: c.task, request });
+    const s2 = await fail(c, s1, "overloaded_error", 529);
+    route(s2);
+    await fail(c, s2, "overloaded_error", 529);
+    assert.equal((await c.fb.spend(c.task)).failures, 2, "counted with no usage report too");
+    // A new call (as after a rebuilt context) starts its own attempt count but not the task's: one more failure uses the limit up.
+    const s3 = await c.fb.begin(c.host, { commandId: cid("b"), taskId: c.task, request });
+    route(s3);
+    const s4 = await fail(c, s3, "overloaded_error", 529);
+    assert.equal(s4.kind, "wait");
+    assert.match((s4 as Extract<Step, { kind: "wait" }>).reason, /retry budget is used up/);
+    const s5 = await c.fb.begin(c.host, { commandId: cid("b"), taskId: c.task, request });
+    assert.equal(s5.kind, "wait", "a further call waits as well");
+    assert.match((s5 as Extract<Step, { kind: "wait" }>).why[0]!, /3 failed attempts of at most 3/);
+    // The owner raises it; only the owner can.
+    await refuses("forbidden", () => c.fb.setBudget(c.host, { commandId: cid("bud"), taskId: c.task, maxFailedAttempts: 10 }));
+    await c.fb.setBudget(c.owner, { commandId: cid("bud"), taskId: c.task, maxFailedAttempts: 10 });
+    route(await c.fb.begin(c.host, { commandId: cid("b"), taskId: c.task, request }));
   });
 
   suite("exhausted routes become a visible wait, and resume tries again when cooldowns or the table have changed", async (c) => {
@@ -146,7 +169,7 @@ for (const backend of backends) {
     const a = await c.fb.begin(c.host, { commandId: cid("b"), taskId: c.task, request });
     const b = await c.fb.begin(c.host, { commandId: cid("b"), taskId: c.task, request });
     await Promise.all([c.fb.succeeded(c.host, { commandId: cid("s"), callId: a.callId, usage: usage(300) }), c.fb.succeeded(c.host, { commandId: cid("s"), callId: b.callId, usage: usage(400) })]);
-    assert.deepEqual(await c.fb.spend(c.task), { costMicros: 700, tokens: 300, calls: 2 });
+    assert.deepEqual(await c.fb.spend(c.task), { costMicros: 700, tokens: 300, calls: 2, failures: 0 });
     await c.fb.setBudget(c.owner, { commandId: cid("g"), taskId: c.task, maxCostMicros: 1000 });
     const s = await c.fb.begin(c.host, { commandId: cid("b"), taskId: c.task, request });
     const out = await fail(c, s, "overloaded_error", 529, { usage: usage(400) });

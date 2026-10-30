@@ -65,8 +65,8 @@ export interface CallBody {
   readonly effects: readonly EffectState[];
   readonly createdBy: string;
 }
-export interface BudgetBody { readonly maxCostMicros?: number; readonly maxTokens?: number; readonly setBy: string }
-export interface SpendBody { readonly costMicros: number; readonly tokens: number; readonly calls: number }
+export interface BudgetBody { readonly maxCostMicros?: number; readonly maxTokens?: number; /** How many failed attempts the task may have in all, across calls, routes and rebuilt contexts. */ readonly maxFailedAttempts?: number; readonly setBy: string }
+export interface SpendBody { readonly costMicros: number; readonly tokens: number; readonly calls: number; /** Failed attempts (absent in entries written before they were counted). */ readonly failures?: number }
 export type Step =
   | { readonly kind: "route"; readonly callId: string; readonly route: string; readonly attempt: number; readonly doNotRepeat: readonly string[] }
   | { readonly kind: "wait"; readonly callId: string; readonly reason: string; readonly until?: string; readonly why: readonly string[] }
@@ -116,11 +116,11 @@ export class FallbackService {
   }
 
   /** The owner caps what a task may spend across all calls and fallbacks. */
-  async setBudget(owner: Principal, command: NoActor & { taskId: string; maxCostMicros?: number; maxTokens?: number }): Promise<void> {
+  async setBudget(owner: Principal, command: NoActor & { taskId: string; maxCostMicros?: number; maxTokens?: number; maxFailedAttempts?: number }): Promise<void> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner sets a spending budget`);
-    onlyKnown(command, ["commandId", "taskId", "maxCostMicros", "maxTokens"]);
+    onlyKnown(command, ["commandId", "taskId", "maxCostMicros", "maxTokens", "maxFailedAttempts"]);
     const taskId = checkTaskId(command.taskId);
-    const body: BudgetBody = { ...(command.maxCostMicros === undefined ? {} : { maxCostMicros: count(command.maxCostMicros, "maxCostMicros") }), ...(command.maxTokens === undefined ? {} : { maxTokens: count(command.maxTokens, "maxTokens") }), setBy: owner.id };
+    const body: BudgetBody = { ...(command.maxFailedAttempts === undefined ? {} : { maxFailedAttempts: count(command.maxFailedAttempts, "maxFailedAttempts") }), ...(command.maxCostMicros === undefined ? {} : { maxCostMicros: count(command.maxCostMicros, "maxCostMicros") }), ...(command.maxTokens === undefined ? {} : { maxTokens: count(command.maxTokens, "maxTokens") }), setBy: owner.id };
     const ref: AggregateRef = { kind: "model-budget", id: taskId };
     await this.#runner.command("model.budget", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
       payload: { taskId, budget: body as unknown as JsonObject },
@@ -134,10 +134,10 @@ export class FallbackService {
   /** What a task has spent: the sum of its calls' entries (each call writes only its own, so calls of one task never collide). */
   async spend(taskId: string): Promise<SpendBody> {
     const kind = spendKind(checkTaskId(taskId));
-    let total: SpendBody = { costMicros: 0, tokens: 0, calls: 0 };
+    let total: SpendBody = { costMicros: 0, tokens: 0, calls: 0, failures: 0 };
     for (let after: string | undefined; ;) {
       const page = await this.#runner.list(kind, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
-      for (const a of page) { after = a.id; const b = a.body as unknown as SpendBody; total = { costMicros: total.costMicros + b.costMicros, tokens: total.tokens + b.tokens, calls: total.calls + b.calls }; }
+      for (const a of page) { after = a.id; const b = a.body as unknown as SpendBody; total = { costMicros: total.costMicros + b.costMicros, tokens: total.tokens + b.tokens, calls: total.calls + b.calls, failures: (total.failures ?? 0) + (b.failures ?? 0) }; }
       if (page.length < 200) return total;
     }
   }
@@ -217,7 +217,8 @@ export class FallbackService {
         const allEffects = this.#mergeEffects(call.effects, effects);
         let next: CallBody;
         let extra: Change[] = [];
-        if (usage !== undefined) extra = await this.#charge(call.taskId, callId, usage);
+        // Every failed attempt is counted against the task, with or without a usage report, so a new call or a rebuilt context does not start the count again.
+        extra = await this.#charge(call.taskId, callId, usage ?? { inputTokens: 0, outputTokens: 0, costMicros: 0 }, usage !== undefined, 1);
         if (allEffects.some((e) => e.state === "uncertain")) {
           next = { ...call, attempts, effects: allEffects, state: "waiting", waiting: { reason: "an effect of the failed attempt is uncertain; it must be reconciled before any other route is tried", why: allEffects.filter((e) => e.state === "uncertain").map((e) => `effect ${e.id} is uncertain`) } };
         } else if (cls === "context-overflow" || cls === "invalid-request" || cls === "unknown") {
@@ -225,7 +226,7 @@ export class FallbackService {
         } else if (used(attempts) >= FALLBACK_LIMITS.attempts) {
           next = { ...call, attempts, effects: allEffects, state: "failed", ended: { reason: `${FALLBACK_LIMITS.attempts} attempts have failed`, why: attempts.map((a) => `${a.route}: ${a.failure?.class ?? a.outcome}`) } };
         } else {
-          const decided = await this.#decide(call.taskId, call.request, attempts, usage, undefined, false, callId);
+          const decided = await this.#decide(call.taskId, call.request, attempts, usage, undefined, false, callId, 1);
           next = decided.route === undefined
             ? { ...call, attempts, effects: allEffects, state: "waiting", waiting: decided.waiting! }
             : { ...call, attempts: [...attempts, { route: decided.route, at: this.#runner.now(), outcome: "started" }], effects: allEffects, state: "running", routingRevision: decided.revision, ...this.#position(decided, call.list) };
@@ -396,16 +397,16 @@ export class FallbackService {
     return [...map.values()].slice(0, FALLBACK_LIMITS.effects);
   }
 
-  async #charge(taskId: string, callId: string, usage: Usage, countCall = true): Promise<Change[]> {
+  async #charge(taskId: string, callId: string, usage: Usage, countCall = true, failure = 0): Promise<Change[]> {
     const ref: AggregateRef = { kind: spendKind(taskId), id: callId };
     const found = await this.#runner.get(ref.kind, ref.id);
     const before = (found?.body as unknown as SpendBody | undefined) ?? { costMicros: 0, tokens: 0, calls: 0 };
-    const body: SpendBody = { costMicros: before.costMicros + usage.costMicros, tokens: before.tokens + usage.inputTokens + usage.outputTokens, calls: before.calls + (countCall ? 1 : 0) };
+    const body: SpendBody = { costMicros: before.costMicros + usage.costMicros, tokens: before.tokens + usage.inputTokens + usage.outputTokens, calls: before.calls + (countCall ? 1 : 0), failures: (before.failures ?? 0) + failure };
     return [found === undefined ? { type: "create", ref, body: body as unknown as JsonObject } : { type: "update", ref, expectedRevision: found.revision, body: body as unknown as JsonObject }];
   }
 
   /** The next route for a call: the first eligible one not already tried (or whose cooldown has passed, on a resume), unless the budget is used up. */
-  async #decide(taskId: string, request: RouteRequest, attempts: readonly Attempt[], pending: Usage | undefined, resumeAt: number | undefined, clearBlocks = false, callId?: string): Promise<{ route?: string; revision: number; list?: { profile: string; routes: readonly string[] }; waiting?: NonNullable<CallBody["waiting"]> }> {
+  async #decide(taskId: string, request: RouteRequest, attempts: readonly Attempt[], pending: Usage | undefined, resumeAt: number | undefined, clearBlocks = false, callId?: string, pendingFailures = 0): Promise<{ route?: string; revision: number; list?: { profile: string; routes: readonly string[] }; waiting?: NonNullable<CallBody["waiting"]> }> {
     const budget = (await this.#runner.get("model-budget", taskId))?.body as unknown as BudgetBody | undefined;
     const before = await this.spend(taskId);
     const spent = pending === undefined ? before : { costMicros: before.costMicros + pending.costMicros, tokens: before.tokens + pending.inputTokens + pending.outputTokens, calls: before.calls + 1 };
@@ -414,6 +415,9 @@ export class FallbackService {
     const why: string[] = [];
     if (budget !== undefined && ((budget.maxCostMicros !== undefined && spent.costMicros >= budget.maxCostMicros) || (budget.maxTokens !== undefined && spent.tokens >= budget.maxTokens))) {
       return { revision: selection.revision, list, waiting: { reason: "the task's budget is used up; the owner can raise it", why: [`spent ${spent.costMicros} micros and ${spent.tokens} tokens`] } };
+    }
+    if (budget?.maxFailedAttempts !== undefined && (before.failures ?? 0) + pendingFailures >= budget.maxFailedAttempts) {
+      return { revision: selection.revision, list, waiting: { reason: "the task's retry budget is used up; the owner can raise it", why: [`${(before.failures ?? 0) + pendingFailures} failed attempts of at most ${budget.maxFailedAttempts}`] } };
     }
     const now = resumeAt ?? new Date(this.#runner.now()).getTime();
     let until: number | undefined;
