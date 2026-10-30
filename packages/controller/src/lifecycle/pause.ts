@@ -137,6 +137,8 @@ const plain = (value: unknown, field: string, max: number): string => {
 const SCOPE_KINDS: readonly PauseScopeKind[] = ["task", "agent", "team", "installation"];
 const AGENT_ID = /^agt-[a-z2-7]{20}$/;
 const TEAM_ID = /^team-[a-z2-7]{20}$/;
+/** Index of the gates that were given a resume time (card L06b): one small entry per scope, so the tick never reads gates that have none. */
+const TIMED_KIND = "pause-timed";
 const gateIdOf = (scope: PauseScope): string => derivedId("pgt", `${scope.kind}\0${scope.id}`);
 const requestIdOf = (gateId: string, seq: number): string => derivedId("prq", `${gateId}\0${seq}`);
 const sameScope = (a: PauseScope, b: PauseScope): boolean => a.kind === b.kind && a.id === b.id;
@@ -260,7 +262,12 @@ export class PauseService implements PauseGuard, PauseLookup {
         if (found === undefined || gate === undefined || gate.intent !== "pause") throw new DomainError("invalid_command", `${scope.kind} ${scope.id} is not paused; a condition is recorded for a pause that is in force`, { field: "scope" });
         if (gate.takenOver === true) throw new DomainError("invalid_command", `${scope.kind} ${scope.id} is being stopped or suspended; a pause that a stop took over is not lifted by a time`, { field: "scope" });
         const next: PauseGateBody = { ...gate, resumeAt: { at, setBy: principal.id, setAt: this.#runner.now() } };
-        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: clean(next) }], detail: { scope: scope as unknown as JsonObject, resumeAt: at } };
+        // The index of timed gates is written in the same operation, so the tick reads this list and not every gate.
+        const indexRef: AggregateRef = { kind: TIMED_KIND, id: gateId };
+        const indexed = await this.#runner.get(indexRef.kind, indexRef.id);
+        const entry = { scope: scope as unknown as JsonObject, at, active: true };
+        const indexChange: Change = indexed === undefined ? { type: "create", ref: indexRef, body: entry } : { type: "update", ref: indexRef, expectedRevision: indexed.revision, body: entry };
+        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: clean(next) }, indexChange], detail: { scope: scope as unknown as JsonObject, resumeAt: at } };
       },
     })));
     return { gateId, replayed: result.replayed };
@@ -298,18 +305,27 @@ export class PauseService implements PauseGuard, PauseLookup {
     const now = Date.parse(this.#runner.now());
     let after: string | undefined;
     for (;;) {
-      const page = await this.#runner.list("pause-gate", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
-      for (const a of page) {
-        after = a.id;
-        const gate = a.body as unknown as PauseGateBody;
-        if (gate.intent !== "pause" || gate.resumeAt === undefined || gate.takenOver === true || Date.parse(gate.resumeAt.at) > now) continue;
+      // Only the index of gates that were given a time is listed; a gate with none is never read.
+      const page = await this.#runner.list(TIMED_KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const entry of page) {
+        after = entry.id;
+        const hint = entry.body as unknown as { active?: boolean; at?: string };
+        if (hint.active !== true || typeof hint.at !== "string" || Date.parse(hint.at) > now) continue;
+        const found = await this.#runner.get("pause-gate", entry.id);
+        const gate = found?.body as unknown as PauseGateBody | undefined;
+        if (found === undefined || gate === undefined) continue;
+        if (gate.intent !== "pause" || gate.resumeAt === undefined || gate.takenOver === true) { await this.#retire(by, entry.id, entry.revision, hint.at, undefined); continue; }
+        // The gate was given another time since the index was written: the index follows it.
+        if (gate.resumeAt.at !== hint.at) { await this.#retire(by, entry.id, entry.revision, hint.at, gate.resumeAt.at); continue; }
+        if (Date.parse(gate.resumeAt.at) > now) continue;
         // A pause that has gone on to be suspended or stopped is not an ordinary pause any more.
         if (gate.observed !== undefined && ["preparing-to-suspend", "suspended", "stopping", "stopped", "recovery-required"].includes(gate.observed.state)) continue;
         try {
           await this.#hooks?.beforeLift?.(gate.scope);
-          await this.#request(by, `cond-${gate.requestId ?? a.id}`, "resume", gate.scope, `the owner's recorded condition (set by ${gate.resumeAt.setBy} at ${gate.resumeAt.setAt}): not before ${gate.resumeAt.at}`, undefined, gate.projectId, { requestId: gate.requestId, at: gate.resumeAt.at });
+          await this.#request(by, `cond-${gate.requestId ?? entry.id}`, "resume", gate.scope, `the owner's recorded condition (set by ${gate.resumeAt.setBy} at ${gate.resumeAt.setAt}): not before ${gate.resumeAt.at}`, undefined, gate.projectId, { requestId: gate.requestId, at: gate.resumeAt.at });
           lifted.push(gate.scope);
           onLifted?.(gate.scope);
+          await this.#retire(by, entry.id, entry.revision, hint.at, undefined);
         } catch (error) {
           // A gate resumed, paused again or given another time since it was read is no longer this condition's to lift. One gate that cannot be lifted does not hold up the others.
           if (error instanceof DomainError && error.code === "invalid_command") continue;
@@ -317,6 +333,26 @@ export class PauseService implements PauseGuard, PauseLookup {
         }
       }
       if (page.length < 200) { if (failure !== undefined) throw failure; return lifted; }
+    }
+  }
+
+  /** Brings one index entry in line with its gate: inactive when the gate holds no condition, or moved to the gate's new time. A lost race leaves the entry as it was; the next tick looks again. */
+  async #retire(by: Principal, gateId: string, revision: number, was: string, now: string | undefined): Promise<void> {
+    const ref: AggregateRef = { kind: TIMED_KIND, id: gateId };
+    try {
+      await this.#runner.command("pause.condition-index", { commandId: `idx-${gateId}-${revision}`, actor: by.id }, async () => {
+        const found = await this.#runner.get(ref.kind, ref.id);
+        const entry = found?.body as unknown as { scope: JsonObject; at: string; active: boolean } | undefined;
+        return {
+          payload: { gateId, was, now: now ?? null },
+          build: async () => {
+            if (found === undefined || entry === undefined || found.revision !== revision || entry.at !== was) throw new DomainError("invalid_command", "the index entry has moved", { field: "scope" });
+            return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: revision, body: { scope: entry.scope, at: now ?? was, active: now !== undefined } }], detail: { gateId, active: now !== undefined } };
+          },
+        };
+      });
+    } catch (error) {
+      if (!(error instanceof DomainError)) throw error;
     }
   }
 
