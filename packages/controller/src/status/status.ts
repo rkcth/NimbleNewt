@@ -187,6 +187,8 @@ export type StatusRequest =
   | { readonly kind: "explanations"; readonly taskId: string; readonly seq?: number; readonly limit?: number }
   | { readonly kind: "activity"; readonly taskId: string; readonly latest?: boolean; readonly after?: number; readonly limit?: number };
 
+interface NeedItem { text: string; cites: Cite[]; taskId?: string; since: string; id: string }
+
 // ---- service -------------------------------------------------------------------------------------------------------------------
 
 export interface StatusDeps {
@@ -468,47 +470,73 @@ export class StatusService {
 
   // ---- everything waiting for the owner (card U11b) -------------------------------------------------------------------------
 
-  /**
-   * One list of what waits for the owner's decision: agent questions, reviews only the owner can decide, and open blockers whose resolver is the owner. What other open tasks wait for comes first, then how many they are, then oldest first.
-   * `count` is the number found (each source is read up to 50); the lines are cut at `limit`. Owner only (anyone else: undefined).
-   */
-  async needsYou(by: Principal, limit?: number): Promise<{ readonly observedAt: string; readonly lines: readonly Line[]; readonly count: number } | undefined> {
-    if (by.kind !== "owner") return undefined;
-    const cap = limit === undefined ? 20 : Number.isSafeInteger(limit) && limit >= 1 && limit <= 50 ? limit : invalid("limit", "must be 1 to 50");
-    type Item = { text: string; cites: Cite[]; taskId?: string; since: string; id: string };
-    const items: Item[] = [];
+  /** What waits for the owner, unranked: agent questions, approvals only the owner can decide and blockers the owner resolves; what is about a finished or cancelled task is left out. */
+  async #needItems(by: Principal): Promise<{ items: NeedItem[]; taskOf: (id: string) => Promise<{ projectId: string; open: boolean } | undefined> }> {
+    const memo = new Map<string, { projectId: string; open: boolean } | undefined>();
+    const taskOf = async (id: string): Promise<{ projectId: string; open: boolean } | undefined> => {
+      if (!memo.has(id)) {
+        const t = (await this.#runner.get("task", id))?.body as unknown as { projectId: string; state: TaskState } | undefined;
+        memo.set(id, t === undefined ? undefined : { projectId: t.projectId, open: t.state !== "done" && t.state !== "cancelled" });
+      }
+      return memo.get(id);
+    };
+    const all: NeedItem[] = [];
     if (this.#deps.ownerQuestions !== undefined) {
       for (const q of (await this.#deps.ownerQuestions.ownerQuestions(by, { limit: 50 })).items) {
-        items.push({ text: `${shown(q.asker)} asks about "${shown(q.task.title)}": "${shown(q.question)}" (answer the question)`, cites: [cite("inquiry", q.inquiryId, q.revision), cite("task", q.task.id)], taskId: q.task.id, since: q.askedAt, id: q.inquiryId });
+        all.push({ text: `${shown(q.asker)} asks about "${shown(q.task.title)}": "${shown(q.question)}" (answer the question)`, cites: [cite("inquiry", q.inquiryId, q.revision), cite("task", q.task.id)], taskId: q.task.id, since: q.askedAt, id: q.inquiryId });
       }
     }
     if (this.#deps.reviews !== undefined) {
       for (const r of await this.#deps.reviews.ownerPending(by, 50)) {
-        items.push({ text: `An approval of "${shown(r.name)}" is waiting for you (allow or deny it)`, cites: [cite("review", r.id), cite("task", r.taskId)], taskId: r.taskId, since: r.requestedAt, id: r.id });
+        all.push({ text: `An approval of "${shown(r.name)}" is waiting for you (allow or deny it)`, cites: [cite("review", r.id), cite("task", r.taskId)], taskId: r.taskId, since: r.requestedAt, id: r.id });
       }
     }
-    for (const b of (await this.#deps.blockers.list({ limit: 50, openOnly: true })).items) {
-      if (b.resolver !== "owner") continue;
-      const onTask = b.subject.kind === "task";
-      items.push({ text: `${shown(b.summary)} (${b.type}; resolve it or give what is missing)`, cites: [cite("blocker", b.id), ...(onTask ? [cite("task", b.subject.id)] : [])], ...(onTask ? { taskId: b.subject.id } : {}), since: b.openedAt, id: b.id });
+    // The owner's blockers are looked for through all the open ones (the others are the agents' to resolve), up to 50 found.
+    let owned = 0;
+    for (let after: string | undefined, pages = 0; owned < 50 && pages < 20; pages++) {
+      const page = await this.#deps.blockers.list({ ...(after === undefined ? {} : { afterId: after }), limit: 200, openOnly: true });
+      for (const b of page.items) {
+        if (b.resolver !== "owner" || owned >= 50) continue;
+        owned++;
+        const onTask = b.subject.kind === "task";
+        all.push({ text: `${shown(b.summary)} (${b.type}; resolve it or give what is missing)`, cites: [cite("blocker", b.id), ...(onTask ? [cite("task", b.subject.id)] : [])], ...(onTask ? { taskId: b.subject.id } : {}), since: b.openedAt, id: b.id });
+      }
+      if (page.next === undefined) break;
+      after = page.next;
     }
-    // How many other open tasks wait, directly or through others, for the task an item is about.
-    const reverse = new Map<string, Map<string, string[]>>();
-    const taskOf = async (id: string): Promise<{ projectId: string; open: boolean } | undefined> => {
-      const t = (await this.#runner.get("task", id))?.body as unknown as { projectId: string; state: TaskState } | undefined;
-      return t === undefined ? undefined : { projectId: t.projectId, open: t.state !== "done" && t.state !== "cancelled" };
+    const items: NeedItem[] = [];
+    for (const i of all) if (i.taskId === undefined || (await taskOf(i.taskId))?.open !== false) items.push(i);
+    return { items, taskOf };
+  }
+
+  /** How many things wait for the owner (for the count in a reply); no ranking is done. Owner only (anyone else: 0). */
+  async needsYouCount(by: Principal): Promise<number> {
+    return by.kind !== "owner" ? 0 : (await this.#needItems(by)).items.length;
+  }
+
+  /**
+   * One list of what waits for the owner's decision: agent questions, reviews only the owner can decide, and open blockers whose resolver is the owner. What other open tasks wait for comes first, then how many they are, then oldest first.
+   * `count` is the number found (each source up to 50); the lines are cut at `limit`. Owner only (anyone else: undefined).
+   */
+  async needsYou(by: Principal, limit?: number): Promise<{ readonly observedAt: string; readonly lines: readonly Line[]; readonly count: number } | undefined> {
+    if (by.kind !== "owner") return undefined;
+    const cap = limit === undefined ? 20 : Number.isSafeInteger(limit) && limit >= 1 && limit <= 50 ? limit : invalid("limit", "must be 1 to 50");
+    const { items, taskOf } = await this.#needItems(by);
+    // How many other open tasks wait, directly or through others, for the task an item is about (the edges of a project are read once).
+    const reverse = new Map<string, Promise<Map<string, string[]>>>();
+    const reverseOf = (projectId: string): Promise<Map<string, string[]>> => {
+      let r = reverse.get(projectId);
+      if (r === undefined) {
+        r = this.#deps.contracts.activeEdges(projectId).then((edges) => { const m = new Map<string, string[]>(); for (const e of edges) m.set(e.prerequisiteId, [...(m.get(e.prerequisiteId) ?? []), e.taskId]); return m; });
+        reverse.set(projectId, r);
+      }
+      return r;
     };
-    const openMemo = new Map<string, boolean>();
-    const blockedBy = async (item: Item): Promise<number> => {
+    const blockedBy = async (item: NeedItem): Promise<number> => {
       if (item.taskId === undefined) return 0;
       const t = await taskOf(item.taskId);
       if (t === undefined) return 0;
-      let rev = reverse.get(t.projectId);
-      if (rev === undefined) {
-        rev = new Map();
-        for (const e of await this.#deps.contracts.activeEdges(t.projectId)) rev.set(e.prerequisiteId, [...(rev.get(e.prerequisiteId) ?? []), e.taskId]);
-        reverse.set(t.projectId, rev);
-      }
+      const rev = await reverseOf(t.projectId);
       const seen = new Set<string>([item.taskId]);
       const queue = [item.taskId];
       let n = 0;
@@ -516,13 +544,13 @@ export class StatusService {
         for (const next of rev.get(queue.shift()!) ?? []) {
           if (seen.has(next)) continue;
           seen.add(next);
-          if (!openMemo.has(next)) openMemo.set(next, (await taskOf(next))?.open === true);
-          if (openMemo.get(next) === true) { n++; queue.push(next); }
+          if ((await taskOf(next))?.open === true) { n++; queue.push(next); }
         }
       }
       return n;
     };
-    const ranked = await Promise.all(items.map(async (i) => ({ i, blocked: await blockedBy(i) })));
+    const ranked: { i: NeedItem; blocked: number }[] = [];
+    for (const i of items) ranked.push({ i, blocked: await blockedBy(i) });
     ranked.sort((a, b) => b.blocked - a.blocked || (a.i.since < b.i.since ? -1 : a.i.since > b.i.since ? 1 : a.i.id < b.i.id ? -1 : 1));
     const lines: Line[] = ranked.slice(0, cap).map(({ i, blocked }) => line(`${i.text}${blocked > 0 ? `; ${blocked} other open task${blocked === 1 ? " waits" : "s wait"} for it` : ""}; since ${i.since}.`, ...i.cites));
     if (lines.length === 0) lines.push(line("Nothing is waiting for you."));

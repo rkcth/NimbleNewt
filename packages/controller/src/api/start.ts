@@ -389,7 +389,7 @@ export async function startController(options: StartOptions): Promise<Controller
       const policy = PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) });
       const policyEdits = PolicyEditService.withEpoch(storage, epoch, { policy, reviews, grants, configuration, conversations, interpreter: o.interpreter });
       policyEditsLive = policyEdits;
-      chat = ChatService.withEpoch(storage, epoch, { principals, api, interpreter: o.interpreter, policy, status, policyEdits, coordinator: () => coordinator, waiting: async (owner) => (await messages.ownerQuestions(owner, { limit: 50 })).items.length, needing: async (owner) => (await status.needsYou(owner, 1))?.count ?? 0, ...(o.coordinator === undefined ? {} : { coordinatorToken: o.coordinator.token }) });
+      chat = ChatService.withEpoch(storage, epoch, { principals, api, interpreter: o.interpreter, policy, status, policyEdits, coordinator: () => coordinator, waiting: async (owner) => (await messages.ownerQuestions(owner, { limit: 50 })).items.length, needing: (owner) => status.needsYouCount(owner), ...(o.coordinator === undefined ? {} : { coordinatorToken: o.coordinator.token }) });
       if (o.coordinator !== undefined) {
         const c = o.coordinator;
         coordinator = CoordinatorService.withEpoch(storage, epoch, {

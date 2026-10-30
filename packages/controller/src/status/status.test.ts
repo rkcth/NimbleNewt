@@ -969,9 +969,20 @@ for (const backend of backends) {
     assert.match(got.lines[2]!.text, /approval of "tool\.deploy"/);
     assert.match(got.lines[3]!.text, /lone task/);
     assert.deepEqual(got.lines[2]!.cites.map((x) => [x.kind, x.id]), [["review", "rev-9"], ["task", d]]);
-    // Finished tasks no longer count as waiting; a bad limit or key is refused; nobody else sees the list.
-    await c.projects.transitionTask({ commandId: cid("x"), actor: c.owner.id, taskId: d, to: "cancelled" } as never).catch(() => undefined);
+    assert.equal(await status.needsYouCount(c.owner), 4);
+    assert.equal(await status.needsYouCount(await c.agent("eve0", [{ action: "task.read", project: "*" }])), 0);
     assert.equal((await status.ask(c.owner, { kind: "needs_you", limit: 2 }))!.lines.length, 3, "two items and the note that more are waiting");
+    // What is about a task that has been cancelled no longer waits, and no longer holds anything up.
+    const dRev = (await c.projects.getTask(d))!.revision;
+    await c.projects.transitionTask({ commandId: cid("x"), actor: c.owner.id, taskId: d, expectedRevision: dRev, to: "cancelled" });
+    const later = (await status.needsYou(c.owner))!;
+    assert.equal(later.count, 3, "the approval of the cancelled task is gone");
+    assert.doesNotMatch(later.lines.map((l) => l.text).join("\n"), /tool\.deploy/);
+    assert.match(later.lines[0]!.text, /root.*1 other open task waits for it/, "the leaf no longer counts");
+    // Owner blockers are found behind many that agents resolve.
+    for (let i = 0; i < 55; i++) await c.blockers.openBlocker({ commandId: `ag-${i}`, actor: c.owner.id, type: "manual_hold", subject: { kind: "task", id: await c.work(`Agent job ${i}`) }, summary: `agent ${i}`, resolver: "agent:ann" });
+    await c.blockers.openBlocker({ commandId: "ny-late", actor: c.owner.id, type: "manual_hold", subject: { kind: "task", id: await c.work("Late job") }, summary: "Late owner hold", resolver: "owner" });
+    assert.match((await status.needsYou(c.owner, 50))!.lines.map((l) => l.text).join("\n"), /Late owner hold/);
     await assert.rejects(status.ask(c.owner, { kind: "needs_you", limit: 0 }));
     const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
     assert.equal(await status.ask(reader, { kind: "needs_you" }), undefined);

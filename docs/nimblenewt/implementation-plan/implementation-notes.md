@@ -2772,3 +2772,9 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## U09 (part 2): gaps in the timeline
 
 - `ActivityService.timeline` now also returns `gaps` (steps in the looked-at range whose records are gone, with the reason) and the chat/status `timeline` view tells them as "Step N of a task is no longer available: reason", so a gap is not mistaken for a quiet stretch. A gone step has no known actor, so with an `agent` filter no gaps are listed. Remaining in U09 (to split into U09b when flipped): replay that causes no effect, simulation as a separate command, proposed/dispatched/confirmed/uncertain and concurrent branches kept distinct in the view, superseded decisions marked, the same checks for search/summary/export, "what led to this change" links, collapsed thinking and its retention wording, branch and agent navigation, the web view.
+
+## Batch 13 review fixes
+
+- **U11b.** The owner's blockers are looked for through all open blockers (pages of 200, up to 50 found), not only the first 50. What is about a finished or cancelled task is left out and no longer counts as holding anything up. The count in a chat reply uses `needsYouCount` (no ranking, no dependency walk); the ranking reads each project's edges once. Known: each source is read up to 50 (reviews up to 10,000 records scanned, then silently stop); the count is the number found, not an exact total.
+- **U09.** `gaps` are left out when the timeline is filtered by time as well as agent, since a gone step has no known time.
+- Known: the L06 reboot test pauses before anything has started; it does not cover a recovery that restarts an attempt already running when the pause began.

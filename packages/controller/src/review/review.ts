@@ -249,11 +249,6 @@ export class ReviewService {
     return { id: r.id, replayed: r.replayed, cleared: r.id !== id };
   }
 
-  /**
-   * A reviewer gives one of four verdicts. Only the reviewer the review is assigned to (or the owner) may decide a pending review, never its requester or a contributor to the work, and
-   * only the owner may decide one that is reserved for the owner or sent to the owner. `allow` needs the essential context (tool version, authority source, expected effects); without it
-   * the verdict is refused, and the reviewer can ask for it with `request-context`.
-   */
   /** The reviews only the owner can decide, oldest first (up to `limit`), for the owner alone (card U11b). */
   async ownerPending(owner: Principal, limit = 50): Promise<{ id: string; taskId: string; projectId: string; name: string; requestedAt: string }[]> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", "only the owner lists the reviews waiting for them");
@@ -271,6 +266,11 @@ export class ReviewService {
     return out.sort((x, y) => (x.requestedAt < y.requestedAt ? -1 : x.requestedAt > y.requestedAt ? 1 : x.id < y.id ? -1 : 1)).slice(0, limit);
   }
 
+  /**
+   * A reviewer gives one of four verdicts. Only the reviewer the review is assigned to (or the owner) may decide a pending review, never its requester or a contributor to the work, and
+   * only the owner may decide one that is reserved for the owner or sent to the owner. `allow` needs the essential context (tool version, authority source, expected effects); without it
+   * the verdict is refused, and the reviewer can ask for it with `request-context`.
+   */
   async decide(reviewer: Principal, command: Decide): Promise<void> {
     onlyKnown(command, ["commandId", "requestId", "expectedRevision", "verdict", "reason", "expiresAt", "cost"]);
     const id = this.#id(command.requestId);
