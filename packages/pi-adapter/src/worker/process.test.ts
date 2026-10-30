@@ -3,7 +3,7 @@ import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { MemoryStorage } from "@earendil-works/pi-durable";
-import { LineDecoder, encodeMessage, parseFromChild, parseToChild, type ChannelStart, type FromChild, type ToChild } from "@nimblenewt/contracts";
+import { LeaseWatchdog, LineDecoder, encodeMessage, parseFromChild, parseToChild, type ChannelStart, type FromChild, type ToChild } from "@nimblenewt/contracts";
 import { createOfflineModels } from "../testing/offline.js";
 import { runWorker, type WorkerHooks } from "./process.js";
 
@@ -249,4 +249,51 @@ test("the host's context limits reach Pi's policy; the extractive fallback never
   const line = (context: unknown): string => JSON.stringify({ t: "start", v: 1, start: { ...start, context } });
   assert.deepEqual(parseToChild(JSON.parse(line({ streamTimeoutMs: 60_000, compaction: { fallback: "extractive" } }))) !== undefined, true);
   for (const bad of [{ streamTimeoutMs: 5 }, { streamMaxRetries: 99 }, { toolOutputBytes: -1 }, { compaction: { fallback: "model" } }, { compaction: { timeoutMs: 1 } }]) assert.throws(() => parseToChild(JSON.parse(line(bad))), /./, JSON.stringify(bad));
+});
+
+/** A clock the test moves (card H08b): `sleep` moves wall time only. */
+function fakeClock() {
+  const c = { m: 1000, w: 1_700_000_000_000 };
+  return { mono: () => c.m, wall: () => c.w, advance: (ms: number) => { c.m += ms; c.w += ms; }, sleep: (ms: number) => { c.w += ms; } };
+}
+const leased: ChannelStart = { ...offlineStart, lease: { leaseMs: 20_000, graceMs: 5000 } };
+
+test("a lease that ends while a turn waits stops the turn, answers its pending call as unavailable, records the reason as the result and needs no termination (card H08b)", async () => {
+  const { offline, hooks } = scripted();
+  offline.faux.setResponses([fauxAssistantMessage(fauxToolCall("nimblenewt__desk-read", { recordId: "dsk-aaaaaaaaaaaaaaaaaaaa" }, { id: "c1" }), { stopReason: "toolUse" }), fauxAssistantMessage("never reached")]);
+  const k = fakeClock(); let dog: LeaseWatchdog | undefined; const ended: string[] = [];
+  const h = host({ ...hooks, lease: { clock: k, tickMs: 0, onWatchdog: (d) => { dog = d; }, terminate: (r) => { ended.push(r); } } });
+  h.send({ t: "start", v: 1, start: leased });
+  await h.next("ready");
+  h.send({ t: "run", requestId: "req-1", content: "work" });
+  await h.next("bridge");
+  k.advance(19_000); await dog!.tick();
+  assert.equal(dog!.productive, true, "still inside the lease");
+  k.advance(2000); await dog!.tick();
+  const result = await h.next("result");
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /^lease lost \(silent\)/);
+  assert.equal(h.seen.filter((m) => m.t === "bridge").length, 1, "no call left the process after the loss");
+  k.advance(60_000); await dog!.tick();
+  assert.deepEqual(ended, [], "it wound down on its own, so it is not killed");
+  h.send({ t: "close" });
+  await h.done;
+});
+
+test("a machine that slept loses the lease as 'wake' before any turn runs; the loss is told to the host and a later run is refused with that reason (card H08b)", async () => {
+  const { hooks } = scripted();
+  const k = fakeClock(); let dog: LeaseWatchdog | undefined;
+  const h = host({ ...hooks, lease: { clock: k, tickMs: 0, onWatchdog: (d) => { dog = d; } } });
+  h.send({ t: "start", v: 1, start: leased });
+  await h.next("ready");
+  k.sleep(60_000); await dog!.tick();
+  assert.equal(dog!.reason, "wake");
+  const told = await h.next("result");
+  assert.match(told.error ?? "", /^lease lost \(wake\)/);
+  h.send({ t: "run", requestId: "req-1", content: "work" });
+  const second = await h.next("result", h.seen.indexOf(told) + 1);
+  assert.match(second.error ?? "", /^lease lost \(wake\)/);
+  assert.equal(h.seen.some((m) => m.t === "bridge"), false);
+  h.send({ t: "close" });
+  await h.done;
 });

@@ -60,6 +60,11 @@ export interface ChannelStart {
   /** The address the process uses for model calls. Calls to anything else fail: the sandbox has no network. */
   readonly relayBase: string;
   readonly context?: ChannelContext;
+  /**
+   * The lease the controller meant for this attempt, as a duration (card H08b): the process counts it from the moment it reads the start, on its own monotonic clock, so a wrong wall clock changes nothing. Without it the process runs no watchdog.
+   * `graceMs` is how long after work stops the process ends itself if it has not wound down.
+   */
+  readonly lease?: { readonly leaseMs: number; readonly graceMs: number };
 }
 
 export type BridgeReplyMessage = { readonly ok: true; readonly result: Obj } | { readonly ok: false; readonly code: string; readonly message: string };
@@ -123,12 +128,15 @@ function parseStart(o: Obj): ChannelStart {
   if (retention !== undefined && retention !== "none" && retention !== "short" && retention !== "long") fail("cache.retention: none, short or long");
   const key = c === undefined ? undefined : optStr(c, "key", 200);
   const context = o["context"] === undefined ? undefined : parseContext(obj(o, "context"));
+  const leaseObj = o["lease"] === undefined ? undefined : obj(o, "lease");
+  const lease = leaseObj === undefined ? undefined : { leaseMs: bounded(leaseObj, "leaseMs", 1000, 3_600_000) ?? fail("lease.leaseMs: required"), graceMs: bounded(leaseObj, "graceMs", 0, 600_000) ?? fail("lease.graceMs: required") };
   return {
     attemptId: str(o, "attemptId", 200), agentId: str(o, "agentId", 200), namespaceId: /^[a-z0-9]{6,32}$/.test(str(o, "namespaceId", 40)) ? (o["namespaceId"] as string) : fail("namespaceId: 6 to 32 lower-case letters or digits"), credential: str(o, "credential", 4096),
     storeDir: str(o, "storeDir", 1000), model,
     ...(c === undefined ? {} : { cache: { ...(key === undefined ? {} : { key }), ...(retention === undefined ? {} : { retention: retention as "none" | "short" | "long" }) } }),
     relayBase: str(o, "relayBase", 500),
     ...(context === undefined ? {} : { context }),
+    ...(lease === undefined ? {} : { lease }),
   };
 }
 

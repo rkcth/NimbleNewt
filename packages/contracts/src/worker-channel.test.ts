@@ -57,3 +57,12 @@ test("a credential and the host's own fields are not part of a start the process
   assert.deepEqual(Object.keys((parsed as { start: ChannelStart }).start).sort(), ["agentId", "attemptId", "cache", "credential", "model", "namespaceId", "relayBase", "storeDir"]);
   assert.deepEqual(Object.keys((parsed as { start: ChannelStart }).start.model).sort(), ["alias", "api", "contextWindow", "input", "maxTokens", "modelId", "provider", "reasoning"]);
 });
+
+test("a start may carry the lease as a duration and a grace; bad or partial leases are refused (card H08b)", () => {
+  const ok = parseToChild(JSON.parse(JSON.stringify({ t: "start", v: 1, start: { ...start, lease: { leaseMs: 20_000, graceMs: 5000 } } })));
+  assert.deepEqual((ok as { start: ChannelStart }).start.lease, { leaseMs: 20_000, graceMs: 5000 });
+  assert.equal((parseToChild(JSON.parse(JSON.stringify({ t: "start", v: 1, start }))) as { start: ChannelStart }).start.lease, undefined);
+  for (const lease of [{ leaseMs: 20_000 }, { graceMs: 5 }, { leaseMs: 5, graceMs: 5 }, { leaseMs: "20000", graceMs: 5 }, { leaseMs: 10_000_000, graceMs: 5 }, []]) {
+    assert.throws(() => parseToChild(JSON.parse(JSON.stringify({ t: "start", v: 1, start: { ...start, lease } }))), ChannelError);
+  }
+});

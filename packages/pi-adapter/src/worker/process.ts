@@ -2,7 +2,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, createProvider, type Models } from "@earendil-works/pi-ai";
 import { openNodeJsonlStorage } from "@earendil-works/pi-durable/storage/jsonl/node";
 import type { Storage } from "@earendil-works/pi-durable";
-import { ChannelError, LineDecoder, WORKER_CHANNEL_VERSION, encodeMessage, parseToChild, requestId, type ChannelStart, type FromChild, type ToChild } from "@nimblenewt/contracts";
+import { ChannelError, LeaseWatchdog, LineDecoder, WORKER_CHANNEL_VERSION, encodeMessage, parseToChild, requestId, type ChannelStart, type FromChild, type LossReason, type ToChild, type WatchdogClock } from "@nimblenewt/contracts";
 import { PiAdapter } from "../adapter.js";
 import type { AdapterContextPolicy } from "../context-policy.js";
 import { boundTransport, composeTools, createBridge, type Bridge, type BridgeReply } from "../bridge.js";
@@ -25,6 +25,16 @@ export interface WorkerHooks {
   /** The models for the attempt. Default: one provider whose model calls go through the relay (`fetch`). Tests give a scripted one. */
   readonly models?: (start: ChannelStart, fetch: typeof globalThis.fetch) => Promise<Models> | Models;
   readonly storage?: (directory: string) => Promise<Storage> | Storage;
+  /** The lease watchdog's seams (card H08b); it runs only when the start carries a lease. Tests give a fake clock, a tick they drive themselves and a `terminate` that does not end the test process. */
+  readonly lease?: {
+    readonly clock?: WatchdogClock;
+    /** Milliseconds between the watchdog's looks at its clocks. Default 1000. 0: no timer (the test calls `onWatchdog` itself). */
+    readonly tickMs?: number;
+    /** Receives the watchdog so a test can drive it. */
+    readonly onWatchdog?: (dog: LeaseWatchdog) => void;
+    /** Ends the process after the grace when it has not wound down. Default: exit code 75. */
+    readonly terminate?: (reason: LossReason) => void;
+  };
 }
 
 /** The Pi API implementations the process can speak, loaded when a route names one. */
@@ -101,17 +111,39 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
   const realFetch = globalThis.fetch;
   let running: Promise<void> | undefined;
   let closed = false;
+  let dog: LeaseWatchdog | undefined;
+  let stopTicking: (() => void) | undefined;
+  let turnOpen = false;
 
   const fault = (message: string, id?: number): void => send({ t: "fault", ...(id === undefined ? {} : { id }), message: message.slice(0, 3900) });
 
+  /** Authority is gone (card H08b): the turn is aborted, no further call leaves the process, and the reason is the turn's recorded result. */
+  const authorityLost = async (reason: LossReason): Promise<void> => {
+    relay?.closeAll(`the lease ended (${reason})`);
+    for (const resolve of bridgeWaiting.values()) resolve({ ok: false, code: "unavailable", message: `the lease ended (${reason})` });
+    bridgeWaiting.clear();
+    try { await adapter?.root().abort(); } catch { /* the turn's result below is what is reported */ }
+    // A turn that is running reports in its own `finally`-path; with none running the loss is told here. Either way the process is quiet once it has told the host.
+    if (!turnOpen) { send({ t: "result", status: "failed", error: `lease lost (${reason}): the attempt's authority ended before a turn ran` }); dog?.quiet(); }
+  };
+
   const begin = async (start: ChannelStart): Promise<void> => {
     started = start;
+    if (start.lease !== undefined) {
+      // The lease counts from now on this process's own monotonic clock: the controller sent a duration, so a wrong wall clock here changes nothing.
+      dog = new LeaseWatchdog({ ...(hooks.lease?.clock === undefined ? {} : { clock: hooks.lease.clock }), maxLeaseMs: start.lease.leaseMs, graceMs: start.lease.graceMs, onStop: authorityLost, onTerminate: (reason) => { if (hooks.lease?.terminate !== undefined) hooks.lease.terminate(reason); else process.exit(75); } }, start.lease.leaseMs);
+      const tickMs = hooks.lease?.tickMs ?? 1000;
+      if (tickMs > 0) stopTicking = dog.run(tickMs);
+      hooks.lease?.onWatchdog?.(dog);
+    }
     relay = relayFetch(start.relayBase, send);
     // Whatever Pi's SDK uses to reach the model goes through the relay: nothing in the process can reach anything else.
     globalThis.fetch = relay.fetch;
     const models = await (hooks.models ?? ((s) => relayModels(s)))(start, relay.fetch);
     const storage = await (hooks.storage ?? ((dir) => openNodeJsonlStorage(dir, BACKGROUND_CONTEXT)))(start.storeDir);
     const transport = boundTransport(start.credential, (token, request) => new Promise<BridgeReply>((resolve) => {
+      // Nothing productive starts once the lease is gone, and the reply says why.
+      if (dog !== undefined && !dog.productive) return resolve({ ok: false, code: "unavailable", message: `the lease ended (${dog.reason})` });
       const id = ++nextBridge;
       bridgeWaiting.set(id, resolve);
       send({ t: "bridge", id, token, request: { op: request.op, callId: request.callId, ...(request.args === undefined ? {} : { args: request.args as never }) } });
@@ -132,18 +164,21 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
 
   const turn = async (requestIdText: string, content: string): Promise<void> => {
     if (adapter === undefined || started === undefined) return fault("the process was not started");
+    turnOpen = true;
     try {
+      if (dog !== undefined) await dog.assertProductive();
       // The request opens with a snapshot of the catalogue's declarations, which go to the model in the volatile context after the stable prompt. A tool registered while the request is in flight appears in the next request's snapshot.
       let shown = "";
       try { await bridge!.declarations.openRequest(requestIdText); shown = bridge!.declarations.textOf(requestIdText); } catch { /* the model works without the list; it can still ask tool-discover */ }
       const handle = await adapter.root().submit({ kind: "input", requestId: requestId(requestIdText), content: shown === "" ? content : `${content}\n\n${volatileContext(shown)}` });
       const result = await handle.result();
-      if (result.status === "completed") send({ t: "result", status: "completed", text: result.text });
+      if (dog !== undefined && !dog.productive) send({ t: "result", status: "failed", error: `lease lost (${dog.reason}): the turn was stopped` });
+      else if (result.status === "completed") send({ t: "result", status: "completed", text: result.text });
       else if (result.status === "unanswered" && result.reason === "aborted") send({ t: "result", status: "cancelled" });
       else send({ t: "result", status: "failed", error: result.status === "unanswered" ? `the model did not answer (${result.reason}${"detail" in result && typeof result.detail === "string" ? `: ${result.detail}` : ""})` : `the turn ended as ${result.status}` });
     } catch (error) {
-      send({ t: "result", status: "failed", error: String((error as Error)?.message ?? error).slice(0, 2000) });
-    } finally { bridge?.declarations.closeRequest(requestIdText); }
+      send({ t: "result", status: "failed", error: dog !== undefined && !dog.productive ? `lease lost (${dog.reason}): the turn was stopped` : String((error as Error)?.message ?? error).slice(0, 2000) });
+    } finally { turnOpen = false; bridge?.declarations.closeRequest(requestIdText); dog?.quiet(); }
   };
 
   const handle = async (message: ToChild): Promise<void> => {
@@ -197,6 +232,7 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
   } catch (error) {
     if (error instanceof ChannelError) fault(error.message);
   } finally {
+    stopTicking?.();
     relay?.closeAll("the channel closed");
     for (const resolve of bridgeWaiting.values()) resolve({ ok: false, code: "unavailable", message: "the channel closed" });
     bridgeWaiting.clear();
