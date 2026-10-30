@@ -2217,10 +2217,38 @@
       "existing_issue": "AII-257",
       "title": "Record activity: artifact versions, chat, explanation index",
       "depends_on": [
-        "C09f",
-        "H12k"
+        "C09f"
       ],
       "deliverable": "Split from C09f (2026-10-29): artifact-version steps, chat access, the per-task explanation index",
+      "acceptance_and_verification": "Each step of a real run appears in the activity record",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "97cbf3d"
+        ],
+        "ci_runs": [
+          "40998470231"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "An artifact published for a task by a remote worker is an artifact-version step of its activity.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "C09h",
+      "parent": "N07",
+      "existing_issue": "AII-257",
+      "title": "Record activity: local worker artifacts, chat access, explanation index",
+      "depends_on": [
+        "C09g",
+        "H12k"
+      ],
+      "deliverable": "Split from C09g (2026-10-29): artifact steps for local workers, chat access, the per-task explanation index",
       "acceptance_and_verification": "Each step of a real run appears in the activity record",
       "status": "planned",
       "research_evidence": null,
@@ -2576,6 +2604,35 @@
       ],
       "deliverable": "Split from L03d (2026-10-29): chat commands, package sections from continuation, locks, drafts, temporary reassignment with auto-return, responsibilities",
       "acceptance_and_verification": "A temporary reassignment returns on its own",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "e0e68bb",
+          "e6f6fc9"
+        ],
+        "ci_runs": [
+          "40998470231"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "A temporary reassignment returns by itself, as the one who asked, if they still hold the right and the task is where the hand-off left it.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "L03f",
+      "parent": "N05",
+      "existing_issue": "AII-255",
+      "title": "Finish hand-off: chat, richer package, locks, drafts",
+      "depends_on": [
+        "L03e"
+      ],
+      "deliverable": "Split from L03e (2026-10-29): chat commands, package sections from continuation, locks, drafts, responsibilities",
+      "acceptance_and_verification": "The owner can hand a task over, or cover it for a time, in chat",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -3708,10 +3765,39 @@
       "existing_issue": "AII-260",
       "title": "Finish event watching: real sources, chat",
       "depends_on": [
-        "H13d",
-        "H12k"
+        "H13d"
       ],
       "deliverable": "Split from H13d (2026-10-29): choose and configure the sources a real installation polls, the owner chat command",
+      "acceptance_and_verification": "Events from a real source wake the right agent",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "4af7fb6",
+          "e6f6fc9"
+        ],
+        "ci_runs": [
+          "40998470231"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "A built-in task-completion source reports each later closing once, with a baseline, a cursor and bounded memory.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "H13f",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Finish event watching: other real sources, choosing sources in settings, chat",
+      "depends_on": [
+        "H13e",
+        "H12k"
+      ],
+      "deliverable": "Split from H13e (2026-10-29): repository, file, service-health and timer sources chosen in settings, the owner chat command",
       "acceptance_and_verification": "Events from a real source wake the right agent",
       "status": "planned",
       "research_evidence": null,
@@ -5101,6 +5187,34 @@
       ],
       "deliverable": "Split from U12c (2026-10-29): deliver at the stand-up boundary, chat presentation of owner questions",
       "acceptance_and_verification": "The owner sees the question in chat and a stand-up boundary delivers messages",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "186db4f"
+        ],
+        "ci_runs": [
+          "40998470231"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "The stand-up brief tells each agent how many messages wait for it.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "U12e",
+      "parent": "N10a",
+      "existing_issue": "AII-520",
+      "title": "Finish agent messages: chat presentation of owner questions",
+      "depends_on": [
+        "U12d"
+      ],
+      "deliverable": "Split from U12d (2026-10-29): chat presentation of owner questions",
+      "acceptance_and_verification": "The owner sees the question in chat",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -5533,6 +5647,34 @@
       ],
       "deliverable": "Split from M03d (2026-10-29): agenda outcomes to chat turns and inquiries, the notice/allocation/usage/owner-item sinks, the owner told of decisions still untold after some days, chat commands",
       "acceptance_and_verification": "A stand-up runs end to end in the running controller",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "f14ec51"
+        ],
+        "ci_runs": [
+          "40998470231"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "The owner is shown improvement decisions that went untold for seven days.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "M03f",
+      "parent": "N12",
+      "existing_issue": "AII-262",
+      "title": "Finish stand-ups: agenda outcomes to chat turns and inquiries, other sinks, chat",
+      "depends_on": [
+        "M03e"
+      ],
+      "deliverable": "Split from M03e (2026-10-29): agenda outcomes to chat turns and inquiries, the notice/allocation/usage/owner-item sinks, chat commands",
+      "acceptance_and_verification": "A stand-up runs end to end in the running controller",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -5660,6 +5802,36 @@
       ],
       "deliverable": "Split from M04d (2026-10-29): the controller enforces no long-running work while an agent is in a meeting (not only telling it), a wake sink that lets a Stopped agent in after the owner's exception, chat wording",
       "acceptance_and_verification": "A long-running job started during a meeting is refused; a Stopped agent the owner excepted attends and goes back to Stopped",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "51d9cdb",
+          "dd7c5ed",
+          "e6f6fc9"
+        ],
+        "ci_runs": [
+          "40998470231"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Long-running work from an agent attending a meeting is refused; the owner's exception for a stopped agent is reachable through the state API and returns the agent to stopped.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "M04f",
+      "parent": "N12",
+      "existing_issue": "AII-262",
+      "title": "Finish meeting attendance: chat wording for the stopped-agent exception, wake of agents the host reports stopped",
+      "depends_on": [
+        "M04e"
+      ],
+      "deliverable": "Split from M04e (2026-10-29): chat wording that explains the owner's exception for a stopped agent, a wake path for agents the host's own availability hook reports stopped",
+      "acceptance_and_verification": "The owner can ask in chat for a stopped agent to attend and is told what it means",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -7601,7 +7773,13 @@
         "M04e",
         "M03e",
         "M02e",
-        "K01h"
+        "K01h",
+        "M04f",
+        "M03f",
+        "L03f",
+        "U12e",
+        "H13f",
+        "C09h"
       ],
       "deliverable": "Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete",
       "acceptance_and_verification": "D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards",

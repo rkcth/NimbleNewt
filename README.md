@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **177 of 292 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **183 of 298 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -109,16 +109,16 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓▓▓░` 93% | 15 of 16 |
 | Pi runtime and inference caching | `▓▓▓▓▓▓▓▓░░░░` 72% | 8 of 11 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
-| Pause, suspend and resume | `▓▓▓▓▓▓▓▓░░░░` 68% | 13 of 19 |
+| Pause, suspend and resume | `▓▓▓▓▓▓▓▓░░░░` 70% | 14 of 20 |
 | Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓░░░` 80% | 17 of 21 |
-| Context and memory | `▓▓▓▓▓▓▓▓▓▓░░` 90% | 19 of 21 |
+| Context and memory | `▓▓▓▓▓▓▓▓▓▓░░` 90% | 20 of 22 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
 | Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓░░` 84% | 11 of 13 |
 | Owner chat and web UI | `▓▓▓▓▓▓░░░░░░` 56% | 9 of 16 |
-| Workers, dispatch and teams | `▓▓▓▓▓▓▓░░░░░` 61% | 27 of 44 |
-| Agent messaging | `▓▓▓▓▓▓░░░░░░` 57% | 4 of 7 |
+| Workers, dispatch and teams | `▓▓▓▓▓▓▓░░░░░` 62% | 28 of 45 |
+| Agent messaging | `▓▓▓▓▓▓▓░░░░░` 62% | 5 of 8 |
 | Health and recovery | `▓▓▓▓▓▓▓▓▓░░░` 75% | 3 of 4 |
-| Meetings | `▓▓▓▓▓▓░░░░░░` 56% | 13 of 23 |
+| Meetings | `▓▓▓▓▓▓▓░░░░░` 60% | 15 of 25 |
 | Tools and skills | `▓▓▓▓▓▓▓▓░░░░` 73% | 11 of 15 |
 | Projects, repositories and workspaces | `▓▓▓▓░░░░░░░░` 35% | 6 of 17 |
 | Quality: deliverables, QA and defects | `░░░░░░░░░░░░` 0% | 0 of 5 |
@@ -205,7 +205,7 @@ Project and task records, assignments, durable delivery, the effect ledger and a
 </details>
 
 <details>
-<summary><strong>Pause, suspend and resume</strong> — ▓▓▓▓▓▓▓▓░░░░ 13 of 19</summary>
+<summary><strong>Pause, suspend and resume</strong> — ▓▓▓▓▓▓▓▓░░░░ 14 of 20</summary>
 
 Pause, suspend, stop, release and checked resume, interrupting a model mid-generation, the remote watchdog, and shutdown and reboot handling.
 
@@ -227,7 +227,8 @@ Pause, suspend, stop, release and checked resume, interrupting a model mid-gener
 - [ ] **L04c** · P34 · Call the checked resume from the dispatcher and observe dependencies _(needs L04b, H12k)_
 - [ ] **L02d** · P35 · Finish Stop: local processes, child work, cleanup spend _(needs L02c)_
 - [x] **L03d** · P35 · Finish hand-off: chat, richer package, temporary reassignment, responsibilities _(needs L03c)_
-- [ ] **L03e** · P36 · Finish hand-off: chat, richer package, temporary reassignment _(needs L03d)_
+- [x] **L03e** · P36 · Finish hand-off: chat, richer package, temporary reassignment _(needs L03d)_
+- [ ] **L03f** · P37 · Finish hand-off: chat, richer package, locks, drafts _(needs L03e)_
 
 </details>
 
@@ -261,7 +262,7 @@ Authenticated principals, revisioned grants, the sandbox launchers, the protecte
 </details>
 
 <details>
-<summary><strong>Context and memory</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 19 of 21</summary>
+<summary><strong>Context and memory</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 20 of 22</summary>
 
 Separated task, chat and meeting context, working notes, source-backed retrieval, safe-boundary continuation, retained branches, context budgets, owner decisions and the activity record.
 
@@ -285,7 +286,8 @@ Separated task, chat and meeting context, working notes, source-backed retrieval
 - [x] **C09d** · P33 · Record activity at every step: dispatcher, tools, messages, meetings, chat _(needs C09c)_
 - [x] **C09e** · P34 · Record activity: approvals, messages, meetings, chat _(needs C09d)_
 - [x] **C09f** · P35 · Record activity: approvals, messages, artifact versions, chat _(needs C09e)_
-- [ ] **C09g** · P36 · Record activity: artifact versions, chat, explanation index _(needs C09f, H12k)_
+- [x] **C09g** · P36 · Record activity: artifact versions, chat, explanation index _(needs C09f)_
+- [ ] **C09h** · P37 · Record activity: local worker artifacts, chat access, explanation index _(needs C09g, H12k)_
 
 </details>
 
@@ -346,7 +348,7 @@ Talking to your agents: the chat interpreter, policy editing, status and blocker
 </details>
 
 <details>
-<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓▓▓░░░░░ 27 of 44</summary>
+<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓▓▓░░░░░ 28 of 45</summary>
 
 Enrolled hosts, remote workers, priority admission, the local worker runtime and dispatcher, agents, teams and roles, reviews and wait-cycle handling.
 
@@ -372,6 +374,7 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 - [x] **H12g** · P29 · Use the DNS-rebinding guard in the remote MCP client _(needs H12, T03)_
 - [x] **H12h** · P29 · Route owner-mode reviews only to the owner _(needs H12, A05)_
 - [x] **H12l** · P29 · Give the controller integration, checkout refresh and quarantine operations _(needs H12, A04, A06)_
+- [x] **H13e** · P29 · Finish event watching: real sources, chat _(needs H13d)_
 - [x] **H02b** · P30 · Fence a remote handle's controls by placement and close every failed startup _(needs H02)_
 - [x] **H07** · P30 · Implement idle host polling and capability placement _(needs H02, H03)_
 - [ ] **H12a** · P30 · Carry the dispatch contract to remote workers _(needs H12, H02)_
@@ -389,7 +392,7 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 - [ ] **H12k** · P32 · Compose the local worker host in the controller _(needs H12b, H12c, H12d, H12f, H12g)_
 - [x] **H07e** · P33 · Pass over remote hosts that would refuse the attempt _(needs H07, H07c)_
 - [ ] **H09** · P33 · Implement reconnect reconciliation and primary epochs _(needs H08, L04, S05)_
-- [ ] **H13e** · P33 · Finish event watching: real sources, chat _(needs H13d, H12k)_
+- [ ] **H13f** · P33 · Finish event watching: other real sources, choosing sources in settings, chat _(needs H13e, H12k)_
 - [ ] **H10** · P34 · Implement distributed agent capacity and fan-in limits _(needs H07, H09, H03, R05)_
 - [ ] **H12n** · P38 · End agent work with work.end _(needs H12, H12l, Q01b, P08)_
 - [ ] **H12o** · P39 · Commit an approved submission exactly once _(needs H12n, A06)_
@@ -398,7 +401,7 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 </details>
 
 <details>
-<summary><strong>Agent messaging</strong> — ▓▓▓▓▓▓░░░░░░ 4 of 7</summary>
+<summary><strong>Agent messaging</strong> — ▓▓▓▓▓▓▓░░░░░ 5 of 8</summary>
 
 Durable conversations between agents, delivery classes, and the MCP conversation adapter.
 
@@ -408,7 +411,8 @@ Durable conversations between agents, delivery classes, and the MCP conversation
 - [ ] **U12** · P30 · Implement agent messages, delivery classes and interruption budget _(needs U02, S08, L05, M01)_
 - [x] **U12b** · P30 · Deliver informational messages at check-ins and show agent questions in chat _(needs U02, S08, L05, M01)_
 - [x] **U12c** · P32 · Finish agent messages: owner questions in chat, stand-up boundary _(needs U12b, M03b)_
-- [ ] **U12d** · P33 · Finish agent messages: stand-up boundary delivery, chat presentation _(needs U12c)_
+- [x] **U12d** · P33 · Finish agent messages: stand-up boundary delivery, chat presentation _(needs U12c)_
+- [ ] **U12e** · P34 · Finish agent messages: chat presentation of owner questions _(needs U12d)_
 
 </details>
 
@@ -425,7 +429,7 @@ Stall detection and bounded supervisor recovery.
 </details>
 
 <details>
-<summary><strong>Meetings</strong> — ▓▓▓▓▓▓░░░░░░ 13 of 23</summary>
+<summary><strong>Meetings</strong> — ▓▓▓▓▓▓▓░░░░░ 15 of 25</summary>
 
 Scheduling, votes and decisions, stand-ups, attendance and return to work, and facilitation.
 
@@ -450,8 +454,10 @@ Scheduling, votes and decisions, stand-ups, attendance and return to work, and f
 - [ ] **M02e** · P33 · Finish meeting records: grant, budget and ownership appliers, decision log, steward _(needs M02d)_
 - [x] **M03d** · P33 · Finish stand-ups: sinks, real occurrences, chat _(needs M03c)_
 - [x] **M04d** · P33 · Finish meeting attendance: wake sinks, chat, stand-up link _(needs M04c)_
-- [ ] **M03e** · P34 · Finish stand-ups: other sinks, untold decisions shown to the owner, chat _(needs M03d)_
-- [ ] **M04e** · P34 · Finish meeting attendance: keep no long-running work during a meeting, stopped agents, chat _(needs M04d)_
+- [x] **M03e** · P34 · Finish stand-ups: other sinks, untold decisions shown to the owner, chat _(needs M03d)_
+- [x] **M04e** · P34 · Finish meeting attendance: keep no long-running work during a meeting, stopped agents, chat _(needs M04d)_
+- [ ] **M03f** · P35 · Finish stand-ups: agenda outcomes to chat turns and inquiries, other sinks, chat _(needs M03e)_
+- [ ] **M04f** · P35 · Finish meeting attendance: chat wording for the stopped-agent exception, wake of agents the host reports stopped _(needs M04e)_
 
 </details>
 
@@ -594,7 +600,7 @@ Installation, documentation, QA on real machines, the release decision and closi
 - [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, C07e, H07e, T09b, H07, H07b, H02e, T09, A07d, A07e, H07c, H07d, H11b, Q01b, A07f, P08, P08b, H12n, H12p, H12o, P09, P10, P10b, P10c, T09c, T09d)_
 - [ ] **D04** · P50 · Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
 - [ ] **D04b** · P51 · Measure code-navigation aids on real coding tasks (optional, after the first release) _(needs D04)_
-- [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, K01h)_
+- [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, K01h, M04f, M03f, L03f, U12e, H13f, C09h)_
 
 </details>
 

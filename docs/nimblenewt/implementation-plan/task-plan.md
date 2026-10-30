@@ -32,14 +32,14 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N02 / AII-252 | F01, F02, F03, F04a, F04b, F04c, F04d, F04, F04f, F04g, F04h, F04i, F04j, F04k, F04e, F09 |
 | N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06, C06b |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
-| N05 / AII-255 | L05, L05b, L01, L01b, L02, L02b, L02c, L02d, L03, L03b, L03c, L03d, L03e, L04, L04b, L04c, L06, H08, H08b |
+| N05 / AII-255 | L05, L05b, L01, L01b, L02, L02b, L02c, L02d, L03, L03b, L03c, L03d, L03e, L03f, L04, L04b, L04c, L06, H08, H08b |
 | N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A07e, A08, A08b, A08c, A09, A10, A10b, A07f, A07g |
-| N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C07e, C07f, C08, C09, C09b, C09c, C09d, C09e, C09f, C09g, C08b, C08c, C08d |
+| N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C07e, C07f, C08, C09, C09b, C09c, C09d, C09e, C09f, C09g, C09h, C08b, C08c, C08d |
 | N08 / AII-258 | R01, R02, R03, R04, R04b, R04c, R05, R05b, R05c, R05d, R05f, R05g, R05e |
 | N09 / AII-259 | U03, U03d, U03e, U05b, U04, U05, U06, U06b, U03b, U03c, U07, U09, U08, U10, U11, U11b |
-| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H07b, H07c, H07d, H07e, H02e, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H13b, H13c, H13d, H13e, H02b, H02c, H02d, H11b, H12n, H12p, H12o |
+| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H07b, H07c, H07d, H07e, H02e, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H13b, H13c, H13d, H13e, H13f, H02b, H02c, H02d, H11b, H12n, H12p, H12o |
 | N11 / AII-261 | V01, V01b, V01c, V02 |
-| N12 / AII-262 | M01b, M01c, M01d, M00, M01, M02, M02b, M02c, M02d, M02e, M03, M03b, M03c, M03d, M03e, M04, M04b, M04c, M04d, M04e, M05, M05b, M06 |
+| N12 / AII-262 | M01b, M01c, M01d, M00, M01, M02, M02b, M02c, M02d, M02e, M03, M03b, M03c, M03d, M03e, M03f, M04, M04b, M04c, M04d, M04e, M04f, M05, M05b, M06 |
 | N13 / AII-263 | U04b, U04c, U04d, T01, T02, T03, T06, T06b, T07, T07b, T08, T09, T09b, T09c, T09d |
 | N14 / AII-264 | P01b, P01c, P01, P02, P02b, P03, P04, P05, P06, P07, P08, P08b, P08c, P09, P10, P10b, P10c |
 | N15 / AII-265 | Q01, Q02, Q03, Q04, Q01b |
@@ -48,7 +48,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N18 / AII-268 | G06, X11, X09, X10, X01, X02, X03, X04, X05, X06, X07, X08, Y01, Y02, Y03 |
 | N19 / AII-269 | D01, D02, D03, D04, D04b, D05 |
 | N07a / AII-519 | U01, U13, T04 |
-| N10a / AII-520 | U02, U02b, U12, U12b, U12c, U12d, T05 |
+| N10a / AII-520 | U02, U02b, U12, U12b, U12c, U12d, U12e, T05 |
 | N16a / AII-615 | B02, B03, B04, B05, B06 |
 
 ## Cards
@@ -821,8 +821,18 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### C09g — Record activity: artifact versions, chat, explanation index
 
 - **Parent:** N07 / AII-257.
-- **Blockers:** C09f, H12k.
+- **Status:** implemented; commits `97cbf3d`; CI runs 40998470231; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** An artifact published for a task by a remote worker is an artifact-version step of its activity.
+- **Blockers:** C09f.
 - **Deliverable:** Split from C09f (2026-10-29): artifact-version steps, chat access, the per-task explanation index.
+- **Acceptance and verification:** Each step of a real run appears in the activity record.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### C09h — Record activity: local worker artifacts, chat access, explanation index
+
+- **Parent:** N07 / AII-257.
+- **Blockers:** C09g, H12k.
+- **Deliverable:** Split from C09g (2026-10-29): artifact steps for local workers, chat access, the per-task explanation index.
 - **Acceptance and verification:** Each step of a real run appears in the activity record.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
@@ -945,9 +955,19 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### L03e — Finish hand-off: chat, richer package, temporary reassignment
 
 - **Parent:** N05 / AII-255.
+- **Status:** implemented; commits `e0e68bb`, `e6f6fc9`; CI runs 40998470231; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** A temporary reassignment returns by itself, as the one who asked, if they still hold the right and the task is where the hand-off left it.
 - **Blockers:** L03d.
 - **Deliverable:** Split from L03d (2026-10-29): chat commands, package sections from continuation, locks, drafts, temporary reassignment with auto-return, responsibilities.
 - **Acceptance and verification:** A temporary reassignment returns on its own.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### L03f — Finish hand-off: chat, richer package, locks, drafts
+
+- **Parent:** N05 / AII-255.
+- **Blockers:** L03e.
+- **Deliverable:** Split from L03e (2026-10-29): chat commands, package sections from continuation, locks, drafts, responsibilities.
+- **Acceptance and verification:** The owner can hand a task over, or cover it for a time, in chat.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### L04 — Implement checked resume and evidence invalidation
@@ -1351,8 +1371,18 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H13e — Finish event watching: real sources, chat
 
 - **Parent:** N10 / AII-260.
-- **Blockers:** H13d, H12k.
+- **Status:** implemented; commits `4af7fb6`, `e6f6fc9`; CI runs 40998470231; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** A built-in task-completion source reports each later closing once, with a baseline, a cursor and bounded memory.
+- **Blockers:** H13d.
 - **Deliverable:** Split from H13d (2026-10-29): choose and configure the sources a real installation polls, the owner chat command.
+- **Acceptance and verification:** Events from a real source wake the right agent.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### H13f — Finish event watching: other real sources, choosing sources in settings, chat
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H13e, H12k.
+- **Deliverable:** Split from H13e (2026-10-29): repository, file, service-health and timer sources chosen in settings, the owner chat command.
 - **Acceptance and verification:** Events from a real source wake the right agent.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
@@ -1829,9 +1859,19 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### U12d — Finish agent messages: stand-up boundary delivery, chat presentation
 
 - **Parent:** N10a / AII-520.
+- **Status:** implemented; commits `186db4f`; CI runs 40998470231; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The stand-up brief tells each agent how many messages wait for it.
 - **Blockers:** U12c.
 - **Deliverable:** Split from U12c (2026-10-29): deliver at the stand-up boundary, chat presentation of owner questions.
 - **Acceptance and verification:** The owner sees the question in chat and a stand-up boundary delivers messages.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### U12e — Finish agent messages: chat presentation of owner questions
+
+- **Parent:** N10a / AII-520.
+- **Blockers:** U12d.
+- **Deliverable:** Split from U12d (2026-10-29): chat presentation of owner questions.
+- **Acceptance and verification:** The owner sees the question in chat.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### U13 — Expose lifecycle, decisions, deliverables and activity through the state API
@@ -1985,8 +2025,18 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### M03e — Finish stand-ups: other sinks, untold decisions shown to the owner, chat
 
 - **Parent:** N12 / AII-262.
+- **Status:** implemented; commits `f14ec51`; CI runs 40998470231; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The owner is shown improvement decisions that went untold for seven days.
 - **Blockers:** M03d.
 - **Deliverable:** Split from M03d (2026-10-29): agenda outcomes to chat turns and inquiries, the notice/allocation/usage/owner-item sinks, the owner told of decisions still untold after some days, chat commands.
+- **Acceptance and verification:** A stand-up runs end to end in the running controller.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### M03f — Finish stand-ups: agenda outcomes to chat turns and inquiries, other sinks, chat
+
+- **Parent:** N12 / AII-262.
+- **Blockers:** M03e.
+- **Deliverable:** Split from M03e (2026-10-29): agenda outcomes to chat turns and inquiries, the notice/allocation/usage/owner-item sinks, chat commands.
 - **Acceptance and verification:** A stand-up runs end to end in the running controller.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
@@ -2031,9 +2081,19 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### M04e — Finish meeting attendance: keep no long-running work during a meeting, stopped agents, chat
 
 - **Parent:** N12 / AII-262.
+- **Status:** implemented; commits `51d9cdb`, `dd7c5ed`, `e6f6fc9`; CI runs 40998470231; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Long-running work from an agent attending a meeting is refused; the owner's exception for a stopped agent is reachable through the state API and returns the agent to stopped.
 - **Blockers:** M04d.
 - **Deliverable:** Split from M04d (2026-10-29): the controller enforces no long-running work while an agent is in a meeting (not only telling it), a wake sink that lets a Stopped agent in after the owner's exception, chat wording.
 - **Acceptance and verification:** A long-running job started during a meeting is refused; a Stopped agent the owner excepted attends and goes back to Stopped.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### M04f — Finish meeting attendance: chat wording for the stopped-agent exception, wake of agents the host reports stopped
+
+- **Parent:** N12 / AII-262.
+- **Blockers:** M04e.
+- **Deliverable:** Split from M04e (2026-10-29): chat wording that explains the owner's exception for a stopped agent, a wake path for agents the host's own availability hook reports stopped.
+- **Acceptance and verification:** The owner can ask in chat for a stopped agent to attend and is told what it means.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### M05 — Implement meeting facilitation and owner control
@@ -2711,7 +2771,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, K01h.
+- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, K01h, M04f, M03f, L03f, U12e, H13f, C09h.
 - **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
 - **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
