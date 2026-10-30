@@ -333,7 +333,11 @@ for (const backend of backends) {
       const rt = new Runtime();
       const stops = StopService.withEpoch(world.storage, epoch, PauseService.withEpoch(world.storage, epoch, {}, options), rt, options);
       const scope = { kind: "installation", id: "installation" } as const;
-      assert.deepEqual(await stops.readiness(owner, scope), { scope, ready: true, paused: false, unsettled: [], truncated: false });
+      assert.deepEqual(await stops.readiness(owner, scope), { scope, ready: true, paused: false, unsettled: [], tracked: [], truncated: false });
+      // A permitted remote job that is tracked is named but does not stop the scope from being ready.
+      rt.items = [{ kind: "job", ref: "job-remote", state: "tracked" }];
+      const exception = await stops.readiness(owner, scope);
+      assert.deepEqual([exception.ready, exception.unsettled, exception.tracked], [true, [], [{ kind: "job", ref: "job-remote", state: "tracked" }]]);
       rt.items = [{ kind: "job", ref: "job-1", state: "running" }, { kind: "process", ref: "pid-2", state: "settled" }];
       const busy = await stops.readiness(owner, scope);
       assert.equal(busy.ready, false);

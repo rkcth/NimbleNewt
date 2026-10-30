@@ -16,7 +16,7 @@ export const STOP_CHOICES = ["wait", "restart-earlier-boundary", "force-stop"] a
 export type StopChoice = (typeof STOP_CHOICES)[number];
 
 /** One thing that may still be running for the scope (the inventory covers foreground operations, local processes, T07 jobs and delegated child work). */
-export interface InventoryItem { readonly kind: "foreground" | "process" | "job" | "child"; readonly ref: string; readonly state: "settled" | "running" | "uncooperative" | "unknown" }
+export interface InventoryItem { readonly kind: "foreground" | "process" | "job" | "child"; readonly ref: string; /** `tracked`: a permitted remote background job that keeps running through a stop, listed as an exception and not waited for. */ readonly state: "settled" | "tracked" | "running" | "uncooperative" | "unknown" }
 
 /** What the controller asks of the runtime. Every call must be safe to repeat: a restart makes the same call again. */
 export interface StopPorts {
@@ -201,7 +201,7 @@ export class StopService {
       return { phase: body.blocked?.resume ?? "preparing" };
     }
     await this.#observe(by, body.scope, String(command.intentId), "recovery-required", "restart from an earlier boundary chosen; the scope is not suspended");
-    await this.#settle(String(command.intentId), by, { state: "recovery-required", graceful: false, unresolved: body.inventory.filter((i) => i.state !== "settled").map((i) => i.ref), at }, "recovery-required", "restart from an earlier boundary chosen", ["blocked"]);
+    await this.#settle(String(command.intentId), by, { state: "recovery-required", graceful: false, unresolved: body.inventory.filter((i) => i.state !== "settled" && i.state !== "tracked").map((i) => i.ref), at }, "recovery-required", "restart from an earlier boundary chosen", ["blocked"]);
     return { phase: "recovery-required" };
   }
 
@@ -244,7 +244,7 @@ export class StopService {
         if (result.modelLost === true) { await this.#block(id, by.id, "the cleanup model was lost and the backup model could not finish the cleanup", ["preparing"]); continue; }
         if (b.spendBudget !== undefined && spent > b.spendBudget && result.remaining.length > 0) { await this.#update(id, (x) => ({ ...x, spent }), ["preparing"]); await this.#block(id, by.id, "the cleanup budget is used up with work still running", ["preparing"]); continue; }
         if (result.remaining.length > 0) {
-          const stuck = result.remaining.filter((i) => i.state !== "settled");
+          const stuck = result.remaining.filter((i) => i.state !== "settled" && i.state !== "tracked");
           await this.#update(id, (x) => ({ ...x, spent, inventory: result.remaining.slice(0, STOP_LIMITS.inventory) }), ["preparing"]);
           if (Date.parse(now) >= Date.parse(b.deadlineAt) || stuck.some((i) => i.state === "uncooperative")) { await this.#block(id, by.id, stuck.some((i) => i.state === "uncooperative") ? "an uncooperative operation will not settle" : "the deadline passed with work still running", ["preparing"]); continue; }
           return view<StopIntentBody>((await this.#runner.get(KIND, id))!); // still settling: the next call looks again
@@ -309,14 +309,15 @@ export class StopService {
    * Whether a stop of the scope could finish now, without starting one (card L06): everything the stop inventory finds for the scope that is not settled, as it is today. A look that fails is not "ready": it is reported as one unknown item.
    * `truncated` says the inventory was cut at its limit, so the list is not all of it. Nothing is paused, recorded or changed.
    */
-  async readiness(by: Principal, scope: PauseScope): Promise<{ scope: PauseScope; ready: boolean; paused: boolean; unsettled: readonly InventoryItem[]; truncated: boolean }> {
+  async readiness(by: Principal, scope: PauseScope): Promise<{ scope: PauseScope; ready: boolean; paused: boolean; unsettled: readonly InventoryItem[]; /** Permitted remote jobs that keep running through a stop: not waited for, but named. */ tracked: readonly InventoryItem[]; truncated: boolean }> {
     await this.#pauses.authorizeControl(by, scope);
     const clean = { kind: scope.kind, id: scope.id } as PauseScope;
     const cannot = this.#ports.unsupported?.(clean);
     if (cannot !== undefined) throw new DomainError("unavailable", cannot, { field: "scope" });
     const found = await this.#ports.inventory(clean, { lookOnly: true }).catch(() => [{ kind: "process", ref: "runtime:inventory", state: "unknown" } as InventoryItem]);
-    const unsettled = found.filter((i) => i.state !== "settled");
-    return { scope: clean, ready: unsettled.length === 0, paused: (await this.#pauses.gate(by, clean))?.intent === "pause", unsettled: unsettled.slice(0, STOP_LIMITS.inventory), truncated: unsettled.length > STOP_LIMITS.inventory };
+    const unsettled = found.filter((i) => i.state !== "settled" && i.state !== "tracked");
+    const tracked = found.filter((i) => i.state === "tracked");
+    return { scope: clean, ready: unsettled.length === 0, paused: (await this.#pauses.gate(by, clean))?.intent === "pause", unsettled: unsettled.slice(0, STOP_LIMITS.inventory), tracked: tracked.slice(0, STOP_LIMITS.inventory), truncated: unsettled.length > STOP_LIMITS.inventory };
   }
 
   async get(viewer: Principal, intentId: string): Promise<View<StopIntentBody> | undefined> {

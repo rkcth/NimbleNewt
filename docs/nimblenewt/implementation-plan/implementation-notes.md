@@ -2779,3 +2779,8 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - **U09.** `gaps` are left out when the timeline is filtered by time as well as agent, since a gone step has no known time.
 - Known: the L06 reboot test pauses before anything has started; it does not cover a recovery that restarts an attempt already running when the pause began.
 - **Batch 13, second pass.** Owner blockers on finished or cancelled tasks no longer use up the 50 found; the scan says so when it stopped early ("this list may be incomplete"); the test makes 150 agent blockers and 10 owner ones, since blocker IDs are hashes and their order says nothing about creation. Known: questions and reviews are still read up to 50 before the finished-task filter, and the chat count still runs the three reads on every reply.
+
+## L06 (part 4): permitted remote jobs as tracked exceptions
+
+- A job of kind `remote` that is a permitted background job (`background`) with `remote_tracked` resumability and is running appears in the stop inventory as state `tracked`: a stop does not wait for it, `readiness` stays ready and names it under `tracked`, and the owner's shutdown view lists it as a permitted remote job that keeps running through a stop. A remote job that is not background, a local job, or one whose outcome is unknown is still counted as before. `JobService.unfinishedOf` now returns each job's kind, background flag and resumability.
+- Still remaining in L06: bookkeeping when the last model fails mid-preparation, resume only on a recorded authorized condition, a non-chat Stop/Force Stop command with every route down.

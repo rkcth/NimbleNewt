@@ -96,6 +96,24 @@ test("the stop inventory counts a task's running jobs, names one asked to stop a
   assert.deepEqual(await ports.inventory(task), []);
 });
 
+test("a permitted remote background job the controller tracks is a named exception: it is not unsettled and a stop does not wait for it, while a local or untracked one still is (card L06)", async () => {
+  const jobs = [
+    { id: "job-remote", state: "running", kind: "remote", background: true, resumability: "remote_tracked" },
+    { id: "job-remote-fg", state: "running", kind: "remote", background: false, resumability: "remote_tracked" },
+    { id: "job-local", state: "running", kind: "process", background: true, resumability: "none" },
+    { id: "job-remote-lost", state: "outcome_unknown", kind: "remote", background: true, resumability: "remote_tracked" },
+  ];
+  const dispatcher = { liveAttemptsOf: async () => ["att-1"], get: async () => ({ taskId: "task-x" }) as never, operations: async () => [] as never, stop: async () => undefined, quiesce: async () => ({}), release: async () => undefined };
+  const ports = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), () => "pending", undefined, async (_by, taskId) => (taskId === "task-x" ? jobs : []));
+  const task = { kind: "task", id: "task-x" } as const;
+  assert.deepEqual(await ports.inventory(task), [
+    { kind: "job", ref: "job-remote", state: "tracked" },
+    { kind: "job", ref: "job-remote-fg", state: "running" },
+    { kind: "job", ref: "job-local", state: "running" },
+    { kind: "job", ref: "job-remote-lost", state: "unknown" },
+  ]);
+});
+
 test("the stop inventory lists the local processes and child work a runtime reports, an uncooperative or unknown one is unresolved, a runtime that cannot say is itself unknown, and the cleanup spend comes from the runtime (card L02d)", async () => {
   const dispatcher = { liveAttemptsOf: async () => ["att-1"], get: async () => ({ taskId: "task-x" }) as never, operations: async () => [] as never, stop: async () => undefined, quiesce: async () => ({}), release: async () => undefined };
   let report: Awaited<ReturnType<NonNullable<LocalWork["processes"]>>> | "down" = [{ ref: "pid-41", kind: "process", state: "running" }, { ref: "child-7", kind: "child", state: "uncooperative" }, { ref: "pid-42", kind: "process", state: "unknown" }];

@@ -204,7 +204,7 @@ export interface StatusDeps {
   readonly watch?: Pick<WatchService, "failures" | "inspect">;
   /** The hand-off going on for a task (card L03f). Absent: the view is not offered. */
   /** Whether the installation could be stopped now (card L06). Absent: the view is not offered. */
-  readonly shutdown?: { readiness(by: Principal): Promise<{ readonly ready: boolean; readonly paused: boolean; readonly unsettled: readonly { readonly kind: string; readonly ref: string; readonly state: string }[]; readonly truncated: boolean }> };
+  readonly shutdown?: { readiness(by: Principal): Promise<{ readonly ready: boolean; readonly paused: boolean; readonly unsettled: readonly { readonly kind: string; readonly ref: string; readonly state: string }[]; readonly tracked?: readonly { readonly kind: string; readonly ref: string; readonly state: string }[]; readonly truncated: boolean }> };
   readonly handoffs?: { forTask(by: Principal, taskId: string): Promise<View<TaskHandoffBody> | undefined> };
   /** The planned meetings of a project (card M04f). Absent: the view is not offered. */
   readonly meetings?: { planned(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { id: string; revision: number; title: string; kind: string; startsAt: string; endsAt: string; mode: string; state: string; participants: readonly { id: string; status?: string; availability?: string }[] }[]; next?: string } | undefined> };
@@ -369,9 +369,11 @@ export class StatusService {
       throw error;
     }
     const at = this.#runner.now();
-    if (r.ready) return { observedAt: at, lines: [line(r.paused ? "Nothing is running or unknown; the installation could be stopped now, and it is paused." : "Nothing is running or unknown; the installation could be stopped now.", cite("installation", "installation"))] };
+    const exceptions = (r.tracked ?? []).slice(0, 20).map((i) => line(`${shown(i.kind)} ${shown(i.ref)} is a permitted remote job; it keeps running through a stop and is tracked.`, cite("installation", "installation")));
+    if (r.ready) return { observedAt: at, lines: [line(r.paused ? "Nothing is running or unknown; the installation could be stopped now, and it is paused." : "Nothing is running or unknown; the installation could be stopped now.", cite("installation", "installation")), ...exceptions] };
     const lines: Line[] = [line(`The installation could not be stopped cleanly yet: ${r.unsettled.length}${r.truncated ? " or more" : ""} thing(s) are still running or not known.`, cite("installation", "installation"))];
     for (const i of r.unsettled.slice(0, 20)) lines.push(line(`${shown(i.kind)} ${shown(i.ref)}: ${shown(i.state)}.`, cite("installation", "installation")));
+    lines.push(...exceptions);
     return { observedAt: at, lines };
   }
 

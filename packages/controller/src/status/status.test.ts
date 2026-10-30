@@ -1101,6 +1101,9 @@ for (const backend of backends) {
     assert.deepEqual((await status.ask(c.owner, { kind: "shutdown" }))!.lines.map((l) => l.text), ["Nothing is running or unknown; the installation could be stopped now."]);
     answer = { ready: false, paused: true, unsettled: [{ kind: "job", ref: "job-1", state: "running" }], truncated: true };
     assert.deepEqual((await status.ask(c.owner, { kind: "shutdown" }))!.lines.map((l) => l.text), ["The installation could not be stopped cleanly yet: 1 or more thing(s) are still running or not known.", "job job-1: running."]);
+    const withExempt = { ready: true, paused: false, unsettled: [] as { kind: string; ref: string; state: string }[], tracked: [{ kind: "job", ref: "job-r", state: "tracked" }], truncated: false };
+    const exempt = c.rebuild({}, { shutdown: { readiness: async () => withExempt } });
+    assert.deepEqual((await exempt.ask(c.owner, { kind: "shutdown" }))!.lines.map((l) => l.text), ["Nothing is running or unknown; the installation could be stopped now.", "job job-r is a permitted remote job; it keeps running through a stop and is tracked."]);
     const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
     assert.equal(await status.ask(reader, { kind: "shutdown" }), undefined);
     assert.equal(await c.rebuild().ask(c.owner, { kind: "shutdown" }), undefined);

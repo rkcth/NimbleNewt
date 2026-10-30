@@ -52,7 +52,7 @@ export interface LocalWork {
   spent?(attempts: readonly string[]): Promise<number | undefined>;
 }
 
-export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; principal: Principal } | undefined, runtime: () => "none" | "pending" = () => "pending", members?: (scope: PauseScope) => Promise<readonly string[]>, jobs?: (by: Principal, taskId: string) => Promise<readonly { readonly id: string; readonly state: string }[]>, local?: LocalWork): StopPorts {
+export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; principal: Principal } | undefined, runtime: () => "none" | "pending" = () => "pending", members?: (scope: PauseScope) => Promise<readonly string[]>, jobs?: (by: Principal, taskId: string) => Promise<readonly { readonly id: string; readonly state: string; readonly kind?: string; readonly background?: boolean; readonly resumability?: string }[]>, local?: LocalWork): StopPorts {
   const attemptsOf = async (scope: PauseScope): Promise<string[]> => {
     const h = dispatch();
     // No dispatcher exists in this controller: nothing can be running. A dispatcher that should exist but is not up (a restart in progress, a failed start) is not the same, and nothing is claimed about it.
@@ -93,7 +93,9 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
       for (const taskId of tasks) {
         for (const job of await jobs(h.principal, taskId)) {
           const state = job.state === "cancellation_requested" ? "uncooperative" : job.state === "outcome_unknown" ? "unknown" : ["admitted", "dispatched", "running"].includes(job.state) ? "running" : undefined;
-          if (state !== undefined) out.push({ kind: "job", ref: job.id.slice(0, 120), state });
+          // A permitted remote background job that the controller tracks keeps running through a stop: it is named as an exception and not waited for (card L06).
+          if (state === "running" && job.kind === "remote" && job.background === true && job.resumability === "remote_tracked") out.push({ kind: "job", ref: job.id.slice(0, 120), state: "tracked" });
+          else if (state !== undefined) out.push({ kind: "job", ref: job.id.slice(0, 120), state });
         }
       }
     }

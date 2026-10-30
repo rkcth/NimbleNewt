@@ -438,12 +438,12 @@ export class JobService {
    * Every job of a task that has not ended, for the controller's own Stop machinery (card L02c). It is the controller reading its own records, so it asks no viewer for rights and is never offered through the state API; all pages are read,
    * so a task with many jobs is not cut off.
    */
-  async unfinishedOf(taskId: string): Promise<{ readonly id: string; readonly state: JobState }[]> {
+  async unfinishedOf(taskId: string): Promise<{ readonly id: string; readonly state: JobState; readonly kind: JobKind; readonly background: boolean; readonly resumability: Resumability }[]> {
     const id = checkTaskId(taskId);
-    const out: { id: string; state: JobState }[] = [];
+    const out: { id: string; state: JobState; kind: JobKind; background: boolean; resumability: Resumability }[] = [];
     for (let after: string | undefined; ;) {
       const page = await this.#scan((job) => job.taskId === id && !TERMINAL.includes(job.state), after, JOB_LIMITS.page);
-      for (const j of page.jobs) out.push({ id: j.id, state: j.state });
+      for (const j of page.jobs) out.push({ id: j.id, state: j.state, kind: j.kind, background: j.background, resumability: j.resumability });
       if (page.next === undefined) return out;
       after = page.next;
     }
