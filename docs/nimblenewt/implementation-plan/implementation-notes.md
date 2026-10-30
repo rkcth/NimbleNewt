@@ -2620,3 +2620,8 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - New read `handoff.for-task` (`HandoffService.forTask`): the hand-off of a task that is still going, for a caller who may control the task; `not_found` when none.
 - Chat commands `handoff.prepare` (applies at once: it suspends the task at a checkpoint and moves nothing), `handoff.complete` (follows the profile: it moves the task), `handoff.cancel` (applies: the old owner keeps the task) and `handoff.takeover` (always shown first: it force-stops). The task is named by its title, the recipient by the agent's name (`toAgentName`, exactly one active agent, resolved to its agent ID); complete and cancel find the hand-off as the one going on for the named task, and refuse when none is. The reason must be in the owner's own words; `returnAt` is a time the assistant works out from the owner's words and is shown back with the reply.
 - Not built yet (remains in L03f): richer package sections from continuation, locks and drafts in the package, chat wording of a blocked hand-off's choices (`handoff.choose`).
+
+## H13f (part 1): watches by chat
+
+- Chat command `watch.create` (follows the profile: matching events wake the task's owner and spend work). The task whose owner is told is named by its title; the stream defaults to that task's own, another task's stream is named by its title (`watchedTaskTitle`, exactly one task of the project; several of the same title ask). A stream the model typed itself is not accepted unless the owner's message holds it.
+- Not built yet (remains in H13f): other real sources (repository, file, service health), choosing sources in settings, cancelling a watch by words (`watch.list` returns only IDs, so there is nothing to name one by yet).

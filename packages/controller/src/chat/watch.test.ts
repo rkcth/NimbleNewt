@@ -1,0 +1,42 @@
+import assert from "node:assert/strict";
+import { after, test } from "node:test";
+import { backends, stopServer } from "../domain/testing/backends.js";
+import type { Outcome } from "./index.js";
+import { cid, openWorld } from "./testing/harness.js";
+
+after(stopServer);
+
+const cmd = (op: string, args: Record<string, unknown>, evidence: string) => ({ kind: "command", op, args, evidence, basis: "owner" });
+
+for (const backend of backends) {
+  test(`${backend.name}: the owner sets up a watch in chat by task titles; the stream defaults to the task's own, another task is named by its title and an unclear title asks (card H13f)`, async () => {
+    const script: Record<string, unknown> = {};
+    const made: Record<string, unknown>[] = [];
+    const stub = { create: async (_p: unknown, c: Record<string, unknown>) => { made.push(c); return { id: `watch-${made.length}`, replayed: false }; }, cancel: async () => ({ ok: true }), list: async () => [] };
+    const w = await openWorld(backend, script, undefined, { watchControl: stub as never });
+    try {
+      const a = await w.project("A");
+      const build = await w.task(a, "Build the login");
+      const deploy = await w.task(a, "Deploy the site");
+      await w.task(a, "Test");
+      await w.task(a, "Test");
+      const chat = w.chat();
+      await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+      w.profile.value = "autonomous";
+      const say = async (text: string): Promise<Outcome> => { const o = (await chat.submit(w.ownerToken, { messageId: cid("m"), text })).outcomes; assert.equal(o.length, 1); return o[0]!; };
+      script["Watch the Build the login task."] = [cmd("watch.create", { taskTitle: "Build the login" }, "Watch the Build the login task")];
+      assert.equal((await say("Watch the Build the login task.")).status, "applied");
+      assert.deepEqual([made[0]!["stream"], made[0]!["taskId"]], [`task:${build}`, build]);
+      script["Tell the Deploy the site owner when the Build the login task changes."] = [cmd("watch.create", { taskTitle: "Deploy the site", watchedTaskTitle: "Build the login" }, "Tell the Deploy the site owner when the Build the login task changes")];
+      assert.equal((await say("Tell the Deploy the site owner when the Build the login task changes.")).status, "applied");
+      assert.deepEqual([made[1]!["stream"], made[1]!["taskId"]], [`task:${build}`, deploy]);
+      script["Tell the Deploy the site owner when Test changes."] = [cmd("watch.create", { taskTitle: "Deploy the site", watchedTaskTitle: "Test" }, "Tell the Deploy the site owner when Test changes")];
+      const asked = await say("Tell the Deploy the site owner when Test changes.");
+      assert.equal(asked.status, "asked");
+      assert.equal(asked.options!.length, 2);
+      script["Watch nothing in particular."] = [cmd("watch.create", {}, "Watch nothing")];
+      assert.equal((await say("Watch nothing in particular.")).status, "refused");
+      assert.equal(made.length, 2);
+    } finally { await w.close(); }
+  });
+}

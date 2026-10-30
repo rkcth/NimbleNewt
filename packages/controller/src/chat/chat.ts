@@ -646,6 +646,25 @@ export class ChatService {
         labels[String(args["agent"])] = agentName.trim();
       }
     }
+    // A watch: the stream is the named task's own unless another task is named (`watchedTaskTitle`, exactly one task of the project); the task whose owner is told is the one named in the usual way.
+    if (intent.op === "watch.create") {
+      const watched = args["watchedTaskTitle"];
+      delete args["watchedTaskTitle"];
+      if (typeof args["watchedTaskId"] === "string" && args["stream"] === undefined) args["stream"] = `task:${args["watchedTaskId"]}`;
+      delete args["watchedTaskId"];
+      if (args["stream"] !== undefined && watched !== undefined) return refuse("invalid_command", "give either stream or watchedTaskTitle, not both");
+      if (typeof args["taskId"] !== "string") return refuse("invalid_command", "say which task's owner should be told");
+      if (args["stream"] === undefined) {
+        if (watched === undefined) args["stream"] = `task:${args["taskId"]}`;
+        else {
+          if (typeof watched !== "string" || watched.length === 0) return refuse("invalid_command", "watchedTaskTitle must be text");
+          const matches = await this.#tasksByTitle(token, projectId as string, watched);
+          if (matches.length === 0) return refuse("not_found", `no task called "${watched.slice(0, 80)}" in that project`);
+          if (matches.length > 1) return { ok: false, kind: "ask", question: `More than one task is called "${watched.slice(0, 80)}". Which one?`, options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${m.id} (${m.state})`), field: "watchedTaskId" };
+          args["stream"] = `task:${(matches[0] as { id: string }).id}`;
+        }
+      }
+    }
     // A hand-off: the recipient named by the agent's name (exactly one active agent), and, for completing or cancelling, the hand-off itself found as the one going on for the named task.
     if (intent.op === "handoff.prepare" || intent.op === "handoff.takeover") {
       const named = args["toAgentName"];
