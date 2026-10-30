@@ -466,6 +466,16 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => { only(a, ["taskId", "seq"]); return asJson(await activityOf(c).explainLater(c.principal, { commandId: need(id), ...a } as never)); } },
   { name: "activity.explanations", kind: "query", summary: "The explanations written for a task, or one step of it.", args: { taskId: "the task", "seq?": "one step" }, result: "`{ items: [...] }`.",
     run: async (c, a) => { only(a, ["taskId", "seq"]); return asJson({ items: await activityOf(c).explanations(c.principal, a["taskId"] as string, a["seq"] as number | undefined) }); } },
+  { name: "activity.corrections", kind: "query", summary: "The corrections appended to one step (oldest first), each with who and when. A step in an unavailable range has none to show. Read only. Needs the task's history right.", args: { taskId: "the task", seq: "the step number", "after?": "how many corrections you have already read (the previous `next`)", "limit?": "at most 100" }, result: "`{ items: [{ note, by, at, ... }], next? }`; `next` is passed as `after` for the following page.",
+    run: async (c, a) => {
+      only(a, ["taskId", "seq", "after", "limit"]);
+      const after = a["after"] === undefined ? 0 : a["after"], limit = a["limit"] === undefined ? 50 : a["limit"];
+      if (typeof after !== "number" || !Number.isInteger(after) || after < 0) throw new DomainError("invalid_command", "after must be a whole number, 0 or more", { field: "after" });
+      if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > 100) throw new DomainError("invalid_command", "limit must be a whole number from 1 to 100", { field: "limit" });
+      const all = await activityOf(c).corrections(c.principal, a["taskId"] as string, a["seq"] as number);
+      const items = all.slice(after, after + limit);
+      return asJson({ items, ...(after + limit < all.length ? { next: after + limit } : {}) });
+    } },
   { name: "activity.correct", kind: "command", summary: "Appends a correction to a step. The step is never changed; the correction keeps who and when.", args: { taskId: "the task", seq: "the step", note: "the correction", commandId: "required" }, result: "`{ id, replayed }`.",
     run: async (c, a, id) => { only(a, ["taskId", "seq", "note"]); return asJson(await activityOf(c).correct(c.principal, { commandId: need(id), ...a } as never)); } },
   { name: "activity.unavailable", kind: "command", summary: "Owner only: marks a range of steps as no longer available (archived, deleted, lost). They stay listed; their content is withheld.", args: { taskId: "the task", first: "first step", last: "last step", reason: "why", commandId: "required" }, result: "`{ replayed }`.",

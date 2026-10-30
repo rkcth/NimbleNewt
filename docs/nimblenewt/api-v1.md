@@ -296,6 +296,19 @@ Arguments:
 
 Result: `{ items: [...] }`.
 
+#### `activity.corrections`
+
+The corrections appended to one step (oldest first), each with who and when. A step in an unavailable range has none to show. Read only. Needs the task's history right.
+
+Arguments:
+
+- `taskId`: the task
+- `seq`: the step number
+- `after` (optional): how many corrections you have already read (the previous `next`)
+- `limit` (optional): at most 100
+
+Result: `{ items: [{ note, by, at, ... }], next? }`; `next` is passed as `after` for the following page.
+
 #### `policy.context`
 
 The approval policy as it binds you in a project, read from the records now: which kinds of action are decided by the owner, by review or not at all, the environment tier, the approvals you hold and the latest changes. Nothing is cached, so a change the owner made is in your next read. You may ask about yourself only.

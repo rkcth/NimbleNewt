@@ -3146,3 +3146,11 @@ Before this slice no chair desk read existed in code (no `meetingRead`, no chair
 - Finding 3: the resume check is committed before the later admission steps (host, place, budget, grant); if one of them skips the attempt, the commit has already been recorded. The commit should come last, just before the claim.
 - Finding 4: a `ready` check is committed even when it holds relevant verdicts (changes judged to matter); the dispatcher should hold such a check for the agent or owner instead of committing it.
 - Per-tick cache of prerequisites per project (finding 7, remainder).
+
+## U13 slice 1: paged activity corrections read (partial)
+
+Survey of U13 groups against `api/operations.ts`: lifecycle (`lifecycle.status/get/readiness` and commands) and decisions (`decision.get/history/authoritative/context/reliance/propagation`) already have read operations; activity had steps, timeline, payload and explanations but no way to read a step's corrections; deliverables have only the `status.ask` `delivered` view and no dedicated operation.
+
+Done: `activity.corrections` (query; `taskId`, `seq`, optional `after` cursor and `limit` 1 to 100, default 50; returns `{ items, next? }`), same history-right check and not_found as `activity.steps`, unavailable steps show none. Tests added in `api/start-activity.test.ts` (reader, refused agent without history right, bad limit/after, paging). Contract doc regenerated.
+
+Remains for U13: deliverable read operations (list/get with revision and provenance); the overview filters (paused assignee, unreachable worker, stale artifact, uncertain tool result); paging on `activity.explanations`; tool activity and message-reference reads; long-running command states; restart-surviving subscription cursors.
