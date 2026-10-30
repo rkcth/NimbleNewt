@@ -316,7 +316,8 @@ export class StandupService {
       if (this.#options.onBriefed !== undefined) for (const [item, e] of briefed) {
         const body = facts.improvements.find((x) => x.id === item)?.body as unknown as ImprovementBody | undefined;
         const proposers = body === undefined ? [] : [body.proposedBy, ...(body.duplicates ?? []).map((d) => (facts.improvements.find((x) => x.id === d)?.body as unknown as ImprovementBody | undefined)?.proposedBy)];
-        if (proposers.length === 0 || !proposers.every((a) => a === undefined || e.agents.has(a))) continue;
+        // A cut-off scan or a duplicate whose record was not read could hide a proposer, so nothing is marked on it.
+        if (facts.partial || proposers.length === 0 || !proposers.every((a) => a !== undefined && e.agents.has(a))) continue;
         try { await this.#options.onBriefed(by, item, e.revision); } catch { /* told again next time */ }
       }
 
