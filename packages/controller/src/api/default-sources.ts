@@ -17,6 +17,8 @@ export function defaultEventSources(projects: Pick<ProjectService, "listTasks">,
   return [{
     id: "tasks",
     type: "task-completion",
+    retentionMs: DEFAULT_SOURCE_LIMITS.recentDays * 86_400_000,
+    critical: false,
     async poll({ state, limit }) {
       const since = clock() - DEFAULT_SOURCE_LIMITS.recentDays * 86_400_000;
       const prev = (typeof state === "object" && state !== null ? state : {}) as { seen?: Record<string, string>; cursor?: string; baselining?: boolean; floor?: number };

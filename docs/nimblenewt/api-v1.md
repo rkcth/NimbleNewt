@@ -96,7 +96,7 @@ Arguments:
 
 - none
 
-Result: `{ item }`: `revision`, `disabled` (source IDs), and `sources` (`id`, `type`, `enabled`).
+Result: `{ item }`: `revision`, `disabled` (source IDs), and `sources` (`id`, `type`, `enabled`, `critical`).
 
 Completion: finished when accepted (`completed: true`).
 
@@ -1392,7 +1392,7 @@ Arguments:
 - `disabled`: source IDs to leave off, for example `["service-health"]`
 - `expectedRevision` (optional): the revision of the setting you read
 
-Result: `{ revision }`.
+Result: `{ revision, warning? }`: `warning` says when a source turned off will lose events older than its window. A source the controller relies on (critical) cannot be turned off.
 
 Completion: finished when accepted (`completed: true`).
 
@@ -1405,7 +1405,7 @@ Arguments:
 - `disable` (optional): source IDs to turn off
 - `enable` (optional): source IDs to turn on
 
-Result: `{ revision }`.
+Result: `{ revision, warning? }`: `warning` says when a source turned off will lose events older than its window. A critical source cannot be turned off.
 
 Completion: finished when accepted (`completed: true`).
 

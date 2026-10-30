@@ -227,14 +227,39 @@ export function watchLoops(watches: { activeOf(by: Principal): Promise<string[]>
  * H13d: polls the external event sources the controller was given, once per tick, and publishes what they found. A source that fails is reported after the rest, so the loop shows as failing and one bad source does not stop the others.
  * Sources are given by the caller; none is built in, so without any there is no loop and nothing is polled.
  */
-export function sourceLoops(sources: Pick<SourceService, "run">, list: readonly EventSource[], disabled?: () => Promise<ReadonlySet<string>>): DispatcherLoop[] {
+export interface SourceLoopOptions {
+  /** Tells the owner something (a stable `id` so the same thing is not told twice). */
+  readonly tell?: (notice: { readonly id: string; readonly text: string }) => Promise<unknown>;
+  /** Records a failure that does not stop the tick. */
+  readonly log?: (message: string) => void;
+  /** Consecutive failed reads of the setting before the owner is told (default 5). */
+  readonly unreadableAfter?: number;
+}
+
+export function sourceLoops(sources: Pick<SourceService, "run">, list: readonly EventSource[], disabled?: () => Promise<ReadonlySet<string>>, options: SourceLoopOptions = {}): DispatcherLoop[] {
   if (list.length === 0) return [];
+  const limit = options.unreadableAfter ?? 5;
+  let lastGood: ReadonlySet<string> | undefined;
+  let failures = 0;
+  let episode = 0;
   return [{ name: "events.sources", run: async (by) => {
-    // H13f: the owner's choice is read at every tick; when it cannot be read nothing is polled (the loop shows as failing) instead of polling a source that was turned off.
-    const off = disabled === undefined ? undefined : await disabled();
+    // H13f: the owner's choice is read at every tick. When it cannot be read, the last choice that could be read is used (fail open on what the owner last said, with the failure logged); with no such choice nothing is polled and the loop shows as failing.
+    let off: ReadonlySet<string> | undefined;
+    if (disabled !== undefined) {
+      try { off = await disabled(); lastGood = off; if (failures >= limit) episode++; failures = 0; } catch (error) {
+        failures++;
+        options.log?.(`event source setting could not be read (${failures} in a row): ${error instanceof Error ? error.message : String(error)}`);
+        if (failures === limit) await options.tell?.({ id: `event-sources-unreadable:${episode}`, text: "Event watching is not running: the source setting cannot be read." }).catch(() => undefined);
+        if (lastGood === undefined) throw error;
+        off = lastGood;
+      }
+    }
     const chosen = off === undefined || off.size === 0 ? list : list.filter((s) => !off.has(s.id));
     if (chosen.length === 0) return;
-    const failed = (await sources.run(by, chosen)).filter((r) => r.error !== undefined);
+    const runs = await sources.run(by, chosen);
+    // A source whose saved position is older than what it can still see lost events: told once per gap (the notice id names the source and where the gap began).
+    for (const r of runs) if (r.gap !== undefined) await options.tell?.({ id: `event-gap:${r.source}:${r.gap.from}`.replace(/[^A-Za-z0-9._:-]/g, "-").slice(0, 120), text: `Events from ${r.source} between ${r.gap.from} and ${r.gap.to} were not watched; it starts again from now.` }).catch(() => undefined);
+    const failed = runs.filter((r) => r.error !== undefined);
     if (failed.length > 0) throw new Error(`${failed.length} event source(s) could not be polled: ${failed.slice(0, 3).map((f) => `${f.source}: ${f.error}`).join("; ")}`);
   } }];
 }

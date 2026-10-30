@@ -41,6 +41,10 @@ export interface PollResult {
 export interface EventSource {
   readonly id: string;
   readonly type: SourceType;
+  /** How far back this source can still see what happened (a source that forgets older things, like the built-in tasks source, sets it). A saved position older than this has lost events: the runner reports a gap and starts again from the present. */
+  readonly retentionMs?: number;
+  /** The controller relies on this source: the owner may not switch it off. Default false. */
+  readonly critical?: boolean;
   poll(input: PollInput): Promise<PollResult>;
 }
 

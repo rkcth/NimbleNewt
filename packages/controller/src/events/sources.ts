@@ -43,6 +43,8 @@ export interface SourceRun {
   readonly slowed?: { readonly retryAfterSeconds: number };
   /** More was waiting than one run takes. */
   readonly more: boolean;
+  /** The saved position was older than the source's retention window (a long time off, or the controller was down): what happened between `from` and `to` was not watched, and the source started again from the present. */
+  readonly gap?: { readonly from: string; readonly to: string };
   readonly error?: string;
 }
 
@@ -109,7 +111,9 @@ export class SourceService {
     const saved = await this.#runner.get(ref.kind, ref.id);
     const before = saved?.body as unknown as SourceStateBody | undefined;
     let polled;
-    try { polled = await source.poll({ state: before?.state, now: this.#runner.now(), limit }); } catch (error) {
+    const now = this.#runner.now();
+    const gap = before !== undefined && source.retentionMs !== undefined && Date.parse(now) - Date.parse(before.at) > source.retentionMs ? { from: before.at, to: now } : undefined;
+    try { polled = await source.poll({ state: gap === undefined ? before?.state : undefined, now, limit }); } catch (error) {
       return { source: source.id, polled: 0, published: 0, duplicates: 0, suppressed: 0, rejected: [], more: false, error: redactText(error instanceof Error ? error.message : String(error)).slice(0, SOURCE_LIMITS.error) };
     }
     let published = 0; let duplicates = 0; let suppressed = 0; const rejected: string[] = [];
@@ -127,7 +131,7 @@ export class SourceService {
     try { await this.#save(source.id, ref, saved?.revision, before?.runs ?? 0, polled.state); } catch (error) {
       if (!(error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict"))) throw error;
     }
-    return { source: source.id, polled: polled.signals.length, published, duplicates, suppressed, rejected, more: polled.more };
+    return { source: source.id, polled: polled.signals.length, published, duplicates, suppressed, rejected, more: polled.more, ...(gap === undefined ? {} : { gap }) };
   }
 
   async #publish(by: Principal, source: string, signal: Signal): Promise<"published" | "duplicate" | "suppressed" | { slowed: { retryAfterSeconds: number } } | { rejected: string }> {

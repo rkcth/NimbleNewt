@@ -85,3 +85,65 @@ test("when the owner's choice cannot be read no source is polled, and the failur
   await some!.run({ id: "service:dispatcher", kind: "service" } as never);
   assert.deepEqual(polled, ["b"]);
 });
+
+test("turning off a source that forgets old events warns, and a critical source cannot be turned off (card H13f review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-srcset-"));
+  const src = (id: string, extra: Partial<EventSource>): EventSource => ({ id, type: "repository", poll: async ({ state }) => ({ signals: [], state: state ?? {}, more: false }), ...extra });
+  const c = await startController({
+    storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [],
+    eventSources: [src("tasks", { retentionMs: 7 * 86_400_000 }), src("core", { critical: true }), src("plain", {})],
+    dispatch: { timer: new ManualTimer(), intervalMs: 1000 },
+  });
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const call = (op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<{ ok: boolean; result?: any; error?: { code: string; message: string } }>;
+    const refused = await call("events.sources.set", { disabled: ["core"] }, "k1");
+    assert.equal(refused.error?.code, "invalid_command");
+    assert.match(refused.error!.message, /core cannot be switched off/);
+    assert.equal((await call("events.sources.change", { disable: ["plain", "core"] }, "k2")).error?.code, "invalid_command");
+    assert.deepEqual((await call("events.sources.get", {})).result.item.disabled ?? [], [], "a refused change changed nothing");
+    const plain = await call("events.sources.set", { disabled: ["plain"] }, "k4");
+    assert.ok(plain.ok); assert.equal(plain.result.warning, undefined);
+    const warned = await call("events.sources.change", { disable: ["tasks"] }, "k5");
+    assert.ok(warned.ok);
+    assert.match(warned.result.warning, /tasks: events that happen while it is off and are older than 7 days/);
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("when the setting cannot be read the last known choice is used, and after five failures in a row the owner is told once (card H13f review)", async () => {
+  const polled: string[][] = [];
+  const told: Array<{ id: string; text: string }> = [];
+  const logged: string[] = [];
+  let broken = false;
+  const list = [{ id: "a", type: "file" } as never, { id: "b", type: "file" } as never];
+  const runner = { run: async (_by: never, l: readonly EventSource[]) => { polled.push(l.map((s) => s.id)); return []; } };
+  const [loop] = sourceLoops(runner, list, async () => { if (broken) throw new Error("storage unavailable"); return new Set(["a"]); }, { tell: async (n) => { told.push(n); }, log: (m) => { logged.push(m); } });
+  const by = { id: "service:dispatcher", kind: "service" } as never;
+  await loop!.run(by);
+  broken = true;
+  for (let i = 0; i < 7; i++) await loop!.run(by);
+  assert.deepEqual(polled, Array(8).fill(["b"]), "the source the owner turned off stays off while the setting is unreadable");
+  assert.equal(logged.length, 7);
+  assert.equal(told.length, 1, "told once, not on every tick");
+  assert.match(told[0]!.text, /event watching is not running: the source setting cannot be read/i);
+  broken = false; await loop!.run(by);
+  broken = true; for (let i = 0; i < 5; i++) await loop!.run(by);
+  assert.equal(told.length, 2, "a new episode is told again, with a different id");
+  assert.notEqual(told[0]!.id, told[1]!.id);
+  // Never read successfully: nothing is cached, so nothing is polled and the tick fails.
+  polled.length = 0; told.length = 0;
+  const [cold] = sourceLoops(runner, list, async () => { throw new Error("storage unavailable"); }, { tell: async (n) => { told.push(n); } });
+  for (let i = 0; i < 5; i++) await assert.rejects(() => cold!.run(by), /storage unavailable/);
+  assert.deepEqual(polled, []);
+  assert.equal(told.length, 1, "told even when nothing could be cached");
+});
+
+test("the loop tells the owner once about a source's gap (card H13f review)", async () => {
+  const told: Array<{ id: string; text: string }> = [];
+  const gap = { from: "2026-10-01T00:00:00.000Z", to: "2026-10-20T00:00:00.000Z" };
+  const [loop] = sourceLoops({ run: async () => [{ source: "tasks", polled: 0, published: 0, duplicates: 0, suppressed: 0, rejected: [], more: false, gap }] }, [{ id: "tasks", type: "task-completion" } as never], undefined, { tell: async (n) => { told.push(n); } });
+  await loop!.run({ id: "service:dispatcher", kind: "service" } as never);
+  await loop!.run({ id: "service:dispatcher", kind: "service" } as never);
+  assert.match(told[0]!.text, /Events from tasks between 2026-10-01T00:00:00.000Z and 2026-10-20T00:00:00.000Z were not watched/);
+  assert.equal(told[0]!.id, told[1]!.id, "the same id each time, so the notification is not repeated");
+});

@@ -1,3 +1,4 @@
+import { defaultEventSources } from "../api/default-sources.js";
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { StateApi } from "../api/index.js";
@@ -687,5 +688,28 @@ for (const backend of backends) {
     assert.deepEqual(seen.events.map((e) => e.ref.id), ["b"]);
     assert.deepEqual([seen.resumed?.cursor, seen.resumed?.at], [1, new Date(now).toISOString()]);
     assert.equal((await c.events.status(c.disp, await subOf())).state, "active");
+  });
+
+  suite("a source whose saved position is older than what it can still see reports one gap and starts again from now (card H13f review)", async (c) => {
+    const day = 86_400_000;
+    const closed = new Map<string, { id: string; state: string; projectId: string; updatedAt: string }>();
+    const close = (id: string, ageMs = 0) => closed.set(id, { id, state: "done", projectId: c.a, updatedAt: new Date(now - ageMs).toISOString() });
+    const tasks = defaultEventSources({ listTasks: async () => ({ items: [...closed.values()] as never }) } as never, () => now)[0]!;
+    assert.equal(tasks.retentionMs, 7 * day);
+    close("task-old");
+    assert.equal((await c.sources.run(c.disp, [tasks]))[0]!.gap, undefined, "first run: nothing saved, no gap");
+    now += 3 * day; close("task-a");
+    const normal = (await c.sources.run(c.disp, [tasks]))[0]!;
+    assert.deepEqual([normal.gap, normal.published], [undefined, 1], "within the window it carries on and reports");
+    // Off for 10 days (not polled, position kept): a task closed in the span is older than the window when it is polled again.
+    const lastPoll = new Date(now).toISOString();
+    now += 4 * day; close("task-missed");
+    now += 6 * day; close("task-b", 1000);
+    const back = (await c.sources.run(c.disp, [tasks]))[0]!;
+    assert.deepEqual(back.gap, { from: lastPoll, to: new Date(now).toISOString() });
+    assert.equal(back.published, 0, "re-baselined: the span is told as a gap, not as events");
+    now += 60_000; close("task-c");
+    const after = (await c.sources.run(c.disp, [tasks]))[0]!;
+    assert.deepEqual([after.gap, after.published], [undefined, 1], "reporting resumes after the gap");
   });
 }

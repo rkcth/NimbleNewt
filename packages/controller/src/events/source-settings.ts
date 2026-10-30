@@ -24,38 +24,40 @@ export interface EventSourceSettingsBody {
  */
 export class EventSourceSettingsService {
   readonly #runner: CommandRunner;
-  readonly #configured: () => readonly Pick<EventSource, "id" | "type">[];
+  readonly #configured: () => readonly Pick<EventSource, "id" | "type" | "retentionMs" | "critical">[];
 
-  private constructor(runner: CommandRunner, configured: () => readonly Pick<EventSource, "id" | "type">[]) { this.#runner = runner; this.#configured = configured; }
+  private constructor(runner: CommandRunner, configured: () => readonly Pick<EventSource, "id" | "type" | "retentionMs" | "critical">[]) { this.#runner = runner; this.#configured = configured; }
 
-  static withEpoch(storage: ControllerStorage, epoch: number, configured: () => readonly Pick<EventSource, "id" | "type">[], options: RunnerOptions = {}): EventSourceSettingsService {
+  static withEpoch(storage: ControllerStorage, epoch: number, configured: () => readonly Pick<EventSource, "id" | "type" | "retentionMs" | "critical">[], options: RunnerOptions = {}): EventSourceSettingsService {
     return new EventSourceSettingsService(new CommandRunner(storage, epoch, options), configured);
   }
 
-  async get(by: Principal): Promise<{ readonly revision: number; readonly disabled: readonly string[]; readonly sources: readonly { id: string; type: string; enabled: boolean }[] }> {
+  async get(by: Principal): Promise<{ readonly revision: number; readonly disabled: readonly string[]; readonly sources: readonly { id: string; type: string; enabled: boolean; critical: boolean }[] }> {
     if (by.kind !== "owner") throw new DomainError("forbidden", `${by.id} may not read which event sources are watched`);
     const found = await this.#runner.get(REF.kind, REF.id);
     const off = new Set((found?.body as unknown as EventSourceSettingsBody | undefined)?.disabled ?? []);
-    return { revision: found?.revision ?? 0, disabled: [...off].sort(), sources: this.#configured().map((s) => ({ id: s.id, type: s.type, enabled: !off.has(s.id) })) };
+    return { revision: found?.revision ?? 0, disabled: [...off].sort(), sources: this.#configured().map((s) => ({ id: s.id, type: s.type, enabled: !off.has(s.id), critical: s.critical === true })) };
   }
 
   /** The owner names every source to leave off (the list replaces the earlier one; an empty list turns all on). */
-  async set(owner: Principal, command: NoActor & { disabled?: readonly string[]; expectedRevision?: number }): Promise<{ revision: number }> {
+  async set(owner: Principal, command: NoActor & { disabled?: readonly string[]; expectedRevision?: number }): Promise<{ revision: number; warning?: string }> {
     this.#owner(owner);
     this.#fields(command, ["commandId", "disabled", "expectedRevision"]);
     if (command.disabled === undefined) throw new DomainError("invalid_command", "disabled: name the sources to leave off (an empty list turns all on)", { field: "disabled" });
     const list = this.#ids(command.disabled, "disabled", true);
+    this.#notCritical(list, "disabled");
     this.#revision(command.expectedRevision);
     return this.#write("event-sources.set", owner, command.commandId, { disabled: list, expectedRevision: command.expectedRevision ?? null }, command.expectedRevision, () => new Set(list));
   }
 
   /** The owner turns sources off or on, leaving the rest as they are (what the chat proposes, so a request that waits while the setting changes still does only what it says). */
-  async change(owner: Principal, command: NoActor & { disable?: readonly string[]; enable?: readonly string[] }): Promise<{ revision: number }> {
+  async change(owner: Principal, command: NoActor & { disable?: readonly string[]; enable?: readonly string[] }): Promise<{ revision: number; warning?: string }> {
     this.#owner(owner);
     this.#fields(command, ["commandId", "disable", "enable"]);
     const disable = command.disable === undefined ? [] : this.#ids(command.disable, "disable", true);
     const enable = command.enable === undefined ? [] : this.#ids(command.enable, "enable", false);
     if (disable.length + enable.length === 0) throw new DomainError("invalid_command", "disable: name at least one source to turn off or on", { field: "disable" });
+    this.#notCritical(disable, "disable");
     for (const id of disable) if (enable.includes(id)) throw new DomainError("invalid_command", `disable: ${id} is also named in enable; a source is named once`, { field: "disable" });
     return this.#write("event-sources.change", owner, command.commandId, { disable, enable }, undefined, (before) => { const next = new Set(before); for (const id of enable) next.delete(id); for (const id of disable) next.add(id); return next; });
   }
@@ -66,7 +68,15 @@ export class EventSourceSettingsService {
     return new Set((found?.body as unknown as EventSourceSettingsBody | undefined)?.disabled ?? []);
   }
 
-  async #write(name: string, owner: Principal, commandId: string, payload: JsonObject, expected: number | undefined, compute: (before: readonly string[]) => Set<string>): Promise<{ revision: number }> {
+  /** A source declared critical cannot be switched off. */
+  #notCritical(ids: readonly string[], field: string): void {
+    for (const id of ids) {
+      if (this.#configured().find((s) => s.id === id)?.critical === true) throw new DomainError("invalid_command", `${field}: ${id} cannot be switched off; the controller relies on it`, { field });
+    }
+  }
+
+  async #write(name: string, owner: Principal, commandId: string, payload: JsonObject, expected: number | undefined, compute: (before: readonly string[]) => Set<string>): Promise<{ revision: number; warning?: string }> {
+    let newlyOff: string[] = [];
     const result = await this.#runner.command(name, { commandId: scopedCommandId(owner.id, commandId), actor: owner.id }, async () => ({
       payload,
       build: async () => {
@@ -74,13 +84,18 @@ export class EventSourceSettingsService {
         const before = current?.body as unknown as EventSourceSettingsBody | undefined;
         if (expected !== undefined && (current?.revision ?? 0) !== expected) throw new DomainError("stale_revision", `the event source setting is at revision ${current?.revision ?? 0}, not ${expected}`, { currentRevision: current?.revision ?? 0 });
         const disabled = [...compute(before?.disabled ?? [])].sort();
+        newlyOff = disabled.filter((id) => !(before?.disabled ?? []).includes(id));
         if (disabled.length > SOURCE_SETTING_LIMITS.sources) throw new DomainError("invalid_command", `at most ${SOURCE_SETTING_LIMITS.sources} sources may be turned off`, { field: "disabled" });
         const next: EventSourceSettingsBody = { disabled, updatedBy: owner.id, updatedAt: this.#runner.now() };
         const change = current === undefined ? { type: "create" as const, ref: REF, body: next as unknown as JsonObject } : { type: "update" as const, ref: REF, expectedRevision: current.revision, body: next as unknown as JsonObject };
         return { ref: REF, creates: current === undefined, changes: [change], detail: { disabled: disabled.length } };
       },
     }));
-    return { revision: result.revision };
+    // A source that forgets older events loses them while it is off: say so when it is turned off.
+    const lossy = this.#configured().filter((s) => newlyOff.includes(s.id) && s.retentionMs !== undefined);
+    if (lossy.length === 0) return { revision: result.revision };
+    const days = (ms: number): string => `${Math.round((ms / 86_400_000) * 10) / 10} days`;
+    return { revision: result.revision, warning: lossy.map((s) => `${s.id}: events that happen while it is off and are older than ${days(s.retentionMs!)} when it is turned on again are lost; the controller will report that gap then`).join("; ") };
   }
 
   #owner(by: Principal): void { if (by.kind !== "owner") throw new DomainError("forbidden", `${by.id} may not change which event sources are watched`); }
