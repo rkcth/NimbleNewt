@@ -485,7 +485,7 @@ test("reapply does not merge a file again that already holds its markers for the
   } finally { await w.done(); }
 });
 
-test("reapply keeps the executable bit of a file taken from the landing branch, and counts a mode-only change as the agent's work", { skip }, async () => {
+test("reapply keeps the executable bit of a file taken from the landing branch, and counts a mode-only change as the agent's work", { skip: skip || (process.platform === "win32" ? "POSIX modes" : false) }, async () => {
   const w = await world();
   try {
     await writeFile(join(w.shared, "run.sh"), "#!/bin/sh\n"); await chmod(join(w.shared, "run.sh"), 0o755); sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "script");
