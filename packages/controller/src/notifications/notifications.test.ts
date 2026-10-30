@@ -163,16 +163,16 @@ for (const backend of backends) {
   suite("an item that waits on the owner is raised to Urgent by the controller after the owner's threshold, told once, outside quiet hours, and nothing else is (card U11b)", async (c) => {
     set("2026-10-22T08:00:00.000Z");
     const waiting = await c.report(c.ann, "blocker", "blocker", await c.blocker("wait_overdue"));
+    // Reported with the first one, then resolved in its own flow: it is old enough to be raised, and is not.
+    const settledBlocker = await c.blocker("manual_hold");
+    const settled = await c.report(c.ann, "blocker", "blocker", settledBlocker);
+    await c.resolveBlocker(settledBlocker);
     const note = await c.report(c.ctl, "maintenance", "host", "host-3");
     const hours = (n: number) => set(new Date(Date.parse("2026-10-22T08:00:00.000Z") + n * 3_600_000).toISOString());
     const item = async (id: string) => (await c.svc.inbox(c.owner)).items.find((i) => i.id === id)!;
     hours(23);
     await c.svc.runDue();
     assert.equal((await item(waiting.itemId)).urgent, false, "23 hours: not yet");
-    // A blocker that was resolved in its own flow is not raised as Urgent.
-    const settledBlocker = await c.blocker("manual_hold");
-    const settled = await c.report(c.ann, "blocker", "blocker", settledBlocker);
-    await c.resolveBlocker(settledBlocker);
     hours(25);
     await c.svc.runDue();
     assert.equal((await item(settled.itemId)).urgent, false, "a settled record is not raised");

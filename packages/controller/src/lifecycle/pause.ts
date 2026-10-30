@@ -43,6 +43,8 @@ export interface PauseGateBody {
   readonly intent: LifecycleIntent;
   /** The owner's recorded, authorized condition for lifting this pause (card L06b): the time after which the controller lifts it. It belongs to the pause it was set for; a resume or a new pause drops it. */
   readonly resumeAt?: { readonly at: string; readonly setBy: string; readonly setAt: string };
+  /** A Stop, a Suspend or a hand-off has taken this pause over: no time can be recorded for it and none lifts it. Ends with the pause. */
+  readonly takenOver?: true;
   /** Present while paused. */
   readonly mode?: "pause";
   /** Who paused it. Kept until the gate is resumed; resuming never silently changes it to someone else. */
@@ -256,6 +258,7 @@ export class PauseService implements PauseGuard, PauseLookup {
         const found = await this.#runner.get(ref.kind, ref.id);
         const gate = found === undefined ? undefined : (found.body as unknown as PauseGateBody);
         if (found === undefined || gate === undefined || gate.intent !== "pause") throw new DomainError("invalid_command", `${scope.kind} ${scope.id} is not paused; a condition is recorded for a pause that is in force`, { field: "scope" });
+        if (gate.takenOver === true) throw new DomainError("invalid_command", `${scope.kind} ${scope.id} is being stopped or suspended; a pause that a stop took over is not lifted by a time`, { field: "scope" });
         const next: PauseGateBody = { ...gate, resumeAt: { at, setBy: principal.id, setAt: this.#runner.now() } };
         return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: clean(next) }], detail: { scope: scope as unknown as JsonObject, resumeAt: at } };
       },
@@ -263,10 +266,6 @@ export class PauseService implements PauseGuard, PauseLookup {
     return { gateId, replayed: result.replayed };
   }
 
-  /**
-   * The controller's tick: lifts every pause whose recorded condition has come, and only that scope, with the reason naming the condition. A gate with no recorded condition is never touched, and a repeat of the tick
-   * (or a restart) lifts nothing twice. The caller is the dispatcher (owner, host or service). Answers the scopes it lifted.
-   */
   /**
    * A Stop, a Suspend or a hand-off takes the pause over: the time the owner recorded for an ordinary pause no longer applies to it, so it is dropped (card L06b). The caller is the one controlling the scope.
    * Safe to repeat; a gate with no recorded condition is not touched.
@@ -278,15 +277,20 @@ export class PauseService implements PauseGuard, PauseLookup {
     await this.#retrying(async () => {
       const ref: AggregateRef = { kind: "pause-gate", id: gateId };
       const found = await this.#runner.get(ref.kind, ref.id);
-      if (found === undefined || (found.body as unknown as PauseGateBody).resumeAt === undefined) return;
-      const { resumeAt: _dropped, ...rest } = found.body as unknown as PauseGateBody; void _dropped;
+      const current = found?.body as unknown as PauseGateBody | undefined;
+      if (found === undefined || current === undefined || current.intent !== "pause" || (current.takenOver === true && current.resumeAt === undefined)) return;
+      const { resumeAt: _dropped, ...rest } = current; void _dropped;
       await this.#runner.command("pause.condition-drop", { commandId: `drop-cond-${gateId}-${found.revision}`, actor: principal.id }, async () => ({
         payload: { scope: checked as unknown as JsonObject },
-        build: async () => ({ ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: clean(rest) }], detail: { scope: checked as unknown as JsonObject, resumeAt: null } }),
+        build: async () => ({ ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: clean({ ...rest, takenOver: true }) }], detail: { scope: checked as unknown as JsonObject, resumeAt: null } }),
       }));
     });
   }
 
+  /**
+   * The controller's tick: lifts every pause whose recorded condition has come, and only that scope, with the reason naming the condition. A gate with no recorded condition is never touched, and a repeat of the tick
+   * (or a restart) lifts nothing twice. The caller is the dispatcher (owner, host or service). Answers the scopes it lifted.
+   */
   async liftDue(by: Principal): Promise<PauseScope[]> {
     if (!(by.kind === "owner" || by.kind === "host" || by.kind === "service")) throw new DomainError("forbidden", `${by.id} is not the dispatcher; recorded conditions are carried out by the controller`);
     const lifted: PauseScope[] = [];
@@ -298,11 +302,11 @@ export class PauseService implements PauseGuard, PauseLookup {
       for (const a of page) {
         after = a.id;
         const gate = a.body as unknown as PauseGateBody;
-        if (gate.intent !== "pause" || gate.resumeAt === undefined || Date.parse(gate.resumeAt.at) > now) continue;
+        if (gate.intent !== "pause" || gate.resumeAt === undefined || gate.takenOver === true || Date.parse(gate.resumeAt.at) > now) continue;
         // A pause that has gone on to be suspended or stopped is not an ordinary pause any more.
         if (gate.observed !== undefined && ["preparing-to-suspend", "suspended", "stopping", "stopped", "recovery-required"].includes(gate.observed.state)) continue;
         try {
-          await this.#request(by, `cond-${gate.requestId ?? a.id}`, "resume", gate.scope, `the owner's recorded condition (set by ${gate.resumeAt.setBy} at ${gate.resumeAt.setAt}): not before ${gate.resumeAt.at}`, undefined, gate.projectId, { requestId: gate.requestId, at: gate.resumeAt.at, now });
+          await this.#request(by, `cond-${gate.requestId ?? a.id}`, "resume", gate.scope, `the owner's recorded condition (set by ${gate.resumeAt.setBy} at ${gate.resumeAt.setAt}): not before ${gate.resumeAt.at}`, undefined, gate.projectId, { requestId: gate.requestId, at: gate.resumeAt.at });
           lifted.push(gate.scope);
         } catch (error) {
           // A gate resumed, paused again or given another time since it was read is no longer this condition's to lift. One gate that cannot be lifted does not hold up the others.
@@ -314,7 +318,7 @@ export class PauseService implements PauseGuard, PauseLookup {
     }
   }
 
-  async #request(principal: Principal, commandId: unknown, action: "pause" | "resume", scope: PauseScope, reason: string, background: BackgroundPolicy | undefined, projectId: string | undefined, onlyIf?: { requestId: string | undefined; at: string; now: number }) {
+  async #request(principal: Principal, commandId: unknown, action: "pause" | "resume", scope: PauseScope, reason: string, background: BackgroundPolicy | undefined, projectId: string | undefined, onlyIf?: { requestId: string | undefined; at: string }) {
     const scoped = scopedCommandId(principal.id, commandId);
     const gateId = gateIdOf(scope);
     const result = await this.#retrying(() => this.#runner.command(`pause.${action}`, { commandId: scoped, actor: principal.id }, async () => ({
@@ -326,7 +330,7 @@ export class PauseService implements PauseGuard, PauseLookup {
         if (action === "pause" && gate.intent === "pause") throw new DomainError("invalid_command", `${scope.kind} ${scope.id} is already paused`, { field: "scope" });
         if (action === "resume" && gate.intent !== "pause") throw new DomainError("invalid_command", `${scope.kind} ${scope.id} is not paused`, { field: "scope" });
         // A lift by recorded condition applies only to the very pause and time it was read with.
-        if (onlyIf !== undefined && (gate.requestId !== onlyIf.requestId || gate.resumeAt?.at !== onlyIf.at || Date.parse(onlyIf.at) > onlyIf.now)) throw new DomainError("invalid_command", `${scope.kind} ${scope.id} no longer has that condition`, { field: "scope" });
+        if (onlyIf !== undefined && (gate.requestId !== onlyIf.requestId || gate.resumeAt?.at !== onlyIf.at || gate.takenOver === true)) throw new DomainError("invalid_command", `${scope.kind} ${scope.id} no longer has that condition`, { field: "scope" });
         const at = this.#runner.now();
         const seq = gate.requests + 1;
         const requestId = requestIdOf(gateId, seq);
