@@ -699,6 +699,19 @@ export class ChatService {
         }
       }
     }
+    // A watch to end: found as the one that tells the named task's owner (exactly one, else the owner is asked); an ID given directly must be an active watch.
+    if (intent.op === "watch.cancel") {
+      const active = await this.#listItems(token, "watch.describe");
+      if (typeof args["watchId"] === "string") { if (!active.some((w) => w["id"] === args["watchId"])) return refuse("not_found", "that watch is not active"); }
+      else {
+        if (typeof args["taskId"] !== "string") return refuse("invalid_command", "say which task's watch should end");
+        const mine = active.filter((w) => w["taskId"] === args["taskId"]);
+        if (mine.length === 0) return refuse("not_found", "no watch is active for that task");
+        if (mine.length > 1) return { ok: false, kind: "ask", question: "More than one watch tells that task's owner. Which one?", options: mine.slice(0, CHAT_LIMITS.options).map((w) => `${String(w["id"])} (${String(w["stream"])})`), field: "watchId", choices: mine.slice(0, CHAT_LIMITS.options).map((w) => String(w["id"])) };
+        args["watchId"] = String(mine[0]!["id"]);
+      }
+      delete args["taskId"];
+    }
     // A hand-off: the recipient named by the agent's name (exactly one active agent), and, for completing or cancelling, the hand-off itself found as the one going on for the named task.
     if (intent.op === "handoff.prepare" || intent.op === "handoff.takeover") {
       const named = args["toAgentName"];
@@ -943,6 +956,13 @@ export class ChatService {
   }
 
   /** Every item of a list operation, bounded (five pages). */
+  /** A list the operation returns whole (it takes no paging arguments). */
+  async #listItems(token: string, op: string): Promise<Record<string, unknown>[]> {
+    const response = await this.#deps.api.handle(token, { v: API_VERSION, op, args: {} });
+    if (!response.ok) { if (response.error.code === "forbidden" || response.error.code === "not_found") return []; throw new DomainError("unavailable", response.error.message); }
+    return (response.result["items"] ?? []) as Record<string, unknown>[];
+  }
+
   async #listAll(token: string, op: string, args: Record<string, unknown>): Promise<Record<string, unknown>[]> {
     const items: Record<string, unknown>[] = [];
     let after: string | undefined;

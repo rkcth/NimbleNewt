@@ -86,6 +86,7 @@ export interface Context {
     create(owner: Principal, command: { commandId: string; stream: string; taskId: string; kinds?: readonly string[]; cooldownSeconds?: number; batch?: number }): Promise<{ id: string; replayed: boolean }>;
     cancel(owner: Principal, command: { commandId: string; watchId: string }): Promise<void>;
     list(owner: Principal): Promise<string[]>;
+    describe(owner: Principal): Promise<{ id: string; stream: string; taskId: string; projectId: string }[]>;
   };
   readonly policyForward?: Pick<PolicyEditService, "forward">;
   readonly backups?: Pick<BackupService, "backUpNow" | "backUpFor" | "list" | "status">;
@@ -496,6 +497,8 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => { only(a, ["watchId"]); await (c.watchControl ?? unavailable("event watching")).cancel(c.principal, { commandId: need(id), watchId: a["watchId"] as string }); return asJson({ ok: true }); } },
   { name: "watch.list", kind: "query", summary: "Owner only: the active watches.", args: {}, result: "`{ items: [watchId] }`.",
     run: async (c, a) => { only(a, []); return asJson({ items: await (c.watchControl ?? unavailable("event watching")).list(c.principal) }); } },
+  { name: "watch.describe", kind: "query", summary: "Owner only: the active watches with what each watches (`stream`) and whose task owner it tells (`taskId`).", args: {}, result: "`{ items: [{ id, stream, taskId, projectId }] }`.",
+    run: async (c, a) => { only(a, []); return asJson({ items: await (c.watchControl ?? unavailable("event watching")).describe(c.principal) }); } },
   improvementOp("propose", "command", "Reports friction in a tool, skill, communication or workflow, with the evidence you may share and the work it affected. Anyone with meeting.agenda may; a similar proposal is grouped, never merged.", "propose", ["projectId", "title", "observation", "possibleImprovement", "evidence", "affectedTasks", "timeboxMinutes"], "`{ id, replayed }`."),
   improvementOp("group", "command", "Manager or owner: records that a proposal is another report of the same friction as an earlier one. Each proposer's evidence stays on its own record.", "group", ["itemId", "expectedRevision", "under", "underRevision"], "`{ ok }`."),
   improvementOp("decide", "command", "Manager or owner: accepts, rejects or defers a proposal (accepting grants nothing; planning and authority come from the usual process). Recorded on the proposal; returning it to the proposers is not connected yet.", "decide", ["itemId", "expectedRevision", "to", "reason", "nextStep", "evaluation", "taskId", "owner"], "`{ ok }`."),

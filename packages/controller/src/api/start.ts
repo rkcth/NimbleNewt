@@ -371,6 +371,7 @@ export async function startController(options: StartOptions): Promise<Controller
       create: async (owner: Principal, command: { commandId: string; stream: string; taskId: string; kinds?: readonly string[]; cooldownSeconds?: number; batch?: number }) => { const w = asDispatcher(owner); return w.watches.watch(w.by, command); },
       cancel: async (owner: Principal, command: { commandId: string; watchId: string }) => { const w = asDispatcher(owner); await w.watches.cancelWatch(w.by, command); },
       list: async (owner: Principal) => { const w = asDispatcher(owner); return w.watches.activeOf(w.by); },
+      describe: async (owner: Principal) => { const w = asDispatcher(owner); return w.watches.describeActive(w.by); },
     };
     // Forwarding goes through the policy-edit service, which exists only when chat is configured and after the API (it uses the API).
     let policyEditsLive: PolicyEditService | undefined;

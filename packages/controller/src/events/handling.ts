@@ -577,6 +577,18 @@ export class WatchService {
   // ---- internals ------------------------------------------------------------------------------------------------------------
 
   #hid(value: unknown): string { return typeof value === "string" && HANDLING_ID.test(value) ? value : invalid("handlingId", "is not a handling ID"); }
+  /** The active watches the caller set up, with what each watches and whose owner it tells (what `activeOf` names by ID alone). */
+  async describeActive(by: Principal): Promise<{ id: string; stream: string; taskId: string; projectId: string }[]> {
+    if (!(by.kind === "owner" || by.kind === "service")) throw new DomainError("forbidden", `${by.id} may not list watches`);
+    const out: { id: string; stream: string; taskId: string; projectId: string }[] = [];
+    for (let after: string | undefined, pages = 0; pages < this.#pages; pages++) {
+      const chunk = await this.#runner.list(WATCH_KIND, { ...(after === undefined ? {} : { afterId: after }), limit: this.#pageSize });
+      for (const rec of chunk) { after = rec.id; const w = rec.body as unknown as WatchBody; if (w.state === "active" && w.subscriber === by.id) out.push({ id: rec.id, stream: w.stream, taskId: w.taskId, projectId: w.projectId }); }
+      if (chunk.length < this.#pageSize) break;
+    }
+    return out;
+  }
+
   /** The IDs of the active watches the caller set up (the owner and services see their own; a watch is dispatched only by the principal that set it up). */
   async activeOf(by: Principal): Promise<string[]> {
     if (!(by.kind === "owner" || by.kind === "service")) throw new DomainError("forbidden", `${by.id} may not list watches`);

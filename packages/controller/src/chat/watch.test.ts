@@ -12,7 +12,9 @@ for (const backend of backends) {
   test(`${backend.name}: the owner sets up a watch in chat by task titles; the stream defaults to the task's own, another task is named by its title and an unclear title asks (card H13f)`, async () => {
     const script: Record<string, unknown> = {};
     const made: Record<string, unknown>[] = [];
-    const stub = { create: async (_p: unknown, c: Record<string, unknown>) => { made.push(c); return { id: `watch-${made.length}`, replayed: false }; }, cancel: async () => ({ ok: true }), list: async () => [] };
+    const cancelled: string[] = [];
+    let described: { id: string; stream: string; taskId: string; projectId: string }[] = [];
+    const stub = { create: async (_p: unknown, c: Record<string, unknown>) => { made.push(c); return { id: `watch-${made.length}`, replayed: false }; }, cancel: async (_p: unknown, c: Record<string, unknown>) => { cancelled.push(String(c["watchId"])); }, list: async () => [], describe: async () => described };
     const w = await openWorld(backend, script, undefined, { watchControl: stub as never });
     try {
       const a = await w.project("A");
@@ -20,6 +22,7 @@ for (const backend of backends) {
       const deploy = await w.task(a, "Deploy the site");
       await w.task(a, "Test");
       await w.task(a, "Test");
+      await w.task(a, "Quiet chore");
       const chat = w.chat();
       await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
       w.profile.value = "autonomous";
@@ -37,6 +40,21 @@ for (const backend of backends) {
       script["Watch nothing in particular."] = [cmd("watch.create", {}, "Watch nothing")];
       assert.equal((await say("Watch nothing in particular.")).status, "refused");
       assert.equal(made.length, 2);
+      // Ending a watch: found as the one that tells the named task's owner.
+      described = [{ id: "watch-1", stream: `task:${build}`, taskId: build, projectId: a }, { id: "watch-2", stream: `task:${deploy}`, taskId: deploy, projectId: a }];
+      script["Stop watching for Build the login."] = [cmd("watch.cancel", { taskTitle: "Build the login" }, "Stop watching for Build the login")];
+      assert.equal((await say("Stop watching for Build the login.")).status, "applied");
+      assert.deepEqual(cancelled, ["watch-1"]);
+      script["Stop watching for Quiet chore."] = [cmd("watch.cancel", { taskTitle: "Quiet chore" }, "Stop watching for Quiet chore")];
+      assert.equal((await say("Stop watching for Quiet chore.")).status, "refused", "no watch tells that task's owner");
+      described.push({ id: "watch-3", stream: `task:${build}`, taskId: build, projectId: a });
+      script["Stop watching for Build the login now."] = [cmd("watch.cancel", { taskTitle: "Build the login" }, "Stop watching for Build the login")];
+      const two = await say("Stop watching for Build the login now.");
+      assert.equal(two.status, "asked");
+      assert.deepEqual(two.options!.map((o) => o.split(" ")[0]), ["watch-1", "watch-3"]);
+      script["Stop watching, watch-9."] = [cmd("watch.cancel", { watchId: "watch-9" }, "watch-9")];
+      assert.equal((await say("Stop watching, watch-9.")).status, "refused", "an ID that is not an active watch");
+      assert.equal(cancelled.length, 1);
     } finally { await w.close(); }
   });
 }

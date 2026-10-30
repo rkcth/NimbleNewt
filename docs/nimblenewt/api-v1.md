@@ -470,6 +470,16 @@ Arguments:
 
 Result: `{ items: [watchId] }`.
 
+#### `watch.describe`
+
+Owner only: the active watches with what each watches (`stream`) and whose task owner it tells (`taskId`).
+
+Arguments:
+
+- none
+
+Result: `{ items: [{ id, stream, taskId, projectId }] }`.
+
 #### `improvement.get`
 
 One proposal with its evidence and disposition, if you may read it.

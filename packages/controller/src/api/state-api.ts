@@ -113,6 +113,7 @@ export interface StateApiDeps {
     create(owner: Principal, command: { commandId: string; stream: string; taskId: string; kinds?: readonly string[]; cooldownSeconds?: number; batch?: number }): Promise<{ id: string; replayed: boolean }>;
     cancel(owner: Principal, command: { commandId: string; watchId: string }): Promise<void>;
     list(owner: Principal): Promise<string[]>;
+    describe(owner: Principal): Promise<{ id: string; stream: string; taskId: string; projectId: string }[]>;
   };
   readonly policyForward?: Pick<PolicyEditService, "forward">;
   readonly backups?: Pick<BackupService, "backUpNow" | "backUpFor" | "list" | "status">;
