@@ -134,7 +134,9 @@ const clean = <T>(v: object): T => Object.fromEntries(Object.entries(v).filter((
 const idOf = (attemptId: string): string => `wend-${createHash("sha256").update(attemptId).digest("hex").slice(0, 32)}`;
 const OPEN_STATES: readonly WorkEndState[] = ["requested", "ending"];
 const INDEX = "work-end-open";
-const INDEX_ID = "open";
+const SHARDS = 32;
+const SCANNED_ID = "scanned";
+const shardOf = (attemptId: string): string => `s${createHash("sha256").update(attemptId).digest().readUInt16BE(0) % SHARDS}`;
 /** At most this many open endings are completed in one `recover` (the rest wait for the next tick). */
 const RECOVER_PER_TICK = 50;
 interface OpenIndex { readonly attempts: readonly string[]; /** True once the records written before the index existed were scanned in. */ readonly scanned?: boolean }
@@ -158,6 +160,7 @@ export class WorkEndService {
   readonly #epoch: number;
   readonly #instance = randomUUID();
   /** Endings being completed in this process: a second `complete` for the same attempt waits for the first's answer. */
+  #rotation = 0;
   readonly #running = new Map<string, Promise<WorkEndAnswer>>();
   private constructor(runner: CommandRunner, deps: WorkEndDeps, epoch: number) { this.#runner = runner; this.#deps = deps; this.#epoch = epoch; }
   static withEpoch(storage: ConstructorParameters<typeof CommandRunner>[0], epoch: number, deps: WorkEndDeps, options: RunnerOptions = {}): WorkEndService {
@@ -276,7 +279,7 @@ export class WorkEndService {
       if (attempt === undefined || attempt.stopped !== undefined || (!attempt.live && !started)) {
         // The true reason: an owner's (or emergency) stop only when the attempt was stopped; otherwise the attempt ended by itself before the ending could be completed.
         const by = attempt?.stopped?.by;
-        return this.#drop(attemptId, by === "emergency" ? "emergency_stop" : by === "owner" || by === "other" ? "owner_stop" : "attempt_ended", attempt?.stopped?.reason ?? "the attempt ended before the ending was completed");
+        return this.#drop(attemptId, by === "emergency" ? "emergency_stop" : by === "owner" ? "owner_stop" : "attempt_ended", attempt?.stopped?.reason ?? "the attempt ended before the ending was completed");
       }
       // A task that is paused, stopped or suspended makes no progress on the agent's ending; a stop drops it (begin), a plain pause leaves it for after the resume.
       if (attempt !== undefined && await this.#deps.paused?.(attempt.taskId)) return { ...body, replayed: false };
@@ -367,18 +370,26 @@ export class WorkEndService {
     const out: WorkEndAnswer[] = [];
     const failed: string[] = [];
     const gone: string[] = [];
-    const open = ((await this.#runner.get(INDEX, INDEX_ID))?.body as unknown as OpenIndex | undefined)?.attempts ?? [];
+    const open = await this.#openList();
+    // Only endings completed or failed count against the cap; paused or busy ones are passed over, and the start rotates so they cannot starve the rest.
     let handled = 0;
-    for (const attemptId of open) {
+    const start = open.length === 0 ? 0 : this.#rotation % open.length;
+    let seen = 0;
+    for (; seen < open.length && handled < RECOVER_PER_TICK; seen++) {
+      const attemptId = open[(start + seen) % open.length]!;
       const b = (await this.#get(idOf(attemptId)))?.body;
       if (b === undefined || !OPEN_STATES.includes(b.state)) { gone.push(attemptId); continue; }
-      if (handled >= RECOVER_PER_TICK) continue;
-      handled++;
-      try { out.push(await this.complete(attemptId)); } catch (error) {
+      try {
+        const answer = await this.complete(attemptId);
+        out.push(answer);
+        if (!OPEN_STATES.includes(answer.state)) handled++;
+      } catch (error) {
         if (error instanceof DomainError && error.code === "unavailable" && /^busy/.test(error.message)) continue;
+        handled++;
         failed.push(`${attemptId}: ${redactText(String((error as Error)?.message ?? error)).slice(0, 150)}`);
       }
     }
+    this.#rotation = open.length === 0 ? 0 : (start + seen) % open.length;
     if (gone.length > 0) await this.#index(undefined, gone);
     if (failed.length > 0) throw new DomainError("unavailable", `${failed.length} ending(s) could not be completed (${out.length} were): ${failed.slice(0, 5).join("; ")}`);
     return out;
@@ -386,7 +397,7 @@ export class WorkEndService {
 
   /** The records written before the index existed: scanned in once. */
   async #backfill(): Promise<void> {
-    if (((await this.#runner.get(INDEX, INDEX_ID))?.body as unknown as OpenIndex | undefined)?.scanned === true) return;
+    if (((await this.#runner.get(INDEX, SCANNED_ID))?.body as unknown as OpenIndex | undefined)?.scanned === true) return;
     const found: string[] = [];
     for (let after: string | undefined;;) {
       const page = await this.#runner.list(RECORD, { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
@@ -396,50 +407,77 @@ export class WorkEndService {
     await this.#index(undefined, undefined, found, true);
   }
 
-  /** Adds and removes attempts in the index of open endings (re-read and written again when it moved). */
+  /** Adds and removes attempts in the index of open endings. The index is split in shards by attempt, so concurrent `work.end` calls rarely write the same document (each shard is re-read and written again when it moved, with a jittered wait). */
   async #index(add: string | undefined, remove: readonly string[] | undefined, addMany: readonly string[] = [], scanned = false): Promise<void> {
-    for (let n = 0; n < 8; n++) {
-      const rec = await this.#runner.get(INDEX, INDEX_ID);
+    const byShard = new Map<string, { add: Set<string>; remove: Set<string> }>();
+    const slot = (a: string) => { const id = shardOf(a); let e = byShard.get(id); if (e === undefined) { e = { add: new Set(), remove: new Set() }; byShard.set(id, e); } return e; };
+    if (add !== undefined) slot(add).add.add(add);
+    for (const a of addMany) slot(a).add.add(a);
+    for (const r of remove ?? []) slot(r).remove.add(r);
+    for (const [id, e] of byShard) {
+      await this.#shardWrite(id, (cur) => {
+        const set = new Set(cur?.attempts ?? []);
+        for (const a of e.add) set.add(a);
+        for (const r of e.remove) set.delete(r);
+        return { attempts: [...set].sort() };
+      });
+    }
+    if (scanned) await this.#shardWrite(SCANNED_ID, () => ({ attempts: [], scanned: true }));
+  }
+
+  async #shardWrite(id: string, fn: (cur: OpenIndex | undefined) => OpenIndex): Promise<void> {
+    for (let n = 0; n < 24; n++) {
+      const rec = await this.#runner.get(INDEX, id);
       const cur = rec?.body as unknown as OpenIndex | undefined;
-      const set = new Set(cur?.attempts ?? []);
-      if (add !== undefined) set.add(add);
-      for (const a of addMany) set.add(a);
-      for (const r of remove ?? []) set.delete(r);
-      const next: OpenIndex = { attempts: [...set], ...(cur?.scanned === true || scanned ? { scanned: true } : {}) };
+      const next = fn(cur);
       if (cur !== undefined && JSON.stringify(cur) === JSON.stringify(next)) return;
-      const ref: AggregateRef = { kind: INDEX, id: INDEX_ID };
+      const ref: AggregateRef = { kind: INDEX, id };
       const digest = createHash("sha256").update(JSON.stringify(next)).digest("hex").slice(0, 16);
       try {
-        await this.#runner.command("workend.index", { commandId: `wend-idx:${rec?.revision ?? 0}:${digest}`, actor: "controller" }, async () => ({
+        await this.#runner.command("workend.index", { commandId: `wend-idx:${id}:${rec?.revision ?? 0}:${digest}`, actor: "controller" }, async () => ({
           payload: { revision: rec?.revision ?? 0 },
           build: async () => ({ ref, creates: rec === undefined, changes: [rec === undefined ? { type: "create" as const, ref, body: json(next) } : { type: "update" as const, ref, expectedRevision: rec.revision, body: json(next) }], detail: {}, contention: async () => new DomainError("stale_revision", "the index changed at the same moment") }),
         }));
         return;
-      } catch (error) { if (!(error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict"))) throw error; }
+      } catch (error) {
+        if (!(error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict"))) throw error;
+        await new Promise((r) => setTimeout(r, Math.floor(Math.random() * 5 * (n + 1))));
+      }
     }
     throw new DomainError("stale_revision", "the index of open endings kept changing");
+  }
+
+  async #openList(): Promise<string[]> {
+    const all: string[] = [];
+    for (let i = 0; i < SHARDS; i++) all.push(...(((await this.#runner.get(INDEX, `s${i}`))?.body as unknown as OpenIndex | undefined)?.attempts ?? []));
+    return all.sort();
   }
 
   /**
    * The dispatcher is about to end the attempt for its own reason (the turn completed, a stop, a lost worker). An ending the agent asked for is not lost: a stop drops it with its true reason; the turn completing after `work.end` completes it (settle, submit, tell,
    * and the attempt ends with the agent's result, which is what `handled` says); any other end drops it as `attempt_ended`, after the tell, with the agent's request written into the end's summary.
    */
-  async resolveOnEnd(attemptId: string, how: { readonly outcome: "succeeded" | "failed" | "abandoned"; readonly summary: string; readonly stopped?: { readonly by: "owner" | "emergency"; readonly reason: string } }): Promise<{ readonly handled?: true; readonly summary?: string } | undefined> {
+  async resolveOnEnd(attemptId: string, how: { readonly outcome: "succeeded" | "failed" | "abandoned"; readonly summary: string; readonly stopped?: { readonly by: "owner" | "emergency"; readonly reason: string } }): Promise<{ readonly handled?: true; readonly summary?: string; readonly outcome?: "succeeded" | "failed" | "abandoned"; readonly partial?: true } | undefined> {
     const found = await this.#get(idOf(attemptId));
     if (found === undefined || !OPEN_STATES.includes(found.body.state)) return undefined;
     if (how.stopped !== undefined) { await this.#drop(attemptId, how.stopped.by === "emergency" ? "emergency_stop" : "owner_stop", how.stopped.reason); return undefined; }
+    let override: "succeeded" | "abandoned" | undefined;
     if (how.outcome === "succeeded") {
-      try { const answer = await this.complete(attemptId); return answer.state === "done" ? { handled: true } : undefined; } catch (error) {
-        if (error instanceof DomainError && error.code === "unavailable") return undefined;
-        throw error;
+      let incomplete = false;
+      try { const answer = await this.complete(attemptId); if (answer.state === "done") return { handled: true }; incomplete = true; } catch (error) {
+        if (!(error instanceof DomainError && error.code === "unavailable")) throw error;
+        incomplete = true;
       }
+      // The ending could not be completed now (the task is paused, another instance is busy): a plain `done` leaves it for later and the turn's own end stands; any other result is not lost, the end carries it.
+      if (incomplete && found.body.result === "done") return undefined;
+      override = found.body.result === "partial" ? "succeeded" : "abandoned";
     }
     const b = found.body;
     const attempt = await this.#deps.attempts.get(attemptId);
     if (b.message !== undefined && b.steps?.told !== true && attempt !== undefined) await this.#deps.tell?.(attempt, b.message, stepKey(attemptId, "told")).catch(() => undefined);
     const asked = `the agent had asked to end it: ${b.result}${b.note === undefined ? "" : `: ${b.note}`}`;
     await this.#drop(attemptId, "attempt_ended", `the attempt ended first (${how.summary}); ${asked}`.slice(0, 300));
-    return { summary: `${how.summary}; ${asked}`.slice(0, 1000) };
+    return { summary: `${how.summary}; ${asked}`.slice(0, 1000), ...(override === undefined ? {} : { outcome: override }), ...(override === "succeeded" ? { partial: true as const } : {}) };
   }
 
   async get(attemptId: string): Promise<WorkEndAnswer | undefined> {

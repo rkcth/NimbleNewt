@@ -41,6 +41,8 @@ class Runtime implements StopPorts {
   throwOnCheckpoint = false;
   /** Runs inside cleanup, so a test can make something else happen while preparation is in progress. */
   duringCleanup: (() => Promise<void>) | undefined;
+  begins = 0;
+  async begin(): Promise<void> { this.begins++; }
   async release(): Promise<void> { this.calls.push("release"); }
   async inventory(): Promise<InventoryItem[]> { this.calls.push("inventory"); return this.items; }
   async cleanup(_s: unknown, o: { backup: boolean }) { this.calls.push("cleanup"); const hook = this.duringCleanup; this.duringCleanup = undefined; if (hook !== undefined) await hook(); this.backups.push(o.backup); return this.cleanups.length > 1 ? this.cleanups.shift()! : this.cleanups[0]!; }
@@ -95,6 +97,16 @@ for (const backend of backends) {
     assert.equal(JSON.stringify(await c.assignments.getAssignment(c.task)), before, "the assignment is unchanged");
     const again = await c.stops.advance(c.mgr, { intentId });
     assert.equal(again.revision, done.revision, "advancing a finished request changes nothing");
+  });
+
+  suite("a retried old stop request (same command) does not begin again: it would drop the endings of newer attempts (card H12n review fix 3)", async (c) => {
+    const command = { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "shutting down" } as const;
+    const first = await c.stops.request(c.owner, command);
+    assert.equal(c.rt.begins, 1);
+    await c.stops.advance(c.owner, { intentId: first.intentId });
+    const again = await c.stops.request(c.owner, command);
+    assert.equal(again.replayed, true);
+    assert.equal(c.rt.begins, 1, "a replay does not begin, the stop being over or not");
   });
 
   suite("stop: pause, prepare, then end execution; graceful only after preparation, and the task and its owner stay as they were", async (c) => {

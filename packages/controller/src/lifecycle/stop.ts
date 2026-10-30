@@ -153,7 +153,10 @@ export class StopService {
         };
       },
     }));
-    await this.#ports.begin?.(scope, { force: false }).catch(() => undefined);
+    // A replay (a retried old request) does not begin again: it would drop the endings of attempts newer than the request. Nor does a stop that is already over.
+    const startedIntent = await this.#runner.get(KIND, intentId);
+    const startedPhase = (startedIntent?.body as unknown as StopIntentBody | undefined)?.phase;
+    if (!run.replayed && !(startedPhase !== undefined && TERMINAL.includes(startedPhase))) await this.#ports.begin?.(scope, { force: false }).catch(() => undefined);
     // A replay of a request that upgraded an earlier one has no intent of its own: it answers with the one it upgraded.
     const own = await this.#runner.get(KIND, intentId);
     return { intentId: own !== undefined ? intentId : (await this.#activeId(scope)) ?? intentId, replayed: run.replayed };

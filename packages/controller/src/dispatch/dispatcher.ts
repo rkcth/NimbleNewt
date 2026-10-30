@@ -55,7 +55,7 @@ function withoutFreeze(b: DispatchBody, includeEnding: boolean): DispatchBody {
 }
 
 /** What the dispatcher tells the agent's ending (`work.end`, card H12n) when it is about to end an attempt for another reason: `handled` means the ending completed the attempt itself; a `summary` replaces the end's own. */
-export type EndHook = (attemptId: string, how: { readonly outcome: "succeeded" | "failed" | "abandoned"; readonly summary: string; readonly stopped?: { readonly by: "owner" | "emergency"; readonly reason: string } }) => Promise<{ readonly handled?: true; readonly summary?: string } | undefined>;
+export type EndHook = (attemptId: string, how: { readonly outcome: "succeeded" | "failed" | "abandoned"; readonly summary: string; readonly stopped?: { readonly by: "owner" | "emergency"; readonly reason: string } }) => Promise<{ readonly handled?: true; readonly summary?: string; readonly outcome?: "succeeded" | "failed" | "abandoned"; readonly partial?: true } | undefined>;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 
 /** What a route resolver says: the route and harness for a task, or why there is none. The resolver is the owner's configuration read at the moment of dispatch (R03). */
@@ -158,6 +158,8 @@ export interface AttemptDispatcherOptions extends RunnerOptions {
   readonly maxAttempts?: number;
   /** After this many ticks in a row in which an attempt pinned to a host could not start because that host was unavailable, a blocker names the owner (who can move it). Default 5. */
   readonly pinnedStaleTicks?: number;
+  /** How long the end hook (the agent's ending) may take before the attempt ends with the dispatcher's own outcome and the hook's delay is reported through `onError`. Default 30 seconds. */
+  readonly endHookMs?: number;
   /** Assignments looked at per tick. Default 100. */
   readonly scanPage?: number;
   /** How long the dispatcher expects an attempt to run when the contract says nothing, for the meeting check (M04). Default 30 minutes. */
@@ -458,7 +460,8 @@ export class DispatcherService {
   /** Lifts a freeze. */
   async release(by: Principal, attemptId: string, options: { readonly includeEnding?: boolean } = {}): Promise<void> {
     const d = await this.#controlled(by, attemptId);
-    await this.#update(d.body.attemptId, (b) => withoutFreeze(b, options.includeEnding === true));
+    // The stop marker goes with the ending's freeze: a stop that failed part-way and a scope that was resumed leave a live attempt that can end itself.
+    await this.#update(d.body.attemptId, (b) => { const x = withoutFreeze(b, options.includeEnding === true); if (options.includeEnding !== true || x.stopped === undefined) return x; const { stopped: _s, ...rest } = x; void _s; return rest; });
   }
 
   /**
@@ -508,14 +511,15 @@ export class DispatcherService {
   async stop(by: Principal, attemptId: string, options: { emergency?: boolean; reason: string }): Promise<void> {
     const d = await this.#controlled(by, attemptId);
     if (typeof options.reason !== "string" || options.reason.length < 1 || options.reason.length > 300) invalid("reason", "must be 1 to 300 characters");
-    // Recorded first: the agent's ending reads it, so an owner's stop is told from an attempt that merely ended (card H12n).
+    // Recorded just before the end: the agent's ending reads it, so an owner's stop is told from an attempt that merely ended (card H12n).
     const stopped = { by: options.emergency === true ? "emergency" as const : "owner" as const, reason: options.reason };
-    await this.#update(d.body.attemptId, (b) => ({ ...b, stopped: b.stopped ?? stopped }));
     if (options.emergency !== true) {
       await this.freeze(by, attemptId, options.reason);
       await this.settle(by, attemptId, { cancel: true });
       await this.#checkpoint(attemptId, options.reason);
     }
+    // Written only once nothing before the end can fail: a stop that failed part-way and a scope that was resumed leave the attempt able to end itself.
+    await this.#update(d.body.attemptId, (b) => ({ ...b, stopped: b.stopped ?? stopped }));
     await this.#end(d.body.attemptId, "abandoned", options.reason, { readmit: false, stopped });
   }
 
@@ -1242,22 +1246,49 @@ export class DispatcherService {
 
   async #end(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean; lost?: boolean; stopped?: { readonly by: "owner" | "emergency"; readonly reason: string }; skipHook?: boolean; partial?: boolean }): Promise<{ readmitted?: string }> {
     // `idle()` waits for every end in progress, not only for the turns: an attempt leaves the live list part-way through its end, and the blocker for a failure is opened after that.
-    // Two paths can end the same attempt at once (the worker's result and the lease scan): the second joins the first, whose outcome stands. Its own would reuse the first's command IDs with a different summary.
+    // Two paths can end the same attempt at once (the worker's result, the lease scan, a stop): the second joins the first, whose outcome stands. Its own would reuse the first's command IDs with a different summary.
+    // The end is registered synchronously, before the end hook is awaited, so a second end that comes while the hook runs joins it.
     const already = this.#endingBy.get(attemptId);
-    if (already !== undefined) return already;
-    if (this.#endHook !== undefined && options.skipHook !== true) {
-      try {
-        const told = await this.#endHook(attemptId, { outcome, summary, ...(options.stopped === undefined ? {} : { stopped: options.stopped }) });
-        if (told?.handled === true) return {};
-        if (told?.summary !== undefined) summary = told.summary;
-      } catch (error) { this.#options.onError?.(error); }
+    if (already !== undefined) {
+      // The agent's own ending, completed inside the hook, finishes the attempt itself (it cannot join the end that is waiting for it).
+      if (options.skipHook === true && this.#inHook.has(attemptId)) return this.#endInner(attemptId, outcome, this.#cleanSummary(outcome, summary), options);
+      return already;
     }
-    // The reason may be a worker's or a model's error text, which the records refuse if it holds control characters or half a character: an attempt must always be able to end.
-    const clean = Array.from(summary.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ").replace(/[\ud800-\udfff]/g, "?")).slice(0, 1000).join("").trim();
-    const ending = this.#endInner(attemptId, outcome, clean === "" ? `the attempt ${outcome}` : clean, options);
+    const ending = this.#endHooked(attemptId, outcome, summary, options);
     this.#ending.add(ending);
     this.#endingBy.set(attemptId, ending);
     try { return await ending; } finally { this.#ending.delete(ending); if (this.#endingBy.get(attemptId) === ending) this.#endingBy.delete(attemptId); }
+  }
+
+  readonly #inHook = new Set<string>();
+
+  #cleanSummary(outcome: string, summary: string): string {
+    // The reason may be a worker's or a model's error text, which the records refuse if it holds control characters or half a character: an attempt must always be able to end.
+    const clean = Array.from(summary.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ").replace(/[\ud800-\udfff]/g, "?")).slice(0, 1000).join("").trim();
+    return clean === "" ? `the attempt ${outcome}` : clean;
+  }
+
+  async #endHooked(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean; lost?: boolean; stopped?: { readonly by: "owner" | "emergency"; readonly reason: string }; skipHook?: boolean; partial?: boolean }): Promise<{ readmitted?: string }> {
+    if (this.#endHook !== undefined && options.skipHook !== true) {
+      const hook = this.#endHook;
+      this.#inHook.add(attemptId);
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        const limit = this.#options.endHookMs ?? 30_000;
+        const timeout = new Promise<"timeout">((resolve) => { timer = setTimeout(() => resolve("timeout"), limit); });
+        const call = hook(attemptId, { outcome, summary, ...(options.stopped === undefined ? {} : { stopped: options.stopped }) });
+        call.catch(() => undefined);
+        const told = await Promise.race([call, timeout]);
+        if (told === "timeout") this.#options.onError?.(new Error(`the end hook of attempt ${attemptId} did not answer within ${limit} ms; the attempt ends with the dispatcher's own outcome`));
+        else {
+          if (told?.handled === true) return {};
+          if (told?.summary !== undefined) summary = told.summary;
+          if (told?.outcome !== undefined) outcome = told.outcome;
+          if (told?.partial === true) options = { ...options, partial: true };
+        }
+      } catch (error) { this.#options.onError?.(error); } finally { if (timer !== undefined) clearTimeout(timer); this.#inHook.delete(attemptId); }
+    }
+    return this.#endInner(attemptId, outcome, this.#cleanSummary(outcome, summary), options);
   }
 
   async #endInner(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean; lost?: boolean; partial?: boolean }): Promise<{ readmitted?: string }> {

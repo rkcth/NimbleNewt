@@ -198,3 +198,42 @@ test("a credential scoped to one task cannot end the same agent's attempt on ano
     assert.ok(ok.ok, JSON.stringify(ok));
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+test("work.end blocked while the task is paused, then the turn completes: the attempt is abandoned with the note, not succeeded, and the intent is dropped as attempt_ended (card H12n review fix 2)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-workend-"));
+  const { c, owner, project, client, state } = await world(d);
+  try {
+    const one = await attemptFor(c, owner, project, 1);
+    await c.dispatch!.dispatcher.tick();
+    const offers = await client.offers();
+    const offer = offers.find((o) => o.order.attemptId === one.attempt)!;
+    const att = client.attempt(one.attempt, offer.placement);
+    await att.accept();
+    assert.ok((await call(c, one.token, "work.end", { attemptId: one.attempt, result: "blocked", note: "no seeds" }, "e1")).ok);
+    await c.services.pauses.pause(owner, { commandId: "pz", scope: { kind: "task", id: one.task }, reason: "plain pause" });
+    await att.complete({ status: "completed", text: "stopping" });
+    for (let n = 0; n < 200 && (await state(one.attempt)).state !== "finished"; n++) await new Promise((r) => setTimeout(r, 25));
+    const ended = await state(one.attempt);
+    assert.equal(ended.state, "finished");
+    assert.equal(ended.outcome?.status, "abandoned", "the agent's blocked result is not lost under a pause");
+    assert.match(ended.outcome?.summary ?? "", /blocked.*no seeds/);
+    const rec = await c.services.workEnd.get(one.attempt);
+    assert.deepEqual([rec?.state, rec?.typed], ["dropped", "attempt_ended"]);
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("an emergency stop of an attempt with an open ending drops the intent as emergency_stop, end to end (card H12n review fix 5)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-workend-"));
+  const { c, owner, project, state } = await world(d);
+  try {
+    const one = await attemptFor(c, owner, project, 1);
+    await c.dispatch!.dispatcher.tick();
+    assert.ok((await call(c, one.token, "work.end", { attemptId: one.attempt, result: "done" }, "e1")).ok);
+    await c.dispatch!.dispatcher.stop(c.dispatch!.principal, one.attempt, { emergency: true, reason: "pull the plug" });
+    const rec = await c.services.workEnd.get(one.attempt);
+    assert.deepEqual([rec?.state, rec?.typed], ["dropped", "emergency_stop"]);
+    const after = await state(one.attempt);
+    assert.equal(after.state, "finished");
+    assert.equal(after.outcome?.status, "abandoned");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});

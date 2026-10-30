@@ -846,6 +846,91 @@ for (const backend of backends) {
     await c.dispatcher.idle();
   });
 
+  /** An attempt whose worker waits, started by a tick; `release` lets its turn complete. */
+  const scripts = new WeakMap<object, Map<string, { started: () => void; gate: Promise<void> }>>();
+  async function running(c: Ctx, name: string) {
+    const ann = await c.agent(name, workGrants(c.project, ["read-file"]));
+    const { attemptId } = await c.task(name, ann);
+    const started = deferred();
+    const release = deferred();
+    let map = scripts.get(c.worker);
+    if (map === undefined) {
+      const m = new Map<string, { started: () => void; gate: Promise<void> }>();
+      map = m; scripts.set(c.worker, m);
+      c.worker.script = async ({ order }) => { const e = m.get(order.attemptId)!; e.started(); await e.gate; return { status: "completed", text: "x" }; };
+    }
+    map.set(attemptId!, { started: () => started.resolve(), gate: release.promise });
+    return { attemptId: attemptId!, started, release };
+  }
+
+  suite("two ends of one attempt at once join the first, also while the end hook is awaited; a hook that hangs or throws does not hold the end (card H12n review fix 1)", async (c) => {
+    const errors: unknown[] = [];
+    c.dispatcher = c.restart({}, { endHookMs: 60, onError: (e) => errors.push(e) });
+    const a = await running(c, "ann");
+    await c.dispatcher.tick();
+    await a.started.promise;
+    let calls = 0;
+    const gate = deferred<undefined>();
+    c.dispatcher.onEnd(async () => { calls++; return gate.promise; });
+    const first = c.dispatcher.stop(c.owner, a.attemptId, { emergency: true, reason: "first" });
+    const second = c.dispatcher.stop(c.owner, a.attemptId, { emergency: true, reason: "second" });
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(calls, 1, "the second end joined the first while the hook was still awaited");
+    // The hook never answers: the end goes on with the dispatcher's own outcome after the limit, and says so.
+    await Promise.all([first, second]);
+    assert.equal((await c.assignments.getAttempt(a.attemptId))!.state, "abandoned");
+    assert.ok(errors.some((e) => /did not answer within 60 ms/.test(String(e))), errors.map(String).join("|"));
+    gate.resolve(undefined);
+    await c.dispatcher.idle();
+    // A hook that throws: the attempt still ends, and the error is reported.
+    const b = await running(c, "bob");
+    await c.dispatcher.tick();
+    await b.started.promise;
+    c.dispatcher.onEnd(async () => { throw new Error("hook broke"); });
+    await c.dispatcher.stop(c.owner, b.attemptId, { emergency: true, reason: "stop b" });
+    assert.equal((await c.assignments.getAttempt(b.attemptId))!.state, "abandoned");
+    assert.ok(errors.some((e) => /hook broke/.test(String(e))));
+    a.release.resolve(); b.release.resolve();
+    await c.dispatcher.idle();
+  });
+
+  suite("a stop that fails before the end does not leave the stopped marker; one that succeeds records it for the hook (card H12n review fix 4)", async (c) => {
+    const a = await running(c, "ann");
+    await c.dispatcher.tick();
+    await a.started.promise;
+    const handle = c.worker.handles.find((h) => h.order.attemptId === a.attemptId)!;
+    handle.checkpoint = async () => { throw new Error("checkpoint failed"); };
+    await assert.rejects(c.dispatcher.stop(c.owner, a.attemptId, { reason: "owner stop" }), /checkpoint failed/);
+    assert.equal((await c.dispatcher.get(c.owner, a.attemptId))!.stopped, undefined, "the failed stop left no marker");
+    // The scope is resumed, the attempt is live, and its own ending is accepted.
+    await c.dispatcher.release(c.owner, a.attemptId, { includeEnding: true });
+    assert.equal(await c.dispatcher.finishWith(c.owner, a.attemptId, { result: "blocked", note: "n" }), true);
+    assert.equal((await c.assignments.getAttempt(a.attemptId))!.state, "abandoned");
+    const b = await running(c, "bob");
+    await c.dispatcher.tick();
+    await b.started.promise;
+    let seen: unknown;
+    c.dispatcher.onEnd(async (_id, how) => { seen = how.stopped; return undefined; });
+    await c.dispatcher.stop(c.owner, b.attemptId, { emergency: true, reason: "stop b" });
+    assert.deepEqual(seen, { by: "emergency", reason: "stop b" });
+    assert.deepEqual((await c.dispatcher.get(c.owner, b.attemptId))!.stopped, { by: "emergency", reason: "stop b" });
+  });
+
+  suite("a partial ending leaves the overflow count alone, a done one resets it (card H12n review fix 5)", async (c) => {
+    const resets: string[] = [];
+    c.dispatcher = c.restart({ context: { ensureHandoff: async () => undefined, reportOverflow: async () => undefined, resetOverflow: async (_p: unknown, x: { attemptId: string }) => { resets.push(x.attemptId); }, limitTool: async () => undefined } as never });
+    const a = await running(c, "ann");
+    await c.dispatcher.tick();
+    await a.started.promise;
+    assert.equal(await c.dispatcher.finishWith(c.owner, a.attemptId, { result: "partial", note: "half" }), true);
+    assert.deepEqual(resets, [], "partial: not reset");
+    const b = await running(c, "bob");
+    await c.dispatcher.tick();
+    await b.started.promise;
+    assert.equal(await c.dispatcher.finishWith(c.owner, b.attemptId, { result: "done" }), true);
+    assert.deepEqual(resets, [b.attemptId]);
+  });
+
   suite("an agent is quiet (frozen, settled, checkpointed) before its changes are integrated or its checkout is refreshed, and calls resume when it is released", async (c) => {
     const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
     const { attemptId } = await c.task("t", ann);

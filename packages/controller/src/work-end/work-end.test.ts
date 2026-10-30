@@ -41,7 +41,7 @@ for (const backend of backends) {
     const landed: Landed = opts.landed ?? { base: "h1", head: "h1", mine: ["a.ts"], landed: [] };
     const deps: WorkEndDeps = {
       attempts: {
-        get: async (id) => (id === "att-1" ? state.attempt : id === "att-2" ? { ...state.attempt, attemptId: "att-2", live: state.live2 } : undefined),
+        get: async (id) => (id === "att-1" ? state.attempt : id === "att-2" ? { ...state.attempt, attemptId: "att-2", live: state.live2 } : id.startsWith("many-") ? { ...state.attempt, attemptId: id } : undefined),
         freeze: async (_id, reason) => { state.freezeCalls++; if (opts.freezeFailsOnce && state.freezeCalls === 1) throw new Error("freeze hiccup"); state.frozen.push(reason); },
         settle: async (id) => { state.settled++; if (opts.settleFails === id) throw new Error("settle exploded"); if (opts.settleGone) throw new DomainError("not_found", "gone"); await opts.onSettle?.(); return opts.settle ?? { killed: [] }; },
         finish: async (id, result, key, confirm) => {
@@ -295,7 +295,7 @@ for (const backend of backends) {
       await assert.rejects(r.service.recover(), /1 ending\(s\) could not be completed \(1 were\).*att-1/);
       assert.equal((await r.service.get("att-2"))?.state, "done", "the other ending was completed");
       assert.notEqual((await r.service.get("att-1"))?.state, "done");
-      const index = async () => ((await r.w.storage.getAggregate({ kind: "work-end-open", id: "open" }))?.body as unknown as { attempts: string[] }).attempts;
+      const index = async () => { const all: string[] = []; for (let i = 0; i < 64; i++) all.push(...(((await r.w.storage.getAggregate({ kind: "work-end-open", id: `s${i}` }))?.body as unknown as { attempts: string[] } | undefined)?.attempts ?? [])); return all.sort(); };
       assert.deepEqual(await index(), ["att-1", "att-2"]);
       await assert.rejects(r.service.recover(), /att-1/);
       assert.deepEqual(await index(), ["att-1"], "the closed one left the index");
@@ -351,4 +351,22 @@ for (const backend of backends) {
       assert.equal((await f.service.complete("att-2")).typed, "attempt_ended");
     } finally { await f.store.close(); }
   });
+  test(`${backend.name}: paused endings do not use up the cap of one recover; the rest are completed by the next (H12n review fix 5)`, async () => {
+    const r = await rig();
+    try {
+      for (let i = 0; i < 55; i++) await r.service.request(r.ann, { commandId: `m${i}`, attemptId: `many-${i}`, result: "done" });
+      r.state.paused = true;
+      assert.equal((await r.service.get("many-54"))?.state, "requested");
+      const paused = await r.service.recover();
+      assert.equal(paused.length, 55, "all 55 were looked at: paused ones do not count against the cap");
+      assert.ok(paused.every((a) => a.state !== "done"));
+      r.state.paused = false;
+      const first = await r.service.recover();
+      assert.equal(first.filter((a) => a.state === "done").length, 50, "at most 50 completed per call");
+      const second = await r.service.recover();
+      assert.ok(second.length >= 5 && second.some((a) => a.attemptId === "many-54" || a.state === "done"));
+      for (let i = 0; i < 55; i++) assert.equal((await r.service.get(`many-${i}`))?.state, "done", `many-${i}`);
+    } finally { await r.store.close(); }
+  });
+
 }
