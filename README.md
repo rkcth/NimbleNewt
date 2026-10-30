@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **193 of 301 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **194 of 301 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -113,7 +113,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓░░░` 80% | 17 of 21 |
 | Context and memory | `▓▓▓▓▓▓▓▓▓▓░░` 90% | 20 of 22 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
-| Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓░░` 84% | 11 of 13 |
+| Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓▓░` 92% | 12 of 13 |
 | Owner chat and web UI | `▓▓▓▓▓▓▓░░░░░` 62% | 10 of 16 |
 | Workers, dispatch and teams | `▓▓▓▓▓▓▓░░░░░` 65% | 30 of 46 |
 | Agent messaging | `▓▓▓▓▓▓▓▓▓▓░░` 87% | 7 of 8 |
@@ -304,7 +304,7 @@ The versioned state API that every client uses, and the controller-backed MCP st
 </details>
 
 <details>
-<summary><strong>Model routing, fallback and cost</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 11 of 13</summary>
+<summary><strong>Model routing, fallback and cost</strong> — ▓▓▓▓▓▓▓▓▓▓▓░ 12 of 13</summary>
 
 Routes and capability policy, provider failure fallback, difficulty profiles, drain and cutover, and cost attribution.
 
@@ -312,7 +312,7 @@ Routes and capability policy, provider failure fallback, difficulty profiles, dr
 - [x] **R02** · P25 · Implement fallback and cumulative budget accounting _(needs R01, S05, C04)_
 - [x] **R03** · P26 · Implement difficulty profiles and escalation _(needs R02, S10, H11)_
 - [x] **R05** · P26 · Implement cost and resource attribution and delegated budgets _(needs R02, H03, S10)_
-- [ ] **R04** · P27 · Implement provider drain, cutover and failback policy _(needs R02, L05)_
+- [x] **R04** · P27 · Implement provider drain, cutover and failback policy _(needs R02, L05)_
 - [x] **R04b** · P27 · Compose provider drain and cutover into the running controller (owner operations) _(needs R02, L05)_
 - [x] **R05c** · P27 · Budget requests reach their addressee and budgets are exposed in the API _(needs R05, U11)_
 - [x] **R05e** · P28 · Tell the delegated holder of a budget request _(needs R05c)_

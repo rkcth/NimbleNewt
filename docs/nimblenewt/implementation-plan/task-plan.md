@@ -1441,6 +1441,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### R04 — Implement provider drain, cutover and failback policy
 
 - **Parent:** N08 / AII-258.
+- **Status:** implemented; commits `1f924b8`, `e022435`; CI runs 41039601643; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Drain, cutover and failback services with validated fallback lists, owner operations through the state API and restart-safe state; wiring model calls and probes into the running controller is R04c.
 - **Blockers:** R02, L05.
 - **Deliverable:** Fallback-list validation for every model-using role including the coordinator and safety supervisor; exclusions at model, endpoint, account, provider and local-service level with alias resolution; persisted list position and attempt history; planned-drain and immediate-cutover modes; cooldowns and a separate failback policy (README 459-476; pitfalls-and-safeguards 119; design-decisions 55).
 - **Acceptance and verification:** A role without a valid list is rejected at configuration; an alias to a disabled service is excluded; no recursion into a fallback's own list and no cycles; list position survives restart; drain reports routing applied, in-flight requests remaining and service safe to stop as separate facts, including when no local route is in use; cutover cancels in-flight attempts, rejects late responses and records possible outstanding charges; an account-wide block is distinguished from an endpoint failure; a tool error or bad answer does not trigger failover; an explicitly disabled route stays disabled despite probes; failback follows its own policy without flapping; local-only, cloud-only and mixed configurations exercised across restart.
