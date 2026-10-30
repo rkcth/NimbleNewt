@@ -872,12 +872,19 @@ for (const backend of backends) {
     let calls = 0;
     const gate = deferred<undefined>();
     c.dispatcher.onEnd(async () => { calls++; return gate.promise; });
-    const first = c.dispatcher.stop(c.owner, a.attemptId, { emergency: true, reason: "first" });
-    const second = c.dispatcher.stop(c.owner, a.attemptId, { emergency: true, reason: "second" });
-    await new Promise((r) => setTimeout(r, 10));
+    // Handlers are attached at once: a stop that rejects before the suite looks at it must never be an unhandled rejection, and nothing may still run when the storage closes.
+    const first = c.dispatcher.stop(c.owner, a.attemptId, { emergency: true, reason: "first" }).then(() => undefined, (e: unknown) => e);
+    // The hook is reached after a few storage round trips; wait for it instead of a fixed time (a slow server needs more than 10 ms).
+    for (let i = 0; i < 500 && calls === 0; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(calls, 1, "the first end reached the hook");
+    const revisionOf = async () => (await c.storage.listAggregates("dispatch", { limit: 100 })).find((x) => (x.body as unknown as { attemptId: string }).attemptId === a.attemptId)!.revision;
+    const before = await revisionOf();
+    const second = c.dispatcher.stop(c.owner, a.attemptId, { emergency: true, reason: "second" }).then(() => undefined, (e: unknown) => e);
+    await new Promise((r) => setTimeout(r, 20));
     assert.equal(calls, 1, "the second end joined the first while the hook was still awaited");
+    assert.equal(await revisionOf(), before, "a joined stop writes nothing to the attempt");
     // The hook never answers: the end goes on with the dispatcher's own outcome after the limit, and says so.
-    await Promise.all([first, second]);
+    assert.deepEqual(await Promise.all([first, second]), [undefined, undefined], "neither stop rejects");
     assert.equal((await c.assignments.getAttempt(a.attemptId))!.state, "abandoned");
     assert.ok(errors.some((e) => /did not answer within 60 ms/.test(String(e))), errors.map(String).join("|"));
     gate.resolve(undefined);

@@ -519,7 +519,14 @@ export class DispatcherService {
       await this.#checkpoint(attemptId, options.reason);
     }
     // Written only once nothing before the end can fail: a stop that failed part-way and a scope that was resumed leave the attempt able to end itself.
-    await this.#update(d.body.attemptId, (b) => ({ ...b, stopped: b.stopped ?? stopped }));
+    // A stop that comes while another end of the attempt is in progress joins that end and writes nothing: the first stop already recorded the marker, and a write that lands once the end
+    // is over could reach storage after it was closed. A marker write that fails because the attempt ended meanwhile does not reject the stop either.
+    if (!this.#endingBy.has(d.body.attemptId)) {
+      try { await this.#update(d.body.attemptId, (b) => (b.state === "finished" ? b : { ...b, stopped: b.stopped ?? stopped })); }
+      catch (error) {
+        if (!this.#endingBy.has(d.body.attemptId) && (await this.#load(d.body.attemptId).catch(() => undefined))?.body.state !== "finished") throw error;
+      }
+    }
     await this.#end(d.body.attemptId, "abandoned", options.reason, { readmit: false, stopped });
   }
 
