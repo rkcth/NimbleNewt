@@ -197,6 +197,10 @@ export class ReleaseService {
         if (candidate === undefined) throw new DomainError("not_found", "no such release candidate");
         const manifest = (candidate.body as unknown as CandidateBody).manifest;
         if (!manifest.matrix.some((c) => cellKey(c) === cellKey(cell))) throw new DomainError("invalid_command", `${cellKey(cell)} is not in this candidate's matrix`, { field: "cell" });
+        // A version the candidate names is the version tested: an issue that names another is refused, and one that names none takes the candidate's.
+        const named = manifest.matrix.find((c) => cellKey(c) === cellKey(cell))!;
+        if (named.osVersion !== undefined && cell.osVersion !== undefined && cell.osVersion !== named.osVersion) throw new DomainError("invalid_command", `this platform is ${named.osVersion} in the candidate's matrix, not ${cell.osVersion}`, { field: "cell" });
+        const tested: Cell = named.osVersion !== undefined ? { ...cell, osVersion: named.osVersion } : cell;
         const host = (await this.#runner.get(HOST, `rhs-${sha(hostId).slice(0, 24)}`))?.body as unknown as HostAuthBody | undefined;
         if (host === undefined || !host.active) throw new DomainError("forbidden", `${hostId} is not authorized for release tests`);
         if (host.os !== cell.os || host.arch !== cell.arch) throw new DomainError("forbidden", `${hostId} is authorized for ${host.os}/${host.arch}, not ${cellKey(cell)}`);
@@ -206,9 +210,9 @@ export class ReleaseService {
         if (latest?.state === "passed") throw new DomainError("invalid_command", "this platform already passed", { field: "cell" });
         const n = (latest?.n ?? 0) + 1;
         const attemptId = attemptIdOf(command.candidateId, cell, n);
-        const payload = jobPayload(command.candidateId, manifest, cell, attemptId, limits);
+        const payload = jobPayload(command.candidateId, manifest, tested, attemptId, limits);
         const ref: AggregateRef = { kind: ATTEMPT, id: attemptId };
-        const body: AttemptBody = { candidateId: command.candidateId, cell, n, hostId, workerId, payloadDigest: sha(canonicalJson(payload as unknown as JsonObject)), limits, state: "issued", issuedAt: this.#runner.now() };
+        const body: AttemptBody = { candidateId: command.candidateId, cell: tested, n, hostId, workerId, payloadDigest: sha(canonicalJson(payload as unknown as JsonObject)), limits, state: "issued", issuedAt: this.#runner.now() };
         issued = { attemptId, payload };
         return { ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { candidateId: command.candidateId, platform: cellKey(cell), attempt: n } };
       },

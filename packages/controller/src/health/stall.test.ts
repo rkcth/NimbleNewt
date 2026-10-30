@@ -378,7 +378,9 @@ for (const backend of backends) {
 
   suite("a concern left undecided past the wait is passed on to the owner once told; a decision before then or after it still works; an unauthorized caller is refused (card V02b)", async (c) => {
     const h = await c.host("h1");
-    const t = await c.work();
+    const boss = await c.hbAgent("Boss");
+    const ann = await c.hbAgent("Ann", { supervisorId: boss.id });
+    const t = await c.work({ owner: ann.id });
     for (let i = 0; i < 6; i++) await c.send(h, t, step("run tests", "tests"));
     await c.stall.scan(c.owner);
     assert.deepEqual(await c.stall.escalateUndecided(c.owner), [], "not yet: it was only just suspected");
@@ -401,6 +403,14 @@ for (const backend of backends) {
     assert.ok(kept!.escalatedAt !== undefined && kept!.notifiedAt !== undefined);
     assert.equal((await c.stall.decide(c.owner, { commandId: cid("d"), concernId: kept!.id, expectedRevision: kept!.revision, decision: "confirm", reason: "yes" })).replayed, false);
     await refuses("forbidden", async () => c.stall.escalateUndecided(await c.plain("ann")));
+    // A concern already routed to the owner has no supervisor to wait for, so it is not escalated.
+    const solo = await c.work({ owner: (await c.hbAgent("Loner")).id });
+    for (let i = 0; i < 6; i++) await c.send(h, solo, step("run tests", "tests"));
+    await c.stall.scan(c.owner);
+    now += 40 * MIN;
+    const owned = (await c.stall.list(c.owner, { taskId: solo })).items;
+    assert.ok(owned.length > 0 && owned.every((x) => x.route.via === "owner"));
+    assert.ok(!(await c.stall.escalateUndecided(c.owner)).some((x) => x.taskId === solo));
     await refuses("forbidden", async () => c.stall.markEscalationNotified(await c.plain("ben"), told[0]!.id));
   });
 

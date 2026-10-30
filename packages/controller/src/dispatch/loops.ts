@@ -177,7 +177,7 @@ export function reviewLoops(reviews: Pick<ReviewService, "sweep">, projects: () 
  * L01b: the reconciler's pass (repairs, inbox admission with the pause lookup, effect recovery, wait deadlines) and stall detection. The scan needs the dedicated `recovery.stall-scan` right; a dispatcher
  * without it is told once (`missing`) and the scan is skipped, so the tick does not fail every time.
  */
-export function recoveryLoops(stall: Pick<StallService, "scan"> & Partial<Pick<StallService, "escalateUndecided" | "markEscalationNotified">>, reconciler: { runPass(): Promise<unknown> }, missing: () => Promise<unknown>, renew?: () => Promise<Principal>, notifyEscalation?: (concern: { id: string; taskId: string; projectId: string; kind: string; detail: string }) => Promise<void>): DispatcherLoop[] {
+export function recoveryLoops(stall: Pick<StallService, "scan"> & Partial<Pick<StallService, "escalateUndecided" | "markEscalationNotified">>, reconciler: { runPass(): Promise<unknown> }, missing: () => Promise<unknown>, renew?: () => Promise<Principal>, notifyEscalation?: (concern: { id: string; taskId: string; projectId: string; kind: string; detail: string; escalatedAt?: string }) => Promise<void>): DispatcherLoop[] {
   let said = false;
   // The scan continues where the last tick stopped and wraps at the end, so every assignment is reached however many there are.
   let cursor: string | undefined;
@@ -194,7 +194,10 @@ export function recoveryLoops(stall: Pick<StallService, "scan"> & Partial<Pick<S
         }
         // A concern its supervisor left undecided is passed on to the owner; a notice that could not be sent is offered again next tick (card V02b).
         if (notifyEscalation !== undefined && stall.escalateUndecided !== undefined && stall.markEscalationNotified !== undefined) {
-          for (const c of await stall.escalateUndecided(by)) { await notifyEscalation(c); await stall.markEscalationNotified(by, c.id); }
+          // One concern whose notice cannot be sent does not hold back the others; the first failure is raised after all were tried.
+          let failure: unknown;
+          for (const c of await stall.escalateUndecided(by)) { try { await notifyEscalation(c); await stall.markEscalationNotified(by, c.id); } catch (error) { failure ??= error; } }
+          if (failure !== undefined) throw failure;
         }
         said = false;
       } catch (error) {

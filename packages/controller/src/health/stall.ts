@@ -509,11 +509,15 @@ export class StallService {
   async escalateUndecided(by: Principal, limit = 100): Promise<(ConcernBody & { id: string; revision: number })[]> {
     this.#mayScan(by);
     const after = Date.parse(this.#runner.now()) - this.#escalateAfterMs;
-    for (const c of await this.#suspected(limit)) {
-      if (c.escalatedAt !== undefined || Date.parse(c.lastChangedAt) > after) continue;
-      try { await this.#write(by, c.id, c.revision, { ...c, escalatedAt: this.#runner.now() }); } catch (error) { if (!(error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict"))) throw error; }
+    // One read of the concerns a tick (the marks written here are applied to this list), not two.
+    const all = await this.#suspected(limit);
+    for (const [i, c] of all.entries()) {
+      // A concern already routed to the owner has no supervisor to wait for.
+      if (c.escalatedAt !== undefined || c.route.via !== "supervisor" || Date.parse(c.lastChangedAt) > after) continue;
+      const escalatedAt = this.#runner.now();
+      try { const w = await this.#write(by, c.id, c.revision, { ...c, escalatedAt }); all[i] = { ...c, escalatedAt, revision: w.revision }; } catch (error) { if (!(error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict"))) throw error; }
     }
-    return (await this.#suspected(limit)).filter((c) => c.escalatedAt !== undefined && c.notifiedAt === undefined).sort((a, b) => (a.escalatedAt! < b.escalatedAt! ? -1 : 1));
+    return all.filter((c) => c.escalatedAt !== undefined && c.notifiedAt === undefined).sort((a, b) => (a.escalatedAt! < b.escalatedAt! ? -1 : 1));
   }
 
   /** The suspected concerns, read as the controller (no per-reader filter: the caller is the owner or the recovery service), at most `limit`. */

@@ -92,6 +92,7 @@ for (const backend of backends) {
     const pinned = (await c.rel.submit(c.owner, { commandId: cid("s"), manifest: manifest({ matrix: [{ os: "linux", arch: "x64", osVersion: "22.04" }] }) })).candidateId;
     await c.rel.authorizeHost(c.owner, { commandId: cid("a"), hostId: "lx1", os: "linux", arch: "x64" });
     const cell = { os: "linux", arch: "x64", osVersion: "22.04" } as const;
+    await refuses("invalid_command", () => c.rel.issue(c.owner, { commandId: cid("i"), candidateId: pinned, cell: { os: "linux", arch: "x64", osVersion: "20.04" }, hostId: "lx1", workerId: c.w1.id, timeoutSeconds: 60, memoryMb: 64 }), /not 20.04/);
     const cmd = { commandId: "issue-fixed", candidateId: pinned, cell, hostId: "lx1", workerId: c.w1.id, timeoutSeconds: 600, memoryMb: 1024 };
     const first = await c.rel.issue(c.owner, cmd);
     await c.rel.interrupt(c.owner, { commandId: cid("x"), attemptId: first.attemptId, reason: "lost" });

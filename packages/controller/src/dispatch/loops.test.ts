@@ -144,6 +144,15 @@ test("a stall concern its supervisor left undecided is told to the owner after t
   assert.deepEqual([told, marked], [["stl-1"], ["stl-1"]]);
 });
 
+test("one stall escalation whose notice cannot be sent does not hold back the others (card V02b)", async () => {
+  const told: string[] = [];
+  const marked: string[] = [];
+  const mk = (id: string) => ({ id, taskId: "task-1", projectId: "proj-1", kind: "loop", detail: "d" });
+  const [, scan] = recoveryLoops({ scan: async () => ({ checked: 0, opened: 0, reopened: 0, cleared: 0, contended: 0 }), escalateUndecided: async () => [mk("bad"), mk("good")].filter((x) => !marked.includes(x.id)) as never, markEscalationNotified: async (_by, id) => { marked.push(id); } }, { runPass: async () => undefined }, async () => undefined, undefined, async (x) => { if (x.id === "bad") throw new Error("invalid"); told.push(x.id); });
+  await assert.rejects(scan!.run({ id: "service:dispatcher", kind: "service" } as never), /invalid/);
+  assert.deepEqual([told, marked], [["good"], ["good"]]);
+});
+
 test("an escalated incident is passed on for a notice, and one project failing does not stop the others being tried (card P04)", async () => {
   const seen: string[] = [];
   const told: string[] = [];
