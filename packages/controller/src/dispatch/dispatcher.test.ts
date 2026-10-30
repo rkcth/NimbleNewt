@@ -229,6 +229,23 @@ for (const backend of backends) {
     assert.deepEqual([after.reservedInFlight.costMicros, after.spent.costMicros], [0, 7], "and what it used was charged in the end");
   });
 
+  suite("after a reboot an installation pause still holds: assignments are unchanged, nothing is started, and only the owner's resume lets the work go (card L06)", async (c) => {
+    const t = await c.task("Order seeds", await c.agent("ann", workGrants(c.project, ["read-file"])));
+    await c.pauses.pause(c.owner, { commandId: "pz-inst", scope: { kind: "installation", id: "installation" }, reason: "reboot" });
+    const before = JSON.stringify(await c.assignments.getAssignment(t.taskId));
+    // The process goes away and a new one starts on the same store.
+    c.dispatcher = c.restart({}, { reserveCostMicros: 1000 });
+    const report = await c.dispatcher.tick();
+    await c.dispatcher.idle();
+    assert.equal(c.worker.starts.length, 0, "nothing was scheduled while the pause holds");
+    assert.deepEqual(report.started, []);
+    assert.equal(JSON.stringify(await c.assignments.getAssignment(t.taskId)), before, "the assignment is as it was");
+    assert.equal((await c.pauses.status(c.owner, t.taskId))?.paused, true, "the pause is still held");
+    await c.pauses.resume(c.owner, { commandId: "pr-inst", scope: { kind: "installation", id: "installation" }, reason: "back" });
+    await c.run();
+    assert.equal(c.worker.starts.length, 1, "after the owner's resume the work starts");
+  });
+
   suite("an attempt that ends while a hold release is still unfinished finishes the release (card P01b)", async (c) => {
     const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
     await c.resources.bindResource(c.owner, { commandId: "b1", projectId: c.project, kind: "repository", label: "Web", locator: "/work/web", repositoryId: "web" });
