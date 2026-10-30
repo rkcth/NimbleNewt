@@ -50,6 +50,7 @@ import { CatalogService } from "../catalog/index.js";
 import { CommandService, catalogSource } from "../commands/index.js";
 import { BUILTIN_COMMANDS } from "./operations.js";
 
+import { wideningDecision } from "./widening.js";
 import { IntegrationPolicyService, PolicyService, ProtectedBranchService } from "../policy/index.js";
 import { StatusService } from "../status/index.js";
 import { ChatService, CoordinatorService, type ChatInterpreter, type CoordinatorModel } from "../chat/index.js";
@@ -362,7 +363,7 @@ export async function startController(options: StartOptions): Promise<Controller
       widening: async (cls, projectId) => {
         const cell = await PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }).classMode(projectId, cls);
         // The engine keeps a change of rights a decision for the owner whatever the profile says, so a vote widens rights without the owner only where the owner set that cell by hand (a specific setting overrides the profile).
-        return cell.mode === "allow" && (cls === "spend" || cell.explicit) ? "allow" : "ask";
+        return wideningDecision(cell, cls);
       },
       // A change that was carried out, or refused, is a step in the task it names (card C09f); the step is written by the controller itself (a service identity with no grants, which the activity service accepts as a service).
       onChange: async (e) => {
