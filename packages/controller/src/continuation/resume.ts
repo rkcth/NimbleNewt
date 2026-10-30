@@ -272,6 +272,12 @@ export class ResumeCheckService {
     return found === undefined ? undefined : view<ResumeCheckBody>(found);
   }
 
+  /** Whether a complete continuation exists for the task at all: a resume with none has nothing to verify (the dispatcher then starts from the checkpoint as before). */
+  async hasContinuation(by: Principal, taskId: string): Promise<boolean> {
+    await this.#authorize(by, checkTaskId(taskId));
+    return (await this.#continuations.latest(by, checkTaskId(taskId))) !== undefined;
+  }
+
   /** The ID the check started with this command ID by this principal has (or would have): lets a caller tell its own check from another one. */
   checkIdFor(by: Principal, commandId: string): string { return derivedId("rck", scopedCommandId(by.id, commandId)); }
 

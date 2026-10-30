@@ -95,7 +95,7 @@ export interface DispatcherDeps {
    * The checked resume (card L04c). An attempt that brings earlier work back (it has a checkpoint to continue from: after a restart or a move) starts only once its resume check is done: the dispatcher starts the check,
    * commits it when it is ready and waits while it is open or blocked (a blocked check has opened its own blocker). Without it such an attempt starts as before.
    */
-  readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "advance" | "retry" | "cancel" | "forTask" | "checkIdFor" | "retryable" | "exhausted" | "cancelledAsStale" | "get">;
+  readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "advance" | "retry" | "cancel" | "forTask" | "checkIdFor" | "retryable" | "exhausted" | "cancelledAsStale" | "get"> & Partial<Pick<ResumeCheckService, "hasContinuation">>;
   /** `GenerationService.guardFor` is handed to every effect that is started (it adds the generation hold to the pause and decision guards). */
   readonly generation?: Pick<GenerationService, "guardFor">;
   readonly reviews?: Pick<ReviewService, "request" | "admit" | "get">;
@@ -728,6 +728,11 @@ export class DispatcherService {
     const b = (await this.#load(attemptId))?.body;
     if (resumes === undefined || b === undefined || b.resumeFrom === undefined) return undefined;
     const by = this.#deps.principal;
+    // No continuation was ever captured for the task (a move or restart of an attempt that never had one): there is nothing to verify, so the attempt starts from its checkpoint as before rather than waiting for ever on `missing_context`.
+    // A continuation that exists is still checked. A fault in asking is a wait, like any fault in the check.
+    if (resumes.hasContinuation !== undefined) {
+      try { if (!(await resumes.hasContinuation(by, taskId))) return undefined; } catch (error) { return `the resume check could not be run: ${errorText(error)}`.slice(0, 500); }
+    }
     const slash = route.indexOf("/");
     const plain = (v: string): string => v.replace(/[^A-Za-z0-9._:-]/g, "_").slice(0, 80) || "unknown";
     const model = { provider: plain(slash < 0 ? "route" : route.slice(0, slash)), id: plain(slash < 0 ? route : route.slice(slash + 1)) };

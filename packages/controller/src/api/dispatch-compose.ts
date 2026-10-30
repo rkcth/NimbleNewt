@@ -186,7 +186,7 @@ export interface ComposeInput {
   /** Health probes of failed-over routes (card R04c): off unless given, and then only while `enabled()` says so. */
   readonly probes?: { readonly cutover: Pick<CutoverService, "downTargets" | "probe">; readonly probes: RouteProbes };
   /** The checked resume the dispatcher calls when an attempt brings earlier work back (card L04c). */
-  readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "advance" | "retry" | "cancel" | "forTask" | "checkIdFor" | "retryable" | "exhausted" | "cancelledAsStale" | "get">;
+  readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "advance" | "retry" | "cancel" | "forTask" | "checkIdFor" | "retryable" | "exhausted" | "cancelledAsStale" | "get"> & Partial<Pick<ResumeCheckService, "hasContinuation">>;
   /** Unfinished hand-offs and checked resumes are carried on the same way (cards L03c, L04c). */
   readonly sweeps?: readonly { readonly name: string; readonly sweep: (by: Principal) => Promise<unknown> }[];
   /** The stall detection and the reconciler the controller built; the dispatcher's tick runs them (card L01b). */

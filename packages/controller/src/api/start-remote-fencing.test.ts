@@ -102,6 +102,33 @@ test("moving an attempt to another host: the policy and the integrity of what tr
   } finally { await w.c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
+test("a move whose checkpoint has no captured continuation does not wait on a resume check: the new host is offered the attempt from the checkpoint (card L04c, after H02c)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-fence-"));
+  const policy: { dataHosts: string[] } = { dataHosts: [] };
+  const w = await world(d, policy);
+  try {
+    const to = await w.host("r1", false);
+    const from = await w.host("r2");
+    policy.dataHosts.push(to.id);
+    const t = await w.task("Order seeds");
+    assert.deepEqual((await w.tick()).started, [t.attemptId]);
+    await to.join();
+    const offer = (await from.client.offers())[0]!;
+    const attempt = from.client.attempt(t.attemptId, offer.placement);
+    await attempt.accept();
+    await attempt.putCheckpoint(1, { turn: 1, said: "ordered" });
+    assert.equal(await w.c.services.resumes.hasContinuation(w.rob, t.taskId), false, "nothing was captured for the task");
+    const moved = await w.c.dispatch!.remote!.relocate(w.rob, { commandId: "mv-nocont", attemptId: t.attemptId, toHostId: to.id, reason: "retiring" });
+    const report = await w.tick();
+    assert.deepEqual(report.started, [t.attemptId], JSON.stringify(report.skipped));
+    assert.deepEqual(report.blocked, [], "no blocker for a resume with nothing to check");
+    assert.equal((await w.c.services.resumes.forTask(w.rob, t.taskId)), undefined, "no resume check was made");
+    const again = (await to.client.offers())[0]!;
+    assert.equal(again.placement, moved.placement);
+    assert.deepEqual(again.order.resumeFrom, { turn: 1, said: "ordered" });
+  } finally { await w.c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
 test("the native store of an agent has one owner host: another task of the agent waits while an attempt holds it, then runs on the same host, and only the owner moves the store (card H02c)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-fence-"));
   const w = await world(d, { dataHosts: [] });
