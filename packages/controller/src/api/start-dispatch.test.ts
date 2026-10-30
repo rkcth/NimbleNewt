@@ -315,3 +315,20 @@ test("the composed dispatcher reads prerequisites without grants: a task with an
     assert.equal(blockers.length, 1, JSON.stringify(blockers));
   } finally { await c.close(); cleanup(d); }
 });
+
+test("start hands the configured limits for local agents to the host builder, and refuses a bad figure at start (card H12k)", async () => {
+  const d = dir();
+  const seen: unknown[] = [];
+  const mk = (limits?: unknown) => ({ harnesses: [PI], dispatch: { timer: new ManualTimer(), manual: true, local: { window: () => 8192, ...(limits === undefined ? {} : { limits }), build: (s: { limits?: unknown }) => { seen.push(s.limits); return { hostId: "host:w1" } as unknown as WorkerHost; } } } } as unknown as Partial<Parameters<typeof startController>[0]>);
+  const none = await open(join(d, "a.sqlite"), mk());
+  await none.close();
+  assert.deepEqual(seen, [undefined], "nothing configured: nothing applied");
+  const c = await open(join(d, "b.sqlite"), mk({ cpus: 2, memoryMb: 2048, processes: undefined }));
+  await c.close();
+  assert.deepEqual(seen[1], { cpus: 2, memoryMb: 2048 });
+  for (const bad of [{ cpus: 0 }, { cpus: 1.5 }, { memoryMb: "1g" }, { diskMb: -1 }, { gpus: 1 }, [1], null]) {
+    await assert.rejects(open(join(d, `x${seen.length}.sqlite`), mk(bad)), /dispatch\.local\.limits/);
+  }
+  assert.equal(seen.length, 2, "a refused start builds nothing");
+  cleanup(d);
+});

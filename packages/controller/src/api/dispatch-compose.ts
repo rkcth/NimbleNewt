@@ -11,6 +11,7 @@ import { DecisionService, type DecisionDeps } from "../decisions/index.js";
 import { ContextEnforcementService } from "../context/index.js";
 import { CachePolicies, type AttemptCache, type CachePolicyDeps } from "../dispatch/cache.js";
 import { MarkerService } from "../inference-cache/index.js";
+import { checkLocalWorkerLimits, type LocalWorkerLimits } from "./worker-limits.js";
 import type { WorkspaceOpService, WorkspacePort } from "../workspace-ops/index.js";
 import { DispatchDriver, DispatcherService, QuiesceCoordinator, controllerGuards, type RuntimeGuards, type WorkOrder, activeAgents, attendanceLoops, budgetNoticeLoops, workspaceLoops, decisionLoops, meetingLoops, eventLoops, watchLoops, wakeLoops, attemptWaker, recordLoops, responsibilityLoops, probeLoops, sourceLoops, improvementOutcomeLoops, untoldImprovementLoops, type RouteProbes, recoveryLoops, reviewLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLoop, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
 import type { CutoverService } from "../routing/cutover.js";
@@ -106,7 +107,9 @@ export interface DispatchStartOptions {
     /** The model's context window for the order's route, in tokens; `undefined` when the route does not say. */
     readonly window: (order: WorkOrder) => number | undefined;
     readonly storedTokens?: (from: NonNullable<WorkOrder["resumeFrom"]>) => number | undefined;
-    readonly build: (services: { readonly guards: RuntimeGuards; /** The process's context limits for an order (card C07b): tool output cut to the window\'s share and the extractive compaction fallback; `undefined` when the route does not say its window. The host\'s `context` option takes it. */ readonly context: (order: WorkOrder) => WorkerContextLimits | undefined; /** Records the input size the provider reported for the attempt\'s first model call (the relay\'s `onFirstUsage`) against the call that was admitted. Never throws. */ readonly confirmFirstCall: (order: WorkOrder, usage: { readonly inputTokens: number; readonly requestChars: number }) => Promise<void>; /** The relay of one attempt (the same object for every call of the attempt, so that only its first call is measured), with the first-call count already going to `confirmFirstCall`. Use this instead of `relay.forAttempt`. */ readonly attemptRelay: (order: WorkOrder, relay: ModelRelay, options?: { readonly model?: string; readonly cache?: Parameters<ModelRelay["forAttempt"]>[1] }) => AttemptRelay; readonly cache?: { forOrder(order: WorkOrder): Promise<AttemptCache> } }) => WorkerHost | Promise<WorkerHost>;
+    /** What one agent on this host may use (cpus, memoryMb, diskMb, processes), checked at start and handed to `build` as `limits` for the host's `workspace` to carry (`AttemptWorkspace.limits`). Absent: none applied. */
+    readonly limits?: LocalWorkerLimits;
+    readonly build: (services: { readonly guards: RuntimeGuards; /** The checked limits for each local agent (`dispatch.local.limits`); `undefined` when none were configured. */ readonly limits?: LocalWorkerLimits; /** The process's context limits for an order (card C07b): tool output cut to the window\'s share and the extractive compaction fallback; `undefined` when the route does not say its window. The host\'s `context` option takes it. */ readonly context: (order: WorkOrder) => WorkerContextLimits | undefined; /** Records the input size the provider reported for the attempt\'s first model call (the relay\'s `onFirstUsage`) against the call that was admitted. Never throws. */ readonly confirmFirstCall: (order: WorkOrder, usage: { readonly inputTokens: number; readonly requestChars: number }) => Promise<void>; /** The relay of one attempt (the same object for every call of the attempt, so that only its first call is measured), with the first-call count already going to `confirmFirstCall`. Use this instead of `relay.forAttempt`. */ readonly attemptRelay: (order: WorkOrder, relay: ModelRelay, options?: { readonly model?: string; readonly cache?: Parameters<ModelRelay["forAttempt"]>[1] }) => AttemptRelay; readonly cache?: { forOrder(order: WorkOrder): Promise<AttemptCache> } }) => WorkerHost | Promise<WorkerHost>;
     /** Shuts down what `build` made (live workers, the sandbox launcher, the relay). Called when the controller closes and when a later step of the start fails. */
     readonly close?: () => Promise<void>;
   };
@@ -273,6 +276,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   // Context enforcement (card C07b): the worker host's first-call checks, and the dispatcher's overflow count and hand-off when an attempt ends.
   const context = ContextEnforcementService.withEpoch(storage, epoch, { blockers, retrieval: i.retrieval }, ro);
   if (i.options.local !== undefined) {
+    const limits = checkLocalWorkerLimits(i.options.local.limits);
     const guards = controllerGuards({
       context, pause: pauses, messages, system: principal,
       agent: (order) => i.taskCredentials.authenticate(order.credential),
@@ -349,7 +353,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       }
       return found.relay;
     };
-    workers.push(await i.options.local.build({ guards, context: contextFor, confirmFirstCall, attemptRelay, ...(cache === undefined ? {} : { cache }) }));
+    workers.push(await i.options.local.build({ guards, ...(limits === undefined ? {} : { limits }), context: contextFor, confirmFirstCall, attemptRelay, ...(cache === undefined ? {} : { cache }) }));
   }
   // Whatever was built before a later step fails is closed again: the listener, and the local host built above (a host the controller was given the means to build owns real resources).
   let transport: WorkerTransport | undefined;

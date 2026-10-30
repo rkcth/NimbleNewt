@@ -62,6 +62,7 @@ import { ActivityService } from "../activity/index.js";
 import { HandoffService, PauseService, StopService, agentsUnder, controllerHandoffSources, dispatchStopPorts, type LocalWork } from "../lifecycle/index.js";
 import { ReviewService } from "../review/index.js";
 import { CutoverService, DifficultyService, FallbackService, RoutingService } from "../routing/index.js";
+import { checkLocalWorkerLimits } from "./worker-limits.js";
 import { WorkspaceOpService } from "../workspace-ops/index.js";
 import { ArtifactService, DeliverableService, FileBlobStore } from "../artifacts/index.js";
 import { composeDispatch, type DispatchHandle, type DispatchStartOptions } from "./dispatch-compose.js";
@@ -207,6 +208,8 @@ export async function startController(options: StartOptions): Promise<Controller
   const dataDirectory = options.dataDirectory ?? (options.storage.kind === "sqlite" ? dirname(resolve(options.storage.path)) : undefined);
   const filesystems: FilesystemReport[] = await checkFilesystems([...(dataDirectory === undefined ? [] : [{ role: "data directory" as const, path: dataDirectory }]), ...(options.workspaceRoots ?? []).map((path) => ({ role: "workspace" as const, path }))], { platform: facts.platform, ...(options.filesystem === undefined ? {} : { detect: options.filesystem }) });
   // A controller that builds a local worker host runs agents in the sandbox on this machine, so the sandbox tools and the limits mechanism are required at start with the same found / required / install / switch message as every other prerequisite (card F04j). `features` says so explicitly (a test, or a controller whose workers are all remote).
+  // Card H12k: a bad limit for local agents refuses the start, not the first attempt.
+  checkLocalWorkerLimits(options.dispatch?.local?.limits);
   const features = options.features ?? (options.dispatch?.local === undefined ? [] : ["sandbox", "limits"] as const);
   const needs: PrerequisiteNeed[] = ["start", options.storage.kind, ...features];
   const prerequisites = await checkPrerequisites({ platform: facts.platform, needs, probes: { ...realProbes({ sqlite: probeSqliteLibrary, postgres: probePostgresLibrary }), ...(options.probes ?? {}) } });
