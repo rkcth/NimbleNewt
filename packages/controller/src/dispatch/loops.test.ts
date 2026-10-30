@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { DomainError } from "../domain/errors.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
-import { activeAgents, assignedTaskIn, attendanceLoops, budgetNoticeLoops, decisionLoops, eventLoops, meetingLoops, messageLoops, projectIds, recordLoops, responsibilityLoops, untoldImprovementLoops, attemptWaker, wakeLoops, recoveryLoops, standupLoops, sourceLoops } from "./loops.js";
+import { activeAgents, assignedTaskIn, attendanceLoops, budgetNoticeLoops, decisionLoops, eventLoops, meetingLoops, messageLoops, projectIds, recordLoops, responsibilityLoops, archiveLoops, untoldImprovementLoops, attemptWaker, wakeLoops, recoveryLoops, standupLoops, sourceLoops } from "./loops.js";
 import { buildWorld, workGrants } from "./testing/world.js";
 
 after(stopServer);
@@ -252,4 +252,11 @@ test("the owner is told of a decision that has gone untold, once per decision an
   const [cut] = untoldImprovementLoops({ untold: async () => [{ id: "imp-2", revision: 1, title: "t".repeat(200), disposition: "investigating", decidedAt: "2026-10-01T00:00:00.000Z" }] }, async () => ["p1"], async (n) => { long.push(n.text); });
   await cut!.run({ id: "service:dispatcher", kind: "service" } as never);
   assert.ok(long[0]!.length <= 200, String(long[0]!.length));
+});
+
+test("archive loop: one project's failure does not skip the others and is raised afterwards (card K06)", async () => {
+  const seen: string[] = [];
+  const [loop] = archiveLoops({ archive: async (_by, o) => { seen.push(o.projectId!); if (o.projectId === "proj-a") throw new Error("boom"); return 0; } }, async () => ["proj-a", "proj-b"]);
+  await assert.rejects(loop!.run({ id: "svc" } as never), /boom/);
+  assert.deepEqual(seen, ["proj-a", "proj-b"]);
 });

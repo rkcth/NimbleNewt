@@ -296,6 +296,17 @@ export function responsibilityLoops(checks: { generate(by: Principal, projectId:
   } }];
 }
 
+/** K06: old resolved incidents are soft-archived, per project, so one project's failure does not skip the others. Not wired into the controller yet. */
+export function archiveLoops(incidents: { archive(by: Principal, options: { projectId?: string }): Promise<number> }, projects: () => Promise<readonly string[]>): DispatcherLoop[] {
+  return [{ name: "responsibilities.archive", run: async (by) => {
+    let failure: unknown;
+    for (const projectId of await projects()) {
+      try { await incidents.archive(by, { projectId }); } catch (error) { failure ??= error; }
+    }
+    if (failure !== undefined) throw failure;
+  } }];
+}
+
 /** H13c: the agent whose watched event is waiting is told to look at its inbox: the waker reports `woken` once the agent's current attempt will see it, and `deferred` (tried again next tick) when there is none to wake. */
 export function wakeLoops(watches: Pick<WatchService, "consumeWakes">, waker: Waker): DispatcherLoop[] {
   return [{ name: "events.wakes", run: async (by) => { await watches.consumeWakes(by, waker); } }];

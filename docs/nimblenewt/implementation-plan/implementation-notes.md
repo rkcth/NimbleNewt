@@ -3022,3 +3022,9 @@ Depends on branches `wip/nn-sa-lift1793371678` (the index) and `wip/nn-sa-rt1793
 - Notifications: `#closeSettled` now closes a digest whose items are all answered or settled, and drops a settled item's pending external delivery (marked failed, kept out of the failed list).
 - Status: owner questions are read with limit 51; only more than 50 items is flagged truncated, so exactly 50 is not.
 - Stop: the recorded attempt list keeps the newest 100 ids, not the oldest.
+
+## K06 first slice: soft incident archive (2026-10-30)
+
+- Storage has no delete, so `IncidentService.archive(by, { olderThanDays = 90 (7..3650), limit = 200 (1..1000), projectId? })` (owner or service only) sets `archivedAt` on resolved incidents older than the cutoff, by guarded update (a lost race is skipped), at most `limit` per call, and returns the count. A resolved incident that was escalated but never told (`notifiedAt` unset) is kept.
+- `list` hides archived incidents unless `includeArchived: true`; `observed` therefore ignores them. `escalate` and `untold` already filter on `state === "open"`, so archived records never match there (the scan still reads them; a real delete or an index is the later K06 step).
+- `archiveLoops(incidents, projects)` in `dispatch/loops.ts` (per-project catch, first error raised after all) is exported but NOT wired in `start.ts` / `dispatch-compose.ts`.

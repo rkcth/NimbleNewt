@@ -118,4 +118,26 @@ for (const backend of backends) {
     const writer = await agent([{ action: "responsibility.write", project }, { action: "responsibility.read", project }]);
     assert.equal((await inc.report(writer, { commandId: cid("i"), responsibilityId: r, signature: "s", summary: "x", outcome: "failed" })).replayed, false);
   });
+
+  suite("soft archive (card K06): old resolved incidents are archived up to the limit once, hidden from list unless asked; young, open and escalated-untold ones stay; only owner or service may", async ({ owner, project, inc, setNow, make, agent }) => {
+    const r = await make();
+    const rep = (sig: string) => inc.report(owner, { commandId: cid("i"), responsibilityId: r, signature: sig, summary: "x", outcome: "attention" });
+    const res = async (sig: string) => { const i = (await inc.list(owner, project, { open: true }))!.find((x) => x.signature === sig)!; await inc.resolve(owner, { commandId: cid("v"), incidentId: i.id, evidence: "ok" }); return i.id; };
+    await rep("old1"); await rep("old2"); await rep("old3"); await rep("untold"); await rep("stays-open");
+    await res("old1"); await res("old2"); await res("old3");
+    setNow("2026-10-22T10:40:00.000Z");
+    await inc.escalate(owner, project);
+    await res("untold");
+    setNow("2026-12-30T10:00:00.000Z");
+    await rep("young"); await res("young");
+    const stranger = await agent([{ action: "responsibility.write", project }]);
+    await assert.rejects(inc.archive(stranger), (e: unknown) => e instanceof DomainError);
+    await assert.rejects(inc.archive(owner, { olderThanDays: 3 }), (e: unknown) => e instanceof DomainError);
+    assert.equal(await inc.archive(owner, { limit: 2 }), 2, "the limit is respected");
+    assert.equal(await inc.archive(owner), 1, "the rest of the old ones");
+    assert.equal(await inc.archive(owner), 0, "a repeat archives nothing more");
+    const visible = (await inc.list(owner, project))!.map((i) => i.signature).sort();
+    assert.deepEqual(visible, ["stays-open", "untold", "young"].sort());
+    assert.equal((await inc.list(owner, project, { includeArchived: true }))!.length, 6);
+  });
 }

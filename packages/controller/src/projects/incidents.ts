@@ -26,6 +26,8 @@ export interface IncidentBody {
   /** When the escalation was passed on as a notice (the loop retries until it is). */
   readonly notifiedAt?: string;
   readonly resolvedAt?: string;
+  /** Soft archive (card K06): set on old resolved incidents so the scans skip them; the record stays and `list` shows it on request. */
+  readonly archivedAt?: string;
   readonly resolvedBy?: string;
   readonly evidence?: string;
 }
@@ -182,10 +184,40 @@ export class IncidentService {
     }
   }
 
+  /**
+   * Soft archive (card K06): marks resolved incidents resolved more than `olderThanDays` ago (default 90, 7..3650) as archived, at most `limit` (default 200, 1..1000) per call, optionally
+   * for one project. An incident escalated but not yet told is kept. A lost race is skipped. Returns how many were archived. Owner or service only.
+   */
+  async archive(by: Principal, options: { olderThanDays?: number; limit?: number; projectId?: string } = {}): Promise<number> {
+    if (!(by.kind === "owner" || by.kind === "service")) throw hidden(by, "archive incidents");
+    const days = options.olderThanDays ?? 90;
+    const limit = options.limit ?? 200;
+    if (!Number.isInteger(days) || days < 7 || days > 3650) throw invalid("olderThanDays", "must be a whole number from 7 to 3650");
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw invalid("limit", "must be a whole number from 1 to 1000");
+    const cutoff = Date.parse(this.#runner.now()) - days * 86_400_000;
+    const old = (b: IncidentBody): boolean => b.state === "resolved" && b.archivedAt === undefined && b.resolvedAt !== undefined && Date.parse(b.resolvedAt) < cutoff && !(b.escalatedAt !== undefined && b.notifiedAt === undefined);
+    let done = 0;
+    for (const a of await scanAll(this.#runner, INCIDENT, 50_000, (x) => { const b = x.body as unknown as IncidentBody; return (options.projectId === undefined || b.projectId === options.projectId) && old(b); })) {
+      if (done >= limit) break;
+      const result = await this.#runner.command("responsibility.incident.archive", { commandId: `rarc-${a.id}`, actor: by.id }, async () => ({
+        payload: { incidentId: a.id },
+        build: async (): Promise<Built> => {
+          const fresh = await this.#runner.get(INCIDENT, a.id);
+          const cur = fresh?.body as unknown as IncidentBody | undefined;
+          if (fresh === undefined || cur === undefined || !old(cur)) throw new DomainError("stale_revision", "already handled");
+          const next: IncidentBody = { ...cur, archivedAt: this.#runner.now() };
+          return { ref: { kind: INCIDENT, id: a.id }, creates: false, changes: [{ type: "update", ref: { kind: INCIDENT, id: a.id }, expectedRevision: fresh.revision, body: next as unknown as JsonObject }], detail: {} };
+        },
+      })).catch((error: unknown) => { if (error instanceof DomainError && error.code === "stale_revision") return undefined; throw error; });
+      if (result !== undefined && !result.replayed) done++;
+    }
+    return done;
+  }
+
   /** The incidents of a project, open first then newest, optionally only the open ones. `undefined` for a project the caller may not read. */
-  async list(by: Principal, projectId: string, filter: { open?: boolean } = {}): Promise<View<IncidentBody>[] | undefined> {
+  async list(by: Principal, projectId: string, filter: { open?: boolean; includeArchived?: boolean } = {}): Promise<View<IncidentBody>[] | undefined> {
     if ((await this.#duties.list(by, projectId)) === undefined) return undefined;
-    const found = await scanAll(this.#runner, INCIDENT, 50_000, (x) => { const b = x.body as unknown as IncidentBody; return b.projectId === projectId && (filter.open !== true || b.state === "open"); });
+    const found = await scanAll(this.#runner, INCIDENT, 50_000, (x) => { const b = x.body as unknown as IncidentBody; return b.projectId === projectId && (filter.open !== true || b.state === "open") && (filter.includeArchived === true || b.archivedAt === undefined); });
     return found.map((a) => view<IncidentBody>(a)).sort((a, b) => (a.state === b.state ? (a.lastAt < b.lastAt ? 1 : a.lastAt > b.lastAt ? -1 : 0) : a.state === "open" ? -1 : 1));
   }
 
