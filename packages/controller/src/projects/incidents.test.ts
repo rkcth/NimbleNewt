@@ -128,7 +128,7 @@ for (const backend of backends) {
     setNow("2026-10-22T10:40:00.000Z");
     await inc.escalate(owner, project);
     await res("untold");
-    setNow("2026-12-30T10:00:00.000Z");
+    setNow("2027-03-30T10:00:00.000Z");
     await rep("young"); await res("young");
     const stranger = await agent([{ action: "responsibility.write", project }]);
     await assert.rejects(inc.archive(stranger), (e: unknown) => e instanceof DomainError);
