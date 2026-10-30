@@ -2657,3 +2657,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## M03f (part 2): the open agenda in chat
 
 - `StatusService` view `agenda` (`{ kind: "agenda", projectId, limit? }`, default 10, at most 50; the project in focus when none is named): the project's open topics in the order the stand-up takes them, each with its urgency, kind of request and state, who asked, the question, the outcome asked for and the timebox; words that came from others are shown as theirs. A project the caller may not read, or an installation with no meeting source, gives nothing.
+
+## M04f (part 2): planned meetings and their rosters in chat
+
+- `StatusService` view `meetings` (`{ kind: "meetings", projectId, limit? }`, the project in focus when none is named): the project's planned meetings, soonest first, each with its title, kind, time, how it is held and the roster with each member's placing (status and availability, so a paused or stopped agent is visible before the owner decides on the exception). A project the caller may not read gives nothing.
