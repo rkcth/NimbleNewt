@@ -152,6 +152,8 @@ export interface ChangeRecord extends ProposedChange {
   readonly appliedRevision?: number;
   /** Who allowed the change, recorded when it enters `applying` so a replay uses the same basis. */
   readonly agreedBy?: string;
+  /** The principal id the effect is carried out as, recorded when the change enters `applying`: the command digest includes the actor, so a replay by someone else (the service after the owner's agreement) must reuse it. */
+  readonly actedAs?: string;
   readonly at?: string;
 }
 

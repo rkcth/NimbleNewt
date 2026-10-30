@@ -896,6 +896,46 @@ for (const backend of backends) {
     assert.equal((await c.projects.getTask(task.id))!.title, "Write the guide, v2");
   });
 
+  suite("an apply that committed and crashed before `applied` was saved is replayed under the recorded actor, so the service's recovery finishes it (card M02e3)", async (c) => {
+    const assignments = AssignmentService.withEpoch(c.storage, c.projects.epoch, c.projects, options);
+    const mayWork = async () => true;
+    const crashing = (base: ChangeApplier, seen: string[]): ChangeApplier => {
+      let crash = true;
+      return { ...base, widens: "spend", async apply(ch) { seen.push(ch.actor); const done = await base.apply(ch); if (crash) { crash = false; throw new DomainError("unavailable", "went down after the effect"); } return done; } };
+    };
+    const idOf = (p: string): string => p.slice("agent:".length);
+    // task.update: the owner agrees (the owner applies), the effect commits, the save of `applied` is lost, the service recovers.
+    const seenU: string[] = [];
+    const svcU = c.reopen({ appliers: { "task.update": crashing(taskUpdateApplier(c.projects), seenU) }, widening: async () => "ask" });
+    const task = await c.task("Crash task");
+    await c.grantUpdate(c.pA);
+    const one = await c.meet({ chair: c.pD, item: "delegated-decision" });
+    const mU = await adopt({ ...c, records: svcU } as Ctx, one.rec, c.asB, { agendaItemId: one.item, changes: [change(c, task, c.pA, "Retitled once")] });
+    const dU = await decisionOf({ ...c, records: svcU } as Ctx, mU);
+    await refuses("unavailable", () => svcU.ownerRespond(c.owner, { commandId: cid("or"), decisionId: dU.id, response: "agree" }));
+    const midU = (await decisionOf({ ...c, records: svcU } as Ctx, mU)).changes[0]!;
+    assert.deepEqual([midU.state, midU.actedAs], ["applying", c.owner.id]);
+    assert.deepEqual(await svcU.apply(c.host, { decisionId: dU.id }), { applied: 1, notApplied: 0, pending: 0 });
+    assert.deepEqual(seenU, [c.owner.id, c.owner.id], "the replay runs as the recorded actor");
+    assert.equal((await c.projects.getTask(task.id))!.title, "Retitled once");
+    assert.equal((await c.projects.getTask(task.id))!.revision, task.revision + 1, "the effect happened once");
+    // task.reassign, the same way.
+    const seenR: string[] = [];
+    const svcR = c.reopen({ appliers: { "task.reassign": crashing(taskReassignApplier(assignments, c.projects, c.principals, mayWork), seenR) }, widening: async () => "ask" });
+    await c.grants.grant(c.owner, { commandId: cid("g"), grantee: c.pA, action: "assignment.manage", project: c.project, source: "direct", basis: "may reassign" } as never);
+    const t = await c.task("Crash reassign");
+    await assignments.assignTask({ commandId: cid("as"), actor: c.owner.id, taskId: t.id, owner: { kind: "agent", id: idOf(c.pD) } });
+    const a = (await assignments.getAssignment(t.id))!;
+    const two = await c.meet({ chair: c.pD });
+    const mR = await adopt({ ...c, records: svcR } as Ctx, two.rec, c.asB, { topic: "unrelated topic", changes: [{ kind: "task.reassign", agent: c.pA, target: { kind: "task", id: t.id }, expectedRevision: t.revision, patch: { toAgent: c.pC, from: c.pD, generation: a.generation, revision: a.revision }, summary: "hand the task over" }] });
+    const dR = await decisionOf({ ...c, records: svcR } as Ctx, mR);
+    await refuses("unavailable", () => svcR.ownerRespond(c.owner, { commandId: cid("or"), decisionId: dR.id, response: "agree" }));
+    assert.equal((await decisionOf({ ...c, records: svcR } as Ctx, mR)).changes[0]!.state, "applying");
+    assert.deepEqual(await svcR.apply(c.host, { decisionId: dR.id }), { applied: 1, notApplied: 0, pending: 0 });
+    assert.deepEqual(seenR, [c.owner.id, c.owner.id]);
+    assert.equal((await assignments.getAssignment(t.id))!.owner?.id, idOf(c.pC));
+  });
+
   suite("an owner decline that arrives before a change is saved as applying stops the apply", async (c) => {
     const task = await c.task();
     await c.grantUpdate(c.pA);

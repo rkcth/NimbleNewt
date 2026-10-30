@@ -39,7 +39,7 @@ export interface ChangeApplier {
    */
   readonly widens?: "access-change" | "spend";
   /** Carries the change out. `commandId` is stable per change, so a repeat after a crash does it once. A `stale_revision` refusal means the target moved and the change is not applied. */
-  apply(change: { readonly commandId: string; readonly actor: string; readonly target: { kind: string; id: string }; readonly expectedRevision: number; readonly patch: JsonObject; /** Who allowed it: `owner:agreed` (the owner agreed to the decision) or `policy:<class>` (the approval policy let its class through). */ readonly agreedBy: string }): Promise<{ revision?: number }>;
+  apply(change: { readonly commandId: string; readonly actor: string; readonly target: { kind: string; id: string }; readonly expectedRevision: number; readonly patch: JsonObject; /** Who allowed it: `owner:agreed` (the owner agreed to the decision) or `policy:<class>` (the approval policy let its class through). */ readonly agreedBy: string; /** The principal the effect was started as (fixed when the change entered `applying`; `actor` is the same value). */ readonly actedAs?: string }): Promise<{ revision?: number }>;
 }
 
 /**
@@ -951,12 +951,13 @@ export class MeetingRecordService {
         // Who allowed it is fixed now and kept: a replay after a crash uses it (the grant basis is part of the command digest), and a later owner decline does not cancel a change already started.
         const agreedBy = d.ownerResponse === "agreed" ? "owner:agreed" : `policy:${applier.widens ?? "none"}`;
         // The owner may have declined since this was read: then the change is not started, and the decline's own record stands.
-        if (!(await save({ ...change, state: "applying", agreedBy }, agreedBy))) continue;
+        // The actor of the effect is fixed the same way: the command digest includes it, and a replay may run under another principal (the owner agreed, the service recovers).
+        if (!(await save({ ...change, state: "applying", agreedBy, actedAs: by.id }, agreedBy))) continue;
       }
       const applier = this.#options.appliers?.[change.kind];
       if (applier === undefined) { await refuse("failed", `no applier is registered for ${change.kind}`); continue; }
       try {
-        const done = await applier.apply({ commandId: `mtg:${decisionId}:${change.id}`, actor: by.id, target: change.target, expectedRevision: change.expectedRevision, patch: change.patch, agreedBy: change.agreedBy ?? (d.ownerResponse === "agreed" ? "owner:agreed" : `policy:${applier.widens ?? "none"}`) });
+        const done = await applier.apply({ commandId: `mtg:${decisionId}:${change.id}`, actor: change.actedAs ?? by.id, actedAs: change.actedAs ?? by.id, target: change.target, expectedRevision: change.expectedRevision, patch: change.patch, agreedBy: change.agreedBy ?? (d.ownerResponse === "agreed" ? "owner:agreed" : `policy:${applier.widens ?? "none"}`) });
         await save({ ...change, state: "applied", ...(done.revision === undefined ? {} : { appliedRevision: done.revision }) });
       } catch (error) {
         if (error instanceof DomainError && error.code === "stale_revision") await refuse("conflict", `${change.target.kind} ${change.target.id} changed meanwhile: ${error.message}`);
