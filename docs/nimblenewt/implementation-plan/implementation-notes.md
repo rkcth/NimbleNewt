@@ -2957,3 +2957,8 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 
 - New test hook `beforeLift(scope)` (runs after `liftDue` decided a gate is due, before it lifts it). Tested: a gate resumed by hand and paused again, or given a later time, between the read and the lift is not lifted; a gate whose lift throws a non-`invalid_command` error does not stop the others, and the first failure is thrown after the scan.
 - `liftDue` does not return the lifted scopes when it throws; it takes an optional `onLifted(scope)` callback, called as each is lifted, for a caller that needs them.
+
+## Backup race test: replacement already made when the second waiter resumes
+
+- The fix in `BackupService.backUpFor` (`current !== known` check) stops a second repeat of one command ID, waiting on a removed backup, from starting another replacement after the first waiter's replacement was made and finished. The old test only covered the case where the replacement still ran, which the "one backup at a time" guard in `backUpNow` hid.
+- Test: `two repeats waiting on a removed backup start exactly one replacement...` in `packages/controller/src/backup/backup.test.ts`. A subclass makes `backUpNow` finish at once without sharing a running backup, so the finished-first interleaving is forced and no timing is involved. With the check removed from the compiled file the test fails (2 starts, expected 1); restored, the backup suite passes (12/12).

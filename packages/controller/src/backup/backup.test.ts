@@ -231,3 +231,29 @@ test("a repeated ask gets the backup its first ask made, unless that backup has 
     assert.equal(readdirSync(root).filter((n) => !n.endsWith(".partial")).length, 1, "one backup was made for the two asks");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("two repeats waiting on a removed backup start exactly one replacement, even when the replacement has finished before the second one resumes", async () => {
+  const store = new MemoryStorage(); const root = tmp();
+  let clock = Date.parse(AT);
+  // backUpNow is replaced after the first backup by one that finishes at once and does not share a running backup, so the real "one at a time" guard cannot hide the race: only the
+  // check for a replacement already made keeps the second waiter from starting another.
+  class Counting extends BackupService {
+    starts = 0; instant = false;
+    override backUpNow(kind: BackupKind = "manual") {
+      if (!this.instant) return super.backUpNow(kind);
+      this.starts++;
+      return Promise.resolve({ path: join(root, `replacement-${this.starts}`), manifest: undefined as never });
+    }
+  }
+  try {
+    await populate(store);
+    const service = new Counting(store, { root, version: "t", now: () => new Date(clock) });
+    const first = await service.backUpFor("cmd-1");
+    rmSync(first.path, { recursive: true, force: true });
+    mkdirSync(join(root, "replacement-1"));
+    service.instant = true;
+    const [x, y] = await Promise.all([service.backUpFor("cmd-1"), service.backUpFor("cmd-1")]);
+    assert.equal(service.starts, 1, "one replacement for the two waiters");
+    assert.equal(x.path, y.path);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
