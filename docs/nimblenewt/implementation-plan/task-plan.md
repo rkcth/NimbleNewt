@@ -37,8 +37,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C07e, C07f, C08, C09, C09b, C09c, C09d, C09e, C09f, C09g, C09h, C08b, C08c, C08d |
 | N08 / AII-258 | R01, R02, R03, R04, R04b, R04c, R05, R05b, R05c, R05d, R05f, R05g, R05e |
 | N09 / AII-259 | U03, U03d, U03e, U05b, U04, U05, U06, U06b, U03b, U03c, U07, U09, U08, U10, U11, U11b |
-| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H07b, H07c, H07d, H07e, H02e, H09, H10, H11, H12, H12a, H12b, H12c, H12d, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H13b, H13c, H13d, H13e, H13f, H02b, H02c, H02d, H11b, H12n, H12p, H12o |
-| N11 / AII-261 | V01, V01b, V01c, V02 |
+| N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H07b, H07c, H07d, H07e, H02e, H09, H09b, H10, H11, H12, H12a, H12b, H12c, H12d, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H13b, H13c, H13d, H13e, H13f, H02b, H02c, H02d, H11b, H12n, H12p, H12o |
+| N11 / AII-261 | V01, V01b, V01c, V02, V02b |
 | N12 / AII-262 | M01b, M01c, M01d, M00, M01, M02, M02b, M02c, M02d, M02e, M03, M03b, M03c, M03d, M03e, M03f, M04, M04b, M04c, M04d, M04e, M04f, M05, M05b, M06 |
 | N13 / AII-263 | U04b, U04c, U04d, T01, T02, T03, T06, T06b, T07, T07b, T08, T09, T09b, T09c, T09d |
 | N14 / AII-264 | P01b, P01c, P01, P02, P02b, P03, P04, P05, P06, P07, P08, P08b, P08c, P09, P10, P10b, P10c |
@@ -1185,9 +1185,19 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H09 — Implement reconnect reconciliation and primary epochs
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `3700913`, `2a2d08d`, `c02fb8e`; CI runs 41032986929; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** A lost attempt with a call of unknown outcome is not replaced (a blocker names the owner); an old primary cannot renew a worker or take its result; message fencing was already in place.
 - **Blockers:** H08, L04, S05.
 - **Deliverable:** Epoch-bound admission and recovery handshake.
 - **Acceptance and verification:** Old-primary response cannot renew work; uncertain effects block replacement; reconnect never automatically resumes cached attempt.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### H09b — Finish reconnect reconciliation: recovery handshake, explicit re-accept, adoption by a new primary
+
+- **Parent:** N10 / AII-260.
+- **Blockers:** H09.
+- **Deliverable:** Split from H09 (2026-10-30): the connect handshake carries held attempts and the primary epoch, a re-accept is a controller decision, and a new primary adopts or ends the remote attempts it finds.
+- **Acceptance and verification:** A worker that reconnects does not resume until the controller decides; a new primary never renews an attempt it did not start without adopting it; tested with two controller instances on one store.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### H10 — Implement distributed agent capacity and fan-in limits
@@ -1343,6 +1353,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H13 — Implement event source adapters and watchers
 
 - **Parent:** N10 / AII-260.
+- **Status:** implemented; commits `cc1f257`; CI runs 41032986929; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Event sources, dedup, causation, watchers, storm and loop holds; remainder in H13f.
 - **Blockers:** H06, H01, R02.
 - **Deliverable:** Event source adapters for timers, task completion, file and repository changes (watchers as hints), service failures and model availability feeding H06 subscriptions, and event-to-inbox scheduling of the owning agent (README 70, 586-588; resume-reconciliation 11, 39).
 - **Acceptance and verification:** Each source produces deduplicated events with causation links; a subscribed event creates an inbox item that schedules the owning agent, subject to holds, to revise its plan; dropped or duplicated watcher events are still caught by the direct version check at resume; event payload text cannot invoke tools or grant authority; a self-triggering loop is detected and held; an event storm leaves unrelated work responsive; failed handling attempts can be listed and inspected from chat and API.
@@ -1392,7 +1404,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 
 - **Parent:** N10 / AII-260.
 - **Blockers:** H13e, H12k.
-- **Deliverable:** Split from H13e (2026-10-29): repository, file, service-health and timer sources chosen in settings, the owner chat command.
+- **Deliverable:** Split from H13e (2026-10-29): repository, file, service-health and timer sources chosen in settings, the owner chat command; a real model-availability source.
 - **Acceptance and verification:** Events from a real source wake the right agent.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
@@ -1705,6 +1717,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### U04 — Implement conversational policy editing
 
 - **Parent:** N09 / AII-259.
+- **Status:** implemented; commits `cc1f257`; CI runs 41032986929; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Policy edits by chat and API use the A07 classes and the U10 configuration service; concurrent edits and forwarded messages are handled; the next attempt shows the current policy (dispatcher test).
 - **Blockers:** U03, A02, A05, A07, U10.
 - **Deliverable:** Original wording, proposed interpretation and applied revision.
 - **Acceptance and verification:** Scoped exception preserves unrelated gates; unsupported condition explicitly unapplied; concurrent API edit detected; a direct API or UI edit appears in the next agent context build; forwarded messages record authenticated origin and forwarding agent separately; policy edits use the A07 action classes and the U10 configuration service.
@@ -1841,6 +1855,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### U12 — Implement agent messages, delivery classes and interruption budget
 
 - **Parent:** N10a / AII-520.
+- **Status:** implemented; commits `cc1f257`; CI runs 41032986929; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Delivery classes, interruption budget, coalescing, limits, escalation across restart, wired into the live controller and chat (audited 2026-10-30).
 - **Blockers:** U02, S08, L05, M01.
 - **Deliverable:** Per-agent message envelope (task, sender, purpose, urgency, optional deadline, correlation ID) with sending, accepted, delivered, handled and answered states; delivery classes; focus periods, interruption allowance and coalescing (README 61, 68, 153, 177, 185, 259, 482-491; agent-apis 19, 25, 29, 45; pitfalls-and-safeguards 65-67).
 - **Acceptance and verification:** Informational messages batch to the next check-in or stand-up; advice is read at the next safe boundary; a blocking dependency wakes only an eligible waiting task, never through a pause; urgent control interrupts only under sender authority and parent rank does not imply urgency; repeated updates coalesce; per-sender and per-recipient rate and queue limits and reply-loop bounds are enforced; a message or inquiry to a paused or suspended agent stays queued, does not wake it and reports queued or unavailable; an agent's question to the owner appears in owner chat with its task context and the answer resolves the linked wait; a request without a reply reaches its escalation path at its deadline; states survive restart.
@@ -1927,9 +1943,19 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### V02 — Implement bounded supervisor recovery
 
 - **Parent:** N11 / AII-261.
+- **Status:** implemented; commits `6835f2a`, `c02fb8e`; CI runs 41032986929; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The task has a retry limit across calls and rebuilt contexts (owner-set maxFailedAttempts); cost and tokens were already added up across routes.
 - **Blockers:** V01, V01b, L03, L04, R02, H05.
 - **Deliverable:** Recovery action ladder and supervisor monitoring.
 - **Acceptance and verification:** Loop recovery preserves history/effects; cumulative cost/retries enforced; supervisor stall escalates; owner holds remain; switching model or context never resets cumulative retry, time or cost limits; supervisors are subject to the same detection; an intervention and queued input are persisted before a stuck request is cancelled, and a resume on a backup route or rebuilt context records what context was carried.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### V02b — Finish supervisor recovery: action ladder, escalation, loop recovery, carried context
+
+- **Parent:** N11 / AII-261.
+- **Blockers:** V02.
+- **Deliverable:** Split from V02 (2026-10-30): escalation of an undecided concern, persisting an intervention and queued input before a stuck request is cancelled, loop recovery that keeps history and effects, the context carried on a fallback, a supervisor assessed like any agent.
+- **Acceptance and verification:** A stuck request is cancelled only after the intervention and queued input are stored; an undecided concern escalates; a supervisor stall is detected.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### M00 — Prototype the meeting protocol and run meeting experiments
@@ -1953,6 +1979,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### M02 — Implement votes, decisions and meeting summaries
 
 - **Parent:** N12 / AII-262.
+- **Status:** implemented; commits `cc1f257`; CI runs 41032986929; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Votes, decisions and summaries with expected revisions; remainder in M02e.
 - **Blockers:** M01, A02, C02, C08.
 - **Deliverable:** Decision records, dissent, owner presence and task updates.
 - **Acceptance and verification:** New decisions respect effective authority; owner arrival handled; summary matches applied changes; old grants not reopened; the summary lists attendance, key updates, decisions with reasons and links to the discussion, dissent, unresolved questions, actions and plan, and separates adopted from applied; a full-discussion view sits beside it and answers why a decision was taken from the record; transcript and summary stay durable and access-controlled when the meeting is interrupted or the summarizer fails; entries are typed (motion, amendment, ruling, vote, correction) and corrections are linked updates; decisions apply with expected revisions and a conflict shows as not applied; a conclusion published from private records is marked unverifiable when its source cannot be shared and asking for rationale grants no desk access (the one exception is the chair's meeting-scoped read of an absent member's desk, M05); stand-up plans persist.
@@ -1992,13 +2020,15 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 
 - **Parent:** N12 / AII-262.
 - **Blockers:** M02d.
-- **Deliverable:** Split from M02d (2026-10-29): appliers for a grant, a budget raise and an ownership change run under the owner-authorized path, recording each decision and its outcome so safe patterns can be found, the steward agent for decisions no coded rule covers, the narrator, chat commands.
+- **Deliverable:** Split from M02d (2026-10-29): appliers for a grant, a budget raise and an ownership change run under the owner-authorized path, recording each decision and its outcome so safe patterns can be found, the steward agent for decisions no coded rule covers, the narrator, chat commands; the meeting record is given a shareable-notes check so shared records count as verifiable (start.ts passes none today).
 - **Acceptance and verification:** A decision that widens rights or spend is carried out only with the owner's agreement or the policy's leave.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### M03 — Implement stand-up preparation, briefs and agenda items
 
 - **Parent:** N12 / AII-262.
+- **Status:** implemented; commits `cc1f257`; CI runs 41032986929; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Stand-up preparation, briefs, agenda and outcomes; remainder in M03f.
 - **Blockers:** M01, C02, U03.
 - **Deliverable:** Stand-up schedule configuration (time, IANA timezone, participant group, duration, daily window), advance notice, durable briefs, agenda ordering, supervisor-captured agenda items with request type and states, and improvement-backlog items with a timebox (README 69, 499-501, 531, 539-543; production-and-capacity 39-41).
 - **Acceptance and verification:** Schedules follow real timezone and DST rules with one catch-up report after downtime; agents are notified to reach a safe boundary and each brief lists accomplishments over about 24 hours, unfinished work, blockers, advice needed and next priorities from records without waking paused agents; the agenda puts conflicts, questions and decisions first; a captured item is shown in chat and correctable; its request type (discussion, recommendation, delegated decision, instruction) sets its authority and a tentative idea is never executed; queued, scheduled, discussed, deferred and resolved states carry owner and outcome links; deferred items stay visible with reason and next step; outcomes return to the originating conversation; the planning agenda includes a P/PC balance review.
@@ -2055,6 +2085,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### M04 — Implement meeting attendance and return to work
 
 - **Parent:** N12 / AII-262.
+- **Status:** implemented; commits `cc1f257`; CI runs 41032986929; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Meeting attendance and return to work; remainder in M04f and M05.
 - **Blockers:** M01, L01, L05, H04.
 - **Deliverable:** Bounded meeting task under a task-scoped Pause, participant states (preparing, present, unavailable, blocked), immediate-meeting rooms, wake rules and the end-of-meeting return policy (README 501, 505, 509, 570-574, 580; operational-contracts 45, 103).
 - **Acceptance and verification:** Near a scheduled meeting, admission avoids starting work that cannot yield before it while safe long-running operations continue; joining keeps ownership and background work and never uses Suspend, handoff or Force Stop; the meeting task does not advance the paused assignment; an immediate meeting starts with available participants scoped to the current project or named team, asking first if scope is unclear; a saved brief is never shown as a live answer; "everyone required" waits for missing participants under a visible timeout; a schedule never wakes a paused agent, while a direct owner invitation allows bounded attendance with other work still paused; suspended or stopped agents are woken only with owner authorization; the meeting proceeds without the owner and a late joiner sees the state so far; at the end only assignments paused solely for attendance resume, earlier or newly requested pauses, suspensions and stops are kept and nothing is transferred; return revalidates decisions and ownership and a new priority may defer it without transfer; absent affected agents are notified and revalidate their next actions before continuing; a participant who is not holding the floor receives no further messages from the meeting (the delivery rule is M05's).
@@ -2104,7 +2136,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 
 - **Parent:** N12 / AII-262.
 - **Blockers:** M04e.
-- **Deliverable:** Split from M04e (2026-10-29): chat wording that explains the owner's exception for a stopped agent, a wake path for agents the host's own availability hook reports stopped.
+- **Deliverable:** Split from M04e (2026-10-29): chat wording that explains the owner's exception for a stopped agent, a wake path for agents the host's own availability hook reports stopped; the dispatcher passes safeLongRunning so long work is refused during a meeting.
 - **Acceptance and verification:** The owner can ask in chat for a stopped agent to attend and is told what it means.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
@@ -2783,7 +2815,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g.
+- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b.
 - **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
 - **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
