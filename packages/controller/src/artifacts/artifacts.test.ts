@@ -185,6 +185,25 @@ for (const backend of backends) {
     assert.equal((await world.storage.listAudit({ afterSeq: 0, limit: 10 })).length, 0);
   });
 
+  suite("a published artifact of a task is told to the host once recorded, again on a repeat, never for one without a task, and a failing hook never undoes it (card C09g)", async ({ blobs }, world) => {
+    const told: { artifactId: string; name: string; taskId: string; projectId?: string; files: number }[] = [];
+    let fail = false;
+    const tracked = ArtifactService.withEpoch(world.storage, (await ArtifactService.open(world.storage, blobs, { holder: "c2", ...fast })).epoch, blobs, { ...fast, onPublished: async (e) => { if (fail) throw new Error("activity down"); told.push(e); } });
+    const projects = ProjectService.withEpoch(world.storage, tracked.epoch, fast);
+    const p = await projects.createProject({ commandId: cid("p"), actor: me, name: "P" });
+    const t = await projects.createTask({ commandId: cid("t"), actor: me, projectId: p.id, title: "T" });
+    const command = { commandId: cid("pub"), actor: me, name: "report", projectId: p.id, taskId: t.id, files: [file("a.txt", "A"), file("b.txt", "B")] };
+    const r = await tracked.publish(command);
+    assert.deepEqual(told, [{ artifactId: r.id, name: "report", taskId: t.id, projectId: p.id, files: 2 }]);
+    await tracked.publish(command);
+    assert.equal(told.length, 2, "a repeat tells again (the host's own key makes that harmless)");
+    await tracked.publish({ commandId: cid("pub"), actor: me, name: "loose", files: [file("c.txt", "C")] });
+    assert.equal(told.length, 2, "no task, nothing to record");
+    fail = true;
+    const kept = await tracked.publish({ commandId: cid("pub"), actor: me, name: "kept", projectId: p.id, taskId: t.id, files: [file("d.txt", "D")] });
+    assert.equal((await tracked.get(kept.id))?.name, "kept");
+  });
+
   suite("an artifact can belong to a project and a task, which must exist and agree", async ({ artifacts }, world) => {
     const projects = ProjectService.withEpoch(world.storage, artifacts.epoch, fast);
     const p1 = await projects.createProject({ commandId: cid("p"), actor: me, name: "P1" });

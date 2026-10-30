@@ -2578,3 +2578,9 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - A controller started without `eventSources` now polls `defaultEventSources` (`api/default-sources.ts`): a task-completion source over the real task records, reporting tasks seen done or cancelled in the last 7 days once each on `project:<id>`, scanning at most 5000 tasks per poll. Passing `eventSources: []` turns it off; passing a list replaces it.
 - Older closed tasks are never reported, which also bounds what the source remembers. A watcher subscribed to a project stream for `task.completed` / `task.cancelled` is now woken by the record itself.
 - Not built yet (remains in H13e): other real sources (repositories, files, service health, timers from the owner's settings), choosing them in settings, and the owner's chat command.
+
+## C09g (part 1): artifact versions appear in the task's activity record
+
+- `ArtifactService` takes `onPublished` (option `ArtifactOptions`): told after an artifact that names a task has been recorded, with its id, name, task, project and file count. A repeated publish tells again; the host's key (`artv:<artifact>`) makes the step appear once. A failing hook never undoes the publication.
+- The composed dispatcher's remote-worker artifact service records an `artifact-version` step ("Recorded artifact <name> (<n> files)") citing the artifact, so every artifact a remote worker publishes for a task shows in its activity.
+- Not built yet (remains in C09g): artifact steps for local workers' outputs, chat access to the activity record, the per-task explanation index.

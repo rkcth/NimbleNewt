@@ -9,6 +9,11 @@ import { CommandRunner, view, type CommandMeta, type CommandResult, type RunnerO
 import type { TaskBody } from "../domain/model.js";
 import { MANIFEST_LIMITS, checkEntries, checkPath, manifestDigest, type ManifestEntry } from "./manifest.js";
 
+export interface ArtifactOptions extends RunnerOptions {
+  /** Told once an artifact of a task has been recorded (card C09g): the host puts the step in the task's activity record. Best effort; keyed by the artifact, so telling twice is harmless. */
+  readonly onPublished?: (event: { readonly artifactId: string; readonly name: string; readonly taskId: string; readonly projectId?: string; readonly files: number }) => Promise<unknown>;
+}
+
 export interface PublishArtifact extends CommandMeta {
   /** A human label. Not identity: the artifact's identity is derived from the command ID. */
   readonly name: string;
@@ -84,10 +89,12 @@ const SCAN_PAGE = 500;
 export class ArtifactService {
   readonly #runner: CommandRunner;
   readonly #blobs: FileBlobStore;
+  readonly #onPublished: ArtifactOptions["onPublished"];
 
-  private constructor(runner: CommandRunner, blobs: FileBlobStore) {
+  private constructor(runner: CommandRunner, blobs: FileBlobStore, onPublished?: ArtifactOptions["onPublished"]) {
     this.#runner = runner;
     this.#blobs = blobs;
+    this.#onPublished = onPublished;
   }
 
   /** Takes a new primary epoch (deposing earlier services) and returns the service that writes under it. */
@@ -96,15 +103,24 @@ export class ArtifactService {
   }
 
   /** A service that writes under an epoch the controller already took, shared with its other services. */
-  static withEpoch(storage: ConstructorParameters<typeof CommandRunner>[0], epoch: number, blobs: FileBlobStore, options: RunnerOptions = {}): ArtifactService {
+  static withEpoch(storage: ConstructorParameters<typeof CommandRunner>[0], epoch: number, blobs: FileBlobStore, options: ArtifactOptions = {}): ArtifactService {
     if (!Number.isSafeInteger(epoch) || epoch < 1) throw new DomainError("invalid_command", "epoch: must be a whole number of at least 1", { field: "epoch" });
-    return new ArtifactService(new CommandRunner(storage, epoch, options), blobs);
+    return new ArtifactService(new CommandRunner(storage, epoch, options), blobs, options.onPublished);
   }
 
   get epoch(): number { return this.#runner.epoch; }
 
   /** Stores the files, then records the manifest. Idempotent by command ID; a repeat with the same files returns the recorded result. */
-  publish(command: PublishArtifact): Promise<CommandResult> {
+  async publish(command: PublishArtifact): Promise<CommandResult> {
+    const result = await this.#publish(command);
+    // Told after the manifest committed, also on a repeat (the hook's own key makes that harmless), so a crash between the commit and the hook is made good by the repeated command. A failure here never undoes the publication.
+    if (this.#onPublished !== undefined && typeof command.taskId === "string") {
+      try { await this.#onPublished({ artifactId: result.id, name: command.name, taskId: command.taskId, ...(command.projectId === undefined ? {} : { projectId: command.projectId }), files: command.files.length }); } catch { /* the activity step is best effort */ }
+    }
+    return result;
+  }
+
+  #publish(command: PublishArtifact): Promise<CommandResult> {
     return this.#blobs.lock.shared(() => this.#runner.command("artifact.publish", command, async (meta) => {
       onlyKnown(command, ["commandId", "actor", "name", "projectId", "taskId", "files"]);
       const name = text(command.name, "name", { min: 1, max: NAME_LIMIT });
