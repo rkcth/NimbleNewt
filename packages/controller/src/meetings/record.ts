@@ -30,6 +30,11 @@ export interface ChangeApplier {
   readonly action: string;
   /** The project the target belongs to; `undefined` when it does not exist. */
   project(target: { kind: string; id: string }): Promise<string | undefined>;
+  /**
+   * Set for a kind of change that widens what someone may do or spend (a grant, a budget): the approval policy's class for it. Such a kind is allowed in a motion (owner decision 2026-10-29, answer to question 3 of the M02d design set),
+   * but the decision waits for the owner unless the policy lets that class through (`widening`); otherwise it is carried out only once the owner agrees.
+   */
+  readonly widens?: "access-change" | "spend";
   /** Carries the change out. `commandId` is stable per change, so a repeat after a crash does it once. A `stale_revision` refusal means the target moved and the change is not applied. */
   apply(change: { readonly commandId: string; readonly actor: string; readonly target: { kind: string; id: string }; readonly expectedRevision: number; readonly patch: JsonObject }): Promise<{ revision?: number }>;
 }
@@ -64,6 +69,8 @@ export interface RecordOptions extends RunnerOptions {
    * command ID from the decision and the change); a failure never changes the decision.
    */
   readonly onChange?: (event: { decisionId: string; index: number; projectId: string; target: { kind: string; id: string }; state: "applied" | "not-applied"; summary: string; reason?: string }) => Promise<void>;
+  /** Whether the approval policy lets a class of widening change be carried out without asking the owner (strict: no; autonomous: spend only; a specific setting overrides the profile). Missing: always ask the owner. */
+  readonly widening?: (cls: "access-change" | "spend", projectId: string) => Promise<"allow" | "ask">;
   /** Minutes a vote stays open (default 10), unless the vote names its own. */
   readonly voteMinutes?: number;
 }
@@ -700,7 +707,10 @@ export class MeetingRecordService {
     const scope = outcome === "adopted" ? await this.#scope(motion, rec) : { scope: "in-scope" as const };
     const adopted = outcome === "adopted";
     const changeRecords: ChangeRecord[] = !adopted ? [] : motion.changes.map((c) => (scope.scope === "recommendation" ? { ...c, state: "not-applied" as const, code: "recommendation" as const, reason: scope.reason ?? "advisory only", at: now } : { ...c, state: "adopted" as const }));
-    const ownerResponse: OwnerResponse = adopted && scope.scope === "in-scope" && changeRecords.length > 0 && rec.ownerPresent ? "pending" : "not-asked";
+    // A change that widens rights or spend waits for the owner unless the approval policy lets its class through, whether or not the owner is in the room.
+    let widensAsk = false;
+    if (adopted && scope.scope === "in-scope") for (const c of changeRecords) { const cls = this.#options.appliers?.[c.kind]?.widens; if (cls !== undefined && (this.#options.widening === undefined || (await this.#options.widening(cls, motion.projectId).catch(() => "ask" as const)) !== "allow")) widensAsk = true; }
+    const ownerResponse: OwnerResponse = adopted && scope.scope === "in-scope" && changeRecords.length > 0 && (rec.ownerPresent || widensAsk) ? "pending" : "not-asked";
     const voteSeq = rec.nextSeq;
     const voteEntry = entryIdOf(motion.recordId, voteSeq);
     const trail = [...motion.trail, { entryId: voteEntry, seq: voteSeq, kind: "vote" as const }];
@@ -763,7 +773,7 @@ export class MeetingRecordService {
   async #mayCarry(c: ProposedChange, projectId: string): Promise<string | undefined> {
     const applier = this.#options.appliers?.[c.kind];
     if (applier === undefined) return `no applier is registered for ${c.kind}`;
-    if (NEVER.test(applier.action)) return `${applier.action} is never decided by a vote`;
+    if (applier.widens === undefined && NEVER.test(applier.action)) return `${applier.action} is never decided by a vote`;
     const who = await this.#options.authority?.(c.agent).catch(() => undefined);
     if (who === undefined) return `${c.agent} holds no authority that can be checked`;
     return allows(who, applier.action, projectId, { resource: c.target, now: this.#runner.now() }) ? undefined : `${c.agent} does not hold ${applier.action} on ${c.target.kind} ${c.target.id} now`;
@@ -811,6 +821,8 @@ export class MeetingRecordService {
       if (change.state === "adopted") {
         const applier = this.#options.appliers?.[change.kind];
         if (applier === undefined) { await refuse("failed", `no applier is registered for ${change.kind}`); continue; }
+        // The policy may have tightened since the vote: a widening change goes ahead without the owner's agreement only while the policy still lets its class through.
+        if (applier.widens !== undefined && d.ownerResponse !== "agreed" && (this.#options.widening === undefined || (await this.#options.widening(applier.widens, d.projectId).catch(() => "ask" as const)) !== "allow")) { await refuse("unauthorized", `the approval policy asks the owner before ${applier.widens} changes are carried out, and the owner has not agreed`); continue; }
         if (change.target.kind === "task" && this.#deps.decisions !== undefined) {
           const blocked = (await this.#deps.decisions.guard(change.target.id, "start")).blockedBy;
           if (blocked.length > 0) { await refuse("gate", `an owner gate or a superseded decision blocks work on the task (${blocked.join(", ")})`); continue; }
@@ -1271,7 +1283,7 @@ export class MeetingRecordService {
       const kind = typeof c["kind"] === "string" ? c["kind"] : invalid("changes", "a change has a kind");
       const applier = this.#options.appliers?.[kind];
       if (applier === undefined) invalid("changes", `${kind} is not a kind of change a meeting may decide`);
-      else if (NEVER.test(applier.action)) invalid("changes", `${applier.action} is never decided by a vote: a motion widens no permission, budget or configuration`);
+      else if (applier.widens === undefined && NEVER.test(applier.action)) invalid("changes", `${applier.action} is never decided by a vote: a motion widens no permission, budget or configuration`);
       const agent = await this.#agent(c["agent"], "changes.agent");
       const target = c["target"] as { kind?: unknown; id?: unknown } | undefined;
       if (target === undefined || target === null || typeof target.kind !== "string" || typeof target.id !== "string" || !/^[a-z][a-z-]{0,39}$/.test(target.kind) || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(target.id)) invalid("changes", "a change names its target as {kind, id}");

@@ -293,6 +293,18 @@ export class PolicyService {
   }
 
   /**
+   * What the approval policy says to a class of action in a project right now (card M02d): the installation's profile, with the project's environment and any specific setting that overrides the profile. Used by the controller
+   * to decide whether something an agent group decided (a meeting vote) may be carried out at once or waits for the owner; it is not a tool call and executes nothing.
+   */
+  async classMode(projectId: string, cls: ActionClass): Promise<Mode> {
+    const project = checkProjectId(projectId);
+    const inst = await this.#installationRecord();
+    const proj = (await this.#runner.get("approval-policy", project))?.body as unknown as PolicyBody | undefined;
+    const tier = tierOf(proj?.environment ?? "development");
+    return this.#view(inst.body, proj, await this.#reserved(project)).cells[`${cls}.${tier}` as CellKey];
+  }
+
+  /**
    * A conversation's action request (card U02 stores it with `needsAuthorization`) judged as a request. It is not a tool call and not a class the catalogue knows, so it goes to review: an agent
    * review under derived and autonomous, the owner under strict. Nothing is executed because a message asked; the answer only says how the request is to be treated.
    */

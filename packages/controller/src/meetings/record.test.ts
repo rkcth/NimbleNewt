@@ -31,7 +31,7 @@ for (const backend of backends) {
     pA: string; pB: string; pC: string; pD: string; pE: string; project: string;
     meetings: MeetingService; records: MeetingRecordService; decisions: DecisionService; grants: GrantService; principals: PrincipalService; projects: ProjectService;
     other: Map<string, Availability>; shared: Set<string>; calls: { applied: string[]; failOnce: boolean; narrate: "ok" | "throw" };
-    reopen(extra?: Partial<{ appliers: Record<string, ChangeApplier>; shareable: (c: SourceCite) => Promise<boolean> }>): MeetingRecordService;
+    reopen(extra?: Partial<{ appliers: Record<string, ChangeApplier>; shareable: (c: SourceCite) => Promise<boolean>; widening: (cls: "access-change" | "spend", projectId: string) => Promise<"allow" | "ask"> }>): MeetingRecordService;
     task(title?: string): Promise<{ id: string; revision: number }>;
     grantUpdate(agent: string): Promise<{ id: string; revision: number }>;
     meet(o?: { roster?: string[]; chair?: string; paused?: string[]; item?: "delegated-decision" | "owner-instruction" }): Promise<{ occ: string; rec: string; item?: string }>;
@@ -79,8 +79,8 @@ for (const backend of backends) {
           const p = await principals.get(id);
           return p === undefined ? undefined : grants.effective({ id, kind: p.kind, name: p.name, grants: p.grants }, clock());
         };
-        const make = (extra: Partial<{ appliers: Record<string, ChangeApplier>; shareable: (c: SourceCite) => Promise<boolean> }> = {}) => MeetingRecordService.withEpoch(world.storage, epoch, { meetings, decisions }, {
-          ...options, authority, appliers: extra.appliers ?? { "task.update": counting }, shareable: extra.shareable ?? (async (c) => shared.has(`${c.kind}:${c.id}`)),
+        const make = (extra: Partial<{ appliers: Record<string, ChangeApplier>; shareable: (c: SourceCite) => Promise<boolean>; widening: (cls: "access-change" | "spend", projectId: string) => Promise<"allow" | "ask"> }> = {}) => MeetingRecordService.withEpoch(world.storage, epoch, { meetings, decisions }, {
+          ...options, authority, appliers: extra.appliers ?? { "task.update": counting }, shareable: extra.shareable ?? (async (c) => shared.has(`${c.kind}:${c.id}`)), ...(extra.widening === undefined ? {} : { widening: extra.widening }),
           narrate: async ({ summary }) => { if (calls.narrate === "throw") throw new Error("the model is down"); return `A meeting with ${summary.decisions.length} decision(s).`; },
         });
         const records = make();
@@ -690,6 +690,46 @@ for (const backend of backends) {
     await refuses("invalid_command", () => motionOf(c, rec, c.asA, { changes: [change(c, { id: foreign.id, revision: foreign.revision }, c.pA)] }), (e) => assert.match(e.message, /not in this meeting's project/));
     await refuses("invalid_command", () => motionOf(c, rec, c.asA, { changes: [{ ...change(c, task, c.pA), patch: { title: "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH" } }] }));
     await refuses("forbidden", () => motionOf(c, rec, c.asE));
+  });
+
+  suite("a kind of change that widens spend or rights may be moved, and waits for the owner unless the approval policy lets its class through; the owner's agreement is what carries it out (owner decision 2026-10-29)", async (c) => {
+    const widens = { ...taskUpdateApplier(c.projects), widens: "spend" as const };
+    const asked: string[] = [];
+    // Under a policy that asks (or with no policy given), the decision waits for the owner even though the owner is not in the room.
+    const asking = c.reopen({ appliers: { "task.update": taskUpdateApplier(c.projects), "task.retitle-widening": widens }, widening: async (cls, project) => { asked.push(`${cls} ${project}`); return "ask"; } });
+    const task = await c.task("Budgeted task");
+    await c.grantUpdate(c.pA);
+    const { rec } = await c.meet({ chair: c.pD, item: "delegated-decision" });
+    const agenda = (await c.meetings.occurrence(c.owner, (await recordOf(c, rec)).occurrenceId))!.agenda.find((a) => a.intent === "delegated-decision")!.id;
+    const m = await adopt({ ...c, records: asking } as Ctx, rec, c.asB, { agendaItemId: agenda, topic: "unrelated topic", changes: [{ ...change(c, task, c.pA, "Retitled by a vote"), kind: "task.retitle-widening" }] });
+    const d = await decisionOf({ ...c, records: asking } as Ctx, m);
+    assert.deepEqual([d.scope, d.ownerResponse], ["in-scope", "pending"], "a widening change waits for the owner");
+    assert.ok(asked.length >= 1 && asked.every((a) => a.startsWith("spend ")));
+    assert.deepEqual(await asking.apply(c.host, { decisionId: d.id }), { applied: 0, notApplied: 0, pending: 1, waitingFor: "owner" });
+    assert.equal((await c.projects.getTask(task.id))!.title, "Budgeted task");
+    assert.equal((await asking.ownerRespond(c.owner, { commandId: cid("or"), decisionId: d.id, response: "agree" })).applied, 1);
+    assert.equal((await c.projects.getTask(task.id))!.title, "Retitled by a vote");
+    // A policy that lets the class through (an autonomous profile, or a specific setting) carries it out without asking.
+    const second = await c.task("Second budgeted task");
+    const letting = c.reopen({ appliers: { "task.update": taskUpdateApplier(c.projects), "task.retitle-widening": widens }, widening: async () => "allow" });
+    const two = await c.meet({ chair: c.pD, item: "delegated-decision" });
+    const agenda2 = (await c.meetings.occurrence(c.owner, (await recordOf(c, two.rec)).occurrenceId))!.agenda.find((a) => a.intent === "delegated-decision")!.id;
+    const m2 = await adopt({ ...c, records: letting } as Ctx, two.rec, c.asB, { agendaItemId: agenda2, topic: "unrelated topic", changes: [{ ...change(c, second, c.pA, "Retitled with the policy's leave"), kind: "task.retitle-widening" }] });
+    const d2 = await decisionOf({ ...c, records: letting } as Ctx, m2);
+    assert.equal(d2.ownerResponse, "not-asked");
+    assert.deepEqual(await letting.apply(c.host, { decisionId: d2.id }), { applied: 1, notApplied: 0, pending: 0 });
+    // The policy tightened after the vote: with the owner not having agreed, the change is refused at apply, not carried out.
+    const third = await c.task("Third budgeted task");
+    const three = await c.meet({ chair: c.pD, item: "delegated-decision" });
+    const agenda3 = (await c.meetings.occurrence(c.owner, (await recordOf(c, three.rec)).occurrenceId))!.agenda.find((a) => a.intent === "delegated-decision")!.id;
+    let answer: "allow" | "ask" = "allow";
+    const moving = c.reopen({ appliers: { "task.update": taskUpdateApplier(c.projects), "task.retitle-widening": widens }, widening: async () => answer });
+    const m3 = await adopt({ ...c, records: moving } as Ctx, three.rec, c.asB, { agendaItemId: agenda3, topic: "unrelated topic", changes: [{ ...change(c, third, c.pA, "Should not happen"), kind: "task.retitle-widening" }] });
+    answer = "ask";
+    const d3 = await decisionOf({ ...c, records: moving } as Ctx, m3);
+    const result = await moving.apply(c.host, { decisionId: d3.id });
+    assert.deepEqual([result.applied, result.notApplied], [0, 1]);
+    assert.equal((await c.projects.getTask(third.id))!.title, "Third budgeted task");
   });
 
   suite("decisions apply with the expected revision: an adopted change is carried out once, a target that moved is shown as not applied, and a grant revoked since the meeting is not honoured", async (c) => {
