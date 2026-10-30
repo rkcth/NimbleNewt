@@ -2665,3 +2665,9 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## L03f (part 2): the hand-off going on for a task in chat
 
 - `StatusService` view `handoff` (`{ kind: "handoff", taskId }`, the task named by its title in chat): from whom to whom, its mode and phase, why and who asked, when a temporary one returns, whether the package is complete and what it lacks, gaps accepted, what holds it up and the choices, and a failure. A task with no hand-off going gets a plain line; a task the caller may not control or read gets nothing.
+
+### Batch 9 review fixes
+
+- `HandoffService.forTask` checks the right to control the task before looking for a hand-off, so a caller without it learns nothing (before, it could tell "none going" from "refused").
+- The `meetings` and `agenda` views give the owner nothing for a project that does not exist (as the other views do). A chat status request carrying both a task ID and a title, or a title that is not text, drops the title.
+- Known, not fixed: the explanation reader loads every explanation record of the installation before applying its limit (cost grows with the installation); `explanations` follows the activity service's own read rule for host principals.

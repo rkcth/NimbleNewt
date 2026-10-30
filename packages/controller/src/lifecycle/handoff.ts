@@ -343,7 +343,10 @@ export class HandoffService {
 
   /** The hand-off of a task that is still going (not finished, failed or cancelled), for a caller who may control the task; undefined otherwise. */
   async forTask(by: Principal, taskId: string): Promise<View<TaskHandoffBody> | undefined> {
-    const id = await this.#activeId(checkTaskId(taskId));
+    const tid = checkTaskId(taskId);
+    // The right to control the task is checked first, so a caller who may not learns nothing, not even that no hand-off is going.
+    try { await this.#mayControl(by, tid); } catch (error) { if (error instanceof DomainError && error.code === "not_found") return undefined; throw error; }
+    const id = await this.#activeId(tid);
     return id === undefined ? undefined : this.get(by, id);
   }
 

@@ -299,6 +299,11 @@ for (const backend of backends) {
     await refuses("forbidden", () => c.handoffs.prepare(c.ann, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "z" }));
     await refuses("not_found", () => c.handoffs.advance(c.ann, { handoffId: h.id }));
     assert.equal(await c.handoffs.get(c.ann, h.id), undefined);
+    // The hand-off going on for a task is told only to one who may control the task, and a caller who may not learns nothing either way.
+    assert.equal((await c.handoffs.forTask(c.mgr, c.task))!.id, h.id);
+    assert.equal(await c.handoffs.forTask(c.ann, c.task), undefined);
+    await c.handoffs.cancel(c.mgr, { handoffId: h.id });
+    assert.equal(await c.handoffs.forTask(c.mgr, c.task), undefined);
     await refuses("forbidden", () => c.handoffs.sweep(c.mgr));
   });
 

@@ -356,6 +356,7 @@ export class StatusService {
     if (this.#deps.meetings === undefined) return undefined;
     const projectId = checkProjectId(request.projectId);
     const limit = request.limit === undefined ? 10 : Number.isSafeInteger(request.limit) && request.limit >= 1 && request.limit <= 50 ? request.limit : invalid("limit", "must be 1 to 50");
+    if (by.kind === "owner" && (await this.#runner.get("project", projectId)) === undefined) return undefined;
     const planned = await this.#deps.meetings.planned(by, projectId, { limit });
     if (planned === undefined) return undefined;
     const lines: Line[] = planned.items.map((m) => {
@@ -372,6 +373,7 @@ export class StatusService {
     if (this.#deps.agenda === undefined) return undefined;
     const projectId = checkProjectId(request.projectId);
     const limit = request.limit === undefined ? 10 : Number.isSafeInteger(request.limit) && request.limit >= 1 && request.limit <= 50 ? request.limit : invalid("limit", "must be 1 to 50");
+    if (by.kind === "owner" && (await this.#runner.get("project", projectId)) === undefined) return undefined;
     const open = await this.#deps.agenda.openAgenda(by, projectId, { limit });
     if (open === undefined) return undefined;
     const lines: Line[] = open.items.map((i, n) => line(
