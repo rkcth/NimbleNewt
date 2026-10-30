@@ -2763,6 +2763,34 @@
       ],
       "deliverable": "Lifecycle commands at agent, team and installation scope with explicit descendants and jobs, an aggregated shutdown readiness report, a reboot procedure, a resume-condition policy and an authenticated non-chat Stop and Force Stop command (README 65, 191, 382, 398, 404, 420-429, 605; pitfalls-and-safeguards 111)",
       "acceptance_and_verification": "Installation shutdown reports ready only when every affected agent and job is, listing unsettled and permitted remote jobs as tracked exceptions; bookkeeping after preparation completes with no model available, and the last model failing mid-preparation leaves a mechanically recoverable checkpoint and reports the missing briefing; reboot preserves assignments and pause intent and schedules no paused work; resume happens only on explicit owner action or a recorded authorized condition; gates at task, agent, team and installation scope stack and resuming one never lifts another; Stop and Force Stop work through the non-chat command with every model route down",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "bdaf482"
+        ],
+        "ci_runs": [
+          "41043394298"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Readiness report, stacked gates, reboot keeps the pause, permitted remote jobs tracked as exceptions, stop works with no model route; resume on a recorded condition is L06b.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "L06b",
+      "parent": "N05",
+      "existing_issue": "AII-255",
+      "title": "Finish shutdown and resume: resume on a recorded authorized condition",
+      "depends_on": [
+        "L06"
+      ],
+      "deliverable": "Split from L06 (2026-10-30): a gate may be lifted by a recorded, authorized condition (set by the owner ahead of time) as well as by an explicit owner or manager resume",
+      "acceptance_and_verification": "A condition that was never recorded never resumes anything; a recorded one resumes only the scope it names and is itself audited",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -7965,7 +7993,8 @@
         "C09h",
         "L03g",
         "H09b",
-        "V02b"
+        "V02b",
+        "L06b"
       ],
       "deliverable": "Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete",
       "acceptance_and_verification": "D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards",
