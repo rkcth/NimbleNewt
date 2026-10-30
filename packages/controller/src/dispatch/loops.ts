@@ -88,6 +88,11 @@ export function attendanceLoops(attendance: Pick<AttendanceService, "sweepReturn
   return [{ name: "attendance.sweepReturns", run: (by) => attendance.sweepReturns(by) }];
 }
 
+/** M03d: the stand-up's decisions on improvements go back to the agents that proposed them, project by project; one that cannot be filed yet stays pending. */
+export function improvementOutcomeLoops(improvements: { deliverOutcomes(by: Principal, projectId: string): Promise<unknown> }, projects: () => Promise<readonly string[]>): DispatcherLoop[] {
+  return [{ name: "improvements.outcomes", run: async (by) => { for (const projectId of await projects()) await improvements.deliverOutcomes(by, projectId); } }];
+}
+
 /** M03: for each project, the preparation of every planned occurrence (briefs, notices) and the delivery of agenda outcomes to the conversations they came from. */
 export function standupLoops(standups: Pick<StandupService, "prepare" | "deliverOutcomes">, meetings: Pick<MeetingService, "planned">, projects: () => Promise<readonly string[]>): DispatcherLoop[] {
   return [

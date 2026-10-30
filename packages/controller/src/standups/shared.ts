@@ -17,8 +17,11 @@ export interface OutcomeNotice {
   readonly to: { readonly kind: "chat-turn" | "inquiry" | "agent"; readonly id: string };
   readonly text: string;
   readonly refs: readonly Cite[];
+  /** The task the outcome is about, when it has one (an accepted improvement's task): where a notice can be filed. */
+  readonly taskId?: string;
 }
-export interface OutcomeSink { deliver(notice: OutcomeNotice): Promise<void> }
+/** `deliver` says whether the outcome was filed; `false` means it could not be (for example no task to file it on): it stays waiting, and nothing is marked as told. */
+export interface OutcomeSink { deliver(notice: OutcomeNotice): Promise<void | boolean> }
 
 export const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 /** Bounded text that is not credential-shaped. */

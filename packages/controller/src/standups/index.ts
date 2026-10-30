@@ -4,3 +4,4 @@ export {
 } from "./standups.js";
 export { IMPROVEMENT_LIMITS, ImprovementService, outcomeText, type Disposition, type EvidenceRef, type ImprovementBody, type ImprovementOptions } from "./improvements.js";
 export type { OutcomeNotice, OutcomeSink } from "./shared.js";
+export { improvementOutcomeSink } from "./outcome-sink.js";

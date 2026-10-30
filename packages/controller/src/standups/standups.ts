@@ -460,7 +460,8 @@ export class StandupService {
     for (const item of snapshot) {
       const sink = this.#options.outcomes;
       if (sink === undefined || item.source === undefined) { waiting.push(item.id); continue; }
-      await sink.deliver({ key: `${item.id}:${item.revision}`, kind: "agenda-outcome", projectId: project, to: { kind: item.source.kind, id: item.source.id }, text: outcomeLine(item), refs: [{ kind: "agenda-item", id: item.id, revision: item.revision }] });
+      const sent = await sink.deliver({ key: `${item.id}:${item.revision}`, kind: "agenda-outcome", projectId: project, to: { kind: item.source.kind, id: item.source.id }, text: outcomeLine(item), refs: [{ kind: "agenda-item", id: item.id, revision: item.revision }] });
+      if (sent === false) { waiting.push(item.id); continue; }
       // Marked only if the item is still the one that was sent; a newer outcome stays waiting and goes next time.
       if (await this.#meetings.markOutcomeReturned(by, item.id, item.revision)) delivered.push(item.id); else waiting.push(item.id);
     }

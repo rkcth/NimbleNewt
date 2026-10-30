@@ -749,10 +749,14 @@ for (const backend of backends) {
     await refuses("forbidden", () => im.deliverOutcomes(c.mgr, c.a));
     const quiet = c.makeImprovements(false);
     assert.ok((await quiet.deliverOutcomes(c.host, c.a)).waiting.includes(first.id));
+    // A sink that could not file it (no task to hang it on) leaves it waiting, not told.
+    const unfiled = ImprovementService.withEpoch(c.storage, c.epoch, { meetings: c.meetings }, { outcomes: { deliver: async () => false } });
+    assert.ok((await unfiled.deliverOutcomes(c.host, c.a)).waiting.includes(first.id));
     const told = await im.deliverOutcomes(c.host, c.a);
     assert.ok(told.delivered.includes(first.id));
     const notices = c.outcomes.filter((o) => o.kind === "improvement-outcome" && o.refs[0]!.id === first.id);
     assert.deepEqual(notices.map((o) => o.to.id).sort(), [c.dev.id, c.dev2.id].sort());
+    assert.ok(notices.every((o) => o.taskId === mineTask), "the outcome names the task it is about, where a notice can be filed");
     assert.match(notices[0]!.text, /was adopted\. Evaluation: Retried builds: failures down from 9 to 1 a week\./);
     assert.match(outcomeLine({ topic: "T", state: "deferred", intent: "discussion", deferral: { reason: "r", nextStep: "n" } }), /Next step: n/);
     assert.deepEqual((await im.deliverOutcomes(c.host, c.a)).delivered.filter((id) => id === first.id), []);

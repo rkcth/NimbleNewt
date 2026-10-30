@@ -259,9 +259,12 @@ export class ImprovementService {
       if (this.#sink === undefined) { waiting.push(id); continue; }
       const group = [body.proposedBy, ...(await Promise.all((body.duplicates ?? []).map(async (d) => ((await this.#runner.get("improvement-item", d))?.body as unknown as ImprovementBody | undefined)?.proposedBy)))].filter((x): x is string => x !== undefined);
       const text = outcomeText(body);
+      let filed = true;
       for (const to of [...new Set(group)]) {
-        await this.#sink.deliver({ key: `${id}:${found.revision}:${to}`, kind: "improvement-outcome", projectId: project, to: { kind: "agent", id: to }, text, refs: [{ kind: "improvement-item", id, revision: found.revision }] });
+        const sent = await this.#sink.deliver({ key: `${id}:${found.revision}:${to}`, kind: "improvement-outcome", projectId: project, to: { kind: "agent", id: to }, text, refs: [{ kind: "improvement-item", id, revision: found.revision }], ...(body.taskId === undefined ? {} : { taskId: body.taskId }) });
+        if (sent === false) filed = false;
       }
+      if (!filed) { waiting.push(id); continue; } // not told yet: it stays pending, and is tried again
       await this.#retrying(async () => {
         const cur = await this.#runner.get("improvement-item", id);
         const b = cur?.body as unknown as ImprovementBody | undefined;
