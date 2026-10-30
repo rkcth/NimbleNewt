@@ -50,7 +50,7 @@ export interface ItemBody {
   readonly urgent: boolean;
   /** When the controller raised this item to Urgent because it waited too long (card U11b); told once. */
   readonly escalatedAt?: string;
-  readonly state: "queued" | "sent" | "answered";
+  readonly state: "queued" | "sent" | "answered" | "settled";
   /** How many times the same event was reported while this item was open. */
   readonly count: number;
   readonly occurrence: number;
@@ -59,6 +59,8 @@ export interface ItemBody {
   readonly digestId?: string;
   readonly answer?: string;
   readonly answeredAt?: string;
+  /** When the controller closed the item because the record it points at was settled elsewhere (not answered through the inbox). */
+  readonly settledAt?: string;
 }
 
 export interface DigestBody { readonly createdAt: string; readonly itemIds: readonly string[]; readonly state: "open" | "answered" }
@@ -218,7 +220,7 @@ export class NotificationService {
         let occurrence = 0; let found: Awaited<ReturnType<CommandRunner["get"]>>;
         for (; occurrence < NOTIFICATION_LIMITS.occurrences; occurrence++) {
           found = await this.#runner.get("notification-item", derivedId("ntf", `${base}|${occurrence}`));
-          if (found === undefined || (found.body as unknown as ItemBody).state !== "answered") break;
+          if (found === undefined || !["answered", "settled"].includes((found.body as unknown as ItemBody).state)) break;
         }
         if (occurrence >= NOTIFICATION_LIMITS.occurrences) throw new DomainError("unavailable", "this event has been reported and answered too many times to keep separate records");
         const itemId = derivedId("ntf", `${base}|${occurrence}`);
@@ -260,6 +262,8 @@ export class NotificationService {
     const now = this.#runner.now();
     const digestIds: string[] = [];
     let problem: unknown;
+    // Items whose record was settled elsewhere are closed first, so they reach neither an escalation nor a digest; quiet hours do not matter, nothing is told.
+    try { await this.#closeSettled(now); } catch (error) { problem = error; }
     try {
       if (!this.#quiet(settings, now)) {
         // A failure to raise one item does not hold back the release of urgent reviews and the digests; it is raised after they were tried.
@@ -421,7 +425,7 @@ export class NotificationService {
   async #escalateStale(settings: NotificationSettings, now: string): Promise<void> {
     const limit = Date.parse(now) - (settings.escalateAfterHours ?? DEFAULT_ESCALATE_AFTER_HOURS) * 3_600_000;
     for (const item of await this.#load<ItemBody>("notification-item", (await this.#index()).body.items)) {
-      if (item.state === "answered" || item.escalatedAt !== undefined || !WAITS_ON_OWNER.has(item.kind) || Date.parse(item.firstAt) > limit) continue;
+      if (item.state === "answered" || item.state === "settled" || item.escalatedAt !== undefined || !WAITS_ON_OWNER.has(item.kind) || Date.parse(item.firstAt) > limit) continue;
       // What the item points at may have been settled in its own flow (a blocker resolved, a review decided): a settled record is not raised as Urgent.
       try { await this.#describe(item.kind, item.ref, item.projectId); } catch (error) { if (error instanceof DomainError && (error.code === "not_found" || error.code === "invalid_command")) continue; throw error; }
       const hours = Math.floor((Date.parse(now) - Date.parse(item.firstAt)) / 3_600_000);
@@ -429,7 +433,7 @@ export class NotificationService {
       await this.#apply("notification.escalate", { commandId: `escalate-${item.id}-${item.firstAt}`, actor: "notifications" }, { id: item.id }, async (index) => {
         const current = await this.#runner.get("notification-item", item.id);
         const body = current?.body as unknown as ItemBody | undefined;
-        if (current === undefined || body === undefined || body.state === "answered" || body.escalatedAt !== undefined) return undefined;
+        if (current === undefined || body === undefined || body.state === "answered" || body.state === "settled" || body.escalatedAt !== undefined) return undefined;
         const ref: AggregateRef = { kind: "notification-item", id: item.id };
         return { ref, creates: false, changes: [
           { type: "update", ref, expectedRevision: current.revision, body: { ...body, state: "sent", urgent: true, immediate: true, escalatedAt: now } as unknown as JsonObject },
@@ -438,6 +442,31 @@ export class NotificationService {
         ], detail: { escalated: true } };
       });
     }
+  }
+
+  /**
+   * An item that waits on the owner, whose blocker, review or question was settled in its own flow (resolved, decided, answered elsewhere, gone), is closed as settled and leaves the inbox,
+   * so no digest or "needs you" count carries it. A record that cannot be read this time is skipped and tried again on the next tick; the first such failure is raised after the others were tried.
+   */
+  async #closeSettled(now: string): Promise<void> {
+    let problem: unknown;
+    for (const item of await this.#load<ItemBody>("notification-item", (await this.#index()).body.items)) {
+      if (item.state === "answered" || item.state === "settled" || !WAITS_ON_OWNER.has(item.kind)) continue;
+      try {
+        try { await this.#describe(item.kind, item.ref, item.projectId); continue; } catch (error) { if (!(error instanceof DomainError && (error.code === "not_found" || error.code === "invalid_command"))) throw error; }
+        await this.#apply("notification.settle", { commandId: `settle-${item.id}-${item.firstAt}`, actor: "notifications" }, { id: item.id }, async (index) => {
+          const current = await this.#runner.get("notification-item", item.id);
+          const body = current?.body as unknown as ItemBody | undefined;
+          if (current === undefined || body === undefined || body.state === "answered" || body.state === "settled") return undefined;
+          const ref: AggregateRef = { kind: "notification-item", id: item.id };
+          return { ref, creates: false, changes: [
+            { type: "update", ref, expectedRevision: current.revision, body: { ...body, state: "settled", settledAt: now } as unknown as JsonObject },
+            this.#indexChange(index, { items: without(index.body.items, item.id) }),
+          ], detail: { settled: true } };
+        });
+      } catch (error) { problem ??= error; }
+    }
+    if (problem !== undefined) throw problem;
   }
 
   async #releaseUrgent(settings: NotificationSettings, now: string): Promise<void> {
@@ -532,6 +561,7 @@ export class NotificationService {
     const item = aggregate.body as unknown as ItemBody;
     // A repeat of an answer already recorded is answered from the record.
     if (item.state === "answered") { if (item.answer === answer) return; throw new DomainError("invalid_command", "already answered", { field: "answer" }); }
+    if (item.state === "settled") throw new DomainError("invalid_command", "that item was settled elsewhere and is closed", { field: "itemId" });
     // What an item means (kind, record, label, answers) never changes after it is made; only its count and state do, so an item that keeps being reported can still be answered from an older view.
     if (revision > aggregate.revision) throw new DomainError("stale_revision", `notification ${command.itemId} is at revision ${aggregate.revision}, not ${revision}`, { currentRevision: aggregate.revision });
     if (!(item.answers.includes(answer) || answer === "ok")) throw new DomainError("invalid_command", `not an answer this item offers (${[...item.answers, "ok"].join(", ")})`, { field: "answer" });
@@ -540,7 +570,7 @@ export class NotificationService {
     await this.#apply("notification.answer", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, { itemId: command.itemId, answer, revision }, async (index) => {
       const ref: AggregateRef = { kind: "notification-item", id: command.itemId };
       const current = (await this.#runner.get("notification-item", command.itemId))!;
-      if ((current.body as unknown as ItemBody).state === "answered") return undefined;
+      if ((current.body as unknown as ItemBody).state === "answered" || (current.body as unknown as ItemBody).state === "settled") return undefined;
       return { ref, creates: false, changes: [
         { type: "update", ref, expectedRevision: current.revision, body: { ...(current.body as unknown as ItemBody), state: "answered", answer, answeredAt: this.#runner.now() } as unknown as JsonObject },
         this.#indexChange(index, { items: without(index.body.items, command.itemId) }),
@@ -551,7 +581,7 @@ export class NotificationService {
   async #closeDigestIfDone(owner: Principal, digestId: string, commandId: string): Promise<void> {
     const digest = (await this.#runner.get("notification-digest", digestId))?.body as unknown as DigestBody | undefined;
     if (digest === undefined || digest.state === "answered") return;
-    for (const id of digest.itemIds) if (((await this.#runner.get("notification-item", id))?.body as unknown as ItemBody | undefined)?.state !== "answered") return;
+    for (const id of digest.itemIds) { const state = ((await this.#runner.get("notification-item", id))?.body as unknown as ItemBody | undefined)?.state; if (state !== "answered" && state !== "settled") return; }
     await this.#apply("notification.digest-done", { commandId: scopedCommandId(owner.id, `${commandId}.done.${digestId}`), actor: owner.id }, { digestId }, async (index) => {
       const current = (await this.#runner.get("notification-digest", digestId))!;
       const ref: AggregateRef = { kind: "notification-digest", id: digestId };

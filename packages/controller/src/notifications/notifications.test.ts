@@ -29,7 +29,7 @@ for (const backend of backends) {
   interface Ctx {
     svc: NotificationService; owner: Principal; ann: Principal; evil: Principal; ctl: Principal; wide: Principal; a: string; b: string; ta: string;
     sent: { text: string; links: unknown }[]; failing: { on: boolean }; responded: { commandId: string; id: string; answer: string }[];
-    review(): Promise<string>; resolveBlocker(id: string): Promise<void>; blocker(type?: "manual_hold" | "wait_overdue" | "unexplained_block"): Promise<string>; question(): Promise<string>;
+    readsFailFor(id: string): NotificationService; review(): Promise<string>; resolveBlocker(id: string): Promise<void>; blocker(type?: "manual_hold" | "wait_overdue" | "unexplained_block"): Promise<string>; question(): Promise<string>;
     report(who: Principal, kind: NotificationKind, refKind: string, id: string, extra?: Record<string, unknown>): ReturnType<NotificationService["emit"]>;
   }
   const suite = (name: string, body: (c: Ctx) => Promise<void>) =>
@@ -62,6 +62,7 @@ for (const backend of backends) {
           responders: { "review-request": async (_o, item, answer, commandId) => { if (answer === "deny") throw new Error("the review is already decided"); responded.push({ commandId, id: item.ref.id, answer }); } },
         });
         await body({
+          readsFailFor: (id) => NotificationService.withEpoch(new Proxy(world.storage, { get: (t, k) => { const v = Reflect.get(t, k, t); if (k !== "getAggregate") return typeof v === "function" ? v.bind(t) : v; return async (ref: { kind: string; id: string }) => { if (ref.id === id) throw new Error("storage hiccup"); return t.getAggregate(ref); }; } }), projects.epoch, options),
           svc, owner, ann, evil, ctl, wide, a, b, ta, sent, failing, responded,
           review: async () => (await reviews.request(ann, { commandId: cid("rq"), taskId: ta, operation: { name: "git-commit", args: { n: n++ }, target: { kind: "repository", id: "main" } }, context })).id,
           blocker: async (type = "manual_hold") => (await blockers.openBlocker({ commandId: cid("bl"), actor: "owner:rob", type, subject: { kind: "task", id: ta }, summary: "stuck", resolver: "owner:rob" })).id,
@@ -160,6 +161,28 @@ for (const backend of backends) {
     for (const who of [c.ann, c.evil]) { await refuses("forbidden", () => c.svc.inbox(who)); await refuses("forbidden", () => c.svc.report(who)); await refuses("forbidden", () => c.svc.settings(who)); await refuses("forbidden", () => c.svc.configure(who, { commandId: cid("cf"), digestTimes: ["08:00"] })); }
   });
 
+  suite("an item whose record was settled elsewhere is closed by the sweep and leaves the digest; one still waiting is untouched; one unreadable record does not stop the others", async (c) => {
+    const resolved = await c.blocker("manual_hold"); const still = await c.blocker("wait_overdue"); const flaky = await c.blocker("unexplained_block");
+    const a = await c.report(c.ann, "blocker", "blocker", resolved);
+    const b = await c.report(c.ann, "blocker", "blocker", still);
+    const f = await c.report(c.ann, "blocker", "blocker", flaky);
+    await c.resolveBlocker(resolved); await c.resolveBlocker(flaky)
+    const raw = async (id: string) => (await c.svc.inbox(c.owner)).items.find((i) => i.id === id);
+    // The record of the first of the flaky pair cannot be read this tick: the error is raised after the others were closed.
+    await assert.rejects(c.readsFailFor(flaky).runDue(), /storage hiccup/);
+    assert.equal(await raw(a.itemId), undefined, "closed despite the failure on another");
+    assert.equal((await raw(f.itemId))?.state, "queued", "the unreadable one is left for the next tick");
+    assert.equal((await raw(b.itemId))?.state, "queued", "a record still waiting is untouched");
+    await c.svc.runDue();
+    assert.equal(await raw(f.itemId), undefined, "closed on the next tick");
+    minutes(60);
+    const ran = await c.svc.runDue();
+    const inbox = await c.svc.inbox(c.owner);
+    assert.equal(ran.digestIds.length, 1);
+    assert.deepEqual(inbox.digests[0]!.itemIds, [b.itemId], "the digest carries only what still waits");
+    await refuses("invalid_command", () => c.svc.answerItem(c.owner, { commandId: cid("an"), itemId: a.itemId, answer: "ok", revision: 1 }));
+  });
+
   suite("an item that waits on the owner is raised to Urgent by the controller after the owner's threshold, told once, outside quiet hours, and nothing else is (card U11b)", async (c) => {
     set("2026-10-22T08:00:00.000Z");
     const waiting = await c.report(c.ann, "blocker", "blocker", await c.blocker("wait_overdue"));
@@ -175,7 +198,7 @@ for (const backend of backends) {
     assert.equal((await item(waiting.itemId)).urgent, false, "23 hours: not yet");
     hours(25);
     await c.svc.runDue();
-    assert.equal((await item(settled.itemId)).urgent, false, "a settled record is not raised");
+    assert.equal((await c.svc.inbox(c.owner)).items.some((i) => i.id === settled.itemId), false, "a settled record is not raised, and its item is closed");
     const raised = await item(waiting.itemId);
     assert.deepEqual([raised.urgent, raised.state, raised.escalatedAt], [true, "sent", new Date(now).toISOString()]);
     assert.equal((await item(note.itemId)).urgent, false, "an item that only informs is never raised");

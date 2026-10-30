@@ -2962,3 +2962,10 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 
 - The fix in `BackupService.backUpFor` (`current !== known` check) stops a second repeat of one command ID, waiting on a removed backup, from starting another replacement after the first waiter's replacement was made and finished. The old test only covered the case where the replacement still ran, which the "one backup at a time" guard in `backUpNow` hid.
 - Test: `two repeats waiting on a removed backup start exactly one replacement...` in `packages/controller/src/backup/backup.test.ts`. A subclass makes `backUpNow` finish at once without sharing a running backup, so the finished-first interleaving is forced and no timing is involved. With the check removed from the compiled file the test fails (2 starts, expected 1); restored, the backup suite passes (12/12).
+
+## U11b follow-up: items settled elsewhere are closed
+
+- `NotificationService.runDue` now first runs `#closeSettled`: a blocker, review-request or owner-question item whose record is no longer waiting on the owner (blocker resolved, review decided, inquiry answered or gone) gets state `settled` with `settledAt`, and leaves the inbox index, so no later digest or escalation carries it. It runs in quiet hours too (nothing is told).
+- `settled` is a new `ItemBody.state`. It is treated like `answered` for re-reports (a new occurrence opens), escalation, digest completion; `answerItem` on a settled item is refused (`invalid_command`).
+- A record that cannot be read (a failure other than not_found/invalid_command) is skipped, left for the next tick, and the first such error is raised after the other items were tried.
+- Tests: new suite in `notifications.test.ts` (both backends) covering close, digest omission, still-waiting untouched, and per-record failure isolation.
