@@ -77,9 +77,11 @@ test("after the stop the process is ended once the grace runs out, unless the wo
 
 test("contained termination ends the process and what it started, TERM then KILL, and refuses pids that are not its to end", { skip: process.platform === "win32" ? "process groups are POSIX; the Windows launcher is A03b" : false }, async () => {
   // A child that is its own group leader, starts a grandchild, and ignores TERM.
-  const child = spawn(process.execPath, ["-e", `process.on("SIGTERM", () => {}); require("node:child_process").spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" }); setInterval(() => {}, 1000);`], { detached: true, stdio: "ignore" });
+  const child = spawn(process.execPath, ["-e", `process.on("SIGTERM", () => {}); require("node:child_process").spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" }); setInterval(() => {}, 1000); process.stdout.write("ready");`], { detached: true, stdio: ["ignore", "pipe", "ignore"] });
   const pid = child.pid!;
-  await new Promise((r) => setTimeout(r, 300));
+  // wait until the child has installed its handler (a fixed sleep raced with start-up under load)
+  await new Promise<void>((resolve) => child.stdout!.once("data", () => resolve()));
+  await new Promise((r) => setTimeout(r, 100));
   const signals: string[] = [];
   const gone = await killContained(pid, { termMs: 300, signal: (p, s) => { signals.push(s); try { process.kill(-p, s); } catch { /* gone */ } } });
   assert.equal(gone, true);
