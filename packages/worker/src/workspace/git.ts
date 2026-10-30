@@ -1,12 +1,14 @@
 import { createHash, randomBytes } from "node:crypto";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { createReadStream, createWriteStream } from "node:fs";
+import { pipeline } from "node:stream/promises";
 import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { WorkspaceBridge, ABSENT, versionOf, type WriteResult } from "./bridge.js";
 import { WorkspaceError } from "./errors.js";
 import { touchesGit } from "./names.js";
-import { NOFOLLOW, resolveSafe } from "./paths.js";
+import { NOFOLLOW, resolveSafe, sameFile } from "./paths.js";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 
@@ -127,53 +129,105 @@ export class GitBridge {
 
   /**
    * The author's own refresh (card H12p): a three-way re-apply of the agent's work onto `commit` (the current head of the landing branch). The agent's work is its net difference from the base,
-   * committed or not. For each file: only the agent changed it, it stays; only the landing branch changed it, the checkout takes that version; both changed it, the two are merged line by line.
-   * Overlapping edits are never resolved: the file keeps conflict markers (`<<<<<<< mine`, `||||||| base`, `>>>>>>> landing`) and is listed. A file one side deleted and the other changed, a file that is
-   * not text, and a file added on both sides with different content are listed too and keep the agent's side. Nothing is read or written until every file has been planned, so a refused path
-   * (Git's own name, a link) changes nothing. Afterwards the base is `commit`, and what the checkout holds is the agent's work on top of it. Returns the files by outcome.
+   * committed or not (a change of mode alone counts). For each file: only the agent changed it, it stays; only the landing branch changed it, the checkout takes that version (with the landing
+   * mode); both changed it, the two are merged line by line. Overlapping edits are never resolved: the file keeps conflict markers (`<<<<<<< mine`, `||||||| base`, `>>>>>>> landing <commit>`) and is
+   * listed. A file one side deleted and the other changed, a file that is not text, and a file added on both sides with different content (listed `both-added`, no markers) are listed too and keep the
+   * agent's side. Everything is planned and prepared before the first write: every path is resolved and checked (Git's names, links, hard links, a directory or a file in the wrong place, size of the
+   * files that must be merged) and the new content is made in a private directory, so a refusal changes nothing; the parent directories are made before the first file is written. A file already holding
+   * this call's markers for the same landing commit (a retry) is not merged again. Files are written without following a link and checked against what was resolved. Afterwards the base is `commit`
+   * and what the checkout holds is the agent's work on top of it. When the base already is `commit` nothing at all is done (the agent's own commits stay). Returns the files by outcome.
    */
-  async reapply(options: { shared: string; commit: string; gitDir: string; checkout: string }): Promise<{ base: string; previous: string; unchanged: boolean; kept: string[]; taken: string[]; merged: string[]; conflicts: { path: string; kind: "overlap" | "deleted-here" | "deleted-there" | "binary" | "both-added" }[] }> {
+  async reapply(options: { shared: string; commit: string; gitDir: string; checkout: string; hooks?: { beforeOpen?: (absolute: string) => Promise<void> } }): Promise<{ base: string; previous: string; unchanged: boolean; kept: string[]; taken: string[]; merged: string[]; conflicts: { path: string; kind: "overlap" | "deleted-here" | "deleted-there" | "binary" | "both-added" }[] }> {
     if (!COMMIT.test(options.commit)) throw new WorkspaceError("invalid_path", "a refresh goes to a full commit ID");
     const previous = await this.#base(options.gitDir);
-    const mine = new Map((await this.changes(options)).filter((c) => !c.modeOnly).map((c) => [c.path, c.op] as const));
+    const mine = new Map((await this.changes(options)).map((c) => [c.path, { op: c.op, modeOnly: c.modeOnly }] as const));
     const sharedGit = await this.#sharedGitDir(options.shared);
     await this.#run(["fetch", "--no-tags", "--no-recurse-submodules", sharedGit, options.commit], { gitDir: options.gitDir, allowFile: true });
-    const listing = (await this.#run(["diff", "--name-status", "-z", "--no-renames", previous, options.commit], { gitDir: options.gitDir })).stdout.split("\0").filter(Boolean);
-    const theirs = new Map<string, "write" | "delete">();
+    const listing = (await this.#run(["diff", "--raw", "--no-abbrev", "-z", "--no-renames", previous, options.commit], { gitDir: options.gitDir })).stdout.split("\0").filter(Boolean);
+    const theirs = new Map<string, { op: "write" | "delete"; mode: string; oldMode: string; sha: string }>();
     for (let i = 0; i + 1 < listing.length; i += 2) {
+      const [oldMode = "", newMode = "", , sha = "", status = ""] = listing[i]!.slice(1).split(" ");
       const path = listing[i + 1]!;
       if (touchesGit(path.split("/"))) throw new WorkspaceError("protected_path", `${JSON.stringify(path.slice(0, 80))} on the landing branch is Git's own name; nothing was changed`);
-      if (listing[i] === "T") throw new WorkspaceError("link_refused", `${JSON.stringify(path.slice(0, 80))} changed kind on the landing branch; nothing was changed`);
-      theirs.set(path, listing[i] === "D" ? "delete" : "write");
+      if (status === "T" || newMode === "120000" || newMode === "160000") throw new WorkspaceError("link_refused", `${JSON.stringify(path.slice(0, 80))} is or became a link or submodule on the landing branch; nothing was changed`);
+      theirs.set(path, { op: status === "D" ? "delete" : "write", mode: newMode, oldMode, sha });
     }
     if (theirs.size > GIT_LIMITS.files) throw new WorkspaceError("invalid_path", `more than ${GIT_LIMITS.files} files changed on the landing branch`);
     const result = { base: options.commit, previous, unchanged: previous === options.commit, kept: [...mine.keys()].filter((p) => !theirs.has(p)).sort(), taken: [] as string[], merged: [] as string[], conflicts: [] as { path: string; kind: "overlap" | "deleted-here" | "deleted-there" | "binary" | "both-added" }[] };
-    const writes: { path: string; bytes: Buffer | undefined }[] = [];
-    for (const [path, op] of [...theirs].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
-      const there = op === "delete" ? undefined : await this.#blobAt(options.gitDir, options.commit, path);
-      if (!mine.has(path)) { writes.push({ path, bytes: there }); result.taken.push(path); continue; }
-      const here = mine.get(path) === "delete" ? undefined : await this.#readChecked((await resolveSafe(options.checkout, path)).absolute, path);
-      const base = await this.#blobAt(options.gitDir, previous, path);
-      if (here === undefined && there === undefined) { result.merged.push(path); continue; }
-      if (here !== undefined && there !== undefined && here.equals(there)) { result.merged.push(path); continue; }
-      if (here === undefined) { result.conflicts.push({ path, kind: "deleted-here" }); continue; }
-      if (there === undefined) { result.conflicts.push({ path, kind: "deleted-there" }); continue; }
-      if (here.includes(0) || there.includes(0) || (base?.includes(0) ?? false)) { result.conflicts.push({ path, kind: "binary" }); continue; }
-      const outcome = await this.#mergeText(options.gitDir, base ?? Buffer.alloc(0), here, there);
-      writes.push({ path, bytes: outcome.bytes });
-      if (outcome.conflicts === 0) result.merged.push(path); else result.conflicts.push({ path, kind: base === undefined ? "both-added" : "overlap" });
-    }
-    for (const w of writes) {
-      const safe = await resolveSafe(options.checkout, w.path, { forWrite: true, createParents: true });
-      if (w.bytes === undefined) { if (safe.exists === "file") await rm(safe.absolute); continue; }
-      if (safe.exists === "directory") throw new WorkspaceError("invalid_path", `${JSON.stringify(w.path.slice(0, 80))} is a directory in the checkout; the refresh stopped there`);
-      await writeFile(safe.absolute, w.bytes);
-    }
+    // Nothing to do on the same head: the refs, the index and the agent's own commits stay as they are.
+    if (result.unchanged) return result;
+    const stage = await mkdtemp(join(options.gitDir, "nn-reapply-"));
+    try {
+      const steps: { path: string; source?: string; mode?: number }[] = [];
+      const marker = `>>>>>>> landing ${options.commit.slice(0, 12)}`;
+      let n = 0;
+      const modeOf = (mode: string): number => (mode === "100755" ? 0o755 : 0o644);
+      for (const [path, info] of [...theirs].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+        const own = mine.get(path);
+        if (own === undefined || own.modeOnly) {
+          // Only the landing branch changed the content (an agent's mode change is kept: the file keeps its mode).
+          if (info.op === "delete") { steps.push({ path }); result.taken.push(path); continue; }
+          const source = join(stage, String(n++));
+          await this.#blobTo(options.gitDir, info.sha, source);
+          steps.push({ path, source, ...(own === undefined ? { mode: modeOf(info.mode) } : {}) }); result.taken.push(path); continue;
+        }
+        const there = info.op === "delete" ? undefined : await this.#blobAt(options.gitDir, options.commit, path);
+        const here = own.op === "delete" ? undefined : await this.#readChecked((await resolveSafe(options.checkout, path)).absolute, path);
+        const base = await this.#blobAt(options.gitDir, previous, path);
+        if (here === undefined && there === undefined) { result.merged.push(path); continue; }
+        if (here !== undefined && there !== undefined && here.equals(there)) { result.merged.push(path); continue; }
+        if (here === undefined) { result.conflicts.push({ path, kind: "deleted-here" }); continue; }
+        if (there === undefined) { result.conflicts.push({ path, kind: "deleted-there" }); continue; }
+        if (here.includes(0) || there.includes(0) || (base?.includes(0) ?? false)) { result.conflicts.push({ path, kind: "binary" }); continue; }
+        if (base === undefined) { result.conflicts.push({ path, kind: "both-added" }); continue; }
+        if (here.includes(marker)) { result.conflicts.push({ path, kind: "overlap" }); continue; } // a retry: this file was merged already
+        const outcome = await this.#mergeText(options.gitDir, base, here, there, `landing ${options.commit.slice(0, 12)}`);
+        const source = join(stage, String(n++));
+        await writeFile(source, outcome.bytes);
+        steps.push({ path, source, ...(info.mode !== info.oldMode ? { mode: modeOf(info.mode) } : {}) });
+        if (outcome.conflicts === 0) result.merged.push(path); else result.conflicts.push({ path, kind: "overlap" });
+      }
+      // Every path is checked before the first write; a missing directory on the way is made below.
+      for (const s of steps) {
+        const safe = await resolveSafe(options.checkout, s.path, { forWrite: s.source !== undefined }).catch((error: unknown) => { if (error instanceof WorkspaceError && error.code === "not_found") return undefined; throw error; });
+        if (safe?.exists === "directory" && s.source !== undefined) throw new WorkspaceError("invalid_path", `${JSON.stringify(s.path.slice(0, 80))} is a directory in the checkout; nothing was changed`);
+      }
+      for (const s of steps) if (s.source !== undefined) await resolveSafe(options.checkout, s.path, { forWrite: true, createParents: true });
+      for (const s of steps) {
+        const safe = await resolveSafe(options.checkout, s.path, { forWrite: true, createParents: true });
+        if (s.source === undefined) { if (safe.exists === "file") await rm(safe.absolute); continue; }
+        if (safe.exists === "directory") throw new WorkspaceError("invalid_path", `${JSON.stringify(s.path.slice(0, 80))} is a directory in the checkout; the refresh stopped there`);
+        await options.hooks?.beforeOpen?.(safe.absolute);
+        let handle;
+        try { handle = await open(safe.absolute, constants.O_WRONLY | constants.O_CREAT | NOFOLLOW, 0o644); } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new WorkspaceError("link_refused", `${JSON.stringify(s.path.slice(0, 80))} became a link while the refresh ran; it was not written`);
+          throw new WorkspaceError("unavailable", `${JSON.stringify(s.path.slice(0, 80))} could not be opened for writing`);
+        }
+        let streamed = false;
+        try {
+          const opened = await handle.stat();
+          const now = await lstat(safe.absolute).catch(() => undefined);
+          const parent = await realpath(dirname(safe.absolute)).catch(() => undefined);
+          if (now === undefined || !now.isFile() || !sameFile(opened, now) || opened.nlink > 1 || parent !== safe.parent) throw new WorkspaceError("link_refused", `${JSON.stringify(s.path.slice(0, 80))} was swapped while the refresh ran; it was not written`);
+          await handle.truncate(0);
+          if (s.mode !== undefined) await handle.chmod(s.mode);
+          streamed = true; // the stream closes the handle
+          await pipeline(createReadStream(s.source), handle.createWriteStream({ start: 0 }));
+        } finally { if (!streamed) await handle.close().catch(() => undefined); }
+      }
+    } finally { await rm(stage, { recursive: true, force: true }); }
     await this.#run(["update-ref", "refs/nn/base", options.commit], { gitDir: options.gitDir });
     await this.#run(["update-ref", "HEAD", options.commit], { gitDir: options.gitDir });
     await this.#run(["read-tree", "--reset", options.commit], { gitDir: options.gitDir, workTree: options.checkout });
     result.kept.sort();
     return result;
+  }
+
+  /** Streams one blob to a file without holding it in memory. */
+  async #blobTo(gitDir: string, sha: string, target: string): Promise<void> {
+    const child = spawn(this.#git, [...this.#flags(), "--git-dir", gitDir, "cat-file", "blob", sha], { env: this.#env(), windowsHide: true, cwd: this.#empty, stdio: ["ignore", "pipe", "ignore"] });
+    const exited = new Promise<void>((resolveExit, reject) => { child.on("error", () => reject(new WorkspaceError("unavailable", "git could not be run"))); child.on("close", (code) => (code === 0 ? resolveExit() : reject(new WorkspaceError("unavailable", "a file of the landing commit could not be read")))); });
+    await Promise.all([pipeline(child.stdout, createWriteStream(target, { mode: 0o600 })), exited]);
   }
 
   async #blobAt(gitDir: string, commit: string, path: string): Promise<Buffer | undefined> {
@@ -185,12 +239,12 @@ export class GitBridge {
   }
 
   /** `git merge-file` over three byte strings in a private directory: its exit status is the number of conflicts, and the merged text (with markers) is what it prints. */
-  async #mergeText(gitDir: string, base: Buffer, mine: Buffer, theirs: Buffer): Promise<{ bytes: Buffer; conflicts: number }> {
+  async #mergeText(gitDir: string, base: Buffer, mine: Buffer, theirs: Buffer, label = "landing"): Promise<{ bytes: Buffer; conflicts: number }> {
     const dir = await mkdtemp(join(gitDir, "nn-merge-"));
     try {
       await Promise.all([writeFile(join(dir, "mine"), mine), writeFile(join(dir, "base"), base), writeFile(join(dir, "landing"), theirs)]);
       return await new Promise((resolveMerge, reject) => {
-        execFile(this.#git, ["merge-file", "-p", "--diff3", "-L", "mine", "-L", "base", "-L", "landing", join(dir, "mine"), join(dir, "base"), join(dir, "landing")], { env: this.#env(), encoding: "buffer", maxBuffer: GIT_LIMITS.fileBytes * 2, windowsHide: true, cwd: this.#empty, timeout: GIT_LIMITS.timeoutMs }, (error, stdout) => {
+        execFile(this.#git, ["merge-file", "-p", "--diff3", "-L", "mine", "-L", "base", "-L", label, join(dir, "mine"), join(dir, "base"), join(dir, "landing")], { env: this.#env(), encoding: "buffer", maxBuffer: GIT_LIMITS.fileBytes * 2, windowsHide: true, cwd: this.#empty, timeout: GIT_LIMITS.timeoutMs }, (error, stdout) => {
           if (error === null) return resolveMerge({ bytes: stdout as unknown as Buffer, conflicts: 0 });
           const code = (error as { code?: unknown }).code;
           if (typeof code === "number" && code > 0 && code < 128) return resolveMerge({ bytes: stdout as unknown as Buffer, conflicts: code });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -420,5 +420,114 @@ test("a refresh that cannot be planned (Git's name on the landing branch, a bad 
     assert.equal(await readFile(join(w.checkout, "README.md"), "utf8"), "hello\n", "nothing taken from the branch before the refusals");
     const r = await w.git.reapply({ shared: w.shared, commit: next, gitDir: w.gitDir, checkout: w.checkout });
     assert.deepEqual(r.taken, ["README.md"]);
+  } finally { await w.done(); }
+});
+
+test("reapply writes without following a link: a target swapped for a link between the check and the write is refused and the outside file is untouched", { skip }, async () => {
+  const w = await world();
+  try {
+    const outside = join(w.dir, "outside.txt"); await writeFile(outside, "secret\n");
+    const next = await advance(w, { "README.md": "moved\n" });
+    await refuses("link_refused", () => w.git.reapply({ shared: w.shared, commit: next, gitDir: w.gitDir, checkout: w.checkout, hooks: { beforeOpen: async (abs) => { await rm(abs); await symlink(outside, abs); } } }));
+    assert.equal(await readFile(outside, "utf8"), "secret\n");
+    // A hard link made in the same gap is refused before anything is cut.
+    const w2 = await world();
+    try {
+      const out2 = join(w2.dir, "o2.txt"); await writeFile(out2, "keep\n");
+      const n2 = await advance(w2, { "README.md": "moved\n" });
+      await refuses("link_refused", () => w2.git.reapply({ shared: w2.shared, commit: n2, gitDir: w2.gitDir, checkout: w2.checkout, hooks: { beforeOpen: async (abs) => { await rm(abs); await link(out2, abs); } } }));
+      assert.equal(await readFile(out2, "utf8"), "keep\n");
+    } finally { await w2.done(); }
+  } finally { await w.done(); }
+});
+
+test("reapply plans every refusal before the first write: a directory at the last target changes no earlier file, and a retry is safe", { skip }, async () => {
+  const w = await world();
+  try {
+    await writeFile(join(w.shared, "doc.txt"), lines(20)); sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "doc");
+    const start = await w.git.head(w.shared);
+    const dir = join(w.dir, "c2"); const gd = join(w.dir, "t2.git");
+    await w.git.createCheckout({ shared: w.shared, commit: start, gitDir: gd, checkout: dir });
+    await writeFile(join(dir, "doc.txt"), lines(20, [5, "agent five"]));
+    await mkdir(join(dir, "zlast.txt"));            // a directory where the landing branch adds a file
+    await writeFile(join(dir, "zlast.txt", "x"), "x");
+    const next = await advance(w, { "doc.txt": lines(20, [5, "landing five"]), "README.md": "moved\n", "zlast.txt": "file\n" });
+    await refuses("invalid_path", () => w.git.reapply({ shared: w.shared, commit: next, gitDir: gd, checkout: dir }));
+    assert.equal(await readFile(join(dir, "doc.txt"), "utf8"), lines(20, [5, "agent five"]), "no earlier file was merged");
+    assert.equal(await readFile(join(dir, "README.md"), "utf8"), "hello\n");
+    assert.equal(await w.git.head(w.shared), next);
+    // Remove the obstacle and retry: the merge happens once.
+    await rm(join(dir, "zlast.txt"), { recursive: true });
+    const r = await w.git.reapply({ shared: w.shared, commit: next, gitDir: gd, checkout: dir });
+    assert.deepEqual(r.conflicts, [{ path: "doc.txt", kind: "overlap" }]);
+    const once = await readFile(join(dir, "doc.txt"), "utf8");
+    assert.equal(once.split("<<<<<<< mine").length - 1, 1);
+  } finally { await w.done(); }
+});
+
+test("reapply does not merge a file again that already holds its markers for the same landing commit", { skip }, async () => {
+  const w = await world();
+  try {
+    await writeFile(join(w.shared, "doc.txt"), lines(20)); sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "doc");
+    const start = await w.git.head(w.shared);
+    const dir = join(w.dir, "c2"); const gd = join(w.dir, "t2.git");
+    await w.git.createCheckout({ shared: w.shared, commit: start, gitDir: gd, checkout: dir });
+    await writeFile(join(dir, "doc.txt"), lines(20, [5, "agent five"]));
+    const next = await advance(w, { "doc.txt": lines(20, [5, "landing five"]) });
+    await w.git.reapply({ shared: w.shared, commit: next, gitDir: gd, checkout: dir });
+    const first = await readFile(join(dir, "doc.txt"), "utf8");
+    // Simulate a failure after the file was written: the base has not moved.
+    sh(dir, "--version");
+    execFileSync("git", ["--git-dir", gd, "update-ref", "refs/nn/base", start]);
+    const r = await w.git.reapply({ shared: w.shared, commit: next, gitDir: gd, checkout: dir });
+    assert.deepEqual(r.conflicts, [{ path: "doc.txt", kind: "overlap" }]);
+    assert.equal(await readFile(join(dir, "doc.txt"), "utf8"), first);
+  } finally { await w.done(); }
+});
+
+test("reapply keeps the executable bit of a file taken from the landing branch, and counts a mode-only change as the agent's work", { skip }, async () => {
+  const w = await world();
+  try {
+    await writeFile(join(w.shared, "run.sh"), "#!/bin/sh\n"); await chmod(join(w.shared, "run.sh"), 0o755); sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "script");
+    const next = await w.git.head(w.shared);
+    await chmod(join(w.checkout, "README.md"), 0o755); // mode only
+    const r = await w.git.reapply({ shared: w.shared, commit: next, gitDir: w.gitDir, checkout: w.checkout });
+    assert.deepEqual(r.taken, ["run.sh"]); assert.deepEqual(r.kept, ["README.md"]);
+    assert.equal((await stat(join(w.checkout, "run.sh"))).mode & 0o111, 0o111);
+    const s = await w.git.stage({ gitDir: w.gitDir, checkout: w.checkout });
+    assert.ok(!s.files.some((f) => f.path === "run.sh"), "the landing file is not the agent's work");
+    assert.equal((await stat(join(w.checkout, "run.sh"))).mode & 0o111, 0o111);
+    assert.equal((await stat(join(w.checkout, "README.md"))).mode & 0o111, 0o111, "the agent's mode change survives");
+  } finally { await w.done(); }
+});
+
+test("reapply streams taken files: a landing file over the size cap that the agent never touched does not block the refresh", { skip }, async () => {
+  const w = await world();
+  try {
+    const big = Buffer.alloc(8 * 1024 * 1024 + 10, 97);
+    const next = await advance(w, { "big.txt": big.toString("latin1") });
+    const r = await w.git.reapply({ shared: w.shared, commit: next, gitDir: w.gitDir, checkout: w.checkout });
+    assert.deepEqual(r.taken, ["big.txt"]);
+    assert.equal((await stat(join(w.checkout, "big.txt"))).size, big.length);
+  } finally { await w.done(); }
+});
+
+test("reapply: a file added on both sides with different content keeps the agent's side with no markers; the same head does not reset the agent's commits", { skip }, async () => {
+  const w = await world();
+  try {
+    await writeFile(join(w.checkout, "both.txt"), "mine\n");
+    const next = await advance(w, { "both.txt": "theirs\n" });
+    const r = await w.git.reapply({ shared: w.shared, commit: next, gitDir: w.gitDir, checkout: w.checkout });
+    assert.deepEqual(r.conflicts, [{ path: "both.txt", kind: "both-added" }]);
+    assert.equal(await readFile(join(w.checkout, "both.txt"), "utf8"), "mine\n");
+    // An own commit that is not recorded stays when the head has not moved.
+    await writeFile(join(w.checkout, "work.txt"), "w\n");
+    const s = await w.git.stage({ gitDir: w.gitDir, checkout: w.checkout });
+    await w.git.commit({ gitDir: w.gitDir, checkout: w.checkout, permit: { base: s.base, tree: s.tree, filesDigest: filesDigest(s.files), message: "m", author: { name: "a", email: "a@x.invalid" }, committer: { name: "n", email: "n@x.invalid" }, trailers: [] } });
+    const headBefore = execFileSync("git", ["--git-dir", w.gitDir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    assert.notEqual(headBefore, next);
+    const again = await w.git.reapply({ shared: w.shared, commit: next, gitDir: w.gitDir, checkout: w.checkout });
+    assert.equal(again.unchanged, true);
+    assert.equal(execFileSync("git", ["--git-dir", w.gitDir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), headBefore);
   } finally { await w.done(); }
 });
