@@ -2860,3 +2860,8 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 
 - **Stall escalation notice.** The notice text is cut to the notification limit (200) so it can be sent; one concern whose notice fails no longer holds back the others (the first failure is raised after all were tried); the notice's command ID includes the escalation time, so a concern that reopens and is escalated again is a new notice, not a replay of (or a conflict with) the earlier one; a concern already routed to the owner is not escalated; the tick reads the concerns once. Known: the read still walks every stored concern (cleared ones are not pruned: K06).
 - **X09.** The platform version a candidate names is the version tested: an issue naming another version is refused, and one naming none takes the candidate's. A replay of an issue command recorded before the limits were stored is refused as a conflict (no such record exists outside tests).
+
+## H12d: the release path behind the quiesce
+
+- `release` (committing the reviewed tree, A06) is now an operation of `workspace.request`, run inside `QuiesceCoordinator.around` like integration, refresh and quarantine: every live attempt has new calls refused, calls in flight settled and a checkpoint taken first, and a failure to do so refuses the operation with a typed `runtime_hold` blocker (tested for `release` with a failing checkpoint). `QuiesceOperation` already named it.
+- **Remainder (H12d2):** landing (P10) will be a fifth operation when it exists; no production host has a `workspace` port yet (H12m), so against a real host these requests are still answered `refused`.

@@ -18,7 +18,7 @@ import type { Aggregate, AggregateRef, Change, JsonObject } from "../storage/typ
  * controller that crashed can release exactly those (`recover`, or the next request for the task). A repeat of a command returns the recorded answer; a request that was recorded but whose outcome was never written is answered `uncertain` and is not run
  * again, because the host may have done it; if the original call then finishes it replaces `uncertain` with what really happened.
  */
-export const WORKSPACE_OPERATIONS = ["integration", "refresh", "quarantine"] as const;
+export const WORKSPACE_OPERATIONS = ["integration", "refresh", "release", "quarantine"] as const;
 export type WorkspaceOperation = (typeof WORKSPACE_OPERATIONS)[number];
 export type WorkspaceState = "started" | "done" | "refused" | "failed" | "uncertain";
 

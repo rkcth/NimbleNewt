@@ -99,6 +99,24 @@ for (const backend of backends) {
     } finally { await r.store.close(); }
   });
 
+  test(`${backend.name}: an attempt that cannot be made quiet also blocks the release of reviewed work (the A06 release path): the host is not asked and nothing stays frozen (card H12d)`, async () => {
+    const r = await rig(async () => { throw new Error("the checkpoint could not be taken"); });
+    try {
+      r.turn.second = async () => "x";
+      await r.d.tick();
+      await r.inCall;
+      let asked = 0;
+      const answer = await service(r, { run: async () => { asked++; return { ok: true, summary: "x" }; } }).request(r.w.owner, { commandId: "ws2r", operation: "release", taskId: r.taskId, reason: "commit the reviewed tree" });
+      assert.equal(asked, 0);
+      assert.equal(answer.state, "refused");
+      assert.match(answer.summary!, /release did not run.*checkpoint could not be taken/);
+      assert.ok(answer.blocker !== undefined && (await r.w.blockers.openFor("runtime_hold", { kind: "task", id: r.taskId })) !== undefined, "the owner sees why");
+      assert.equal((await r.d.get(r.w.owner, r.attemptId))!.frozen, undefined);
+      r.turn.release?.();
+      await r.d.idle();
+    } finally { await r.store.close(); }
+  });
+
   test(`${backend.name}: who may ask, what is checked, and what is recorded (card H12l)`, async () => {
     const r = await rig(async () => ({}));
     try {
@@ -112,7 +130,7 @@ for (const backend of backends) {
       await refuses("not_found", () => ask(nobody, {}, "w-n"));
       await refuses("not_found", () => ask(elsewhere, {}, "w-e"));
       await refuses("not_found", () => ask(boss, { taskId: derivedId("task", "no-such-task") }, "w-m"));
-      await refuses("invalid_command", () => ask(boss, { operation: "release" }, "w-o"));
+      await refuses("invalid_command", () => ask(boss, { operation: "landing" }, "w-o"));
       await refuses("invalid_command", () => ask(boss, { reason: "token sk-abcdefghijklmnopqrstuvwxyz0123456789ABCD" }, "w-r"));
       await refuses("invalid_command", () => ask(boss, { extra: 1 }, "w-x"));
       assert.equal(calls.length, 0, "nothing ran for a refused caller or a malformed request");
