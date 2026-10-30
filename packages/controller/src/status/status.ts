@@ -471,7 +471,7 @@ export class StatusService {
   // ---- everything waiting for the owner (card U11b) -------------------------------------------------------------------------
 
   /** What waits for the owner, unranked: agent questions, approvals only the owner can decide and blockers the owner resolves; what is about a finished or cancelled task is left out. */
-  async #needItems(by: Principal): Promise<{ items: NeedItem[]; taskOf: (id: string) => Promise<{ projectId: string; open: boolean } | undefined> }> {
+  async #needItems(by: Principal): Promise<{ items: NeedItem[]; taskOf: (id: string) => Promise<{ projectId: string; open: boolean } | undefined>; partial: boolean }> {
     const memo = new Map<string, { projectId: string; open: boolean } | undefined>();
     const taskOf = async (id: string): Promise<{ projectId: string; open: boolean } | undefined> => {
       if (!memo.has(id)) {
@@ -493,12 +493,16 @@ export class StatusService {
     }
     // The owner's blockers are looked for through all the open ones (the others are the agents' to resolve), up to 50 found.
     let owned = 0;
-    for (let after: string | undefined, pages = 0; owned < 50 && pages < 20; pages++) {
+    let partial = false;
+    for (let after: string | undefined, pages = 0; owned < 50; pages++) {
+      if (pages >= 20) { partial = true; break; }
       const page = await this.#deps.blockers.list({ ...(after === undefined ? {} : { afterId: after }), limit: 200, openOnly: true });
       for (const b of page.items) {
         if (b.resolver !== "owner" || owned >= 50) continue;
-        owned++;
         const onTask = b.subject.kind === "task";
+        // A blocker on a finished or cancelled task does not wait for anything and does not use up the room.
+        if (onTask && (await taskOf(b.subject.id))?.open === false) continue;
+        owned++;
         all.push({ text: `${shown(b.summary)} (${b.type}; resolve it or give what is missing)`, cites: [cite("blocker", b.id), ...(onTask ? [cite("task", b.subject.id)] : [])], ...(onTask ? { taskId: b.subject.id } : {}), since: b.openedAt, id: b.id });
       }
       if (page.next === undefined) break;
@@ -506,7 +510,8 @@ export class StatusService {
     }
     const items: NeedItem[] = [];
     for (const i of all) if (i.taskId === undefined || (await taskOf(i.taskId))?.open !== false) items.push(i);
-    return { items, taskOf };
+    if (owned >= 50) partial = true;
+    return { items, taskOf, partial };
   }
 
   /** How many things wait for the owner (for the count in a reply); no ranking is done. Owner only (anyone else: 0). */
@@ -521,7 +526,7 @@ export class StatusService {
   async needsYou(by: Principal, limit?: number): Promise<{ readonly observedAt: string; readonly lines: readonly Line[]; readonly count: number } | undefined> {
     if (by.kind !== "owner") return undefined;
     const cap = limit === undefined ? 20 : Number.isSafeInteger(limit) && limit >= 1 && limit <= 50 ? limit : invalid("limit", "must be 1 to 50");
-    const { items, taskOf } = await this.#needItems(by);
+    const { items, taskOf, partial } = await this.#needItems(by);
     // How many other open tasks wait, directly or through others, for the task an item is about (the edges of a project are read once).
     const reverse = new Map<string, Promise<Map<string, string[]>>>();
     const reverseOf = (projectId: string): Promise<Map<string, string[]>> => {
@@ -555,6 +560,7 @@ export class StatusService {
     const lines: Line[] = ranked.slice(0, cap).map(({ i, blocked }) => line(`${i.text}${blocked > 0 ? `; ${blocked} other open task${blocked === 1 ? " waits" : "s wait"} for it` : ""}; since ${i.since}.`, ...i.cites));
     if (lines.length === 0) lines.push(line("Nothing is waiting for you."));
     else if (ranked.length > cap) lines.push(line(`${ranked.length - cap} more are waiting; deal with these first and ask again.`));
+    if (partial) lines.push(line("This list may be incomplete: only part of the open blockers could be looked at."));
     return { observedAt: this.#runner.now(), lines, count: ranked.length };
   }
 

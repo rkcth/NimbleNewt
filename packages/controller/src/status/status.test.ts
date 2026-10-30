@@ -980,9 +980,18 @@ for (const backend of backends) {
     assert.doesNotMatch(later.lines.map((l) => l.text).join("\n"), /tool\.deploy/);
     assert.match(later.lines[0]!.text, /root.*1 other open task waits for it/, "the leaf no longer counts");
     // Owner blockers are found behind many that agents resolve.
-    for (let i = 0; i < 55; i++) await c.blockers.openBlocker({ commandId: `ag-${i}`, actor: c.owner.id, type: "manual_hold", subject: { kind: "task", id: await c.work(`Agent job ${i}`) }, summary: `agent ${i}`, resolver: "agent:ann" });
-    await c.blockers.openBlocker({ commandId: "ny-late", actor: c.owner.id, type: "manual_hold", subject: { kind: "task", id: await c.work("Late job") }, summary: "Late owner hold", resolver: "owner" });
-    assert.match((await status.needsYou(c.owner, 50))!.lines.map((l) => l.text).join("\n"), /Late owner hold/);
+    // (Blocker IDs are hashes, so their order is not the order they were made: many agent blockers and several owner ones, and every owner one must be found.)
+    for (let i = 0; i < 150; i++) await c.blockers.openBlocker({ commandId: `ag-${i}`, actor: c.owner.id, type: "manual_hold", subject: { kind: "task", id: await c.work(`Agent job ${i}`) }, summary: `agent ${i}`, resolver: "agent:ann" });
+    for (let i = 0; i < 10; i++) await c.blockers.openBlocker({ commandId: `ow-${i}`, actor: c.owner.id, type: "manual_hold", subject: { kind: "task", id: await c.work(`Owner job ${i}`) }, summary: `Late owner hold ${i}`, resolver: "owner" });
+    const many = (await status.needsYou(c.owner, 50))!;
+    assert.equal(many.lines.filter((l) => /Late owner hold/.test(l.text)).length, 10, "all ten are found behind the agents' blockers");
+    // Owner blockers on cancelled tasks do not use up the room.
+    for (let i = 0; i < 3; i++) {
+      const gone = await c.work(`Gone ${i}`);
+      await c.blockers.openBlocker({ commandId: `gone-${i}`, actor: c.owner.id, type: "manual_hold", subject: { kind: "task", id: gone }, summary: `Gone hold ${i}`, resolver: "owner" });
+      await c.projects.transitionTask({ commandId: cid("g"), actor: c.owner.id, taskId: gone, expectedRevision: (await c.projects.getTask(gone))!.revision, to: "cancelled" });
+    }
+    assert.doesNotMatch((await status.needsYou(c.owner, 50))!.lines.map((l) => l.text).join("\n"), /Gone hold/);
     await assert.rejects(status.ask(c.owner, { kind: "needs_you", limit: 0 }));
     const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
     assert.equal(await status.ask(reader, { kind: "needs_you" }), undefined);
