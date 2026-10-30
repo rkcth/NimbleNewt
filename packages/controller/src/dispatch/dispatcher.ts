@@ -506,6 +506,18 @@ export class DispatcherService {
   }
 
   /**
+   * Ends an attempt with the agent's own result (card H12n, `work.end`): `done` and `partial` end it `succeeded`, `blocked` and `abandoned` end it `abandoned`; the summary carries the result and the note.
+   * The task itself is not touched. Repeating it, or ending an attempt that is already over, does nothing (the end is derived from the attempt, so a repeat reuses its command IDs).
+   */
+  async finishWith(by: Principal, attemptId: string, end: { readonly result: "done" | "blocked" | "partial" | "abandoned"; readonly note?: string; readonly submissionId?: string }): Promise<void> {
+    const d = typeof attemptId === "string" && ATTEMPT.test(attemptId) ? await this.#load(attemptId) : undefined;
+    if (d === undefined || d.body.state === "finished") return;
+    await this.#controlled(by, attemptId);
+    const summary = `ended by the agent: ${end.result}${end.note === undefined ? "" : `: ${end.note}`}${end.submissionId === undefined ? "" : ` (submission ${end.submissionId})`}`;
+    await this.#end(attemptId, end.result === "done" || end.result === "partial" ? "succeeded" : "abandoned", summary, { readmit: false });
+  }
+
+  /**
    * Moves an attempt to another worker host (card H02). Only the owner or the dispatcher may. The calls in flight are settled, the place on the old host is given back, and the attempt goes back to
    * waiting pinned to the new host with the checkpoint to continue from: the normal tick then asks admission for a place on that host and starts the worker there, or leaves it waiting (it never
    * falls back to another host). The old worker is ended after the record has changed, so whatever it still returns changes nothing. Repeating the move to the same host is a no-op.

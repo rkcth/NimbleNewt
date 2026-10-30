@@ -39,6 +39,7 @@ import type { PolicyService } from "../policy/policy.js";
 import { BuiltinCommands, type CommandService } from "../commands/index.js";
 
 import type { WorkingNoteService } from "../context/notes.js";
+import type { WorkEndService } from "../work-end/index.js";
 import type { PauseService } from "../lifecycle/pause.js";
 import type { StopChoice, StopService } from "../lifecycle/stop.js";
 import type { ActivityService } from "../activity/activity.js";
@@ -87,6 +88,8 @@ export interface Context {
   /** Absent when the controller runs without remote workers (card H07c). */
   readonly placement?: Pick<PlacementSettingsService, "get" | "set" | "change">;
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set">;
+  /** Absent when the controller runs without the agent's ending (card H12n). */
+  readonly workEnd?: Pick<WorkEndService, "request" | "get">;
   readonly notes?: Pick<WorkingNoteService, "write" | "revise" | "setVisibility" | "read" | "versions" | "list">;
   readonly integration?: Pick<IntegrationPolicyService, "get" | "set" | "getDefault" | "setDefault" | "ensure" | "precheck">;
 
@@ -357,6 +360,9 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, []); return asJson({ item: await integrationOf(c).getDefault(c.principal) as never }); } },
   { name: "integration.default.set", kind: "command", summary: "The owner sets what new projects start with (existing projects keep theirs) and may forbid `main-automatic` installation-wide (owner only).", args: { "landing?": "`integration-branch`, `main-automatic` or `human-promotes`", "integrator?": "`agent` or `human`", "requiredChecks?": "list of checks", "refreshRounds?": "0 to 10", "forbidMainAutomatic?": "true to forbid landing on main automatically everywhere", "expectedRevision?": "the revision you read" }, result: "`{ revision }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["landing", "integrator", "requiredChecks", "refreshRounds", "forbidMainAutomatic", "expectedRevision"]); return asJson({ ...(await integrationOf(c).setDefault(c.principal, { commandId: need(id), ...a } as never)) }); } },
+  // The agent's ending (card H12n): its own attempt only; the service checks the agent, the attempt and, for a submit, the base.
+  { name: "work.end", kind: "command", summary: "An agent ends its own attempt: it is frozen at once, the calls in flight settle, and the controller then finishes the attempt with the result. With `submit` the attempt's changes are offered for landing (refused when the landing branch moved and changed files you changed). Only the attempt's own agent may call it; asking again for the same ending returns the recorded one.", args: { attemptId: "your attempt", "submit?": "true to offer your changes for landing", "result?": "`done` (default), `blocked`, `partial` or `abandoned`", "note?": "up to 1,000 characters", "message?": "up to 2,000 characters for your supervisor", commandId: "required" }, result: "`{ item }`: the ending (state, result, replayed).", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["attemptId", "submit", "result", "note", "message"]); if (c.principal.kind !== "agent") throw new DomainError("forbidden", "only an agent ends its own attempt"); return asJson({ item: await (c.workEnd ?? unavailable("work.end")).request(c.principal, { commandId: need(id), ...a } as never) }); } },
   // Shared working notes (card C01b): written by the agent for its project, read by the project's members; the service decides who may do what.
   { name: "note.write", kind: "command", summary: "Writes a shared working note on the caller's own desk: what the agent is doing, a decision with its reason, a measurement or hand-off state, for its project to read while the work is not yet in the codebase. A text that looks like a credential is refused.", args: { projectId: "the project", "taskId?": "the task it concerns", category: "`status`, `decision`, `measurement` or `handoff`", title: "up to 200 characters", body: "up to 8,000 characters", "reason?": "required for a decision" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["projectId", "taskId", "category", "title", "body", "reason"]); return written(await notesOf(c).write(c.principal, { commandId: need(id), ...a } as never)); } },

@@ -1386,6 +1386,23 @@ Result: `{ revision }`.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `work.end`
+
+An agent ends its own attempt: it is frozen at once, the calls in flight settle, and the controller then finishes the attempt with the result. With `submit` the attempt's changes are offered for landing (refused when the landing branch moved and changed files you changed). Only the attempt's own agent may call it; asking again for the same ending returns the recorded one.
+
+Arguments:
+
+- `attemptId`: your attempt
+- `submit` (optional): true to offer your changes for landing
+- `result` (optional): `done` (default), `blocked`, `partial` or `abandoned`
+- `note` (optional): up to 1,000 characters
+- `message` (optional): up to 2,000 characters for your supervisor
+- `commandId`: required
+
+Result: `{ item }`: the ending (state, result, replayed).
+
+Completion: finished when accepted (`completed: true`).
+
 #### `note.write`
 
 Writes a shared working note on the caller's own desk: what the agent is doing, a decision with its reason, a measurement or hand-off state, for its project to read while the work is not yet in the codebase. A text that looks like a credential is refused.

@@ -52,7 +52,7 @@ export interface LocalWork {
   spent?(attempts: readonly string[]): Promise<number | undefined>;
 }
 
-export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; principal: Principal } | undefined, runtime: () => "none" | "pending" = () => "pending", members?: (scope: PauseScope) => Promise<readonly string[]>, jobs?: (by: Principal, taskId: string) => Promise<readonly { readonly id: string; readonly state: string; readonly kind?: string; readonly background?: boolean; readonly resumability?: string }[]>, local?: LocalWork): StopPorts {
+export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; principal: Principal } | undefined, runtime: () => "none" | "pending" = () => "pending", members?: (scope: PauseScope) => Promise<readonly string[]>, jobs?: (by: Principal, taskId: string) => Promise<readonly { readonly id: string; readonly state: string; readonly kind?: string; readonly background?: boolean; readonly resumability?: string }[]>, local?: LocalWork, ending?: { dropEnding(attemptId: string, why: "owner_stop" | "emergency_stop", reason: string): Promise<unknown> }): StopPorts {
   const attemptsOf = async (scope: PauseScope): Promise<string[]> => {
     const h = dispatch();
     // No dispatcher exists in this controller: nothing can be running. A dispatcher that should exist but is not up (a restart in progress, a failed start) is not the same, and nothing is claimed about it.
@@ -138,6 +138,8 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
       const attempts = await attemptsOf(scope);
       const unresolved: string[] = [];
       for (const id of attempts) {
+        // The owner's stop wins over an agent's ending (card H12n): the intent is dropped before the attempt is stopped, so nothing is staged or submitted for it afterwards.
+        await ending?.dropEnding(id, options.force ? "emergency_stop" : "owner_stop", options.force ? "force stop" : "stop after preparation");
         await h!.dispatcher.stop(h!.principal, id, { reason: options.force ? "force stop" : "stop after preparation", ...(options.force ? { emergency: true } : {}) });
         for (const op of (await h!.dispatcher.operations(h!.principal, id)) ?? []) if (op.state === "uncertain") unresolved.push(`${id}/${op.callId}`.slice(0, 120));
       }

@@ -29,6 +29,7 @@ import type { PlacementSettingsService } from "../remote/placement-settings.js";
 import type { ProtectedBranchService } from "../policy/protected-branches.js";
 import type { PolicyService } from "../policy/policy.js";
 import type { WorkingNoteService } from "../context/notes.js";
+import type { WorkEndService } from "../work-end/index.js";
 import type { PauseService } from "../lifecycle/pause.js";
 import type { StopService } from "../lifecycle/stop.js";
 import type { BackupService } from "../backup/index.js";
@@ -109,6 +110,8 @@ export interface StateApiDeps {
   /** When present, the owner can say which hosts may hold local-only data through the API (card H07c). */
   readonly placement?: Pick<PlacementSettingsService, "get" | "set" | "change">;
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set">;
+  /** Absent when the controller runs without the agent's ending (card H12n). */
+  readonly workEnd?: Pick<WorkEndService, "request" | "get">;
   readonly notes?: Pick<WorkingNoteService, "write" | "revise" | "setVisibility" | "read" | "versions" | "list">;
   readonly integration?: Pick<IntegrationPolicyService, "get" | "set" | "getDefault" | "setDefault" | "ensure" | "precheck">;
 
@@ -224,6 +227,7 @@ export class StateApi {
         ...(this.#deps.branchSettings === undefined ? {} : { branchSettings: this.#deps.branchSettings }),
         ...(this.#deps.integration === undefined ? {} : { integration: this.#deps.integration }),
         ...(this.#deps.notes === undefined ? {} : { notes: this.#deps.notes }),
+        ...(this.#deps.workEnd === undefined ? {} : { workEnd: this.#deps.workEnd }),
         ...(this.#deps.stops === undefined ? {} : { stops: this.#deps.stops }),
         ...(this.#deps.policyForward === undefined ? {} : { policyForward: this.#deps.policyForward }),
         ...(this.#deps.backups === undefined ? {} : { backups: this.#deps.backups }),
