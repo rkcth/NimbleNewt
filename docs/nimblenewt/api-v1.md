@@ -1224,6 +1224,16 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `submission.get`
+
+One submission record (the owner, or the agent that made it; anyone else gets not found).
+
+Arguments:
+
+- `submissionId`: the submission's ID (`id` of `submission.record`)
+
+Result: `{ item }`: the submission with its revision.
+
 #### `release.gate`
 
 Owner only: where each platform of a candidate stands (passed, failed, interrupted, running, missing) and whether the release is ready and approved.
@@ -3559,6 +3569,32 @@ Arguments:
 - `commandId`: required
 
 Result: `{ id, replayed }`.
+
+#### `submission.record`
+
+An agent records one submission in the role it holds: a code submission (author) names the base, tree and patch ID of its work, a review (reviewer), qa report (qa), document (docs) or sign-off (director) names the submission it is about. Evidence must be bound to the submitted tree or artifact. A code submission must come from the owner of the task's current attempt; a review or qa report on one's own submission is refused. Agents only. Repeating the same command ID records once.
+
+Arguments:
+
+- `taskId`: the task
+- `kind`: `code`, `review`, `qa`, `document` or `signoff`
+- `role`: the role you submit in: `author`, `reviewer`, `qa`, `docs` or `director`
+- `base` (optional): code: the base commit (git object ID)
+- `tree` (optional): code: the tree (git object ID)
+- `patchId` (optional): code: the patch ID
+- `refreshRound` (optional): code: the refresh round, default 0
+- `subject` (optional): review, qa, signoff: the submission it is about
+- `verdict` (optional): review: `approve`, `changes` or `reject`
+- `decision` (optional): signoff: `approve` or `decline`
+- `report` (optional): qa or document: the report
+- `artifactDigest` (optional): document: `sha256:` and the digest
+- `artifactId` (optional): document: the artifact
+- `evidence` (optional): [{ check, result: `pass`, `fail` or `not_run`, boundTo }]
+- `commandId`: required
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
 
 #### `release.submit`
 

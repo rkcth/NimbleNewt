@@ -52,7 +52,7 @@ export interface SubmissionBody {
 }
 
 /** The roles a principal holds in one project, and for one task of it: roles are not global (an agent that is director in project X is not director in Y). */
-export type RolesOf = (principalId: string, scope: { readonly projectId: string; readonly taskId: string }) => Promise<readonly string[]>;
+export type RolesOf = (principalId: string, scope: { readonly projectId: string; readonly taskId: string }, by: Principal) => Promise<readonly string[]>;
 
 /** The task's current attempt, when it has one: who owns it (a principal ID) and its state. Only an active attempt, or one that has just succeeded (the attempt is ending with this submission), may submit code. */
 export type AttemptOf = (taskId: string) => Promise<{ readonly ownerId: string; readonly state: string } | undefined>;
@@ -124,7 +124,7 @@ export class SubmissionService {
     return new SubmissionService(new CommandRunner(storage, epoch, options), roles, options);
   }
 
-  async record(by: Principal, command: NoActor & RecordSubmission): Promise<{ id: string; revision: number }> {
+  async record(by: Principal, command: NoActor & RecordSubmission): Promise<{ id: string; revision: number; replayed: boolean }> {
     if (by.kind !== "agent") throw new DomainError("forbidden", `${by.id} is not an agent, so it has no role to submit in`);
     if (command === null || typeof command !== "object") throw new DomainError("invalid_command", "a command is an object");
     const unknown = Object.keys(command).filter((k) => !(FIELDS as readonly string[]).includes(k));
@@ -147,7 +147,7 @@ export class SubmissionService {
     if (task === undefined) return hidden();
     if ((by.taskScope !== undefined && (!inTaskScope(by, task.projectId) || by.taskScope.taskId !== taskId)) || !allows(by, "task.read", task.projectId, { resource: { kind: "task", id: taskId } })) return hidden();
 
-    if (!(await this.#roles(by.id, { projectId: task.projectId, taskId })).includes(role)) throw new DomainError("forbidden", `${by.id} does not hold the role ${role} in this project`);
+    if (!(await this.#roles(by.id, { projectId: task.projectId, taskId }, by)).includes(role)) throw new DomainError("forbidden", `${by.id} does not hold the role ${role} in this project`);
     if (kind === "code" && this.#attemptOf !== undefined) {
       const attempt = await this.#attemptOf(taskId);
       if (attempt === undefined || attempt.ownerId !== by.id || (attempt.state !== "active" && attempt.state !== "succeeded")) throw new DomainError("forbidden", "a code submission must come from the agent that owns the task's current attempt");
@@ -169,7 +169,7 @@ export class SubmissionService {
         return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }], detail: { taskId, kind, role } };
       },
     }));
-    return { id: result.id, revision: result.revision };
+    return { id: result.id, revision: result.revision, replayed: result.replayed };
   }
 
   /** One submission, readable by the owner and by the agent that made it. */

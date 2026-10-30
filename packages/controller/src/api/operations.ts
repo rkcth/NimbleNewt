@@ -15,6 +15,7 @@ import type { FallbackService } from "../routing/fallback.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
 import type { ReleaseService } from "../release/index.js";
+import type { SubmissionService } from "../submissions/index.js";
 import type { TaskHandoffBody } from "../lifecycle/handoff.js";
 import type { View } from "../domain/model.js";
 import type { SwarmService } from "../swarm/index.js";
@@ -72,6 +73,8 @@ export interface Context {
   /** Child tasks with delegated allowances, and cancelling a whole swarm (card H10). */
   readonly swarm?: Pick<SwarmService, "spawn" | "cancel" | "children">;
   readonly incidents?: Pick<IncidentService, "report" | "resolve" | "list" | "observed">;
+  /** Submissions by role (card Q01b). */
+  readonly submissions?: Pick<SubmissionService, "record" | "get">;
   /** Absent when the controller runs without meetings (cards M01 and M03). */
   readonly meetings?: MeetingService;
   /** Absent when the controller runs without a dispatcher (cards H12l, H12d). */
@@ -216,6 +219,7 @@ const decisionsOf = (c: Context): NonNullable<Context["decisions"]> => c.decisio
 const meetingsOf = (c: Context): MeetingService => c.meetings ?? unavailable("meetings");
 const releaseOf = (c: Context): NonNullable<Context["release"]> => c.release ?? unavailable("release testing");
 const swarmOf = (c: Context): NonNullable<Context["swarm"]> => c.swarm ?? unavailable("child tasks");
+const submissionsOf = (c: Context): NonNullable<Context["submissions"]> => c.submissions ?? unavailable("submissions");
 const incidentsOf = (c: Context): NonNullable<Context["incidents"]> => c.incidents ?? unavailable("responsibility incidents");
 const checksOf = (c: Context): NonNullable<Context["responsibilityChecks"]> => c.responsibilityChecks ?? unavailable("responsibility checks");
 const duties = (c: Context): ResponsibilityService => c.responsibilities ?? unavailable("responsibilities");
@@ -855,6 +859,10 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => written(await incidentsOf(c).report(c.principal, { commandId: need(id), ...(a as object) } as never)) },
   { name: "incident.resolve", kind: "command", summary: "Resolves an open incident with the evidence that it is over.", args: { incidentId: "the incident", evidence: "what shows it is resolved", commandId: "required" }, result: "`{ id, replayed }`.",
     run: async (c, a, id) => written(await incidentsOf(c).resolve(c.principal, { commandId: need(id), ...(a as object) } as never)) },
+  { name: "submission.record", kind: "command", summary: "An agent records one submission in the role it holds: a code submission (author) names the base, tree and patch ID of its work, a review (reviewer), qa report (qa), document (docs) or sign-off (director) names the submission it is about. Evidence must be bound to the submitted tree or artifact. A code submission must come from the owner of the task's current attempt; a review or qa report on one's own submission is refused. Agents only. Repeating the same command ID records once.", args: { taskId: "the task", kind: "`code`, `review`, `qa`, `document` or `signoff`", role: "the role you submit in: `author`, `reviewer`, `qa`, `docs` or `director`", "base?": "code: the base commit (git object ID)", "tree?": "code: the tree (git object ID)", "patchId?": "code: the patch ID", "refreshRound?": "code: the refresh round, default 0", "subject?": "review, qa, signoff: the submission it is about", "verdict?": "review: `approve`, `changes` or `reject`", "decision?": "signoff: `approve` or `decline`", "report?": "qa or document: the report", "artifactDigest?": "document: `sha256:` and the digest", "artifactId?": "document: the artifact", "evidence?": "[{ check, result: `pass`, `fail` or `not_run`, boundTo }]", commandId: "required" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["taskId", "kind", "role", "base", "tree", "patchId", "refreshRound", "subject", "verdict", "decision", "report", "artifactDigest", "artifactId", "evidence"]); return written(await submissionsOf(c).record(c.principal, { commandId: need(id), ...(a as object) } as never)); } },
+  { name: "submission.get", kind: "query", summary: "One submission record (the owner, or the agent that made it; anyone else gets not found).", args: { submissionId: "the submission's ID (`id` of `submission.record`)" }, result: "`{ item }`: the submission with its revision.",
+    run: async (c, a) => { only(a, ["submissionId"]); return found("submission", await submissionsOf(c).get(c.principal, str(a, "submissionId"))); } },
   { name: "release.submit", kind: "command", summary: "Owner only: submits an immutable release candidate: source commit, built artifact hashes, dependency lock hashes, test-suite revision and the platforms (os, arch) it must pass on. The same manifest is the same candidate.", args: { manifest: "{ sourceCommit, suiteRevision, artifacts: {name: sha256}, dependencyLocks: {name: sha256}, matrix: [{os, arch, osVersion?}] }", commandId: "required" }, result: "`{ candidateId, replayed }`.",
     run: async (c, a, id) => { only(a, ["manifest"]); return asJson(await releaseOf(c).submit(c.principal, { commandId: need(id), ...(a as object) } as never) as never); } },
   { name: "release.host", kind: "command", summary: "Owner only: allows (or with active=false stops allowing) a host to run destructive release tests for one platform. A machine used for production work is not authorized by that.", args: { hostId: "the host", os: "linux, darwin or win32", arch: "x64 or arm64", "active?": "false to withdraw", commandId: "required" }, result: "`{ ok }`.",
