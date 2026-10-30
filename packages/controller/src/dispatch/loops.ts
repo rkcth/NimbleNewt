@@ -258,8 +258,18 @@ export function recordLoops(records: Pick<MeetingRecordService, "sweep">, projec
 }
 
 /** P04: checks that came due are recorded and open incidents past their escalation time are escalated, for every project, on each tick. */
-export function responsibilityLoops(checks: { generate(by: Principal, projectId: string): Promise<unknown> }, incidents: { escalate(by: Principal, projectId: string): Promise<unknown> }, projects: () => Promise<readonly string[]>): DispatcherLoop[] {
-  return [{ name: "responsibilities.checks", run: async (by) => { for (const projectId of await projects()) { await checks.generate(by, projectId); await incidents.escalate(by, projectId); } } }];
+export function responsibilityLoops(checks: { generate(by: Principal, projectId: string): Promise<unknown> }, incidents: { escalate(by: Principal, projectId: string): Promise<readonly { id: string; projectId: string; escalatedTo?: string; signature: string; responsibilityId: string; count: number }[]> }, projects: () => Promise<readonly string[]>, notify?: (escalated: { id: string; projectId: string; escalatedTo?: string; signature: string; responsibilityId: string; count: number }) => Promise<void>): DispatcherLoop[] {
+  // One project's failure does not skip the others this tick; the first error is raised after all have been tried.
+  return [{ name: "responsibilities.checks", run: async (by) => {
+    let failure: unknown;
+    for (const projectId of await projects()) {
+      try {
+        await checks.generate(by, projectId);
+        for (const e of await incidents.escalate(by, projectId)) await notify?.(e);
+      } catch (error) { failure ??= error; }
+    }
+    if (failure !== undefined) throw failure;
+  } }];
 }
 
 /** H13c: the agent whose watched event is waiting is told to look at its inbox: the waker reports `woken` once the agent's current attempt will see it, and `deferred` (tried again next tick) when there is none to wake. */

@@ -50,12 +50,19 @@ test("a child task is made with its parent's outcome and criteria and an allowan
     // A parent with nothing left to give is refused, and the child it made is cancelled, not left without an allowance.
     await assert.rejects(swarm.spawn(rob, { commandId: "s6", parentTaskId: a.taskId, title: "Needs money", costMicros: 5_000_000, computeMs: 1 }), (e: unknown) => e instanceof DomainError);
     const tasks = await c.storage.listAggregates("task", { limit: 100 });
-    assert.ok(tasks.length >= before);
+    assert.ok(tasks.length > before, "a refused spawn that had to make its child leaves it cancelled, not live");
     assert.ok(!tasks.some((t) => (t.body as { title?: string }).title === "Needs money" && (t.body as { state?: string }).state !== "cancelled"), "no live child without an allowance");
     // Someone without the parent's budget cannot spawn from it.
     await c.services.principals.enroll(rob, { commandId: "e1", kind: "agent", name: "eve", grants: [{ action: "task.create", project }] });
     const eve = await c.services.principals.authenticate((await c.services.principals.issueCredential(rob, "agent:eve")).token);
-    await assert.rejects(swarm.spawn(eve, { commandId: "s7", parentTaskId: root, title: "Sneaky", costMicros: 1, computeMs: 1 }), (e: unknown) => e instanceof DomainError);
+    const tasksBefore = (await c.storage.listAggregates("task", { limit: 200 })).length;
+    await assert.rejects(swarm.spawn(eve, { commandId: "s7", parentTaskId: root, title: "Sneaky", costMicros: 1, computeMs: 1 }), (e: unknown) => e instanceof DomainError && e.code === "forbidden");
+    // Not even a limit is told to someone who may not spawn (the root has two live children), and nothing is made.
+    await assert.rejects(swarm.spawn(eve, { commandId: "s8", parentTaskId: root, title: "Sneaky 2", costMicros: 1, computeMs: 1 }), (e: unknown) => e instanceof DomainError && e.code === "forbidden");
+    assert.equal((await c.storage.listAggregates("task", { limit: 200 })).length, tasksBefore, "no task was made for them, not even a cancelled one");
+    await assert.rejects(swarm.cancel(eve, { commandId: "x0", parentTaskId: root, reason: "mischief" }), (e: unknown) => e instanceof DomainError && e.code === "forbidden");
+    // A refused spawn is not completed by asking again with the same command ID after room was made.
+    await assert.rejects(swarm.spawn(rob, { commandId: "s5", parentTaskId: root, title: "One too many", costMicros: 1, computeMs: 1 }), (e: unknown) => e instanceof DomainError && /new command ID|live children/.test(e.message));
 
     // Cancelling the parent stops the whole swarm, deepest first, and gives the allowance back.
     const result = await swarm.cancel(rob, { commandId: "x1", parentTaskId: root, reason: "plans changed" });

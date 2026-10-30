@@ -6,6 +6,7 @@ import type { BudgetService } from "../budgets/budgets.js";
 import type { StopService } from "../lifecycle/stop.js";
 import type { ContractService } from "../planning/contracts.js";
 import { DEFAULT_LIMITS } from "../admission/policy.js";
+import { allows } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
@@ -21,7 +22,7 @@ export interface SwarmLinkBody {
 export interface SwarmDeps {
   readonly projects: Pick<ProjectService, "createTask" | "getTask" | "transitionTask">;
   readonly contracts: Pick<ContractService, "setContract">;
-  readonly budgets: Pick<BudgetService, "delegate" | "reclaim">;
+  readonly budgets: Pick<BudgetService, "delegate" | "reclaim" | "canManage">;
   readonly stops: Pick<StopService, "request" | "advance">;
   /** Depth and live children of one parent (card H03 defaults unless given). */
   readonly limits?: { readonly depth: number; readonly children: number };
@@ -53,13 +54,16 @@ export class SwarmService {
     onlyKnown(command, ["commandId", "parentTaskId", "title", "expectedResult", "acceptanceCriteria", "costMicros", "computeMs"]);
     const parentId = checkTaskId(command.parentTaskId);
     const title = text(command.title, "title", { min: 1, max: 200 });
+    // Who may is settled before anything is made or any limit is reported (a foreign task answers like a missing one).
     const parent = await this.#deps.projects.getTask(parentId);
-    if (parent === undefined) throw new DomainError("forbidden", `${by.id} may not spawn from that task`);
+    if (parent === undefined || !(await this.#deps.budgets.canManage(by, parentId)) || !(by.kind === "owner" || allows(by, "task.create", parent.projectId))) throw new DomainError("forbidden", `${by.id} may not spawn from that task`);
     const limits = this.#deps.limits ?? { depth: DEFAULT_LIMITS.depth, children: DEFAULT_LIMITS.children };
     if ((await this.#depth(parentId)) + 1 > limits.depth) throw new DomainError("invalid_command", `a task may spawn at most ${limits.depth} levels deep`, { field: "parentTaskId" });
     const live = await this.#liveChildren(parentId);
     const created = await this.#deps.projects.createTask({ commandId: scopedCommandId(by.id, `${command.commandId}:child`), actor: by.id, projectId: parent.projectId, title } as never);
     const childId = created.id;
+    // A child an earlier, refused call made and cancelled is not given an allowance by a retry: a refused spawn is asked again with a new command ID.
+    if (created.replayed && (await this.#runner.get(LINK, childId)) === undefined && (await this.#deps.projects.getTask(childId))?.state === "cancelled") throw new DomainError("invalid_command", "that spawn was refused earlier; ask again with a new command ID", { field: "commandId" });
     // A replay of a spawn that completed finds the child already linked and has nothing more to do.
     if (created.replayed && (await this.#runner.get(LINK, childId)) !== undefined) return { taskId: childId, replayed: true };
     if (live >= limits.children) { await this.#abandon(by, childId); throw new DomainError("invalid_command", `a task may have at most ${limits.children} live children`, { field: "parentTaskId" }); }
@@ -98,7 +102,7 @@ export class SwarmService {
     const parentId = checkTaskId(command.parentTaskId);
     const reason = text(command.reason, "reason", { min: 1, max: 500 });
     const parent = await this.#deps.projects.getTask(parentId);
-    if (parent === undefined) throw new DomainError("forbidden", `${by.id} may not cancel that swarm`);
+    if (parent === undefined || !(await this.#deps.budgets.canManage(by, parentId))) throw new DomainError("forbidden", `${by.id} may not cancel that swarm`);
     const links = await this.#links(parent.projectId);
     const order: string[] = [];
     const visit = (id: string): void => { for (const l of links) if (l.parentTaskId === id) { visit(l.id); order.push(l.id); } };
@@ -111,7 +115,9 @@ export class SwarmService {
       const stop = await this.#deps.stops.request(by, { commandId: `swc-${command.commandId}-${childId}`, scope: { kind: "task", id: childId }, mode: "stop", reason });
       const advanced = await this.#deps.stops.advance(by, { intentId: stop.intentId });
       if (advanced.outcome === undefined || advanced.outcome.state === "recovery-required") { pending.push(childId); continue; }
-      await this.#deps.budgets.reclaim(by, { commandId: `swr-${command.commandId}-${childId}`, taskId: childId }).catch((error: unknown) => { if (!(error instanceof DomainError && ["forbidden", "not_found"].includes(error.code))) throw error; });
+      // What a child did not use goes back before it is cancelled; a caller who cannot take it back leaves the child as it is, so a later call by someone who can still finds it.
+      const reclaimed = await this.#deps.budgets.reclaim(by, { commandId: `swr-${command.commandId}-${childId}`, taskId: childId }).then(() => true, (error: unknown) => { if (error instanceof DomainError && ["forbidden", "not_found"].includes(error.code)) return false; throw error; });
+      if (!reclaimed) { pending.push(childId); continue; }
       const fresh = (await this.#deps.projects.getTask(childId))!;
       if (!FINAL.has(fresh.state)) await this.#deps.projects.transitionTask({ commandId: `swt-${command.commandId}-${childId}`, actor: by.id, taskId: childId, expectedRevision: fresh.revision, to: "cancelled" } as never);
       settled.push(childId);

@@ -673,6 +673,15 @@ export class BudgetService {
   #owner(by: Principal, what: string): void { if (by.kind !== "owner") throw new DomainError("forbidden", `${by.id} is not the owner; only the owner ${what}`); }
   #dispatcher(by: Principal): void { if (!(by.kind === "owner" || by.kind === "host" || by.kind === "service")) throw new DomainError("forbidden", `${by.id} is not the dispatcher; reservations and charges are the controller's and its hosts'`); }
   #resId(v: unknown): string { return typeof v === "string" && /^bgr-[a-z2-7]{20}$/.test(v) ? v : invalid("reservationId", "is not a reservation ID"); }
+  /** Whether `by` could delegate from (or reclaim under) the task's budget: the owner, or its holder with `budget.manage`. A pure read; a task with no budget answers false, like one the caller may not manage. */
+  async canManage(by: Principal, taskId: string): Promise<boolean> {
+    const link = await this.#runner.get(LINK, checkTaskId(taskId));
+    const treeId = (link?.body as unknown as { treeId: string } | undefined)?.treeId;
+    if (treeId === undefined) return false;
+    const node = (await this.#tree(treeId)).body.nodes[taskId];
+    return node !== undefined && this.#manages(by, node);
+  }
+
   #manages(by: Principal, node: Node): boolean { return by.kind === "owner" || (node.holder === by.id && allows(by, "budget.manage", node.projectId, { resource: { kind: "task", id: node.taskId } }) && inTaskScope(by, node.projectId)); }
   #mayRead(by: Principal, projectId: string, taskId: string): boolean { return inTaskScope(by, projectId) && (allows(by, "budget.read", projectId, { resource: { kind: "task", id: taskId } }) || allows(by, "budget.manage", projectId, { resource: { kind: "task", id: taskId } })); }
 

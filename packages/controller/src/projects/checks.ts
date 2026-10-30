@@ -77,7 +77,7 @@ export class ResponsibilityChecks {
     if (list === undefined) return undefined;
     const last = new Map<string, number | undefined>();
     for (const r of list) { const lastAt = (await this.#responsibilities.status(by, r.id))?.lastCheckAt; last.set(r.id, lastAt === undefined ? undefined : Date.parse(lastAt)); }
-    const found = await scanAll(this.#runner, KIND, 5000, (a) => (a.body as unknown as CheckBody).projectId === projectId);
+    const found = await scanAll(this.#runner, KIND, 50_000, (a) => (a.body as unknown as CheckBody).projectId === projectId);
     return found.map((a) => view<CheckBody>(a)).filter((c) => last.has(c.responsibilityId) && (last.get(c.responsibilityId) === undefined || Date.parse(c.slotStart) > last.get(c.responsibilityId)!)).sort((a, b) => (a.slotStart < b.slotStart ? -1 : a.slotStart > b.slotStart ? 1 : a.id < b.id ? -1 : 1));
   }
 }

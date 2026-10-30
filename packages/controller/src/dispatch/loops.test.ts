@@ -129,6 +129,16 @@ test("each tick records the checks that came due and escalates incidents, for ev
   assert.deepEqual(seen, ["check:service:dispatcher:proj-a", "escalate:service:dispatcher:proj-a", "check:service:dispatcher:proj-b", "escalate:service:dispatcher:proj-b"]);
 });
 
+test("an escalated incident is passed on for a notice, and one project failing does not stop the others being tried (card P04)", async () => {
+  const seen: string[] = [];
+  const told: string[] = [];
+  const e = { id: "rinc-1", projectId: "proj-b", escalatedTo: "owner", signature: "disk", responsibilityId: "rsp-1", count: 2 };
+  const [loop] = responsibilityLoops({ generate: async (_by, p) => { seen.push(p); if (p === "proj-a") throw new Error("boom"); return []; } }, { escalate: async (_by, p) => (p === "proj-b" ? [e] : []) }, async () => ["proj-a", "proj-b"], async (x) => { told.push(x.id); });
+  await assert.rejects(loop!.run({ id: "service:dispatcher", kind: "service" } as never), /boom/);
+  assert.deepEqual(seen, ["proj-a", "proj-b"], "the second project was still tried");
+  assert.deepEqual(told, ["rinc-1"]);
+});
+
 test("a watched event wakes the agent only when its attempt will read the inbox, and the wake loop asks every tick (card H13c)", async () => {
   const states = new Map<string, string>([["att-run", "running"], ["att-wait", "waiting"], ["att-park", "parked"], ["att-done", "finished"]]);
   const waker = attemptWaker(() => ({ get: async (_by, id) => (states.has(id) ? { state: states.get(id)! } : undefined) }), { id: "service:dispatcher", kind: "service" } as never);

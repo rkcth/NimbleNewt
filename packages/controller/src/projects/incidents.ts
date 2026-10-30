@@ -129,7 +129,7 @@ export class IncidentService {
     if (!(by.kind === "owner" || by.kind === "service" || may(by, "responsibility.write", projectId))) throw hidden(by, "escalate incidents in that project");
     const out: View<IncidentBody>[] = [];
     const now = Date.parse(this.#runner.now());
-    for (const a of await scanAll(this.#runner, INCIDENT, 5000, (x) => { const b = x.body as unknown as IncidentBody; return b.projectId === projectId && b.state === "open" && b.escalatedAt === undefined; })) {
+    for (const a of await scanAll(this.#runner, INCIDENT, 50_000, (x) => { const b = x.body as unknown as IncidentBody; return b.projectId === projectId && b.state === "open" && b.escalatedAt === undefined; })) {
       const b = a.body as unknown as IncidentBody;
       const duty = await this.#duties.get(by, b.responsibilityId);
       const esc = duty?.escalation;
@@ -152,7 +152,7 @@ export class IncidentService {
   /** The incidents of a project, open first then newest, optionally only the open ones. `undefined` for a project the caller may not read. */
   async list(by: Principal, projectId: string, filter: { open?: boolean } = {}): Promise<View<IncidentBody>[] | undefined> {
     if ((await this.#duties.list(by, projectId)) === undefined) return undefined;
-    const found = await scanAll(this.#runner, INCIDENT, 5000, (x) => { const b = x.body as unknown as IncidentBody; return b.projectId === projectId && (filter.open !== true || b.state === "open"); });
+    const found = await scanAll(this.#runner, INCIDENT, 50_000, (x) => { const b = x.body as unknown as IncidentBody; return b.projectId === projectId && (filter.open !== true || b.state === "open"); });
     return found.map((a) => view<IncidentBody>(a)).sort((a, b) => (a.state === b.state ? (a.lastAt < b.lastAt ? 1 : a.lastAt > b.lastAt ? -1 : 0) : a.state === "open" ? -1 : 1));
   }
 
