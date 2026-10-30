@@ -330,3 +330,95 @@ test("markIntegrated does not move the base while work is uncommitted or the sha
     assert.deepEqual([before.moved, before.differing], [false, ["work.txt"]], "not in the shared workspace yet");
   } finally { await w.done(); }
 });
+
+const lines = (n: number, edit?: [number, string]): string => Array.from({ length: n }, (_, i) => (edit !== undefined && edit[0] === i ? edit[1] : `line ${i}`)).join("\n") + "\n";
+const advance = async (w: Awaited<ReturnType<typeof world>>, files: Record<string, string | null>): Promise<string> => {
+  for (const [path, content] of Object.entries(files)) {
+    if (content === null) await rm(join(w.shared, path)); else { await mkdir(join(w.shared, path, ".."), { recursive: true }); await writeFile(join(w.shared, path), content); }
+  }
+  sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "moved");
+  return w.git.head(w.shared);
+};
+
+test("a refresh re-applies the agent's work onto a branch that moved in unrelated files: nothing is lost, the base moves, and the work is still the net difference", { skip }, async () => {
+  const w = await world();
+  try {
+    await writeFile(join(w.checkout, "src", "a.ts"), "export const a = 2;\n");
+    await writeFile(join(w.checkout, "mine.ts"), "export const m = 1;\n");
+    await rm(join(w.checkout, "src", "b.ts"));
+    const next = await advance(w, { "README.md": "hello again\n", "other.ts": "export const o = 1;\n" });
+    const r = await w.git.reapply({ shared: w.shared, commit: next, gitDir: w.gitDir, checkout: w.checkout });
+    assert.equal(r.base, next); assert.equal(r.previous, w.commit); assert.equal(r.unchanged, false);
+    assert.deepEqual(r.conflicts, []); assert.deepEqual(r.merged, []);
+    assert.deepEqual(r.taken, ["README.md", "other.ts"]); assert.deepEqual(r.kept, ["mine.ts", "src/a.ts", "src/b.ts"]);
+    assert.equal(await readFile(join(w.checkout, "README.md"), "utf8"), "hello again\n");
+    assert.equal(await readFile(join(w.checkout, "other.ts"), "utf8"), "export const o = 1;\n");
+    assert.equal(await readFile(join(w.checkout, "src", "a.ts"), "utf8"), "export const a = 2;\n");
+    assert.equal(existsSync(join(w.checkout, "src", "b.ts")), false);
+    const changes = await w.git.changes({ gitDir: w.gitDir, checkout: w.checkout });
+    assert.deepEqual(changes.map((c) => [c.path, c.op]).sort(), [["mine.ts", "write"], ["src/a.ts", "write"], ["src/b.ts", "delete"]], "only the agent's own work is left to submit");
+    // Refreshing again onto the same head changes nothing.
+    const again = await w.git.reapply({ shared: w.shared, commit: next, gitDir: w.gitDir, checkout: w.checkout });
+    assert.equal(again.unchanged, true); assert.deepEqual(again.taken, []);
+  } finally { await w.done(); }
+});
+
+test("a refresh onto a branch that moved in the same file merges non-overlapping edits and lists overlapping ones with markers, never resolving them", { skip }, async () => {
+  const w = await world();
+  try {
+    await writeFile(join(w.shared, "doc.txt"), lines(20)); sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "doc");
+    const start = await w.git.head(w.shared);
+    const dir2 = join(w.dir, "c2"); await w.git.createCheckout({ shared: w.shared, commit: start, gitDir: join(w.dir, "t2.git"), checkout: dir2 });
+    await writeFile(join(dir2, "doc.txt"), lines(20, [2, "mine two"]));
+    await writeFile(join(dir2, "clash.txt"), "x\n");
+    const next = await advance(w, { "doc.txt": lines(20, [15, "landing fifteen"]) });
+    const clean = await w.git.reapply({ shared: w.shared, commit: next, gitDir: join(w.dir, "t2.git"), checkout: dir2 });
+    assert.deepEqual(clean.merged, ["doc.txt"]); assert.deepEqual(clean.conflicts, []);
+    const text = await readFile(join(dir2, "doc.txt"), "utf8");
+    assert.ok(text.includes("mine two") && text.includes("landing fifteen") && !text.includes("<<<<<<<"));
+    // Now the overlap: the agent and the branch both change line 5 in the same file.
+    const dir3 = join(w.dir, "c3"); await w.git.createCheckout({ shared: w.shared, commit: next, gitDir: join(w.dir, "t3.git"), checkout: dir3 });
+    await writeFile(join(dir3, "doc.txt"), lines(20, [5, "agent five"]).replace("landing fifteen", "landing fifteen"));
+    const after = await advance(w, { "doc.txt": (await readFile(join(w.shared, "doc.txt"), "utf8")).replace("line 5", "landing five") });
+    const r = await w.git.reapply({ shared: w.shared, commit: after, gitDir: join(w.dir, "t3.git"), checkout: dir3 });
+    assert.deepEqual(r.conflicts, [{ path: "doc.txt", kind: "overlap" }]); assert.deepEqual(r.merged, []);
+    const marked = await readFile(join(dir3, "doc.txt"), "utf8");
+    assert.ok(marked.includes("<<<<<<< mine") && marked.includes("agent five") && marked.includes("landing five") && marked.includes(">>>>>>> landing"));
+    // The base moved all the same, and the file with markers is still the agent's work.
+    assert.ok((await w.git.changes({ gitDir: join(w.dir, "t3.git"), checkout: dir3 })).some((c) => c.path === "doc.txt"));
+  } finally { await w.done(); }
+});
+
+test("a file one side deleted and the other changed, a file added on both sides, and a binary file are listed and keep the agent's side", { skip }, async () => {
+  const w = await world();
+  try {
+    await writeFile(join(w.checkout, "src", "a.ts"), "export const a = 'mine';\n");
+    await rm(join(w.checkout, "src", "b.ts"));
+    await writeFile(join(w.checkout, "both.txt"), "mine\n");
+    await writeFile(join(w.checkout, "img.bin"), Buffer.from([0, 1, 2, 3]));
+    await writeFile(join(w.shared, "img.bin"), Buffer.from([0, 9, 9]));
+    const next = await advance(w, { "src/a.ts": null, "src/b.ts": "export const b = 'theirs';\n", "both.txt": "theirs\n" });
+    const r = await w.git.reapply({ shared: w.shared, commit: next, gitDir: w.gitDir, checkout: w.checkout });
+    const kinds = Object.fromEntries(r.conflicts.map((c) => [c.path, c.kind]));
+    assert.deepEqual(kinds, { "src/a.ts": "deleted-there", "src/b.ts": "deleted-here", "both.txt": "both-added", "img.bin": "binary" });
+    assert.equal(await readFile(join(w.checkout, "src", "a.ts"), "utf8"), "export const a = 'mine';\n");
+    assert.equal(existsSync(join(w.checkout, "src", "b.ts")), false);
+    assert.deepEqual([...(await readFile(join(w.checkout, "img.bin")))], [0, 1, 2, 3]);
+  } finally { await w.done(); }
+});
+
+test("a refresh that cannot be planned (Git's name on the landing branch, a bad commit ID) changes nothing", { skip }, async () => {
+  const w = await world();
+  try {
+    await writeFile(join(w.checkout, "src", "a.ts"), "export const a = 2;\n");
+    await refuses("invalid_path", () => w.git.reapply({ shared: w.shared, commit: "main", gitDir: w.gitDir, checkout: w.checkout }));
+    await writeFile(join(w.checkout, ".git"), "x");
+    await refuses("protected_path", () => w.git.reapply({ shared: w.shared, commit: w.commit, gitDir: w.gitDir, checkout: w.checkout }));
+    await rm(join(w.checkout, ".git"));
+    const next = await advance(w, { "README.md": "moved\n" });
+    await writeFile(join(w.checkout, "src", "a.ts"), "export const a = 2;\n");
+    assert.equal(await readFile(join(w.checkout, "README.md"), "utf8"), "hello\n", "nothing taken from the branch before the refusals");
+    const r = await w.git.reapply({ shared: w.shared, commit: next, gitDir: w.gitDir, checkout: w.checkout });
+    assert.deepEqual(r.taken, ["README.md"]);
+  } finally { await w.done(); }
+});

@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { execFile } from "node:child_process";
-import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { WorkspaceBridge, ABSENT, versionOf, type WriteResult } from "./bridge.js";
@@ -123,6 +123,81 @@ export class GitBridge {
     await this.#run(["update-ref", "refs/nn/base", options.commit], { gitDir: options.gitDir });
     await this.#run(["update-ref", "HEAD", options.commit], { gitDir: options.gitDir });
     return { base: options.commit };
+  }
+
+  /**
+   * The author's own refresh (card H12p): a three-way re-apply of the agent's work onto `commit` (the current head of the landing branch). The agent's work is its net difference from the base,
+   * committed or not. For each file: only the agent changed it, it stays; only the landing branch changed it, the checkout takes that version; both changed it, the two are merged line by line.
+   * Overlapping edits are never resolved: the file keeps conflict markers (`<<<<<<< mine`, `||||||| base`, `>>>>>>> landing`) and is listed. A file one side deleted and the other changed, a file that is
+   * not text, and a file added on both sides with different content are listed too and keep the agent's side. Nothing is read or written until every file has been planned, so a refused path
+   * (Git's own name, a link) changes nothing. Afterwards the base is `commit`, and what the checkout holds is the agent's work on top of it. Returns the files by outcome.
+   */
+  async reapply(options: { shared: string; commit: string; gitDir: string; checkout: string }): Promise<{ base: string; previous: string; unchanged: boolean; kept: string[]; taken: string[]; merged: string[]; conflicts: { path: string; kind: "overlap" | "deleted-here" | "deleted-there" | "binary" | "both-added" }[] }> {
+    if (!COMMIT.test(options.commit)) throw new WorkspaceError("invalid_path", "a refresh goes to a full commit ID");
+    const previous = await this.#base(options.gitDir);
+    const mine = new Map((await this.changes(options)).filter((c) => !c.modeOnly).map((c) => [c.path, c.op] as const));
+    const sharedGit = await this.#sharedGitDir(options.shared);
+    await this.#run(["fetch", "--no-tags", "--no-recurse-submodules", sharedGit, options.commit], { gitDir: options.gitDir, allowFile: true });
+    const listing = (await this.#run(["diff", "--name-status", "-z", "--no-renames", previous, options.commit], { gitDir: options.gitDir })).stdout.split("\0").filter(Boolean);
+    const theirs = new Map<string, "write" | "delete">();
+    for (let i = 0; i + 1 < listing.length; i += 2) {
+      const path = listing[i + 1]!;
+      if (touchesGit(path.split("/"))) throw new WorkspaceError("protected_path", `${JSON.stringify(path.slice(0, 80))} on the landing branch is Git's own name; nothing was changed`);
+      if (listing[i] === "T") throw new WorkspaceError("link_refused", `${JSON.stringify(path.slice(0, 80))} changed kind on the landing branch; nothing was changed`);
+      theirs.set(path, listing[i] === "D" ? "delete" : "write");
+    }
+    if (theirs.size > GIT_LIMITS.files) throw new WorkspaceError("invalid_path", `more than ${GIT_LIMITS.files} files changed on the landing branch`);
+    const result = { base: options.commit, previous, unchanged: previous === options.commit, kept: [...mine.keys()].filter((p) => !theirs.has(p)).sort(), taken: [] as string[], merged: [] as string[], conflicts: [] as { path: string; kind: "overlap" | "deleted-here" | "deleted-there" | "binary" | "both-added" }[] };
+    const writes: { path: string; bytes: Buffer | undefined }[] = [];
+    for (const [path, op] of [...theirs].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+      const there = op === "delete" ? undefined : await this.#blobAt(options.gitDir, options.commit, path);
+      if (!mine.has(path)) { writes.push({ path, bytes: there }); result.taken.push(path); continue; }
+      const here = mine.get(path) === "delete" ? undefined : await this.#readChecked((await resolveSafe(options.checkout, path)).absolute, path);
+      const base = await this.#blobAt(options.gitDir, previous, path);
+      if (here === undefined && there === undefined) { result.merged.push(path); continue; }
+      if (here !== undefined && there !== undefined && here.equals(there)) { result.merged.push(path); continue; }
+      if (here === undefined) { result.conflicts.push({ path, kind: "deleted-here" }); continue; }
+      if (there === undefined) { result.conflicts.push({ path, kind: "deleted-there" }); continue; }
+      if (here.includes(0) || there.includes(0) || (base?.includes(0) ?? false)) { result.conflicts.push({ path, kind: "binary" }); continue; }
+      const outcome = await this.#mergeText(options.gitDir, base ?? Buffer.alloc(0), here, there);
+      writes.push({ path, bytes: outcome.bytes });
+      if (outcome.conflicts === 0) result.merged.push(path); else result.conflicts.push({ path, kind: base === undefined ? "both-added" : "overlap" });
+    }
+    for (const w of writes) {
+      const safe = await resolveSafe(options.checkout, w.path, { forWrite: true, createParents: true });
+      if (w.bytes === undefined) { if (safe.exists === "file") await rm(safe.absolute); continue; }
+      if (safe.exists === "directory") throw new WorkspaceError("invalid_path", `${JSON.stringify(w.path.slice(0, 80))} is a directory in the checkout; the refresh stopped there`);
+      await writeFile(safe.absolute, w.bytes);
+    }
+    await this.#run(["update-ref", "refs/nn/base", options.commit], { gitDir: options.gitDir });
+    await this.#run(["update-ref", "HEAD", options.commit], { gitDir: options.gitDir });
+    await this.#run(["read-tree", "--reset", options.commit], { gitDir: options.gitDir, workTree: options.checkout });
+    result.kept.sort();
+    return result;
+  }
+
+  async #blobAt(gitDir: string, commit: string, path: string): Promise<Buffer | undefined> {
+    const exists = await this.#run(["cat-file", "-e", `${commit}:${path}`], { gitDir }).then(() => true, () => false);
+    if (!exists) return undefined;
+    return new Promise((resolveBlob, reject) => {
+      execFile(this.#git, [...this.#flags(), "--git-dir", gitDir, "cat-file", "blob", `${commit}:${path}`], { env: this.#env(), encoding: "buffer", maxBuffer: GIT_LIMITS.fileBytes + 1, windowsHide: true, cwd: this.#empty }, (error, stdout) => (error === null ? resolveBlob(stdout as unknown as Buffer) : reject(new WorkspaceError("invalid_path", `${JSON.stringify(path.slice(0, 80))} could not be read at that commit (it may be larger than ${GIT_LIMITS.fileBytes} bytes)`))));
+    });
+  }
+
+  /** `git merge-file` over three byte strings in a private directory: its exit status is the number of conflicts, and the merged text (with markers) is what it prints. */
+  async #mergeText(gitDir: string, base: Buffer, mine: Buffer, theirs: Buffer): Promise<{ bytes: Buffer; conflicts: number }> {
+    const dir = await mkdtemp(join(gitDir, "nn-merge-"));
+    try {
+      await Promise.all([writeFile(join(dir, "mine"), mine), writeFile(join(dir, "base"), base), writeFile(join(dir, "landing"), theirs)]);
+      return await new Promise((resolveMerge, reject) => {
+        execFile(this.#git, ["merge-file", "-p", "--diff3", "-L", "mine", "-L", "base", "-L", "landing", join(dir, "mine"), join(dir, "base"), join(dir, "landing")], { env: this.#env(), encoding: "buffer", maxBuffer: GIT_LIMITS.fileBytes * 2, windowsHide: true, cwd: this.#empty, timeout: GIT_LIMITS.timeoutMs }, (error, stdout) => {
+          if (error === null) return resolveMerge({ bytes: stdout as unknown as Buffer, conflicts: 0 });
+          const code = (error as { code?: unknown }).code;
+          if (typeof code === "number" && code > 0 && code < 128) return resolveMerge({ bytes: stdout as unknown as Buffer, conflicts: code });
+          reject(new WorkspaceError("unavailable", "the three-way merge of a file could not be made"));
+        });
+      });
+    } finally { await rm(dir, { recursive: true, force: true }); }
   }
 
   async #base(gitDir: string): Promise<string> {
