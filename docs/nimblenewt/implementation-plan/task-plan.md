@@ -32,7 +32,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N02 / AII-252 | F01, F02, F03, F04a, F04b, F04c, F04d, F04, F04f, F04g, F04h, F04i, F04j, F04k, F04e, F09 |
 | N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06, C06b |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
-| N05 / AII-255 | L05, L05b, L01, L01b, L02, L02b, L02c, L02d, L03, L03b, L03c, L03d, L03e, L03f, L04, L04b, L04c, L06, H08, H08b |
+| N05 / AII-255 | L05, L05b, L01, L01b, L02, L02b, L02c, L02d, L03, L03b, L03c, L03d, L03e, L03f, L03g, L04, L04b, L04c, L06, H08, H08b |
 | N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A07e, A08, A08b, A08c, A09, A10, A10b, A07f, A07g |
 | N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C07e, C07f, C08, C09, C09b, C09c, C09d, C09e, C09f, C09g, C09h, C08b, C08c, C08d |
 | N08 / AII-258 | R01, R02, R03, R04, R04b, R04c, R05, R05b, R05c, R05d, R05f, R05g, R05e |
@@ -965,9 +965,19 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### L03f — Finish hand-off: chat, richer package, locks, drafts
 
 - **Parent:** N05 / AII-255.
+- **Status:** implemented; commits `7f2a99f`, `d95b8d6`, `8daa315`, `783928e`, `bc0e96a`; CI runs 41010823746; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The owner can prepare, complete, cancel and force a hand-off in chat, cover a task for a time (shown first), and ask how a hand-off stands.
 - **Blockers:** L03e.
 - **Deliverable:** Split from L03e (2026-10-29): chat commands, package sections from continuation, locks, drafts, responsibilities.
 - **Acceptance and verification:** The owner can hand a task over, or cover it for a time, in chat.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### L03g — Finish hand-off: richer package, locks, drafts, responsibilities
+
+- **Parent:** N05 / AII-255.
+- **Blockers:** L03f.
+- **Deliverable:** Split from L03f (2026-10-30): package sections from continuation, locks, drafts and responsibilities in the package.
+- **Acceptance and verification:** A recipient can carry on from the package alone.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### L04 — Implement checked resume and evidence invalidation
@@ -1869,6 +1879,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### U12e — Finish agent messages: chat presentation of owner questions
 
 - **Parent:** N10a / AII-520.
+- **Status:** implemented; commits `d6dbefc`, `5051d36`, `8daa315`, `783928e`; CI runs 41010823746; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The owner sees the questions agents have put to them in chat, answers them in their own words, and every reply says how many wait.
 - **Blockers:** U12d.
 - **Deliverable:** Split from U12d (2026-10-29): chat presentation of owner questions.
 - **Acceptance and verification:** The owner sees the question in chat.
@@ -2771,7 +2783,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, K01h, M04f, M03f, L03f, U12e, H13f, C09h.
+- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g.
 - **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
 - **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
