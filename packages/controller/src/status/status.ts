@@ -492,7 +492,7 @@ export class StatusService {
       }
     }
     if (this.#deps.reviews !== undefined) {
-      // One more than the room, to tell "exactly 50" from "more".
+      // Ask for one beyond the room, to tell exactly 50 apart from more than 50.
       const pending = await this.#deps.reviews.ownerPending(by, 51);
       if (pending.length > 50) truncated.push("approvals");
       for (const r of pending.slice(0, 50)) {
