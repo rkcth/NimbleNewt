@@ -119,6 +119,7 @@ export class MemoryStorage implements ControllerStorage {
 
     for (const [i, change] of input.changes.entries()) {
       if (change.type === "check") continue;
+      if (change.type === "delete") { this.#aggregates.delete(key(change.ref)); continue; }
       const body = canonicalJson(change.body);
       const old = this.#aggregates.get(key(change.ref));
       this.#aggregates.set(key(change.ref), { kind: change.ref.kind, id: change.ref.id, revision: revisions[i]!.revision, body, createdAt: old?.createdAt ?? input.at, updatedAt: input.at });

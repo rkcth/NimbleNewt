@@ -80,7 +80,16 @@ export type Change =
   /** The aggregate must be at `expectedRevision`. Its body is replaced and the revision becomes `expectedRevision + 1`. */
   | { readonly type: "update"; readonly ref: AggregateRef; readonly expectedRevision: number; readonly body: JsonObject }
   /** The aggregate must be at `expectedRevision`; nothing is written. A guard, for example against a parent that moved. */
-  | { readonly type: "check"; readonly ref: AggregateRef; readonly expectedRevision: number };
+  | { readonly type: "check"; readonly ref: AggregateRef; readonly expectedRevision: number }
+  /**
+   * Removes the aggregate (retention, card K06b). It must be at `expectedRevision`, so a record changed since the caller looked
+   * is never removed. The operation must carry an audit entry whose `subject` is this aggregate (the removal is always on
+   * the record), and no outbox message may announce it. The result lists the revision that was removed. A repeat of the
+   * operation is answered from the stored result like any other, and is never a second removal. Removing does not reset the
+   * aggregate's identity: a later `create` of the same ref starts at revision 1 again, so callers that expire a kind must not
+   * reuse its IDs. Deliveries, timers and effects that name the aggregate are not touched.
+   */
+  | { readonly type: "delete"; readonly ref: AggregateRef; readonly expectedRevision: number };
 
 export interface AuditEntry {
   /** What happened, for example `task.assigned`. */

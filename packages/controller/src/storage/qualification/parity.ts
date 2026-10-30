@@ -134,9 +134,9 @@ export async function runParity(seed: number, steps: number, backends: readonly 
         touched.add(`${kind}/${id}`);
         const current = await guide.getAggregate({ kind, id });
         const body: JsonObject = { n: Math.floor(rnd() * 100), tag: pick(["a", "b", "c"]), nested: { k: pick([1, 2, null]) } };
-        const type = pick(["create", "update", "update", "check"] as const);
+        const type = pick(["create", "update", "update", "check", "delete"] as const);
         const expected = current === undefined ? 1 : chance(0.85) ? current.revision : current.revision + pick([1, 2]);
-        changes.push(type === "create" ? { type, ref: { kind, id }, body } : type === "update" ? { type, ref: { kind, id }, expectedRevision: expected, body } : { type, ref: { kind, id }, expectedRevision: expected });
+        changes.push(type === "create" ? { type, ref: { kind, id }, body } : type === "delete" ? { type, ref: { kind, id }, expectedRevision: expected } : type === "update" ? { type, ref: { kind, id }, expectedRevision: expected, body } : { type, ref: { kind, id }, expectedRevision: expected });
       }
       const outbox = changes.length === 0 ? [] : Array.from({ length: Math.floor(rnd() * 3) }, () => {
         if (chance(0.9)) deliveries += 1; // otherwise reuse the last ID, to provoke duplicate_id
@@ -155,7 +155,8 @@ export async function runParity(seed: number, steps: number, backends: readonly 
         ...empty(chance(0.97) ? `o${n}` : "o1", useEpoch, now),
         actor: pick(["alice", "bob"]),
         changes,
-        audit: Array.from({ length: Math.floor(rnd() * 3) }, () => ({ type: pick(["x.changed", "y.changed"]), detail: { v: Math.floor(rnd() * 5) } })),
+        audit: [...Array.from({ length: Math.floor(rnd() * 3) }, () => ({ type: pick(["x.changed", "y.changed"]), detail: { v: Math.floor(rnd() * 5) } })),
+          ...changes.filter((c) => c.type === "delete" && chance(0.9)).map((c) => ({ type: "z.removed", subject: c.ref, detail: {} }))],
         outbox, effects: newEffects, timers: newTimers,
         cancelTimers: chance(0.15) ? [`t${Math.max(1, Math.floor(rnd() * (timers + 1)))}`] : [],
         completeDeliveries: completeD === undefined ? [] : [{ deliveryId: completeD.deliveryId, claimToken: chance(0.8) ? completeD.claimToken : "forged", receipt: { ok: chance(0.8) } }],

@@ -468,6 +468,13 @@ export class PostgresStorage implements ControllerStorage {
           if (now === undefined) refuse(0, i, "not_found", `${label} does not exist`);
           else refuse(0, i, "revision_conflict", `${label} is at revision ${count(now, "revision")}, expected ${change.expectedRevision}`);
         } else revisions[i]!.revision = count(updated[0]!, "revision");
+      } else if (change.type === "delete") {
+        const removed = await tx.q("DELETE FROM aggregates WHERE kind = $1 AND id = $2 AND revision = $3 RETURNING revision", [change.ref.kind, change.ref.id, change.expectedRevision]);
+        if (removed.length === 0) {
+          const now = (await tx.q("SELECT revision FROM aggregates WHERE kind = $1 AND id = $2", [change.ref.kind, change.ref.id]))[0];
+          if (now === undefined) refuse(0, i, "not_found", `${label} does not exist`);
+          else refuse(0, i, "revision_conflict", `${label} is at revision ${count(now, "revision")}, expected ${change.expectedRevision}`);
+        } else revisions[i]!.revision = change.expectedRevision;
       } else {
         const row = (await tx.q("SELECT revision FROM aggregates WHERE kind = $1 AND id = $2 FOR SHARE", [change.ref.kind, change.ref.id]))[0];
         if (row === undefined) refuse(0, i, "not_found", `${label} does not exist`);

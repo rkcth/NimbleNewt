@@ -292,6 +292,44 @@ export function runStorageConformance(harness: StorageHarness): void {
         assert.equal((await s.getAggregate(ref("task", "t1")))?.revision, 1);
       });
 
+      withStore("remove an aggregate only at its expected revision, once, with the removal on the audit trail (K06b)", async (s) => {
+        await s.applyOperation(op("c", { changes: [create("task", "t1"), create("task", "t2")] }));
+        await s.applyOperation(op("u", { changes: [update("task", "t1", 1, { n: 1 })] }));
+        const del = (id: string, rev: number): Change => ({ type: "delete", ref: ref("task", id), expectedRevision: rev });
+        const gone = (id: string) => ({ type: "task.expired", subject: ref("task", id), detail: { why: "retention" } });
+        // stale revision, missing target: nothing removed, nothing recorded
+        await expectKind(s.applyOperation(op("d1", { changes: [del("t1", 1)], audit: [gone("t1")] })), "revision_conflict");
+        await expectKind(s.applyOperation(op("d2", { changes: [del("nope", 1)], audit: [gone("nope")] })), "not_found");
+        assert.equal((await s.getAggregate(ref("task", "t1")))?.revision, 2);
+        assert.equal(await s.getOperation("d1"), undefined);
+        // a removal without its own audit entry, and a message announcing the removed record, are refused as invalid input
+        await expectKind(s.applyOperation(op("d3", { changes: [del("t1", 2)] })), "invalid_input");
+        await expectKind(s.applyOperation(op("d4", { changes: [del("t1", 2)], audit: [gone("t2")] })), "invalid_input");
+        await expectKind(s.applyOperation(op("d5", { changes: [del("t1", 2)], audit: [gone("t1")], outbox: [outbox("m1")] })), "invalid_input");
+        assert.equal((await s.getAggregate(ref("task", "t1")))?.revision, 2);
+        // a removal and a change of the same record in one operation are refused
+        await expectKind(s.applyOperation(op("d6", { changes: [del("t1", 2), update("task", "t1", 2, { n: 9 })], audit: [gone("t1")] })), "invalid_input");
+        // a failing sibling change undoes the removal
+        await expectKind(s.applyOperation(op("d7", { changes: [del("t1", 2), update("task", "t2", 7, { n: 9 })], audit: [gone("t1")] })), "revision_conflict");
+        assert.equal((await s.getAggregate(ref("task", "t1")))?.revision, 2);
+        // the real removal
+        const r = await s.applyOperation(op("d8", { changes: [del("t1", 2), update("task", "t2", 1, { n: 5 })], audit: [gone("t1")] }));
+        assert.deepEqual(r.revisions, [{ ref: ref("task", "t1"), revision: 2 }, { ref: ref("task", "t2"), revision: 2 }]);
+        assert.equal(await s.getAggregate(ref("task", "t1")), undefined);
+        assert.deepEqual((await s.listAggregates("task", { limit: 10 })).map((a) => a.id), ["t2"]);
+        assert.deepEqual((await s.listAudit({ afterSeq: 0, limit: 100 })).filter((a) => a.type === "task.expired").map((a) => a.subject), [ref("task", "t1")]);
+        // a repeat is answered from the stored result and removes nothing more; the same ID with other content is a conflict
+        const again = await s.applyOperation(op("d8", { changes: [del("t1", 2), update("task", "t2", 1, { n: 5 })], audit: [gone("t1")] }));
+        assert.equal(again.replayed, true);
+        assert.deepEqual(again.revisions, r.revisions);
+        await expectKind(s.applyOperation(op("d8", { changes: [del("t2", 2)], audit: [gone("t2")] })), "idempotency_conflict");
+        assert.equal((await s.getAggregate(ref("task", "t2")))?.revision, 2);
+        // a stale epoch cannot remove (a first submission)
+        await s.acquireEpoch({ holder: "controller-2", at: T0 });
+        await expectKind(s.applyOperation(op("d9", { epoch: 1, changes: [del("t2", 2)], audit: [gone("t2")] })), "stale_epoch");
+        assert.equal((await s.getAggregate(ref("task", "t2")))?.revision, 2);
+      });
+
       withStore("let exactly one of many concurrent writers win on the same expected revision", async (s) => {
         await s.applyOperation(op("c", { changes: [create("task", "t1", { n: 0 })] }));
         const outcomes = await Promise.all(Array.from({ length: 10 }, (_, i) =>

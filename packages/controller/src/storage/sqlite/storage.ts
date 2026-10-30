@@ -391,6 +391,7 @@ export class SqliteStorage implements ControllerStorage {
 
     for (const [i, change] of input.changes.entries()) {
       if (change.type === "check") continue;
+      if (change.type === "delete") { this.#run("DELETE FROM aggregates WHERE kind = ? AND id = ? AND revision = ?", change.ref.kind, change.ref.id, change.expectedRevision); continue; }
       const revision = revisions[i]!.revision;
       if (change.type === "create") {
         this.#run("INSERT INTO aggregates (kind, id, revision, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)", change.ref.kind, change.ref.id, revision, canonicalJson(change.body), input.at, input.at);

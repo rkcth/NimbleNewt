@@ -4,6 +4,7 @@ import { DomainError } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
+import type { ControllerStorage } from "../storage/types.js";
 import { IncidentService } from "./incidents.js";
 import { ResponsibilityService } from "./index.js";
 
@@ -13,7 +14,7 @@ let n = 0;
 const cid = (label: string): string => `${label}-${n++}`;
 
 for (const backend of backends) {
-  const suite = (name: string, body: (c: { owner: Principal; project: string; duties: ResponsibilityService; inc: IncidentService; again(): IncidentService; setNow(iso: string): void; make(extra?: Record<string, unknown>): Promise<string>; agent(grants: { action: string; project: string }[]): Promise<Principal> }) => Promise<void>) =>
+  const suite = (name: string, body: (c: { owner: Principal; project: string; duties: ResponsibilityService; inc: IncidentService; again(): IncidentService; setNow(iso: string): void; make(extra?: Record<string, unknown>): Promise<string>; agent(grants: { action: string; project: string }[]): Promise<Principal>; storage: ControllerStorage }) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
       const world = await backend.open();
       let now = "2026-10-22T10:00:00.000Z";
@@ -26,7 +27,7 @@ for (const backend of backends) {
         const inc = IncidentService.withEpoch(world.storage, projects.epoch, duties, options);
         const project = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "Ops" })).id;
         await body({
-          owner, project, duties, inc,
+          owner, project, duties, inc, storage: world.storage,
           again: () => IncidentService.withEpoch(world.storage, projects.epoch, ResponsibilityService.withEpoch(world.storage, projects.epoch, options), options),
           setNow: (iso) => { now = iso; },
           make: async (extra = {}) => (await duties.create(owner, { commandId: cid("r"), projectId: project, title: "Keep the server healthy", objective: "Up", everyMinutes: 60, escalation: { to: "owner", afterMinutes: 30 }, ...extra } as never)).id,
@@ -139,5 +140,33 @@ for (const backend of backends) {
     const visible = (await inc.list(owner, project))!.map((i) => i.signature).sort();
     assert.deepEqual(visible, ["stays-open", "untold", "young"].sort());
     assert.equal((await inc.list(owner, project, { includeArchived: true }))!.length, 6);
+  });
+
+  suite("hard removal (card K06b): only owner or service, a window of at least 30 days is required, only archived resolved incidents past it go, once, up to the limit, with an audit record", async ({ owner, project, inc, setNow, make, agent, storage }) => {
+    const r = await make();
+    const rep = (sig: string) => inc.report(owner, { commandId: cid("i"), responsibilityId: r, signature: sig, summary: "x", outcome: "attention" });
+    const res = async (sig: string) => { const i = (await inc.list(owner, project, { open: true }))!.find((x) => x.signature === sig)!; await inc.resolve(owner, { commandId: cid("v"), incidentId: i.id, evidence: "ok" }); return i.id; };
+    await rep("a1"); await rep("a2"); await rep("a3"); await rep("live"); await rep("fresh");
+    const ids = [await res("a1"), await res("a2"), await res("a3")];
+    setNow("2027-01-30T10:00:00.000Z");
+    assert.equal(await inc.archive(owner), 3);
+    await rep("late"); await res("late");
+    setNow("2027-06-30T10:00:00.000Z");
+    assert.equal(await inc.archive(owner), 1, "late is archived now, so it is not yet 30 days past archiving");
+    const stranger = await agent([{ action: "responsibility.write", project }]);
+    await assert.rejects(inc.purge(stranger, { olderThanDays: 30 }), (e: unknown) => e instanceof DomainError);
+    await assert.rejects(inc.purge(owner, { olderThanDays: 29 }), (e: unknown) => e instanceof DomainError);
+    await assert.rejects(inc.purge(owner, { olderThanDays: Number.NaN }), (e: unknown) => e instanceof DomainError);
+    await assert.rejects(inc.purge(owner, {} as { olderThanDays: number }), (e: unknown) => e instanceof DomainError);
+    assert.equal(await inc.purge(owner, { olderThanDays: 3000 }), 0, "a long window removes nothing");
+    assert.equal(await inc.purge(owner, { olderThanDays: 60, limit: 2 }), 2, "the limit is respected");
+    assert.equal(await inc.purge(owner, { olderThanDays: 60 }), 1, "the rest of the expired ones");
+    assert.equal(await inc.purge(owner, { olderThanDays: 60 }), 0, "a repeat removes nothing more");
+    assert.equal(await inc.purge(owner, { olderThanDays: 30 }), 0, "the recently archived one stays");
+    const left = (await inc.list(owner, project, { includeArchived: true }))!.map((i) => i.signature).sort();
+    assert.deepEqual(left, ["fresh", "late", "live"], "open incidents and the recently archived one are untouched");
+    for (const id of ids) assert.equal(await storage.getAggregate({ kind: "responsibility-incident", id }), undefined);
+    const removed = (await storage.listAudit({ afterSeq: 0, limit: 1000 })).filter((a) => a.type === "responsibility.incident.purge");
+    assert.deepEqual(removed.map((a) => a.subject?.id).sort(), [...ids].sort());
   });
 }

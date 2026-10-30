@@ -214,6 +214,37 @@ export class IncidentService {
     return done;
   }
 
+  /**
+   * Hard removal (card K06b, the storage delete primitive): removes incidents archived more than `olderThanDays` ago (30..3650, required: nothing is removed
+   * by default), at most `limit` (default 200, 1..1000) per call, optionally for one project. Only records that are resolved, archived, and not escalated-but-untold
+   * qualify; each removal is guarded by the revision just read (a record changed in between is skipped) and recorded in the audit trail. Owner or service only.
+   * Returns how many were removed. Which window applies (a chat-settable retention key, else the profile) is decided by the caller.
+   */
+  async purge(by: Principal, options: { olderThanDays: number; limit?: number; projectId?: string }): Promise<number> {
+    if (!(by.kind === "owner" || by.kind === "service")) throw hidden(by, "remove incidents");
+    const days = options.olderThanDays;
+    const limit = options.limit ?? 200;
+    if (!Number.isInteger(days) || days < 30 || days > 3650) throw invalid("olderThanDays", "must be a whole number from 30 to 3650");
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw invalid("limit", "must be a whole number from 1 to 1000");
+    const cutoff = Date.parse(this.#runner.now()) - days * 86_400_000;
+    const expired = (b: IncidentBody): boolean => b.state === "resolved" && b.archivedAt !== undefined && Date.parse(b.archivedAt) < cutoff && !(b.escalatedAt !== undefined && b.notifiedAt === undefined);
+    let done = 0;
+    for (const a of await scanAll(this.#runner, INCIDENT, 50_000, (x) => { const b = x.body as unknown as IncidentBody; return (options.projectId === undefined || b.projectId === options.projectId) && expired(b); })) {
+      if (done >= limit) break;
+      const result = await this.#runner.command("responsibility.incident.purge", { commandId: `rpurge-${a.id}`, actor: by.id }, async () => ({
+        payload: { incidentId: a.id },
+        build: async (): Promise<Built> => {
+          const fresh = await this.#runner.get(INCIDENT, a.id);
+          const cur = fresh?.body as unknown as IncidentBody | undefined;
+          if (fresh === undefined || cur === undefined || !expired(cur)) throw new DomainError("stale_revision", "already handled");
+          return { ref: { kind: INCIDENT, id: a.id }, creates: false, changes: [{ type: "delete", ref: { kind: INCIDENT, id: a.id }, expectedRevision: fresh.revision }], detail: { projectId: cur.projectId, signature: cur.signature, archivedAt: cur.archivedAt ?? "" } };
+        },
+      })).catch((error: unknown) => { if (error instanceof DomainError && error.code === "stale_revision") return undefined; throw error; });
+      if (result !== undefined && !result.replayed) done++;
+    }
+    return done;
+  }
+
   /** The incidents of a project, open first then newest, optionally only the open ones. `undefined` for a project the caller may not read. */
   async list(by: Principal, projectId: string, filter: { open?: boolean; includeArchived?: boolean } = {}): Promise<View<IncidentBody>[] | undefined> {
     if ((await this.#duties.list(by, projectId)) === undefined) return undefined;

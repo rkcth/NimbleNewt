@@ -75,6 +75,7 @@ export function validateOperation(input: OperationInput): void {
   checkTimestamp(input.at, "at");
 
   const changed = new Set<string>();
+  const deleted = new Set<string>();
   list<OperationInput["changes"][number]>(input.changes, "changes").forEach((c, i) => {
     const p = `changes[${i}]`;
     if (c === null || typeof c !== "object") return bad(p, "must be an object");
@@ -84,7 +85,11 @@ export function validateOperation(input: OperationInput): void {
     if (c.type === "create") { only(c, ["type", "ref", "body"], p); checkBody(c.body, `${p}.body`); }
     else if (c.type === "update") { only(c, ["type", "ref", "expectedRevision", "body"], p); checkCount(c.expectedRevision, `${p}.expectedRevision`, Number.MAX_SAFE_INTEGER - 1, 1); checkBody(c.body, `${p}.body`); }
     else if (c.type === "check") { only(c, ["type", "ref", "expectedRevision"], p); checkCount(c.expectedRevision, `${p}.expectedRevision`, Number.MAX_SAFE_INTEGER, 1); }
-    else bad(`${p}.type`, 'must be "create", "update" or "check"');
+    else if (c.type === "delete") {
+      only(c, ["type", "ref", "expectedRevision"], p); checkCount(c.expectedRevision, `${p}.expectedRevision`, Number.MAX_SAFE_INTEGER, 1);
+      deleted.add(refKey(c.ref));
+    }
+    else bad(`${p}.type`, 'must be "create", "update", "check" or "delete"');
   });
 
   list<OperationInput["audit"][number]>(input.audit, "audit").forEach((a, i) => {
@@ -95,6 +100,10 @@ export function validateOperation(input: OperationInput): void {
     if (a.subject !== undefined) checkRef(a.subject, `${p}.subject`);
     checkBody(a.detail, `${p}.detail`);
   });
+
+  for (const d of deleted) {
+    if (!input.audit.some((a) => a !== null && typeof a === "object" && a.subject !== undefined && a.subject !== null && refKey(a.subject) === d)) bad("audit", `a removal of ${d} must carry an audit entry whose subject is that aggregate`);
+  }
 
   const deliveries = new Set<string>();
   list<OperationInput["outbox"][number]>(input.outbox, "outbox").forEach((o, i) => {
@@ -108,6 +117,7 @@ export function validateOperation(input: OperationInput): void {
     if (o.orderingKey !== undefined) checkText(o.orderingKey, `${p}.orderingKey`);
     checkCount(o.priority, `${p}.priority`, 9);
     checkRef(o.aggregate, `${p}.aggregate`);
+    if (deleted.has(refKey(o.aggregate))) bad(`${p}.aggregate`, "a removed aggregate cannot be announced by a message");
     if (!changed.has(refKey(o.aggregate))) bad(`${p}.aggregate`, "must be one of the aggregates this operation changes or checks, so the message records its revision");
     checkBody(o.payload, `${p}.payload`);
     if (o.notBefore !== undefined) checkTimestamp(o.notBefore, `${p}.notBefore`);
