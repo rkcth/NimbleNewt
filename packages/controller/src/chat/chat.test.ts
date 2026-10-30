@@ -6,7 +6,7 @@ import { DomainError } from "../domain/errors.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import type { StateApi } from "../api/index.js";
 import { API_VERSION } from "../api/index.js";
-import { ChatService, checkIntents, splitQuoted, type Outcome } from "./index.js";
+import { CHAT_OPS, acceptedArgs, ChatService, checkIntents, splitQuoted, type Outcome } from "./index.js";
 import { cid, openWorld, options, type World } from "./testing/harness.js";
 
 after(stopServer);
@@ -65,6 +65,34 @@ for (const backend of backends) {
     const ann = await w.agent("ann", [{ action: "*", project: "*" }]);
     await assert.rejects(say(w, w.chat(), "hello", "m-x").then(() => w.chat().submit(ann.token, { messageId: "m-y", text: "hello" })), (e: unknown) => e instanceof DomainError && e.code === "forbidden");
     await assert.rejects(w.chat().submit("garbage", { messageId: "m-z", text: "hello" }), (e: unknown) => e instanceof DomainError && e.code === "unauthenticated");
+  });
+
+  test(`${backend.name}: the owner sets how notifications reach them by chat (escalation hours, quiet hours, digest times); the revision is filled in, an agent cannot use the chat (card U11b)`, async () => {
+    assert.ok(CHAT_OPS["notifications.configure"], "the chat's operations include the notification setting");
+    for (const k of ["escalateAfterHours", "quietHours", "digestTimes", "channel", "expectedRevision"]) assert.ok(acceptedArgs("notifications.configure")!.includes(k), k);
+    assert.equal(CHAT_OPS["notifications.settings"], undefined, "reading is a query, not a chat command");
+    let state: Record<string, unknown> = { revision: 3, escalateAfterHours: 24 };
+    const calls: Record<string, unknown>[] = [];
+    const stub = {
+      settings: async () => ({ ...state }),
+      configure: async (_p: unknown, c: Record<string, unknown>) => { calls.push(c); assert.equal(c["expectedRevision"], state["revision"], "the chat read the revision"); const { commandId: _id, expectedRevision: _r, ...fields } = c; state = { ...state, ...fields, revision: (state["revision"] as number) + 1 }; return { revision: state["revision"] }; },
+    };
+    const script: Record<string, unknown> = {};
+    const w = await openWorld(backend, script, undefined, { notifications: stub as never });
+    try {
+      const chat = w.chat();
+      const a = "escalate after 48 hours, digest at 08:00 and 17:00";
+      const b = "quiet hours 22:00 to 07:00";
+      script[a] = [cmd("notifications.configure", { escalateAfterHours: 48, digestTimes: ["08:00", "17:00"] }, a)];
+      script[b] = [cmd("notifications.configure", { quietHours: { start: "22:00", end: "07:00" } }, b)];
+      assert.equal(only((await say(w, chat, a)).outcomes).status, "applied");
+      assert.equal(only((await say(w, chat, b)).outcomes).status, "applied");
+      assert.equal(calls.length, 2);
+      assert.deepEqual([state["escalateAfterHours"], state["digestTimes"], state["quietHours"], state["revision"]], [48, ["08:00", "17:00"], { start: "22:00", end: "07:00" }, 5]);
+      const ann = await w.agent("ann", [{ action: "*", project: "*" }]);
+      await assert.rejects(w.chat().submit(ann.token, { messageId: "m-n", text: a }), (e: unknown) => e instanceof DomainError && e.code === "forbidden");
+      assert.equal(calls.length, 2, "an agent changed nothing");
+    } finally { await w.close(); }
   });
 
   suite("material ambiguity asks and holds the whole message; an unknown name is refused, not guessed", async (w, script) => {

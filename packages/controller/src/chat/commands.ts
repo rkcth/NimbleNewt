@@ -10,7 +10,7 @@ export interface ChatOp {
   readonly verb: string;
   /** `apply`: at once. `propose`: always a proposal. `profile`: an explicit owner order applies directly in the derived and autonomous profiles and is a proposal in the strict one (or when read failed). */
   readonly mode: "apply" | "propose" | "profile";
-  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "grant" | "decision";
+  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "grant" | "decision" | "notifications";
   /** The project the command is about is needed, and comes from the conversation's focus when the owner does not name it. */
   readonly needsProject?: boolean;
   /** The command hands a task to someone: it carries an explicit project and repository (checkout) and is always a proposal. */
@@ -65,6 +65,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "watch.create": { verb: "Watch events for task", mode: "profile", needsProject: true },
   // The owner's exception for a paused, suspended or stopped agent to attend one meeting (card M04f): it widens who may be in the room, so an explicit order applies directly only where the profile lets rights widen, and is shown first in the strict one.
   "meeting.invite-direct": { verb: "Let an agent attend a meeting", mode: "profile", needsProject: true },
+  // How notifications reach the owner (card U11b): digest times, quiet hours, the hours before an unanswered item is escalated, and the channel. It only changes how the owner is told, can be set back by saying so, and applies from the next notification, so an explicit order applies at once. The settings revision is read, not quoted.
+  "notifications.configure": { verb: "Change how notifications reach you", mode: "apply", revision: "notifications" },
 };
 
 /** Names the owner may use in place of an ID; each is resolved from records and an unclear match asks. */

@@ -894,6 +894,11 @@ export class ChatService {
         const item = typeof args["grantId"] === "string" ? await this.#get(token, "grant.get", { grantId: args["grantId"] }) : undefined;
         return item === undefined ? refuse("not_found", "no such grant") : { ok: true, name: "expectedRevision", value: item["revision"] as number };
       }
+      case "notifications": {
+        // Settings never made have no revision to expect (the operation takes that as 0).
+        const item = await this.#get(token, "notifications.settings", {});
+        return item === undefined || typeof item["revision"] !== "number" ? { ok: true } : { ok: true, name: "expectedRevision", value: item["revision"] + ahead("notifications") };
+      }
       case "contract": {
         const item = typeof args["taskId"] === "string" ? await this.#get(token, "contract.get", { taskId: args["taskId"] }) : undefined;
         return item === undefined ? refuse("not_found", "no such task") : { ok: true, name: "expectedVersion", value: (item["version"] as number) + ahead(`contract:${args["taskId"] as string}`) };
@@ -1424,6 +1429,7 @@ function recordOf(step: ChatStep): string | undefined {
     case "contract.set": return `contract:${a["taskId"] as string}`;
     case "decision.record": return `decision:${a["projectId"] as string}:${normalTopic(String(a["topic"] ?? ""))}:${typeof a["taskId"] === "string" ? a["taskId"] : "*"}`;
     case "agenda.correct": return `agenda:${a["itemId"] as string}`;
+    case "notifications.configure": return "notifications";
     default: return undefined;
   }
 }
