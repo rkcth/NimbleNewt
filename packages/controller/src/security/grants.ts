@@ -152,6 +152,8 @@ export const AGREED_GRANTABLE_ACTIONS: readonly string[] = [
   "task.read", "task.create", "assignment.read", "attempt.work", "artifact.publish", "artifact.read", "desk.write", "desk.read", "history.append", "history.read",
   "review.request", "wait.manage", "blocker.manage", "conversation.send", "conversation.receive", "message.send", "job.read", "meeting.agenda", "meeting.read", "resource.read", "budget.read", "responsibility.read", "notes.chair.read",
 ];
+/** Granted by a decision only for exactly one task (a `resource` of kind task): the grant then covers that task and no other. A project-wide request for these stays refused. */
+export const AGREED_GRANTABLE_ON_ONE_TASK: readonly string[] = ["task.update", "task.transition"];
 /** The longest an agreed (meeting-decided) grant may last. Provisional; the owner may change it. */
 export const AGREED_GRANT_MAX_MS = 30 * 24 * 3600 * 1000;
 const KIND = /^[a-z][a-z0-9-]{0,39}$/;
@@ -237,7 +239,17 @@ export class GrantService {
     // Only one exact, named action: never `*`, a prefix like `task.*`, or an approval grant (waiving a question stays the owner's, as in `derive`). A decision may not hand out the power to carry out more decisions.
     const action = command.action;
     if (typeof action !== "string") invalid("action", "must be an action name");
-    if (!AGREED_GRANTABLE_ACTIONS.includes(action)) invalid("action", `${action} cannot be granted by a decision: it needs the owner (a decision may grant only ordinary working actions)`);
+    const resource = checkResource(command.resource);
+    if (resource !== undefined && resource.kind !== "task") invalid("resource", "an agreed grant may be narrowed to one task and nothing else");
+    if (resource !== undefined && typeof command.commandId === "string") {
+      // The named task must be a task of the grant's project: a grant for one project naming another project's task would be inert, but the service should not depend on the applier to say so.
+      const task = await this.#runner.get("task", resource.id).catch(() => undefined);
+      if (task === undefined || (task.body as { projectId?: unknown }).projectId !== command.project) invalid("resource", "must be a task of the grant's project");
+    }
+    if (AGREED_GRANTABLE_ON_ONE_TASK.includes(action)) {
+      if (resource === undefined) invalid("action", `${action} can be granted by a decision only for one task: name the task as the resource`);
+    } else if (resource !== undefined && !AGREED_GRANTABLE_ACTIONS.includes(action)) invalid("action", `${action} cannot be granted by a decision`);
+    if (!AGREED_GRANTABLE_ACTIONS.includes(action) && !AGREED_GRANTABLE_ON_ONE_TASK.includes(action)) invalid("action", `${action} cannot be granted by a decision: it needs the owner (a decision may grant only ordinary working actions)`);
     // A replay of a grant that was already made returns that result first: the time and standing checks below depend on the clock and could fail it after a crash.
     let made = false;
     if (typeof command.commandId === "string") {

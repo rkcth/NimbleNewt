@@ -1086,3 +1086,21 @@ test("a grant decided in a meeting widens rights, is for the target project, one
   await assert.rejects(() => applier.apply({ ...base, target: { kind: "task", id: "t" }, patch: { grantee: "agent:ann", action: "task.read", expiresAt: "2026-10-21T08:00:00Z" }, agreedBy: "owner:agreed" }), (e: unknown) => e instanceof DomainError);
   assert.equal(calls.length, 1, "nothing refused reached the grants");
 });
+
+test("a grant decided in a meeting may name one task of the project, which becomes the grant's resource, and nothing else (card M02e)", async () => {
+  const calls: Record<string, unknown>[] = [];
+  const controller = { id: "service:meeting-records", kind: "service", name: "meeting-records", grants: [] } as never;
+  const tasks: Record<string, string> = { "task-a": "proj-a", "task-b": "proj-b" };
+  const applier = grantApplier({ grantAgreed: async (_by: unknown, command: Record<string, unknown>) => { calls.push(command); } } as never, controller, { getTask: async (id: string) => (tasks[id] === undefined ? undefined : { projectId: tasks[id] }) } as never);
+  const base = { commandId: "mtg:d1:c1", actor: "agent:x", target: { kind: "project", id: "proj-a" }, expectedRevision: 1 };
+  const patch = { grantee: "agent:ann", action: "task.update", expiresAt: "2026-10-21T08:00:00Z" };
+  await applier.apply({ ...base, patch: { ...patch, taskId: "task-a" }, agreedBy: "owner:agreed" });
+  await applier.apply({ ...base, commandId: "mtg:d1:c2", patch, agreedBy: "owner:agreed" });
+  assert.deepEqual(calls.map((c) => c["resource"]), [{ kind: "task", id: "task-a" }, undefined]);
+  for (const bad of [{ taskId: "task-b" }, { taskId: "task-zzz" }, { taskId: 5 }, { taskId: "" }, { taskId: "task-a", resource: { kind: "project", id: "proj-a" } }]) {
+    await assert.rejects(() => applier.apply({ ...base, patch: { ...patch, ...bad } as never, agreedBy: "owner:agreed" }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
+  }
+  const noProjects = grantApplier({ grantAgreed: async () => { calls.push({}); } } as never, controller);
+  await assert.rejects(() => noProjects.apply({ ...base, patch: { ...patch, taskId: "task-a" }, agreedBy: "owner:agreed" }), (e: unknown) => e instanceof DomainError);
+  assert.equal(calls.length, 2, "nothing refused reached the grants");
+});

@@ -101,6 +101,24 @@ for (const backend of backends) {
     void b;
   });
 
+  suite("an agreed grant of task.update or task.transition is allowed only for exactly one task and covers only that task (card M02e)", async ({ grants, a, ta, ta2, agent, at }) => {
+    const ann = await agent("ann");
+    const controller = { id: "service:meeting-records", kind: "service", name: "meeting-records", grants: [] } as unknown as Principal;
+    const base = { grantee: "agent:ann", project: a, expiresAt: SOON, basis: "to edit one task", decisionId: "mtg:dec-1:chg-1", agreedBy: "owner:agreed" };
+    for (const action of ["task.update", "task.transition"]) {
+      await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), action }), (e) => assert.equal(e.field, "action"));
+      await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), action, resource: { kind: "project", id: a } }), (e) => assert.equal(e.field, "resource"));
+      await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), action, resource: { kind: "task", id: ta, extra: 1 } } as never));
+    }
+    await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), action: "principal.manage", resource: { kind: "task", id: ta } }), (e) => assert.equal(e.field, "action"));
+    await grants.grantAgreed(controller, { ...base, commandId: cid("ag"), action: "task.update", resource: { kind: "task", id: ta } });
+    const now = await at(ann, T);
+    assert.equal(allows(now, "task.update", a, { now: T, resource: { kind: "task", id: ta } }), true);
+    assert.equal(allows(now, "task.update", a, { now: T, resource: { kind: "task", id: ta2 } }), false, "not the neighbour task");
+    assert.equal(allows(now, "task.update", a, { now: T }), false, "not without naming a task");
+    assert.equal(allows(now, "task.transition", a, { now: T, resource: { kind: "task", id: ta } }), false, "only the action granted");
+  });
+
   suite("a malformed timestamp is refused on every grant path", async ({ grants, owner, a, agent }) => {
     await agent("ann");
     const parent = await give(grants, owner, "agent:ann", "task.read", a, { expiresAt: SOON });

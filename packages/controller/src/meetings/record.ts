@@ -86,18 +86,25 @@ export function taskUpdateApplier(projects: ProjectService): ChangeApplier {
  * owner's agreement or where the owner set the access-change cell by hand (a specific setting overrides the profile; the engine otherwise keeps a change of rights a decision for the owner). The carrying agent must
  * hold `principal.manage`. The grant is direct, for this project only, and ends.
  */
-export function grantApplier(grants: Pick<GrantService, "grantAgreed">, controller: Principal): ChangeApplier {
+export function grantApplier(grants: Pick<GrantService, "grantAgreed">, controller: Principal, projects?: Pick<ProjectService, "getTask">): ChangeApplier {
   return {
     action: "principal.manage",
     widens: "access-change",
     async project(target) { return target.kind === "project" ? target.id : undefined; },
     async apply(change) {
-      const patch = change.patch as { grantee?: unknown; action?: unknown; expiresAt?: unknown; basis?: unknown };
+      const patch = change.patch as { grantee?: unknown; action?: unknown; expiresAt?: unknown; basis?: unknown; taskId?: unknown };
       const bad = (why: string): never => { throw new DomainError("invalid_command", `a grant names ${why}`); };
-      if (Object.keys(patch).some((k) => !["grantee", "action", "expiresAt", "basis"].includes(k))) bad("grantee, action, expiresAt and basis and nothing else");
+      if (Object.keys(patch).some((k) => !["grantee", "action", "expiresAt", "basis", "taskId"].includes(k))) bad("grantee, action, expiresAt, basis and optionally one taskId and nothing else");
       if (change.target.kind !== "project") bad("the project it is for as its target");
       if (typeof patch.grantee !== "string" || typeof patch.action !== "string" || typeof patch.expiresAt !== "string") bad("an agent, one action and an end time");
-      await grants.grantAgreed(controller, { commandId: change.commandId, grantee: patch.grantee as string, action: patch.action as string, project: change.target.id, expiresAt: patch.expiresAt as string, basis: typeof patch.basis === "string" && patch.basis.length > 0 ? patch.basis : "agreed in a meeting", decisionId: change.commandId, agreedBy: change.agreedBy });
+      let resource: { kind: string; id: string } | undefined;
+      if (patch.taskId !== undefined) {
+        if (typeof patch.taskId !== "string" || patch.taskId.length === 0 || projects === undefined) bad("a task of the project as its taskId");
+        const task = await projects!.getTask(patch.taskId as string);
+        if (task === undefined || task.projectId !== change.target.id) bad("a task of the project as its taskId");
+        resource = { kind: "task", id: patch.taskId as string };
+      }
+      await grants.grantAgreed(controller, { commandId: change.commandId, grantee: patch.grantee as string, action: patch.action as string, project: change.target.id, ...(resource === undefined ? {} : { resource }), expiresAt: patch.expiresAt as string, basis: typeof patch.basis === "string" && patch.basis.length > 0 ? patch.basis : "agreed in a meeting", decisionId: change.commandId, agreedBy: change.agreedBy });
       return {};
     },
   };
