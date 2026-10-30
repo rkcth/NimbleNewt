@@ -1,1 +1,1 @@
-export { KIND_ROLES, SUBMISSION_KINDS, SubmissionService, type CheckResult, type Evidence, type RecordSubmission, type RolesOf, type SubmissionBody, type SubmissionKind } from "./submissions.js";
+export { KIND_ROLES, SUBMISSION_KINDS, SubmissionService, type CheckResult, type Evidence, type RecordSubmission, attemptOfAssignments, type AttemptOf, type RolesOf, type SubmissionOptions, type SubmissionBody, type SubmissionKind } from "./submissions.js";

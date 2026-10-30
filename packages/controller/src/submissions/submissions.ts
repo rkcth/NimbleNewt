@@ -1,6 +1,7 @@
 import { DomainError } from "../domain/errors.js";
+import type { AssignmentService } from "../domain/assignments.js";
 import { derivedId } from "../domain/ids.js";
-import { taskId as checkTaskId, type TaskBody } from "../domain/model.js";
+import { artifactId as checkArtifactId, commandId as checkCommandId, taskId as checkTaskId, text, type TaskBody } from "../domain/model.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import { allows, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
@@ -50,7 +51,29 @@ export interface SubmissionBody {
   readonly evidence: readonly Evidence[];
 }
 
-export type RolesOf = (principalId: string) => Promise<readonly string[]>;
+/** The roles a principal holds in one project, and for one task of it: roles are not global (an agent that is director in project X is not director in Y). */
+export type RolesOf = (principalId: string, scope: { readonly projectId: string; readonly taskId: string }) => Promise<readonly string[]>;
+
+/** The task's current attempt, when it has one: who owns it (a principal ID) and its state. Only an active attempt, or one that has just succeeded (the attempt is ending with this submission), may submit code. */
+export type AttemptOf = (taskId: string) => Promise<{ readonly ownerId: string; readonly state: string } | undefined>;
+
+/** The attempt port over the assignment service: the task's active attempt, owned by the agent principal `agent:<id>`-style owner ID the assignment names. */
+export const attemptOfAssignments = (assignments: AssignmentService): AttemptOf => async (taskId) => {
+  const asg = await assignments.getAssignment(taskId);
+  if (asg === undefined || asg.activeAttemptId === undefined) return undefined;
+  const attempt = await assignments.getAttempt(asg.activeAttemptId);
+  return attempt === undefined ? undefined : { ownerId: attempt.owner.id, state: attempt.state };
+};
+
+export interface SubmissionOptions extends RunnerOptions {
+  /** When given, a code submission must come from the owner of the task's current attempt. */
+  readonly attemptOf?: AttemptOf;
+  /**
+   * PROVISIONAL POLICY (owner question): a review or qa report on a submission made by the same principal is refused by default. A one-agent project, which has no second agent to review, may set this to accept it.
+   * A sign-off on one's own work is always refused.
+   */
+  readonly allowSelfReview?: boolean;
+}
 
 export interface RecordSubmission {
   readonly taskId: string;
@@ -93,10 +116,12 @@ const bad = (field: string, message: string): never => { throw new DomainError("
 export class SubmissionService {
   readonly #runner: CommandRunner;
   readonly #roles: RolesOf;
-  private constructor(runner: CommandRunner, roles: RolesOf) { this.#runner = runner; this.#roles = roles; }
+  readonly #attemptOf: AttemptOf | undefined;
+  readonly #allowSelfReview: boolean;
+  private constructor(runner: CommandRunner, roles: RolesOf, options: SubmissionOptions) { this.#runner = runner; this.#roles = roles; this.#attemptOf = options.attemptOf; this.#allowSelfReview = options.allowSelfReview === true; }
 
-  static withEpoch(storage: ControllerStorage, epoch: number, roles: RolesOf, options: RunnerOptions = {}): SubmissionService {
-    return new SubmissionService(new CommandRunner(storage, epoch, options), roles);
+  static withEpoch(storage: ControllerStorage, epoch: number, roles: RolesOf, options: SubmissionOptions = {}): SubmissionService {
+    return new SubmissionService(new CommandRunner(storage, epoch, options), roles, options);
   }
 
   async record(by: Principal, command: NoActor & RecordSubmission): Promise<{ id: string; revision: number }> {
@@ -104,22 +129,29 @@ export class SubmissionService {
     if (command === null || typeof command !== "object") throw new DomainError("invalid_command", "a command is an object");
     const unknown = Object.keys(command).filter((k) => !(FIELDS as readonly string[]).includes(k));
     if (unknown.length > 0) bad(unknown[0]!, "is not a field of this command");
+    const commandId = checkCommandId(command.commandId);
     const kind = command.kind;
     if (!SUBMISSION_KINDS.includes(kind)) bad("kind", `must be one of ${SUBMISSION_KINDS.join(", ")}`);
     const taskId = checkTaskId(command.taskId);
     const role = command.role;
     if (typeof role !== "string" || role === "") bad("role", "name the role you submit in");
+    text(role, "role", { min: 1, max: 40 });
     // A non-code kind makes no commit: it may not carry what only a code submission has.
     for (const key of Object.keys(command)) {
       if (["commandId", "taskId", "kind", "role", "evidence"].includes(key) || (command as unknown as Record<string, unknown>)[key] === undefined) continue;
       if (!ALLOWED[kind].includes(key)) bad(key, kind === "code" ? `a code submission does not carry ${key}` : `a ${kind} submission makes no commit and carries no ${key}`);
     }
     if (!KIND_ROLES[kind].includes(role)) throw new DomainError("forbidden", `the role ${role} may not submit a ${kind} submission (only ${KIND_ROLES[kind].join(", ")})`);
-    if (!(await this.#roles(by.id)).includes(role)) throw new DomainError("forbidden", `${by.id} does not hold the role ${role}`);
     const task = (await this.#runner.get("task", taskId))?.body as unknown as TaskBody | undefined;
     const hidden = (): never => { throw new DomainError("not_found", "no such task"); };
     if (task === undefined) return hidden();
     if ((by.taskScope !== undefined && (!inTaskScope(by, task.projectId) || by.taskScope.taskId !== taskId)) || !allows(by, "task.read", task.projectId, { resource: { kind: "task", id: taskId } })) return hidden();
+
+    if (!(await this.#roles(by.id, { projectId: task.projectId, taskId })).includes(role)) throw new DomainError("forbidden", `${by.id} does not hold the role ${role} in this project`);
+    if (kind === "code" && this.#attemptOf !== undefined) {
+      const attempt = await this.#attemptOf(taskId);
+      if (attempt === undefined || attempt.ownerId !== by.id || (attempt.state !== "active" && attempt.state !== "succeeded")) throw new DomainError("forbidden", "a code submission must come from the agent that owns the task's current attempt");
+    }
 
     const evidence = this.#evidence(command.evidence);
     const subject = command.subject === undefined ? undefined : await this.#subject(command.subject, taskId);
@@ -128,9 +160,9 @@ export class SubmissionService {
     const bound = fields.tree ?? fields.artifactDigest;
     for (const e of evidence) if (e.boundTo !== bound) throw new DomainError("invalid_command", `evidence: ${e.check} is bound to ${e.boundTo}, not to the submitted ${fields.artifactDigest === undefined ? "tree" : "artifact"} ${String(bound)}`, { field: "evidence" });
 
-    const id = derivedId("sbm", scopedCommandId(by.id, command.commandId));
+    const id = derivedId("sbm", scopedCommandId(by.id, commandId));
     const body: SubmissionBody = { taskId, projectId: task.projectId, kind, role, submittedBy: by.id, submittedAt: this.#runner.now(), makesCommit: false, ...fields, evidence };
-    const result = await this.#runner.command("submission.record", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
+    const result = await this.#runner.command("submission.record", { commandId: scopedCommandId(by.id, commandId), actor: by.id }, async () => ({
       payload: { ...(body as unknown as JsonObject), submittedAt: null },
       build: async () => {
         const ref = { kind: "submission", id };
@@ -142,7 +174,7 @@ export class SubmissionService {
 
   /** One submission, readable by the owner and by the agent that made it. */
   async get(by: Principal, id: string): Promise<(SubmissionBody & { id: string; revision: number }) | undefined> {
-    if (typeof id !== "string" || !ID.test(id)) bad("id", "is not a submission ID");
+    if (typeof id !== "string" || id.length > 40 || !ID.test(id)) bad("id", "is not a submission ID");
     const found = await this.#runner.get("submission", id);
     if (found === undefined) return undefined;
     const body = found.body as unknown as SubmissionBody;
@@ -158,12 +190,18 @@ export class SubmissionService {
     return { ...body, id };
   }
 
+  /** A reviewer or QA agent may not judge work its own principal submitted (card Q01b); a one-agent project may opt in with `allowSelfReview`. */
+  #notOwn(by: Principal, subject: SubmissionBody): void {
+    if (subject.submittedBy === by.id && !this.#allowSelfReview) throw new DomainError("forbidden", "a review or qa report cannot be given on the reviewer's own submission");
+  }
+
   #evidence(raw: unknown): Evidence[] {
     if (raw === undefined) return [];
     if (!Array.isArray(raw) || raw.length > MAX_EVIDENCE) return bad("evidence", `must be a list of at most ${MAX_EVIDENCE} checks`);
     return raw.map((e: unknown) => {
       const o = e as Record<string, unknown> | null;
-      if (o === null || typeof o !== "object" || typeof o.check !== "string" || o.check === "" || o.check.length > 120) return bad("evidence", "each item names its check");
+      if (o === null || typeof o !== "object" || typeof o.check !== "string") return bad("evidence", "each item names its check");
+      text(o.check, "evidence.check", { min: 1, max: 120 });
       if (!["pass", "fail", "not_run"].includes(o.result as string)) return bad("evidence", `${o.check}: result must be pass, fail or not_run`);
       if (typeof o.boundTo !== "string" || !(OID.test(o.boundTo) || DIGEST.test(o.boundTo))) return bad("evidence", `${o.check}: boundTo must be a tree or an artifact digest`);
       return { check: o.check, result: o.result as CheckResult, boundTo: o.boundTo };
@@ -173,17 +211,17 @@ export class SubmissionService {
   #fields(by: Principal, kind: SubmissionKind, c: RecordSubmission, subject: (SubmissionBody & { id: string }) | undefined): Partial<SubmissionBody> {
     const need = (name: string, ok: boolean, why: string): void => { if (!ok) bad(name, why); };
     if (kind === "code") {
-      need("base", typeof c.base === "string" && OID.test(c.base), "name the base commit it was made on");
-      need("tree", typeof c.tree === "string" && OID.test(c.tree), "name the tree submitted");
-      need("patchId", typeof c.patchId === "string" && /^[0-9a-f]{40,64}$/.test(c.patchId), "name the patch-id");
+      need("base", typeof c.base === "string" && c.base.length <= 64 && OID.test(c.base), "name the base commit it was made on");
+      need("tree", typeof c.tree === "string" && c.tree.length <= 64 && OID.test(c.tree), "name the tree submitted");
+      need("patchId", typeof c.patchId === "string" && c.patchId.length <= 64 && /^[0-9a-f]{40,64}$/.test(c.patchId), "name the patch-id");
       need("refreshRound", c.refreshRound === undefined || (Number.isSafeInteger(c.refreshRound) && c.refreshRound >= 0 && c.refreshRound <= 1000), "must be a whole number from 0");
       return { base: c.base!, tree: c.tree!, patchId: c.patchId!, refreshRound: c.refreshRound ?? 0 };
     }
     if (kind === "document") {
-      need("artifactDigest", typeof c.artifactDigest === "string" && DIGEST.test(c.artifactDigest), "name the document artifact's digest");
-      need("artifactId", c.artifactId === undefined || (typeof c.artifactId === "string" && /^art-[a-z2-7]{20}$/.test(c.artifactId)), "is not an artifact ID");
+      need("artifactDigest", typeof c.artifactDigest === "string" && c.artifactDigest.length <= 80 && DIGEST.test(c.artifactDigest), "name the document artifact's digest");
+      if (c.artifactId !== undefined) checkArtifactId(c.artifactId);
       need("report", c.report === undefined || (typeof c.report === "string" && c.report.length <= MAX_REPORT), `at most ${MAX_REPORT} characters`);
-      return { artifactDigest: c.artifactDigest!, ...(c.artifactId === undefined ? {} : { artifactId: c.artifactId }), ...(c.report === undefined ? {} : { report: c.report }) };
+      return { artifactDigest: c.artifactDigest!, ...(c.artifactId === undefined ? {} : { artifactId: c.artifactId }), ...(c.report === undefined ? {} : { report: redactText(c.report) }) };
     }
     need("subject", subject !== undefined, "name the submission it is about");
     const s = subject!;
@@ -191,11 +229,13 @@ export class SubmissionService {
     const bound = { subject: s.id, ...(s.tree === undefined ? {} : { tree: s.tree, patchId: s.patchId! }), ...(s.artifactDigest === undefined ? {} : { artifactDigest: s.artifactDigest }) };
     if (kind === "review") {
       need("verdict", ["approve", "changes", "reject"].includes(c.verdict as string), "must be approve, changes or reject");
+      this.#notOwn(by, s);
       return { ...bound, verdict: c.verdict as "approve" | "changes" | "reject" };
     }
     if (kind === "qa") {
       need("report", typeof c.report === "string" && c.report !== "" && c.report.length <= MAX_REPORT, `a report of at most ${MAX_REPORT} characters`);
-      return { ...bound, report: c.report! };
+      this.#notOwn(by, s);
+      return { ...bound, report: redactText(c.report!) };
     }
     need("decision", ["approve", "decline"].includes(c.decision as string), "must be approve or decline");
     // A sign-off is the project's check on the work, so the director cannot give it on work they submitted themselves.

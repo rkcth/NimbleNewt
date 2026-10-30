@@ -402,6 +402,15 @@ export class AgentService {
     return body === undefined || (body as { state?: string }).state !== "active" ? [] : body.roles;
   }
 
+  /**
+   * The roles the agent holds in one project (card Q01b): its roles, but only where it has a live grant in that project (or in every project). `by` is the agent's effective principal, so a role held in project X
+   * is not a role in project Y. Nothing for a principal that is not this agent's own.
+   */
+  async rolesOfPrincipalIn(by: Principal, projectId: string, now: string): Promise<readonly string[]> {
+    const covered = by.grants.some((g) => (g.project === projectId || g.project === "*") && (g.expiresAt === undefined || g.expiresAt > now) && !g.action.startsWith("tool."));
+    return covered ? this.rolesOfPrincipal(by.id) : [];
+  }
+
   /** One agent. The owner, a manager or reader, and the agent itself may ask; anyone else gets the answer a missing agent would get. */
   async get(by: Principal, id: string): Promise<View<AgentBody> | undefined> {
     const found = await this.#runner.get("agent", agentId(id));

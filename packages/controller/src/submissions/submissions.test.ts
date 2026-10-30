@@ -4,7 +4,7 @@ import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
-import { SubmissionService } from "./index.js";
+import { SubmissionService, type SubmissionOptions } from "./index.js";
 
 after(stopServer);
 
@@ -16,10 +16,11 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, match
 };
 const T1 = "a".repeat(40), T2 = "b".repeat(40), BASE = "c".repeat(40), PATCH = "d".repeat(40);
 const DIGEST = `sha256:${"e".repeat(64)}`;
+const OWN = /^agent:/;
 const pass = (boundTo: string) => [{ check: "tests", result: "pass" as const, boundTo }];
 
 for (const backend of backends) {
-  const suite = (name: string, body: (c: { svc: SubmissionService; roles: Map<string, string[]>; agent(name: string, roles: string[]): Promise<Principal>; owner: Principal; task: string }) => Promise<void>) =>
+  const suite = (name: string, body: (c: { open(roles: (id: string, scope: { projectId: string; taskId: string }) => Promise<readonly string[]>, extra?: SubmissionOptions): SubmissionService; other: { task: string }; rawBody(id: string): Promise<unknown>; svc: SubmissionService; roles: Map<string, string[]>; agent(name: string, roles: string[]): Promise<Principal>; owner: Principal; task: string }) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
       const world = await backend.open();
       try {
@@ -28,15 +29,17 @@ for (const backend of backends) {
         const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
         const project = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "P" })).id;
         const task = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "T" })).id;
+        const project2 = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "Q" })).id;
+        const task2 = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project2, title: "T2" })).id;
         const roles = new Map<string, string[]>();
         const agent = async (nm: string, held: string[]): Promise<Principal> => {
-          await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: nm, grants: [{ action: "task.read", project }] });
+          await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: nm, grants: [{ action: "task.read", project }, { action: "task.read", project: project2 }] });
           const p = await principals.authenticate((await principals.issueCredential(owner, `agent:${nm}`)).token);
           roles.set(p.id, held);
           return p;
         };
         const svc = SubmissionService.withEpoch(world.storage, projects.epoch, async (id) => roles.get(id) ?? [], options);
-        await body({ svc, roles, agent, owner, task });
+        await body({ svc, roles, agent, owner, task, other: { task: task2 }, rawBody: async (id) => (await world.storage.getAggregate({ kind: "submission", id }))?.body, open: (r, extra = {}) => SubmissionService.withEpoch(world.storage, projects.epoch, r, { ...options, ...extra }) });
       } finally { await world.close(); }
     });
 
@@ -60,6 +63,7 @@ for (const backend of backends) {
 
   suite("a code submission names base, tree and patch-id; a non-code one makes no commit", async (c) => {
     const ann = await c.agent("ann", ["author", "reviewer", "qa", "docs"]);
+    const bob = await c.agent("bob", ["reviewer"]);
     for (const drop of ["base", "tree", "patchId"]) {
       const full: Record<string, unknown> = { taskId: c.task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH };
       delete full[drop];
@@ -69,24 +73,25 @@ for (const backend of backends) {
     const code = await c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH, refreshRound: 2 });
     assert.equal((await c.svc.get(ann, code.id))?.refreshRound, 2);
     for (const extra of [{ tree: T1 }, { base: BASE }, { patchId: PATCH }]) {
-      await refuses("invalid_command", () => c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "review", role: "reviewer", subject: code.id, verdict: "approve", ...extra }), /makes no commit/);
+      await refuses("invalid_command", () => c.svc.record(bob, { commandId: cid("s"), taskId: c.task, kind: "review", role: "reviewer", subject: code.id, verdict: "approve", ...extra }), /makes no commit/);
       await refuses("invalid_command", () => c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "document", role: "docs", artifactDigest: DIGEST, ...extra }), /makes no commit/);
     }
-    const review = await c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "review", role: "reviewer", subject: code.id, verdict: "changes", evidence: pass(T1) });
-    const stored = await c.svc.get(ann, review.id);
+    const review = await c.svc.record(bob, { commandId: cid("s"), taskId: c.task, kind: "review", role: "reviewer", subject: code.id, verdict: "changes", evidence: pass(T1) });
+    const stored = await c.svc.get(bob, review.id);
     assert.equal(stored?.tree, T1, "the verdict is about the exact tree and patch it was given");
     assert.equal(stored?.patchId, PATCH);
     assert.equal(stored?.makesCommit, false);
-    await refuses("invalid_command", () => c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "review", role: "reviewer", subject: review.id, verdict: "approve" }), /code or document/);
+    await refuses("invalid_command", () => c.svc.record(bob, { commandId: cid("s"), taskId: c.task, kind: "review", role: "reviewer", subject: review.id, verdict: "approve" }), /code or document/);
     await refuses("invalid_command", () => c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "qa", role: "qa", report: "ok" }), /subject/);
   });
 
   suite("evidence for a different tree or artifact version is rejected", async (c) => {
     const ann = await c.agent("ann", ["author", "reviewer", "docs"]);
+    const bob = await c.agent("bob", ["reviewer"]);
     await refuses("invalid_command", () => c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH, evidence: pass(T2) }), /bound to b+, not to the submitted tree/);
     await refuses("invalid_command", () => c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH, evidence: [...pass(T1), ...pass(T2)] }));
     const code = await c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH, evidence: pass(T1) });
-    await refuses("invalid_command", () => c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "review", role: "reviewer", subject: code.id, verdict: "approve", evidence: pass(T2) }), /not to the submitted tree/);
+    await refuses("invalid_command", () => c.svc.record(bob, { commandId: cid("s"), taskId: c.task, kind: "review", role: "reviewer", subject: code.id, verdict: "approve", evidence: pass(T2) }), /not to the submitted tree/);
     await refuses("invalid_command", () => c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "document", role: "docs", artifactDigest: DIGEST, evidence: pass(T1) }), /artifact/);
     await refuses("invalid_command", () => c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "document", role: "docs", artifactDigest: DIGEST, evidence: [{ check: "x", result: "pass", boundTo: "latest" }] }), /boundTo/);
     // not_run is evidence too (it counts as failed at the gate, card P09), but it must still be bound to the exact tree
@@ -117,4 +122,71 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.svc.record(ann, { ...cmd, commandId: cid("s"), bogus: 1 } as never), /bogus/);
     await refuses("not_found", () => c.svc.record(ann, { ...cmd, commandId: cid("s"), taskId: "task-aaaaaaaaaaaaaaaaaaaa" }));
   });
+  suite("a reviewer or qa agent cannot judge its own submission, unless the provisional flag is set", async (c) => {
+    const ann = await c.agent("ann", ["author", "reviewer", "qa"]);
+    const bob = await c.agent("bob", ["reviewer", "qa"]);
+    const mine = await c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH });
+    await refuses("forbidden", () => c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "review", role: "reviewer", subject: mine.id, verdict: "approve" }), /own submission/);
+    await refuses("forbidden", () => c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "qa", role: "qa", subject: mine.id, report: "fine" }), /own submission/);
+    await c.svc.record(bob, { commandId: cid("s"), taskId: c.task, kind: "review", role: "reviewer", subject: mine.id, verdict: "approve" });
+    const lax = c.open(async (id) => c.roles.get(id) ?? [], { allowSelfReview: true });
+    await lax.record(ann, { commandId: cid("s"), taskId: c.task, kind: "review", role: "reviewer", subject: mine.id, verdict: "approve" });
+  });
+
+  suite("roles are looked up for the task's project, so a role in one project is none in another", async (c) => {
+    const ann = await c.agent("ann", []);
+    const seen: string[] = [];
+    const scoped = c.open(async (_id, scope) => { seen.push(`${scope.projectId}/${scope.taskId}`); return scope.taskId === c.task ? ["author"] : []; });
+    const code = { kind: "code" as const, role: "author", base: BASE, tree: T1, patchId: PATCH };
+    await scoped.record(ann, { commandId: cid("s"), taskId: c.task, ...code });
+    await refuses("forbidden", () => scoped.record(ann, { commandId: cid("s"), taskId: c.other.task, ...code }), /in this project/);
+    assert.equal(seen.length, 2);
+    assert.match(seen[0]!, /^proj-[a-z2-7]{20}\/task-/);
+  });
+
+  suite("a code submission must come from the owner of the task's current attempt", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const bob = await c.agent("bob", ["author"]);
+    const code = { kind: "code" as const, role: "author", base: BASE, tree: T1, patchId: PATCH, taskId: c.task };
+    const roles = async (id: string): Promise<readonly string[]> => c.roles.get(id) ?? [];
+    let attempt: { ownerId: string; state: string } | undefined;
+    const gated = c.open(roles, { attemptOf: async () => attempt });
+    await refuses("forbidden", () => gated.record(ann, { commandId: cid("s"), ...code }), /current attempt/);
+    attempt = { ownerId: bob.id, state: "active" };
+    await refuses("forbidden", () => gated.record(ann, { commandId: cid("s"), ...code }), /current attempt/);
+    attempt = { ownerId: ann.id, state: "failed" };
+    await refuses("forbidden", () => gated.record(ann, { commandId: cid("s"), ...code }), /current attempt/);
+    attempt = { ownerId: ann.id, state: "active" };
+    await gated.record(ann, { commandId: cid("s"), ...code });
+    attempt = { ownerId: ann.id, state: "succeeded" };
+    await gated.record(ann, { commandId: cid("s"), ...code, tree: T2 });
+  });
+
+  suite("formats are size-capped and checked: digests, evidence names, role, artifact ID", async (c) => {
+    const ann = await c.agent("ann", ["author", "docs"]);
+    const code = { taskId: c.task, kind: "code" as const, role: "author", base: BASE, tree: T1, patchId: PATCH };
+    await refuses("invalid_command", () => c.svc.record(ann, { commandId: cid("s"), ...code, tree: "a".repeat(5000) }), /tree/);
+    await refuses("invalid_command", () => c.svc.record(ann, { commandId: cid("s"), ...code, patchId: "d".repeat(65) }), /patchId/);
+    await refuses("invalid_command", () => c.svc.record(ann, { commandId: cid("s"), ...code, base: `${"c".repeat(39)}Z` }), /base/);
+    await refuses("invalid_command", () => c.svc.record(ann, { commandId: cid("s"), ...code, evidence: [{ check: "bad\nname", result: "pass", boundTo: T1 }] }), /evidence/);
+    const long = "r".repeat(5000);
+    await assert.rejects(() => c.svc.record(ann, { commandId: cid("s"), ...code, role: long }), (e: unknown) => { assert.ok(e instanceof DomainError); assert.ok(e.message.length < 300, "the echoed role is bounded"); return true; });
+    await refuses("invalid_command", () => c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "document", role: "docs", artifactDigest: DIGEST, artifactId: "art-nope" }), /artifactId/);
+    await refuses("invalid_command", () => c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "document", role: "docs", artifactDigest: `sha256:${"e".repeat(64)}${"e".repeat(5000)}` }), /artifactDigest/);
+  });
+
+  suite("a report is stored redacted, and a missing command ID is an invalid_command", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const bob = await c.agent("bob", ["qa", "docs"]);
+    const code = await c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH });
+    const secret = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
+    const qa = await c.svc.record(bob, { commandId: cid("s"), taskId: c.task, kind: "qa", role: "qa", subject: code.id, report: `token ${secret} leaked` });
+    const doc = await c.svc.record(bob, { commandId: cid("s"), taskId: c.task, kind: "document", role: "docs", artifactDigest: DIGEST, report: `token ${secret}` });
+    for (const id of [qa.id, doc.id]) {
+      const raw = (await c.rawBody(id)) as { report: string };
+      assert.ok(!raw.report.includes(secret), "the stored report holds no secret");
+    }
+    for (const bad of [undefined, "", 7, null]) await refuses("invalid_command", () => c.svc.record(ann, { commandId: bad, taskId: c.task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH } as never), /commandId/);
+  });
+
 }

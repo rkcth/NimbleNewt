@@ -335,4 +335,18 @@ for (const backend of backends) {
     assert.equal((await c.agents.getRole(c.owner, "director"))!.label, undefined);
   });
 
+  suite("an agent's roles count only in the projects it holds a live grant in", async (c) => {
+    await roles(c);
+    const ann = await c.make("Ann", { roles: ["lead"] });
+    const inP = { ...ann.principal, grants: [{ action: "task.read", project: c.project }] };
+    const inOther = { ...ann.principal, grants: [{ action: "task.read", project: "proj-bbbbbbbbbbbbbbbbbbbb" }] };
+    const expired = { ...ann.principal, grants: [{ action: "task.read", project: c.project, expiresAt: "2026-10-01T00:00:00.000Z" }] };
+    const global = { ...ann.principal, grants: [{ action: "task.read", project: "*" }] };
+    const now = "2026-10-21T10:00:00.000Z";
+    assert.deepEqual(await c.agents.rolesOfPrincipalIn(inP, c.project, now), ["lead"]);
+    assert.deepEqual(await c.agents.rolesOfPrincipalIn(inOther, c.project, now), []);
+    assert.deepEqual(await c.agents.rolesOfPrincipalIn(expired, c.project, now), []);
+    assert.deepEqual(await c.agents.rolesOfPrincipalIn(global, c.project, now), ["lead"]);
+  });
+
 }
