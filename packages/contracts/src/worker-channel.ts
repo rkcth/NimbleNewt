@@ -61,7 +61,7 @@ export interface ChannelStart {
   readonly relayBase: string;
   readonly context?: ChannelContext;
   /**
-   * The lease the controller meant for this attempt, as a duration (card H08b): the process counts it from the moment it reads the start, on its own monotonic clock, so a wrong wall clock changes nothing. Without it the process runs no watchdog.
+   * The lease the controller meant for this attempt, as a duration (card H08b): the process counts it from the moment it reads the start, on its own monotonic clock (a wall-clock step of more than 5 seconds is read as a wake and counts as losing the lease). Without it the process runs no watchdog.
    * `graceMs` is how long after work stops the process ends itself if it has not wound down.
    */
   readonly lease?: { readonly leaseMs: number; readonly graceMs: number };
