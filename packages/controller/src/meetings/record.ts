@@ -103,7 +103,7 @@ export function taskReassignApplier(
     async project(target) { return target.kind === "task" ? (await projects.getTask(target.id))?.projectId : undefined; },
     async apply(change) {
       const patch = change.patch as { toAgent?: unknown; from?: unknown; generation?: unknown; revision?: unknown };
-      if (Object.keys(patch).some((k) => !["toAgent", /* split so the import scanner does not read it as an import specifier (see the notes) */ "fro" + "m", "generation", "revision"].includes(k)) || typeof patch.toAgent !== "string" || !AGENT.test(patch.toAgent)) bad("a reassignment names toAgent (agent:<name>), the assignment it observed (from, generation, revision) and nothing else");
+      if (Object.keys(patch).some((k) => !["toAgent", "from", "generation", "revision"].includes(k)) || typeof patch.toAgent !== "string" || !AGENT.test(patch.toAgent)) bad("a reassignment names toAgent (agent:<name>), the assignment it observed (from, generation, revision) and nothing else");
       const toAgent = patch.toAgent as string;
       if (!(patch.from === null || (typeof patch.from === "string" && AGENT.test(patch.from)))) bad("a reassignment names from: the agent that held the task when it was decided, or null when it was released or never assigned");
       if ((patch.generation === undefined) !== (patch.revision === undefined) || (patch.generation !== undefined && (!whole1(patch.generation) || !whole1(patch.revision)))) bad("a reassignment names the observed generation and revision together, as positive whole numbers, or neither (never assigned)");

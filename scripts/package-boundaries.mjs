@@ -40,7 +40,11 @@ const hasSql = (text) => SQL_TEXT.test(text) || (text.match(LITERALS) ?? []).som
 // `(?<![-\w.$])` keeps command-line flags such as "--import" from being read as import statements.
 /** Files that only tests load: they may import devDependencies. */
 const TEST_ONLY = /(?:^|\/)testing\/|\.test\.ts$/;
-const SPECIFIER = /(?:\bfrom\s*|(?<![-\w.$])import\s*\(?\s*|\brequire\s*\(\s*)["']([^"']+)["']/g;
+// `from` must not follow an identifier character, quote, backtick or dot, so the string array ["a", "from", "b"] is not an import;
+// a module specifier has no whitespace or commas.
+const SPECIFIER = /(?:(?<![\w$.'"\x60])from\s*|(?<![-\w.$])import\s*\(?\s*|\brequire\s*\(\s*)["']([^"'\s,]+)["']/g;
+/** Drops whole-line comments only (// lines, and /* ... *\/ blocks that begin a line), so import-like prose is not scanned. Comment markers inside strings are never touched. */
+const stripComments = (text) => text.replace(/^[ \t]*\/\*[\s\S]*?\*\//gm, "").replace(/^[ \t]*\/\/.*$/gm, "");
 /** An exact version, optionally with a pre-release tag (some packages ship their stable builds under one). Ranges never match. */
 const EXACT = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$/;
 
@@ -84,10 +88,11 @@ export function checkBoundaries(packagesDir, allowed = ALLOWED) {
     const srcDir = join(pkgPath, "src");
     if (existsSync(srcDir)) {
       for (const file of sourceFiles(srcDir)) {
-        const text = readFileSync(file, "utf8");
+        const raw = readFileSync(file, "utf8");
+        const text = stripComments(raw);
         const where = relative(packagesDir, file).split(sep).join("/");
         if (!DATABASE_FOLDERS.some((folder) => where.startsWith(folder))) {
-          if (hasSql(text)) errors.push(`${dir}: ${where} contains SQL; only ${DATABASE_FOLDERS.join(" and ")} may`);
+          if (hasSql(raw)) errors.push(`${dir}: ${where} contains SQL; only ${DATABASE_FOLDERS.join(" and ")} may`);
           for (const [, specifier] of text.matchAll(SPECIFIER)) if (DATABASE_DRIVERS.has(specifier) || DATABASE_DRIVERS.has(packageName(specifier))) errors.push(`${dir}: ${where} imports the database driver ${specifier}; only ${DATABASE_FOLDERS.join(" and ")} may`);
         }
         for (const [, specifier] of text.matchAll(SPECIFIER)) {

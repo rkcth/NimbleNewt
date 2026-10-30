@@ -103,6 +103,14 @@ test("a command-line flag such as --import is not mistaken for an import stateme
   assert.ok(real.some((e) => e.includes("left-pad")) && real.some((e) => e.includes("right-pad")), real.join("\n"));
 });
 
+test("a quoted word from, or prose and comments with from \"x\", is not read as an import; real import forms still are", () => {
+  const quiet = fixture((d) => addSource(d, "controller/src/quiet.ts", 'export const keys = ["a", "from", "b"];\n// import x from "comment-pkg"\n/*\n * export * from "block-pkg"\n */\nexport const t = "say from \'x y\', then go";\n'));
+  assert.deepEqual(quiet.filter((e) => /quiet\.ts/.test(e)), []);
+  const forms = ['import x from "p-default";', 'export * from "p-star";', 'const a = await import("p-dyn");', 'const b = require("p-req");', 'import {\n  one,\n  two,\n} from "p-multi";'];
+  const real = fixture((d) => addSource(d, "controller/src/forms.ts", forms.join("\n") + "\n"));
+  for (const name of ["p-default", "p-star", "p-dyn", "p-req", "p-multi"]) assert.ok(real.some((e) => e.includes(name)), `${name}: ${real.join("\n")}`);
+});
+
 test("a devDependency may be imported by test files and testing/ folders but not by production code", () => {
   const allowed = { ...ALLOWED, controller: [...ALLOWED.controller, "test-helper"] };
   const run = (mutate) => {
