@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { DomainError } from "../domain/errors.js";
 import { after, test } from "node:test";
 import { CommandRunner } from "../domain/runner.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
@@ -51,4 +52,13 @@ test("the agenda outcome goes to the chat turn or, for an inquiry, to the agent 
   assert.equal(await sink.deliver({ ...base, to: { kind: "chat-turn", id: "turn-1" } }), false, "a failure leaves it waiting");
   assert.deepEqual(turns, ["turn-1|ago:item:2", "turn-gone|ago:item:2"]);
   assert.deepEqual(notices, [{ taskId: "task-1", to: "agent:ann", commandId: "ago:item:2" }]);
+});
+
+test("an outcome for an inquiry whose asker can never be told is closed, not retried for ever; a passing failure stays waiting (card M03f)", async () => {
+  let error: Error = new DomainError("forbidden", "not an agent");
+  const sink = agendaOutcomeSink({ followUp: async () => true, inquiry: async () => ({ asker: "owner:rob", taskId: "task-1" }), messages: { noticeFromController: async () => { throw error; } } });
+  const n = { key: "item:2", kind: "agenda-outcome" as const, projectId: "prj-1", text: "decided", refs: [], to: { kind: "inquiry" as const, id: "inq-1" } };
+  assert.equal(await sink.deliver(n), true);
+  error = new Error("storage down");
+  assert.equal(await sink.deliver(n), false);
 });

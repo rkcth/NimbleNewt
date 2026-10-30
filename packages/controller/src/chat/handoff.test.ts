@@ -53,3 +53,37 @@ for (const backend of backends) {
     } finally { await w.close(); }
   });
 }
+
+for (const backend of backends) {
+  test(`${backend.name}: a return time or accepting gaps is always shown first, and completing or cancelling needs the owner's words for the move (card L03f)`, async () => {
+    const script: Record<string, unknown> = {};
+    const calls: string[] = [];
+    const stub = {
+      prepare: async () => { calls.push("prepare"); return { id: "hnd-1", phase: "ready", revision: 1 }; },
+      complete: async () => { calls.push("complete"); return { id: "hnd-1", phase: "transferred", revision: 2 }; },
+      cancel: async () => { calls.push("cancel"); return { id: "hnd-1", phase: "cancelled", revision: 2 }; },
+      takeover: async () => { throw new Error("no"); }, choose: async () => { throw new Error("no"); }, advance: async () => { throw new Error("no"); },
+      sweep: async () => ({ advanced: [], failed: [] }), get: async () => undefined,
+      forTask: async () => ({ id: "hnd-1", revision: 1, body: {} }),
+    };
+    const w = await openWorld(backend, script, undefined, { handoffs: stub as never });
+    try {
+      const a = await w.project("A");
+      await w.task(a, "Build the login");
+      await w.agents.create(w.owner, { commandId: cid("ag"), friendlyName: "Ann" });
+      const chat = w.chat();
+      await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+      w.profile.value = "autonomous";
+      const say = async (text: string): Promise<Outcome> => { const o = (await chat.submit(w.ownerToken, { messageId: cid("m"), text })).outcomes; assert.equal(o.length, 1); return o[0]!; };
+      script["Hand Build the login to Ann."] = [cmd("handoff.prepare", { taskTitle: "Build the login", toAgentName: "Ann", returnAt: "2026-11-02T00:00:00.000Z" }, "Hand Build the login to Ann")];
+      assert.equal((await say("Hand Build the login to Ann.")).status, "proposed", "a return time the owner never said is not applied");
+      script["Complete the Build the login hand-off, gaps and all."] = [cmd("handoff.complete", { taskTitle: "Build the login", acceptGaps: true }, "Complete the Build the login hand-off")];
+      assert.equal((await say("Complete the Build the login hand-off, gaps and all.")).status, "proposed", "accepting gaps is shown first");
+      script["What about the Build the login hand-off."] = [cmd("handoff.complete", { taskTitle: "Build the login" }, "What about the Build the login hand-off")];
+      assert.equal((await say("What about the Build the login hand-off.")).status, "proposed", "no word for the move: shown first");
+      script["Cancel the Build the login hand-off."] = [cmd("handoff.cancel", { taskTitle: "Build the login" }, "Cancel the Build the login hand-off")];
+      assert.equal((await say("Cancel the Build the login hand-off.")).status, "applied");
+      assert.deepEqual(calls, ["cancel"]);
+    } finally { await w.close(); }
+  });
+}

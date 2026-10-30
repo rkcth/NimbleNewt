@@ -2631,3 +2631,11 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - `StatusService` view `activity` (`{ kind: "activity", taskId, latest?, after?, limit? }`): a task's recorded steps in plain lines, in order from `after` (default the start, 20 at a time, at most 50) or, with `latest`, the last few (reads up to 1000 steps back). Each line gives the step number, time, actor, kind and summary (an agent's words, shown as such) and how many corrections it has; a step in an unavailable range says so; more steps add a line naming where to continue. Only summaries are shown; stored content (the part that needs a history right) is never quoted. A task the caller may not read reads as missing; without an activity source the view is not offered.
 - In chat the task is named by its title in the project in focus (`taskTitle`); no match or several matches are refused with the reason.
 - Not built yet (remains in C09h): artifact steps for local workers, the per-task explanation index.
+
+### Batch 8 review fixes
+
+- A return time (`returnAt`) on a hand-off, and `acceptGaps` on completing one, are authority fields: shown first in every profile. Completing a hand-off needs a word for the move naming the task in the owner's own sentence (as a transfer does); cancelling likewise.
+- The questions the chat asks to tell two records apart (owner questions, meetings, watched tasks) now carry their answers, and the name the model gave is dropped when one is chosen, so the choice can be carried on. An ID given directly is checked against the waiting questions, the project's planned meetings, or the project's tasks.
+- An answer to an owner's question with no word naming the question is shown first, with the question it would answer; asker IDs are no longer matched as words.
+- A stand-up outcome for an inquiry whose asker can never be told (not an agent, retired, not allowed to read the task) is closed instead of retried for ever.
+- Known, not fixed: the activity view with `latest` reads forward from the start (up to 1000 steps) and does not say when it cut off at that limit; its lines cite the task only.

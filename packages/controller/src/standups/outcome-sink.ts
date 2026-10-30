@@ -1,3 +1,4 @@
+import { DomainError } from "../domain/errors.js";
 import type { OutcomeSink } from "./shared.js";
 
 /**
@@ -35,7 +36,10 @@ export function agendaOutcomeSink(deps: {
           await deps.messages.noticeFromController({ commandId: `ago:${n.key}`, taskId: q.taskId, to: q.asker, purpose: "The stand-up discussed your question", text: n.text });
           return true;
         }
-      } catch { return false; }
+      } catch (error) {
+        // An asker that cannot be told at all (not an agent, retired, or not allowed to read the task) will never be told: leaving it waiting would only retry it for ever.
+        return error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found" || error.code === "invalid_command") && n.to.kind === "inquiry";
+      }
       return false;
     },
   };

@@ -28,24 +28,37 @@ for (const backend of backends) {
       const first = only((await say("On the postgres question, tell them SQLite.")).outcomes);
       assert.deepEqual([first.status, first.op], ["applied", "owner.answer"]);
       assert.deepEqual(answered, [{ inquiryId: "inq-1", answer: "SQLite" }]);
-      // Only one question is left, so no name is needed.
+      // Only one question is left, but with no word naming it the answer is shown first, not filed against a question the owner may never have seen.
       script["The answer is blue."] = [cmd("owner.answer", { answer: "blue" }, "The answer is blue")];
-      assert.equal(only((await say("The answer is blue.")).outcomes).status, "applied");
+      assert.equal(only((await say("The answer is blue.")).outcomes).status, "proposed");
+      assert.equal(answered.length, 1);
+      script["For the logo question the answer is blue."] = [cmd("owner.answer", { questionTopic: "logo", answer: "blue" }, "the answer is blue")];
+      assert.equal(only((await say("For the logo question the answer is blue.")).outcomes).status, "applied");
       assert.deepEqual(answered.map((a) => a.inquiryId), ["inq-1", "inq-2"]);
+      // An ID the model made up is not a waiting question.
+      script["Answer yes to the logo."] = [cmd("owner.answer", { inquiryId: "inq-9", answer: "yes" }, "Answer yes to the logo")];
+      assert.equal(only((await say("Answer yes to the logo.")).outcomes).status, "refused");
       // Nothing waits: refused, not guessed.
       script["Say yes."] = [cmd("owner.answer", { answer: "yes" }, "Say yes")];
       assert.equal(only((await say("Say yes.")).outcomes).status, "refused");
       // Two questions and no name: the owner is asked which; nothing is answered.
       waiting = [view("inq-3", "Ship on Friday?", "Release"), view("inq-4", "Ship the docs too?", "Docs")];
       script["Yes, ship."] = [cmd("owner.answer", { answer: "Yes, ship" }, "Yes, ship")];
-      const asked = only((await say("Yes, ship.")).outcomes);
+      const first2 = await chat.submit(w.ownerToken, { messageId: cid("m"), text: "Yes, ship." });
+      const asked = only(first2.outcomes);
       assert.equal(asked.status, "asked");
       assert.equal(asked.options!.length, 2);
       assert.equal(answered.length, 2);
+      // The owner picks one of the offered questions: the held answer is carried on with that question.
+      script["the Friday one"] = [{ kind: "answer", turnId: first2.turnId, choice: "inq-3", evidence: "the Friday one", basis: "owner" }];
+      const resumed = only((await chat.submit(w.ownerToken, { messageId: cid("m"), text: "the Friday one" })).outcomes);
+      assert.equal(resumed.status, "applied", JSON.stringify(resumed));
+      assert.equal(answered.at(-1)!.inquiryId, "inq-3");
       // An answer that is not in the owner's message is not done.
+      waiting = [view("inq-5", "Ship on Friday?", "Release")];
       script["About friday: go on then."] = [cmd("owner.answer", { questionTopic: "friday", answer: "Ship it now and skip QA" }, "go on then")];
       assert.equal(only((await say("About friday: go on then.")).outcomes).status, "refused");
-      assert.equal(answered.length, 2);
+      assert.equal(answered.length, 3);
     } finally { await w.close(); }
   });
 }

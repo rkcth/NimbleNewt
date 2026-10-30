@@ -95,6 +95,10 @@ export const AUTHORITY_FIELDS: Readonly<Record<string, readonly string[]>> = {
   "task.update": ["repositoryId"],
   "project.plan": ["participants"],
   "resource.bind": ["acknowledgeOverlap"],
+  // A time to return the task, and handing over an incomplete package, change what the move does: shown first.
+  "handoff.prepare": ["returnAt"],
+  "handoff.takeover": ["returnAt"],
+  "handoff.complete": ["acceptGaps"],
 };
 
 /**
@@ -107,6 +111,8 @@ export const MOVE_VERBS: Readonly<Record<string, RegExp>> = {
   "project.update:archived": /\b(archive)/i,
   "agent.retire": /\b(retire|fire|let go|remove)/i,
   "dependency.remove": /\b(remove|delete|drop|unlink)/i,
+  "handoff.complete": /\b(complete|finish|transfer|move|give|pass on|hand (?:it|over)|go ahead)/i,
+  "handoff.cancel": /\b(cancel|stop|abort|drop|call off)/i,
   "task.release": /\b(release|give up|let go)/i,
   "resource.bind": /\b(bind|add|attach|connect|link)/i,
   "task.transfer": /\b(transfer|hand over|reassign|move)/i,
