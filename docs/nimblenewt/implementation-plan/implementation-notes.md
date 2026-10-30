@@ -2998,3 +2998,9 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## L06b follow-up: the `pause-timed` index follows its gate
 
 Depends on branch `wip/nn-sa-lift1793371678` (the index itself). An entry is now made inactive in the same operation that ends its condition: `resume` (an extra `update` Change on the entry inside the resume command) and `dropResumeCondition` (takeover). Re-pausing needs no change, since a pause is only possible after a resume, which already retired the entry. `liftDue` also retires (rather than skips) an entry whose gate is observed stopping, stopped, suspended, preparing-to-suspend or recovery-required, so such a gate is read once when its time comes and never again. Stop/Suspend commands themselves are not changed; the tick (or an earlier dropResumeCondition by the hand-off) covers them. Tests: pause-lift-scan.test.ts, "an index entry follows its gate".
+### U11b follow-up check: readers of a `settled` notification item
+
+- The `needsYou` view (status.ts) does not read notification items at all: it reads open owner questions, owner-pending reviews and open owner blockers directly, so a record settled elsewhere leaves it by itself; `settled` needs no handling there. A test now runs the whole path (blocker raised, notified, resolved elsewhere, `runDue`) and checks `needsYou`, the inbox and the meeting agenda.
+- `settled` items are removed from the inbox index when closed, so `inbox()` never returns them; the one reader that filtered on `answered` only (`needsOwnerFrom` in standups.ts) now excludes `settled` as well, so it stays right if an item is ever read directly.
+- No state union is mirrored in packages/contracts or packages/ui (no notification item type there); the api operations list only settings and configure.
+- `answerOwner` in messages.ts finds the owner-question item through the inbox, so a settled (closed) item is simply not found and not answered again.

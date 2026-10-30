@@ -18,6 +18,8 @@ import { EventService, WatchService } from "../events/index.js";
 import { StallService } from "../health/index.js";
 import { HostService } from "../hosts/index.js";
 import { PauseService } from "../lifecycle/index.js";
+import { NotificationService } from "../notifications/index.js";
+import { needsOwnerFrom } from "../standups/standups.js";
 import { McpService, type CatalogItem } from "../mcp/index.js";
 import { ContractService } from "../planning/contracts.js";
 import { GrantService, PrincipalService, type Principal } from "../security/index.js";
@@ -979,6 +981,28 @@ for (const backend of backends) {
     const all = (await wired(50, 51, true).needsYou(c.owner))!;
     assert.deepEqual(all.truncated, ["questions", "approvals", "blockers"]);
     assert.deepEqual((await c.rebuild().needsYou(c.owner))!.truncated, ["blockers"]);
+  });
+
+  suite("a blocker the owner was notified about and that is settled elsewhere leaves the needs-you list, the inbox and the meeting agenda once the sweep has run (card U11b)", async (c) => {
+    const t = await c.work("Held");
+    const notes = NotificationService.withEpoch(c.storage, c.epoch);
+    const open = await c.blockers.openBlocker({ commandId: "ns-1", actor: c.owner.id, type: "manual_hold", subject: { kind: "task", id: t }, summary: "Settled elsewhere", resolver: "owner" });
+    const keep = await c.blockers.openBlocker({ commandId: "ns-2", actor: c.owner.id, type: "manual_hold", subject: { kind: "task", id: await c.work("Kept") }, summary: "Still open", resolver: "owner" });
+    const item = await notes.emitFromController({ commandId: "ns-n1", kind: "blocker", ref: { kind: "blocker", id: open.id } });
+    await notes.emitFromController({ commandId: "ns-n2", kind: "blocker", ref: { kind: "blocker", id: keep.id } });
+    const status = c.rebuild();
+    const agenda = needsOwnerFrom(notes, c.owner);
+    assert.equal((await status.needsYou(c.owner))!.count, 2);
+    assert.equal((await agenda(c.project)).length, 2);
+    await c.blockers.resolveBlocker({ commandId: "ns-rs", actor: c.owner.id, blockerId: open.id, expectedRevision: open.revision, resolution: "done elsewhere" });
+    await notes.runDue();
+    const after = (await status.needsYou(c.owner))!;
+    assert.equal(after.count, 1);
+    assert.doesNotMatch(after.lines.map((l) => l.text).join("\n"), /Settled elsewhere/);
+    assert.equal(await status.needsYouCount(c.owner), 1);
+    assert.equal((await notes.inbox(c.owner)).items.some((i) => i.id === item.itemId), false, "the settled item is out of the inbox");
+    assert.deepEqual((await agenda(c.project)).map((l) => l.cites[0]!.kind), ["notification-item"], "only the item still waiting is on the agenda");
+    assert.equal((await agenda(c.project)).some((l) => l.cites[0]!.id === item.itemId), false);
   });
 
   suite("the owner sees in one list what waits for their decision, what holds up most open tasks first, then oldest; nobody else sees it (card U11b)", async (c) => {

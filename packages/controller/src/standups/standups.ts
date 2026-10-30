@@ -745,7 +745,7 @@ export function outcomeLine(item: Pick<AgendaBody, "topic" | "state" | "intent" 
  */
 export function needsOwnerFrom(notifications: { inbox(owner: Principal): Promise<{ readonly items: readonly View<ItemBody>[] }> }, owner: Principal): (projectId: string) => Promise<ReviewLine[]> {
   return async (projectId) => {
-    const open = (await notifications.inbox(owner)).items.filter((i) => i.state !== "answered" && i.projectId === projectId);
+    const open = (await notifications.inbox(owner)).items.filter((i) => i.state !== "answered" && i.state !== "settled" && i.projectId === projectId);
     open.sort((a, b) => Number(b.urgent) - Number(a.urgent) || (a.firstAt < b.firstAt ? -1 : a.firstAt > b.firstAt ? 1 : a.id < b.id ? -1 : 1));
     return open.map((i) => ({ text: `${i.urgent ? "Urgent: " : ""}${cut(i.label, 200)}${i.count > 1 ? ` (reported ${i.count} times)` : ""}, waiting since ${i.firstAt}.`, cites: [{ kind: "notification-item", id: i.id, revision: i.revision }] }));
   };
