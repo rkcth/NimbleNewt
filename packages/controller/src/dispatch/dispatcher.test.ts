@@ -1158,6 +1158,23 @@ for (const backend of backends) {
     assert.deepEqual(asked, ["yields=false"]);
   });
 
+  suite("a provisional safeLongRunning predicate is passed to the meeting check; absent or failing it is not passed (card M04e)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, []));
+    await c.task("t", ann);
+    const asked: (boolean | undefined)[] = [];
+    const meetings = {
+      revalidation: async () => ({ required: false, entries: [] }),
+      admission: async (_by: unknown, q: { safeLongRunning?: boolean }) => { asked.push(q.safeLongRunning); return { decision: "defer" as const, reason: "later" }; },
+    };
+    c.dispatcher = c.restart({ meetings: meetings as never });
+    await c.dispatcher.tick();
+    c.dispatcher = c.restart({ meetings: meetings as never }, { safeLongRunning: async () => true });
+    await c.dispatcher.tick();
+    c.dispatcher = c.restart({ meetings: meetings as never }, { safeLongRunning: async () => { throw new Error("unknown"); } });
+    await c.dispatcher.tick();
+    assert.deepEqual(asked, [undefined, true, undefined]);
+  });
+
   suite("an effect call recorded on the ledger is never run again outside it: asked again with a local executor, or through begin, after a restart, it is settled from the ledger", async (c) => {
     const ann = await c.agent("ann", workGrants(c.project, ["git-push"]));
     const { attemptId } = await c.task("push", ann);

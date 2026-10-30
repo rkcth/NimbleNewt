@@ -152,6 +152,11 @@ export interface AttemptDispatcherOptions extends RunnerOptions {
   readonly scanPage?: number;
   /** How long the dispatcher expects an attempt to run when the contract says nothing, for the meeting check (M04). Default 30 minutes. */
   readonly expectedMinutes?: number;
+  /**
+   * PROVISIONAL (card M04e; owner question open: what makes a long-running operation "safe"). Says whether the work of a task is a safe long-running operation that carries on while its agent attends a meeting.
+   * Absent, or throwing, means "not safe" (fails closed: the work is deferred like any long work that cannot yield). No definition is composed yet.
+   */
+  readonly safeLongRunning?: (taskId: string) => Promise<boolean>;
   readonly catalog?: ActionCatalog;
   /** The bridge for each effect kind, so an effect that was started before a restart is reconciled without the worker. */
   readonly bridges?: Readonly<Record<string, EffectBridge>>;
@@ -825,7 +830,8 @@ export class DispatcherService {
       // With no harness shipped nothing can stop a conversation, so nothing yields (an empty list is not "every harness can").
       const shipped = this.#deps.harnesses.list();
       const yieldsAtBoundary = shipped.length > 0 && shipped.every((h) => h.abort !== "none");
-      const advice = await this.#deps.meetings.admission(this.#deps.principal, { agent: agentId, expectedMinutes: (await this.#contractOf(taskId)).maxMinutes ?? this.#options.expectedMinutes, yieldsAtBoundary });
+      const safeLongRunning = this.#options.safeLongRunning === undefined ? false : await this.#options.safeLongRunning(taskId).then((v) => v === true, () => false);
+      const advice = await this.#deps.meetings.admission(this.#deps.principal, { agent: agentId, expectedMinutes: (await this.#contractOf(taskId)).maxMinutes ?? this.#options.expectedMinutes, yieldsAtBoundary, ...(safeLongRunning ? { safeLongRunning } : {}) });
       if (advice.decision === "defer") return skip("meeting", "a meeting the agent attends starts before this work would end");
     }
     // 5. Route and harness, and the recovery gate: every admission names its harness.
