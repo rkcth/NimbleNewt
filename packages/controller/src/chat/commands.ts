@@ -40,6 +40,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // Where local-only data may go is where work is done: shown to the owner first in every profile (card H07c).
   // Which event sources are watched decides what wakes agents and spends work (card H13f): shown first in every profile (provisional; see the notes).
   "events.sources.change": { verb: "Change which event sources are watched", mode: "propose" },
+  // What a local agent may use is a resource decision (card H12k): shown first in every profile (provisional).
+  "workers.limits.set": { verb: "Change the limits for local agents", mode: "propose" },
   "placement.change": { verb: "Change where local-only data may go", mode: "propose" },
   // How finished work lands (card P08b): where work reaches the codebase is authority, so it is shown first in every profile. The record and the rules are the same as through the API.
   "integration.set": { verb: "Change how finished work lands", mode: "propose" },

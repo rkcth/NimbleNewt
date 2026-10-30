@@ -88,6 +88,18 @@ Result: `{ item }`: `revision`, `protected` (branch names, or prefixes such as `
 
 Completion: finished when accepted (`completed: true`).
 
+#### `workers.limits.get`
+
+What one local agent may use (owner only): the figures the owner set, the ones from the controller's start-up configuration, and the effective limits (the owner's win per figure).
+
+Arguments:
+
+- none
+
+Result: `{ item }`: `revision`, `limits` (the owner's), `startup`, `effective`; each has any of `cpus`, `memoryMb`, `diskMb`, `processes`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `events.sources.get`
 
 Which event sources the controller watches (owner only): every source the host configured with its type and whether the owner left it on, and the list of those turned off.
@@ -1391,6 +1403,19 @@ Arguments:
 - `protected` (optional): branch names or prefixes such as `release/*`
 - `landing` (optional): the landing branch, or null to clear it
 - `expectedRevision` (optional): the revision you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `workers.limits.set`
+
+The owner sets what one local agent may use (owner only): `limits` has any of `cpus` (1 to 256), `memoryMb` (16 to 4194304), `diskMb` (1 to 16777216) and `processes` (1 to 100000), whole numbers. The object replaces the earlier setting; an empty object clears it so the start-up figures apply. It counts from the next agent launched; agents already running keep their limits. The host enforces the limits or refuses to launch.
+
+Arguments:
+
+- `limits`: for example `{ "memoryMb": 4096, "processes": 256 }`
+- `expectedRevision` (optional): the revision of the setting you read
 
 Result: `{ revision }`.
 
