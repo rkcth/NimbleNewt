@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { AssignmentService } from "../domain/assignments.js";
 import type { BlockerService } from "../domain/blockers.js";
+import type { ResumeCheckService } from "../continuation/resume.js";
 import type { EffectBridge } from "../domain/effects.js";
 import { mergeChanges } from "../domain/changes.js";
 import type { EffectService } from "../domain/effects.js";
@@ -85,6 +86,16 @@ export interface DispatcherDeps {
   readonly decisions?: DecisionGuard;
   /** Pins the checkout a task is dispatched against and refuses work whose repository moved or was unbound (card P01). */
   readonly checkouts?: { dispatchCheckout(command: { commandId: string; taskId: string; actor: string; pin: boolean }): Promise<{ kind: "none" } | { kind: "ok" } | { kind: "unbound" | "changed"; reason: string }> };
+  /**
+   * The prerequisite tasks of `taskId` that are not complete, each as a short description (card L04c). Work whose prerequisites are not done is not started: the attempt waits, with the reason in the tick's report, and nothing fails.
+   * Without it prerequisites are not looked at here.
+   */
+  readonly prerequisites?: (taskId: string) => Promise<readonly string[]>;
+  /**
+   * The checked resume (card L04c). An attempt that brings earlier work back (it has a checkpoint to continue from: after a restart or a move) starts only once its resume check is done: the dispatcher starts the check,
+   * commits it when it is ready and waits while it is open or blocked (a blocked check has opened its own blocker). Without it such an attempt starts as before.
+   */
+  readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "advance">;
   /** `GenerationService.guardFor` is handed to every effect that is started (it adds the generation hold to the pause and decision guards). */
   readonly generation?: Pick<GenerationService, "guardFor">;
   readonly reviews?: Pick<ReviewService, "request" | "admit" | "get">;
@@ -146,7 +157,7 @@ export interface AttemptDispatcherOptions extends RunnerOptions {
   readonly bridges?: Readonly<Record<string, EffectBridge>>;
 }
 
-export type DispatchCheck = "generation" | "checkout" | "pause" | "decision" | "revalidation" | "meeting" | "harness" | "route" | "budget" | "grant" | "host" | "place" | "expired";
+export type DispatchCheck = "generation" | "checkout" | "pause" | "decision" | "revalidation" | "meeting" | "harness" | "route" | "budget" | "grant" | "host" | "place" | "expired" | "dependency" | "resume";
 
 export interface TickReport {
   readonly at: string;
@@ -697,6 +708,28 @@ export class DispatcherService {
     return { kind: "claimed" };
   }
 
+  /** The checked resume of an attempt that has a checkpoint to continue from. Returns why it waits, or nothing when it may start. A fault in the check is a wait, not a failure of the attempt. */
+  async #resumeCheck(attemptId: string, taskId: string, route: string): Promise<string | undefined> {
+    const resumes = this.#deps.resumes;
+    const b = (await this.#load(attemptId))?.body;
+    if (resumes === undefined || b === undefined || b.resumeFrom === undefined) return undefined;
+    const by = this.#deps.principal;
+    const slash = route.indexOf("/");
+    const plain = (v: string): string => v.replace(/[^A-Za-z0-9._:-]/g, "_").slice(0, 80) || "unknown";
+    const model = { provider: plain(slash < 0 ? "route" : route.slice(0, slash)), id: plain(slash < 0 ? route : route.slice(slash + 1)) };
+    const key = `dpa-rck:${attemptId}:${derivedId("dpa", JSON.stringify([b.resumeFrom, b.resumeNote ?? null])).slice(4, 16)}`;
+    try {
+      let check = await resumes.start(by, { commandId: key, taskId, model, after: b.resumeNote?.includes("restarted") === true ? "restart" : "continue" });
+      if (check.phase === "ready") check = await resumes.commit(by, { commandId: `${key}-commit`, checkId: check.id });
+      if (check.phase === "done") return undefined;
+      if (check.phase === "blocked") return `the resume check ${check.id} is blocked: ${check.blocked?.reason ?? "see its blocker"}`.slice(0, 500);
+      if (check.phase === "cancelled") return `the resume check ${check.id} was cancelled`;
+      return `the resume check ${check.id} is ${check.phase}`;
+    } catch (error) {
+      return `the resume check could not be run: ${errorText(error)}`.slice(0, 500);
+    }
+  }
+
   /**
    * The checks before a claim, in their fixed order. `current` says the attempt is the task's active one at the current generation. Returns what the claim needs, or why the attempt is skipped or blocked.
    */
@@ -719,6 +752,11 @@ export class DispatcherService {
     if (this.#deps.decisions !== undefined) {
       const g = await this.#deps.decisions.guard(taskId, "start");
       if (g.blockedBy.length > 0) return skip("decision", g.blockedBy.join("; "));
+    }
+    // 3a. Prerequisite tasks: work does not start before the tasks it depends on are complete (card L04c). The wait is recorded in the tick's report; it is not a failure.
+    if (this.#deps.prerequisites !== undefined) {
+      const open = await this.#deps.prerequisites(taskId);
+      if (open.length > 0) return skip("dependency", `waiting for ${open.slice(0, 5).join(", ")}${open.length > 5 ? ` and ${open.length - 5} more` : ""} to be complete`.slice(0, 500));
     }
     // 3b. The checkout: a task that names a repository is pinned to the binding and location it has now, and a moved, unbound or re-pointed one does not start until the owner confirms it (card P01).
     if (this.#deps.checkouts !== undefined) {
@@ -749,6 +787,9 @@ export class DispatcherService {
     const recovery = await this.#deps.contracts.recoveryOf(taskId);
     const gap = this.#deps.harnesses.checkAttempt(recovery, chosen.harness);
     if (gap !== undefined) return block("harness", "dispatch_blocked", gap);
+    // 5b. A checked resume (card L04c): an attempt that carries earlier work back is checked first, with the model it is about to run on.
+    const resumed = await this.#resumeCheck(attemptId, taskId, chosen.route);
+    if (resumed !== undefined) return skip("resume", resumed);
     // 6. Budget, from accounting.
     if (this.#deps.budgets !== undefined) {
       const report = await this.#deps.budgets.accounting(this.#deps.principal, taskId);

@@ -1,3 +1,4 @@
+import type { ResumeCheckService } from "../continuation/resume.js";
 import { createHash } from "node:crypto";
 import { framedMcp } from "../dispatch/tools.js";
 import { ProjectResourceService } from "../projects/index.js";
@@ -184,6 +185,8 @@ export interface ComposeInput {
   readonly eventSources?: readonly EventSource[];
   /** Health probes of failed-over routes (card R04c): off unless given, and then only while `enabled()` says so. */
   readonly probes?: { readonly cutover: Pick<CutoverService, "downTargets" | "probe">; readonly probes: RouteProbes };
+  /** The checked resume the dispatcher calls when an attempt brings earlier work back (card L04c). */
+  readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "advance">;
   /** Unfinished hand-offs and checked resumes are carried on the same way (cards L03c, L04c). */
   readonly sweeps?: readonly { readonly name: string; readonly sweep: (by: Principal) => Promise<unknown> }[];
   /** The stall detection and the reconciler the controller built; the dispatcher's tick runs them (card L01b). */
@@ -369,7 +372,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     }
     const dispatcher = DispatcherService.withEpoch(storage, epoch, {
       principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, hosts, workers,  contracts: i.contracts, harnesses: i.catalog, policy, protectedBranch: (projectId, branch) => branchSettings.isProtected(projectId, branch), effects, blockers, route,
-      activity: async (step) => { await ActivityService.withEpoch(storage, epoch, ro).record(principal, { commandId: step.commandId, taskId: step.taskId, kind: step.kind, summary: step.summary, manifest: { refs: step.refs } } as never); }, routing: i.routing, pauses, decisions, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
+      activity: async (step) => { await ActivityService.withEpoch(storage, epoch, ro).record(principal, { commandId: step.commandId, taskId: step.taskId, kind: step.kind, summary: step.summary, manifest: { refs: step.refs } } as never); }, routing: i.routing, pauses, decisions, ...(i.resumes === undefined ? {} : { resumes: i.resumes }), prerequisites: async (taskId: string) => { const deps = await i.contracts.dependencies(principal, taskId); const open: string[] = []; for (const e of deps?.dependsOn ?? []) { const t = await i.projects.getTask(e.prerequisiteId); if (t === undefined || t.state !== "done") open.push(`${e.prerequisiteId} (${t?.state ?? "unknown"})`); } return open; }, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
       ...(i.options.local === undefined ? {} : { toolWindow: (route: string) => { try { return i.options.local!.window({ route } as WorkOrder); } catch { return undefined; } } }),
       ...(remote === undefined ? {} : { storeOwner: (agentId: string, attemptId: string) => remote!.storeOwner(principal, agentId, attemptId) }),
     }, { ...ro, holder: "dispatcher", ...(i.onError === undefined ? {} : { onError: i.onError }), ...(i.options.dispatcher ?? {}) });
