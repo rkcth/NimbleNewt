@@ -36,6 +36,9 @@ export const DEFAULT_ESCALATE_AFTER_HOURS = 24;
 /** The kinds that wait on the owner's decision; the others (maintenance, presence) only inform, and a safety stop is Urgent from the start. */
 const WAITS_ON_OWNER: ReadonlySet<NotificationKind> = new Set<NotificationKind>(["blocker", "review-request", "owner-question"]);
 
+/** The three levels of everything that reaches the owner (card U11b, owner decision 2026-10-22). */
+export type NotificationLevel = "notice" | "needs-you" | "urgent";
+
 export interface ItemBody {
   readonly kind: NotificationKind;
   readonly ref: { readonly kind: string; readonly id: string };
@@ -61,6 +64,17 @@ export interface ItemBody {
   readonly answeredAt?: string;
   /** When the controller closed the item because the record it points at was settled elsewhere (not answered through the inbox). */
   readonly settledAt?: string;
+  /** When a Notice was counted in a digest message (a count only; the Notice itself is never pushed). */
+  readonly countedAt?: string;
+}
+
+/**
+ * The level of an item, from what it is and how it was raised, never from a stored claim: an interrupting or urgent item is Urgent, an item that waits on the owner's decision is Needs you,
+ * and anything that only informs (maintenance, presence) is a Notice.
+ */
+export function levelOf(item: Pick<ItemBody, "kind" | "urgent" | "immediate">): NotificationLevel {
+  if (item.kind === "safety-stop" || item.urgent || item.immediate) return "urgent";
+  return WAITS_ON_OWNER.has(item.kind) ? "needs-you" : "notice";
 }
 
 export interface DigestBody { readonly createdAt: string; readonly itemIds: readonly string[]; readonly state: "open" | "answered" }
@@ -308,10 +322,10 @@ export class NotificationService {
   }
 
   /** What is waiting for the owner: unanswered items and open digests (owner only). */
-  async inbox(owner: Principal): Promise<{ items: View<ItemBody>[]; digests: View<DigestBody>[] }> {
+  async inbox(owner: Principal): Promise<{ items: (View<ItemBody> & { level: NotificationLevel })[]; digests: View<DigestBody>[] }> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner`);
     const index = (await this.#index()).body;
-    return { items: await this.#load<ItemBody>("notification-item", index.items), digests: await this.#load<DigestBody>("notification-digest", index.digests) };
+    return { items: (await this.#load<ItemBody>("notification-item", index.items)).map((i) => ({ ...i, level: levelOf(i) })), digests: await this.#load<DigestBody>("notification-digest", index.digests) };
   }
 
   /** Deliveries still waiting, and the latest ones given up on, so a failure is visible (owner only). */
@@ -495,25 +509,31 @@ export class NotificationService {
   async #collect(settings: NotificationSettings, now: string, due: string): Promise<string[]> {
     const ids: string[] = [];
     for (let n = 0; n < NOTIFICATION_LIMITS.digestsPerRun; n++) {
-      const queued = (await this.#load<ItemBody>("notification-item", (await this.#index()).body.items)).filter((i) => i.state === "queued" && i.firstAt <= due).sort((a, b) => (a.firstAt < b.firstAt ? -1 : 1)).slice(0, NOTIFICATION_LIMITS.digestItems);
-      if (queued.length === 0) break;
-      const id = derivedId("dgs", `${due}|${queued.map((i) => i.id).sort().join(",")}`);
+      const waiting = (await this.#load<ItemBody>("notification-item", (await this.#index()).body.items)).filter((i) => i.state === "queued" && i.firstAt <= due).sort((a, b) => (a.firstAt < b.firstAt ? -1 : 1));
+      // A Notice is never listed or pushed: it stays in the inbox and is only counted in the digest message (card U11b).
+      const queued = waiting.filter((i) => levelOf(i) !== "notice").slice(0, NOTIFICATION_LIMITS.digestItems);
+      const notices = waiting.filter((i) => levelOf(i) === "notice").slice(0, NOTIFICATION_LIMITS.digestItems);
+      if (queued.length === 0 && notices.length === 0) break;
+      const id = derivedId("dgs", `${due}|${queued.map((i) => i.id).sort().join(",")}${notices.length === 0 ? "" : `|n:${notices.map((i) => i.id).sort().join(",")}`}`);
       const ref: AggregateRef = { kind: "notification-digest", id };
       const lines = queued.map((i, k) => `${k + 1}. ${i.kind}: ${i.label}${i.count > 1 ? ` (x${i.count})` : ""}`);
-      const delivery = this.#delivery(settings, { kind: "digest", id }, `${queued.length} item${queued.length === 1 ? "" : "s"} for you:\n${lines.join("\n")}`, now, `digest|${id}`);
+      const noticeLine = notices.length === 0 ? "" : `\n${notices.length} notice${notices.length === 1 ? "" : "s"} in your inbox, no action needed.`;
+      const delivery = queued.length === 0 ? undefined : this.#delivery(settings, { kind: "digest", id }, `${queued.length} item${queued.length === 1 ? "" : "s"} for you:\n${lines.join("\n")}${noticeLine}`, now, `digest|${id}`);
       const body: DigestBody = { createdAt: now, itemIds: queued.map((i) => i.id), state: "open" };
-      const ok = await this.#apply("notification.digest", { commandId: `digest-${id}`, actor: "notifications" }, { due, items: body.itemIds.join(",") }, async (index) => {
+      const ok = await this.#apply(queued.length === 0 ? "notification.notices-counted" : "notification.digest", { commandId: queued.length === 0 ? `notices-${id}` : `digest-${id}`, actor: "notifications" }, { due, items: body.itemIds.join(","), notices: notices.map((i) => i.id).join(",") }, async (index) => {
         // Every item must still be queued at the revision just read.
         const fresh: { id: string; revision: number; body: ItemBody }[] = [];
         for (const q of queued) { const a = await this.#runner.get("notification-item", q.id); if (a === undefined || (a.body as unknown as ItemBody).state !== "queued") return undefined; fresh.push({ id: q.id, revision: a.revision, body: a.body as unknown as ItemBody }); }
-        return { ref, creates: true, changes: [
-          { type: "create", ref, body: body as unknown as JsonObject },
-          { type: "create", ref: { kind: "notification-delivery", id: delivery.id }, body: delivery.body as unknown as JsonObject },
+        const counted: Change[] = [];
+        for (const q of notices) { const a = await this.#runner.get("notification-item", q.id); if (a === undefined || (a.body as unknown as ItemBody).state !== "queued") return undefined; counted.push({ type: "update", ref: { kind: "notification-item", id: q.id }, expectedRevision: a.revision, body: { ...(a.body as unknown as ItemBody), state: "sent", countedAt: now } as unknown as JsonObject }); }
+        return { ref: delivery === undefined ? { kind: "notification-item", id: notices[0]!.id } : ref, creates: delivery !== undefined, changes: [
+          ...(delivery === undefined ? [] : [{ type: "create" as const, ref, body: body as unknown as JsonObject }, { type: "create" as const, ref: { kind: "notification-delivery", id: delivery.id }, body: delivery.body as unknown as JsonObject }]),
           ...fresh.map((f): Change => ({ type: "update", ref: { kind: "notification-item", id: f.id }, expectedRevision: f.revision, body: { ...f.body, state: "sent", digestId: id } as unknown as JsonObject })),
-          this.#indexChange(index, { digests: withId(index.body.digests, id), deliveries: delivery.body.state === "pending" ? withId(index.body.deliveries, delivery.id) : index.body.deliveries }),
-        ], detail: { items: queued.length } };
+          ...counted,
+          this.#indexChange(index, delivery === undefined ? {} : { digests: withId(index.body.digests, id), deliveries: delivery.body.state === "pending" ? withId(index.body.deliveries, delivery.id) : index.body.deliveries }),
+        ], detail: { items: queued.length, notices: notices.length } };
       });
-      if (ok) ids.push(id);
+      if (ok && delivery !== undefined) ids.push(id);
     }
     // Everything waiting at that digest time has been collected (or there was nothing): the next digest time is the next chance.
     const stateRef: AggregateRef = { kind: "notification-state", id: "installation" };

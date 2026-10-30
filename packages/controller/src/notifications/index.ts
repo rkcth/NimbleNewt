@@ -1,1 +1,1 @@
-export { NOTIFICATION_KINDS, NOTIFICATION_LIMITS, NotificationService, type ChannelAdapter, type DeliveryBody, type DigestBody, type Emit, type ItemBody, type NotificationKind, type NotificationSettings, type Responder } from "./notifications.js";
+export { NOTIFICATION_KINDS, levelOf, NOTIFICATION_LIMITS, NotificationService, type ChannelAdapter, type DeliveryBody, type DigestBody, type Emit, type ItemBody, type NotificationKind, type NotificationLevel, type NotificationSettings, type Responder } from "./notifications.js";

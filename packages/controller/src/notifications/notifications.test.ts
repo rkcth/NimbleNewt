@@ -306,12 +306,49 @@ for (const backend of backends) {
     const x = await c.svc.emitFromController({ commandId: id, kind: "maintenance", ref: { kind: "host", id: "h-1" } });
     const y = await c.svc.emitFromController({ commandId: id, kind: "maintenance", ref: { kind: "host", id: "h-1" } });
     assert.equal(x.itemId, y.itemId);
-    for (let i = 0; i < 55; i++) await c.report(c.ctl, "maintenance", "host", `bulk-${i}`);
+    for (let i = 0; i < 55; i++) await c.report(c.ann, "review-request", "review", await c.review());
     minutes(60);
     const ran = await c.svc.runDue();
-    assert.equal(ran.digestIds.length, 2, "56 maintenance items and one review: fifty to a digest");
+    assert.equal(ran.digestIds.length, 2, "56 reviews: fifty to a digest");
     const inbox = await c.svc.inbox(c.owner);
-    assert.deepEqual(inbox.digests.map((d) => d.itemIds.length).sort((p, q) => p - q), [7, 50]);
+    assert.deepEqual(inbox.digests.map((d) => d.itemIds.length).sort((p, q) => p - q), [6, 50]);
+  });
+
+  suite("a Notice is never pushed: it stays in the inbox, is counted in the digest message without its text, and the levels are told apart (card U11b)", async (c) => {
+    await c.svc.configure(c.owner, { commandId: cid("cf"), channel: "external", channelName: "pager", digestTimes: ["09:00", "20:00"] });
+    const note = await c.report(c.ctl, "maintenance", "host", "host-secret-1", { detail: "private note" });
+    const present = await c.report(c.ctl, "presence", "host", "host-2");
+    const asks = await c.report(c.ann, "owner-question", "inquiry", await c.question());
+    const stop = await c.report(c.ctl, "safety-stop", "host", "host-9");
+    assert.deepEqual([note.immediate, present.immediate], [false, false]);
+    const level = async (id: string) => (await c.svc.inbox(c.owner)).items.find((i) => i.id === id)!.level;
+    assert.deepEqual([await level(note.itemId), await level(present.itemId), await level(asks.itemId), await level(stop.itemId)], ["notice", "notice", "needs-you", "urgent"]);
+    await c.svc.runDue();
+    assert.deepEqual(c.sent.map((s) => s.text.split(":")[0]), ["safety-stop"], "only the stop went at once");
+    minutes(60);
+    const ran = await c.svc.runDue();
+    assert.equal(ran.digestIds.length, 1);
+    assert.equal(ran.delivered, 1);
+    const digestText = c.sent[1]!.text;
+    assert.match(digestText, /^1 item for you:/);
+    assert.match(digestText, /2 notices in your inbox, no action needed\.$/);
+    assert.ok(!/maintenance|presence|host-secret|private note/.test(digestText), "no Notice text leaves the installation");
+    const inbox = await c.svc.inbox(c.owner);
+    assert.equal(inbox.digests[0]!.itemIds.length, 1, "the digest lists only what needs a decision");
+    const counted = inbox.items.find((i) => i.id === note.itemId)!;
+    assert.deepEqual([counted.state, counted.countedAt, counted.digestId], ["sent", new Date(now).toISOString(), undefined], "counted once and still in the inbox");
+    // A later digest time with only Notices waiting counts them quietly: no digest, no message.
+    const more = await c.report(c.ctl, "maintenance", "host", "host-3");
+    set("2026-10-22T20:30:00.000Z");
+    const next = await c.svc.runDue();
+    assert.deepEqual([next.digestIds, next.delivered, c.sent.length], [[], 0, 2], "a Notice alone is never pushed");
+    const after = (await c.svc.inbox(c.owner)).items.find((i) => i.id === more.itemId)!;
+    assert.equal(after.state, "sent");
+    assert.equal(after.countedAt, new Date(now).toISOString());
+    assert.equal((await c.svc.report(c.owner)).pending.length, 0);
+    // The owner closes a Notice with "ok".
+    await c.svc.answerItem(c.owner, { commandId: cid("ai"), itemId: more.itemId, answer: "ok", revision: after.revision });
+    assert.equal((await c.svc.inbox(c.owner)).items.some((i) => i.id === more.itemId), false);
   });
 
   suite("nothing leaves the installation unless an external channel is configured, and then only the controller-built label; failures are visible and bounded", async (c) => {
