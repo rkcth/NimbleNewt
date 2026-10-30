@@ -570,7 +570,7 @@ Result: `{ item }`.
 
 #### `status.ask`
 
-A status view from the records, each line citing its records: `task`, `overview`, `noticeboard`, `changes`, `tools`, `delivered` (artifacts are checked against their files when the controller keeps them), `failed_events` and `failed_event`. What the caller may not read reads as missing.
+A status view from the records, each line citing its records: `task`, `overview`, `noticeboard`, `changes`, `tools`, `delivered` (artifacts are checked against their files when the controller keeps them), `failed_events`, `failed_event` and `owner_questions` (owner only: the questions agents have put to the owner, `{ kind: "owner_questions", limit? }`). What the caller may not read reads as missing.
 
 Arguments:
 

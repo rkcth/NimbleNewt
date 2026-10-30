@@ -174,7 +174,8 @@ export type StatusRequest =
   | { readonly kind: "delivered"; readonly projectId: string; readonly taskId?: string; readonly since?: string }
   | { readonly kind: "noticeboard"; readonly projectId: string }
   | { readonly kind: "failed_events"; readonly projectId?: string; readonly taskId?: string; readonly afterId?: string; readonly limit?: number }
-  | { readonly kind: "failed_event"; readonly handlingId: string };
+  | { readonly kind: "failed_event"; readonly handlingId: string }
+  | { readonly kind: "owner_questions"; readonly limit?: number };
 
 // ---- service -------------------------------------------------------------------------------------------------------------------
 
@@ -189,6 +190,8 @@ export interface StatusDeps {
   readonly pauses?: Pick<PauseService, "status" | "isPaused">;
   /** The failed event queue (card H13). Absent: the queue cannot be listed. */
   readonly watch?: Pick<WatchService, "failures" | "inspect">;
+  /** Questions agents have put to the owner (card U12e). Absent: none are listed. */
+  readonly ownerQuestions?: { ownerQuestions(owner: Principal, page?: { afterId?: string; limit?: number }): Promise<{ items: readonly { inquiryId: string; asker: string; question: string; askedAt: string; revision: number; task: { id: string; title: string; projectName: string }; wait?: { summary: string; nextAction: string; deadline?: string } }[]; next?: string }> };
   /** Checks an artifact against its files (card S06). Absent: artifacts are listed as `not_checked`, never as verified. */
   readonly verifyArtifact?: (artifactId: string) => Promise<{ readonly ok: boolean }>;
 }
@@ -269,8 +272,24 @@ export class StatusService {
       case "noticeboard": { onlyKnown(request, ["kind", "projectId"]); return this.noticeboard(by, request.projectId); }
       case "failed_events": { const { kind: _k, ...rest } = request; return this.failedEvents(by, rest); }
       case "failed_event": { onlyKnown(request, ["kind", "handlingId"]); return this.inspectFailedEvent(by, request.handlingId); }
+      case "owner_questions": { onlyKnown(request, ["kind", "limit"]); return this.ownerQuestionLines(by, request.limit); }
       default: return invalid("kind", "is not a kind of status request");
     }
+  }
+
+  // ---- questions to the owner (card U12e) ------------------------------------------------------------------------------------
+
+  /** The questions waiting for the owner's answer, oldest first, for the owner only (anyone else: undefined, as for a record they cannot read). An agent's words are shown as its words, never as the owner's or the system's. */
+  async ownerQuestionLines(by: Principal, limit?: number): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (by.kind !== "owner" || this.#deps.ownerQuestions === undefined) return undefined;
+    const cap = limit === undefined ? 10 : Number.isSafeInteger(limit) && limit >= 1 && limit <= 50 ? limit : invalid("limit", "must be 1 to 50");
+    const { items, next } = await this.#deps.ownerQuestions.ownerQuestions(by, { limit: cap });
+    const lines: Line[] = items.map((q) => line(
+      `${shown(q.asker)} asks about "${shown(q.task.title)}" (${shown(q.task.projectName)}), since ${q.askedAt}: "${shown(q.question)}"${q.wait === undefined ? "" : ` Your answer ends the wait: ${shown(q.wait.summary)}.${q.wait.deadline === undefined ? "" : ` It is due ${q.wait.deadline}.`}`}`,
+      cite("inquiry", q.inquiryId, q.revision), cite("task", q.task.id)));
+    if (lines.length === 0) lines.push(line("No agent is waiting for your answer."));
+    else if (next !== undefined) lines.push(line("There are more questions than shown; answer these first and ask again."));
+    return { observedAt: this.#runner.now(), lines };
   }
 
   // ---- one task ------------------------------------------------------------------------------------------------------------

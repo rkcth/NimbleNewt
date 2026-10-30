@@ -51,6 +51,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "agenda.correct": { verb: "Correct agenda item", mode: "apply", revision: "agenda", needsProject: true },
   // A decision the owner states (card C08b): recorded from this very turn, with the owner's own words as the wording. The version it is based on is read from the records, not said.
   "decision.record": { verb: "Record decision", mode: "apply", revision: "decision", needsProject: true },
+  // An answer to a question an agent put to the owner (card U12e): the answer is the owner's own words; the question is named by its words or, when only one waits, needs no name.
+  "owner.answer": { verb: "Answer question", mode: "apply" },
 };
 
 /** Names the owner may use in place of an ID; each is resolved from records and an unclear match asks. */
@@ -69,7 +71,7 @@ export function acceptedArgs(op: string): readonly string[] | undefined {
   const operation = OPERATION_BY_NAME.get(op);
   if (operation === undefined || operation.kind !== "command") return undefined;
   // `agendaTopic` names an agenda item by its words; the chat resolves it to the item (exactly one open item of the project, else it asks).
-  return [...Object.keys(operation.args).map((k) => k.replace(/\?$/, "")), ...Object.keys(TITLE_KEYS), "projectName", ...(op === "agenda.correct" ? ["agendaTopic"] : [])];
+  return [...Object.keys(operation.args).map((k) => k.replace(/\?$/, "")), ...Object.keys(TITLE_KEYS), "projectName", ...(op === "agenda.correct" ? ["agendaTopic"] : []), ...(op === "owner.answer" ? ["questionTopic"] : [])];
 }
 
 /**
@@ -157,7 +159,7 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
 }
 
 /** Keys whose values name records or fixed choices; every other text in a command must be in the owner's own words. */
-const EXEMPT = new Set(["taskId", "projectId", "project", "prerequisiteId", "agentId", "supervisorId", "teamId", "parentTeamId", "repositoryId", "resourceId", "responsibilityId", "ownerId", "managed", "access", "landing", "integrator", "requiredChecks", "integration", "refreshRounds", "expectedRevision", "expectedVersion", "to", "state", "workClass", "difficulty", "recovery", "kind", "priority", "itemId", "sourceTurnId", "intent", "urgency", "category", "participants"]);
+const EXEMPT = new Set(["taskId", "projectId", "project", "prerequisiteId", "agentId", "supervisorId", "teamId", "parentTeamId", "repositoryId", "resourceId", "responsibilityId", "ownerId", "managed", "access", "landing", "integrator", "requiredChecks", "integration", "refreshRounds", "expectedRevision", "expectedVersion", "to", "state", "workClass", "difficulty", "recovery", "kind", "priority", "itemId", "inquiryId", "sourceTurnId", "intent", "urgency", "category", "participants"]);
 
 /** The first text value of a command's arguments that is not the owner's own words (and not a record reference or fixed choice), or undefined. */
 export function foreignValue(args: Readonly<Record<string, unknown>>, ownText: string, path = ""): string | undefined {

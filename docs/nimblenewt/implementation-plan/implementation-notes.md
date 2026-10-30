@@ -2603,3 +2603,9 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - `agendaOutcomeSink` (`standups/outcome-sink.ts`) delivers a stand-up's agenda outcome: for a topic that came from a chat turn, as a follow-up on that turn; for an inquiry, as a controller notice to the agent that asked, on the inquiry's task. Anything that cannot be put back stays waiting (not marked returned) and is tried again.
 - The composed controller now gives the stand-up service this sink, so outcomes reach the conversations they came from in the running controller (before, no sink was composed and they waited).
 - Not built yet (remains in M03f): the notice/allocation/usage/owner-item sinks, the chat commands, and showing follow-ups in the chat's own listing of turns.
+
+## U12e (part 1): the owner sees and answers agents' questions in chat
+
+- `StatusService` has a new view `owner_questions` (owner only; any other caller, or an installation with no question source, gets nothing): one plain line per waiting question, oldest first, naming the asker, the task and project, the time, the question in quotes (an agent's words, shown as its words) and the wait its answer ends with its due time; each line cites the inquiry and the task. More than the limit (default 10, at most 50) adds a line saying so. It reads only; the composed controller passes the message service in.
+- Chat command `owner.answer` (mode apply): the answer must be in the owner's own message like any text. The question is named by words that appear in it, its task title or its asker (`questionTopic`); when only one question waits no name is needed; several matches ask which, none is refused. Quoted material cannot answer.
+- Not built yet (remains in U12e): the Needs-you grouping and urgency of questions in the chat's own greeting, and answering several questions in one message by question.

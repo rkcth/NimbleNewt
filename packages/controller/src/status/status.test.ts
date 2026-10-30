@@ -22,7 +22,7 @@ import { McpService, type CatalogItem } from "../mcp/index.js";
 import { ContractService } from "../planning/contracts.js";
 import { GrantService, PrincipalService, type Principal } from "../security/index.js";
 import type { ControllerStorage } from "../storage/types.js";
-import { StatusService, type StatusOptions, type StatusRequest } from "./index.js";
+import { StatusService, type StatusDeps, type StatusOptions, type StatusRequest } from "./index.js";
 import type { Line } from "./index.js";
 
 after(stopServer);
@@ -49,7 +49,7 @@ for (const backend of backends) {
     status: StatusService; owner: Principal; project: string; other: string; storage: ControllerStorage; epoch: number;
     projects: ProjectService; assignments: AssignmentService; waits: WaitService; blockers: BlockerService; contracts: ContractService; stall: StallService; pauses: PauseService;
     desks: DeskService; mcp: McpService; artifacts: ArtifactService; blobs: FileBlobStore; watches: WatchService; events: EventService; hosts: HostService; principals: PrincipalService; agents: AgentService;
-    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean }): StatusService;
+    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]> }): StatusService;
     agent(name: string, grants?: AGrant[]): Promise<Principal>;
     host(name: string, project?: string): Promise<Principal>;
     /** A ready task in `project` (default: the main one), created by the owner. */
@@ -89,7 +89,7 @@ for (const backend of backends) {
         const other = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "Q" })).id;
         const rebuild: Ctx["rebuild"] = (extra = {}, deps = {}) => StatusService.withEpoch(world.storage, epoch, {
           assignments, waits, blockers, contracts, stall, pauses,
-          ...(deps.watch === false ? {} : { watch: watches }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
+          ...(deps.watch === false ? {} : { watch: watches }), ...(deps.ownerQuestions === undefined ? {} : { ownerQuestions: deps.ownerQuestions }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
         }, { ...options, ...extra });
         const status = rebuild();
         const grantService = GrantService.withEpoch(world.storage, epoch, options);
@@ -922,5 +922,29 @@ for (const backend of backends) {
     const plain = await c.blockers.openBlocker({ commandId: "bb-2", actor: c.owner.id, type: "manual_hold", subject: { kind: "task", id: t }, summary: "hold", resolver: "owner" });
     assert.equal((await c.blockers.getBlocker(plain.id))!.basis, undefined, "an unstated basis is not stored");
     assert.equal((await c.status.task(c.owner, t))!.blockers.find((b) => b.id === plain.id)!.basis, "owner_hold");
+  });
+
+  suite("the owner sees the questions agents have put to them, in the agent's own words and with the task and wait; nobody else sees them (card U12e)", async (c) => {
+    const q = { inquiryId: "inq-1", asker: "agent:ann", question: "Postgres or SQLite?", askedAt: "2026-10-22T09:00:00.000Z", revision: 2, task: { id: "task-1", title: "Pick the store", projectName: "Alpha" }, wait: { summary: "waiting for the choice of database", nextAction: "build on it", deadline: "2026-10-25T00:00:00.000Z" } };
+    let items = [q];
+    const status = c.rebuild({}, { ownerQuestions: { ownerQuestions: async (_o, page) => ({ items: items.slice(0, page?.limit ?? 10), ...(items.length > (page?.limit ?? 10) ? { next: "more" } : {}) }) } });
+    const got = (await status.ask(c.owner, { kind: "owner_questions" }))!;
+    assert.equal(got.lines.length, 1);
+    assert.match(got.lines[0]!.text, /agent:ann asks about "Pick the store" \(Alpha\)/);
+    assert.match(got.lines[0]!.text, /"Postgres or SQLite\?"/);
+    assert.match(got.lines[0]!.text, /Your answer ends the wait: waiting for the choice of database\. It is due 2026-10-25/);
+    assert.deepEqual(got.lines[0]!.cites.map((x) => [x.kind, x.id]), [["inquiry", "inq-1"], ["task", "task-1"]]);
+    items = [];
+    assert.match((await status.ask(c.owner, { kind: "owner_questions" }))!.lines[0]!.text, /No agent is waiting for your answer/);
+    items = [q, { ...q, inquiryId: "inq-2" }];
+    const cut = (await status.ask(c.owner, { kind: "owner_questions", limit: 1 }))!;
+    assert.equal(cut.lines.length, 2);
+    assert.match(cut.lines[1]!.text, /more questions than shown/);
+    // Not the owner, or nothing wired: nothing is shown. A bad limit or key is refused.
+    const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
+    assert.equal(await status.ask(reader, { kind: "owner_questions" }), undefined);
+    assert.equal(await c.rebuild().ask(c.owner, { kind: "owner_questions" }), undefined);
+    await assert.rejects(status.ask(c.owner, { kind: "owner_questions", limit: 0 }));
+    await assert.rejects(status.ask(c.owner, { kind: "owner_questions", extra: 1 } as never));
   });
 }

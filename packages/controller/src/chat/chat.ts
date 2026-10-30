@@ -604,6 +604,22 @@ export class ChatService {
       if (found === undefined) return refuse("not_found", "no such agenda item");
       labels[String(args["itemId"])] = String(found["topic"]);
     }
+    // A question to the owner named by its words (or the only one waiting): the one open question whose words, task or asker contain them, else the owner is asked.
+    if (intent.op === "owner.answer") {
+      const named = args["questionTopic"];
+      delete args["questionTopic"];
+      if (named !== undefined && args["inquiryId"] !== undefined) return refuse("invalid_command", "give either inquiryId or questionTopic, not both");
+      if (named !== undefined && typeof named !== "string") return refuse("invalid_command", "questionTopic must be text");
+      if (args["inquiryId"] === undefined) {
+        const open = await this.#listAll(token, "owner.questions", {});
+        const words = typeof named === "string" ? named.trim().toLowerCase() : "";
+        const has = (i: Record<string, unknown>): boolean => [String(i["question"]), String((i["task"] as { title?: unknown } | undefined)?.title ?? ""), String(i["asker"])].some((t) => t.toLowerCase().includes(words));
+        const matches = open.filter((i) => words === "" || has(i));
+        if (matches.length === 0) return refuse("not_found", words === "" ? "no agent is waiting for your answer" : `no waiting question is about "${words.slice(0, 80)}"`);
+        if (matches.length > 1) return { ok: false, kind: "ask", question: "Which question are you answering?", options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${String(m["inquiryId"])} (${String(m["question"]).slice(0, 60)})`), field: "inquiryId" };
+        args["inquiryId"] = String(matches[0]!["inquiryId"]);
+      }
+    }
     // A project argument belongs only to the operations that take one (the others only used it to find the task).
     if ("projectId" in args && !acceptedForOp(intent.op).includes("projectId")) delete args["projectId"];
 
