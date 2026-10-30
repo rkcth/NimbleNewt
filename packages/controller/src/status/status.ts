@@ -350,7 +350,7 @@ export class StatusService {
     }
     const lines: Line[] = got.steps.map((s) => line(`${s.at}, ${shown(s.actor)}: ${s.kind} - ${shown(s.summary)}`, cite("task", s.taskId)));
     if (lines.length === 0) lines.push(line("No steps match.", cite("project", request.projectId)));
-    else if (got.truncated) lines.push(line("The project has more tasks than were looked at; this is a part of its recent activity.", cite("project", request.projectId)));
+    else if (got.truncated) lines.push(line("The project has more tasks than were looked at; this shows its most recently active ones.", cite("project", request.projectId)));
     return { observedAt: this.#runner.now(), lines };
   }
 

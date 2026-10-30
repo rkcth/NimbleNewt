@@ -223,5 +223,11 @@ test("a repeated ask gets the backup its first ask made, unless that backup has 
     assert.notEqual(again.path, first.path, "the backup was removed, so the ask gets a new one");
     assert.ok(existsSync(again.path));
     assert.equal((await service.backUpFor("cmd-1")).path, again.path);
+    // Two repeats arriving together after the backup was removed share one new backup.
+    rmSync(again.path, { recursive: true, force: true });
+    clock += 5000;
+    const [x, y] = await Promise.all([service.backUpFor("cmd-1"), service.backUpFor("cmd-1")]);
+    assert.equal(x.path, y.path);
+    assert.equal(readdirSync(root).filter((n) => !n.endsWith(".partial")).length, 1, "one backup was made for the two asks");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

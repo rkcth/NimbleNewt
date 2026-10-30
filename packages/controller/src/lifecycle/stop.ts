@@ -20,7 +20,8 @@ export interface InventoryItem { readonly kind: "foreground" | "process" | "job"
 
 /** What the controller asks of the runtime. Every call must be safe to repeat: a restart makes the same call again. */
 export interface StopPorts {
-  inventory(scope: PauseScope): Promise<readonly InventoryItem[]>;
+  /** What is running for the scope. `lookOnly` asks for a look that remembers and changes nothing (readiness checks). */
+  inventory(scope: PauseScope, options?: { lookOnly?: boolean }): Promise<readonly InventoryItem[]>;
   /** Lets go of what preparation froze, when the request is cancelled because the scope was resumed. Best effort. */
   release?(scope: PauseScope): Promise<void>;
   /** Why a stop cannot be done for this scope at all (so it is refused before anything is paused or recorded), or undefined. */
@@ -313,7 +314,7 @@ export class StopService {
     const clean = { kind: scope.kind, id: scope.id } as PauseScope;
     const cannot = this.#ports.unsupported?.(clean);
     if (cannot !== undefined) throw new DomainError("unavailable", cannot, { field: "scope" });
-    const found = await this.#ports.inventory(clean).catch(() => [{ kind: "process", ref: "runtime:inventory", state: "unknown" } as InventoryItem]);
+    const found = await this.#ports.inventory(clean, { lookOnly: true }).catch(() => [{ kind: "process", ref: "runtime:inventory", state: "unknown" } as InventoryItem]);
     const unsettled = found.filter((i) => i.state !== "settled");
     return { scope: clean, ready: unsettled.length === 0, paused: (await this.#pauses.gate(by, clean))?.intent === "pause", unsettled: unsettled.slice(0, STOP_LIMITS.inventory), truncated: unsettled.length > STOP_LIMITS.inventory };
   }

@@ -47,12 +47,15 @@ export class BackupService {
     if (known !== undefined) {
       // A backup the retention rule has since removed is not an answer to give again: the ask gets a new one.
       const made = await known.catch(() => undefined);
-      if (made === undefined || await stat(made.path).then(() => true, () => false)) return known;
-      if (this.#asked.get(commandId) === known) this.#asked.delete(commandId);
+      if (made === undefined || await stat(made.path).then(() => true, (error: NodeJS.ErrnoException) => error.code !== "ENOENT")) return known;
+      // Another caller may have started the replacement while this one waited: it is the answer.
+      const current = this.#asked.get(commandId);
+      if (current !== undefined && current !== known) return current;
+      this.#asked.delete(commandId);
     }
     const run = this.backUpNow("manual");
     this.#asked.set(commandId, run);
-    run.catch(() => this.#asked.delete(commandId)); // a failed ask may be tried again
+    run.catch(() => { if (this.#asked.get(commandId) === run) this.#asked.delete(commandId); }); // a failed ask may be tried again
     while (this.#asked.size > 50) this.#asked.delete(this.#asked.keys().next().value as string);
     return run;
   }

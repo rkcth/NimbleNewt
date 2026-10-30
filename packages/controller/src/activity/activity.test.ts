@@ -56,7 +56,11 @@ for (const backend of backends) {
       assert.ok(tl.steps.every((x) => x.taskId !== foreign), "another project's steps are not in it");
       assert.ok(tl.steps.every((x, i) => i === 0 || tl.steps[i - 1]!.at >= x.at), "newest first");
       assert.deepEqual((await svc.timeline(auditor, project, { agent: "no-such", limit: 5 })).steps, []);
-      assert.ok((await svc.timeline(auditor, project, { agent: owner.id })).steps.every((x) => x.actor === owner.id));
+      const mine = (await svc.timeline(auditor, project, { agent: owner.id })).steps;
+      assert.ok(mine.length > 0 && mine.every((x) => x.actor === owner.id));
+      assert.ok((await svc.timeline(auditor, project, { since: "2000-01-01T00:00:00Z" })).steps.length > 0, "since keeps steps at or after the time");
+      assert.ok((await svc.timeline(owner, project)).scanned >= 2, "the project's tasks were counted");
+      await refuses("not_found", () => svc.timeline(worker, project));
       assert.deepEqual((await svc.timeline(auditor, project, { since: "2999-01-01T00:00:00Z" })).steps, []);
       assert.equal((await svc.timeline(auditor, project, { limit: 1 })).steps.length, 1);
       await refuses("not_found", () => svc.timeline(stranger, project));

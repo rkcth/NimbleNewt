@@ -66,12 +66,12 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
   };
   // The attempts seen for a scope, so a process of one that ended during preparation is still asked about when the stop ends.
   const seen = new Map<string, Set<string>>();
-  const localOf = async (attempts: readonly string[], scope: PauseScope): Promise<InventoryItem[]> => {
+  const localOf = async (attempts: readonly string[], scope: PauseScope, lookOnly = false): Promise<InventoryItem[]> => {
     if (local?.processes === undefined) return [];
     const key = `${scope.kind}:${scope.id}`;
-    const all = seen.get(key) ?? new Set<string>();
-    for (const a of attempts) all.add(a);
-    seen.set(key, all);
+    // A look-only call (a readiness check) asks about what was remembered plus what runs now, and remembers nothing.
+    const all = lookOnly ? new Set<string>([...(seen.get(key) ?? []), ...attempts]) : (seen.get(key) ?? new Set<string>());
+    if (!lookOnly) { for (const a of attempts) all.add(a); seen.set(key, all); }
     if (all.size === 0) return [];
     const found = await local.processes([...all]).catch(() => undefined);
     // A runtime that cannot say what is running is itself unknown: one item says so, so a stop is never reported clean on silence.
@@ -79,8 +79,8 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
     // What the runtime says is checked: an entry that is not shaped as promised is itself unknown. A ref (it may be a command line) is redacted before it is cut.
     return found.map((p, i) => (typeof p?.ref === "string" && (p.kind === "process" || p.kind === "child") && ["running", "uncooperative", "unknown"].includes(p.state) ? { kind: p.kind, ref: clipText(redactText(p.ref), 120), state: p.state } : { kind: "process" as const, ref: `runtime:processes#${i}`, state: "unknown" as const }));
   };
-  const inFlight = async (attempts: readonly string[], scope: PauseScope): Promise<InventoryItem[]> => {
-    const localItems = await localOf(attempts, scope);
+  const inFlight = async (attempts: readonly string[], scope: PauseScope, lookOnly = false): Promise<InventoryItem[]> => {
+    const localItems = await localOf(attempts, scope, lookOnly);
     const h = dispatch();
     const out: InventoryItem[] = [];
     for (const attemptId of attempts) {
@@ -102,7 +102,7 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
   };
   return {
     unsupported: (scope) => (scope.kind === "task" || scope.kind === "agent" || members !== undefined ? undefined : `stopping a whole ${scope.kind} is not supported yet; stop its tasks or agents one by one (Force Stop works on each)`),
-    inventory: async (scope) => inFlight(await attemptsOf(scope), scope),
+    inventory: async (scope, options) => inFlight(await attemptsOf(scope), scope, options?.lookOnly === true),
     release: async (scope) => { seen.delete(`${scope.kind}:${scope.id}`); const h = dispatch(); if (h === undefined) return; for (const id of await attemptsOf(scope)) await h.dispatcher.release(h.principal, id).catch(() => undefined); },
     cleanup: async (scope, options) => {
       const h = dispatch();

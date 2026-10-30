@@ -2717,3 +2717,9 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 
 - `ActivityService.timeline(by, projectId, { agent?, since?, limit? })`, the query `activity.timeline` and the chat/status view `timeline`: a project's recent steps across its tasks, newest first, optionally one actor's or since a time. Each task contributes its latest ten steps (a summary to start from, not the whole history; use `activity.steps` for one task in full); at most eight pages of task heads are looked at and `truncated` says so. Steps in an unavailable range are left out. Needs the project's history right (or the owner, a host or a service); a caller without it gets `not_found`. Read only: nothing is recorded, run or sent.
 - Remaining in U09: branch and related-agent navigation, links to messages, diffs, comments and artifacts, the collapsed model-thinking display, the web UI, and a replay that steps through one task (the zero-side-effects test for replay).
+
+## Batch 11 review fixes
+
+- **Readiness has no side effect.** `StopPorts.inventory(scope, { lookOnly })`: a look-only call (readiness) asks about what is remembered plus what runs now and remembers nothing, so polling it cannot grow the remembered attempts or colour a later stop.
+- **Timeline picks recent tasks.** Heads now carry `lastAt`; the timeline reads every head of the installation (up to 40 pages of 500, `truncated` says if cut), keeps the project's, and reads steps only for its 25 most recently active tasks (a head from before `lastAt` sorts last). A host no longer gets a project's timeline in one call (it reads a task through `steps`), and a task credential is refused.
+- **Backup.** Two repeats arriving after the cached backup was removed share one new backup; an `stat` error other than "missing" no longer counts as removed; a failed run only clears its own cache entry.

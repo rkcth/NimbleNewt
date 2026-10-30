@@ -128,6 +128,15 @@ test("the stop inventory lists the local processes and child work a runtime repo
   live = [];
   assert.deepEqual(await p2.terminate(task, { force: false }), { ended: true, unresolved: ["pid-5"] });
   assert.deepEqual(asked2.at(-1), ["att-1"]);
+  // A look-only inventory (a readiness check) remembers nothing: a later stop is not asked about attempts only a readiness check saw.
+  let live2 = ["att-7"];
+  const asked3: (readonly string[])[] = [];
+  const looking = { ...dispatcher, liveAttemptsOf: async () => live2 };
+  const p3 = dispatchStopPorts(() => ({ dispatcher: looking as never, principal: staff }), () => "pending", undefined, undefined, { processes: async (a) => { asked3.push(a); return []; } });
+  await p3.inventory(task, { lookOnly: true });
+  live2 = [];
+  await p3.terminate(task, { force: false });
+  assert.deepEqual(asked3, [["att-7"]], "only the look itself asked; terminate had nothing remembered to ask about");
   // Without the hook nothing is listed and nothing is charged.
   const bare = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), () => "pending");
   assert.deepEqual(await bare.inventory(task), []);

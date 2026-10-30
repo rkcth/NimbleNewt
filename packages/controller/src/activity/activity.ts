@@ -30,7 +30,7 @@ export interface ActivityStepBody {
   /** The sensitive part (tool inputs and results, message text) lives in its own record under access control; the step keeps only whether it is there. */
   readonly payload: { readonly state: "stored"; readonly id: string; readonly chars: number; readonly redactions: number; readonly sensitive: boolean } | { readonly state: "none" } | { readonly state: "missing"; readonly reason: string };
 }
-interface HeadBody { readonly next: number; readonly projectId: string; readonly unavailable: readonly { readonly from: number; readonly to: number; readonly reason: string; readonly by: string; readonly at: string }[] }
+interface HeadBody { readonly next: number; readonly projectId: string; /** When the latest step was recorded (absent on heads written before the timeline). */ readonly lastAt?: string; readonly unavailable: readonly { readonly from: number; readonly to: number; readonly reason: string; readonly by: string; readonly at: string }[] }
 interface PayloadBody { readonly taskId: string; readonly projectId: string; readonly seq: number; readonly sensitive: boolean; readonly text: string; readonly redactions: number }
 export interface ExplanationBody {
   readonly taskId: string; readonly projectId: string; readonly seq?: number;
@@ -57,6 +57,8 @@ const forbiddenWords = ["thinking", "reasoning", "chainOfThought", "thoughts", "
 /** The first `max` characters, never leaving half of a surrogate pair at the end. */
 export const clipText = (value: string, max: number): string => { const cut = value.slice(0, max); return value.length > max && /[\ud800-\udbff]$/.test(cut) ? cut.slice(0, -1) : cut; };
 const TIMELINE_PER_TASK = 10;
+const TIMELINE_TASKS = 25;
+const TIMELINE_PAGES = 40;
 const statement = (value: unknown, field: string, max: number = ACTIVITY_LIMITS.statement): string => redactText(text(value, field, { min: 1, max, multiline: true }));
 const checkRef = (value: unknown, field: string): ManifestRef => {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return invalid(field, "must be { kind, id, version? }");
@@ -119,7 +121,7 @@ export class ActivityService {
         const ref: AggregateRef = { kind: KIND_OF.step, id: stepIdAt(seq) };
         const stored = payload.state === "stored" ? { ...payload, id: payloadIdAt(seq) } : payload;
         const body: ActivityStepBody = { taskId, projectId: task.projectId, seq, kind: command.kind, summary, actor: by.id, at: this.#runner.now(), manifest, payload: stored };
-        const next: HeadBody = { next: seq + 1, projectId: task.projectId, unavailable: head?.unavailable ?? [] };
+        const next: HeadBody = { next: seq + 1, projectId: task.projectId, lastAt: this.#runner.now(), unavailable: head?.unavailable ?? [] };
         const changes: { type: "create" | "update"; ref: AggregateRef; body: JsonObject; expectedRevision?: number }[] = [{ type: "create", ref, body: clean(body) }];
         if (payloadBody !== undefined) changes.push({ type: "create", ref: { kind: KIND_OF.payload, id: payloadIdAt(seq) }, body: clean({ ...payloadBody, seq }) });
         changes.push(head === undefined ? { type: "create", ref: headRef, body: clean(next) } : { type: "update", ref: headRef, expectedRevision: found!.revision, body: clean(next) });
@@ -236,35 +238,39 @@ export class ActivityService {
   }
 
   /**
-   * A project's recent steps across its tasks, newest first (card U09): read only, nothing is recorded, run or sent. Each task contributes its latest steps (at most `perTask`, 10), so this is a summary to start from, not the whole history;
+   * A project's recent steps across its tasks, newest first (card U09): read only, nothing is recorded, run or sent. The project's 25 most recently active tasks each contribute their latest steps (at most 10), so this is a summary to start from, not the whole history;
    * `agent` keeps one actor's steps and `since` keeps those at or after a time. A step in an unavailable range is left out. The caller needs the project's history right (or to be the owner, a host or a service).
    */
   async timeline(by: Principal, projectIdValue: string, filter: { agent?: string; since?: string; limit?: number } = {}): Promise<{ steps: { taskId: string; seq: number; kind: ActivityKind; summary: string; actor: string; at: string }[]; scanned: number; truncated: boolean }> {
     onlyKnown(filter, ["agent", "since", "limit"]);
     const projectId = checkProjectId(projectIdValue);
-    if (!(by.kind === "owner" || by.kind === "host" || by.kind === "service" || allows(by, "history.read", projectId))) throw new DomainError("not_found", "no such project");
+    // A host is not given every project's history in one call here (it may read a task it is working through `steps`).
+    if (!(by.kind === "owner" || by.kind === "service" || allows(by, "history.read", projectId))) throw new DomainError("not_found", "no such project");
     const limit = Math.min(Math.max(1, filter.limit ?? 30), ACTIVITY_LIMITS.page);
     const agent = filter.agent === undefined ? undefined : text(filter.agent, "agent", { min: 1, max: 120 });
     const sinceMs = filter.since === undefined ? undefined : Date.parse(text(filter.since, "since", { min: 1, max: 40 }));
     if (sinceMs !== undefined && Number.isNaN(sinceMs)) invalid("since", "must be a time");
     const found: { taskId: string; seq: number; kind: ActivityKind; summary: string; actor: string; at: string }[] = [];
-    let scanned = 0;
     let truncated = false;
+    // Task IDs say nothing about age, so every head is looked at (the head is in the listing already: no read per task) and only the project's most recently active tasks have their steps read.
+    const heads: { id: string; head: HeadBody }[] = [];
     for (let after: string | undefined, pages = 0; ; pages++) {
-      if (pages >= 8) { truncated = true; break; }
+      if (pages >= TIMELINE_PAGES) { truncated = true; break; }
       const chunk = await this.#runner.list(KIND_OF.head, { ...(after === undefined ? {} : { afterId: after }), limit: 500 });
-      for (const rec of chunk) {
-        after = rec.id;
-        const head = rec.body as unknown as HeadBody;
-        if (head.projectId !== projectId) continue;
-        scanned++;
-        for (let seq = Math.max(1, head.next - TIMELINE_PER_TASK); seq < head.next; seq++) {
-          const { step } = await this.#stepView(rec.id, seq, head);
-          if (step === undefined || (agent !== undefined && step.actor !== agent) || (sinceMs !== undefined && Date.parse(step.at) < sinceMs)) continue;
-          found.push({ taskId: rec.id, seq, kind: step.kind, summary: step.summary, actor: step.actor, at: step.at });
-        }
-      }
+      for (const rec of chunk) { after = rec.id; const head = rec.body as unknown as HeadBody; if (head.projectId === projectId) heads.push({ id: rec.id, head }); }
       if (chunk.length < 500) break;
+    }
+    const scanned = heads.length;
+    // A head from before `lastAt` existed sorts last.
+    heads.sort((a, b) => ((b.head.lastAt ?? "") < (a.head.lastAt ?? "") ? -1 : (b.head.lastAt ?? "") > (a.head.lastAt ?? "") ? 1 : a.id < b.id ? -1 : 1));
+    if (heads.length > TIMELINE_TASKS) truncated = true;
+    for (const { id, head } of heads.slice(0, TIMELINE_TASKS)) {
+      if (sinceMs !== undefined && head.lastAt !== undefined && Date.parse(head.lastAt) < sinceMs) continue;
+      for (let seq = Math.max(1, head.next - TIMELINE_PER_TASK); seq < head.next; seq++) {
+        const { step } = await this.#stepView(id, seq, head);
+        if (step === undefined || (agent !== undefined && step.actor !== agent) || (sinceMs !== undefined && Date.parse(step.at) < sinceMs)) continue;
+        found.push({ taskId: id, seq, kind: step.kind, summary: step.summary, actor: step.actor, at: step.at });
+      }
     }
     found.sort((a, b) => (a.at === b.at ? (a.taskId < b.taskId ? 1 : a.taskId > b.taskId ? -1 : b.seq - a.seq) : a.at < b.at ? 1 : -1));
     return { steps: found.slice(0, limit), scanned, truncated };
