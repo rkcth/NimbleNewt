@@ -53,7 +53,7 @@ import type { ReviewService } from "../review/index.js";
 import { DifficultyService, type RoutingService } from "../routing/index.js";
 import { DISPATCHER_PRINCIPAL, type GrantService, type Principal, type PrincipalService, type TaskCredentialService } from "../security/index.js";
 import type { StopService } from "../lifecycle/stop.js";
-import { ImprovementService, StandupService, agendaOutcomeSink, improvementOutcomeSink, needsOwnerFrom } from "../standups/index.js";
+import { ImprovementService, StandupService, agendaOutcomeSink, improvementOutcomeSink, needsOwnerFrom, noticesFrom } from "../standups/index.js";
 import { chatTurnFollowUps } from "../chat/follow-ups.js";
 import type { ControllerStorage } from "../storage/types.js";
 
@@ -263,7 +263,8 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   const improvements = ImprovementService.withEpoch(storage, epoch, { meetings }, { ...ro, outcomes: improvementOutcomeSink(messages) });
   // The one owner-level read the stand-up preparation needs: the inbox, nothing else; the elevated principal does not leave this closure.
   const ownerInboxFor = needsOwnerFrom({ inbox: () => notifications.inbox(recovering(principal)) }, principal);
-  const standups = StandupService.withEpoch(storage, epoch, { meetings, assignments: i.assignments }, { ...ro, availability: pauses.availability, onBriefed: (by, item, revision) => improvements.markTold(by, item, revision), waitingMessages: (by, agent) => messages.waitingAtStandup(by, agent), ownerItems: ownerInboxFor, outcomes: agendaOutcomeSink({ followUp: (turnId, f) => followUps.add(turnId, f), inquiry: async (id) => { const q = (await storage.getAggregate({ kind: "inquiry", id }))?.body as unknown as { asker?: string; taskId?: string } | undefined; return q?.asker === undefined || q.taskId === undefined ? undefined : { asker: q.asker, taskId: q.taskId }; }, messages }) });
+  const ownerNoticesFor = noticesFrom({ inbox: () => notifications.inbox(recovering(principal)) }, principal);
+  const standups = StandupService.withEpoch(storage, epoch, { meetings, assignments: i.assignments }, { ...ro, availability: pauses.availability, onBriefed: (by, item, revision) => improvements.markTold(by, item, revision), waitingMessages: (by, agent) => messages.waitingAtStandup(by, agent), ownerItems: ownerInboxFor, ownerNotices: ownerNoticesFor, outcomes: agendaOutcomeSink({ followUp: (turnId, f) => followUps.add(turnId, f), inquiry: async (id) => { const q = (await storage.getAggregate({ kind: "inquiry", id }))?.body as unknown as { asker?: string; taskId?: string } | undefined; return q?.asker === undefined || q.taskId === undefined ? undefined : { asker: q.asker, taskId: q.taskId }; }, messages }) });
   const projects = (): Promise<string[]> => projectIds(i.projects);
   let stallNotices = 0;
   const loops: DispatcherLoop[] = [

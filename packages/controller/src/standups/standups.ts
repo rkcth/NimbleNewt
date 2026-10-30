@@ -132,6 +132,8 @@ export interface StandupOptions extends RunnerOptions {
   readonly usage?: (projectId: string, since: string, until: string) => Promise<{ readonly pcShare: number; readonly basis: string } | undefined>;
   /** What needs the owner now (the digest, part of the daily meeting by the owner's decision of 2026-10-22), as lines with their records: see `needsOwnerFrom`. Absent or failing: the agenda says the list could not be read. */
   readonly ownerItems?: (projectId: string) => Promise<readonly ReviewLine[]>;
+  /** The number of Notice-level items waiting in the owner's inbox for the project; the agenda ends the owner's part with one line saying so. Read when the agenda is read, never stored in the preparation. Failing: no line. */
+  readonly ownerNotices?: (projectId: string) => Promise<number>;
   /** When the next protected improvement window opens, if one is scheduled. */
   readonly improvementWindow?: (projectId: string) => Promise<string | undefined>;
   /** Records read per page, and pages per kind in one scan. A scan that is cut off says so (`partial`). */
@@ -417,7 +419,7 @@ export class StandupService {
    */
   async agenda(viewer: Principal, occurrenceId: string): Promise<{
     occurrenceId: string; startsAt: string; items: AgendaLine[]; sections: Readonly<Record<"conflicts" | "questions" | "decisions" | "topics" | "improvements", readonly AgendaLine[]>>;
-    needsOwner?: readonly ReviewLine[]; planning?: PlanningReview; briefs?: { agent: string; briefId: string; agentState: Availability; blockers: number; advice: number }[]; withheld: string[]; notes?: string[]; routine: string;
+    needsOwner?: readonly ReviewLine[]; noticeLine?: string; planning?: PlanningReview; briefs?: { agent: string; briefId: string; agentState: Availability; blockers: number; advice: number }[]; withheld: string[]; notes?: string[]; routine: string;
   } | undefined> {
     const shown = await this.#meetings.occurrence(viewer, occurrenceId);
     if (shown === undefined) return undefined;
@@ -435,10 +437,14 @@ export class StandupService {
     const briefs = await this.briefs(viewer, occurrenceId);
     if (prep === undefined || prep.review === undefined) withheld.push("the planning review");
     if (briefs.length === 0 && prep !== undefined) withheld.push("briefs");
+    // Owner only (the same rule as the list itself): one line counting the notices, after the progress; the count is read now, not stored.
+    const notices = prep?.needsOwner !== undefined && this.#options.ownerNotices !== undefined ? await this.#options.ownerNotices(occ.projectId).catch(() => 0) : 0;
     const waiting = await this.#meetings.returnsWaiting(viewer, occ.projectId);
     const notes = waiting === undefined || waiting === 0 ? [] : [`${waiting} outcome${waiting === 1 ? "" : "s"} of earlier topics ${waiting === 1 ? "has" : "have"} not yet been told to the conversation${waiting === 1 ? "" : "s"} they came from.`];
     return {
-      occurrenceId, startsAt: occ.startsAt, items, sections, ...(prep?.needsOwner === undefined ? {} : { needsOwner: prep.needsOwner }), ...(prep?.review === undefined ? {} : { planning: prep.review }),
+      // Needs-you and Urgent items open the report (owner only), then the progress, and the notice count ends it.
+      ...(prep?.needsOwner === undefined ? {} : { needsOwner: prep.needsOwner }), occurrenceId, startsAt: occ.startsAt, items, sections, ...(prep?.review === undefined ? {} : { planning: prep.review }),
+      ...(notices > 0 ? { noticeLine: `${notices} notice${notices === 1 ? "" : "s"} in your inbox, no action needed` } : {}),
       ...(briefs.length === 0 ? {} : { briefs: briefs.map((b) => ({ agent: b.agent, briefId: b.id, agentState: b.agentState, blockers: b.blockers.length, advice: b.advice.length })) }), withheld, ...(notes.length === 0 ? {} : { notes }),
       routine: "Routine progress is in the written briefs; the agenda holds what needs the meeting.",
     };
@@ -746,12 +752,19 @@ export function outcomeLine(item: Pick<AgendaBody, "topic" | "state" | "intent" 
  * What needs the owner, from the notification inbox (card U11): the unanswered items of the project (items that name no project are not shown on any project's agenda), urgent first, then oldest, for `StandupOptions.ownerItems`. The daily meeting opens with them, so the owner answers in
  * one place; each line cites its inbox item. The owner's own principal reads the inbox.
  */
-export function needsOwnerFrom(notifications: { inbox(owner: Principal): Promise<{ readonly items: readonly View<ItemBody>[] }> }, owner: Principal): (projectId: string) => Promise<ReviewLine[]> {
+export function needsOwnerFrom(notifications: { inbox(owner: Principal): Promise<{ readonly items: readonly (View<ItemBody> & { readonly level?: string })[] }> }, owner: Principal): (projectId: string) => Promise<ReviewLine[]> {
   return async (projectId) => {
-    const open = (await notifications.inbox(owner)).items.filter((i) => i.state !== "answered" && i.state !== "settled" && i.projectId === projectId);
-    open.sort((a, b) => Number(b.urgent) - Number(a.urgent) || (a.firstAt < b.firstAt ? -1 : a.firstAt > b.firstAt ? 1 : a.id < b.id ? -1 : 1));
-    return open.map((i) => ({ text: `${i.urgent ? "Urgent: " : ""}${cut(i.label, 200)}${i.count > 1 ? ` (reported ${i.count} times)` : ""}, waiting since ${i.firstAt}.`, cites: [{ kind: "notification-item", id: i.id, revision: i.revision }] }));
+    // Notice-level items never enter this list (owner decision: Needs-you and Urgent first, notices only as a count, see `noticesFrom`).
+    const open = (await notifications.inbox(owner)).items.filter((i) => i.state !== "answered" && i.state !== "settled" && i.projectId === projectId && i.level !== "notice");
+    const rank = (i: { urgent: boolean; level?: string }): number => (i.urgent || i.level === "urgent" ? 1 : 0);
+    open.sort((a, b) => rank(b) - rank(a) || (a.firstAt < b.firstAt ? -1 : a.firstAt > b.firstAt ? 1 : a.id < b.id ? -1 : 1));
+    return open.map((i) => ({ text: `${rank(i) === 1 ? "Urgent: " : ""}${cut(i.label, 200)}${i.count > 1 ? ` (reported ${i.count} times)` : ""}, waiting since ${i.firstAt}.`, cites: [{ kind: "notification-item", id: i.id, revision: i.revision }] }));
   };
+}
+
+/** How many unanswered Notice-level items the project has in the owner's inbox, for `StandupOptions.ownerNotices`: only a count, never lines. */
+export function noticesFrom(notifications: { inbox(owner: Principal): Promise<{ readonly items: readonly (View<ItemBody> & { readonly level?: string })[] }> }, owner: Principal): (projectId: string) => Promise<number> {
+  return async (projectId) => (await notifications.inbox(owner)).items.filter((i) => i.state !== "answered" && i.state !== "settled" && i.projectId === projectId && i.level === "notice").length;
 }
 
 /** The P/PC allocation from the configuration service (`workClass.pcFloor`, `pcTarget`, `pcCeiling`), for `StandupOptions.allocation`. Unreadable: undefined. */

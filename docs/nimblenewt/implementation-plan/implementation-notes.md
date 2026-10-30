@@ -3427,3 +3427,7 @@ The owner saw no reason to ignore built-in events. `tasks` (task completion) is 
 - Not changed: tool/commit-gate reviews (`ReviewService`, `CommitGateService`) are owner/policy approvals of operations, not peer review of work, and still route as before. The landing check that reads `review.required` (integration policy `requiredChecks`) is not built yet; it must honor `review.required === false`.
 - The earlier PROVISIONAL note on `allowSelfReview` (Q01b) is superseded by this entry.
 
+
+## Stand-up report ordering by level (owner decision, 2026-10-30)
+
+The owner's stand-up agenda opens with the Needs-you and Urgent inbox items (`needsOwnerFrom` now drops Notice-level items by the inbox `level`, which already applies the owner's `levelByKind`; Urgent first, then oldest), then the progress, and ends with one `noticeLine` ("N notices in your inbox, no action needed"). The count comes from the new `noticesFrom` / `StandupOptions.ownerNotices`, is read when the agenda is read (never stored in the prep record, so notice churn cannot rewrite it; `stable()` still compares only needs-you item ids), and is shown only where `needsOwner` is shown (owner, no task scope).
