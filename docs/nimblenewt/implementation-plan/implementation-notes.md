@@ -2596,3 +2596,10 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 
 - The built-in source keeps at most 2000 closed tasks in its state (the most recently closed), because a state record is limited to 256 KiB; its dedup key now carries the closing time, so a task closed again is a new event.
 - A hand-off back left without its suspension by a crash is finished from its own record (`returnOf` names the reassignment it undoes) by whichever sweep path reaches it first; if the first owner cannot take the task, it ends failed and the task's activity says so. A failed return is told once (not twice), and a return that is blocked again later is told again (`stuckTold` is the history length at which it was told).
+
+## M03f (part 1): agenda outcomes go back to where the topic came from
+
+- `chatTurnFollowUps` (`chat/follow-ups.ts`) puts a keyed follow-up on a chat turn (`TurnBody.followUps`, latest 20 kept, text cut at 1000); the same key twice changes nothing; a turn that is gone reports not delivered.
+- `agendaOutcomeSink` (`standups/outcome-sink.ts`) delivers a stand-up's agenda outcome: for a topic that came from a chat turn, as a follow-up on that turn; for an inquiry, as a controller notice to the agent that asked, on the inquiry's task. Anything that cannot be put back stays waiting (not marked returned) and is tried again.
+- The composed controller now gives the stand-up service this sink, so outcomes reach the conversations they came from in the running controller (before, no sink was composed and they waited).
+- Not built yet (remains in M03f): the notice/allocation/usage/owner-item sinks, the chat commands, and showing follow-ups in the chat's own listing of turns.

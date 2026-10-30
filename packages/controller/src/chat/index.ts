@@ -7,3 +7,4 @@ export { ChatService, replyOf, type ApplyResult, type ChatDeps, type ContextBody
 export { GRANT_LENGTH_OPTIONS, DEFAULT_GRANT_DAYS, MAX_GRANT_DAYS, POLICY_EDIT_LIMITS, PolicyEditService, chooseGrantLength, lengthInWords, ownerOrders, targetsOf, type EditDraft, type EditOp, type EditResult, type EditStatus, type PolicyEditBody, type PolicyEditDeps, type PrepareInput, type PolicyEditPrepared } from "./policy-edit.js";
 export { checkPolicyChange, type PolicyEditChange } from "./policy-intent.js";
 export { COORDINATOR_ID, CoordinatorService, type Answer, type CoordinatorBody, type CoordinatorDeps, type CoordinatorModel, type CoordinatorRequest, type CoordinatorState, type Decomposition } from "./coordinator.js";
+export { FOLLOW_UP_LIMITS, chatTurnFollowUps } from "./follow-ups.js";

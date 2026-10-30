@@ -121,6 +121,8 @@ export interface TurnBody {
   readonly resumes?: string;
   readonly resumedBy?: string;
   readonly outcomes?: readonly Outcome[];
+  /** What the stand-up later decided about a topic taken from this turn (card M03f), put here by the controller. */
+  readonly followUps?: readonly { readonly key: string; readonly text: string; readonly at: string }[];
   readonly createdAt: string;
   readonly completedAt?: string;
 }
