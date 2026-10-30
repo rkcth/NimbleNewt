@@ -51,7 +51,7 @@ export interface VersionBody {
   readonly registeredBy: string;
   readonly registeredAt: string;
 }
-export interface EntryBody { readonly name: string; readonly layer: Layer; readonly kind: ArtifactKind; readonly owner?: string; readonly latest: string; /** Every published version, in publication order. */ readonly versions: readonly string[]; /** The versions revoked. Revoking changes the entry, so a run in flight notices. */ readonly revoked: readonly string[] }
+export interface EntryBody { readonly name: string; readonly layer: Layer; readonly kind: ArtifactKind; readonly owner?: string; readonly latest: string; /** Every published version, in publication order. */ readonly versions: readonly string[]; /** The versions revoked. Revoking changes the entry, so a run in flight notices. */ readonly revoked: readonly string[]; /** The versions no longer chosen when no version is named (a newer one was rolled back, or the owner set it aside). They still resolve by name and version, so a paused task resumes silently on the one it used. */ readonly deprecated?: readonly string[] }
 export interface RevocationBody { readonly revokedBy: string; readonly reason: string; readonly at: string }
 export interface UsageBody {
   readonly versionId: string;
@@ -280,6 +280,46 @@ export class CatalogService {
     }));
   }
 
+  /**
+   * The owner sets versions aside without withdrawing them (card T02): they are no longer chosen when a caller names no version, but a task that pinned one still resolves and runs it (a resume does not break), and
+   * the record is kept for inspection. A revoked version is a different thing and is refused.
+   */
+  async deprecate(owner: Principal, command: NoActor & { name: string; version: string; reason: string }): Promise<void> {
+    await this.#setAside(owner, "catalog.deprecate", command, (prior) => (prior.versions.includes(command.version) ? [command.version] : []));
+  }
+
+  /**
+   * Returns an entry to an earlier release (card T02): every published version above `toVersion` is set aside (deprecated), so the highest one left is `toVersion`. Nothing is deleted or rewritten, a version that
+   * was revoked stays revoked, and `toVersion` must be published and not revoked.
+   */
+  async rollback(owner: Principal, command: NoActor & { name: string; toVersion: string; reason: string }): Promise<void> {
+    await this.#setAside(owner, "catalog.rollback", { ...command, version: command.toVersion }, (prior) => prior.versions.filter((v) => compare(v, command.toVersion) > 0 && !prior.revoked.includes(v)), true);
+  }
+
+  async #setAside(owner: Principal, op: string, command: NoActor & { name: string; version: string; reason: string }, choose: (prior: EntryBody) => string[], mustBeLive = false): Promise<void> {
+    if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner changes which version is chosen`);
+    onlyKnown(command, ["commandId", "name", "version", "reason", "toVersion"]);
+    const parsed = parseName(command.name);
+    if (parsed === null) invalid("name", "is not a canonical name");
+    if (typeof command.version !== "string" || !VERSION.test(command.version)) invalid("version", "must be major.minor.patch");
+    const reason = redactText(text(command.reason, "reason", { min: 1, max: 500 }));
+    const eref: AggregateRef = { kind: "catalog-entry", id: derivedId("cat", command.name) };
+    await this.#runner.command(op, { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
+      payload: { name: command.name, version: command.version, reason },
+      build: async () => {
+        const entry = await this.#runner.get(eref.kind, eref.id);
+        const prior = entry?.body as unknown as EntryBody | undefined;
+        if (entry === undefined || prior === undefined || !prior.versions.includes(command.version)) throw new DomainError("not_found", `${command.name} ${command.version} is not in the catalog`);
+        if (mustBeLive && prior.revoked.includes(command.version)) throw new DomainError("invalid_command", "that version is revoked; roll back to one that is not", { field: "toVersion" });
+        const add = choose(prior).filter((v) => !(prior.deprecated ?? []).includes(v));
+        const aside = [...(prior.deprecated ?? []), ...add];
+        // Going back to a version that had itself been set aside brings it back into use.
+        const next: EntryBody = { ...prior, deprecated: mustBeLive ? aside.filter((v) => v !== command.version) : aside };
+        return { ref: eref, creates: false, changes: [{ type: "update", ref: eref, expectedRevision: entry.revision, body: next as unknown as JsonObject }], detail: { name: command.name, version: command.version, setAside: add.length, reason }, contention: async () => new DomainError("stale_revision", "the catalog entry changed at the same moment; ask again") };
+      },
+    }));
+  }
+
   /** One version (or the latest live one), if the reader may see it: system and shared artifacts to any authenticated principal with `catalog.read`, a personal one only to its owner and the installation owner. */
   async get(by: Principal, name: string, version?: string): Promise<(View<VersionBody> & { revoked?: RevocationBody }) | undefined> {
     const resolved = await this.#resolve(by, name, version);
@@ -418,11 +458,11 @@ export class CatalogService {
     return allows(by, "catalog.read", undefined);
   }
 
-  /** The highest published version that is not revoked. */
+  /** The highest published version that is neither revoked nor set aside. */
   async #latestLive(name: string): Promise<{ id: string; body: VersionBody } | undefined> {
     const entry = (await this.#runner.get("catalog-entry", derivedId("cat", name)))?.body as unknown as EntryBody | undefined;
     if (entry === undefined) return undefined;
-    const live = entry.versions.filter((v) => !entry.revoked.includes(v)).sort(compare).reverse();
+    const live = entry.versions.filter((v) => !entry.revoked.includes(v) && !(entry.deprecated ?? []).includes(v)).sort(compare).reverse();
     for (const v of live) {
       const id = derivedId("cav", `${name}|${v}`);
       const found = await this.#runner.get("catalog-version", id);

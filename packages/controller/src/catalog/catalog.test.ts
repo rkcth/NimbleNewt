@@ -141,6 +141,33 @@ for (const backend of backends) {
     await refuses("not_found", () => c.cat.revoke(c.owner, { commandId: cid("v"), name: tool.name, version: "7.0.0", reason: "none" }));
   });
 
+  suite("a version can be set aside or rolled back by the owner: it is no longer chosen, a task that pinned it still runs it, nothing is deleted, and a revoked one is refused (card T02)", async (c) => {
+    const readme = await c.note(c.ann, "docs");
+    const reg = async (version: string) => c.cat.register(c.ann, { commandId: cid("r"), name: "fetch", kind: "tool", version, manifest: manifest(), instructionsRecordId: readme, executableRecordId: await c.note(c.ann, `code ${version}`) });
+    const tool = await reg("1.0.0"); await reg("1.1.0"); await reg("1.2.0");
+    const ann = await c.principals.authenticate((await c.principals.issueCredential(c.owner, c.ann.id)).token);
+    const run = (version?: string) => c.cat.authorizeRun(ann, { commandId: cid("u"), name: tool.name, ...(version === undefined ? {} : { version }), taskId: c.ta, projectId: c.a, host });
+    assert.equal((await run() as { version: string }).version, "1.2.0");
+    // Only the owner changes which version is chosen.
+    await refuses("forbidden", () => c.cat.rollback(ann, { commandId: cid("b"), name: tool.name, toVersion: "1.0.0", reason: "not mine" }));
+    await refuses("forbidden", () => c.cat.deprecate(ann, { commandId: cid("b"), name: tool.name, version: "1.2.0", reason: "not mine" }));
+    await c.cat.deprecate(c.owner, { commandId: cid("d"), name: tool.name, version: "1.2.0", reason: "slow" });
+    assert.equal((await run() as { version: string }).version, "1.1.0", "the next one down is chosen");
+    assert.equal((await run("1.2.0") as { version: string }).version, "1.2.0", "a task that pinned the deprecated version still runs it");
+    assert.equal((await c.cat.get(c.owner, tool.name, "1.2.0"))!.version, "1.2.0", "it is kept for inspection");
+    // Rolling back sets aside everything above the target; the target comes back into use if it had been set aside.
+    await c.cat.rollback(c.owner, { commandId: cid("b"), name: tool.name, toVersion: "1.0.0", reason: "1.1 breaks resumes" });
+    assert.equal((await run() as { version: string }).version, "1.0.0");
+    assert.equal((await run("1.1.0") as { version: string }).version, "1.1.0", "set aside, not withdrawn");
+    await refuses("not_found", () => c.cat.rollback(c.owner, { commandId: cid("b"), name: tool.name, toVersion: "9.9.9", reason: "none" }));
+    // A revoked version cannot be rolled back to, and stays revoked whatever is chosen.
+    await c.cat.revoke(c.owner, { commandId: cid("v"), name: tool.name, version: "1.0.0", reason: "leaked" });
+    await refuses("invalid_command", () => c.cat.rollback(c.owner, { commandId: cid("b"), name: tool.name, toVersion: "1.0.0", reason: "back" }));
+    await refuses("forbidden", () => run("1.0.0"), (e) => assert.match(e.message, /revoked/));
+    await c.cat.rollback(c.owner, { commandId: cid("b"), name: tool.name, toVersion: "1.1.0", reason: "back to 1.1" });
+    assert.equal((await run() as { version: string }).version, "1.1.0");
+  });
+
   suite("a host that cannot run a tool is told why before anything starts, and a run is recorded with who, which exact version, task and project, visible only inside that project", async (c) => {
     const readme = await c.note(c.ann, "docs"); const code = await c.note(c.ann, "code");
     const tool = await c.cat.register(c.ann, { commandId: cid("r"), name: "fetch", kind: "tool", version: "1.0.0", manifest: manifest(), instructionsRecordId: readme, executableRecordId: code });
