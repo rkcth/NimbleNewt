@@ -2717,6 +2717,19 @@ Result: `{ ok: true }`.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `meeting.invite-direct`
+
+The owner asks, ahead of the meeting, for a paused, suspended or stopped agent to attend it: the exception lets it in for this meeting only, with its other work staying as it was. Owner only; the agent must be on the roster.
+
+Arguments:
+
+- `occurrenceId`: the occurrence
+- `agent`: the agent principal
+
+Result: `{ ok: true }`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `agent.create`
 
 Creates an agent with a new durable ID and its own identity (no grants, no credential). Needs `agent.manage`.

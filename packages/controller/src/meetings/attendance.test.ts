@@ -460,6 +460,30 @@ for (const backend of backends) {
     assert.equal(await c.pauses.availability(c.pA), "paused");
   });
 
+  suite("a stopped agent attends only when the owner asked for it ahead of time, keeps to its meeting task, and is stopped again afterwards (card M04e)", async (c) => {
+    const t1 = await c.task(c.agentA);
+    await c.pauses.pause(c.owner, { commandId: cid("pz"), scope: { kind: "agent", id: c.agentA }, reason: "stopped by the owner" });
+    await c.pauses.observe(c.owner, { commandId: cid("ob"), scope: { kind: "agent", id: c.agentA }, state: "stopped", evidence: "the stop settled" });
+    const id = await c.urgent([c.pA, c.pB]);
+    await c.room(id);
+    // Without the owner's request the stopped agent stays out, whoever asks.
+    assert.equal(state(await c.status(id), c.pA).state, "unavailable");
+    await refuses("invalid_command", () => c.attendance.prepare(c.owner, { commandId: cid("pr"), occurrenceId: id, agent: c.pA, interrupted: [] }));
+    // The owner's request ahead of time (the direct invitation, which the chat reaches as meeting.invite) lets it in for this meeting only.
+    await c.meetings.inviteDirect(c.owner, { commandId: cid("iv"), occurrenceId: id, agent: c.pA });
+    await c.attendance.refresh(c.owner, id);
+    await c.prep(id, c.pA);
+    const joined = await c.attendance.join(c.asA, { commandId: cid("jn"), occurrenceId: id, agent: c.pA });
+    assert.ok(joined.joined);
+    assert.deepEqual(await c.attendance.meetingOfTask(joined.meetingTaskId!, c.pA), { occurrenceId: id, endsAt: (await c.attendance.status(c.owner, id))!.occurrence.endsAt }, "its meeting task is held to short work");
+    assert.equal((await c.pauses.guard(t1)).blockedBy.length, 1, "its other work stays stopped");
+    await c.attendance.leave(c.asA, { commandId: cid("lv"), occurrenceId: id, agent: c.pA });
+    assert.equal(await c.attendance.meetingOfTask(joined.meetingTaskId!, c.pA), undefined, "after it leaves, nothing is held");
+    await c.attendance.endMeeting(c.owner, { commandId: cid("end"), occurrenceId: id });
+    assert.equal(await c.agentGate(c.agentA), "pause");
+    assert.equal((await c.pauses.gate(c.owner, { kind: "agent", id: c.agentA }))!.observed?.state, "stopped", "it is back to stopped");
+  });
+
   suite("the time an agent spends in a meeting is charged once, to its meeting task, and a failing charge never keeps the agent in the room (card R05d)", async (c) => {
     const charges: { commandId: string; projectId: string; agentId: string; computeMs: number; taskId?: string }[] = [];
     let fail = true;

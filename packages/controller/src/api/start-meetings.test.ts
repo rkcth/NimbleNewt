@@ -173,6 +173,13 @@ test("through the composed controller a paused agent and an agent the host repor
     assert.deepEqual(sent, [`agent:${ids.ann}`], "only the available agent was invited; the paused and the stopped one were not");
     assert.deepEqual(occ.agenda, [topic.result.id], "the occurrence took the agenda item");
     assert.deepEqual((await call("agenda.list", { projectId: project })).result.items, [], "and it is off the open agenda while the occurrence holds it");
+    // The owner's request ahead of time reaches the room through the state API (so the chat can make it): the paused agent is let in for this meeting; the one the host reports stopped is not woken by it (card M04e).
+    const invited = await call("meeting.invite-direct", { occurrenceId: sched.lastOccurrenceId, agent: `agent:${ids.bob}` }, "iv1");
+    assert.ok(invited.ok, JSON.stringify(invited));
+    const seats = (await call("meeting.occurrence", { occurrenceId: sched.lastOccurrenceId })).result.item.occurrence.participants;
+    assert.equal(seats.find((p: { id: string }) => p.id === `agent:${ids.bob}`).status, "owner-invited");
+    const refusedCat = await call("meeting.invite-direct", { occurrenceId: sched.lastOccurrenceId, agent: `agent:${ids.cat}` }, "iv2");
+    assert.equal(refusedCat.ok, false);
     // Settled without reaching it: the item is still open for the next meeting.
     assert.ok((await call("meeting.settle", { occurrenceId: sched.lastOccurrenceId, outcome: "cancelled", reason: "nobody came" }, "st1")).ok);
     const open = await call("agenda.list", { projectId: project });
