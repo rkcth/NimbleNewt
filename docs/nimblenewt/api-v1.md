@@ -287,14 +287,16 @@ Result: `{ payload: { text, redactions } | null }`.
 
 #### `activity.explanations`
 
-The explanations written for a task, or one step of it.
+The explanations written for a task, or one step of it, a page at a time (the worker's own in the order written, then the retrospective ones).
 
 Arguments:
 
 - `taskId`: the task
 - `seq` (optional): one step
+- `after` (optional): how many you have already read (the previous `next`)
+- `limit` (optional): 1 to 100, default 50
 
-Result: `{ items: [...] }`.
+Result: `{ items: [...], next? }`; `next` is passed as `after` for the following page. A page can hold fewer than `limit` items when steps in it are unavailable.
 
 #### `activity.corrections`
 

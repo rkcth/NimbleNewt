@@ -94,7 +94,7 @@ export interface Context {
   readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep">;
   /** Absent when the controller runs without deliverable reads (card U13). */
   readonly deliverables?: Pick<DeliverableService, "list" | "get">;
-  readonly activity?: Pick<ActivityService, "record" | "explain" | "explainLater" | "correct" | "markUnavailable" | "steps" | "payload" | "explanations" | "corrections" | "timeline">;
+  readonly activity?: Pick<ActivityService, "record" | "explain" | "explainLater" | "correct" | "markUnavailable" | "steps" | "payload" | "explanations" | "explanationsPage" | "corrections" | "timeline">;
   readonly policyContext?: Pick<PolicyService, "contextFor">;
   readonly records?: Pick<MeetingRecordService, "open" | "setChair" | "join" | "leave" | "append" | "move" | "amend" | "table" | "openVote" | "castBallot" | "closeVote" | "castingVote" | "apply" | "ownerRespond" | "finish" | "summarize" | "returnOutcomes" | "sweep" | "record" | "recordFor" | "discussion" | "motion" | "ballots" | "decision" | "why" | "summary" | "latestPlan">;
   readonly attendance?: Pick<AttendanceService, "admission" | "openRoom" | "callNow" | "status" | "beginDiscussion" | "prepare" | "reportBlocked" | "join" | "joinAsOwner" | "authorizeWake" | "leave" | "keepPaused" | "deferReturn" | "endMeeting" | "returnToWork" | "acknowledge" | "revalidation" | "saveBrief" | "briefOf">;
@@ -468,8 +468,14 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => { only(a, ["taskId", "seq", "choice", "alternatives", "evidence", "uncertainty"]); return asJson(await activityOf(c).explain(c.principal, { commandId: need(id), ...a } as never)); } },
   { name: "activity.explain-later", kind: "command", summary: "Asks for an explanation of a step after the fact. It is labelled retrospective, built only from the records, and says so when they cannot explain.", args: { taskId: "the task", seq: "the step", commandId: "required" }, result: "`{ id, replayed, explanation }`.",
     run: async (c, a, id) => { only(a, ["taskId", "seq"]); return asJson(await activityOf(c).explainLater(c.principal, { commandId: need(id), ...a } as never)); } },
-  { name: "activity.explanations", kind: "query", summary: "The explanations written for a task, or one step of it.", args: { taskId: "the task", "seq?": "one step" }, result: "`{ items: [...] }`.",
-    run: async (c, a) => { only(a, ["taskId", "seq"]); return asJson({ items: await activityOf(c).explanations(c.principal, a["taskId"] as string, a["seq"] as number | undefined) }); } },
+  { name: "activity.explanations", kind: "query", summary: "The explanations written for a task, or one step of it, a page at a time (the worker's own in the order written, then the retrospective ones).", args: { taskId: "the task", "seq?": "one step", "after?": "how many you have already read (the previous `next`)", "limit?": "1 to 100, default 50" }, result: "`{ items: [...], next? }`; `next` is passed as `after` for the following page. A page can hold fewer than `limit` items when steps in it are unavailable.",
+    run: async (c, a) => {
+      only(a, ["taskId", "seq", "after", "limit"]);
+      const after = a["after"] === undefined ? 0 : a["after"], limit = a["limit"] === undefined ? 50 : a["limit"];
+      if (typeof after !== "number" || !Number.isInteger(after) || after < 0) throw new DomainError("invalid_command", "after must be a whole number, 0 or more", { field: "after" });
+      if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > 100) throw new DomainError("invalid_command", "limit must be a whole number from 1 to 100", { field: "limit" });
+      return asJson(await activityOf(c).explanationsPage(c.principal, a["taskId"] as string, a["seq"] as number | undefined, after, limit));
+    } },
   { name: "activity.corrections", kind: "query", summary: "The corrections appended to one step (oldest first), each with who and when. A step in an unavailable range has none to show. Read only. Needs the task's history right.", args: { taskId: "the task", seq: "the step number", "after?": "how many corrections you have already read (the previous `next`)", "limit?": "at most 100" }, result: "`{ items: [{ note, by, at, ... }], next? }`; `next` is passed as `after` for the following page.",
     run: async (c, a) => {
       only(a, ["taskId", "seq", "after", "limit"]);

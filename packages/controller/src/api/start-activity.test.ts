@@ -40,6 +40,18 @@ test("activity steps, explanations, corrections and unavailable ranges work thro
     assert.equal((await call(aud, "activity.explanations", { taskId: task, seq: 1 })).result.items.length, 1);
 
     assert.equal((await call(ann, "activity.correct", { taskId: task, seq: 1, note: "x" }, "k0")).error.code, "forbidden");
+    // paging the whole-task listing
+    assert.equal((await call(aud, "activity.explanations", { taskId: task, limit: 0 })).error.code, "invalid_command");
+    assert.equal((await call(aud, "activity.explanations", { taskId: task, limit: 101 })).error.code, "invalid_command");
+    assert.equal((await call(aud, "activity.explanations", { taskId: task, after: -1 })).error.code, "invalid_command");
+    assert.equal((await call(aud, "activity.explanations", { taskId: task, after: "1" })).error.code, "invalid_command");
+    assert.equal((await call(zed, "activity.explanations", { taskId: task })).error.code, (await call(zed, "activity.explanations", { taskId: task, limit: 1 })).error.code, "no right, same refusal");
+    const e1 = await call(aud, "activity.explanations", { taskId: task, limit: 1 });
+    assert.deepEqual([e1.ok, e1.result.items.length, e1.result.next], [true, 1, 1], JSON.stringify(e1));
+    const e2 = await call(aud, "activity.explanations", { taskId: task, after: e1.result.next, limit: 1 });
+    assert.deepEqual([e2.result.items.length, e2.result.next], [1, undefined]);
+    assert.notDeepEqual(e1.result.items[0], e2.result.items[0]);
+    assert.equal((await call(aud, "activity.explanations", { taskId: task })).result.items.length, 2);
     assert.ok((await call(boot.token, "activity.correct", { taskId: task, seq: 1, note: "ran on the old checkout" }, "k1")).ok);
     assert.equal((await call(aud, "activity.steps", { taskId: task })).result.steps[0].corrections, 1);
     const cor = await call(aud, "activity.corrections", { taskId: task, seq: 1 });

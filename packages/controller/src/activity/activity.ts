@@ -313,6 +313,27 @@ export class ActivityService {
     return (await this.#stepView(tid, seq)).gone !== undefined ? [] : this.#explanationsFor(tid, seq);
   }
 
+  /**
+   * One page of a task's explanations. Without a step the cursor is a position in the task's index (the worker's own explanations in the order written, then the retrospective ones) and only that page's
+   * records are read from storage; a page may come back shorter than the limit when some of its steps are in an unavailable range. With a step the per-step list is already small and is sliced.
+   */
+  async explanationsPage(by: Principal, taskId: string, seq: number | undefined, after: number, limit: number): Promise<{ items: ExplanationBody[]; next?: number }> {
+    if (seq !== undefined) { const all = await this.explanations(by, taskId, seq); return { items: all.slice(after, after + limit), ...(after + limit < all.length ? { next: after + limit } : {}) }; }
+    const tid = checkTaskId(taskId);
+    const task = await this.#task(tid);
+    this.#mayRead(by, task.projectId, tid);
+    const index = await this.#indexOf(tid);
+    const ids = [...index.explanations, ...(index.later ?? [])];
+    const items: ExplanationBody[] = [];
+    for (const id of ids.slice(after, after + limit)) {
+      const found = await this.#runner.get(KIND_OF.explanation, id);
+      if (found === undefined) continue;
+      const e = found.body as unknown as ExplanationBody;
+      if (e.seq === undefined || (await this.#stepView(tid, e.seq)).gone === undefined) items.push(e);
+    }
+    return { items, ...(after + limit < ids.length ? { next: after + limit } : {}) };
+  }
+
   async corrections(by: Principal, taskId: string, seq: number): Promise<CorrectionBody[]> {
     const tid = checkTaskId(taskId);
     const task = await this.#task(tid);
