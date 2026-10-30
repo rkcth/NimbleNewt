@@ -55,10 +55,12 @@ test("the agenda outcome goes to the chat turn or, for an inquiry, to the agent 
 });
 
 test("an outcome for an inquiry whose asker can never be told is closed, not retried for ever; a passing failure stays waiting (card M03f)", async () => {
-  let error: Error = new DomainError("forbidden", "not an agent");
+  let error: Error = new DomainError("not_found", "no such task");
   const sink = agendaOutcomeSink({ followUp: async () => true, inquiry: async () => ({ asker: "owner:rob", taskId: "task-1" }), messages: { noticeFromController: async () => { throw error; } } });
   const n = { key: "item:2", kind: "agenda-outcome" as const, projectId: "prj-1", text: "decided", refs: [], to: { kind: "inquiry" as const, id: "inq-1" } };
   assert.equal(await sink.deliver(n), true);
+  error = new DomainError("forbidden", "grant lapsed");
+  assert.equal(await sink.deliver(n), false, "a refusal by rights may pass");
   error = new Error("storage down");
   assert.equal(await sink.deliver(n), false);
 });

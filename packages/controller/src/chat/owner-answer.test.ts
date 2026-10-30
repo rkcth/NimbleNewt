@@ -52,13 +52,13 @@ for (const backend of backends) {
       // The owner picks one of the offered questions: the held answer is carried on with that question.
       script["the Friday one"] = [{ kind: "answer", turnId: first2.turnId, choice: "inq-3", evidence: "the Friday one", basis: "owner" }];
       const resumed = only((await chat.submit(w.ownerToken, { messageId: cid("m"), text: "the Friday one" })).outcomes);
-      assert.equal(resumed.status, "applied", JSON.stringify(resumed));
-      assert.equal(answered.at(-1)!.inquiryId, "inq-3");
+      assert.equal(resumed.status, "proposed", "a chosen question is shown with the answer before it is filed");
+      assert.equal(answered.length, 2);
       // An answer that is not in the owner's message is not done.
       waiting = [view("inq-5", "Ship on Friday?", "Release")];
       script["About friday: go on then."] = [cmd("owner.answer", { questionTopic: "friday", answer: "Ship it now and skip QA" }, "go on then")];
       assert.equal(only((await say("About friday: go on then.")).outcomes).status, "refused");
-      assert.equal(answered.length, 3);
+      assert.equal(answered.length, 2);
     } finally { await w.close(); }
   });
 }

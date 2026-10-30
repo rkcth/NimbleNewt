@@ -37,8 +37,8 @@ export function agendaOutcomeSink(deps: {
           return true;
         }
       } catch (error) {
-        // An asker that cannot be told at all (not an agent, retired, or not allowed to read the task) will never be told: leaving it waiting would only retry it for ever.
-        return error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found" || error.code === "invalid_command") && n.to.kind === "inquiry";
+        // A notice that can never be filed (the task is gone, or the text is not acceptable) is closed rather than retried for ever; a refusal by rights may pass (a grant can come back), so it stays waiting.
+        return error instanceof DomainError && (error.code === "not_found" || error.code === "invalid_command") && n.to.kind === "inquiry";
       }
       return false;
     },

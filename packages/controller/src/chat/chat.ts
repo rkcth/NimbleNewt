@@ -625,10 +625,12 @@ export class ChatService {
       if (named !== undefined && typeof named !== "string") return refuse("invalid_command", "questionTopic must be text");
       const open = await this.#listAll(token, "owner.questions", {});
       if (args["inquiryId"] !== undefined && !open.some((i) => i["inquiryId"] === args["inquiryId"])) return refuse("not_found", "that question is not waiting for your answer");
+      // An ID given directly (by the model or carried on from a chosen answer) is shown first like an unnamed question.
+      if (args["inquiryId"] !== undefined) showFirst = "the question it answers is shown to you first";
       if (args["inquiryId"] === undefined) {
         const words = typeof named === "string" ? named.trim().toLowerCase() : "";
         // An answer given with no word naming the question could land on one the owner never saw: it is shown first, with the question it would answer.
-        if (words === "") showFirst = "no question was named, so you are shown the one it would answer first";
+        if (words.length < 4) showFirst = "no question was clearly named, so you are shown the one it would answer first";
         const has = (i: Record<string, unknown>): boolean => [String(i["question"]), String((i["task"] as { title?: unknown } | undefined)?.title ?? "")].some((t) => t.toLowerCase().includes(words));
         const matches = open.filter((i) => words === "" || has(i));
         if (matches.length === 0) return refuse("not_found", words === "" ? "no agent is waiting for your answer" : `no waiting question is about "${words.slice(0, 80)}"`);
