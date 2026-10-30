@@ -2819,12 +2819,25 @@
       ],
       "deliverable": "Split from L06 (2026-10-30): a gate may be lifted by a recorded, authorized condition (set by the owner ahead of time) as well as by an explicit owner or manager resume",
       "acceptance_and_verification": "A condition that was never recorded never resumes anything; a recorded one resumes only the scope it names and is itself audited",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "e7775aa",
+          "16d59d2",
+          "0115950"
+        ],
+        "ci_runs": [
+          "41059220298"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "The owner can record a time for a pause; the controller lifts exactly that scope when it comes, audited; nothing without a recorded time is lifted, and a pause a Stop, Suspend or hand-off took over is not. Time is the only condition kind (provisional).",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
     },
     {
       "id": "H01",

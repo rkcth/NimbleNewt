@@ -1031,6 +1031,8 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### L06b — Finish shutdown and resume: resume on a recorded authorized condition
 
 - **Parent:** N05 / AII-255.
+- **Status:** implemented; commits `e7775aa`, `16d59d2`, `0115950`; CI runs 41059220298; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The owner can record a time for a pause; the controller lifts exactly that scope when it comes, audited; nothing without a recorded time is lifted, and a pause a Stop, Suspend or hand-off took over is not. Time is the only condition kind (provisional).
 - **Blockers:** L06.
 - **Deliverable:** Split from L06 (2026-10-30): a gate may be lifted by a recorded, authorized condition (set by the owner ahead of time) as well as by an explicit owner or manager resume.
 - **Acceptance and verification:** A condition that was never recorded never resumes anything; a recorded one resumes only the scope it names and is itself audited.
