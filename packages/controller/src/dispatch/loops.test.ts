@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { DomainError } from "../domain/errors.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
-import { activeAgents, attendanceLoops, budgetNoticeLoops, decisionLoops, eventLoops, meetingLoops, messageLoops, projectIds, recordLoops, responsibilityLoops, untoldImprovementLoops, attemptWaker, wakeLoops, recoveryLoops, standupLoops, sourceLoops } from "./loops.js";
+import { activeAgents, assignedTaskIn, attendanceLoops, budgetNoticeLoops, decisionLoops, eventLoops, meetingLoops, messageLoops, projectIds, recordLoops, responsibilityLoops, untoldImprovementLoops, attemptWaker, wakeLoops, recoveryLoops, standupLoops, sourceLoops } from "./loops.js";
 import { buildWorld, workGrants } from "./testing/world.js";
 
 after(stopServer);
@@ -168,6 +168,28 @@ test("an escalated incident is passed on for a notice, and one project failing d
   assert.deepEqual([told, marked], [["rinc-1"], ["rinc-1"]], "it is offered again next tick, sent, and then marked");
   await assert.rejects(loop!.run({ id: "service:dispatcher", kind: "service" } as never), /boom/);
   assert.deepEqual(told, ["rinc-1"], "and not told twice");
+});
+
+test("one incident whose notice fails does not hold back the others of its project, and each is told and marked once (card P04c)", async () => {
+  const mk = (id: string) => ({ id, projectId: "proj-a", escalatedTo: "agent:a", signature: "disk", responsibilityId: "rsp-1", count: 2 });
+  const marked: string[] = [];
+  const told: string[] = [];
+  const [loop] = responsibilityLoops({ generate: async () => [] }, { escalate: async () => [], untold: async () => [mk("bad"), mk("good")].filter((x) => !marked.includes(x.id)), markNotified: async (_by, id) => { marked.push(id); } }, async () => ["proj-a"], async (x) => { if (x.id === "bad") throw new Error("no task"); told.push(x.id); });
+  await assert.rejects(loop!.run({ id: "service:dispatcher", kind: "service" } as never), /no task/);
+  assert.deepEqual([told, marked], [["good"], ["good"]], "the failing one is not marked, the other is told");
+});
+
+test("the task that anchors a notice to an agent is one it holds now in that project (card P04c)", async () => {
+  const aggs = [
+    { kind: "assignment", id: "t1", body: { taskId: "t1", state: "released" } },
+    { kind: "assignment", id: "t2", body: { taskId: "t2", state: "assigned", owner: { kind: "agent", id: "agent:a" } } },
+    { kind: "assignment", id: "t3", body: { taskId: "t3", state: "assigned", owner: { kind: "agent", id: "agent:b" } } },
+    { kind: "assignment", id: "t4", body: { taskId: "t4", state: "assigned", owner: { kind: "agent", id: "agent:a" } } },
+  ];
+  const tasks: Record<string, string> = { t2: "proj-x", t3: "proj-a", t4: "proj-a" };
+  const storage = { listAggregates: async (kind: string, o: { afterId?: string }) => (kind === "assignment" ? aggs.filter((a) => o.afterId === undefined || a.id > o.afterId) : []), getAggregate: async (r: { id: string }) => (tasks[r.id] === undefined ? undefined : { body: { projectId: tasks[r.id] } }) } as never;
+  assert.equal(await assignedTaskIn(storage, "proj-a", "agent:a"), "t4");
+  assert.equal(await assignedTaskIn(storage, "proj-a", "agent:c"), undefined);
 });
 
 test("a watched event wakes the agent only when its attempt will read the inbox, and the wake loop asks every tick (card H13c)", async () => {

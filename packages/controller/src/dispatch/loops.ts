@@ -264,6 +264,20 @@ export function recordLoops(records: Pick<MeetingRecordService, "sweep">, projec
   return [{ name: "meeting-records.sweep", run: async (by) => { for (const projectId of await projects()) await records.sweep(by, { projectId }); } }];
 }
 
+/** The task of a project that an agent holds now (the first by id), which anchors a controller notice to the agent: a notice is filed about a task the recipient can read. Absent when it holds none there. */
+export async function assignedTaskIn(storage: Pick<ControllerStorage, "listAggregates" | "getAggregate">, projectId: string, agentId: string): Promise<string | undefined> {
+  for (let after: string | undefined; ;) {
+    const page = await storage.listAggregates("assignment", { ...(after === undefined ? {} : { afterId: after }), limit: PAGE });
+    for (const a of page) {
+      after = a.id;
+      const b = a.body as unknown as { taskId?: string; state?: string; owner?: { id: string } };
+      if (b.state !== "assigned" || b.owner?.id !== agentId || b.taskId === undefined) continue;
+      if (((await storage.getAggregate({ kind: "task", id: b.taskId }))?.body as unknown as { projectId?: string } | undefined)?.projectId === projectId) return b.taskId;
+    }
+    if (page.length < PAGE) return undefined;
+  }
+}
+
 /** P04: checks that came due are recorded and open incidents past their escalation time are escalated, for every project, on each tick. */
 export function responsibilityLoops(checks: { generate(by: Principal, projectId: string): Promise<unknown> }, incidents: { escalate(by: Principal, projectId: string): Promise<unknown>; untold(by: Principal, projectId: string): Promise<readonly { id: string; projectId: string; escalatedTo?: string; signature: string; responsibilityId: string; count: number }[]>; markNotified(by: Principal, incidentId: string): Promise<void> }, projects: () => Promise<readonly string[]>, notify?: (escalated: { id: string; projectId: string; escalatedTo?: string; signature: string; responsibilityId: string; count: number }) => Promise<void>): DispatcherLoop[] {
   // One project's failure does not skip the others this tick; the first error is raised after all have been tried.
@@ -274,7 +288,8 @@ export function responsibilityLoops(checks: { generate(by: Principal, projectId:
         await checks.generate(by, projectId);
         await incidents.escalate(by, projectId);
         // A notice that could not be sent is offered again next tick: an escalation is told once it has been told, not once it was recorded.
-        if (notify !== undefined) for (const e of await incidents.untold(by, projectId)) { await notify(e); await incidents.markNotified(by, e.id); }
+        // One incident whose notice fails does not hold back the others of the project; the first error is raised after all have been tried.
+        if (notify !== undefined) for (const e of await incidents.untold(by, projectId)) { try { await notify(e); await incidents.markNotified(by, e.id); } catch (error) { failure ??= error; } }
       } catch (error) { failure ??= error; }
     }
     if (failure !== undefined) throw failure;

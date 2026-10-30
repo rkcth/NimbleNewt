@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { RouteProbes } from "../dispatch/loops.js";
+import { assignedTaskIn, type RouteProbes } from "../dispatch/loops.js";
 import { allows } from "../security/access.js";
 import { PlacementSettingsService } from "../remote/placement-settings.js";
 import { InvitationInbox, MEETING_LIMITS, MEETING_SETTINGS, MeetingService } from "../meetings/index.js";
@@ -414,7 +414,16 @@ export async function startController(options: StartOptions): Promise<Controller
     let dispatchProblem: string | undefined;
     if (options.dispatch !== undefined) {
       try {
-        dispatch = await composeDispatch({ storage, epoch, workspaceOps, stops, records, responsibilities: { checks: responsibilityChecks, incidents, notify: async (e) => { if (e.escalatedTo === "owner") await notifications.emitFromController({ commandId: `inc-esc-${e.id}`, kind: "maintenance", ref: { kind: "responsibility-incident", id: e.id }, projectId: e.projectId, detail: `An incident on a responsibility (${e.signature}, ${e.count} alert${e.count === 1 ? "" : "s"}) is still open past its escalation time.` }); } }, eventSources: options.eventSources ?? defaultEventSources(projects), ...(options.routeProbes === undefined ? {} : { probes: { cutover, probes: { enabled: () => options.routeProbes?.enabled === true, run: options.routeProbes.run, intervalMs: options.routeProbes.intervalMs ?? 60_000 } } }), ...(backups === undefined ? {} : { backups }), sweeps: [{ name: "handoffs.sweep", sweep: (by) => handoffs.sweep(by) }, { name: "resumes.sweep", sweep: (by) => resumes.sweep(by) }], leadMinutes: meetingLead, options: withPlacement(options.dispatch), ...(options.availability === undefined ? {} : { availability: options.availability }), recovery: { stall, reconciler }, principals, grants, taskCredentials, projects, assignments, waits, contracts, catalog, routing, inquiries, agents, histories, reviews, retrieval, ...(options.onInternalError === undefined ? {} : { onError: options.onInternalError }) });
+        dispatch = await composeDispatch({ storage, epoch, workspaceOps, stops, records, responsibilities: { checks: responsibilityChecks, incidents, notify: async (e) => {
+          const detail = `An incident on a responsibility (${e.signature}, ${e.count} alert${e.count === 1 ? "" : "s"}) is still open past its escalation time.`;
+          if (e.escalatedTo === "owner") await notifications.emitFromController({ commandId: `inc-esc-${e.id}`, kind: "maintenance", ref: { kind: "responsibility-incident", id: e.id }, projectId: e.projectId, detail });
+          // An agent is told through its inbox, as a budget holder is: the notice is filed about a task the agent holds in the project (an incident has none), and with none it is retried each tick.
+          else if (e.escalatedTo?.startsWith("agent:")) {
+            const taskId = await assignedTaskIn(storage, e.projectId, e.escalatedTo);
+            if (taskId === undefined) throw new DomainError("unavailable", `${e.escalatedTo} holds no task in the project to file the escalation notice against`);
+            await messages.noticeFromController({ commandId: `inc-esc-${e.id}`, taskId, to: e.escalatedTo, purpose: "An incident was escalated to you", text: `${detail} Responsibility ${e.responsibilityId}; incident ${e.id}.` });
+          }
+        } }, eventSources: options.eventSources ?? defaultEventSources(projects), ...(options.routeProbes === undefined ? {} : { probes: { cutover, probes: { enabled: () => options.routeProbes?.enabled === true, run: options.routeProbes.run, intervalMs: options.routeProbes.intervalMs ?? 60_000 } } }), ...(backups === undefined ? {} : { backups }), sweeps: [{ name: "handoffs.sweep", sweep: (by) => handoffs.sweep(by) }, { name: "resumes.sweep", sweep: (by) => resumes.sweep(by) }], leadMinutes: meetingLead, options: withPlacement(options.dispatch), ...(options.availability === undefined ? {} : { availability: options.availability }), recovery: { stall, reconciler }, principals, grants, taskCredentials, projects, assignments, waits, contracts, catalog, routing, inquiries, agents, histories, reviews, retrieval, ...(options.onInternalError === undefined ? {} : { onError: options.onInternalError }) });
       } catch (error) {
         // A dispatcher the owner disabled, or a store that failed here, must not keep the rest of the controller from starting; the operator is told, and the reason stays on the controller.
         dispatchProblem = error instanceof Error ? error.message.slice(0, 300) : "the dispatcher could not be built";

@@ -4,7 +4,7 @@ export { connectPublic, resolvePublic, type NameResolver, type Pinned } from "./
 export type { RecipeSummary, ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, WorkerTurnResult, TurnUsage, WorkOrder, WorkerHandle, WorkerHost } from "./ports.js";
 export { DRIVER_LIMITS, DispatchDriver, realTimer, type DriverError, type DriverOptions, type DriverStatus, type TimerPort } from "./driver.js";
 export { type RouteProbes } from "./loops.js";
-export { activeAgents, attendanceLoops, budgetNoticeLoops, decisionLoops, eventLoops, watchLoops, wakeLoops, attemptWaker, recordLoops, responsibilityLoops, probeLoops, sourceLoops, improvementOutcomeLoops, untoldImprovementLoops, meetingLoops, messageLoops, projectIds, recoveryLoops, reviewLoops, standupLoops, workspaceLoops } from "./loops.js";
+export { activeAgents, assignedTaskIn, attendanceLoops, budgetNoticeLoops, decisionLoops, eventLoops, watchLoops, wakeLoops, attemptWaker, recordLoops, responsibilityLoops, probeLoops, sourceLoops, improvementOutcomeLoops, untoldImprovementLoops, meetingLoops, messageLoops, projectIds, recoveryLoops, reviewLoops, standupLoops, workspaceLoops } from "./loops.js";
 export { LocalWorker, catalogFacts, type AttemptRuntime, type DeliverableMessage, type MessageBoundaryName, type RuntimeGuards, type BoundCall, type LocalWorkerOptions, type RuntimeFactory, type SandboxPort, type SandboxSession } from "./local-worker.js";
 export { CachePolicies, type AttemptCache, type CachePolicyDeps, type RouteEndpoint } from "./cache.js";
 export { piFetch, responseBody, type FetchFunction, type PiCall, type PiFetchOptions } from "./pi-fetch.js";
