@@ -49,7 +49,7 @@ for (const backend of backends) {
     status: StatusService; owner: Principal; project: string; other: string; storage: ControllerStorage; epoch: number;
     projects: ProjectService; assignments: AssignmentService; waits: WaitService; blockers: BlockerService; contracts: ContractService; stall: StallService; pauses: PauseService;
     desks: DeskService; mcp: McpService; artifacts: ArtifactService; blobs: FileBlobStore; watches: WatchService; events: EventService; hosts: HostService; principals: PrincipalService; agents: AgentService;
-    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]> }): StatusService;
+    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; activity?: NonNullable<StatusDeps["activity"]> }): StatusService;
     agent(name: string, grants?: AGrant[]): Promise<Principal>;
     host(name: string, project?: string): Promise<Principal>;
     /** A ready task in `project` (default: the main one), created by the owner. */
@@ -89,7 +89,7 @@ for (const backend of backends) {
         const other = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "Q" })).id;
         const rebuild: Ctx["rebuild"] = (extra = {}, deps = {}) => StatusService.withEpoch(world.storage, epoch, {
           assignments, waits, blockers, contracts, stall, pauses,
-          ...(deps.watch === false ? {} : { watch: watches }), ...(deps.ownerQuestions === undefined ? {} : { ownerQuestions: deps.ownerQuestions }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
+          ...(deps.watch === false ? {} : { watch: watches }), ...(deps.ownerQuestions === undefined ? {} : { ownerQuestions: deps.ownerQuestions }), ...(deps.activity === undefined ? {} : { activity: deps.activity }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
         }, { ...options, ...extra });
         const status = rebuild();
         const grantService = GrantService.withEpoch(world.storage, epoch, options);
@@ -946,5 +946,33 @@ for (const backend of backends) {
     assert.equal(await c.rebuild().ask(c.owner, { kind: "owner_questions" }), undefined);
     await assert.rejects(status.ask(c.owner, { kind: "owner_questions", limit: 0 }));
     await assert.rejects(status.ask(c.owner, { kind: "owner_questions", extra: 1 } as never));
+  });
+
+  suite("a task's activity is told step by step in plain lines, the last few on request, and what the caller may not read reads as missing (card C09h)", async (c) => {
+    const t = await c.projects.createTask({ commandId: cid("t"), actor: c.owner.id, projectId: c.project, title: "Build" });
+    const step = (seq: number) => ({ taskId: t.id, projectId: c.project, seq, kind: "tool", summary: `step ${seq} summary`, actor: "agent:ann", at: "2026-10-22T10:00:00.000Z", manifest: {}, payload: { state: "none" }, corrections: seq === 2 ? 1 : 0 });
+    const all = Array.from({ length: 7 }, (_, i) => (i === 2 ? { seq: 3, unavailable: "archived" } : step(i + 1))) as never[];
+    const calls: { taskId: string; after?: number; limit?: number }[] = [];
+    const activity = { steps: async (by: Principal, taskId: string, page: { after?: number; limit?: number } = {}) => {
+      calls.push({ taskId, ...page });
+      if (by.kind !== "owner") throw new DomainError("forbidden", "no");
+      const from = (page.after ?? 0), limit = page.limit ?? 50;
+      return { steps: all.slice(from, from + limit), ...(from + limit < all.length ? { next: from + limit } : {}) };
+    } };
+    const status = c.rebuild({}, { activity });
+    const first = (await status.ask(c.owner, { kind: "activity", taskId: t.id, limit: 3 }))!;
+    assert.match(first.lines[0]!.text, /^Step 1, 2026-10-22T10:00:00.000Z, agent:ann: tool - step 1 summary/);
+    assert.match(first.lines[1]!.text, /\(corrected 1 time\)/);
+    assert.equal(first.lines[2]!.text, "Step 3 is no longer available: archived.");
+    assert.match(first.lines.at(-1)!.text, /ask again after step 3/);
+    const last = (await status.ask(c.owner, { kind: "activity", taskId: t.id, latest: true, limit: 2 }))!;
+    assert.deepEqual(last.lines.map((l) => l.text.slice(0, 7)), ["Step 6,", "Step 7,"]);
+    assert.ok(calls.every((x) => x.taskId === t.id));
+    const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
+    assert.equal(await status.ask(reader, { kind: "activity", taskId: t.id }), undefined, "unreadable reads as missing");
+    assert.equal(await c.rebuild().ask(c.owner, { kind: "activity", taskId: t.id }), undefined, "no source wired: not offered");
+    await assert.rejects(status.ask(c.owner, { kind: "activity", taskId: t.id, limit: 99 }));
+    await assert.rejects(status.ask(c.owner, { kind: "activity", taskId: t.id, latest: true, after: 2 }));
+    await assert.rejects(status.ask(c.owner, { kind: "activity", taskId: t.id, extra: 1 } as never));
   });
 }

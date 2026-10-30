@@ -49,3 +49,29 @@ for (const backend of backends) {
     } finally { await w.close(); }
   });
 }
+
+for (const backend of backends) {
+  test(`${backend.name}: a task's activity is asked for in chat by the task's title (card C09h)`, async () => {
+    const script: Record<string, unknown> = {};
+    const w = await openWorld(backend, script);
+    try {
+      const a = await w.project("A");
+      const build = await w.task(a, "Build the login");
+      await w.task(a, "Twice");
+      await w.task(a, "Twice");
+      const asked: Record<string, unknown>[] = [];
+      const chat = w.chat({ status: { ask: async (_o: unknown, r: unknown) => { asked.push(r as Record<string, unknown>); return { observedAt: "2026-10-22T10:00:00.000Z", lines: [{ text: "Step 1", cites: [] }] }; } } as never });
+      await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+      const ask = async (text: string, title: string) => {
+        script[text] = [{ kind: "status", request: { kind: "activity", taskTitle: title }, evidence: text, basis: "owner" }];
+        const o = (await chat.submit(w.ownerToken, { messageId: cid("m"), text })).outcomes;
+        assert.equal(o.length, 1);
+        return o[0]!;
+      };
+      assert.equal((await ask("What happened on Build the login?", "Build the login")).status, "answered");
+      assert.deepEqual(asked, [{ kind: "activity", taskId: build }]);
+      assert.equal((await ask("What happened on Twice?", "Twice")).status, "refused");
+      assert.equal((await ask("What happened on Nothing?", "Nothing")).status, "refused");
+    } finally { await w.close(); }
+  });
+}

@@ -400,6 +400,14 @@ export class ChatService {
           if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Say which project you mean." }); continue; }
           request["projectId"] = currentFocus.projectId;
         }
+        // A task's activity is asked for by the task's title (the project in focus); a title that fits more than one task asks nothing and says so.
+        if (request["kind"] === "activity" && request["taskId"] === undefined && typeof request["taskTitle"] === "string") {
+          if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Say which project you mean." }); continue; }
+          const matches = await this.#tasksByTitle(token, currentFocus.projectId, request["taskTitle"]);
+          if (matches.length !== 1) { push({ i, kind: "refused", code: matches.length === 0 ? "not_found" : "invalid_command", message: matches.length === 0 ? `no task called "${request["taskTitle"].slice(0, 80)}" in that project` : `more than one task is called "${request["taskTitle"].slice(0, 80)}"; use its ID` }); continue; }
+          request["taskId"] = matches[0]!.id;
+          delete request["taskTitle"];
+        }
         if (!isObject(request) || hasRefMarker(request)) { push({ i, kind: "refused", code: "invalid_command", message: "that question is not understood" }); continue; }
         push({ i, kind: "status", request: asJson(request) });
         continue;

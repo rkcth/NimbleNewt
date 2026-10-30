@@ -2625,3 +2625,9 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 
 - Chat command `watch.create` (follows the profile: matching events wake the task's owner and spend work). The task whose owner is told is named by its title; the stream defaults to that task's own, another task's stream is named by its title (`watchedTaskTitle`, exactly one task of the project; several of the same title ask). A stream the model typed itself is not accepted unless the owner's message holds it.
 - Not built yet (remains in H13f): other real sources (repository, file, service health), choosing sources in settings, cancelling a watch by words (`watch.list` returns only IDs, so there is nothing to name one by yet).
+
+## C09h (part 1): chat access to a task's activity
+
+- `StatusService` view `activity` (`{ kind: "activity", taskId, latest?, after?, limit? }`): a task's recorded steps in plain lines, in order from `after` (default the start, 20 at a time, at most 50) or, with `latest`, the last few (reads up to 1000 steps back). Each line gives the step number, time, actor, kind and summary (an agent's words, shown as such) and how many corrections it has; a step in an unavailable range says so; more steps add a line naming where to continue. Only summaries are shown; stored content (the part that needs a history right) is never quoted. A task the caller may not read reads as missing; without an activity source the view is not offered.
+- In chat the task is named by its title in the project in focus (`taskTitle`); no match or several matches are refused with the reason.
+- Not built yet (remains in C09h): artifact steps for local workers, the per-task explanation index.

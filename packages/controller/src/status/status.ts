@@ -15,6 +15,7 @@ import type { PauseService, PauseStatus } from "../lifecycle/pause.js";
 import type { CallBody } from "../mcp/mcp.js";
 import type { ContractBody, ContractService, DependencyBody, Difficulty } from "../planning/contracts.js";
 import { canRead as deskCanRead, type DeskRecordBody } from "../context/desks.js";
+import type { ActivityService } from "../activity/activity.js";
 import type { ArtifactBody } from "../artifacts/service.js";
 import { allows, inTaskScope } from "../security/access.js";
 import type { Principal, PrincipalBody } from "../security/principals.js";
@@ -175,7 +176,8 @@ export type StatusRequest =
   | { readonly kind: "noticeboard"; readonly projectId: string }
   | { readonly kind: "failed_events"; readonly projectId?: string; readonly taskId?: string; readonly afterId?: string; readonly limit?: number }
   | { readonly kind: "failed_event"; readonly handlingId: string }
-  | { readonly kind: "owner_questions"; readonly limit?: number };
+  | { readonly kind: "owner_questions"; readonly limit?: number }
+  | { readonly kind: "activity"; readonly taskId: string; readonly latest?: boolean; readonly after?: number; readonly limit?: number };
 
 // ---- service -------------------------------------------------------------------------------------------------------------------
 
@@ -190,6 +192,8 @@ export interface StatusDeps {
   readonly pauses?: Pick<PauseService, "status" | "isPaused">;
   /** The failed event queue (card H13). Absent: the queue cannot be listed. */
   readonly watch?: Pick<WatchService, "failures" | "inspect">;
+  /** The steps of a task's activity record (card C09h). Absent: the view is not offered. */
+  readonly activity?: Pick<ActivityService, "steps">;
   /** Questions agents have put to the owner (card U12e). Absent: none are listed. */
   readonly ownerQuestions?: { ownerQuestions(owner: Principal, page?: { afterId?: string; limit?: number }): Promise<{ items: readonly { inquiryId: string; asker: string; question: string; askedAt: string; revision: number; task: { id: string; title: string; projectName: string }; wait?: { summary: string; nextAction: string; deadline?: string } }[]; next?: string }> };
   /** Checks an artifact against its files (card S06). Absent: artifacts are listed as `not_checked`, never as verified. */
@@ -272,9 +276,51 @@ export class StatusService {
       case "noticeboard": { onlyKnown(request, ["kind", "projectId"]); return this.noticeboard(by, request.projectId); }
       case "failed_events": { const { kind: _k, ...rest } = request; return this.failedEvents(by, rest); }
       case "failed_event": { onlyKnown(request, ["kind", "handlingId"]); return this.inspectFailedEvent(by, request.handlingId); }
+      case "activity": { onlyKnown(request, ["kind", "taskId", "latest", "after", "limit"]); return this.activityLines(by, request); }
       case "owner_questions": { onlyKnown(request, ["kind", "limit"]); return this.ownerQuestionLines(by, request.limit); }
       default: return invalid("kind", "is not a kind of status request");
     }
+  }
+
+  // ---- what happened on a task (card C09h) ------------------------------------------------------------------------------------
+
+  /**
+   * The steps of a task's activity record in plain lines, in order: from `after`, or, with `latest`, the last few. What the caller may not read reads as missing. Only the summary of a step is shown (an agent's words, as its words); the stored content of a step is never
+   * quoted here, because it is the part that needs a history right.
+   */
+  async activityLines(by: Principal, request: { taskId: string; latest?: boolean; after?: number; limit?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const activity = this.#deps.activity;
+    if (activity === undefined) return undefined;
+    const taskId = checkTaskId(request.taskId);
+    const limit = request.limit === undefined ? 20 : Number.isSafeInteger(request.limit) && request.limit >= 1 && request.limit <= 50 ? request.limit : invalid("limit", "must be 1 to 50");
+    if (request.after !== undefined && (!Number.isSafeInteger(request.after) || request.after < 0)) invalid("after", "must be a whole number from 0");
+    if (request.latest === true && request.after !== undefined) invalid("latest", "cannot be combined with after");
+    let steps: Awaited<ReturnType<ActivityService["steps"]>>["steps"] = [];
+    let next: number | undefined;
+    try {
+      if (request.latest === true) {
+        let after: number | undefined;
+        for (let page = 0; page < 20; page++) {
+          const got = await activity.steps(by, taskId, { ...(after === undefined ? {} : { after }), limit: 50 });
+          steps = [...steps, ...got.steps].slice(-limit);
+          if (got.next === undefined) break;
+          after = got.next;
+        }
+      } else {
+        const got = await activity.steps(by, taskId, { ...(request.after === undefined ? {} : { after: request.after }), limit });
+        steps = got.steps;
+        next = got.next;
+      }
+    } catch (error) {
+      if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) return undefined;
+      throw error;
+    }
+    const lines: Line[] = steps.map((s) => ("unavailable" in s
+      ? line(`Step ${s.seq} is no longer available: ${shown(s.unavailable)}.`, cite("task", taskId))
+      : line(`Step ${s.seq}, ${s.at}, ${shown(s.actor)}: ${s.kind} - ${shown(s.summary)}${s.corrections > 0 ? ` (corrected ${s.corrections} time${s.corrections === 1 ? "" : "s"})` : ""}`, cite("task", taskId))));
+    if (lines.length === 0) lines.push(line("No steps are recorded for this task yet.", cite("task", taskId)));
+    else if (next !== undefined) lines.push(line(`There are more steps; ask again after step ${next}.`, cite("task", taskId)));
+    return { observedAt: this.#runner.now(), lines };
   }
 
   // ---- questions to the owner (card U12e) ------------------------------------------------------------------------------------
