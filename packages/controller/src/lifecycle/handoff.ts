@@ -65,8 +65,10 @@ export interface TaskHandoffBody {
   readonly autoComplete?: boolean;
   /** Set once the return was made (`handoffId`) or given up (`skipped`, with the reason). */
   readonly returned?: { readonly handoffId?: string; readonly at: string; readonly skipped?: string };
-  /** The host was told that this return is stuck (blocked); told once. */
-  readonly stuckTold?: boolean;
+  /** The host was told that this return is stuck (blocked), at this length of history; told again only if it is blocked again later. */
+  readonly stuckTold?: number;
+  /** On a return: the temporary reassignment it undoes (its command ID is `ret-<this>`), so a return left half-made by a crash can be finished from its own record. */
+  readonly returnOf?: string;
   readonly failure?: string;
   readonly history: readonly { readonly phase: HandoffPhase; readonly at: string; readonly by: string; readonly note: string }[];
 }
@@ -140,7 +142,7 @@ export class HandoffService {
     return new Date(when).toISOString();
   }
 
-  async #prepare(by: Principal, command: NoActor & { taskId: string; to: unknown; reason: string; deadlineMs?: number }, extra: { returnAt?: string; autoComplete?: boolean }): Promise<View<TaskHandoffBody>> {
+  async #prepare(by: Principal, command: NoActor & { taskId: string; to: unknown; reason: string; deadlineMs?: number }, extra: { returnAt?: string; autoComplete?: boolean; returnOf?: string }): Promise<View<TaskHandoffBody>> {
     const reason = plain(command.reason, "reason");
     const to = checkOwner(command.to, "to");
     const scope: PauseScope = { kind: "task", id: String(command.taskId) };
@@ -304,10 +306,14 @@ export class HandoffService {
           try { if (await this.#returnDue(by, rec.id, b)) advanced.push(rec.id); } catch { failed.push(rec.id); }
           continue;
         }
+        if (b.phase === "preparing" && b.autoComplete === true && b.returnOf !== undefined && b.stopIntentId === undefined) {
+          try { if (await this.#finishReturn(by, rec.id, b)) advanced.push(rec.id); } catch { failed.push(rec.id); }
+          continue;
+        }
         if (b.phase === "blocked" && b.autoComplete === true) {
-          if (b.stuckTold !== true) {
+          if (b.stuckTold !== b.history.length) {
             try {
-              await this.#update(rec.id, (x) => ({ ...x, stuckTold: true }), ["blocked"]);
+              await this.#update(rec.id, (x) => ({ ...x, stuckTold: x.history.length }), ["blocked"]);
               try { await this.#onReturnGivenUp?.(by, { handoffId: rec.id, taskId: b.taskId, reason: `the hand-off back is blocked (${b.blocked?.reason ?? "preparation did not finish"}); the task stays with the temporary owner until someone decides` }); } catch { /* best effort */ }
             } catch { failed.push(rec.id); }
           }
@@ -370,11 +376,7 @@ export class HandoffService {
       const back = derivedId("hnd", scopedCommandId(who, `ret-${id}`));
       const found = (await this.#runner.get(KIND, back))?.body as unknown as TaskHandoffBody | undefined;
       if (found === undefined) continue;
-      if (found.phase === "preparing" && found.stopIntentId === undefined) {
-        const acting = await this.#actingFor(by, b.requestedBy, b.taskId);
-        if (typeof acting === "string") { await this.#fail(by, back, `${acting}, so the task was not returned`); await this.#update(id, (x) => ({ ...x, returned: { handoffId: back, at: this.#runner.now() } }), ["transferred"]); return true; }
-        await this.#prepare(acting, { commandId: `ret-${id}`, taskId: b.taskId, to: b.from, reason: "temporary reassignment ended" }, { autoComplete: true });
-      }
+      if (found.phase === "preparing" && found.stopIntentId === undefined) await this.#finishReturn(by, back, found);
       await this.#update(id, (x) => ({ ...x, returned: { handoffId: back, at: this.#runner.now() } }), ["transferred"]);
       return true;
     }
@@ -383,7 +385,7 @@ export class HandoffService {
     const acting = await this.#actingFor(by, b.requestedBy, b.taskId);
     if (typeof acting === "string") { await this.#giveUpReturn(by, id, b.taskId, `${acting}, so the task stays with the temporary owner`); return true; }
     try {
-      await this.#prepare(acting, { commandId: `ret-${id}`, taskId: b.taskId, to: b.from, reason: "temporary reassignment ended" }, { autoComplete: true });
+      await this.#prepare(acting, { commandId: `ret-${id}`, taskId: b.taskId, to: b.from, reason: "temporary reassignment ended" }, { autoComplete: true, returnOf: id });
     } catch (error) {
       // The first owner cannot take the task back (retired, ineligible): that will not change by trying again, so it is given up with the reason. Anything else (another hand-off in progress, storage) is tried again on the next sweep.
       if (error instanceof DomainError && error.field === "to") { await this.#giveUpReturn(by, id, b.taskId, `the first owner cannot take the task back (${error.message}), so it stays with the temporary owner`); return true; }
@@ -393,10 +395,23 @@ export class HandoffService {
     return true;
   }
 
+  /** A hand-off back that a crash left without its suspension is finished (or ended, if it can no longer be made) from its own record, whichever of the sweep's paths reaches it first. */
+  async #finishReturn(by: Principal, id: string, b: TaskHandoffBody): Promise<boolean> {
+    const acting = await this.#actingFor(by, b.requestedBy, b.taskId);
+    if (typeof acting === "string") { await this.#fail(by, id, `${acting}, so the task was not returned`); return true; }
+    try {
+      await this.#prepare(acting, { commandId: `ret-${b.returnOf}`, taskId: b.taskId, to: b.to, reason: "temporary reassignment ended" }, { autoComplete: true, returnOf: b.returnOf! });
+    } catch (error) {
+      if (error instanceof DomainError && error.field === "to") { await this.#fail(by, id, `the first owner cannot take the task back (${error.message}), so it stays with the temporary owner`); return true; }
+      throw error;
+    }
+    return true;
+  }
+
   /** A return that is ready is completed for the one who asked, accepting gaps in the package (recorded). If they no longer hold the right, it ends failed and says why. */
   async #completeReturn(by: Principal, id: string, b: TaskHandoffBody): Promise<boolean> {
     const acting = await this.#actingFor(by, b.requestedBy, b.taskId);
-    if (typeof acting === "string") { await this.#fail(by, id, `${acting}, so the task was not returned`); try { await this.#onReturnGivenUp?.(by, { handoffId: id, taskId: b.taskId, reason: acting }); } catch { /* best effort */ } return true; }
+    if (typeof acting === "string") { await this.#fail(by, id, `${acting}, so the task was not returned`); return true; }
     await this.complete(acting, { commandId: `rc-${id}`, handoffId: id, acceptGaps: true });
     return true;
   }
@@ -433,7 +448,7 @@ export class HandoffService {
     return { collectedAt: this.#runner.now(), sections, missing, ready: missing.length === 0 };
   }
 
-  async #create(by: Principal, commandId: unknown, id: string, taskId: string, projectId: string | undefined, from: Owner, to: Owner, generation: number, mode: "prepared" | "forced", reason: string, heldBefore: boolean, replaces?: string, extra: { returnAt?: string; autoComplete?: boolean } = {}): Promise<void> {
+  async #create(by: Principal, commandId: unknown, id: string, taskId: string, projectId: string | undefined, from: Owner, to: Owner, generation: number, mode: "prepared" | "forced", reason: string, heldBefore: boolean, replaces?: string, extra: { returnAt?: string; autoComplete?: boolean; returnOf?: string } = {}): Promise<void> {
     const activeRef: AggregateRef = { kind: ACTIVE, id: derivedId("hnd", `active\0${taskId}`) };
     await this.#runner.command("handoff.create", { commandId: scopedCommandId(by.id, commandId), actor: by.id }, async () => ({
       payload: { taskId, to: to as unknown as JsonObject, mode, reason, ...(extra.returnAt === undefined ? {} : { returnAt: extra.returnAt }), ...(extra.autoComplete === true ? { autoComplete: true } : {}) },
@@ -447,7 +462,7 @@ export class HandoffService {
         }
         const ref: AggregateRef = { kind: KIND, id };
         const body: TaskHandoffBody = {
-          taskId, ...(projectId === undefined ? {} : { projectId }), from, to, generation, phase: "preparing", mode, reason, requestedBy: by.id, requestedAt: at, heldBefore, ...(replaces === undefined ? {} : { replaces }), ...(extra.returnAt === undefined ? {} : { returnAt: extra.returnAt }), ...(extra.autoComplete === true ? { autoComplete: true } : {}),
+          taskId, ...(projectId === undefined ? {} : { projectId }), from, to, generation, phase: "preparing", mode, reason, requestedBy: by.id, requestedAt: at, heldBefore, ...(replaces === undefined ? {} : { replaces }), ...(extra.returnAt === undefined ? {} : { returnAt: extra.returnAt }), ...(extra.autoComplete === true ? { autoComplete: true } : {}), ...(extra.returnOf === undefined ? {} : { returnOf: extra.returnOf }),
           history: [{ phase: "preparing", at, by: by.id, note: mode === "forced" ? "takeover requested" : "hand-off requested" }],
         };
         const pointer = clean({ handoffId: id });
@@ -491,9 +506,9 @@ export class HandoffService {
   /** The hand-off could not move the task: it ends failed, the old owner (if still the owner) keeps the task, and a hold it added is lifted. */
   async #fail(by: Principal, id: string, why: string): Promise<void> {
     const before = (await this.#runner.get(KIND, id))?.body as unknown as TaskHandoffBody | undefined;
-    await this.#update(id, (x) => ({ ...x, phase: "failed", blocked: undefined, failure: why, history: this.#push(x, "failed", by.id, why) }), LIVE);
+    const changed = await this.#update(id, (x) => ({ ...x, phase: "failed", blocked: undefined, failure: why, history: this.#push(x, "failed", by.id, why) }), LIVE);
     await this.#letGo(by, id);
-    if (before?.autoComplete === true) { try { await this.#onReturnGivenUp?.(by, { handoffId: id, taskId: before.taskId, reason: `the hand-off back failed: ${why}` }); } catch { /* best effort */ } }
+    if (changed && before?.autoComplete === true) { try { await this.#onReturnGivenUp?.(by, { handoffId: id, taskId: before.taskId, reason: `the hand-off back failed: ${why}` }); } catch { /* best effort */ } }
   }
 
   /** The task moved: the new owner may run, so a hold this hand-off added is lifted. */

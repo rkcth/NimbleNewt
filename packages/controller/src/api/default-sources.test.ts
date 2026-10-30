@@ -51,6 +51,15 @@ test("the built-in source records what is already closed without reporting it, t
   assert.deepEqual(later.signals, []);
   assert.deepEqual(Object.keys((later.state as { seen: object }).seen), [], "nothing older than a week is kept");
   assert.ok(DEFAULT_SOURCE_LIMITS.scan >= 1000);
+  // The state record is size-limited, so what it remembers is capped (the most recently closed are kept); the dedup key carries the closing time, so a task closed again is a new event.
+  rows.clear();
+  for (let i = 0; i < DEFAULT_SOURCE_LIMITS.remembered + 100; i++) put(`task-${String(i).padStart(5, "0")}`, "done");
+  const big = await poll(undefined);
+  assert.equal(Object.keys((big.state as { seen: object }).seen).length, DEFAULT_SOURCE_LIMITS.remembered);
+  put("task-x", "in_progress"); const open = await poll(big.state); void open;
+  put("task-x", "done");
+  const closed = await poll(big.state, 1000);
+  assert.match(closed.signals.find((x) => x.ref.id === "task-x")!.dedup, /^task-x:done@\d+$/);
 });
 
 test("a controller with no sources given polls the built-in one: a task marked done appears once on its project's stream, and an empty list turns it off (card H13e)", async () => {

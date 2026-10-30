@@ -3,7 +3,7 @@ import type { EventSource, Signal } from "../events/index.js";
 import type { JsonObject } from "../storage/types.js";
 
 /** How far back a closed task is still reported by the built-in source, and how much one poll reads. */
-export const DEFAULT_SOURCE_LIMITS = { recentDays: 7, scan: 5000, page: 200 } as const;
+export const DEFAULT_SOURCE_LIMITS = { recentDays: 7, scan: 5000, page: 200, remembered: 2000 } as const;
 
 /**
  * The event sources a controller polls when the host gives none (card H13e): tasks seen done or cancelled in the last week, each reported once on its project's stream, so a watcher of a task's completion is woken by the real record
@@ -11,7 +11,7 @@ export const DEFAULT_SOURCE_LIMITS = { recentDays: 7, scan: 5000, page: 200 } as
  *
  * - **Baseline.** The first full pass over the tasks only records what is already closed; it reports nothing, so turning this on does not wake anyone for work finished long ago.
  * - **Bounded reading.** One poll reads at most `scan` tasks and keeps a cursor in the source's state, so a store with more tasks than that is read in turns instead of the same first part every time (task IDs are random).
- * - **Bounded memory.** What it remembers is only the closed tasks of the last week (each with the time it was closed); older entries are dropped at every poll.
+ * - **Bounded memory.** What it remembers is only the closed tasks of the last week (each with the time it was closed), at most `remembered` of them (the most recently closed; the state record has a size limit); older entries are dropped at every poll. A task forgotten by the cap and seen again is reported again but meets its dedup key, so nobody is woken twice. A task closed again later has a new closing time and so a new key.
  */
 export function defaultEventSources(projects: Pick<ProjectService, "listTasks">, clock: () => number = Date.now): EventSource[] {
   return [{
@@ -42,7 +42,7 @@ export function defaultEventSources(projects: Pick<ProjectService, "listTasks">,
           if (baselining) { seen[t.id] = mark; continue; }
           // Beyond the limit nothing is handed out or remembered, so the next poll finds it again.
           if (signals.length >= limit) { more = true; continue; }
-          signals.push({ dedup: `${t.id}:${t.state}`, kind: t.state === "done" ? "task.completed" : "task.cancelled", stream: `project:${t.projectId}`, ref: { kind: "task", id: t.id }, key: `task:${t.id}` });
+          signals.push({ dedup: `${t.id}:${t.state}@${closedAt}`, kind: t.state === "done" ? "task.completed" : "task.cancelled", stream: `project:${t.projectId}`, ref: { kind: "task", id: t.id }, key: `task:${t.id}` });
           seen[t.id] = mark;
         }
         // Some of this page was left for the next poll: it starts again from the top of this page (what was reported is remembered, so only the rest is found).
@@ -51,6 +51,11 @@ export function defaultEventSources(projects: Pick<ProjectService, "listTasks">,
         after = page.next;
       }
       // A pass that reached the end of the list starts again from the top; one cut short carries on from where it stopped.
+      const marks = Object.entries(seen);
+      if (marks.length > DEFAULT_SOURCE_LIMITS.remembered) {
+        marks.sort((a, b) => Number(b[1].slice(b[1].lastIndexOf("@") + 1)) - Number(a[1].slice(a[1].lastIndexOf("@") + 1)) || (a[0] < b[0] ? -1 : 1));
+        for (const [id] of marks.slice(DEFAULT_SOURCE_LIMITS.remembered)) delete seen[id];
+      }
       const next: Record<string, unknown> = { seen, baselining: baselining && !finished };
       if (!finished && cursor !== undefined) next["cursor"] = cursor;
       return { signals, state: next as JsonObject, more };
