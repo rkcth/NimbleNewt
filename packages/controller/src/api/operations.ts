@@ -33,6 +33,7 @@ import type { AgentMessageService } from "../messaging/index.js";
 import { shownLines } from "../standups/standups.js";
 import type { GrantService } from "../security/grants.js";
 import type { EscalationLadderService } from "../health/escalation-ladder.js";
+import type { AgreedLimitsSettingsService } from "./agreed-limits-settings.js";
 import type { WorkerLimitsSettingsService } from "./worker-limits-settings.js";
 import type { PlacementSettingsService } from "../remote/placement-settings.js";
 import type { EventSourceSettingsService } from "../events/source-settings.js";
@@ -92,6 +93,7 @@ export interface Context {
   readonly placement?: Pick<PlacementSettingsService, "get" | "set" | "change">;
   readonly workerLimits?: Pick<WorkerLimitsSettingsService, "get" | "set" | "change">;
   readonly escalationLadder?: Pick<EscalationLadderService, "get" | "set">;
+  readonly agreedLimits?: Pick<AgreedLimitsSettingsService, "get" | "change">;
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set">;
   readonly eventSourceSettings?: Pick<EventSourceSettingsService, "get" | "set" | "change">;
   /** Absent when the controller runs without the agent's ending (card H12n). */
@@ -217,6 +219,7 @@ const branchSettingsOf = (c: Context): NonNullable<Context["branchSettings"]> =>
 const commandsOf = (c: Context): CommandService => c.commands ?? unavailable("typed commands");
 const escalationLadderOf = (c: Context): NonNullable<Context["escalationLadder"]> => c.escalationLadder ?? unavailable("the escalation ladder");
 const workerLimitsOf = (c: Context): NonNullable<Context["workerLimits"]> => c.workerLimits ?? unavailable("worker limits");
+const agreedLimitsOf = (c: Context): NonNullable<Context["agreedLimits"]> => c.agreedLimits ?? unavailable("agreed limits");
 const placementOf = (c: Context): NonNullable<Context["placement"]> => c.placement ?? unavailable("placement settings");
 const grantsOf = (c: Context): NonNullable<Context["grants"]> => c.grants ?? unavailable("rights");
 const eventsOf = (c: Context): NonNullable<Context["events"]> => c.events ?? unavailable("events");
@@ -355,6 +358,10 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, []); return asJson({ item: await escalationLadderOf(c).get(c.principal) }); } },
   { name: "escalation.ladder.set", kind: "command", summary: "The owner sets how long a stall concern waits undecided at each level of the supervisor ladder (owner only): a stuck agent's concern goes to its supervisor first and, undecided after the level's time, to that supervisor's supervisor, and so on up to the owner. `hours` lists whole hours from 1 to 720 (30 days) for level 0 (the first supervisor), level 1 and so on, at most 16 levels; a level the list does not name waits 24 hours. The list replaces the earlier one; an empty list clears it. It counts from the next pass; a wait already running uses the new figure for its level.", args: { hours: "for example `[24, 48]`", "expectedRevision?": "the revision you read" }, result: "`{ revision }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["hours", "expectedRevision"]); return asJson({ ...(await escalationLadderOf(c).set(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
+  { name: "agreed.limits.get", kind: "query", summary: "The optional ceilings on what a decision may carry out (owner only). None is set by default: an agreed raise or grant goes through as agreed.", args: {}, result: "`{ item }`: `revision` and `limits`, which has any of `raiseMaxCostMicros`, `raiseMaxComputeMs`, `grantMaxDays`.", completion: { kind: "completed" },
+    run: async (c, a) => { only(a, []); return asJson({ item: await agreedLimitsOf(c).get(c.principal) }); } },
+  { name: "agreed.limits.change", kind: "command", summary: "The owner sets or clears ceilings on agreed raises and grants (owner only; none by default). `set` has any of `raiseMaxCostMicros` (most money one raise carried out by the approval policy may add, in millionths, 1 to 1e15), `raiseMaxComputeMs` (most compute time one such raise may add, 1 to 1e12 ms) and `grantMaxDays` (longest a right granted by a decision may last, 1 to 3650); `unset` lists ceilings to remove. A ceiling counts from the next carry-out; the rights re-check at carry-out and every other check stay.", args: { "set?": "for example `{ \"grantMaxDays\": 90 }`", "unset?": "ceiling names to remove", "expectedRevision?": "the revision of the setting you read" }, result: "`{ revision }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["set", "unset", "expectedRevision"]); return asJson({ ...(await agreedLimitsOf(c).change(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
   { name: "workers.limits.get", kind: "query", summary: "What one local agent may use (owner only): the figures the owner set, the ones from the controller's start-up configuration, and the effective limits (the owner's win per figure).", args: {}, result: "`{ item }`: `revision`, `limits` (the owner's), `startup`, `effective`; each has any of `cpus`, `memoryMb`, `diskMb`, `processes`.", completion: { kind: "completed" },
     run: async (c, a) => { only(a, []); return asJson({ item: await workerLimitsOf(c).get(c.principal) }); } },
   { name: "workers.limits.set", kind: "command", summary: "The owner sets what one local agent may use (owner only): `limits` has any of `cpus` (1 to 256), `memoryMb` (16 to 4194304), `diskMb` (1 to 16777216) and `processes` (1 to 100000), whole numbers. The object replaces the earlier setting; an empty object clears it so the start-up figures apply. It counts from the next agent launched; agents already running keep their limits. The host enforces the limits or refuses to launch.", args: { limits: "for example `{ \"memoryMb\": 4096, \"processes\": 256 }`", "expectedRevision?": "the revision of the setting you read" }, result: "`{ revision }`.", completion: { kind: "completed" },

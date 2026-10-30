@@ -43,6 +43,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // What a local agent may use is a resource decision (card H12k): shown first in every profile (provisional).
   // How long a stuck agent's concern waits at each supervisor before it climbs is an escalation policy (owner decision 2026-10-30, supervisor ladder): shown first in every profile (provisional).
   "escalation.ladder.set": { verb: "Change how long a stuck agent waits at each level of supervisors", mode: "propose" },
+  // A ceiling on agreed raises and grants widens or narrows what a decision may carry out: shown first in every profile (owner decision 2026-10-30).
+  "agreed.limits.change": { verb: "Change the limits on agreed raises and grants", mode: "propose" },
   "workers.limits.change": { verb: "Change the limits for local agents", mode: "propose" },
   "placement.change": { verb: "Change where local-only data may go", mode: "propose" },
   // How finished work lands (card P08b): where work reaches the codebase is authority, so it is shown first in every profile. The record and the rules are the same as through the API.

@@ -26,6 +26,7 @@ import type { DecisionService } from "../decisions/index.js";
 import { SecureApi } from "../security/secured.js";
 import type { GrantService } from "../security/grants.js";
 import type { EscalationLadderService } from "../health/escalation-ladder.js";
+import type { AgreedLimitsSettingsService } from "./agreed-limits-settings.js";
 import type { WorkerLimitsSettingsService } from "./worker-limits-settings.js";
 import type { PlacementSettingsService } from "../remote/placement-settings.js";
 import type { ProtectedBranchService } from "../policy/protected-branches.js";
@@ -115,6 +116,7 @@ export interface StateApiDeps {
   readonly workerLimits?: Pick<WorkerLimitsSettingsService, "get" | "set" | "change">;
   /** How long an undecided stall concern waits at each level of the supervisor ladder (owner decision 2026-10-30, supervisor ladder). */
   readonly escalationLadder?: Pick<EscalationLadderService, "get" | "set">;
+  readonly agreedLimits?: Pick<AgreedLimitsSettingsService, "get" | "change">;
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set">;
   /** Which event sources are watched (card H13f). */
   readonly eventSourceSettings?: Pick<EventSourceSettingsService, "get" | "set" | "change">;
@@ -232,6 +234,7 @@ export class StateApi {
         ...(this.#deps.decisions === undefined ? {} : { decisions: this.#deps.decisions }),
         ...(this.#deps.grants === undefined ? {} : { grants: this.#deps.grants }),
         ...(this.#deps.placement === undefined ? {} : { placement: this.#deps.placement }),
+        ...(this.#deps.agreedLimits === undefined ? {} : { agreedLimits: this.#deps.agreedLimits }),
         ...(this.#deps.workerLimits === undefined ? {} : { workerLimits: this.#deps.workerLimits }),
         ...(this.#deps.escalationLadder === undefined ? {} : { escalationLadder: this.#deps.escalationLadder }),
         ...(this.#deps.branchSettings === undefined ? {} : { branchSettings: this.#deps.branchSettings }),

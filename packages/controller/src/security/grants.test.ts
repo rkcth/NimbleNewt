@@ -22,7 +22,7 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, check
 
 for (const backend of backends) {
   const suite = (name: string, body: (c: {
-    grants: GrantService; grantsAt(clock: string): GrantService; owner: Principal; a: string; b: string; ta: string; ta2: string; tb: string;
+    grants: GrantService; grantsAt(clock: string, limits?: () => Promise<{ grantMaxDays?: number }>): GrantService; owner: Principal; a: string; b: string; ta: string; ta2: string; tb: string;
     api(p: Principal): SecureApi; agent(name: string): Promise<Principal>; login(name: string): Promise<Principal>; at(p: Principal, when: string): Promise<Principal>;
   }) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
@@ -43,7 +43,7 @@ for (const backend of backends) {
         const ta = (await projects.createTask({ commandId: cid("ta"), actor: "owner:rob", projectId: a, title: "one" })).id;
         const ta2 = (await projects.createTask({ commandId: cid("ta2"), actor: "owner:rob", projectId: a, title: "two" })).id;
         const tb = (await projects.createTask({ commandId: cid("tb"), actor: "owner:rob", projectId: b, title: "three" })).id;
-        await body({ grants, grantsAt: (clock) => GrantService.withEpoch(world.storage, projects.epoch, { ...options, clock: () => clock }), owner, a, b, ta, ta2, tb, api, agent, login: async (name) => principals.authenticate((await principals.issueCredential(owner, `agent:${name}`)).token), at: (p, when) => grants.effective(p, when) });
+        await body({ grants, grantsAt: (clock, limits) => GrantService.withEpoch(world.storage, projects.epoch, { ...options, clock: () => clock, ...(limits === undefined ? {} : { agreedLimits: limits }) }), owner, a, b, ta, ta2, tb, api, agent, login: async (name) => principals.authenticate((await principals.issueCredential(owner, `agent:${name}`)).token), at: (p, when) => grants.effective(p, when) });
       } finally { await world.close(); }
     });
   const give = (g: GrantService, owner: Principal, grantee: string, action: string, project: string, extra: Record<string, unknown> = {}) =>
@@ -82,7 +82,13 @@ for (const backend of backends) {
       await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), action }), (e) => assert.equal(e.field, "action"));
     }
     await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), expiresAt: "2026-10-21T09:00:00.000Z" }), (e) => assert.match(e.message, /past/));
-    await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), expiresAt: "2026-12-31T00:00:00.000Z" }), (e) => assert.match(e.message, /30 days/));
+    // No limit on how long it lasts unless the owner set one (owner decision 2026-10-30).
+    await grants.grantAgreed(controller, { ...base, commandId: cid("ag"), expiresAt: "2027-12-31T00:00:00.000Z" });
+    const capped = grantsAt(T, async () => ({ grantMaxDays: 30 }));
+    await refuses("invalid_command", () => capped.grantAgreed(controller, { ...base, commandId: cid("ag"), expiresAt: "2026-12-31T00:00:00.000Z" }), (e) => assert.match(e.message, /at most 30 days/));
+    await capped.grantAgreed(controller, { ...base, commandId: cid("ag"), expiresAt: "2026-11-20T10:00:00.000Z" });
+    const broken = grantsAt(T, async () => { throw new Error("setting unreadable"); });
+    await assert.rejects(() => broken.grantAgreed(controller, { ...base, commandId: cid("ag"), expiresAt: "2026-11-20T10:00:00.000Z" }), /unreadable/);
     await grants.grantAgreed(controller, { ...base, commandId: cid("ag"), expiresAt: "2026-11-20T10:00:00.000Z" });
     await grants.grantAgreed(controller, { ...base, commandId: cid("ag"), action: "desk.write" });
     // Malformed times that match the shape are refused (a NaN would defeat the cap and never expire).

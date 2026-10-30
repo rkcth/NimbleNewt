@@ -5,7 +5,6 @@ import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Grant, type Principal } from "../security/index.js";
 import { BUDGET_ENFORCEMENT, BudgetService } from "./index.js";
-import { POLICY_RAISE_CAP_MICROS, POLICY_RAISE_CAP_MS } from "./budgets.js";
 
 after(stopServer);
 
@@ -19,7 +18,7 @@ const budgetRefusal = (e: DomainError): void => { assert.match(e.message, /^cost
 
 for (const backend of backends) {
   interface Ctx {
-    svc: BudgetService; open(): BudgetService; owner: Principal; host: Principal; ann: Principal; ben: Principal; cat: Principal; reader: Principal; a: string; b: string;
+    svc: BudgetService; open(): BudgetService; withLimits(l: () => Promise<{ raiseMaxCostMicros?: number; raiseMaxComputeMs?: number }>): BudgetService; owner: Principal; host: Principal; ann: Principal; ben: Principal; cat: Principal; reader: Principal; a: string; b: string;
     root: string; kid1: string; kid2: string; grandkid: string; foreign: string;
     reserve(task: string, cost: number, compute?: number, by?: Principal): Promise<{ id: string }>;
   }
@@ -44,7 +43,7 @@ for (const backend of backends) {
         const reader = await agent("reader", [{ action: "budget.read", project: a }]);
         const svc = BudgetService.withEpoch(world.storage, projects.epoch, options);
         const reserve = (task: string, cost: number, compute = 0, by: Principal = host) => svc.reserve(by, { commandId: cid("r"), taskId: task, costMicros: cost, computeMs: compute, agentId: "agent:ben", purpose: "a call" });
-        await body({ svc, open: () => BudgetService.withEpoch(world.storage, projects.epoch, options), owner, host, ann, ben, cat, reader, a, b, root, kid1, kid2, grandkid, foreign, reserve });
+        await body({ svc, open: () => BudgetService.withEpoch(world.storage, projects.epoch, options), withLimits: (l) => BudgetService.withEpoch(world.storage, projects.epoch, { ...options, agreedLimits: l }), owner, host, ann, ben, cat, reader, a, b, root, kid1, kid2, grandkid, foreign, reserve });
       } finally { await world.close(); }
     });
   const open = (c: Ctx, cost = 100, compute = 1000, holder = "agent:ann") => c.svc.open(c.owner, { commandId: cid("o"), taskId: c.root, currency: "USD", costMicros: cost, computeMs: compute, holder });
@@ -157,11 +156,19 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.svc.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, costMicros: 1, decisionId: "d", agreedBy: "the agent said so" }));
     await refuses("invalid_command", () => c.svc.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, costMicros: 1, decisionId: "d", agreedBy: "owner:agreed", extra: 1 } as never));
     assert.equal((await rep(c, c.root)).available.costMicros, before + 10, "nothing refused changed the budget");
-    // A raise carried out by policy is capped; one the owner agreed to is not (beyond the usual limits).
-    await refuses("invalid_command", () => c.svc.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, costMicros: POLICY_RAISE_CAP_MICROS + 1, decisionId: "d", agreedBy: "policy:spend" }));
-    await refuses("invalid_command", () => c.svc.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, computeMs: POLICY_RAISE_CAP_MS + 1, decisionId: "d", agreedBy: "policy:spend" }));
-    await c.svc.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, costMicros: POLICY_RAISE_CAP_MICROS, computeMs: POLICY_RAISE_CAP_MS, decisionId: "d", agreedBy: "policy:spend" });
-    await c.svc.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, costMicros: POLICY_RAISE_CAP_MICROS + 1, decisionId: "d", agreedBy: "owner:agreed" });
+    // No ceiling on a raise unless the owner set one (owner decision 2026-10-30): a very large raise goes through, by policy or by the owner.
+    const big = 50_000_000_000;
+    const bigMs = 100 * 3600 * 1000;
+    const base = (await rep(c, c.root)).available;
+    await c.svc.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, costMicros: big, computeMs: bigMs, decisionId: "d", agreedBy: "policy:spend" });
+    assert.equal((await rep(c, c.root)).available.costMicros, base.costMicros + big);
+    const capped = c.withLimits(async () => ({ raiseMaxCostMicros: 1000, raiseMaxComputeMs: 5000 }));
+    await refuses("invalid_command", () => capped.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, costMicros: 1001, decisionId: "d", agreedBy: "policy:spend" }), (e) => assert.equal(e.field, "costMicros"));
+    await refuses("invalid_command", () => capped.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, computeMs: 5001, decisionId: "d", agreedBy: "policy:spend" }), (e) => assert.equal(e.field, "computeMs"));
+    await capped.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, costMicros: 1000, computeMs: 5000, decisionId: "d", agreedBy: "policy:spend" });
+    await capped.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, costMicros: big, decisionId: "d", agreedBy: "owner:agreed" });
+    const broken = c.withLimits(async () => { throw new Error("setting unreadable"); });
+    await assert.rejects(() => broken.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, costMicros: 1, decisionId: "d", agreedBy: "policy:spend" }), /unreadable/);
   });
 
   suite("uncertain and in-flight amounts are held and shown until reconciled", async (c) => {

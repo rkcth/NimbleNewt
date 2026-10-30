@@ -1,4 +1,5 @@
 import { DomainError } from "../domain/errors.js";
+import type { AgreedLimitsReader } from "../api/agreed-limits-settings.js";
 import { personalNamespace } from "../catalog/catalog.js";
 import { derivedId } from "../domain/ids.js";
 import { onlyKnown, revision as checkRevision, text, type View } from "../domain/model.js";
@@ -155,7 +156,6 @@ export const AGREED_GRANTABLE_ACTIONS: readonly string[] = [
 /** Granted by a decision only for exactly one task (a `resource` of kind task): the grant then covers that task and no other. A project-wide request for these stays refused. */
 export const AGREED_GRANTABLE_ON_ONE_TASK: readonly string[] = ["task.update", "task.transition"];
 /** The longest an agreed (meeting-decided) grant may last. Provisional; the owner may change it. */
-export const AGREED_GRANT_MAX_MS = 30 * 24 * 3600 * 1000;
 const KIND = /^[a-z][a-z0-9-]{0,39}$/;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 
@@ -208,12 +208,15 @@ export function within(inner: { action: string; project: string; resource?: Reso
 export class GrantService {
   readonly #runner: CommandRunner;
 
-  private constructor(runner: CommandRunner) {
+  readonly #limits: AgreedLimitsReader | undefined;
+
+  private constructor(runner: CommandRunner, limits?: AgreedLimitsReader) {
     this.#runner = runner;
+    this.#limits = limits;
   }
 
-  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions = {}): GrantService {
-    return new GrantService(new CommandRunner(storage, epoch, options));
+  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions & { agreedLimits?: AgreedLimitsReader } = {}): GrantService {
+    return new GrantService(new CommandRunner(storage, epoch, options), options.agreedLimits);
   }
 
   /** The owner grants authority. */
@@ -263,7 +266,9 @@ export class GrantService {
     const now = this.#runner.now();
     if (Number.isNaN(Date.parse(expires!)) || Number.isNaN(Date.parse(now))) invalid("expiresAt", "is not a real time");
     if (expires! <= now) invalid("expiresAt", "is already past");
-    if (Date.parse(expires!) > Date.parse(now) + AGREED_GRANT_MAX_MS) invalid("expiresAt", "an agreed grant lasts at most 30 days");
+    // No limit on how long an agreed grant lasts unless the owner set one (owner decision 2026-10-30). A setting that cannot be read refuses the grant.
+    const maxDays = (this.#limits === undefined ? {} : await this.#limits()).grantMaxDays;
+    if (maxDays !== undefined && Date.parse(expires!) > Date.parse(now) + maxDays * 24 * 3600 * 1000) invalid("expiresAt", `an agreed grant lasts at most ${maxDays} days, the limit the owner set`);
     const grantee = command.grantee;
     if (typeof grantee !== "string" || !grantee.startsWith("agent:")) invalid("grantee", "an agreed grant is for an agent (not a host, service, client or the owner)");
     const who = await this.#runner.get("principal", grantee);

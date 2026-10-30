@@ -1,4 +1,5 @@
 import { DomainError } from "../domain/errors.js";
+import type { AgreedLimitsReader } from "../api/agreed-limits-settings.js";
 import { derivedId } from "../domain/ids.js";
 import { onlyKnown, taskId as checkTaskId, text, type TaskBody } from "../domain/model.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
@@ -116,9 +117,6 @@ export const BUDGET_ENFORCEMENT = {
   other: "Work that does not go through a reservation (background jobs, meetings, supervision) is recorded when reported and cannot be refused beforehand.",
 } as const;
 
-/** The most one raise may add when the approval policy (not the owner) agreed to it. Provisional; the owner may change it. */
-export const POLICY_RAISE_CAP_MICROS = 5_000_000_000;
-export const POLICY_RAISE_CAP_MS = 4 * 3600 * 1000;
 export const BUDGET_LIMITS = { nodes: 200, depth: 8, reservations: 500, openRequestsPerTask: 5, purpose: 200, reason: 1000, rule: 300, scan: 5000, page: 200, max: 1e15 } as const;
 const TREE = "budget-tree";
 const LINK = "budget-link";
@@ -189,11 +187,12 @@ export class BudgetService {
 
   readonly #notify: NotifyRequest | undefined;
 
-  private constructor(runner: CommandRunner, pause: (attempt: number) => Promise<void>, notify: NotifyRequest | undefined) { this.#runner = runner; this.#pause = pause; this.#notify = notify; }
+  readonly #limits: AgreedLimitsReader | undefined;
+  private constructor(runner: CommandRunner, pause: (attempt: number) => Promise<void>, notify: NotifyRequest | undefined, limits?: AgreedLimitsReader) { this.#runner = runner; this.#pause = pause; this.#notify = notify; this.#limits = limits; }
 
   /** `notify` tells the addressee of a new request for more budget (the owner, or the delegated holder); a failing notice never fails the request, which is stored and shown by `pending` whatever happens. */
-  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions & { notify?: NotifyRequest } = {}): BudgetService {
-    return new BudgetService(new CommandRunner(storage, epoch, options), options.pause ?? ((attempt) => new Promise((resolve) => setTimeout(resolve, Math.random() * Math.min(25, attempt * 2)))), options.notify);
+  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions & { notify?: NotifyRequest; agreedLimits?: AgreedLimitsReader } = {}): BudgetService {
+    return new BudgetService(new CommandRunner(storage, epoch, options), options.pause ?? ((attempt) => new Promise((resolve) => setTimeout(resolve, Math.random() * Math.min(25, attempt * 2)))), options.notify, options.agreedLimits);
   }
 
   /** The owner gives a task a root allowance of its own (new money). The task must exist and not already be in a budget tree. */
@@ -276,8 +275,10 @@ export class BudgetService {
     if (typeof command.decisionId !== "string" || command.decisionId.length < 1 || command.decisionId.length > 120) throw new DomainError("invalid_command", "decisionId: must name the decision", { field: "decisionId" });
     if (typeof command.agreedBy !== "string" || !/^(owner:[a-z0-9-]{1,60}|policy:[a-z0-9.-]{1,60})$/.test(command.agreedBy)) throw new DomainError("invalid_command", "agreedBy: must be the owner or the policy that let it through", { field: "agreedBy" });
     if (command.agreedBy.startsWith("policy:")) {
-      if ((command.costMicros ?? 0) > POLICY_RAISE_CAP_MICROS) throw new DomainError("invalid_command", `costMicros: a raise carried out by policy is at most ${POLICY_RAISE_CAP_MICROS}; a larger one needs the owner's agreement`, { field: "costMicros" });
-      if ((command.computeMs ?? 0) > POLICY_RAISE_CAP_MS) throw new DomainError("invalid_command", `computeMs: a raise carried out by policy is at most ${POLICY_RAISE_CAP_MS}; a larger one needs the owner's agreement`, { field: "computeMs" });
+      // No ceiling unless the owner set one (owner decision 2026-10-30). A setting that cannot be read refuses the raise.
+      const limits = this.#limits === undefined ? {} : await this.#limits();
+      if (limits.raiseMaxCostMicros !== undefined && (command.costMicros ?? 0) > limits.raiseMaxCostMicros) throw new DomainError("invalid_command", `costMicros: a raise carried out by policy is at most ${limits.raiseMaxCostMicros}, the ceiling the owner set; a larger one needs the owner's agreement`, { field: "costMicros" });
+      if (limits.raiseMaxComputeMs !== undefined && (command.computeMs ?? 0) > limits.raiseMaxComputeMs) throw new DomainError("invalid_command", `computeMs: a raise carried out by policy is at most ${limits.raiseMaxComputeMs}, the ceiling the owner set; a larger one needs the owner's agreement`, { field: "computeMs" });
     }
     await this.#raise(by, command, { decisionId: command.decisionId, agreedBy: command.agreedBy });
   }
