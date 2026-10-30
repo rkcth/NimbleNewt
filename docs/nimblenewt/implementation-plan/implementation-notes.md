@@ -2572,3 +2572,9 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 - `AgentMessageService.waitingAtStandup(by, agent)` (service principals only) counts the informational and advice messages queued for an agent; it reads and delivers nothing.
 - `StandupOptions.waitingMessages` (bound in the composed controller) adds an advice line to each participant's brief: "N message(s) are waiting for you. Read them at this stand-up (boundary stand-up, this meeting)." The agent reads and confirms them itself (`message.readable` / `message.acknowledge` with the meeting), so delivery is still recorded as the recipient's own confirmation. A count that fails leaves the line out; the brief is rewritten when the count changes (until the meeting starts).
 - Not built yet (remains in U12d): the chat presentation of owner questions.
+
+## H13e (part 1): a built-in event source
+
+- A controller started without `eventSources` now polls `defaultEventSources` (`api/default-sources.ts`): a task-completion source over the real task records, reporting tasks seen done or cancelled in the last 7 days once each on `project:<id>`, scanning at most 5000 tasks per poll. Passing `eventSources: []` turns it off; passing a list replaces it.
+- Older closed tasks are never reported, which also bounds what the source remembers. A watcher subscribed to a project stream for `task.completed` / `task.cancelled` is now woken by the record itself.
+- Not built yet (remains in H13e): other real sources (repositories, files, service health, timers from the owner's settings), choosing them in settings, and the owner's chat command.
