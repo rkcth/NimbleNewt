@@ -9,7 +9,7 @@ import { backends, stopServer } from "../domain/testing/backends.js";
 import type { Availability } from "../conversations/index.js";
 import { PauseService } from "../lifecycle/index.js";
 import { GrantService, PrincipalService, type Principal } from "../security/index.js";
-import { MeetingRecordService, MeetingService, taskUpdateApplier, type ChangeApplier, type DecisionRecordBody, type MotionBody, type RecordBody, type SourceCite } from "./index.js";
+import { MeetingRecordService, MeetingService, budgetRaiseApplier, grantApplier, taskUpdateApplier, type ChangeApplier, type DecisionRecordBody, type MotionBody, type RecordBody, type SourceCite } from "./index.js";
 
 after(stopServer);
 
@@ -996,3 +996,38 @@ for (const backend of backends) {
   });
 
 }
+
+test("a budget raise decided in a meeting widens spend, names a task and positive amounts only, and is carried out as the controller with who allowed it (card M02e)", async () => {
+  const calls: Record<string, unknown>[] = [];
+  const controller = { id: "service:meeting-records", kind: "service", name: "meeting-records", grants: [] } as never;
+  const applier = budgetRaiseApplier({ raiseAgreed: async (_by: unknown, command: Record<string, unknown>) => { calls.push(command); } } as never, controller, { getTask: async (id: string) => (id === "task-a" ? { projectId: "proj-a" } : undefined) } as never);
+  assert.deepEqual([applier.widens, applier.action], ["spend", "budget.manage"]);
+  assert.equal(await applier.project({ kind: "task", id: "task-a" }), "proj-a");
+  assert.equal(await applier.project({ kind: "agent", id: "task-a" }), undefined);
+  const base = { commandId: "mtg:d1:c1", actor: "agent:x", target: { kind: "task", id: "task-a" }, expectedRevision: 1 };
+  await applier.apply({ ...base, patch: { costMicros: 500, computeMs: 60_000 }, agreedBy: "owner:agreed" });
+  await applier.apply({ ...base, commandId: "mtg:d1:c2", patch: { costMicros: 5 }, agreedBy: "policy:spend" });
+  assert.deepEqual(calls.map((c) => [c["taskId"], c["costMicros"], c["computeMs"], c["agreedBy"], c["decisionId"]]), [["task-a", 500, 60_000, "owner:agreed", "mtg:d1:c1"], ["task-a", 5, undefined, "policy:spend", "mtg:d1:c2"]]);
+  for (const patch of [{}, { costMicros: -1 }, { costMicros: 1.5 }, { costMicros: 5, tokens: 9 }, { computeMs: "lots" }]) {
+    await assert.rejects(() => applier.apply({ ...base, patch: patch as never, agreedBy: "owner:agreed" }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
+  }
+  await assert.rejects(() => applier.apply({ ...base, target: { kind: "agent", id: "x" }, patch: { costMicros: 1 }, agreedBy: "owner:agreed" }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
+  assert.equal(calls.length, 2, "nothing refused reached the budget");
+});
+
+test("a grant decided in a meeting widens rights, is for the target project, one agent, one action and an end time, and is carried out as the controller with who allowed it (card M02e)", async () => {
+  const calls: Record<string, unknown>[] = [];
+  const controller = { id: "service:meeting-records", kind: "service", name: "meeting-records", grants: [] } as never;
+  const applier = grantApplier({ grantAgreed: async (_by: unknown, command: Record<string, unknown>) => { calls.push(command); } } as never, controller);
+  assert.deepEqual([applier.widens, applier.action], ["access-change", "principal.manage"]);
+  assert.equal(await applier.project({ kind: "project", id: "proj-a" }), "proj-a");
+  assert.equal(await applier.project({ kind: "task", id: "proj-a" }), undefined);
+  const base = { commandId: "mtg:d1:c1", actor: "agent:x", target: { kind: "project", id: "proj-a" }, expectedRevision: 1 };
+  await applier.apply({ ...base, patch: { grantee: "agent:ann", action: "task.read", expiresAt: "2099-01-01T00:00:00Z", basis: "to read the plan" }, agreedBy: "policy:access-change" });
+  assert.deepEqual(calls.map((c) => [c["grantee"], c["action"], c["project"], c["expiresAt"], c["agreedBy"], c["decisionId"], c["basis"]]), [["agent:ann", "task.read", "proj-a", "2099-01-01T00:00:00Z", "policy:access-change", "mtg:d1:c1", "to read the plan"]]);
+  for (const patch of [{}, { grantee: "agent:ann", action: "task.read" }, { grantee: "agent:ann", action: "task.read", expiresAt: "2099-01-01T00:00:00Z", project: "*" }, { grantee: 5, action: "task.read", expiresAt: "x" }]) {
+    await assert.rejects(() => applier.apply({ ...base, patch: patch as never, agreedBy: "owner:agreed" }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
+  }
+  await assert.rejects(() => applier.apply({ ...base, target: { kind: "task", id: "t" }, patch: { grantee: "agent:ann", action: "task.read", expiresAt: "2099-01-01T00:00:00Z" }, agreedBy: "owner:agreed" }), (e: unknown) => e instanceof DomainError);
+  assert.equal(calls.length, 1, "nothing refused reached the grants");
+});

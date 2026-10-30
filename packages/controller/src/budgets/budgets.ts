@@ -260,6 +260,22 @@ export class BudgetService {
   async raise(owner: Principal, command: NoActor & { taskId: string; costMicros?: number; computeMs?: number }): Promise<void> {
     this.#owner(owner, "adds budget");
     onlyKnown(command, ["commandId", "taskId", "costMicros", "computeMs"]);
+    await this.#raise(owner, command, undefined);
+  }
+
+  /**
+   * Carries out a budget raise that was agreed elsewhere (a meeting decision, card M02e), as the controller's own service identity: the owner agreed to it, or the approval policy let its class through (the profile, with a
+   * specific setting overriding it; owner decision 2026-10-30). It adds exactly the amounts the decision named to the task it named, nothing else, and records who agreed and how in the command's detail.
+   */
+  async raiseAgreed(by: Principal, command: NoActor & { taskId: string; costMicros?: number; computeMs?: number; decisionId: string; agreedBy: string }): Promise<void> {
+    if (by.kind !== "service" && by.kind !== "owner") throw new DomainError("forbidden", `${by.id} is not the controller; an agreed raise is carried out by the controller`);
+    onlyKnown(command, ["commandId", "taskId", "costMicros", "computeMs", "decisionId", "agreedBy"]);
+    if (typeof command.decisionId !== "string" || command.decisionId.length < 1 || command.decisionId.length > 120) throw new DomainError("invalid_command", "decisionId: must name the decision", { field: "decisionId" });
+    if (typeof command.agreedBy !== "string" || !/^(owner:[a-z0-9-]{1,60}|policy:[a-z0-9.-]{1,60})$/.test(command.agreedBy)) throw new DomainError("invalid_command", "agreedBy: must be the owner or the policy that let it through", { field: "agreedBy" });
+    await this.#raise(by, command, { decisionId: command.decisionId, agreedBy: command.agreedBy });
+  }
+
+  async #raise(owner: Principal, command: NoActor & { taskId: string; costMicros?: number; computeMs?: number }, agreement: { decisionId: string; agreedBy: string } | undefined): Promise<void> {
     const taskId = checkTaskId(command.taskId);
     const add = amounts(command, true);
     const treeId = await this.#treeIdOf(taskId, () => new DomainError("not_found", "that task has no budget"));
@@ -270,7 +286,7 @@ export class BudgetService {
         const found = await this.#tree(treeId);
         const tree = clone(found.body);
         this.#grow(tree, taskId, add);
-        return { ref: treeRef, creates: false, changes: [{ type: "update", ref: treeRef, expectedRevision: found.revision, body: tree as unknown as JsonObject }], detail: { taskId, ...add } };
+        return { ref: treeRef, creates: false, changes: [{ type: "update", ref: treeRef, expectedRevision: found.revision, body: tree as unknown as JsonObject }], detail: { taskId, ...add, ...(agreement === undefined ? {} : { agreed: agreement as unknown as JsonObject }) } };
       },
     })));
   }

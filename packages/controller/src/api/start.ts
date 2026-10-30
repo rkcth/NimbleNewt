@@ -6,7 +6,7 @@ import { InvitationInbox, MEETING_LIMITS, MEETING_SETTINGS, MeetingService } fro
 import { BackupService, createBackup } from "../backup/index.js";
 import { defaultEventSources } from "./default-sources.js";
 import { ImprovementService } from "../standups/improvements.js";
-import { MeetingRecordService, taskUpdateApplier } from "../meetings/record.js";
+import { MeetingRecordService, budgetRaiseApplier, grantApplier, taskUpdateApplier } from "../meetings/record.js";
 import { EventService, type EventSource } from "../events/index.js";
 import { BudgetService, holderNotice } from "../budgets/index.js";
 import { NotificationService } from "../notifications/index.js";
@@ -350,10 +350,12 @@ export async function startController(options: StartOptions): Promise<Controller
       agentState: async (id) => ((await storage.getAggregate({ kind: "agent", id }))?.body as unknown as { state?: "active" | "retired" } | undefined)?.state, canWork: async (agentId, projectId) => { const p = await principals.get(`agent:${agentId}`); if (p === undefined || p.state !== "active") return false; const eff = await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); return allows(eff as never, "attempt.work", projectId); } }) });
     const continuations = ContinuationService.withEpoch(storage, epoch);
     const resumes = ResumeCheckService.withEpoch(storage, epoch, { continuations, dependencies: DependencyService.withEpoch(storage, epoch), blockers: BlockerService.withEpoch(storage, epoch), ports: controllerResumePorts(storage) });
+    // The identity that carries out what a meeting decided and was allowed: a service with no grants of its own (the carrying agent's rights are checked separately).
+    const meetingController = { id: "service:meeting-records", kind: "service", name: "meeting-records", grants: [] } as Principal;
     const records = MeetingRecordService.withEpoch(storage, epoch, { meetings, decisions }, {
       // A meeting may retitle or reword a task; the change is made by the project service as the agent that holds the right, and only once (card M02c).
-      appliers: { "task.update": taskUpdateApplier(projects) },
-      // Changes that widen rights or spend (none is registered yet) are carried out without the owner only when the approval policy lets their class through: the profile, with a specific setting overriding it (owner decision 2026-10-29).
+      appliers: { "task.update": taskUpdateApplier(projects), "budget.raise": budgetRaiseApplier(budgets, meetingController, projects), "grant.add": grantApplier(grants, meetingController) },
+      // Changes that widen rights or spend (a budget raise is registered; a grant is not yet) are carried out without the owner only when the approval policy lets their class through: the profile, with a specific setting overriding it (owner decision 2026-10-29).
       widening: async (cls, projectId) => {
         const cell = await PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }).classMode(projectId, cls);
         // The engine keeps a change of rights a decision for the owner whatever the profile says, so a vote widens rights without the owner only where the owner set that cell by hand (a specific setting overrides the profile).

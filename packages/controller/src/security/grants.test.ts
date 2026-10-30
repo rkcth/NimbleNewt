@@ -59,6 +59,27 @@ for (const backend of backends) {
     await refuses("forbidden", () => api(now).createTask({ commandId: cid("c"), projectId: a, title: "x" }), (e) => assert.match(e.message, /may not task.create/));
   });
 
+  suite("an agreed grant is carried out by the controller as one direct, ending grant for one project, with the decision and who allowed it in its basis; nothing wider and nobody else may use it (card M02e)", async ({ grants, owner, a, b, ta, tb, api, agent, at }) => {
+    const ann = await agent("ann");
+    const controller = { id: "service:meeting-records", kind: "service", name: "meeting-records", grants: [] } as unknown as Principal;
+    const end = "2099-01-01T00:00:00.000Z";
+    const base = { commandId: cid("ag"), grantee: "agent:ann", action: "task.read", project: a, expiresAt: end, basis: "to read the plan", decisionId: "mtg:dec-1:chg-1", agreedBy: "owner:agreed" };
+    const made = await grants.grantAgreed(controller, base);
+    assert.equal((await grants.grantAgreed(controller, base)).replayed, true, "a repeat after a crash grants once");
+    const now = await at(ann, T);
+    assert.equal((await api(now).getTask(ta))!.id, ta, "it covers what it names");
+    await refuses("forbidden", () => api(now).getTask(tb), undefined);
+    const record = (await grants.list(owner, { grantee: "agent:ann" })).items.find((g) => g.id === made.id);
+    assert.match(String(record?.basis), /meeting decision mtg:dec-1:chg-1, allowed by owner:agreed: to read the plan/);
+    assert.equal(record?.source, "direct");
+    await refuses("forbidden", () => grants.grantAgreed(ann, { ...base, commandId: cid("ag") }));
+    await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), project: "*" }));
+    await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), expiresAt: undefined } as never));
+    await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), agreedBy: "the agent said so" }));
+    await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), source: "standing" } as never));
+    void b;
+  });
+
   suite("a grant for one resource says nothing about its neighbours", async ({ grants, owner, a, ta, ta2, api, agent, at }) => {
     const ann = await agent("ann");
     await give(grants, owner, "agent:ann", "task.read", a, { resource: { kind: "task", id: ta } });

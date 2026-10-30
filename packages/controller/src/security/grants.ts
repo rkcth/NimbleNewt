@@ -206,6 +206,28 @@ export class GrantService {
   /** The owner grants authority. */
   async grant(owner: Principal, command: GrantInput): Promise<{ id: string; revision: number; replayed: boolean }> {
     requireOwner(owner);
+    return this.#grant(owner, command);
+  }
+
+  /**
+   * Carries out a grant that was agreed elsewhere (a meeting decision, card M02e), as the controller's own service identity: the owner agreed to it, or the approval policy let rights through because the owner set that
+   * cell by hand (a specific setting; owner decision 2026-10-30). It is one direct grant of the one action to the one agent in the one project the decision named, with an end time, and nothing wider: no standing grant,
+   * no all-projects grant. The decision and who allowed it are kept in the grant's basis.
+   */
+  async grantAgreed(by: Principal, command: Omit<GrantInput, "source" | "notBefore" | "terms"> & { decisionId: string; agreedBy: string }): Promise<{ id: string; revision: number; replayed: boolean }> {
+    if (by.kind !== "service" && by.kind !== "owner") throw new DomainError("forbidden", `${by.id} is not the controller; an agreed grant is carried out by the controller`);
+    const given = command as unknown as Record<string, unknown>;
+    for (const key of Object.keys(given)) if (!["commandId", "grantee", "action", "project", "resource", "basis", "expiresAt", "decisionId", "agreedBy"].includes(key)) invalid(key, "is not a field of an agreed grant");
+    if (typeof command.decisionId !== "string" || command.decisionId.length < 1 || command.decisionId.length > 120) invalid("decisionId", "must name the decision");
+    if (typeof command.agreedBy !== "string" || !/^(owner:[a-z0-9-]{1,60}|policy:[a-z0-9.-]{1,60})$/.test(command.agreedBy)) invalid("agreedBy", "must be the owner or the policy that let it through");
+    if (command.project === "*") invalid("project", "an agreed grant is for one project, not all of them");
+    if (checkTime(command.expiresAt, "expiresAt") === undefined) invalid("expiresAt", "an agreed grant ends: give the time it expires");
+    const { decisionId, agreedBy, ...rest } = command;
+    const basis = `meeting decision ${decisionId}, allowed by ${agreedBy}: ${String(rest.basis ?? "").slice(0, Math.max(0, GRANT_LIMITS.basis - decisionId.length - agreedBy.length - 40))}`;
+    return this.#grant(by, { ...rest, basis, source: "direct" } as GrantInput);
+  }
+
+  async #grant(owner: Principal, command: GrantInput): Promise<{ id: string; revision: number; replayed: boolean }> {
     return this.#runner.command("grant.create", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => {
       onlyKnown(command, ["commandId", "grantee", "action", "project", "resource", "source", "basis", "notBefore", "expiresAt", "terms"]);
       const terms = checkTerms(command.terms);

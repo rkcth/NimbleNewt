@@ -143,6 +143,21 @@ for (const backend of backends) {
     await refuses("forbidden", () => c.svc.reclaim(c.cat, { commandId: cid("rc"), taskId: c.grandkid }));
   });
 
+  suite("an agreed raise is carried out by the controller's own identity for exactly the task and amounts it names, with who allowed it recorded; nobody else may use that path (card M02e)", async (c) => {
+    await open(c);
+    const controller = { id: "service:meeting-records", kind: "service", name: "meeting-records", grants: [] } as unknown as Principal;
+    const before = (await rep(c, c.root)).available.costMicros;
+    await c.svc.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, costMicros: 7, decisionId: "mtg:dec-1:chg-1", agreedBy: "owner:agreed" });
+    assert.equal((await rep(c, c.root)).available.costMicros, before + 7, "exactly what was named");
+    await c.svc.raiseAgreed(controller, { commandId: "same-id", taskId: c.root, costMicros: 3, decisionId: "mtg:dec-1:chg-2", agreedBy: "policy:spend" });
+    await c.svc.raiseAgreed(controller, { commandId: "same-id", taskId: c.root, costMicros: 3, decisionId: "mtg:dec-1:chg-2", agreedBy: "policy:spend" });
+    assert.equal((await rep(c, c.root)).available.costMicros, before + 10, "a repeat after a crash adds once");
+    for (const who of [c.ann, c.host, c.reader]) await refuses("forbidden", () => c.svc.raiseAgreed(who, { commandId: cid("ag"), taskId: c.root, costMicros: 1, decisionId: "d", agreedBy: "owner:agreed" }));
+    await refuses("invalid_command", () => c.svc.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, costMicros: 1, decisionId: "d", agreedBy: "the agent said so" }));
+    await refuses("invalid_command", () => c.svc.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, costMicros: 1, decisionId: "d", agreedBy: "owner:agreed", extra: 1 } as never));
+    assert.equal((await rep(c, c.root)).available.costMicros, before + 10, "nothing refused changed the budget");
+  });
+
   suite("uncertain and in-flight amounts are held and shown until reconciled", async (c) => {
     await open(c, 100, 500);
     const r1 = await c.reserve(c.root, 40, 100);

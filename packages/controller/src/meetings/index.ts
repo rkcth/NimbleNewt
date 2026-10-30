@@ -5,7 +5,7 @@ export {
   type AdmissionAdvice, type AttendanceBody, type AttendanceDeps, type AttendanceEvent, type AttendanceOptions, type AttendanceState, type InterruptedWork, type KeptReason, type MeetingDecision, type NoticeSink, type ParticipantView, type ReturnKind, type ReturnPlan,
   type RevalidationBody, type RevalidationEntry, type RoomBody, type RoomKind, type RoomPhase, type RoomStatus, type WakeSink, type WindowSink,
 } from "./attendance.js";
-export { MeetingRecordService, RECORD_LIMITS, taskUpdateApplier, type ChangeApplier, type DiscussionEntry, type RecordOptions } from "./record.js";
+export { MeetingRecordService, RECORD_LIMITS, budgetRaiseApplier, grantApplier, taskUpdateApplier, type ChangeApplier, type DiscussionEntry, type RecordOptions } from "./record.js";
 export type * from "./record-types.js";
 export { buildSummary, isConsistent, type Shared, type SummaryInput } from "./summary.js";
 export { BALLOT_VALUES, castingOutcome, quorumOf, tallyOf, verdictOf, type BallotValue, type CountedBallot, type VoteOutcome, type Tally, type TieBreak, type VoteVerdict } from "./votes.js";

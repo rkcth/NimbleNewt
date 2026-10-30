@@ -6,6 +6,8 @@ import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import { onlyKnown, revision as checkRevision, type TaskBody, type View } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
+import type { BudgetService } from "../budgets/budgets.js";
+import type { GrantService } from "../security/grants.js";
 import type { ProjectService } from "../domain/service.js";
 import { allows, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
@@ -36,7 +38,31 @@ export interface ChangeApplier {
    */
   readonly widens?: "access-change" | "spend";
   /** Carries the change out. `commandId` is stable per change, so a repeat after a crash does it once. A `stale_revision` refusal means the target moved and the change is not applied. */
-  apply(change: { readonly commandId: string; readonly actor: string; readonly target: { kind: string; id: string }; readonly expectedRevision: number; readonly patch: JsonObject }): Promise<{ revision?: number }>;
+  apply(change: { readonly commandId: string; readonly actor: string; readonly target: { kind: string; id: string }; readonly expectedRevision: number; readonly patch: JsonObject; /** Who allowed it: `owner:agreed` (the owner agreed to the decision) or `policy:<class>` (the approval policy let its class through). */ readonly agreedBy: string }): Promise<{ revision?: number }>;
+}
+
+/**
+ * A budget raise for a task, decided in a meeting (card M02e). It widens spend, so it is carried out only with the owner's agreement or where the approval policy lets spend through (the profile, with a specific setting
+ * overriding it); it adds exactly the amounts the decision named to the task it named, as the controller's own identity, recording who allowed it.
+ */
+export function budgetRaiseApplier(budgets: Pick<BudgetService, "raiseAgreed">, controller: Principal, projects: Pick<ProjectService, "getTask">): ChangeApplier {
+  return {
+    action: "budget.manage",
+    widens: "spend",
+    async project(target) { return target.kind === "task" ? (await projects.getTask(target.id))?.projectId : undefined; },
+    async apply(change) {
+      const patch = change.patch as { costMicros?: unknown; computeMs?: unknown };
+      const known = Object.keys(patch).every((k) => k === "costMicros" || k === "computeMs");
+      const number = (v: unknown): number | undefined => (typeof v === "number" && Number.isSafeInteger(v) && v > 0 ? v : undefined);
+      const costMicros = number(patch.costMicros); const computeMs = number(patch.computeMs);
+      if (!known || (patch.costMicros !== undefined && costMicros === undefined) || (patch.computeMs !== undefined && computeMs === undefined) || (costMicros === undefined && computeMs === undefined)) {
+        throw new DomainError("invalid_command", "a budget raise names costMicros and/or computeMs as positive whole numbers and nothing else");
+      }
+      if (change.target.kind !== "task") throw new DomainError("invalid_command", "a budget raise targets a task");
+      await budgets.raiseAgreed(controller, { commandId: change.commandId, taskId: change.target.id, ...(costMicros === undefined ? {} : { costMicros }), ...(computeMs === undefined ? {} : { computeMs }), decisionId: change.commandId, agreedBy: change.agreedBy });
+      return {};
+    },
+  };
 }
 
 /** Task titles and descriptions, through the project service (which checks the expected revision itself). */
@@ -51,6 +77,28 @@ export function taskUpdateApplier(projects: ProjectService): ChangeApplier {
         ...(typeof patch.title === "string" ? { title: patch.title } : {}), ...(typeof patch.description === "string" ? { description: patch.description } : {}),
       });
       return { revision: done.revision };
+    },
+  };
+}
+
+/**
+ * A grant of rights decided in a meeting (card M02e). The target is the project the grant is for; the patch names the agent, the one action and when it ends. It widens rights, so it is carried out only with the
+ * owner's agreement or where the owner set the access-change cell by hand (a specific setting overrides the profile; the engine otherwise keeps a change of rights a decision for the owner). The carrying agent must
+ * hold `principal.manage`. The grant is direct, for this project only, and ends.
+ */
+export function grantApplier(grants: Pick<GrantService, "grantAgreed">, controller: Principal): ChangeApplier {
+  return {
+    action: "principal.manage",
+    widens: "access-change",
+    async project(target) { return target.kind === "project" ? target.id : undefined; },
+    async apply(change) {
+      const patch = change.patch as { grantee?: unknown; action?: unknown; expiresAt?: unknown; basis?: unknown };
+      const bad = (why: string): never => { throw new DomainError("invalid_command", `a grant names ${why}`); };
+      if (Object.keys(patch).some((k) => !["grantee", "action", "expiresAt", "basis"].includes(k))) bad("grantee, action, expiresAt and basis and nothing else");
+      if (change.target.kind !== "project") bad("the project it is for as its target");
+      if (typeof patch.grantee !== "string" || typeof patch.action !== "string" || typeof patch.expiresAt !== "string") bad("an agent, one action and an end time");
+      await grants.grantAgreed(controller, { commandId: change.commandId, grantee: patch.grantee as string, action: patch.action as string, project: change.target.id, expiresAt: patch.expiresAt as string, basis: typeof patch.basis === "string" && patch.basis.length > 0 ? patch.basis : "agreed in a meeting", decisionId: change.commandId, agreedBy: change.agreedBy });
+      return {};
     },
   };
 }
@@ -837,7 +885,7 @@ export class MeetingRecordService {
       const applier = this.#options.appliers?.[change.kind];
       if (applier === undefined) { await refuse("failed", `no applier is registered for ${change.kind}`); continue; }
       try {
-        const done = await applier.apply({ commandId: `mtg:${decisionId}:${change.id}`, actor: by.id, target: change.target, expectedRevision: change.expectedRevision, patch: change.patch });
+        const done = await applier.apply({ commandId: `mtg:${decisionId}:${change.id}`, actor: by.id, target: change.target, expectedRevision: change.expectedRevision, patch: change.patch, agreedBy: d.ownerResponse === "agreed" ? "owner:agreed" : `policy:${applier.widens ?? "none"}` });
         await save({ ...change, state: "applied", ...(done.revision === undefined ? {} : { appliedRevision: done.revision }) });
       } catch (error) {
         if (error instanceof DomainError && error.code === "stale_revision") await refuse("conflict", `${change.target.kind} ${change.target.id} changed meanwhile: ${error.message}`);
