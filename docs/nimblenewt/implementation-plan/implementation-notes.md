@@ -2768,3 +2768,7 @@ Nothing is flipped; `plan.test.mjs` also needs C06, L05 and M01 (not audited) to
 ## L06 (part 3): reboot keeps the pause
 
 - Dispatcher test: with an installation pause held, a new dispatcher on the same store starts nothing and leaves the assignment as it was; the owner's resume lets the work start. Still remaining in L06 (no remainder card yet, to be split when flipped): permitted remote jobs as tracked exceptions, bookkeeping when the last model fails mid-preparation, resume only on a recorded authorized condition, a non-chat Stop/Force Stop command with every route down.
+
+## U09 (part 2): gaps in the timeline
+
+- `ActivityService.timeline` now also returns `gaps` (steps in the looked-at range whose records are gone, with the reason) and the chat/status `timeline` view tells them as "Step N of a task is no longer available: reason", so a gap is not mistaken for a quiet stretch. A gone step has no known actor, so with an `agent` filter no gaps are listed. Remaining in U09 (to split into U09b when flipped): replay that causes no effect, simulation as a separate command, proposed/dispatched/confirmed/uncertain and concurrent branches kept distinct in the view, superseded decisions marked, the same checks for search/summary/export, "what led to this change" links, collapsed thinking and its retention wording, branch and agent navigation, the web view.

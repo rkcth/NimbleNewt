@@ -353,6 +353,7 @@ export class StatusService {
       throw error;
     }
     const lines: Line[] = got.steps.map((s) => line(`${s.at}, ${shown(s.actor)}: ${s.kind} - ${shown(s.summary)}`, cite("task", s.taskId)));
+    for (const g of got.gaps ?? []) lines.push(line(`Step ${g.seq} of a task is no longer available: ${shown(g.reason)}.`, cite("task", g.taskId)));
     if (lines.length === 0) lines.push(line("No steps match.", cite("project", request.projectId)));
     else if (got.truncated) lines.push(line("The project has more tasks than were looked at; this is a part of its recent activity (usually the most recently active tasks).", cite("project", request.projectId)));
     return { observedAt: this.#runner.now(), lines };

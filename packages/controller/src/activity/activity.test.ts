@@ -150,6 +150,10 @@ for (const backend of backends) {
       await svc.markUnavailable(owner, { commandId: cid("u"), taskId: task, first: 1, last: 2, reason: "archived with the old checkout" });
       const after = (await svc.steps(auditor, task)).steps;
       assert.deepEqual(after.slice(0, 2), [{ seq: 1, unavailable: "archived with the old checkout" }, { seq: 2, unavailable: "archived with the old checkout" }]);
+      // The project timeline shows the gap, not a quiet stretch (unless it is filtered by agent: a gone step has no known actor).
+      const gapped = await svc.timeline(auditor, project, { limit: 100 });
+      assert.deepEqual(gapped.gaps.filter((g) => g.taskId === task).map((g) => [g.seq, g.reason]), [[1, "archived with the old checkout"], [2, "archived with the old checkout"]]);
+      assert.deepEqual((await svc.timeline(auditor, project, { agent: owner.id })).gaps, []);
       await refuses("not_found", () => svc.payload(owner, task, 2));
       assert.match((await svc.explainLater(auditor, { commandId: cid("l"), taskId: task, seq: 1 })).explanation.choice, /unavailable/);
       await refuses("invalid_command", () => svc.markUnavailable(owner, { commandId: cid("u"), taskId: task, first: 1, last: 500, reason: "x" }));

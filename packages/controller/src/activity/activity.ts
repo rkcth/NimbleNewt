@@ -244,7 +244,7 @@ export class ActivityService {
    * A project's recent steps across its tasks, newest first (card U09): read only, nothing is recorded, run or sent. The project's 25 most recently active tasks each contribute their latest steps (at most 10), so this is a summary to start from, not the whole history;
    * `agent` keeps one actor's steps and `since` keeps those at or after a time. A step in an unavailable range is left out. The caller needs the project's history right (or to be the owner, a host or a service).
    */
-  async timeline(by: Principal, projectIdValue: string, filter: { agent?: string; since?: string; limit?: number } = {}): Promise<{ steps: { taskId: string; seq: number; kind: ActivityKind; summary: string; actor: string; at: string }[]; scanned: number; truncated: boolean }> {
+  async timeline(by: Principal, projectIdValue: string, filter: { agent?: string; since?: string; limit?: number } = {}): Promise<{ steps: { taskId: string; seq: number; kind: ActivityKind; summary: string; actor: string; at: string }[]; /** Steps in the looked-at range whose records are gone (archived, deleted, ...), so the timeline shows a gap and not a quiet stretch. Left out when the list is filtered by agent (a gone step has no known actor). */ gaps: { taskId: string; seq: number; reason: string }[]; scanned: number; truncated: boolean }> {
     onlyKnown(filter, ["agent", "since", "limit"]);
     const projectId = checkProjectId(projectIdValue);
     // A host is not given every project's history in one call here (it may read a task it is working through `steps`).
@@ -254,6 +254,7 @@ export class ActivityService {
     const sinceMs = filter.since === undefined ? undefined : Date.parse(text(filter.since, "since", { min: 1, max: 40 }));
     if (sinceMs !== undefined && Number.isNaN(sinceMs)) invalid("since", "must be a time");
     const found: { taskId: string; seq: number; kind: ActivityKind; summary: string; actor: string; at: string }[] = [];
+    const gaps: { taskId: string; seq: number; reason: string }[] = [];
     let truncated = false;
     // Task IDs say nothing about age, so every head is looked at (the head is in the listing already: no read per task) and only the project's most recently active tasks have their steps read.
     const heads: { id: string; head: HeadBody }[] = [];
@@ -270,13 +271,14 @@ export class ActivityService {
     for (const { id, head } of heads.slice(0, TIMELINE_TASKS)) {
       if (sinceMs !== undefined && head.lastAt !== undefined && Date.parse(head.lastAt) < sinceMs) continue;
       for (let seq = Math.max(1, head.next - TIMELINE_PER_TASK); seq < head.next; seq++) {
-        const { step } = await this.#stepView(id, seq, head);
+        const { step, gone } = await this.#stepView(id, seq, head);
+        if (step === undefined && gone !== undefined && agent === undefined) gaps.push({ taskId: id, seq, reason: gone });
         if (step === undefined || (agent !== undefined && step.actor !== agent) || (sinceMs !== undefined && Date.parse(step.at) < sinceMs)) continue;
         found.push({ taskId: id, seq, kind: step.kind, summary: step.summary, actor: step.actor, at: step.at });
       }
     }
     found.sort((a, b) => (a.at === b.at ? (a.taskId < b.taskId ? 1 : a.taskId > b.taskId ? -1 : b.seq - a.seq) : a.at < b.at ? 1 : -1));
-    return { steps: found.slice(0, limit), scanned, truncated };
+    return { steps: found.slice(0, limit), gaps: gaps.slice(0, limit), scanned, truncated };
   }
 
   /** The stored content of a step. Sensitive content needs the owner or a history grant; ordinary content is also open to those working the task. */
