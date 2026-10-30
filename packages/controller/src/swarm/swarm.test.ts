@@ -104,3 +104,23 @@ test("the owner spawns and cancels a swarm through the state API, and an agent w
     assert.deepEqual([cancelled.result.settled, cancelled.result.pending], [[made.result.taskId], []]);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+test("spawns sent at the same moment cannot take a parent over its live-children limit (card H10 follow-up)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-swarm-race-"));
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4 });
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const project = (await c.services.projects.createProject({ commandId: "p1", actor: rob.id, name: "Garden" })).id;
+    const root = (await c.services.projects.createTask({ commandId: "t-root", actor: rob.id, projectId: project, title: "Plant" })).id;
+    const budgets = BudgetService.withEpoch(c.storage, c.epoch);
+    await budgets.open(rob, { commandId: "b-open", taskId: root, currency: "USD", costMicros: 1_000_000, computeMs: 60_000 });
+    const swarm = SwarmService.withEpoch(c.storage, c.epoch, { projects: c.services.projects, contracts: c.services.contracts, budgets, stops: StopService.withEpoch(c.storage, c.epoch, c.services.pauses, ports([])), limits: { depth: 2, children: 3 } });
+    const results = await Promise.allSettled([0, 1, 2, 3, 4].map((i) => swarm.spawn(rob, { commandId: `race${i}`, parentTaskId: root, title: `Child ${i}`, costMicros: 1000, computeMs: 10 })));
+    assert.equal(results.filter((r) => r.status === "fulfilled").length, 3, JSON.stringify(results.map((r) => r.status)));
+    for (const r of results) if (r.status === "rejected") assert.ok(r.reason instanceof DomainError && /live children/.test(r.reason.message), String(r.reason));
+    assert.equal((await swarm.children(root, project)).length, 3, "exactly the limit is linked");
+    const live = (await c.storage.listAggregates("task", { limit: 100 })).filter((t) => (t.body as { title?: string }).title?.startsWith("Child ") && (t.body as { state?: string }).state !== "cancelled");
+    assert.equal(live.length, 3, "the refused ones were cancelled");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});

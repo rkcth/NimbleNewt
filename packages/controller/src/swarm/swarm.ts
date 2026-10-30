@@ -29,6 +29,8 @@ export interface SwarmDeps {
 }
 
 const LINK = "swarm-link";
+/** The children a parent has claimed a place for (kind `swarm-gate`, ID = the parent task); its revision serialises concurrent spawns. */
+const GATE = "swarm-gate";
 const FINAL = new Set(["done", "cancelled"]);
 
 /**
@@ -59,14 +61,14 @@ export class SwarmService {
     if (parent === undefined || !(await this.#deps.budgets.canManage(by, parentId)) || !(by.kind === "owner" || allows(by, "task.create", parent.projectId))) throw new DomainError("forbidden", `${by.id} may not spawn from that task`);
     const limits = this.#deps.limits ?? { depth: DEFAULT_LIMITS.depth, children: DEFAULT_LIMITS.children };
     if ((await this.#depth(parentId)) + 1 > limits.depth) throw new DomainError("invalid_command", `a task may spawn at most ${limits.depth} levels deep`, { field: "parentTaskId" });
-    const live = await this.#liveChildren(parentId);
     const created = await this.#deps.projects.createTask({ commandId: scopedCommandId(by.id, `${command.commandId}:child`), actor: by.id, projectId: parent.projectId, title } as never);
     const childId = created.id;
     // A child an earlier, refused call made and cancelled is not given an allowance by a retry: a refused spawn is asked again with a new command ID.
     if (created.replayed && (await this.#runner.get(LINK, childId)) === undefined && (await this.#deps.projects.getTask(childId))?.state === "cancelled") throw new DomainError("invalid_command", "that spawn was refused earlier; ask again with a new command ID", { field: "commandId" });
     // A replay of a spawn that completed finds the child already linked and has nothing more to do.
     if (created.replayed && (await this.#runner.get(LINK, childId)) !== undefined) return { taskId: childId, replayed: true };
-    if (live >= limits.children) { await this.#abandon(by, childId); throw new DomainError("invalid_command", `a task may have at most ${limits.children} live children`, { field: "parentTaskId" }); }
+    // The count and the claim of a place commit together (a check on the parent's gate record), so spawns sent at the same moment cannot all pass.
+    await this.#reserve(parentId, childId, limits.children).catch(async (error: unknown) => { await this.#abandon(by, childId); throw error; });
     try {
       if (command.expectedResult !== undefined || (command.acceptanceCriteria?.length ?? 0) > 0) {
         await this.#deps.contracts.setContract(by, { commandId: scopedCommandId(by.id, `${command.commandId}:contract`), taskId: childId, expectedVersion: 0, ...(command.expectedResult === undefined ? {} : { expectedResult: command.expectedResult }), ...(command.acceptanceCriteria === undefined ? {} : { acceptanceCriteria: command.acceptanceCriteria }) } as never)
@@ -154,6 +156,38 @@ export class SwarmService {
     let n = 0;
     for (const l of await this.#links(parent.projectId)) if (l.parentTaskId === parentId && !FINAL.has((await this.#deps.projects.getTask(l.id))?.state ?? "cancelled")) n++;
     return n;
+  }
+
+  /** Claims one of the parent's places for the child, or refuses when its live children (linked or claimed) are at the limit; a spawn that meets another's claim at the same moment counts again. */
+  async #reserve(parentId: string, childId: string, max: number): Promise<void> {
+    const ref: AggregateRef = { kind: GATE, id: parentId };
+    for (let attempt = 0; ; attempt++) {
+      const gate = await this.#runner.get(GATE, parentId);
+      const claimed = ((gate?.body as { children?: string[] } | undefined)?.children) ?? [];
+      if (claimed.includes(childId)) return;
+      const parent = await this.#deps.projects.getTask(parentId);
+      const known = new Set(claimed);
+      if (parent !== undefined) for (const l of await this.#links(parent.projectId)) if (l.parentTaskId === parentId) known.add(l.id);
+      known.delete(childId);
+      const live: string[] = [];
+      for (const id of known) if (!FINAL.has((await this.#deps.projects.getTask(id))?.state ?? "cancelled")) live.push(id);
+      if (live.length >= max) throw new DomainError("invalid_command", `a task may have at most ${max} live children`, { field: "parentTaskId" });
+      const body = { children: [...live.filter((id) => claimed.includes(id)), childId] } as unknown as JsonObject;
+      try {
+        await this.#runner.command("swarm.reserve", { commandId: `swg-${childId}`, actor: "system" }, async () => ({
+          payload: { childId, parentId },
+          build: async (): Promise<Built> => ({
+            ref, creates: gate === undefined,
+            changes: [gate === undefined ? { type: "create", ref, body } : { type: "update", ref, expectedRevision: gate.revision, body }],
+            detail: { childId },
+            contention: async () => new DomainError("stale_revision", "another spawn claimed a place at the same moment"),
+          }),
+        }));
+        return;
+      } catch (error) {
+        if (!(error instanceof DomainError && error.code === "stale_revision") || attempt >= 50) throw error;
+      }
+    }
   }
 
   /** A child made before a refusal does not stay behind as a task with no allowance. */
