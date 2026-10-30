@@ -620,6 +620,32 @@ export class ChatService {
         args["inquiryId"] = String(matches[0]!["inquiryId"]);
       }
     }
+    // A meeting named by its words (the one planned meeting of the project whose title contains them, or the only one) and an agent named by its name: both are resolved from the records, and anything unclear asks.
+    if (intent.op === "meeting.invite-direct") {
+      const topic = args["meetingTopic"];
+      const agentName = args["agentName"];
+      delete args["meetingTopic"];
+      delete args["agentName"];
+      if (topic !== undefined && args["occurrenceId"] !== undefined) return refuse("invalid_command", "give either occurrenceId or meetingTopic, not both");
+      if (agentName !== undefined && args["agent"] !== undefined) return refuse("invalid_command", "give either agent or agentName, not both");
+      if ((topic !== undefined && typeof topic !== "string") || (agentName !== undefined && typeof agentName !== "string")) return refuse("invalid_command", "meetingTopic and agentName must be text");
+      if (args["occurrenceId"] === undefined) {
+        const planned = await this.#listAll(token, "meeting.planned", { projectId });
+        const words = typeof topic === "string" ? topic.trim().toLowerCase() : "";
+        const matches = planned.filter((i) => words === "" || String(i["title"]).toLowerCase().includes(words));
+        if (matches.length === 0) return refuse("not_found", words === "" ? "no meeting is planned in that project" : `no planned meeting is called "${words.slice(0, 80)}"`);
+        if (matches.length > 1) return { ok: false, kind: "ask", question: "Which meeting do you mean?", options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${String(m["id"])} (${String(m["title"]).slice(0, 60)}, ${String(m["startsAt"])})`), field: "occurrenceId" };
+        args["occurrenceId"] = String(matches[0]!["id"]);
+      }
+      if (args["agent"] === undefined) {
+        if (typeof agentName !== "string" || agentName.trim() === "") return refuse("invalid_command", "say which agent should attend");
+        const agents = await this.#listAll(token, "agent.list", { state: "active" });
+        const named = agents.filter((a) => String(a["friendlyName"]).trim().toLowerCase() === agentName.trim().toLowerCase());
+        if (named.length !== 1) return refuse(named.length === 0 ? "not_found" : "invalid_command", named.length === 0 ? `no active agent called "${agentName.slice(0, 80)}"` : `more than one agent is called "${agentName.slice(0, 80)}"`);
+        args["agent"] = String(named[0]!["principalId"]);
+        labels[String(args["agent"])] = agentName.trim();
+      }
+    }
     // A project argument belongs only to the operations that take one (the others only used it to find the task).
     if ("projectId" in args && !acceptedForOp(intent.op).includes("projectId")) delete args["projectId"];
 
