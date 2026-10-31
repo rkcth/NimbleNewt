@@ -7478,8 +7478,25 @@
         "C02",
         "C06b"
       ],
-      "deliverable": "Retention, export and deletion policy and runner covering derived data (summaries, indexes, caches) and backups, per-agent and per-project storage quotas, and reserved capacity for shutdown and recovery records (operational-contracts 129; pitfalls-and-safeguards 125; README 247, 641; design-decisions 73); stored model thinking (C06b) is deleted 14 days after the task is done, the same as the default cleanup deadline (owner decision 2026-10-22); for conversations that are not tasks (chat) only the words actually said are kept as the durable log, and thinking is held only as long as the live conversation needs it to resume (owner decision 2026-10-22; the last clause is provisional, an AI session's gap-filler to confirm)",
-      "acceptance_and_verification": "Material referenced by a resumable task or by replay is never deleted and shows as retained; a user-requested deletion removes or marks derived summaries, indexes and cached replies and records how backups are handled; export excludes secrets; archived work restores; with the disk near full the next checkpoint and shutdown and recovery records still write and a disk-full checkpoint is never reported successful; quotas enforced with visible warnings; retention configurable, and the owner changes any retention value by chatting with the supervisor (owner-only, recorded, confirmed back with the old and new value; owner decision 2026-10-22); deleting or archiving a source carries to its derived copies, summaries, indexes and embeddings, which keep their source project and origin (A10); stored thinking is deleted at the cleanup deadline, a deletion is recorded, and a task cannot resume after its thinking is deleted without the provider-invalid handling of C06b; chat keeps the words said and drops thinking when the live conversation no longer needs it",
+      "deliverable": "Retention, export and deletion policy and runner covering derived data (summaries, indexes, caches) and backups, per-agent and per-project storage quotas (optional, off by default), and reserved capacity for shutdown and recovery records (operational-contracts 129; pitfalls-and-safeguards 125; README 247, 641; design-decisions 73). Deleting stored model thinking (C06b) 14 days after the task is done (owner decision 2026-10-22) and dropping chat thinking moved to K06c (2026-10-31): it needs adapter support the Pi conversation does not have yet; the 14-day value is a retention setting here.",
+      "acceptance_and_verification": "Material referenced by a resumable task or by replay is never deleted and shows as retained; a user-requested deletion removes or marks derived summaries, indexes and cached replies and records how backups are handled; export excludes secrets; archived work restores; with the disk near full the next checkpoint and shutdown and recovery records still write and a disk-full checkpoint is never reported successful; quotas enforced with visible warnings; retention configurable, and the owner changes any retention value by chatting with the supervisor (owner-only, recorded, confirmed back with the old and new value; owner decision 2026-10-22); deleting or archiving a source carries to its derived copies, summaries, indexes and embeddings, which keep their source project and origin (A10)",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "K06c",
+      "parent": "N17",
+      "existing_issue": "AII-267",
+      "title": "Delete stored model thinking at the cleanup deadline and drop chat thinking",
+      "depends_on": [
+        "K06"
+      ],
+      "deliverable": "Split from K06 (2026-10-31). Original text of the part: stored model thinking (C06b) is deleted 14 days after the task is done, the same as the default cleanup deadline (owner decision 2026-10-22); for conversations that are not tasks (chat) only the words actually said are kept as the durable log, and thinking is held only as long as the live conversation needs it to resume (owner decision 2026-10-22; the last clause is provisional, an AI session's gap-filler to confirm). Needs adapter support: the Pi conversation is append-only through the adapter and ThinkingService has a read-only source that is not wired, so thinking blocks cannot be rewritten or dropped yet. The retention setting thinkingDays (default 14, owner-only, chat-settable) already exists in K06.",
+      "acceptance_and_verification": "Stored thinking is deleted at the cleanup deadline, a deletion is recorded, and a task cannot resume after its thinking is deleted without the provider-invalid handling of C06b; chat keeps the words said and drops thinking when the live conversation no longer needs it",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -8443,7 +8460,8 @@
         "M04g",
         "L03i",
         "T02c",
-        "U11c"
+        "U11c",
+        "K06c"
       ],
       "deliverable": "Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete",
       "acceptance_and_verification": "D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards",

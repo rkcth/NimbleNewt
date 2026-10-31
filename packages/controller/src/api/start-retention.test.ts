@@ -13,7 +13,7 @@ const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease:
 type Reply = { ok: boolean; result?: any; error?: { code: string; message?: string } };
 
 async function world(d: string, extra: Record<string, unknown> = {}) {
-  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer(), intervalMs: 1000 }, retention: { defaults: { reserveBytes: 0 } }, ...extra } as never);
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer(), intervalMs: 1000 }, retention: { defaults: { reserveBytes: 0 }, autoEveryMs: 0 }, ...extra } as never);
   const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
   const rob = await c.services.principals.authenticate(boot.token);
   const call = (token: string, op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<Reply>;
@@ -39,6 +39,10 @@ test("retention settings: owner only, everything off by default, race-safe, repl
     assert.equal(g0.effective.thinkingDays, 14); assert.equal(g0.effective.backupDaily, 7); assert.equal(g0.effective.backupWeekly, 4);
     for (const op of ["retention.settings.get", "retention.status"]) assert.equal((await call(ann.token, op, {})).error?.code, "forbidden", op);
     assert.equal((await call(ann.token, "retention.settings.set", { derivedDays: 30 }, "x1")).error?.code, "forbidden");
+    // No operation of the family is open to an agent, a task credential-less caller or a wildcard grant.
+    const wild = await (async () => { await c.services.principals.enroll(await c.services.principals.authenticate(boot.token), { commandId: "e-wild", kind: "agent", name: "wild", grants: [{ action: "*", project: "*" }] } as never); return (await c.services.principals.issueCredential(await c.services.principals.authenticate(boot.token), "agent:wild")).token; })();
+    const calls: [string, Record<string, unknown>][] = [["retention.check", { kind: "desk-record", id: "dsk-aaaaaaaaaaaaaaaaaaaa" }], ["retention.run", {}], ["retention.delete", { recordId: "dsk-aaaaaaaaaaaaaaaaaaaa", reason: "x" }], ["retention.archive", { taskId: "task-aaaaaaaaaaaaaaaaaaaa" }], ["retention.restore", { taskId: "task-aaaaaaaaaaaaaaaaaaaa" }], ["retention.export", { projectId: "proj-aaaaaaaaaaaaaaaaaaaa" }], ["retention.settings.set", { reserveBytes: 0 }], ["retention.status", {}], ["retention.settings.get", {}]];
+    for (const [op, args] of calls) for (const [who, token] of [["agent", ann.token], ["wildcard agent", wild]] as const) assert.equal((await call(token, op, args, /\.(check|export|status|get)$/.test(op) ? undefined : `f-${op}-${who}`)).error?.code, "forbidden", `${op} by ${who}`);
     for (const bad of [{ derivedDays: 3 }, { derivedDays: 1.5 }, { quotaWarnPercent: 100 }, { autoRun: "yes" }, { thinkingDays: null }, { backupDaily: 0 }, { surprise: 1 }, {}]) assert.equal((await call(boot.token, "retention.settings.set", bad, `bad-${JSON.stringify(bad)}`)).error?.code, "invalid_command", JSON.stringify(bad));
     const set = await call(boot.token, "retention.settings.set", { derivedDays: 30, backupDaily: 3, expectedRevision: 0 }, "s1");
     assert.ok(set.ok, JSON.stringify(set));
@@ -175,6 +179,13 @@ test("the runner: off until derivedDays is set, preview then confirm by digest, 
     assert.equal(r7.backups.deleted.length, 2);
     assert.deepEqual((await c.services.backups!.list()).map((b) => b.manifest.name), [newest], "the newest backup is never deleted");
 
+    // The incident rules (K06's soft archive and the purge) run with the runner once their ages are set; with nothing old they remove nothing.
+    assert.ok((await call(boot.token, "retention.settings.set", { incidentArchiveDays: 30, incidentPurgeDays: 60 }, "s2b")).ok);
+    const p3 = (await call(boot.token, "retention.run", {}, "r8")).result;
+    assert.deepEqual([p3.incidents.archiveDays, p3.incidents.purgeDays], [30, 60]);
+    const r9 = (await call(boot.token, "retention.run", { dryRun: false, confirm: p3.digest }, "r9")).result;
+    assert.deepEqual([r9.incidents.archived, r9.incidents.purged], [0, 0]);
+
     // The dispatcher does nothing by itself until autoRun is on.
     await put("summary-record", "sum-old-1", { projectId: project, title: "t", text: "t", sources: [], createdBy: "x" });
     for (let i = 0; i < 2; i++) await c.dispatch!.dispatcher.tick();
@@ -196,12 +207,16 @@ test("archive then restore returns the original exactly; a record changed since,
     const a = await c.services.desks.write(ann.p, { commandId: "wa", projectId: project, taskId: t2, kind: "progress", title: "Plan", body: "Dig the bed", visibility: "shared", status: "accepted" });
     const b = await c.services.desks.write(ann.p, { commandId: "wb", projectId: project, taskId: t2, kind: "note", title: "Cited", body: "Shared with a live task", visibility: "shared" });
     const before = await c.storage.getAggregate({ kind: "desk-record", id: a.id });
+    const sum = await c.services.retrieval.summarize(ann.p, { commandId: "sm", projectId: project, title: "About the plan", text: "Dig the bed first.", sources: [{ kind: "desk-record", id: a.id }] });
+    const sumBefore = await c.storage.getAggregate({ kind: "summary-record", id: sum.id });
     assert.equal((await call(boot.token, "retention.archive", { taskId: t2 }, "ar0")).error?.code, "invalid_command", "only a finished task");
     await finish(t2, "f");
     await put("ctx-compaction", "cmp-1", { taskId: t1, projectId: project, key: "k", compressorId: "c", state: "done", generation: 1, lineage: [], sources: [{ kind: "desk-record", id: b.id }], pinned: [], title: "t", summary: "x", digest: "d", startedBy: "x" });
     assert.equal((await call(ann.token, "retention.archive", { taskId: t2 }, "ar1")).error?.code, "forbidden");
     const arc = (await call(boot.token, "retention.archive", { taskId: t2, reason: "tidy" }, "ar1")).result;
-    assert.deepEqual(arc.archived, [a.id]);
+    assert.deepEqual(arc.archived.sort(), [a.id, sum.id].sort(), "what was made from the source goes with it");
+    const sumStub = (await c.storage.getAggregate({ kind: "summary-record", id: sum.id }))!.body as any;
+    assert.deepEqual([sumStub.text, sumStub.projectId, sumStub.sources.length], ["", project, 1], "it keeps its project and its sources");
     assert.deepEqual(arc.retained.map((x: any) => x.id), [b.id], "cited by a resumable task: retained, not archived");
     const stub = (await c.storage.getAggregate({ kind: "desk-record", id: a.id }))!.body as any;
     assert.deepEqual([stub.title, stub.body, stub.archived.by !== undefined], ["(archived)", "", true]);
@@ -211,19 +226,22 @@ test("archive then restore returns the original exactly; a record changed since,
     assert.deepEqual((await call(boot.token, "retention.archive", { taskId: t2 }, "ar2")).result.archived, []);
     // Restore: exactly the original body.
     const rest0 = await call(boot.token, "retention.restore", { taskId: t2 }, "rs1"); assert.ok(rest0.ok, JSON.stringify(rest0)); const rest = rest0.result;
-    assert.deepEqual([rest.restored, rest.conflicts], [[a.id], []]);
+    assert.deepEqual([rest.restored.sort(), rest.conflicts], [[a.id, sum.id].sort(), []]);
     const restored = await c.storage.getAggregate({ kind: "desk-record", id: a.id });
     assert.deepEqual(restored!.body, before!.body);
+    assert.deepEqual((await c.storage.getAggregate({ kind: "summary-record", id: sum.id }))!.body, sumBefore!.body, "and so does the summary");
     assert.equal(await c.storage.getAggregate({ kind: "retention-archive", id: `arc-${a.id}` }), undefined);
     // Archived again, then the stub is changed: the restore leaves it and says so.
     await call(boot.token, "retention.archive", { taskId: t2 }, "ar3");
     const cur = (await c.storage.getAggregate({ kind: "desk-record", id: a.id }))!;
     await c.storage.applyOperation({ operationId: "touch", epoch: c.epoch, actor: "test", correlationId: "touch", at: new Date().toISOString(), changes: [{ type: "update", ref: { kind: "desk-record", id: a.id }, expectedRevision: cur.revision, body: { ...cur.body, status: "superseded" } as never }], audit: [{ type: "test.touch", detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
     const rest2 = (await call(boot.token, "retention.restore", { taskId: t2 }, "rs2")).result;
-    assert.deepEqual([rest2.restored, rest2.conflicts], [[], [a.id]]);
+    assert.deepEqual([rest2.restored, rest2.conflicts], [[sum.id], [a.id]]);
     // Deleting an archived record removes its archive too: no copy of the text is left behind.
     const del = (await call(boot.token, "retention.delete", { recordId: a.id, reason: "gone" }, "dl1")).result;
     assert.equal(del.status, "deleted"); assert.deepEqual(del.derived.archives, [`arc-${a.id}`]);
+    assert.equal(await c.storage.getAggregate({ kind: "summary-record", id: sum.id }), undefined, "the summary is gone too");
+    assert.equal(await c.storage.getAggregate({ kind: "retention-archive", id: `arc-${sum.id}` }), undefined);
     assert.equal(await c.storage.getAggregate({ kind: "retention-archive", id: `arc-${a.id}` }), undefined);
 
     // Export: secrets are masked or left out; credential kinds are not in it.
@@ -303,5 +321,41 @@ test("quotas are optional and warn; the reserve is a real file, and with the dis
     for (let i = 0; i < 2; i++) await c.dispatch!.dispatcher.tick();
     assert.equal(existsSync(file), true, "the reserve was set aside again");
     await write("resumed", "ok");
+  } finally { await c.close(); clean(d); }
+});
+
+test("a restart keeps the settings, the quota and the reserve; a missing reserve is set aside again; a damaged setting is an error, not a silent default (card K06)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-restart-"));
+  const open = () => startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer(), intervalMs: 1000 }, retention: { defaults: { reserveBytes: 0 } } } as never);
+  let c = await open();
+  const file = join(d, ".nn-reserve");
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const call = (op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<Reply>;
+    const project = (await call("project.create", { name: "Garden" }, "p1")).result.id as string;
+    await c.services.principals.enroll(rob, { commandId: "e-ann", kind: "agent", name: "ann", grants: [{ action: "desk.write", project }, { action: "desk.read", project }] } as never);
+    const ann = await c.services.principals.authenticate((await c.services.principals.issueCredential(rob, "agent:ann")).token);
+    assert.ok((await call("retention.settings.set", { reserveBytes: 262_144, quotaAgentBytes: 1500, derivedDays: 45 }, "s1")).ok);
+    assert.equal(statSync(file).size, 262_144);
+    await c.close();
+    rmSync(file);
+    c = await open();
+    assert.equal(statSync(file).size, 262_144, "set aside again at start, from the stored value");
+    const read = (await c.api.handle(boot.token, { v: 1, op: "retention.settings.get", args: {} } as never) as Reply).result.item;
+    assert.deepEqual([read.effective.derivedDays, read.effective.quotaAgentBytes, read.effective.reserveBytes, read.revision], [45, 1500, 262_144, 1]);
+    const annAgain = await c.services.principals.authenticate((await c.services.principals.issueCredential(await c.services.principals.authenticate(boot.token), "agent:ann")).token);
+    await assert.rejects(c.services.desks.write(annAgain, { commandId: "w1", projectId: project, kind: "note", title: "t", body: "x".repeat(2000), visibility: "shared" }), /storage quota/);
+    void ann;
+    // A damaged record is an error on the setting; the owner repairs it by setting it again.
+    const raw = unguarded(c.storage); const realGet = raw.getAggregate.bind(raw);
+    let damaged = true;
+    raw.getAggregate = async (ref) => { const a = await realGet(ref); return damaged && ref.kind === "retention-settings" && a !== undefined ? { ...a, body: { values: { derivedDays: "soon" } } } as never : a; };
+    const bad = (await c.api.handle(boot.token, { v: 1, op: "retention.settings.get", args: {} } as never) as Reply);
+    assert.equal(bad.error?.code, "unavailable");
+    assert.equal((await c.api.handle(boot.token, { v: 1, op: "retention.run", args: {}, commandId: "r1" } as never) as Reply).error?.code, "unavailable", "the runner does not guess");
+    assert.ok(((await c.api.handle(boot.token, { v: 1, op: "retention.settings.set", args: { derivedDays: 60 }, commandId: "s2" } as never)) as Reply).ok, "and the owner can repair it");
+    damaged = false;
+    assert.equal((await c.api.handle(boot.token, { v: 1, op: "retention.settings.get", args: {} } as never) as Reply).result.item.effective.derivedDays, 60);
   } finally { await c.close(); clean(d); }
 });

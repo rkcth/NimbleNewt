@@ -45,6 +45,9 @@ export interface RetentionDeps {
   readonly reserve?: ReserveFile;
   readonly meter?: QuotaMeter;
   readonly dataDirectory?: string;
+  /** The least time between two automatic runs of the runner (default one hour: a run reads the whole store). */
+  readonly autoEveryMs?: number;
+  readonly now?: () => number;
 }
 
 const isOwner = (by: Principal): boolean => by.kind === "owner";
@@ -101,6 +104,7 @@ export interface DeletionReport {
 export class RetentionService {
   readonly #runner: CommandRunner;
   readonly #deps: RetentionDeps;
+  #lastAuto: number | undefined;
   private constructor(runner: CommandRunner, deps: RetentionDeps) { this.#runner = runner; this.#deps = deps; }
   static withEpoch(storage: ControllerStorage, epoch: number, deps: RetentionDeps, options: RunnerOptions = {}): RetentionService { return new RetentionService(new CommandRunner(storage, epoch, options), deps); }
 
@@ -116,21 +120,8 @@ export class RetentionService {
     const values = await this.#deps.settings.effective();
     const space = this.#deps.dataDirectory === undefined ? undefined : await diskSpace(this.#deps.dataDirectory);
     const warnings: string[] = [];
-    const quotas: { scope: string; id: string; used: number; quota: number; percent: number; level: "ok" | "warn" | "full" }[] = [];
-    let partial = false;
-    if (this.#deps.meter !== undefined && (values.quotaProjectBytes !== null || values.quotaAgentBytes !== null)) {
-      const usage = await this.#deps.meter.usage();
-      partial = usage.partial;
-      const add = (scope: string, map: ReadonlyMap<string, number>, quota: number | null): void => {
-        if (quota === null) return;
-        for (const [id, used] of map) {
-          const percent = Math.floor((used * 100) / quota);
-          const level = percent >= 100 ? "full" : percent >= values.quotaWarnPercent ? "warn" : "ok";
-          if (level !== "ok") { quotas.push({ scope, id, used, quota, percent, level }); warnings.push(`${scope} ${id} is at ${percent}% of its storage quota`); }
-        }
-      };
-      add("project", usage.byProject, values.quotaProjectBytes); add("agent", usage.byAgent, values.quotaAgentBytes);
-    }
+    const { quotas, partial } = await this.#quotaLevels(values);
+    for (const q of quotas) warnings.push(`${q.scope} ${q.id} is at ${q.percent}% of its storage quota`);
     const reserve = this.#deps.reserve;
     if (reserve !== undefined && reserve.released) warnings.push("the reserve for shutdown and recovery records is in use: only those records are written until room is made");
     else if (reserve !== undefined && reserve.short) warnings.push("the disk has too little room to set the reserve aside");
@@ -143,6 +134,22 @@ export class RetentionService {
       backups: this.#deps.backups === undefined ? { configured: false } : { configured: true, count: (await this.#deps.backups.list()).length, counts: { daily: values.backupDaily, weekly: values.backupWeekly } },
       deletions: deletions as unknown as JsonObject[],
     } as unknown as JsonObject;
+  }
+
+  /** The scopes at or over the warning level of a quota that is set. Nothing is counted while no quota is set. */
+  async #quotaLevels(values: RetentionValues): Promise<{ quotas: { scope: string; id: string; used: number; quota: number; percent: number; level: "warn" | "full" }[]; partial: boolean }> {
+    const quotas: { scope: string; id: string; used: number; quota: number; percent: number; level: "warn" | "full" }[] = [];
+    if (this.#deps.meter === undefined || (values.quotaProjectBytes === null && values.quotaAgentBytes === null)) return { quotas, partial: false };
+    const usage = await this.#deps.meter.usage();
+    const add = (scope: string, map: ReadonlyMap<string, number>, quota: number | null): void => {
+      if (quota === null) return;
+      for (const [id, used] of map) {
+        const percent = Math.floor((used * 100) / quota);
+        if (percent >= values.quotaWarnPercent) quotas.push({ scope, id, used, quota, percent, level: percent >= 100 ? "full" : "warn" });
+      }
+    };
+    add("project", usage.byProject, values.quotaProjectBytes); add("agent", usage.byAgent, values.quotaAgentBytes);
+    return { quotas, partial: usage.partial };
   }
 
   async #recent(kind: string, n: number): Promise<Aggregate[]> {
@@ -177,6 +184,10 @@ export class RetentionService {
     const values = await this.#deps.settings.effective();
     await this.#warn(values);
     if (!values.autoRun) return undefined;
+    // A run reads the whole store, so it is not made every tick.
+    const clock = (this.#deps.now ?? Date.now)();
+    if (this.#lastAuto !== undefined && clock - this.#lastAuto < (this.#deps.autoEveryMs ?? 3_600_000)) return undefined;
+    this.#lastAuto = clock;
     return this.#run(by, { dryRun: false }, true);
   }
 
@@ -275,13 +286,11 @@ export class RetentionService {
     const notify = this.#deps.notify;
     if (notify === undefined) return;
     const week = Math.floor(Date.parse(this.#runner.now()) / (7 * DAY));
-    const status = await this.#status().catch(() => undefined);
-    if (status === undefined) return;
-    for (const q of (status["quotas"] as unknown as { scope: string; id: string; percent: number; level: string; used: number; quota: number }[])) {
+    const { quotas } = await this.#quotaLevels(values).catch(() => ({ quotas: [] as { scope: string; id: string; used: number; quota: number; percent: number; level: "warn" | "full" }[] }));
+    for (const q of quotas) {
       await notify({ commandId: cmdId("rtw", "quota", q.scope, q.id, q.level, week), text: `Storage quota: ${q.scope} ${q.id} is at ${q.percent}% (${q.used} of ${q.quota} bytes)${q.level === "full" ? "; new records from it are refused until you raise the quota or delete something" : ""}.`, ref: { kind: q.scope === "project" ? "project" : "agent", id: q.id } });
     }
-    const disk = status["disk"] as { reserve: { inUse: boolean } };
-    if (disk.reserve.inUse) await notify({ commandId: cmdId("rtw", "reserve", week), text: "The data disk is nearly full and the reserve for shutdown and recovery records is in use. Only those records are written until room is made.", ref: { kind: "installation", id: "main" } });
+    if (this.#deps.reserve?.released === true) await notify({ commandId: cmdId("rtw", "reserve", week), text: "The data disk is nearly full and the reserve for shutdown and recovery records is in use. Only those records are written until room is made.", ref: { kind: "installation", id: "main" } });
   }
 
   // ---- user-requested deletion ----------------------------------------------------------------------------------------------
@@ -319,7 +328,7 @@ export class RetentionService {
     }
     complete = (await scan(this.#runner, "summary-record", (a) => { const b = a.body as { sources?: { source?: { kind?: string; id?: string } }[] }; if ((b.sources ?? []).some((s) => s.source?.kind === "desk-record" && s.source.id !== undefined && copyOf.has(s.source.id))) summaries.push(a); })) && complete;
     complete = (await scan(this.#runner, "ctx-compaction", (a) => { const b = a.body as { sources?: { kind?: string; id?: string }[]; pinned?: { kind?: string; id?: string }[] }; if ([...(b.sources ?? []), ...(b.pinned ?? [])].some((s) => s.kind === "desk-record" && s.id !== undefined && copyOf.has(s.id))) compactions.push(a); })) && complete;
-    for (const id of copyOf) { const arc = await this.#runner.get("retention-archive", archiveIdOf(id)); if (arc !== undefined) archives.push(arc); }
+    for (const id of [...copyOf, ...summaries.map((x) => x.id)]) { const arc = await this.#runner.get("retention-archive", archiveIdOf(id)); if (arc !== undefined) archives.push(arc); }
     members.set(command.recordId, root);
     for (const c of copies) members.set(c.id, c);
 
@@ -369,7 +378,8 @@ export class RetentionService {
     };
     for (const [id, a] of members) {
       if ((a.body as { deleted?: unknown }).deleted !== undefined) continue;
-      await step("record", "desk-record", id, (f) => [{ type: "update", ref: { kind: "desk-record", id }, expectedRevision: f.revision, body: stub(f) }]);
+      // Someone else's deletion of the same record may have got here first: its digest of the original is kept, not overwritten with one of the blank.
+      await step("record", "desk-record", id, (f) => [(f.body as { deleted?: unknown }).deleted !== undefined ? { type: "check", ref: { kind: "desk-record", id }, expectedRevision: f.revision } : { type: "update", ref: { kind: "desk-record", id }, expectedRevision: f.revision, body: stub(f) }]);
     }
     for (const arc of archives) await step("archive", "retention-archive", arc.id, (f) => [{ type: "delete", ref: { kind: "retention-archive", id: arc.id }, expectedRevision: f.revision }]);
     for (const s of summaries) await step("summary", "summary-record", s.id, (f) => [{ type: "delete", ref: { kind: "summary-record", id: s.id }, expectedRevision: f.revision }]);
@@ -411,6 +421,23 @@ export class RetentionService {
     const material = await RetainedMaterial.build(this.#runner.storage);
     const retained: { kind: string; id: string; reasons: string[] }[] = []; const archived: string[] = []; const skipped: string[] = [];
     const at = this.#runner.now();
+    const one = async (kind: "desk-record" | "summary-record", rec: Aggregate, stubOf: (b: Record<string, unknown>, archiveId: string) => JsonObject): Promise<void> => {
+      const archiveId = archiveIdOf(rec.id);
+      const result = await this.#runner.command("retention.archive", { commandId: cmdId("rta", base, rec.id), actor: owner.id }, async () => ({
+        payload: { recordId: rec.id, taskId: command.taskId },
+        build: async (): Promise<Built> => {
+          const fresh = await this.#runner.get(kind, rec.id);
+          if (fresh === undefined) throw new DomainError("not_found", "no such record");
+          const fb = fresh.body as Record<string, unknown>;
+          if (fb["archived"] !== undefined || fb["deleted"] !== undefined) throw new DomainError("stale_revision", "already archived or deleted");
+          const ref = { kind: "retention-archive", id: archiveId };
+          const arch = { recordId: rec.id, recordKind: kind, taskId: command.taskId, projectId: String(fb["projectId"] ?? ""), original: fresh.body, originalRevision: fresh.revision, stubRevision: fresh.revision + 1, at, by: owner.id, ...(command.reason === undefined ? {} : { reason: command.reason }) } as unknown as JsonObject;
+          return { ref, creates: true, changes: [{ type: "create", ref, body: arch }, { type: "update", ref: { kind, id: rec.id }, expectedRevision: fresh.revision, body: stubOf(fb, archiveId) }], detail: { recordId: rec.id, recordKind: kind, taskId: command.taskId } };
+        },
+      })).catch((error: unknown) => { if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "not_found" || error.code === "command_conflict")) return undefined; throw error; });
+      if (result !== undefined) archived.push(rec.id); else skipped.push(rec.id);
+    };
+    const done = new Set<string>();
     for (const rec of records.sort((a, b) => (a.id < b.id ? -1 : 1))) {
       const b = rec.body as { deleted?: unknown; archived?: unknown };
       if (b.deleted !== undefined || b.archived !== undefined) { skipped.push(rec.id); continue; }
@@ -418,21 +445,18 @@ export class RetentionService {
       // The task's own records count as held only because the task can resume; a finished task's are free, unless another resumable task cites them.
       const outside = why?.filter((w) => !w.includes(`written for task ${command.taskId}`));
       if (!material.complete || (outside !== undefined && outside.length > 0)) { retained.push({ kind: "desk-record", id: rec.id, reasons: outside ?? why ?? [] }); continue; }
-      const archiveId = archiveIdOf(rec.id);
-      const result = await this.#runner.command("retention.archive", { commandId: cmdId("rta", base, rec.id), actor: owner.id }, async () => ({
-        payload: { recordId: rec.id, taskId: command.taskId },
-        build: async (): Promise<Built> => {
-          const fresh = await this.#runner.get("desk-record", rec.id);
-          if (fresh === undefined) throw new DomainError("not_found", "no such record");
-          const fb = fresh.body as Record<string, unknown>;
-          if (fb["archived"] !== undefined || fb["deleted"] !== undefined) throw new DomainError("stale_revision", "already archived or deleted");
-          const stubBody = { ...fb, title: "(archived)", body: "", archived: { at, by: owner.id, archiveId } } as JsonObject;
-          const ref = { kind: "retention-archive", id: archiveId };
-          const arch = { recordId: rec.id, taskId: command.taskId, projectId: String(fb["projectId"] ?? ""), original: fresh.body, originalRevision: fresh.revision, stubRevision: fresh.revision + 1, at, by: owner.id, ...(command.reason === undefined ? {} : { reason: command.reason }) } as unknown as JsonObject;
-          return { ref, creates: true, changes: [{ type: "create", ref, body: arch }, { type: "update", ref: { kind: "desk-record", id: rec.id }, expectedRevision: fresh.revision, body: stubBody }], detail: { recordId: rec.id, taskId: command.taskId } };
-        },
-      })).catch((error: unknown) => { if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "not_found" || error.code === "command_conflict")) return undefined; throw error; });
-      if (result !== undefined) archived.push(rec.id); else skipped.push(rec.id);
+      await one("desk-record", rec, (fb, archiveId) => ({ ...fb, title: "(archived)", body: "", archived: { at, by: owner.id, archiveId } }) as JsonObject);
+      done.add(rec.id);
+    }
+    // What was made from an archived source goes with it (summaries keep their project and sources; the text returns on restore).
+    const derived: Aggregate[] = [];
+    if (done.size > 0 && !(await scan(this.#runner, "summary-record", (a) => { const sb = a.body as { sources?: { source?: { kind?: string; id?: string } }[] }; if ((sb.sources ?? []).some((x) => x.source?.kind === "desk-record" && x.source.id !== undefined && done.has(x.source.id))) derived.push(a); }))) throw new DomainError("unavailable", "too many summaries to archive a task safely");
+    for (const sum of derived.sort((a, b) => (a.id < b.id ? -1 : 1))) {
+      const sb = sum.body as { deleted?: unknown; archived?: unknown };
+      if (sb.deleted !== undefined || sb.archived !== undefined) { skipped.push(sum.id); continue; }
+      const why = material.why("summary-record", sum.id);
+      if (!material.complete || why !== undefined) { retained.push({ kind: "summary-record", id: sum.id, reasons: why ?? [] }); continue; }
+      await one("summary-record", sum, (fb, archiveId) => ({ ...fb, title: "(archived)", text: "", archived: { at, by: owner.id, archiveId } }) as JsonObject);
     }
     return { taskId: command.taskId, archived, retained, skipped };
   }
@@ -446,17 +470,18 @@ export class RetentionService {
     if (!(await scan(this.#runner, "retention-archive", (a) => { if ((a.body as { taskId?: string }).taskId === command.taskId) found.push(a); }))) throw new DomainError("unavailable", "too many archives to restore a task safely");
     const restored: string[] = []; const conflicts: string[] = [];
     for (const arc of found.sort((a, b) => (a.id < b.id ? -1 : 1))) {
-      const body = arc.body as unknown as { recordId: string; original: JsonObject; stubRevision: number };
-      const cur = await this.#runner.get("desk-record", body.recordId);
+      const body = arc.body as unknown as { recordId: string; recordKind?: "desk-record" | "summary-record"; original: JsonObject; stubRevision: number };
+      const kind = body.recordKind ?? "desk-record";
+      const cur = await this.#runner.get(kind, body.recordId);
       const marker = (cur?.body as { archived?: { archiveId?: string } } | undefined)?.archived;
       if (cur === undefined || cur.revision !== body.stubRevision || marker?.archiveId !== arc.id) { conflicts.push(body.recordId); continue; }
       const r = await this.#runner.command("retention.restore", { commandId: cmdId("rta", "restore", base, arc.id), actor: owner.id }, async () => ({
         payload: { archiveId: arc.id, taskId: command.taskId },
         build: async (): Promise<Built> => {
-          const fresh = await this.#runner.get("desk-record", body.recordId);
+          const fresh = await this.#runner.get(kind, body.recordId);
           const freshArc = await this.#runner.get("retention-archive", arc.id);
           if (fresh === undefined || freshArc === undefined || fresh.revision !== body.stubRevision) throw new DomainError("stale_revision", "changed since it was archived");
-          const ref = { kind: "desk-record", id: body.recordId };
+          const ref = { kind, id: body.recordId };
           return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: fresh.revision, body: body.original }, { type: "delete", ref: { kind: "retention-archive", id: arc.id }, expectedRevision: freshArc.revision }], detail: { recordId: body.recordId, taskId: command.taskId }, audit: [{ type: "retention.restore.archive", subject: { kind: "retention-archive", id: arc.id }, detail: { recordId: body.recordId, taskId: command.taskId } }] };
         },
       })).catch((error: unknown) => { if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "not_found")) return undefined; throw error; });

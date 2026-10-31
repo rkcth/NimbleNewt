@@ -109,6 +109,7 @@ export class RetentionSettingsService {
     for (const n of given) { const v = command[n]; if (v !== "default" && !fieldOk(n, v)) throw new DomainError("invalid_command", `${n}: must be ${describe(n)}, or "default"`, { field: n }); }
     if (command.expectedRevision !== undefined && (!Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 0)) throw new DomainError("invalid_command", "expectedRevision: must be a whole number", { field: "expectedRevision" });
     let changed: RetentionChange[] = [];
+    let applied: RetentionValues | undefined;
     const result = await this.#runner.command("retention.settings.set", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
       payload: { values: Object.fromEntries(given.map((n) => [n, command[n] as never])) as JsonObject, expectedRevision: command.expectedRevision ?? null },
       build: async () => {
@@ -119,6 +120,7 @@ export class RetentionSettingsService {
         const next: Record<string, number | boolean | null> = { ...stored };
         for (const n of given) { const v = command[n]; if (v === "default") delete next[n]; else next[n] = v as number | boolean | null; }
         const after = { ...this.#defaults, ...next } as RetentionValues;
+        applied = after;
         changed = NAMES.filter((n) => before[n] !== after[n]).map((n) => ({ field: n, old: before[n], new: after[n] }));
         const body = { values: next, updatedBy: owner.id, updatedAt: this.#runner.now() } as unknown as JsonObject;
         const change = current === undefined ? { type: "create" as const, ref: REF, body } : { type: "update" as const, ref: REF, expectedRevision: current.revision, body };
@@ -131,7 +133,7 @@ export class RetentionSettingsService {
       const audit = seq === undefined ? undefined : (await this.#runner.storage.listAudit({ afterSeq: seq - 1, limit: 1 }))[0];
       changed = (audit?.detail["changed"] as unknown as RetentionChange[] | undefined) ?? [];
     }
-    if (this.#onChange !== undefined) await this.#onChange(await this.effective());
+    if (this.#onChange !== undefined) { const now = applied ?? await this.effective().catch(() => undefined); if (now !== undefined) await this.#onChange(now); }
     const fmt = (v: unknown): string => (v === null ? "none" : String(v));
     const summary = changed.length === 0 ? "No retention value changed." : `Retention changed: ${changed.map((c) => `${c.field} ${fmt(c.old)} -> ${fmt(c.new)}`).join("; ")}.`;
     return { revision: result.revision, changed, summary };

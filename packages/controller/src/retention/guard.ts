@@ -93,13 +93,16 @@ export const isCriticalOperation = (input: Pick<OperationInput, "audit">): boole
 };
 
 /** What is metered: the kinds that hold written content, with where their project and writer are. Bytes are the canonical size of the body, plus an artifact's blob bytes. */
-interface Metered { readonly project: (b: Record<string, unknown>) => string | undefined; readonly agent: (b: Record<string, unknown>) => string | undefined; readonly bytes: (b: Record<string, unknown>) => number }
+interface Metered { readonly project: (b: Record<string, unknown>, scopes: ReadonlyMap<string, string>) => string | undefined; readonly agent: (b: Record<string, unknown>) => string | undefined; readonly bytes: (b: Record<string, unknown>) => number }
 const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
 const bodySize = (b: Record<string, unknown>): number => Buffer.byteLength(canonicalJson(b as never));
 export const METERED: Readonly<Record<string, Metered>> = {
   "desk-record": { project: (b) => str(b["projectId"]), agent: (b) => str(b["owner"]), bytes: bodySize },
   "working-note": { project: (b) => str(b["projectId"]), agent: (b) => str(b["owner"]), bytes: bodySize },
   "summary-record": { project: (b) => str(b["projectId"]), agent: (b) => str(b["createdBy"]), bytes: bodySize },
+  // A history entry belongs to the project of its scope; a spill (text paged out of a context) to the project of its task.
+  "history-entry": { project: (b, scopes) => (typeof b["scope"] === "string" ? scopes.get(b["scope"]) : undefined), agent: (b) => str(b["author"]), bytes: bodySize },
+  "ctx-spill": { project: (b) => str(b["projectId"]), agent: () => undefined, bytes: bodySize },
   artifact: { project: (b) => str(b["projectId"]), agent: (b) => str(b["createdBy"]), bytes: (b) => bodySize(b) + (typeof b["totalBytes"] === "number" ? b["totalBytes"] : 0) },
 };
 
@@ -125,13 +128,22 @@ export class QuotaMeter {
     if (this.#usage !== undefined && this.#now() - this.#usage.at < this.#ttlMs) return this.#usage;
     const byProject = new Map<string, number>(); const byAgent = new Map<string, number>();
     let partial = false;
+    const scopes = new Map<string, string>();
+    for (let after: string | undefined, seen = 0; ;) {
+      const page: Aggregate[] = await this.#storage.listAggregates("history-scope", { ...(after === undefined ? {} : { afterId: after }), limit: 500 });
+      for (const a of page) { const p = (a.body as { projectId?: unknown }).projectId; if (typeof p === "string") scopes.set(a.id, p); }
+      seen += page.length;
+      if (page.length < 500) break;
+      if (seen >= USAGE_SCAN_LIMIT) { partial = true; break; }
+      after = page[page.length - 1]!.id;
+    }
     for (const [kind, meter] of Object.entries(METERED)) {
       let after: string | undefined; let seen = 0;
       for (;;) {
         const page: Aggregate[] = await this.#storage.listAggregates(kind, { ...(after === undefined ? {} : { afterId: after }), limit: 500 });
         for (const a of page) {
           const b = a.body as Record<string, unknown>; const n = meter.bytes(b);
-          const p = meter.project(b); const w = meter.agent(b);
+          const p = meter.project(b, scopes); const w = meter.agent(b);
           if (p !== undefined) byProject.set(p, (byProject.get(p) ?? 0) + n);
           if (w !== undefined) byAgent.set(w, (byAgent.get(w) ?? 0) + n);
         }
@@ -156,12 +168,15 @@ export class QuotaMeter {
 /** What an operation adds to each project and writer. */
 export function addedBy(input: Pick<OperationInput, "changes">): { project: Map<string, number>; agent: Map<string, number> } {
   const project = new Map<string, number>(); const agent = new Map<string, number>();
+  // The scopes this operation itself writes or checks (an entry is appended together with its scope's record).
+  const scopes = new Map<string, string>();
+  for (const c of input.changes) if ((c.type === "create" || c.type === "update") && c.ref.kind === "history-scope") { const p = (c.body as { projectId?: unknown }).projectId; if (typeof p === "string") scopes.set(c.ref.id, p); }
   for (const c of input.changes) {
     if (c.type !== "create" && c.type !== "update") continue;
     const meter = METERED[c.ref.kind];
     if (meter === undefined) continue;
     const b = c.body as Record<string, unknown>; const n = meter.bytes(b);
-    const p = meter.project(b); const w = meter.agent(b);
+    const p = meter.project(b, scopes); const w = meter.agent(b);
     if (p !== undefined) project.set(p, (project.get(p) ?? 0) + n);
     if (w !== undefined) agent.set(w, (agent.get(w) ?? 0) + n);
   }

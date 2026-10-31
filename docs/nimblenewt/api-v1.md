@@ -1476,6 +1476,49 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `retention.settings.get`
+
+Owner only: the retention policy in force. Everything that deletes is off until set; every limit is optional. Gives the values you set, the installation defaults, the effective values and the revision to quote when changing them.
+
+Arguments:
+
+- none
+
+Result: `{ item: { revision, settings, defaults, effective } }`.
+
+#### `retention.status`
+
+Owner only: the retention state: values in force, the data disk and the reserve for shutdown and recovery records, quota use with warnings, the backup counts and the latest deletions.
+
+Arguments:
+
+- none
+
+Result: `{ item }`.
+
+#### `retention.check`
+
+Owner only: whether a record is held by a resumable task or a replay (it then shows as retained, with why, and is never deleted).
+
+Arguments:
+
+- `kind`: the record kind, for example desk-record
+- `id`: the record ID
+
+Result: `{ kind, id, retained, reasons }`.
+
+#### `retention.export`
+
+Owner only: an export of a project's records (project, tasks, desk records, summaries, artifact metadata, archived originals) in pages. Secrets are excluded: secret-named fields are replaced, key-shaped text is masked, and credential records are not exported.
+
+Arguments:
+
+- `projectId`: the project
+- `after` (optional): the `next` of the previous page
+- `limit` (optional): 1 to 200 (default 100)
+
+Result: `{ projectId, items, redactions, next?, partial? }`.
+
 #### `deliverable.record.get`
 
 One deliverable with its newest (or the named) version: state, content, review, and the state of every version. Hidden as not found where the caller may not read it (the task's read right, narrowed or widened by the access scope).
@@ -4269,6 +4312,82 @@ Arguments:
 - `expectedRevision` (optional): the revision you read (0 when none was set yet)
 
 Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `retention.settings.set`
+
+Owner only: changes retention values; only the fields given change, `null` clears an optional one and "default" returns a field to the installation default. `derivedDays` (7 to 3650) expires derived summaries (off unless set); `autoRun` lets the dispatcher run it by itself; `thinkingDays` (default 14) is how long stored model thinking is kept after a task is done (recorded; deleting it needs card K06c); `backupDaily` and `backupWeekly` are the backup counts kept (7 and 4); `incidentArchiveDays` and `incidentPurgeDays` archive and then remove old resolved incidents (off); `quotaProjectBytes` and `quotaAgentBytes` are optional storage quotas (off), warned at `quotaWarnPercent` (80); `reserveBytes` is the room kept for shutdown and recovery records (16 MiB; 0 for none). The answer names each old and new value. This is the form the chat uses.
+
+Arguments:
+
+- `derivedDays` (optional): 7 to 3650, or null
+- `autoRun` (optional): true or false
+- `thinkingDays` (optional): 1 to 365
+- `backupDaily` (optional): 1 to 365
+- `backupWeekly` (optional): 0 to 520
+- `incidentArchiveDays` (optional): 7 to 3650, or null
+- `incidentPurgeDays` (optional): 30 to 3650, or null
+- `quotaProjectBytes` (optional): bytes, or null
+- `quotaAgentBytes` (optional): bytes, or null
+- `quotaWarnPercent` (optional): 50 to 99
+- `reserveBytes` (optional): 0 to 1073741824
+- `expectedRevision` (optional): the revision you read (0 when none was set yet)
+
+Result: `{ id, revision, changed: [{ field, old, new }], summary, shown }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `retention.run`
+
+Owner only: the retention runner. Without `dryRun: false` it only shows what the rule would remove (derived summaries older than `derivedDays`, backups outside the counts) and gives a `digest`; run it for real by passing that digest as `confirm`. Material a resumable task or replay needs is skipped and shown as retained. Nothing is removed while derivedDays is unset (backups follow their counts).
+
+Arguments:
+
+- `dryRun` (optional): default true
+- `confirm` (optional): the digest of the preview
+- `limit` (optional): 1 to 1000 (default 200)
+
+Result: The report: candidates, retained, removed, backups, incidents, digest.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `retention.delete`
+
+Owner only: deletes a desk record at the owner's request, with what was made from it: copies, summaries that cite it (removed), compactions (text blanked and marked) and its archive. A digest, who, why and when stay. A record a resumable task or a replay needs is not deleted: the request is recorded as retained with the reasons. The answer and the record say how backups are handled (left to expire, and for how long); no search index or reply cache exists. `dryRun: true` shows the effect only.
+
+Arguments:
+
+- `recordId`: the desk record
+- `reason`: why (recorded)
+- `dryRun` (optional): true to preview
+
+Result: `{ status: deleted | retained | preview, derived, backups, retained?, deletionId? }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `retention.archive`
+
+Owner only: archives a done or cancelled task's desk records: their text moves into archive records and the desk record keeps a stub. A record a resumable task or replay needs is left and shown as retained.
+
+Arguments:
+
+- `taskId`: the finished task
+- `reason` (optional): why
+
+Result: `{ taskId, archived, retained, skipped }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `retention.restore`
+
+Owner only: puts a task's archived desk records back exactly as they were. A record changed since is left and listed as a conflict.
+
+Arguments:
+
+- `taskId`: the task
+
+Result: `{ taskId, restored, conflicts }`.
 
 Completion: finished when accepted (`completed: true`).
 
