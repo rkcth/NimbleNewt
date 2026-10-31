@@ -140,7 +140,7 @@ function parseStart(o: Obj): ChannelStart {
   return {
     attemptId: str(o, "attemptId", 200), agentId: str(o, "agentId", 200), namespaceId: /^[a-z0-9]{6,32}$/.test(str(o, "namespaceId", 40)) ? (o["namespaceId"] as string) : fail("namespaceId: 6 to 32 lower-case letters or digits"), credential: str(o, "credential", 4096),
     storeDir: str(o, "storeDir", 1000), model,
-    ...(o["recover"] === undefined ? {} : { recover: { reason: str(obj(o, "recover"), "reason", 300) } }),
+    ...(o["recover"] === undefined ? {} : { recover: { reason: str(obj(o, "recover"), "reason", 300).trim() === "" ? fail("recover.reason: required") : (obj(o, "recover")["reason"] as string) } }),
     ...(c === undefined ? {} : { cache: { ...(key === undefined ? {} : { key }), ...(retention === undefined ? {} : { retention: retention as "none" | "short" | "long" }) } }),
     relayBase: str(o, "relayBase", 500),
     ...(context === undefined ? {} : { context }),

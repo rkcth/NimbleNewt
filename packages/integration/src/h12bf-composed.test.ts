@@ -62,12 +62,16 @@ const queued = async (x: Rig): Promise<number> => { const r = await x.c.api.hand
 const requestText = (m: Model, at: number): string => JSON.stringify(m.seen[at]?.body.messages ?? []);
 
 const records: LaunchRecord[] = [];
+/** Bubblewrap on Linux, Seatbelt on macOS (the host's own paths, no private view); no launcher is provided here for Windows (card A03b's remainder), so nothing runs there. */
+const style = process.platform === "darwin" ? "host" as const : "private" as const;
 async function launcher(): Promise<SandboxLauncher | undefined> {
   const real = await SandboxLauncher.create({ protectedPaths: [], audit: (r) => { records.push(r); } });
-  const usable = real.capacity.available && real.capacity.backend === "bubblewrap" && !["/usr", "/bin", "/lib"].includes(nodeRoot);
-  if (!usable && required && process.platform === "linux") assert.fail(`the sandbox is required but unusable: ${real.capacity.reason}`);
+  const backend = process.platform === "darwin" ? "seatbelt" : "bubblewrap";
+  const usable = real.capacity.available && real.capacity.backend === backend && !["/usr", "/bin", "/lib"].includes(nodeRoot);
+  if (!usable && required && (process.platform === "linux" || process.platform === "darwin")) assert.fail(`the sandbox is required but unusable: ${real.capacity.reason}`);
   return usable ? real : undefined;
 }
+const linuxOnly = process.platform === "linux" ? undefined : "this check reads the sandbox from the host's /proc and mount table (Linux), or runs a program at the private path /opt/node; the macOS and Windows proof is the remainder card of H12b";
 
 interface Rig {
   readonly c: Awaited<ReturnType<typeof startController>>;
@@ -116,7 +120,7 @@ async function rig(real: SandboxLauncher, answer: Model): Promise<Rig> {
             relay: (order, request) => services.attemptRelay(order as never, relay, { model: "local" }).relay(request),
             context: (order) => services.context(order as never),
             reach: (name) => (name === "inputs-a" ? { readOnly: [{ host: inputs, guest: "/inputs/a" }] } : undefined),
-            requireEnforced: false,
+            requireEnforced: false, guestPaths: style,
           });
           local = new LocalWorker({
             hostId: "host:w1", resources: { cpus: 1, memoryMb: 1024 }, version: "h12bf-test", guards: services.guards,
@@ -160,7 +164,7 @@ const mountPoints = (pid: string): string[] => read(pid, "mountinfo").split("\n"
 describe("the composed controller runs the real worker process (cards H12b, H12f)", () => {
   test("a pause that arrives mid-turn shows as pausing while the model call is open and as paused once it has settled; an interrupt reaches the running attempt and never a paused one; the provider's count of the first call is recorded", async (t) => {
     const real = await launcher();
-    if (real === undefined) return t.skip("bubblewrap or a node install it can mount is unusable");
+    if (real === undefined) return t.skip("the sandbox of this OS (bubblewrap, Seatbelt) or a node install it can mount is unusable");
     const first = gate();
     const answer = await model([{ hold: first.promise, call: { name: "nimblenewt__desk-read", args: { recordId: "dsk-aaaaaaaaaaaaaaaaaaaa" } } }, { text: "all done" }]);
     const x = await rig(real, answer);
@@ -211,7 +215,7 @@ describe("the composed controller runs the real worker process (cards H12b, H12f
 
   test("a stored conversation over the startup share is compacted once by the real process and then admitted; one that cannot fit is refused at start with the blocker, and nothing was sent to the model", async (t) => {
     const real = await launcher();
-    if (real === undefined) return t.skip("bubblewrap or a node install it can mount is unusable");
+    if (real === undefined) return t.skip("the sandbox of this OS (bubblewrap, Seatbelt) or a node install it can mount is unusable");
     const big = (n: number): string => `Seed order part ${n}. `.concat("The seed order is long and detailed. ".repeat(330));
     const answer = await model([{ text: big(1) }, { text: big(2) }, { text: "continued" }]);
     const x = await rig(real, answer);
@@ -252,8 +256,9 @@ describe("the composed controller runs the real worker process (cards H12b, H12f
   });
 
   test("a recipe change on a running attempt is applied by the real launcher: widening adds a mount and limits, narrowing removes them, the turn and its conversation go on in the new process, the agent is told on a widening, and the turn keeps one number", async (t) => {
+    if (linuxOnly !== undefined) return t.skip(linuxOnly);
     const real = await launcher();
-    if (real === undefined) return t.skip("bubblewrap or a node install it can mount is unusable");
+    if (real === undefined) return t.skip("the sandbox of this OS (bubblewrap, Seatbelt) or a node install it can mount is unusable");
     const g1 = gate(), g2 = gate(), g3 = gate();
     const answer = await model([{ hold: g1.promise, text: "never sent" }, { hold: g2.promise, call: { name: "nimblenewt__desk-read", args: { recordId: "dsk-aaaaaaaaaaaaaaaaaaaa" } } }, { hold: g3.promise, text: "never sent" }, { text: "all done after two restarts" }]);
     const x = await rig(real, answer);
@@ -312,8 +317,9 @@ describe("the composed controller runs the real worker process (cards H12b, H12f
   });
 
   test("from inside the sandbox nothing but the relay's address can be reached: the model endpoint, loopback and an outside address all fail", async (t) => {
+    if (linuxOnly !== undefined) return t.skip(linuxOnly);
     const real = await launcher();
-    if (real === undefined) return t.skip("bubblewrap or a node install it can mount is unusable");
+    if (real === undefined) return t.skip("the sandbox of this OS (bubblewrap, Seatbelt) or a node install it can mount is unusable");
     const answer = await model([{ text: "x" }]);
     const directory = realpathSync(mkdtempSync(join(tmpdir(), "nn h12bn ")));
     try {

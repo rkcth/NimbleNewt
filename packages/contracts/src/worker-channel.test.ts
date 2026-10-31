@@ -66,3 +66,12 @@ test("a start may carry the lease as a duration and a grace; bad or partial leas
     assert.throws(() => parseToChild(JSON.parse(JSON.stringify({ t: "start", v: 1, start: { ...start, lease } }))), ChannelError);
   }
 });
+
+test("a start may say the controller reviewed the unfinished work of an earlier process (card H12b); a bad or empty reason is refused", () => {
+  const ok = parseToChild(JSON.parse(JSON.stringify({ t: "start", v: 1, start: { ...start, recover: { reason: "the controller restarted the sandbox" } } })));
+  assert.deepEqual((ok as { start: ChannelStart }).start.recover, { reason: "the controller restarted the sandbox" });
+  assert.equal((parseToChild(JSON.parse(JSON.stringify({ t: "start", v: 1, start }))) as { start: ChannelStart }).start.recover, undefined, "absent unless said");
+  for (const recover of [{}, { reason: "" }, { reason: 5 }, { reason: "x".repeat(301) }, [], "yes"]) {
+    assert.throws(() => parseToChild(JSON.parse(JSON.stringify({ t: "start", v: 1, start: { ...start, recover } }))), ChannelError, JSON.stringify(recover));
+  }
+});

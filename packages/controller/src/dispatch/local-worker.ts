@@ -154,6 +154,7 @@ export class LocalWorker implements WorkerHost {
     let generation = 0;
     let restarting: Promise<void> | undefined;
     let restartFailed = false;
+    let stopped = false;
     const call: BoundCall = async (request, executor) => {
       if (gateway === undefined) throw new DomainError("fenced", "the turn has not started; a tool call needs the attempt's gateway");
       inFlight++;
@@ -264,13 +265,19 @@ export class LocalWorker implements WorkerHost {
       checkpoint: () => runtime!.checkpoint(),
       restart: async (recipe, resumeFrom) => {
         generation++;
+        // One restart at a time, and none after the attempt was stopped: a stop that comes while the sandbox is being started again ends what the restart opened.
+        const before = restarting;
         const done = (async () => {
+          await before?.catch(() => undefined);
+          if (stopped) throw new DomainError("fenced", "the attempt was stopped");
           await runtime!.close();
           await sandbox.close();
           sandbox = await options.sandbox.open(recipe, order);
+          if (stopped) { await sandbox.close().catch(() => undefined); throw new DomainError("fenced", "the attempt was stopped"); }
           // The conversation continues from a checkpoint just taken from the same attempt; the new process has told nothing yet.
           reported = undefined;
           runtime = await options.runtimes.open({ ...order, recipe }, call, resumeFrom);
+          if (stopped) { await runtime.close().catch(() => undefined); await sandbox.close().catch(() => undefined); throw new DomainError("fenced", "the attempt was stopped"); }
           // The new process takes the whole stored conversation into its next call: it is admitted again (and compacted once if it must be), and a refusal leaves the attempt frozen (the dispatcher keeps it so).
           const again = await admitFirst(runtime, "");
           if (again !== undefined) throw new DomainError("unavailable", `the restarted sandbox's first call was not sent: ${again}`);
@@ -279,7 +286,7 @@ export class LocalWorker implements WorkerHost {
         try { await done; restartFailed = false; } catch (error) { restartFailed = true; throw error; } finally { if (restarting === done) restarting = undefined; }
       },
       tell: async (text) => { await runtime!.tell?.(text); },
-      stop: async () => { await runtime!.close().catch(() => undefined); await sandbox.close().catch(() => undefined); },
+      stop: async () => { stopped = true; await restarting?.catch(() => undefined); await runtime!.close().catch(() => undefined); await sandbox.close().catch(() => undefined); },
     };
   }
 }

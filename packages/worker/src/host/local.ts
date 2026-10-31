@@ -69,13 +69,15 @@ export interface WorkerApp {
   readonly mounts: readonly ReadOnlyMount[];
   /** The process's entry file, as the sandbox sees it. */
   readonly entry: string;
+  /** The same file on this machine, for a launcher whose sandbox shows the host's own paths (`guestPaths: "host"`). */
+  readonly hostEntry?: string;
 }
 
 /** The mounts and entry of a source checkout that has been built: the worker process lives in `packages/pi-adapter` and needs `contracts` and `registry` beside it. */
 export function appFromRepository(repository: string, node: { readonly root: string; readonly executable: string }): WorkerApp {
   const mounts: ReadOnlyMount[] = [{ host: join(repository, "node_modules"), guest: "/opt/app/node_modules" }];
   for (const name of ["pi-adapter", "contracts", "registry"]) mounts.push({ host: join(repository, "packages", name), guest: `/opt/app/packages/${name}` });
-  return { node, mounts, entry: "/opt/app/packages/pi-adapter/dist/worker/main.js" };
+  return { node, mounts, entry: "/opt/app/packages/pi-adapter/dist/worker/main.js", hostEntry: join(repository, "packages", "pi-adapter", "dist", "worker", "main.js") };
 }
 
 export interface AttemptWorkspace extends AttemptSandboxPlan { readonly limits?: ResourceLimits }
@@ -177,6 +179,11 @@ export interface LocalHostOptions<Call> {
   readonly bestEffort?: (order: HostOrder) => Promise<boolean> | boolean;
   /** Told what each launch came to, started or refused, before the launch is used. If it throws, a started process is ended and the launch refused: nothing runs unrecorded. */
   readonly onLaunch?: (record: LaunchEnforcement) => Promise<void> | void;
+  /**
+   * How the sandbox shows what it mounts. `private` (default; bubblewrap): its own view, so the program is at `/opt/node/...` and the conversation store at `/home/agent/pi`. `host` (Seatbelt on macOS, which confines by what a process may touch and has no private filesystem
+   * view): every path is the host's own, so the program, its entry file and the store are given by their host paths. The mounts are still checked and still the only things the profile lets the process read.
+   */
+  readonly guestPaths?: "private" | "host";
   /** The address the process uses for model calls (default `http://relay.invalid`). */
   readonly relayBase?: string;
   readonly clock?: () => number;
@@ -197,6 +204,8 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
   readonly ownerPolicy: boolean;
 } {
   const reserved = new Map<string, Reserved>();
+  const hostPaths = options.guestPaths === "host";
+  if (hostPaths && options.app.hostEntry === undefined) throw new Error("a launcher that shows host paths needs the worker app's host entry file (appFromRepository gives it)");
   const clock = options.clock ?? Date.now;
 
   /** The mounts and environment the recipe's named reaches stand for. Every name must be known to this host; a name twice, a bad name or too many are refused. */
@@ -249,7 +258,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
       let turnSeq = typeof nn?.["turnSeq"] === "number" ? (nn["turnSeq"] as number) : 0;
       let lastRequest = typeof nn?.["lastRequest"] === "string" ? (nn["lastRequest"] as string) : undefined;
       // The conversation is kept in the agent's home on this host. A checkpoint to continue from with no such store (another host, a wiped home) would silently start from nothing: refused instead.
-      if (from?.["pi"] !== undefined && !existsSync(join(entry.workspace.home, "pi"))) throw new Error("the attempt resumes from a checkpoint but this host no longer holds the conversation");
+      if ((from?.["pi"] !== undefined || nn?.["midTurn"] === true) && !existsSync(join(entry.workspace.home, "pi"))) throw new Error("the attempt resumes from a checkpoint but this host no longer holds the conversation");
       // Work an earlier process of this attempt left unfinished (this host restarted the sandbox, or the attempt resumes from a checkpoint) was reviewed by the controller before it asked: the conversation goes on from it.
       const goesOn = entry.process !== undefined || from !== undefined;
       await entry.process?.close().catch(() => undefined);
@@ -269,7 +278,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
         const { wallTimeMs: _wall, ...processLimits } = requested;
         process = await WorkerProcess.launch(options.launcher, {
           recipe: entry.recipe,
-          command: [`/opt/node/${options.app.node.executable}`, options.app.entry],
+          command: hostPaths ? [join(options.app.node.root, options.app.node.executable), options.app.hostEntry!] : [`/opt/node/${options.app.node.executable}`, options.app.entry],
           timeoutMs: wallTimeMs,
           // Standard error is kept (bounded) for the failure message; standard output is the channel.
           maxOutputBytes: 64 * 1024,
@@ -295,7 +304,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
       try {
         await process.start({
           attemptId: order.attemptId, agentId: order.agentId, namespaceId: options.namespaceId(order), credential: order.credential,
-          storeDir: `${GUEST.home}/pi`, model, ...(goesOn ? { recover: { reason: entry.process !== undefined ? "the controller restarted the sandbox of this attempt" : "the controller resumed this attempt from a checkpoint" } } : {}), relayBase: options.relayBase ?? RELAY_BASE,
+          storeDir: hostPaths ? join(entry.workspace.home, "pi") : `${GUEST.home}/pi`, model, ...(goesOn ? { recover: { reason: entry.process !== undefined ? "the controller restarted the sandbox of this attempt" : "the controller resumed this attempt from a checkpoint" } } : {}), relayBase: options.relayBase ?? RELAY_BASE,
           ...(options.context?.(order) === undefined ? {} : { context: options.context(order)! }),
           ...(cache === undefined || (cache.key === undefined && cache.retention === undefined) ? {} : { cache: { ...(cache.key === undefined ? {} : { key: cache.key }), ...(cache.retention === undefined ? {} : { retention: cache.retention }) } }),
         }, PROCESS_LIMITS.readyMs);

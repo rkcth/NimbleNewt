@@ -3525,7 +3525,7 @@
         "A08"
       ],
       "deliverable": "Bind the A03 SandboxLauncher and the A08 resource-limit recipe to the H12 SandboxPort, protect the separate git directory with the attemptSandbox rules and build the real worker process that runs the Pi adapter inside the sandbox, which has no network and talks to the controller over one channel; a narrow relay, its own replaceable component, makes the worker's model calls for it: it reaches only the model endpoints the routing table allows and adds the provider credentials itself (owner decision 2026-10-25)",
-      "acceptance_and_verification": "A real attempt runs in the selected sandbox with only the checkout mounted and the git directory protected; resource limits apply as A08 states; the worker process exits and is reaped on completion, pause, stop and loss; a crash leaves no running tool process; the integration test uses the real launcher on Linux and the OS-specific launchers on their CI cells; the composer passes the cache policy to the Pi adapter and each turn's cache figures into the usage report, with a worker-side turn sequence unique across all placements of one attempt, and a missed pin marker is recorded as lost; from inside the sandbox only the allowed model endpoints can be reached, through the relay, and any other destination fails; no provider key, and nothing but the task credential, is present in the worker process, its environment, its files or its output; the relay can be replaced without changing the worker, and a model stream is relayed as it arrives, not buffered whole; a sandbox-level narrowing and a widening of a running attempt are applied by the real launcher with a really narrower or wider recipe, the conversation context survives both, and the agent is told on a widening (carried from H12)",
+      "acceptance_and_verification": "A real attempt runs in the selected sandbox with only the checkout mounted and the git directory protected; resource limits apply as A08 states; the worker process exits and is reaped on completion, pause, stop and loss; a crash leaves no running tool process; the integration test uses the real launcher on Linux (the same test under Seatbelt and Windows Sandbox, on their CI cells, is card H12r); the composer passes the cache policy to the Pi adapter and each turn's cache figures into the usage report, with a worker-side turn sequence unique across all placements of one attempt, and a missed pin marker is recorded as lost; from inside the sandbox only the allowed model endpoints can be reached, through the relay, and any other destination fails; no provider key, and nothing but the task credential, is present in the worker process, its environment, its files or its output; the relay can be replaced without changing the worker, and a model stream is relayed as it arrives, not buffered whole; a sandbox-level narrowing and a widening of a running attempt are applied by the real launcher with a really narrower or wider recipe, the conversation context survives both, and the agent is told on a widening (carried from H12); (macOS and Windows split off to H12r on 2026-10-31: the Linux launcher, the worker process, the relay, the limits and the recipe changes are built and proven here; a launcher whose sandbox shows the host's own paths is supported by the host, but its run needs a Mac)",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -3602,6 +3602,24 @@
       ],
       "deliverable": "Split from H12d (2026-10-30): landing runs behind the quiesce and the production workspace port supplies it",
       "acceptance_and_verification": "A landing waits for running attempts to quiesce and an attempt cannot start during one",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "H12r",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Run the worker process under Seatbelt and Windows Sandbox",
+      "depends_on": [
+        "H12b",
+        "A03b"
+      ],
+      "deliverable": "Split from H12b (2026-10-31): the integration proofs of the worker process on macOS (Seatbelt, host paths) and on Windows (Windows Sandbox), which need those operating systems",
+      "acceptance_and_verification": "The same composed test that runs under bubblewrap (a stored conversation compacted once and admitted, a pause and an interrupt arriving mid-turn, no destination but the relay reachable, no provider key anywhere in the worker, reaping on stop and loss) runs on the macOS and Windows CI cells; the Seatbelt profile lets the worker process read the Node installation and the packages it loads and nothing else; the Windows launcher mounts the Node installation read-only and keeps its supervisor outside guest-writable staging; a recipe change (narrower and wider) is applied with a restart on both; a platform that cannot run the process says so and refuses instead of running unconfined",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -8418,6 +8436,7 @@
         "L03h",
         "V02c",
         "H12q",
+        "H12r",
         "U14",
         "M02g",
         "M03g",

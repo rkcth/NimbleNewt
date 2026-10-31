@@ -91,6 +91,25 @@ for (const backend of backends) {
     assert.equal((await enf.admit(owner, { taskId: t, attemptId: "att-1", round: 3, window: WINDOW, call: { ...call, startupTokens: 3_000 } })).admit, true);
   });
 
+  suite("a refusal the caller will retry after making the call smaller opens no blocker; the refusal of the retry does (card H12f)", async ({ enf, owner, blockers, t }) => {
+    const call = { systemPromptChars: 9_000, toolSchemaChars: 100_000, startupTokens: 2_000, replyReserveTokens: 8_000 };
+    const first = await enf.admit(owner, { taskId: t, attemptId: "att-1", round: 1, window: WINDOW, call, retry: true });
+    assert.deepEqual([first.admit, first.blockerId], [false, undefined]);
+    assert.equal((await blockers.list({ limit: 20, openOnly: true })).items.filter((b) => b.type === "context_overflow").length, 0, "nothing for the owner yet");
+    // The smaller call passes: no blocker was ever opened for the attempt.
+    const second = await enf.admit(owner, { taskId: t, attemptId: "att-1", round: 2, window: WINDOW, call: { ...call, toolSchemaChars: 15_000 } });
+    assert.equal(second.admit, true);
+    // A repeat of the retried refusal is the recorded decision, still with no blocker.
+    assert.deepEqual([(await enf.admit(owner, { taskId: t, attemptId: "att-1", round: 1, window: WINDOW, call, retry: true })).replayed, (await enf.admit(owner, { taskId: t, attemptId: "att-1", round: 1, window: WINDOW, call, retry: true })).blockerId], [true, undefined]);
+    // When the retry is refused too, that refusal is final and opens the blocker.
+    const bad = await enf.admit(owner, { taskId: t, attemptId: "att-2", round: 1, window: WINDOW, call, retry: true });
+    const last = await enf.admit(owner, { taskId: t, attemptId: "att-2", round: 2, window: WINDOW, call });
+    assert.deepEqual([bad.blockerId, last.admit], [undefined, false]);
+    assert.ok(last.blockerId);
+    assert.equal((await blockers.getBlocker(last.blockerId))!.type, "context_overflow");
+    await refuses("invalid_command", () => enf.admit(owner, { taskId: t, attemptId: "att-3", window: WINDOW, call, retry: "yes" as never }));
+  });
+
   suite("after the call: the reported size is recorded with the characters per token it implies, and an estimate that was too low is flagged", async ({ enf, owner, t }) => {
     await enf.admit(owner, { taskId: t, attemptId: "att-1", window: WINDOW, call: { systemPromptChars: 9_000, toolSchemaChars: 9_000, startupTokens: 2_000, replyReserveTokens: 8_000 } });
     const c = await enf.confirmUsage(owner, { taskId: t, attemptId: "att-1", reportedInputTokens: 40_000, promptChars: 80_000 });

@@ -217,3 +217,101 @@ test("H12j: advice waits for a safe boundary while a model call is open", async 
   finish();
   await running;
 });
+
+const ADMIT_ALL: RuntimeGuards["context"] = { admit: async () => ({ admit: true, reasons: [] }), resume: async () => ({ resume: true, reason: "fits" }) };
+
+test("card H12f: the first refusal is announced as one to be retried when the runtime can compact (no blocker yet), the second is final; a compaction that fails still gets the second round, which refuses", async () => {
+  const calls: [number, boolean | undefined][] = [];
+  const r = rig(() => ({ firstCall: () => CALL, compact: async () => { throw new Error("the process could not compact"); } }), { context: { admit: async (_o, _c, round, retry) => { calls.push([round, retry]); return { admit: false, reasons: ["too big"] }; }, resume: ADMIT_ALL.resume } });
+  const result = await (await r.local.start(order())).run(gateway());
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /first call was not sent: too big/);
+  assert.deepEqual(calls, [[1, true], [2, false]]);
+  assert.deepEqual(r.errors, ["compaction: the process could not compact"], "the failed compaction is reported, not silent");
+  // A runtime that cannot compact has one round, and it is final.
+  const plain: [number, boolean | undefined][] = [];
+  const p = rig(() => ({ firstCall: () => CALL }), { context: { admit: async (_o, _c, round, retry) => { plain.push([round, retry]); return { admit: false, reasons: ["too big"] }; }, resume: ADMIT_ALL.resume } });
+  await (await p.local.start(order())).run(gateway());
+  assert.deepEqual(plain, [[1, false]]);
+});
+
+test("card H12b: a recipe change in the middle of a turn ends the old process on purpose and the turn goes on in the new one under the same request; usage of the part that was cut is carried; a failed restart ends the turn as it was", async () => {
+  const runs: string[] = [];
+  let release!: () => void;
+  const hold = new Promise<void>((ok) => { release = ok; });
+  let opens = 0;
+  let started!: () => void;
+  const running = new Promise<void>((ok) => { started = ok; });
+  const r = rig((_log) => {
+    const mine = ++opens;
+    return {
+      run: async (_c: string, requestId: string) => {
+        runs.push(`${mine}:${requestId}`);
+        if (mine === 1) { started(); await hold; return { status: "failed", error: "the worker process was closed", usage: { turnSeq: 1, cache: { backend: "vllm", route: "llama/local", cachedTokens: 5, computedTokens: 7, writtenTokens: 1 } } }; }
+        return { status: "completed", text: "finished in the new process", usage: { turnSeq: 1, cache: { backend: "vllm", route: "llama/local", cachedTokens: 10, computedTokens: 2, writtenTokens: 0 } } };
+      },
+      close: async () => { if (mine === 1) release(); },
+    };
+  }, {});
+  const handle = await r.local.start(order());
+  const turn = handle.run(gateway());
+  await running;
+  await handle.restart({ revision: "r2", reach: ["x"] } as never, { n: 1 });
+  const result = await turn;
+  assert.equal(result.status, "completed");
+  assert.equal(result.text, "finished in the new process");
+  assert.deepEqual(runs, ["1:req-1", "2:req-1"], "the same request in the new process");
+  assert.deepEqual(result.usage, { turnSeq: 1, cache: { backend: "vllm", route: "llama/local", cachedTokens: 15, computedTokens: 9, writtenTokens: 1 } }, "the part cut short is not lost");
+
+  // A restart that fails leaves the turn's own result: nothing is run again on a runtime that is not there.
+  let go!: () => void;
+  const stuck = new Promise<void>((ok) => { go = ok; });
+  let began!: () => void;
+  const begun = new Promise<void>((ok) => { began = ok; });
+  let sandboxes = 0;
+  const bad = new LocalWorker({
+    hostId: "host:local", resources: { cpus: 1, memoryMb: 1 }, version: "v", capabilities: () => ({}) as never,
+    sandbox: { open: async (recipe) => { if (++sandboxes === 2) throw new Error("no sandbox for the new recipe"); return { revision: recipe.revision, close: async () => undefined }; } },
+    runtimes: { open: async () => ({ run: async () => { began(); await stuck; return { status: "failed", error: "closed" }; }, checkpoint: async () => ({}), close: async () => { go(); } }) },
+  });
+  const h2 = await bad.start(order());
+  const t2 = h2.run(gateway());
+  await begun;
+  await assert.rejects(h2.restart({ revision: "r2", reach: [] } as never, {}), /no sandbox for the new recipe/);
+  const after = await t2;
+  assert.deepEqual([after.status, after.error], ["failed", "closed"]);
+});
+
+test("card H12f: a restarted sandbox's conversation is admitted again; one that cannot fit is refused and the restart fails, leaving the attempt for the dispatcher to keep frozen", async () => {
+  const rounds: [number, boolean | undefined][] = [];
+  let sizes = 0;
+  const r = rig(() => ({ firstCall: () => { sizes++; return CALL; } }), { context: { admit: async (_o, _c, round, retry) => { rounds.push([round, retry]); return { admit: rounds.length === 1 || round === 5, reasons: ["conversation too big"] }; }, resume: ADMIT_ALL.resume } });
+  const handle = await r.local.start(order());
+  await assert.rejects(handle.restart({ revision: "r2", reach: [] } as never, {}), /restarted sandbox's first call was not sent: conversation too big/);
+  assert.deepEqual(rounds.map(([round]) => round), [1, 2], "the restart's check has a round of its own (numbering goes on from the start)");
+  assert.equal(sizes, 2);
+});
+
+test("card H12b: restarts run one at a time, and a stop that comes while the sandbox is being started again ends what the restart opened", async () => {
+  const log: string[] = [];
+  let release!: () => void;
+  const slow = new Promise<void>((ok) => { release = ok; });
+  let sandboxes = 0;
+  let entered!: () => void;
+  const inOpen = new Promise<void>((ok) => { entered = ok; });
+  const local = new LocalWorker({
+    hostId: "host:local", resources: { cpus: 1, memoryMb: 1 }, version: "v", capabilities: () => ({}) as never,
+    sandbox: { open: async (recipe) => { const n = ++sandboxes; log.push(`sandbox ${n} open`); if (n === 2) { entered(); await slow; } return { revision: recipe.revision, close: async () => { log.push(`sandbox ${n} close`); } }; } },
+    runtimes: { open: async () => { const n = log.filter((l) => l.startsWith("runtime") && l.endsWith("open")).length + 1; log.push(`runtime ${n} open`); return { run: async () => ({ status: "completed" as const }), checkpoint: async () => ({}), close: async () => { log.push(`runtime ${n} close`); } }; } },
+  });
+  const handle = await local.start(order());
+  const restarting = handle.restart({ revision: "r2", reach: [] } as never, {});
+  const outcome = restarting.then(() => "restarted", (error: Error) => error.message);
+  await inOpen;
+  const stopping = handle.stop();
+  release();
+  await stopping;
+  assert.match(await outcome, /the attempt was stopped/);
+  assert.ok(log.includes("sandbox 2 close"), `the sandbox the restart opened was closed: ${log.join(", ")}`);
+  assert.equal(log.filter((l) => l === "runtime 2 open").length, 0, "no runtime was started in it");
+});
