@@ -195,6 +195,18 @@ Result: `{ item }`: `revision`, `limits` (the owner's), `startup`, `effective`; 
 
 Completion: finished when accepted (`completed: true`).
 
+#### `workers.limits.enforced`
+
+What the launches of one local agent attempt came to (owner only): per launch (last ten) whether it started or was refused, the limits asked for, how each was enforced (full, partial or none, by what mechanism), whether best effort was allowed, and the wall-clock limit.
+
+Arguments:
+
+- `attemptId`: the attempt
+
+Result: `{ item }`: `attemptId`, `count` (all launches), `launches`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `cleanup.settings.get`
 
 What happens to an attempt's scratch workspace when the attempt ends (owner only): `scratch` is the owner's entry (null when none), `default`, and the `effective` mode. `after-handoff` (the default) lets the controller order the controller-created scratch removed once the work was handed onward (submission or recorded checkpoint, settled calls, message passed on); `keep` never does. Anything an agent installed or left running is never removed: it is reported to the agent's supervisor.
@@ -1772,6 +1784,19 @@ Arguments:
 - `set` (optional): for example `{ "memoryMb": 4096 }`
 - `unset` (optional): figure names to clear, for example `["processes"]`
 - `expectedRevision` (optional): the revision of the setting you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `workers.limits.besteffort`
+
+The owner allows or forbids best effort for local agents (owner only). Off (the default): an agent whose limits (cpus, memoryMb, diskMb, processes) this operating system cannot enforce in full is not started; the refusal is recorded with the reason. On: it starts anyway and the record says which limit was only partly enforced or not at all. Counts from the next agent launched. Chat: enable or disable.
+
+Arguments:
+
+- `enabled`: true to allow best effort, false to refuse
+- `expectedRevision` (optional): the revision of the limits setting you read
 
 Result: `{ revision }`.
 

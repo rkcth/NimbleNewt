@@ -99,6 +99,8 @@ export interface SandboxRun {
   readonly recipeRevision: string;
   /** Where the agent finds its checkout, home, scratch, temporary directory and inputs. */
   readonly guest: GuestView;
+  /** How each limit asked for was applied (the same figures the launch record holds); empty when none was asked for. Absent on a run that does not report it. */
+  readonly enforcement?: readonly LimitEnforcement[];
   /** Ends the process and everything it started. Safe to call more than once. */
   kill(): void;
   /** Writes to the standard input of a run started with `stream`; resolves when the text has been handed to the program. Rejects for any other run, and once the program has gone. */
@@ -221,10 +223,10 @@ export class SandboxLauncher {
     };
     try { await this.#config.audit(record); } catch (error) { throw new SandboxError("audit_failed", `the launch could not be recorded, so it did not happen: ${(error as Error).message}`, { cause: error }); }
     // Planned only now, after the record is written, so the checks the plan repeats run as close to the start as possible.
-    return this.#start(runId, recipe, limitedPlan(makePlan(), limits, caps).plan, recipe.mode === "sandboxed" ? this.#backend : undefined, timeoutMs, maxOutputBytes, request.stdin, request.stream);
+    return this.#start(runId, recipe, limitedPlan(makePlan(), limits, caps).plan, recipe.mode === "sandboxed" ? this.#backend : undefined, timeoutMs, maxOutputBytes, request.stdin, request.stream, limited.report);
   }
 
-  #start(runId: string, recipe: NormalizedRecipe, plan: SpawnPlan, backend: SandboxBackend | undefined, timeoutMs: number, maxOutputBytes: number, stdin: string | undefined, stream: LaunchRequest["stream"]): SandboxRun {
+  #start(runId: string, recipe: NormalizedRecipe, plan: SpawnPlan, backend: SandboxBackend | undefined, timeoutMs: number, maxOutputBytes: number, stdin: string | undefined, stream: LaunchRequest["stream"], enforcement: readonly LimitEnforcement[]): SandboxRun {
     const started = Date.now();
     const child = spawn(plan.file, [...plan.args], { env: { ...plan.env }, ...(plan.cwd === undefined ? {} : { cwd: plan.cwd }), stdio: ["pipe", "pipe", "pipe"], detached: true, windowsHide: true });
     // The program's input is the request's `stdin` (none: it reads end-of-file at once). A program that exits without reading it closes the pipe: that is its answer, not an error of the launcher.
@@ -293,7 +295,7 @@ export class SandboxLauncher {
       child.once("error", (error) => { void Promise.resolve(backend?.release?.(plan)).catch(() => undefined); ended = true; clearTimeout(timer); if (poller !== undefined) clearInterval(poller); resolve({ exitCode: null, signal: null, timedOut, killed, stdout: "", stderr: `could not start: ${error.message}`, truncated: false, stdoutTruncated: false, durationMs: Date.now() - started }); });
     });
     const guest: GuestView = backend?.guestView(recipe) ?? { workdir: recipe.workdir, home: recipe.home, scratch: recipe.scratch, tmp: recipe.scratch, inputs: recipe.readOnly.map((m) => ({ host: m.host, guest: m.host })) };
-    const run: SandboxRun = { runId, mode: recipe.mode, recipeRevision: recipe.revision, guest, kill: () => { killed = true; killTree(); },
+    const run: SandboxRun = { runId, mode: recipe.mode, recipeRevision: recipe.revision, guest, enforcement, kill: () => { killed = true; killTree(); },
       write: (text) => (stream === undefined || ended ? Promise.reject(new SandboxError("unavailable", "this run takes no input")) : new Promise<void>((resolve, reject) => { child.stdin.write(text, (error) => (error ? reject(error) : resolve())); })),
       endInput: () => { if (stream !== undefined) child.stdin.end(); }, result };
     this.#live.add(run);

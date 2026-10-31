@@ -1,3 +1,3 @@
 export { PROCESS_LIMITS, WorkerProcess, type ProcessHandlers, type RelayRequest, type RelayResponse } from "./process.js";
-export { appFromRepository, localWorkerParts, storedTokensOf, type HostFirstCall, type AttemptWorkspace, type CacheFigures, type HostOrder, type HostRuntime, type HostSandboxSession, type HostTurnResult, type LocalHostOptions, type WorkerApp } from "./local.js";
+export { appFromRepository, localWorkerParts, storedTokensOf, strictestLimits, type LaunchEnforcement, type HostFirstCall, type AttemptWorkspace, type CacheFigures, type HostOrder, type HostRuntime, type HostSandboxSession, type HostTurnResult, type LocalHostOptions, type WorkerApp } from "./local.js";
 export { LeaseLost, LeaseWatchdog, killContained, systemClock, type LossReason, type WatchdogClock, type WatchdogOptions } from "./watchdog.js";

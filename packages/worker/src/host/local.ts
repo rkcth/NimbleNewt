@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { BridgeReplyMessage, ChannelContext, ChannelModel, JsonValue } from "@nimblenewt/contracts";
 import { attemptSandbox, type AttemptSandboxPlan } from "../sandbox/attempt.js";
 import type { SandboxLauncher } from "../sandbox/launcher.js";
-import type { ResourceLimits } from "../sandbox/limits.js";
+import type { LimitEnforcement, ResourceLimits } from "../sandbox/limits.js";
 import { GUEST, normalizeRecipe, type ReadOnlyMount } from "../sandbox/recipe.js";
 import { PROCESS_LIMITS, WorkerProcess, type RelayRequest, type RelayResponse } from "./process.js";
 
@@ -80,6 +80,34 @@ export function appFromRepository(repository: string, node: { readonly root: str
 
 export interface AttemptWorkspace extends AttemptSandboxPlan { readonly limits?: ResourceLimits }
 
+/** What a launch of the worker process came to, for the record (card H12k): the figures asked for, how each was applied, and whether the owner allowed best effort. Contains no secret. */
+export interface LaunchEnforcement {
+  readonly attemptId: string;
+  readonly outcome: "started" | "refused";
+  /** The limits asked for at this launch (the workspace's and the owner's setting, the smaller of each figure). */
+  readonly requested: ResourceLimits;
+  /** True when the owner allowed a limit the host cannot enforce in full to go ahead. */
+  readonly bestEffort: boolean;
+  /** One entry per limit asked for; a limit that is not `full` is a limit the agent ran without (best effort) or the reason for the refusal. */
+  readonly enforcement: readonly LimitEnforcement[];
+  /** The wall-clock time the process may run, enforced by the launcher's time limit. */
+  readonly wallTimeMs: number;
+  /** Why the launch was refused (at most 500 characters). */
+  readonly reason?: string;
+}
+
+/** The smaller of each figure two limit sets name; a figure only one names is kept. */
+export function strictestLimits(a: ResourceLimits | undefined, b: ResourceLimits | undefined): ResourceLimits | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  const out: Record<string, number> = {};
+  for (const key of ["cpus", "memoryMb", "diskMb", "processes"] as const) {
+    const x = a[key]; const y = b[key];
+    if (x !== undefined || y !== undefined) out[key] = Math.min(x ?? Number.MAX_SAFE_INTEGER, y ?? Number.MAX_SAFE_INTEGER);
+  }
+  return out;
+}
+
 export interface LocalHostOptions<Call> {
   readonly launcher: Pick<SandboxLauncher, "launch">;
   readonly app: WorkerApp;
@@ -101,8 +129,17 @@ export interface LocalHostOptions<Call> {
   readonly context?: (order: HostOrder) => ChannelContext | undefined;
   /** What to put before the agent after the owner's decisions changed. */
   readonly refreshText?: (order: HostOrder) => Promise<string> | string;
-  /** Whether a limit the host cannot enforce in full refuses the launch (default true, as for scripts). */
+  /** Whether a limit the host cannot enforce in full refuses the launch (default true, as for scripts). Used when `bestEffort` is not given. */
   readonly requireEnforced?: boolean;
+  /**
+   * The owner's limits for an agent launched now (card H12k), read at each launch of the process and combined with `workspace(...).limits` by taking the smaller figure. It may throw (the setting is unreadable): the launch is then refused,
+   * never made without limits.
+   */
+  readonly limits?: (order: HostOrder) => Promise<ResourceLimits | undefined> | ResourceLimits | undefined;
+  /** Whether the owner allowed best effort: true lets a limit this OS cannot enforce in full go ahead (and be recorded as such); false or absent refuses it. Read at each launch; a throw refuses the launch. */
+  readonly bestEffort?: (order: HostOrder) => Promise<boolean> | boolean;
+  /** Told what each launch came to, started or refused, before the launch is used. If it throws, a started process is ended and the launch refused: nothing runs unrecorded. */
+  readonly onLaunch?: (record: LaunchEnforcement) => Promise<void> | void;
   /** The address the process uses for model calls (default `http://relay.invalid`). */
   readonly relayBase?: string;
   readonly clock?: () => number;
@@ -156,18 +193,32 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
       if (from?.["pi"] !== undefined && !existsSync(join(entry.workspace.home, "pi"))) throw new Error("the attempt resumes from a checkpoint but this host no longer holds the conversation");
       await entry.process?.close().catch(() => undefined);
       const remaining = Math.min(MAX_RUN_MS, order.expiresAt === undefined ? Number.MAX_SAFE_INTEGER : Math.max(1000, Date.parse(order.expiresAt) - clock()));
-      const process = await WorkerProcess.launch(options.launcher, {
-        recipe: entry.recipe,
-        command: [`/opt/node/${options.app.node.executable}`, options.app.entry],
-        timeoutMs: remaining,
-        // Standard error is kept (bounded) for the failure message; standard output is the channel.
-        maxOutputBytes: 64 * 1024,
-        ...(entry.workspace.limits === undefined ? {} : { limits: entry.workspace.limits }),
-        requireEnforced: options.requireEnforced ?? true,
-      }, {
-        bridge: (token, request) => options.bridge(order, call, token, request),
-        relay: (request) => options.relay(order, request),
-      });
+      const requested = strictestLimits(entry.workspace.limits, await options.limits?.(order)) ?? {};
+      const bestEffort = options.bestEffort === undefined ? options.requireEnforced === false : (await options.bestEffort(order)) === true;
+      let process: WorkerProcess;
+      try {
+        process = await WorkerProcess.launch(options.launcher, {
+          recipe: entry.recipe,
+          command: [`/opt/node/${options.app.node.executable}`, options.app.entry],
+          timeoutMs: remaining,
+          // Standard error is kept (bounded) for the failure message; standard output is the channel.
+          maxOutputBytes: 64 * 1024,
+          ...(Object.keys(requested).length === 0 ? {} : { limits: requested }),
+          requireEnforced: !bestEffort,
+        }, {
+          bridge: (token, request) => options.bridge(order, call, token, request),
+          relay: (request) => options.relay(order, request),
+        });
+      } catch (error) {
+        try { await options.onLaunch?.({ attemptId: order.attemptId, outcome: "refused", requested, bestEffort, enforcement: [], wallTimeMs: remaining, reason: String((error as Error)?.message ?? error).slice(0, 500) }); } catch { /* the refusal itself is what is reported */ }
+        throw error;
+      }
+      try {
+        await options.onLaunch?.({ attemptId: order.attemptId, outcome: "started", requested, bestEffort, enforcement: process.enforcement, wallTimeMs: remaining });
+      } catch (error) {
+        await process.close().catch(() => undefined);
+        throw error;
+      }
       entry.process = process;
       try {
         await process.start({

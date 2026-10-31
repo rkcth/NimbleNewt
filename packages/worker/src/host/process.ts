@@ -1,4 +1,5 @@
 import { ChannelError, LineDecoder, WORKER_CHANNEL_VERSION, encodeMessage, parseFromChild, type BridgeReplyMessage, type ChannelStart, type FromChild, type HeaderList, type ToChild } from "@nimblenewt/contracts";
+import type { LimitEnforcement } from "../sandbox/limits.js";
 import type { LaunchRequest, RunResult, SandboxLauncher, SandboxRun } from "../sandbox/launcher.js";
 
 /**
@@ -54,6 +55,9 @@ export class WorkerProcess {
     });
     return process;
   }
+
+  /** How each limit was applied to this process (empty when none was asked for). */
+  get enforcement(): readonly LimitEnforcement[] { return this.#run.enforcement ?? []; }
 
   get exited(): Promise<RunResult> { return this.#run.result; }
   get stderrTail(): string { return this.#exit?.stderr.trim().split("\n").slice(-5).join(" | ").slice(0, 500) ?? ""; }
