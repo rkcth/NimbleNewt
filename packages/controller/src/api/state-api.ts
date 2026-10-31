@@ -121,7 +121,7 @@ export interface StateApiDeps {
   readonly grants?: Pick<GrantService, "grant" | "revoke" | "getGrant" | "list">;
   /** When present, the owner can say which hosts may hold local-only data through the API (card H07c). */
   readonly placement?: Pick<PlacementSettingsService, "get" | "set" | "change">;
-  readonly reconnect?: Pick<ReconnectSettingsService, "get" | "set"> & Pick<RemoteWorkerService, "decideReaccept">;
+  readonly reconnect?: Pick<ReconnectSettingsService, "get" | "set"> & Pick<RemoteWorkerService, "decideReaccept" | "pending">;
   readonly workerLimits?: Pick<WorkerLimitsSettingsService, "get" | "set" | "change">;
   /** When present, the owner can read what is set up and what is missing before a first agent can work (card U14). */
   readonly setup?: Pick<SetupReadinessService, "check">;

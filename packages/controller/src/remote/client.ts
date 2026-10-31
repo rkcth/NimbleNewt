@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
 import type { ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, TurnUsage, WorkerTurnResult } from "../dispatch/ports.js";
-import { DIGEST_HEADER, PROTOCOL_HEADER, SESSION_HEADER, WORKER_PROTOCOL, type ArtifactListing, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange } from "./protocol.js";
+import { DIGEST_HEADER, PROTOCOL_HEADER, SESSION_HEADER, WORKER_PROTOCOL, WAITING_FOR_OWNER, type ArtifactListing, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange } from "./protocol.js";
 
 type Json = null | boolean | number | string | readonly Json[] | { readonly [key: string]: Json };
 
@@ -11,6 +11,8 @@ export class WorkerRequestError extends Error {
   constructor(readonly status: number, readonly code: string, message: string, readonly supported?: VersionRange) { super(message); this.name = "WorkerRequestError"; }
   /** The controller no longer accepts this attempt, session or placement from this worker: stop work on it. */
   get fenced(): boolean { return this.code === "fenced"; }
+  /** The attempt is not lost or ended: the controller waits for the owner to decide on taking it up again (card H09b). Wait and ask again; do not treat it as a failure. */
+  get waitingForOwner(): boolean { return this.status === 503 && this.code === "unavailable" && this.message.includes(WAITING_FOR_OWNER); }
 }
 
 export interface RemoteWorkerClientOptions {

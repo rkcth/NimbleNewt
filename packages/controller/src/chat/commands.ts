@@ -227,7 +227,7 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
 }
 
 /** Keys whose values name records or fixed choices; every other text in a command must be in the owner's own words. */
-const EXEMPT = new Set(["taskId", "projectId", "project", "prerequisiteId", "agentId", "supervisorId", "teamId", "parentTeamId", "repositoryId", "resourceId", "responsibilityId", "ownerId", "managed", "access", "landing", "integrator", "requiredChecks", "integration", "refreshRounds", "expectedRevision", "expectedVersion", "requestId", "currency", "level", "to", "state", "workClass", "difficulty", "recovery", "kind", "priority", "itemId", "inquiryId", "occurrenceId", "watchedTaskId", "watchId", "returnAt", "sourceTurnId", "intent", "urgency", "category", "participants"]);
+const EXEMPT = new Set(["taskId", "projectId", "project", "prerequisiteId", "agentId", "supervisorId", "teamId", "parentTeamId", "repositoryId", "resourceId", "responsibilityId", "ownerId", "managed", "access", "landing", "integrator", "requiredChecks", "integration", "refreshRounds", "expectedRevision", "expectedVersion", "requestId", "currency", "level", "to", "state", "workClass", "difficulty", "recovery", "kind", "priority", "itemId", "inquiryId", "occurrenceId", "watchedTaskId", "watchId", "returnAt", "sourceTurnId", "intent", "urgency", "category", "participants", "attemptId", "sessionId", "waitingSince", "decision", "reaccept", "patienceHours"]);
 
 /** The first text value of a command's arguments that is not the owner's own words (and not a record reference or fixed choice), or undefined. */
 export function foreignValue(args: Readonly<Record<string, unknown>>, ownText: string, path = ""): string | undefined {

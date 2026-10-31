@@ -130,7 +130,20 @@ Arguments:
 
 - none
 
-Result: `{ item }`: `revision`, `reaccept` (auto, owner or null), `profile`, `effective`.
+Result: `{ item }`: `revision`, `reaccept` (auto, owner or null), `profile`, `effective`, `patienceHours` (how long an attempt waiting for you keeps its lease: a number of hours or off; 24 unless chosen) and `patienceChosen`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `reconnect.pending`
+
+The attempts whose worker reconnected and waits for the owner's decision (owner only), oldest attempt ID first: attempt, placement, host, the session that asked and when it was recorded. Decide with `reconnect.reaccept`.
+
+Arguments:
+
+- `limit` (optional): 1 to 100, default 20
+- `after` (optional): the `next` of the previous page
+
+Result: `{ items, next? }`: each with `attemptId`, `placement`, `hostId`, `sessionId`, `at`.
 
 Completion: finished when accepted (`completed: true`).
 
@@ -1556,7 +1569,8 @@ The owner enables (`auto`) or disables (`owner`) automatic re-accept of attempts
 
 Arguments:
 
-- `reaccept`: auto, owner or null
+- `reaccept` (optional): auto, owner or null (left out: unchanged)
+- `patienceHours` (optional): how many hours an attempt that waits for your decision keeps its lease, so moving it does not race your decision: a number above 0, off, or null for the default of 24 (left out: unchanged)
 - `expectedRevision` (optional): the revision of the setting you read
 
 Result: `{ revision }`.
@@ -1565,12 +1579,14 @@ Completion: finished when accepted (`completed: true`).
 
 #### `reconnect.reaccept`
 
-The owner decides on an attempt whose worker reconnected and waits for approval (owner only): `approve` lets that worker's next accept in its current session succeed, `stop` ends the attempt so the worker is fenced. The decision is for the named placement and for the session that asked; a newer session asks again.
+The owner decides on an attempt whose worker reconnected and waits for approval (owner only): `approve` lets that worker's next accept in its current session succeed, `stop` ends the attempt so the worker is fenced. The decision is for the named placement and for the session that asked (take both from `reconnect.pending`); if a newer session asked meanwhile it is refused (`fenced`) and nothing is approved. A repeat of the same command ID returns the recorded result.
 
 Arguments:
 
 - `attemptId`: the attempt
 - `placement`: its current placement number
+- `sessionId`: the worker session that asked, from reconnect.pending
+- `waitingSince` (optional): when the waiting was recorded, from reconnect.pending (refused if it was recorded again since)
 - `decision`: approve or stop
 
 Result: `{ state }`: approved or stopped.

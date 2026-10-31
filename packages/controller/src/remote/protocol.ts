@@ -41,6 +41,9 @@ export class ProtocolMismatch extends DomainError {
   constructor(message: string, readonly supported: VersionRange) { super("invalid_command", message, { field: "protocol" }); this.name = "ProtocolMismatch"; }
 }
 
+/** What the controller says (and a worker recognises) when an attempt waits for the owner's decision: waiting is not a failure and not the end of the attempt (card H09b). */
+export const WAITING_FOR_OWNER = "it is waiting for the owner";
+
 export const REMOTE_LIMITS = {
   /** The largest JSON body, in bytes. */
   bodyBytes: 1024 * 1024,

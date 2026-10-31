@@ -31,7 +31,7 @@ export interface PollerOptions {
   /** The clock for the heartbeat interval (default `Date.now`). */
   readonly now?: () => number;
   /** Told about every failure and how long the poller will wait. */
-  readonly onTrouble?: (event: { readonly error: unknown; readonly retryInMs: number; readonly kind: "connect" | "poll" | "heartbeat" | "offers" }) => void;
+  readonly onTrouble?: (event: { readonly error: unknown; readonly retryInMs: number; readonly kind: "connect" | "poll" | "heartbeat" | "offers" | "waiting-for-owner" }) => void;
 }
 
 const timerSleep = (ms: number, signal: AbortSignal): Promise<void> => new Promise((resolve) => {
@@ -93,6 +93,13 @@ export class HostPoller {
 
   async #trouble(error: unknown, kind: "connect" | "poll" | "heartbeat" | "offers", signal: AbortSignal): Promise<void> {
     if (signal.aborted) return;
+    // An attempt that waits for the owner's decision is not a failure: the session stays, the failure count does not grow, and the poller asks again after a calm wait.
+    if (error instanceof WorkerRequestError && error.waitingForOwner) {
+      const calm = Math.floor(this.#o.maxBackoffMs * (0.5 + 0.5 * this.#random()));
+      this.#o.onTrouble?.({ error, retryInMs: calm, kind: "waiting-for-owner" });
+      await this.#sleep(calm, signal);
+      return;
+    }
     this.#failures++;
     let retryAfter = 0; let delay: number;
     if (error instanceof WorkerRequestError && (error.fenced || error.code === "not_connected")) this.#o.client.forgetSession();

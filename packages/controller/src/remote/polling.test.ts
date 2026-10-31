@@ -5,7 +5,7 @@ import { workGrants } from "../dispatch/testing/world.js";
 import { WorkerRequestError } from "./client.js";
 import { HostPoller, type PollerOptions } from "./poller.js";
 import { DEFAULT_WORKER_TRANSPORT_LIMITS } from "./server.js";
-import { REMOTE_LIMITS, type Offer } from "./protocol.js";
+import { REMOTE_LIMITS, WAITING_FOR_OWNER, type Offer } from "./protocol.js";
 import { REMOTE_CAPS } from "./testing/world.js";
 import { remoteSuite, refuses, wireRefuses, type Ctx } from "./testing/suite.js";
 import type { RemoteHost } from "./testing/world.js";
@@ -391,4 +391,17 @@ test("hosts refused outright do not all return at the same instant (card H07)", 
     await poller(fake({ connect: () => new WorkerRequestError(426, "protocol_unsupported", "too old") }), { random: seeded(i + 3), maxBackoffMs: 60_000, spreadMs: 0, sleep: async (ms) => { if (++n === 2) delays.add(ms); if (n >= 2) stop.abort(); } }).run(stop.signal);
   }
   assert.ok(delays.size >= 15 && [...delays].every((d) => d >= 45_000 && d <= 60_000), JSON.stringify([...delays]));
+});
+
+test("an attempt that waits for the owner's decision is a calm wait for the poller, not a failure: the session stays and the failure count does not grow (card H09b)", async () => {
+  const delays: number[] = []; const kinds: string[] = []; const stop = new AbortController(); let tries = 0;
+  const client = fake({ offers: () => [{ placement: 1, order: {} } as never] });
+  const waiting = new WorkerRequestError(503, "unavailable", `attempt att-x was taken up in another session; ${WAITING_FOR_OWNER} to approve taking it up again`);
+  assert.equal(waiting.waitingForOwner, true);
+  assert.equal(new WorkerRequestError(503, "unavailable", "the controller is busy").waitingForOwner, false);
+  await poller(client, { random: () => 0.5, baseBackoffMs: 100, maxBackoffMs: 1000, minGapMs: 0, spreadMs: 0, onTrouble: (e) => { kinds.push(e.kind); }, onOffers: async () => { if (++tries > 4) stop.abort(); throw waiting; }, sleep: async (ms) => { delays.push(ms); } }).run(stop.signal);
+  assert.deepEqual(delays.slice(1, 5), [750, 750, 750, 750], "the same calm wait every time, not a growing backoff");
+  assert.ok(kinds.length >= 4 && kinds.every((k) => k === "waiting-for-owner"));
+  assert.equal(client.forgets, 0, "the session is kept");
+  assert.equal(client.connects, 1, "no reconnecting");
 });
