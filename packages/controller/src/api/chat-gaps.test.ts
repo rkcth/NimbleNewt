@@ -74,7 +74,7 @@ test("the API ops for budgets, the optional aggregate cap and the merging branch
     assert.equal((await call(O, "budget.raise", { taskId: root }, "r3")).error?.code, "invalid_command");
 
     // ---- API: the aggregate cap is unset by default, is owner-set, and turns off again.
-    assert.deepEqual((await call(O, "budget.aggregate.get", {})).result.item, { revision: 0, enabled: false });
+    assert.deepEqual((await call(O, "budget.aggregate.get", {})).result.item, { revision: 0, enabled: false, state: "off" });
     const budgets = BudgetService.withEpoch(c.storage, c.epoch);
     const host = await (async () => { await c.services.principals.enroll(rob, { commandId: "e-h", kind: "host", name: "h1", grants: [] }); return c.services.principals.authenticate((await c.services.principals.issueCredential(rob, "host:h1")).token); })();
     const res = (cost: number, id: string) => budgets.reserve(host, { commandId: id, taskId: root, costMicros: cost, agentId: "agent:ann", purpose: "call" });
@@ -130,7 +130,7 @@ test("the API ops for budgets, the optional aggregate cap and the merging branch
     assert.equal(out[0]!.status, "proposed", JSON.stringify(out));
     assert.equal((await call(O, "budget.aggregate.get", {})).result.item.enabled, false, "still off until accepted");
     await accept(out[0]);
-    assert.deepEqual(((await call(O, "budget.aggregate.get", {})).result.item), { revision: 3, enabled: true, scope: "installation", period: "day", amountMicros: 5000, currency: "USD" });
+    assert.deepEqual(((await call(O, "budget.aggregate.get", {})).result.item), { revision: 3, enabled: true, state: "on", scope: "installation", period: "day", amountMicros: 5000, currency: "USD" });
     text = "Turn the overall spending cap off.";
     out = await turn(text, [cmd("budget.aggregate.set", { enabled: false }, text)]);
     assert.equal(out[0]!.status, "proposed", "lifting a cap is shown first as well");
@@ -175,8 +175,8 @@ test("the API ops for budgets, the optional aggregate cap and the merging branch
     if (out[0]!.status === "proposed") await accept(out[0]); else assert.equal(out[0]!.status, "applied", JSON.stringify(out));
 
     // Moving a task up to a profile that may spend more is shown first, in any approval profile; moving it to one that spends no more is not held for that reason.
-    text = "Replace difficulty profiles: lite uses r-lite, pricey uses r-cloud with a spend limit of 5000, and medium maps to lite and hard maps to pricey.";
-    out = await turn(text, [cmd("difficulty.set-profiles", { profiles: { profiles: { lite: { routingProfile: "r-lite" }, pricey: { routingProfile: "r-cloud", spendLimitMicros: 5000 } }, mapping: { medium: "lite", hard: "pricey" } } }, text)]);
+    text = "Replace difficulty profiles: lite uses r-lite with a spend limit of 0, pricey uses r-cloud with a spend limit of 5000, and medium maps to lite and hard maps to pricey.";
+    out = await turn(text, [cmd("difficulty.set-profiles", { profiles: { profiles: { lite: { routingProfile: "r-lite", spendLimitMicros: 0 }, pricey: { routingProfile: "r-cloud", spendLimitMicros: 5000 } }, mapping: { medium: "lite", hard: "pricey" } } }, text)]);
     assert.equal(out[0]!.status, "proposed", JSON.stringify(out));
     await accept(out[0]);
     text = "Set the difficulty of Water the bed to hard.";
@@ -186,5 +186,14 @@ test("the API ops for budgets, the optional aggregate cap and the merging branch
     text = "Set the difficulty of Water the bed to medium.";
     out = await turn(text, [cmd("difficulty.set", { taskTitle: "Water the bed", difficulty: "medium" }, text)]);
     assert.doesNotMatch(JSON.stringify(out[0]), /may spend more/);
+    // A profile with NO spend limit allows paid routes with no limit: moving to it from a limited one is shown first too.
+    text = "Replace difficulty profiles: lite uses r-lite, open uses r-cloud with no spend limit, and medium maps to lite and hard maps to open.";
+    out = await turn(text, [cmd("difficulty.set-profiles", { profiles: { profiles: { lite: { routingProfile: "r-lite", spendLimitMicros: 0 }, open: { routingProfile: "r-cloud" } }, mapping: { medium: "lite", hard: "open" } } }, text)]);
+    assert.equal(out[0]!.status, "proposed", JSON.stringify(out));
+    await accept(out[0]);
+    text = "Set the difficulty of Water the bed to hard.";
+    out = await turn(text, [cmd("difficulty.set", { taskTitle: "Water the bed", difficulty: "hard" }, text)]);
+    assert.equal(out[0]!.status, "proposed", JSON.stringify(out));
+    assert.match(JSON.stringify(out[0]), /may spend more/, "a missing spend limit is the highest, not zero");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

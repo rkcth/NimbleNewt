@@ -18,6 +18,10 @@ export interface AggregateBody {
   readonly amountMicros?: number;
   /** Only money in this currency counts toward the cap (spending in another currency is not summed with it). Default USD when the cap is turned on without one. */
   readonly currency?: string;
+  /** When the running totals were last built from the ledger (the first configuration, or turning the cap on again). */
+  readonly totalsFrom?: string;
+  /** True when the ledger scan that built the totals hit its bound: the totals may be lower than the true figures. */
+  readonly approximate?: boolean;
   readonly updatedBy: string;
   readonly updatedAt: string;
 }

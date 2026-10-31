@@ -790,6 +790,16 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `budget.aggregate.get`
+
+The owner's optional aggregate money cap (owner only): whether it is on, its scope, period and amount, and the revision to quote. Unset means no cap.
+
+Arguments:
+
+- none
+
+Result: `{ item }`: `revision`, `enabled`, `state` (off, on or damaged: a cap record that cannot be read is damaged and refuses paid work, it is never off), and `scope`, `period`, `amountMicros`, `currency` when set, and `approximate` when the totals were built from a ledger scan that hit its bound.
+
 #### `difficulty.profiles`
 
 The difficulty profiles and the mapping from difficulty to profile (owner, or someone with `routing.write`).
@@ -1501,6 +1511,22 @@ Arguments:
 
 - `maxRounds`: 1 to 10, or null to clear
 - `expectedRevision` (optional): the revision of the setting you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `project.branches.change`
+
+The owner protects more branches of a project or takes named ones off the list, leaving the others as they are (owner only). This is the form the chat uses, so a request that waits to be accepted does only what it says. Taking off a branch from a project still on the default list writes the default out first, so the other default stays protected.
+
+Arguments:
+
+- `project`: the project ID
+- `add` (optional): branch names or prefixes such as `release/*` to protect
+- `remove` (optional): branch names or prefixes to stop protecting
+- `landing` (optional): the landing branch, or null to clear it
+- `expectedRevision` (optional): the revision you read
 
 Result: `{ revision }`.
 
@@ -2905,6 +2931,65 @@ Arguments:
 - `note` (optional): a note
 
 Result: `{ ok: true }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `budget.open`
+
+The owner gives a task a root allowance of its own: new money, in one currency, and/or compute time (owner only). The task must exist and not already be in a budget. No limit is imposed on the amount; a budget is optional and a task without one is not held back by it.
+
+Arguments:
+
+- `taskId`: the task
+- `currency`: a currency code such as USD
+- `costMicros` (optional): money, in millionths of the currency
+- `computeMs` (optional): compute time in milliseconds
+- `holder` (optional): the principal (owner:<name>, agent:<name>) who answers for it and may delegate from it
+
+Result: `{ id, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `budget.raise`
+
+The owner adds new money or compute to a task's budget and, so that nobody's available figure falls, to each budget above it (owner only). A raise the owner states here counts as agreed by the owner; no size limit applies to it.
+
+Arguments:
+
+- `taskId`: the task
+- `costMicros` (optional): money to add, in millionths
+- `computeMs` (optional): compute to add, in milliseconds
+
+Result: `{ ok: true }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `budget.close`
+
+The owner closes a budget (the task it was opened on; owner only): nothing more can be reserved, delegated, requested or added, and it stops counting as open. Refused while calls still hold allowance or requests are open. It cannot be undone; closing again changes nothing.
+
+Arguments:
+
+- `taskId`: the task the budget was opened on
+
+Result: `{ ok: true }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `budget.aggregate.set`
+
+The owner sets, changes, turns on or turns off an aggregate money cap (owner only; only the fields named change). It is off until set. When on, a reservation that would take the money used in the scope and period above the amount is refused, no further paid model call of a local agent is made once the money SPENT (settled and charged, not holds) has reached the amount (calls made by remote workers and by the chat and coordinator models are not gated by it; they are still bounded by their reservations), and the owner is told once per window; with it off, or never set, nothing is refused. Spending already recorded stays recorded. Only money in the cap's currency counts (default USD). Turning it on needs scope, period and amount (now or from before). Running totals are kept only once a cap has been configured; they start from a bounded scan of the ledger (marked approximate in the result when the scan was cut short) and are rebuilt whenever the cap is turned on. Money only; compute is not capped.
+
+Arguments:
+
+- `enabled` (optional): true to turn on, false to turn off (the figures are kept)
+- `scope` (optional): installation, project (the amount applies to each project) or agent (to each agent)
+- `period` (optional): day or month (UTC; the count restarts) or none (everything ever recorded)
+- `amountMicros` (optional): the cap in millionths of one currency, a whole number from 0
+- `currency` (optional): the currency the cap counts, such as USD (default USD)
+- `expectedRevision` (optional): the revision you read
+
+Result: `{ revision }`.
 
 Completion: finished when accepted (`completed: true`).
 

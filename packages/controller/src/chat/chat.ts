@@ -1011,7 +1011,8 @@ export class ChatService {
       if (typeof args["difficulty"] !== "string") return false;
       const profiles = await this.#get(token, "difficulty.profiles", {}) as { profiles?: Record<string, { spendLimitMicros?: number }>; mapping?: Record<string, string> } | undefined;
       const contract = await this.#get(token, "contract.get", { taskId: args["taskId"] }) as { difficulty?: string } | undefined;
-      const spendOf = (level: string): number => profiles?.profiles?.[profiles.mapping?.[level] ?? ""]?.spendLimitMicros ?? 0;
+      // A profile with no spendLimitMicros allows paid routes with NO limit (see routing/difficulty.ts: only a limit of 0 forbids them), so it is the highest; no profile at all spends nothing.
+      const spendOf = (level: string): number => { const profile = profiles?.profiles?.[profiles.mapping?.[level] ?? ""]; return profile === undefined ? 0 : profile.spendLimitMicros ?? Infinity; };
       return spendOf(args["difficulty"]) > spendOf(contract?.difficulty ?? "unrated");
     } catch { return true; }
   }
