@@ -99,9 +99,10 @@ export class ResumeCheckService {
   }
 
   static withEpoch(storage: ControllerStorage, epoch: number, deps: { continuations: Pick<ContinuationService, "latest" | "resume">; dependencies: Pick<DependencyService, "check">; blockers: Pick<BlockerService, "openBlocker" | "getBlocker">; ports: ResumePorts }, options: RunnerOptions & { maxRounds?: number; /** Read once per new check (the owner's setting); wins over `maxRounds`. */ rounds?: () => Promise<number> } = {}): ResumeCheckService {
-    const rounds = options.maxRounds ?? RESUME_LIMITS.rounds;
-    if (!validRounds(rounds)) throw new RangeError("maxRounds must be a whole number from 1 to 10");
-    return new ResumeCheckService(new CommandRunner(storage, epoch, options), deps, options.rounds ?? rounds);
+    // A supplied rounds() is read for each new check; a fixed maxRounds is then ignored, so it is not even validated.
+    const rounds = options.rounds ?? options.maxRounds ?? RESUME_LIMITS.rounds;
+    if (typeof rounds === "number" && !validRounds(rounds)) throw new RangeError("maxRounds must be a whole number from 1 to 10");
+    return new ResumeCheckService(new CommandRunner(storage, epoch, options), deps, rounds);
   }
 
   // ---- requests ------------------------------------------------------------------------------------------------------------

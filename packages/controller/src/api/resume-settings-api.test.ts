@@ -32,3 +32,19 @@ test("resume.settings.get/set through the API: owner only, validated, replay-saf
     assert.equal((await call(boot.token, "resume.settings.get", {})).result.item.effective, 3);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true }); }
 });
+
+test("a damaged stored retry limit does not stop a resume start: the default applies and the owner gets one maintenance notification", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-rset-"));
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [] } as never);
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const call = (op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<{ ok: boolean; result?: any; error?: { code: string } }>;
+    assert.ok((await call("resume.settings.set", { maxRounds: 6 }, "r1")).ok);
+    const real = c.storage.getAggregate.bind(c.storage);
+    c.storage.getAggregate = async (ref) => { const a = await real(ref); return ref.kind === "resume-settings" && a !== undefined ? { ...a, body: { ...(a.body as object), maxRounds: 99 } } as never : a; };
+    const emitted = async () => (await c.storage.listAudit({ afterSeq: 0, limit: 1000 })).filter((a) => a.type === "notification.emit").length;
+    assert.equal((await call("resume.settings.get", {})).result.item.effective, 3, "the default, not an error");
+    assert.equal((await call("resume.settings.get", {})).result.item.effective, 3);
+    assert.equal(await emitted(), 1, "one notification for the episode, however often it is read");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true }); }
+});

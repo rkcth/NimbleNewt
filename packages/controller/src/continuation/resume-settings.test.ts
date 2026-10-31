@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
+import { MemoryStorage } from "../storage/memory.js";
 import { DomainError } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
@@ -86,3 +87,27 @@ for (const backend of backends) {
     } finally { await world.close(); }
   });
 }
+
+test("a damaged stored retry limit falls back to the default and warns the owner once per damage episode, never blocking a resume", async () => {
+  const storage = new MemoryStorage();
+  const { epoch } = await storage.acquireEpoch({ holder: "t", at: "2026-10-30T10:00:00.000Z" });
+  const warned: { revision: number; detail: string }[] = [];
+  const settings = ResumeSettingsService.withEpoch(storage, epoch, 3, { ...options, warn: async (d) => { warned.push(d); } });
+  const owner = { id: "owner:rob", kind: "owner", name: "rob", grants: [] } as never;
+  await settings.set(owner, { commandId: cid("w"), maxRounds: 5 });
+  assert.equal(await settings.effective(), 5);
+  assert.equal(warned.length, 0);
+  const real = storage.getAggregate.bind(storage);
+  let body: unknown = { maxRounds: 99, updatedBy: "owner:rob", updatedAt: "x" };
+  storage.getAggregate = async (ref) => { const a = await real(ref); return ref.kind === "resume-settings" && a !== undefined ? { ...a, body } as never : a; };
+  for (const damaged of [{ maxRounds: 99 }, { maxRounds: "4" }, { maxRounds: 2.5 }, { maxRounds: null }, "junk"]) {
+    body = damaged;
+    assert.equal(await settings.effective(), 3, `${JSON.stringify(damaged)}: the default applies instead of throwing`);
+  }
+  assert.equal(warned.length, 5, "the service reports every read; the notification's stable id per revision makes it one");
+  assert.equal(new Set(warned.map((w) => w.revision)).size, 1, "one damage episode = one record revision = one notification ID");
+  assert.match(warned[0]!.detail, /damaged/);
+  // A warning that cannot be sent does not block the resume.
+  const failing = ResumeSettingsService.withEpoch(storage, epoch, 3, { ...options, warn: async () => { throw new Error("notifications down"); } });
+  assert.equal(await failing.effective(), 3);
+});

@@ -25,11 +25,13 @@ export class ResumeSettingsService {
   readonly #runner: CommandRunner;
   readonly #startup: number;
 
-  private constructor(runner: CommandRunner, startup: number) { this.#runner = runner; this.#startup = startup; }
+  readonly #warn: ((damage: { readonly revision: number; readonly detail: string }) => Promise<void>) | undefined;
 
-  static withEpoch(storage: ControllerStorage, epoch: number, startup: number = RESUME_ROUNDS.default, options: RunnerOptions = {}): ResumeSettingsService {
+  private constructor(runner: CommandRunner, startup: number, warn: ((damage: { readonly revision: number; readonly detail: string }) => Promise<void>) | undefined) { this.#runner = runner; this.#startup = startup; this.#warn = warn; }
+
+  static withEpoch(storage: ControllerStorage, epoch: number, startup: number = RESUME_ROUNDS.default, options: RunnerOptions & { warn?: (damage: { readonly revision: number; readonly detail: string }) => Promise<void> } = {}): ResumeSettingsService {
     if (!whole(startup)) throw new RangeError("maxRounds must be a whole number from 1 to 10");
-    return new ResumeSettingsService(new CommandRunner(storage, epoch, options), startup);
+    return new ResumeSettingsService(new CommandRunner(storage, epoch, options), startup, options.warn);
   }
 
   async get(by: Principal): Promise<{ readonly revision: number; readonly maxRounds: number | null; readonly default: number; readonly effective: number }> {
@@ -59,12 +61,20 @@ export class ResumeSettingsService {
     return { revision: result.revision };
   }
 
-  /** The limit for a check starting now. Re-validated on read: a damaged record throws, so the start is refused instead of running with a wrong limit. */
+  /**
+   * The limit for a check starting now. A stored figure that is damaged (not a whole number from 1 to 10, or a record that is not an object) never blocks a resume: the default applies and `warn` tells the owner once per damage episode
+   * (the warning's identity is the damaged record's revision, so reading again does not repeat it, and the owner's next `resume.settings.set` repairs it). A failure to send the warning does not stop the resume either; the next read tries again.
+   */
   async effective(): Promise<number> {
     const found = await this.#runner.get(REF.kind, REF.id);
-    const v = (found?.body as unknown as ResumeSettingsBody | undefined)?.maxRounds;
+    if (found === undefined) return this.#startup;
+    const body = found.body as unknown;
+    const v = body === null || typeof body !== "object" || Array.isArray(body) ? Symbol("damaged") : (body as ResumeSettingsBody).maxRounds;
     if (v === undefined) return this.#startup;
-    if (!whole(v)) throw new DomainError("invalid_command", "the stored resume retry limit is damaged", { field: "maxRounds" });
-    return v;
+    if (whole(v)) return v;
+    if (this.#warn !== undefined) {
+      try { await this.#warn({ revision: found.revision, detail: `the stored resume retry limit is damaged, so the default of ${this.#startup} applies until you set it again (resume.settings.set)` }); } catch { /* the next read tries again */ }
+    }
+    return this.#startup;
   }
 }

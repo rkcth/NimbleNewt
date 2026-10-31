@@ -410,7 +410,7 @@ export async function startController(options: StartOptions): Promise<Controller
       },
       agentState: async (id) => ((await storage.getAggregate({ kind: "agent", id }))?.body as unknown as { state?: "active" | "retired" } | undefined)?.state, canWork: async (agentId, projectId) => { const p = await principals.get(`agent:${agentId}`); if (p === undefined || p.state !== "active") return false; const eff = await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); return allows(eff as never, "attempt.work", projectId); } }) });
     const continuations = ContinuationService.withEpoch(storage, epoch);
-    const resumeSettings = ResumeSettingsService.withEpoch(storage, epoch);
+    const resumeSettings = ResumeSettingsService.withEpoch(storage, epoch, undefined, { warn: async (d) => { await notifications.emitFromController({ commandId: `resume-settings-damaged:${d.revision}`, kind: "maintenance", level: "needs-you", ref: { kind: "resume-settings", id: "main" }, detail: d.detail }); } });
     const resumes = ResumeCheckService.withEpoch(storage, epoch, { continuations, dependencies: DependencyService.withEpoch(storage, epoch), blockers: BlockerService.withEpoch(storage, epoch), ports: controllerResumePorts(storage) }, { rounds: () => resumeSettings.effective() });
     // The identity that carries out what a meeting decided and was allowed: a service with no grants of its own (the carrying agent's rights are checked separately).
     const meetingController = { id: "service:meeting-records", kind: "service", name: "meeting-records", grants: [] } as Principal;
