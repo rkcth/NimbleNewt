@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -23,9 +23,12 @@ test("release staging and activation end to end: the owner's word only, bound to
   const open = () => startController({
     storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [],
     chat: { interpreter: new ScriptedInterpreter((input) => say[input.text] ?? []) },
-    releases: { root, switcher: "symlink", platform: { os: "linux", arch: "x64" }, hook: (p) => { if (p === crashAt) throw new SimulatedCrash(p); } },
+    releases: { root, switcher: process.platform === "win32" ? "pointer" : "symlink", platform: { os: "linux", arch: "x64" }, hook: (p) => { if (p === crashAt) throw new SimulatedCrash(p); } },
   });
-  const link = () => (existsSync(join(root, "current")) || (() => { try { lstatSync(join(root, "current")); return true; } catch { return false; } })() ? readlinkSync(join(root, "current")) : undefined);
+  const link = (): string | undefined => {
+    if (process.platform === "win32") return existsSync(join(root, "current.json")) ? `releases/${(JSON.parse(readFileSync(join(root, "current.json"), "utf8")) as { release: string }).release}` : undefined;
+    return existsSync(join(root, "current")) || (() => { try { lstatSync(join(root, "current")); return true; } catch { return false; } })() ? readlinkSync(join(root, "current")) : undefined;
+  };
   let c = await open();
   try {
     const boot = await c.services.principals.bootstrapOwner({ name: "rob" });

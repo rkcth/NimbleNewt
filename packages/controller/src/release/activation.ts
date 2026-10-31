@@ -69,7 +69,7 @@ export class SymlinkSwitcher implements Switcher {
     let st;
     try { st = await lstat(path); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
     if (!st.isSymbolicLink()) return "invalid";
-    const m = /^releases\/(rcn-[0-9a-f]{24})$/.exec(await readlink(path));
+    const m = /^releases\/(rcn-[0-9a-f]{24})$/.exec((await readlink(path)).replaceAll("\\", "/"));
     return m === null ? "invalid" : m[1]!;
   }
   async write(id: string): Promise<void> {

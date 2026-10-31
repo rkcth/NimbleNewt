@@ -26,7 +26,8 @@ const linux = { os: "linux" as const, arch: "x64" as const };
 
 for (const backend of backends.slice(0, 2)) for (const switcher of ["symlink", "pointer"] as const) {
   const suite = (name: string, body: (c: W) => Promise<void>): void => {
-    test(`${backend.name}, ${switcher}: ${name}`, async () => {
+    // On Windows the production default is the pointer file: a rename cannot replace a directory symlink there (EPERM), so the symlink switcher is not offered and not tested.
+    test(`${backend.name}, ${switcher}: ${name}`, { skip: switcher === "symlink" && process.platform === "win32" ? "the symlink switcher is POSIX-only; Windows uses the pointer file" : false }, async () => {
       const world = await backend.open();
       const root = mkdtempSync(join(tmpdir(), "nn-act-"));
       try {
