@@ -36,6 +36,7 @@ import { DISPATCHER_PRINCIPAL, type TaskCredentialService } from "../security/ta
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
 import { DISPATCHER_ACTOR, DISPATCH_KIND, DISPATCH_LIMITS, type DispatchBody, type DispatchRevisions, type Frozen, type ToolIdentity, type ToolOperationBody } from "./model.js";
 import { ToolPath, type Loaded } from "./tools.js";
+import { sealContract } from "../remote/contract.js";
 import type { HostProbe, RecipeSummary, ToolGateway, WorkerTurnResult, TurnUsage, WorkOrder, WorkerHandle, WorkerHost } from "./ports.js";
 import { chooseHost, type HostVerdict } from "../hosts/candidates.js";
 
@@ -1171,10 +1172,10 @@ export class DispatcherService {
     return all.length === 0 ? undefined : Math.min(...all);
   }
 
-  async #contractOf(taskId: string): Promise<{ version: number; maxMinutes?: number; maxAttempts?: number; tools: readonly string[] }> {
-    const c = (await this.#runner.get("task-contract", taskId))?.body as unknown as { version: number; budget?: { maxMinutes?: number; maxAttempts?: number }; permissions?: readonly string[] } | undefined;
+  async #contractOf(taskId: string): Promise<{ version: number; maxMinutes?: number; maxAttempts?: number; maxCost?: number; permissions: readonly string[]; tools: readonly string[] }> {
+    const c = (await this.#runner.get("task-contract", taskId))?.body as unknown as { version: number; budget?: { maxMinutes?: number; maxAttempts?: number; maxCost?: number }; permissions?: readonly string[] } | undefined;
     return {
-      version: c?.version ?? 0, ...(c?.budget?.maxMinutes === undefined ? {} : { maxMinutes: c.budget.maxMinutes }), ...(c?.budget?.maxAttempts === undefined ? {} : { maxAttempts: c.budget.maxAttempts }),
+      version: c?.version ?? 0, permissions: c?.permissions ?? [], ...(c?.budget?.maxCost === undefined ? {} : { maxCost: c.budget.maxCost }), ...(c?.budget?.maxMinutes === undefined ? {} : { maxMinutes: c.budget.maxMinutes }), ...(c?.budget?.maxAttempts === undefined ? {} : { maxAttempts: c.budget.maxAttempts }),
       // Only a tool named in full (no wildcard, no class) is a grant the task is said to need.
       tools: (c?.permissions ?? []).filter((p) => p.startsWith("tool.") && !p.endsWith("*")),
     };
@@ -1381,8 +1382,13 @@ export class DispatcherService {
       content: await this.#contentOf(b.taskId) + await this.#policyNote(b), requestId: `cmd:adm:${b.attemptId}`, ...(b.expiresAt === undefined ? {} : { expiresAt: b.expiresAt }),
       ...(b.resumeFrom === undefined ? {} : { resumeFrom: b.resumeFrom }), ...(b.resumeNote === undefined ? {} : { resumeNote: b.resumeNote }),
     };
+    // The dispatch contract goes with the order (card H12a): the task contract as it stands now, and what the allowance holds for this attempt.
+    const taskContract = await this.#contractOf(b.taskId);
+    const held = (await this.#load(b.attemptId))?.body.reserving;
+    const budget = { ...(taskContract.maxMinutes === undefined ? {} : { maxMinutes: taskContract.maxMinutes }), ...(taskContract.maxAttempts === undefined ? {} : { maxAttempts: taskContract.maxAttempts }), ...(taskContract.maxCost === undefined ? {} : { maxCost: taskContract.maxCost }), ...(held === undefined ? {} : { held: { ...(held.costMicros === undefined ? {} : { costMicros: held.costMicros }), ...(held.computeMs === undefined ? {} : { computeMs: held.computeMs }) } }) };
+    const sealed = sealContract(order, { taskContractVersion: taskContract.version, permissions: taskContract.permissions, ...(Object.keys(budget).length === 0 ? {} : { budget }), bestEffort: false });
     let handle: WorkerHandle;
-    try { handle = await host.start(order); } catch (error) {
+    try { handle = await host.start(sealed); } catch (error) {
       const why = error instanceof Error ? error.message.slice(0, 200) : "failed";
       await this.#end(b.attemptId, "failed", `the worker did not start: ${why}`, { readmit: false });
       // The report says why too (a host that cannot meet a requirement is a visible refusal, not a silent skip).

@@ -9,3 +9,4 @@ export { QUIET_HOST, QuietHostSettingsService, type QuietHostFigures, type Quiet
 export { DEFAULT_MAX_GAP_MS, DEFAULT_QUIET_AFTER_MS, QUIET_HOST_KIND, QUIET_HOST_LIMITS, QUIET_HOST_RETENTION_MS, QuietHostService, type MoveWorkResult, type QuietHostBody, type QuietHostDeps, type QuietHostNotice, type QuietHostOptions, type QuietHostPass } from "./quiet-hosts.js";
 export { ReconnectSettingsService, profileReaccept, type ReacceptMode, type ReconnectSettingsBody } from "./reconnect-settings.js";
 export { WorkspaceResponder } from "./responder.js";
+export { CONTRACT_FORMAT, CONTRACT_FEATURES, checkContract, contractDigest, contractProblems, enforcementFor, requiresOf, sealContract, type ContractEnforcement, type WorkerAbilities } from "./contract.js";

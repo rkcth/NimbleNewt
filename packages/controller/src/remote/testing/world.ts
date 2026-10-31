@@ -33,7 +33,10 @@ export class RemoteTestHost implements WorkerHost {
   /** How the worker answers a request for a checkpoint: it sends one itself, over the wire, as a real worker does. Set when the host connects. */
   respond: ((attemptId: string, placement: number) => Promise<void>) | undefined;
   constructor(readonly hostId: string, private readonly remote: RemoteWorkerService, private readonly by: Principal, readonly resources = { cpus: 1, memoryMb: 1024 }) {}
-  async start(order: WorkOrder): Promise<WorkerHandle> {
+  /** What the product host does with the owner's limits: another contract sealed onto the order before it is placed. */
+  seal: ((order: WorkOrder) => WorkOrder) | undefined;
+  async start(given: WorkOrder): Promise<WorkerHandle> {
+    const order = this.seal === undefined ? given : this.seal(given);
     this.starts.push(order);
     const placed = await this.remote.place(this.by, { hostId: this.hostId, order, requirements: this.requirements(order), inputs: this.inputs(order) });
     const handle = new RemoteTestHandle(this, this.remote, this.by, order.attemptId, placed.placement);

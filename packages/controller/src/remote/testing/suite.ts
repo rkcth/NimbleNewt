@@ -5,6 +5,7 @@ import type { WorkOrder } from "../../dispatch/ports.js";
 import { workGrants } from "../../dispatch/testing/world.js";
 import { DomainError, type DomainErrorCode } from "../../domain/errors.js";
 import type { Backend } from "../../domain/testing/backends.js";
+import type { WorkerAbilities } from "../contract.js";
 import { WorkerRequestError, type RemoteAttempt } from "../client.js";
 import { buildRemoteWorld, type RemoteHost, type RemoteWorld } from "./world.js";
 
@@ -15,13 +16,15 @@ export const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>
 export const wireRefuses = async (code: string, run: () => Promise<unknown>, status?: number, check?: (e: WorkerRequestError) => void): Promise<void> => {
   await assert.rejects(run, (e: unknown) => { assert.ok(e instanceof WorkerRequestError, String(e)); assert.equal(e.code, code, e.message); if (status !== undefined) assert.equal(e.status, status); check?.(e); return true; });
 };
+/** A worker that speaks contract format 1, knows both features and enforces every limit in full. */
+export const FULL_ABILITIES: WorkerAbilities = { formats: [1], features: ["limits", "wall-time"], enforces: { cpus: "full", memoryMb: "full", diskMb: "full", processes: "full", wallTimeMs: "full" } };
 export const READ = (callId: string) => ({ callId, tool: { name: "read-file", version: "1.0.0" }, args: { path: "README.md" } });
 export const local = (text: string) => ({ kind: "local" as const, run: async () => ({ text }) });
 
 export interface Started { readonly taskId: string; readonly attemptId: string; readonly placement: number; readonly order: WorkOrder; readonly attempt: RemoteAttempt }
 export interface Ctx extends RemoteWorld {
   /** A new task for agent ann, ticked until the dispatcher starts it on `host` (it is the only host that can), and the worker accepts the offer. */
-  started(host: RemoteHost, title?: string, extra?: { agent?: string }): Promise<Started>;
+  started(host: RemoteHost, title?: string, extra?: { agent?: string; /** Leave the dispatch contract unconfirmed (the worker has not yet answered it). */ unconfirmed?: boolean }): Promise<Started>;
   ops(attemptId: string): Promise<ToolOperationBody[]>;
 }
 
@@ -36,7 +39,7 @@ export function remoteSuite(backend: Backend) {
         const w = world;
         const agents = new Map<string, { id: string; aid: string }>();
         const c: Ctx = Object.assign(w, {
-          started: async (host: RemoteHost, title = "Order seeds", extra: { agent?: string } = {}) => {
+          started: async (host: RemoteHost, title = "Order seeds", extra: { agent?: string; unconfirmed?: boolean } = {}) => {
             const name = extra.agent ?? "ann";
             if (!agents.has(name)) agents.set(name, await w.agent(name, workGrants(w.project, ["read-file", "write-file"])));
             w.prefer(host);
@@ -48,6 +51,7 @@ export function remoteSuite(backend: Backend) {
             assert.ok(offer, "the attempt was offered to the host");
             const attempt = host.client.attempt(attemptId!, offer.placement);
             await attempt.accept();
+            if (extra.unconfirmed !== true) assert.deepEqual(await attempt.honorContract(offer.order, FULL_ABILITIES, w.clock.now()), { ok: true });
             return { taskId, attemptId: attemptId!, placement: offer.placement, order: offer.order, attempt };
           },
           ops: async (attemptId: string) => (await w.storage.listAggregates(operationKind(attemptId), { limit: 100 })).map((a) => a.body as unknown as ToolOperationBody),

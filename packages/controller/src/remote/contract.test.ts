@@ -1,0 +1,173 @@
+import assert from "node:assert/strict";
+import { after, test } from "node:test";
+import type { WorkOrder } from "../dispatch/ports.js";
+import { backends, stopServer } from "../domain/testing/backends.js";
+import { checkContract, contractDigest, contractProblems, sealContract, type WorkerAbilities } from "./contract.js";
+import { FULL_ABILITIES, READ, local, remoteSuite, wireRefuses } from "./testing/suite.js";
+
+after(stopServer);
+
+const ORDER: WorkOrder = { attemptId: "att-aaaaaaaaaaaa", taskId: "tsk-aaaaaaaaaaaa", projectId: "prj-aaaaaaaaaaaa", agentId: "agent:ann", generation: 1, route: "localp/small", credential: "secret.token", recipe: { revision: "r-1", reach: ["read-file"] }, content: "do it", requestId: "cmd:adm:1", expiresAt: "2030-01-01T00:00:00.000Z" };
+const NOW = "2026-10-31T00:00:00.000Z";
+const LIMITED = sealContract(ORDER, { taskContractVersion: 3, permissions: ["tool.read-file", "class.inspect"], budget: { maxMinutes: 30, held: { computeMs: 1000 } }, limits: { memoryMb: 512, processes: 50 }, bestEffort: false });
+
+test("the contract is sealed to its order: the digest covers identity, recipe, expiry and every figure, never the credential", () => {
+  const c = LIMITED.contract!;
+  assert.equal(c.format, 1);
+  assert.deepEqual(c.requires, ["limits", "wall-time"]);
+  assert.equal(checkContract(LIMITED).digest, c.digest);
+  const { digest, ...rest } = c;
+  assert.equal(contractDigest(LIMITED, rest), digest);
+  assert.equal(contractDigest({ ...LIMITED, credential: "another" }, rest), digest, "the credential is not part of it");
+  for (const changed of [{ ...LIMITED, route: "localp/big" }, { ...LIMITED, generation: 2 }, { ...LIMITED, recipe: { revision: "r-1", reach: [] } }, { ...LIMITED, expiresAt: "2031-01-01T00:00:00.000Z" }, { ...LIMITED, agentId: "agent:bob" }]) {
+    assert.notEqual(contractDigest(changed, rest), digest);
+    assert.throws(() => checkContract(changed as WorkOrder), /digest/);
+  }
+  for (const edit of [{ permissions: [] }, { limits: { memoryMb: 4096, processes: 50 } }, { bestEffort: true }, { budget: { maxMinutes: 999 } }]) {
+    assert.throws(() => checkContract({ ...LIMITED, contract: { ...c, ...edit } }), /digest/, JSON.stringify(edit));
+  }
+});
+
+test("a contract of the wrong shape is refused: unknown fields, limits out of bounds, an unlisted limit, too many permissions", () => {
+  const c = LIMITED.contract!;
+  for (const bad of [{ ...c, extra: 1 }, { ...c, limits: { memoryMb: 1 } }, { ...c, limits: { gpus: 2 } }, { ...c, limits: { cpus: 1.5 } }, { ...c, permissions: Array.from({ length: 201 }, () => "tool.x") }, { ...c, bestEffort: "yes" }, { ...c, digest: 7 }, { ...c, requires: "limits" }]) {
+    assert.throws(() => checkContract({ ...LIMITED, contract: bad as never }), /order\.contract/, JSON.stringify(bad).slice(0, 80));
+  }
+  assert.throws(() => checkContract(ORDER), /must be an object/);
+});
+
+test("a worker refuses what it cannot honour, and an order without a contract; best effort lets a partial limit through", () => {
+  assert.deepEqual(contractProblems(LIMITED, FULL_ABILITIES, NOW), []);
+  assert.deepEqual(contractProblems(ORDER, FULL_ABILITIES, NOW), ["the order carries no dispatch contract"]);
+  assert.match(contractProblems(LIMITED, { ...FULL_ABILITIES, formats: [2] }, NOW)[0]!, /format 1/);
+  assert.match(contractProblems(LIMITED, { ...FULL_ABILITIES, features: ["wall-time"] }, NOW).join(), /cannot enforce limits/);
+  assert.match(contractProblems(LIMITED, { ...FULL_ABILITIES, features: ["limits"] }, NOW).join(), /cannot enforce wall-time/);
+  const partial: WorkerAbilities = { ...FULL_ABILITIES, enforces: { ...FULL_ABILITIES.enforces, memoryMb: "partial", processes: "none" } };
+  const why = contractProblems(LIMITED, partial, NOW).join("; ");
+  assert.match(why, /memoryMb \(512\).*only in part/);
+  assert.match(why, /processes \(50\).*not at all/);
+  const lenient = sealContract(ORDER, { taskContractVersion: 3, permissions: [], limits: { memoryMb: 512, processes: 50 }, bestEffort: true });
+  assert.deepEqual(contractProblems(lenient, partial, NOW), []);
+  assert.match(contractProblems(LIMITED, FULL_ABILITIES, "2031-06-01T00:00:00.000Z").join(), /expired/);
+  assert.match(contractProblems({ ...LIMITED, route: "other/model" }, FULL_ABILITIES, NOW).join(), /digest/, "an order altered after sealing");
+});
+
+const expectedShort = "the limit memoryMb is enforced only in part and best effort is not allowed";
+
+for (const backend of backends) {
+  const suite = remoteSuite(backend);
+
+  suite("the dispatcher's order carries a sealed contract, and no tool call is decided until the worker confirms it for this placement", async (c) => {
+    const r1 = await c.host("r1");
+    const { attemptId, order, attempt, placement } = await c.started(r1, "Order seeds", { unconfirmed: true });
+    assert.equal(checkContract(order).digest, order.contract!.digest);
+    assert.equal(order.contract!.format, 1);
+    assert.deepEqual(order.contract!.requires, ["wall-time"].filter(() => order.expiresAt !== undefined));
+    // Before the confirmation: nothing is judged, recorded or run, the lease still counts.
+    await wireRefuses("invalid_transition", () => attempt.begin(READ("c1")), 409, (e) => assert.match(e.message, /confirm/));
+    await wireRefuses("invalid_transition", () => attempt.call(READ("c1"), local("x")), 409);
+    assert.deepEqual(await c.ops(attemptId), []);
+    // Another digest is not a confirmation, and neither is a confirmation of an older placement.
+    await wireRefuses("fenced", () => r1.client.send("POST", `/worker/attempts/${attemptId}/launched`, { body: { placement, digest: "0".repeat(64), enforcement: [] }, session: true }), 409);
+    await wireRefuses("fenced", () => r1.client.send("POST", `/worker/attempts/${attemptId}/launched`, { body: { placement: placement + 1, digest: order.contract!.digest, enforcement: [] }, session: true }), 409);
+    await wireRefuses("invalid_transition", () => attempt.begin(READ("c1")), 409);
+    assert.deepEqual(await attempt.honorContract(order, FULL_ABILITIES, c.clock.now()), { ok: true });
+    assert.equal((await attempt.call(READ("c1"), local("ok"))).state, "confirmed");
+    // The same confirmation again is the same answer; another set of figures is not.
+    assert.deepEqual(await attempt.honorContract(order, FULL_ABILITIES, c.clock.now()), { ok: true });
+    const stored = (await c.remote.placement(c.owner, attemptId))!;
+    assert.equal(stored.contract!.launched!.sessionId, stored.sessionId);
+    assert.equal((await c.ops(attemptId)).length, 1);
+  });
+
+  suite("a worker that cannot honour the contract refuses the order: the run ends failed with the reasons, the attempt is not started again, nothing ran", async (c) => {
+    const r1 = await c.host("r1");
+    r1.worker.seal = (o) => sealContract(o, { taskContractVersion: 1, permissions: [], limits: { memoryMb: 512, diskMb: 100 }, bestEffort: false });
+    const { attemptId, order, attempt } = await c.started(r1, "Order seeds", { unconfirmed: true });
+    assert.deepEqual(order.contract!.limits, { memoryMb: 512, diskMb: 100 });
+    const weak: WorkerAbilities = { ...FULL_ABILITIES, enforces: { ...FULL_ABILITIES.enforces, diskMb: "none" } };
+    const answer = await attempt.honorContract(order, weak, c.clock.now());
+    assert.equal(answer.ok, false);
+    assert.match((answer as unknown as { reasons: string[] }).reasons.join(), /diskMb \(100\).*not at all/);
+    await c.current.idle();
+    const dispatch = (await c.current.get(c.owner, attemptId))!;
+    assert.equal(dispatch.state, "finished");
+    assert.equal(dispatch.outcome!.status, "failed");
+    assert.match(dispatch.outcome!.summary, /refused the dispatch contract.*diskMb/);
+    assert.deepEqual(await c.ops(attemptId), []);
+    const stored = (await c.remote.placement(c.owner, attemptId))!;
+    assert.equal(stored.state, "completed");
+    assert.equal(stored.contract!.launched, undefined);
+    assert.match(stored.contract!.refused!.join(), /diskMb/);
+    await wireRefuses("fenced", () => attempt.begin(READ("c1")), 409);
+  });
+
+  suite("the controller does not take the worker's word that a limit is held: a confirmation that is short, wrong or silent ends the run unless best effort is allowed", async (c) => {
+    const r1 = await c.host("r1");
+    r1.worker.seal = (o) => sealContract(o, { taskContractVersion: 1, permissions: [], limits: { memoryMb: 512, processes: 40 }, bestEffort: false });
+    const { attemptId, order, attempt, placement } = await c.started(r1, "Order seeds", { unconfirmed: true });
+    const post = (enforcement: unknown[]) => r1.client.send("POST", `/worker/attempts/${attemptId}/launched`, { body: { placement, digest: order.contract!.digest, enforcement: enforcement as never }, session: true });
+    // Unknown limit, bad level, duplicate entry, too many entries: malformed, nothing recorded.
+    await wireRefuses("invalid_command", () => post([{ limit: "gpus", value: 1, enforced: "full" }]), 400);
+    await wireRefuses("invalid_command", () => post([{ limit: "memoryMb", value: 512, enforced: "mostly" }]), 400);
+    await wireRefuses("invalid_command", () => post([{ limit: "memoryMb", value: 512, enforced: "full" }, { limit: "memoryMb", value: 512, enforced: "full" }]), 400);
+    await wireRefuses("invalid_transition", () => attempt.begin(READ("c1")), 409);
+    // Wrong figure, so the worker would run under another limit than the owner's: the controller ends the run itself.
+    const wrong = await post([{ limit: "memoryMb", value: 4096, enforced: "full" }, { limit: "processes", value: 40, enforced: "full" }]);
+    assert.equal((wrong.body as { confirmed: boolean }).confirmed, false);
+    await c.current.idle();
+    const dispatch = (await c.current.get(c.owner, attemptId))!;
+    assert.equal(dispatch.outcome!.status, "failed");
+    assert.match(dispatch.outcome!.summary, /memoryMb was confirmed at 4096/);
+    await wireRefuses("fenced", () => attempt.begin(READ("c1")), 409);
+  });
+
+  suite("a short confirmation is accepted when the owner allowed best effort, and a silent one never is", async (c) => {
+    const r1 = await c.host("r1");
+    // Without best effort a partial limit is not accepted, whatever the worker meant to do about it.
+    r1.worker.seal = (o) => sealContract(o, { taskContractVersion: 1, permissions: [], limits: { memoryMb: 512 }, bestEffort: false });
+    const strict = await c.started(r1, "Strict task", { agent: "cy", unconfirmed: true });
+    const short = await r1.client.send("POST", `/worker/attempts/${strict.attemptId}/launched`, { body: { placement: strict.placement, digest: strict.order.contract!.digest, enforcement: [{ limit: "memoryMb", value: 512, enforced: "partial" }] as never }, session: true });
+    assert.deepEqual(short.body, { confirmed: false, reasons: [expectedShort] });
+    await c.current.idle();
+    assert.equal((await c.current.get(c.owner, strict.attemptId))!.outcome!.status, "failed");
+    r1.worker.seal = (o) => sealContract(o, { taskContractVersion: 1, permissions: [], limits: { memoryMb: 512, processes: 40 }, bestEffort: true });
+    const { attemptId, order, attempt, placement } = await c.started(r1, "Order seeds", { unconfirmed: true });
+    const post = (enforcement: unknown[]) => r1.client.send("POST", `/worker/attempts/${attemptId}/launched`, { body: { placement, digest: order.contract!.digest, enforcement: enforcement as never }, session: true });
+    const silent = await post([{ limit: "memoryMb", value: 512, enforced: "full" }]);
+    assert.equal((silent.body as { confirmed: boolean }).confirmed, false, "a limit the confirmation does not mention is not held");
+    const second = await c.started(r1, "Second task", { agent: "bob", unconfirmed: true });
+    const post2 = (enforcement: unknown[]) => r1.client.send("POST", `/worker/attempts/${second.attemptId}/launched`, { body: { placement: second.placement, digest: second.order.contract!.digest, enforcement: enforcement as never }, session: true });
+    const ok = await post2([{ limit: "memoryMb", value: 512, enforced: "partial", detail: "cgroup missing" }, { limit: "processes", value: 40, enforced: "none" }]);
+    assert.equal((ok.body as { confirmed: boolean }).confirmed, true);
+    assert.equal((await second.attempt.call(READ("c1"), local("ok"))).state, "confirmed");
+    void attempt;
+    // The confirmed figures are on the placement for the owner to see.
+    const stored = (await c.remote.placement(c.owner, second.attemptId))!;
+    assert.deepEqual(stored.contract!.launched!.enforcement.map((e) => [e.limit, e.enforced]), [["memoryMb", "partial"], ["processes", "none"]]);
+  });
+
+  suite("a move or a second placement starts over: the new holder must confirm the contract of its own placement before any call", async (c) => {
+    const r1 = await c.host("r1");
+    const r2 = await c.host("r2");
+    r1.worker.requirements = () => ({ data: "local-only", harness: "pi", isolation: ["bubblewrap"], workspaces: ["garden"] });
+    r2.worker.requirements = r1.worker.requirements;
+    const { attemptId, attempt, order: first } = await c.started(r1);
+    assert.equal((await attempt.call(READ("c1"), local("one"))).state, "confirmed");
+    await attempt.putCheckpoint(1, { turn: 1 });
+    await c.remote.relocate(c.owner, { commandId: "mv-1", attemptId, toHostId: r2.id, reason: "retired" });
+    assert.deepEqual((await c.tick()).started, [attemptId]);
+    const offer = (await r2.client.offers())[0]!;
+    assert.notEqual(offer.order.contract!.digest, "");
+    const next = r2.client.attempt(attemptId, offer.placement);
+    await next.accept();
+    assert.equal((await c.remote.placement(c.owner, attemptId))!.contract!.launched, undefined, "the old host's confirmation does not carry over");
+    await wireRefuses("invalid_transition", () => next.begin(READ("c2")), 409);
+    // A confirmation or a refusal that was delayed on the old host's side arrives after the move and is fenced.
+    await wireRefuses("fenced", () => attempt.honorContract(first, FULL_ABILITIES, c.clock.now()), 409);
+    await wireRefuses("fenced", () => attempt.honorContract(first, { ...FULL_ABILITIES, formats: [9] }, c.clock.now()), 409);
+    assert.equal((await c.remote.placement(c.owner, attemptId))!.contract!.launched, undefined);
+    assert.deepEqual(await next.honorContract(offer.order, FULL_ABILITIES, c.clock.now()), { ok: true });
+    assert.equal((await next.call(READ("c2"), local("two"))).state, "confirmed");
+  }, { policy: async () => ({ dataHosts: ["host:r1", "host:r2"] }) });
+}

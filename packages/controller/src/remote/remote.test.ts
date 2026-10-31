@@ -6,7 +6,7 @@ import { backends, stopServer } from "../domain/testing/backends.js";
 import { workGrants } from "../dispatch/testing/world.js";
 import { DomainError } from "../domain/errors.js";
 import { REMOTE_LIMITS } from "./protocol.js";
-import { READ, local, refuses, remoteSuite, wireRefuses } from "./testing/suite.js";
+import { FULL_ABILITIES, READ, local, refuses, remoteSuite, wireRefuses } from "./testing/suite.js";
 import { REMOTE_CAPS } from "./testing/world.js";
 import { RemoteWorkerHost } from "./host.js";
 
@@ -104,6 +104,7 @@ for (const backend of backends) {
     };
     const mine = r1.client.attempt(attemptId!, offer.placement, dog);
     await mine.accept();
+    await mine.honorContract(offer.order, FULL_ABILITIES, c.clock.now());
     assert.ok((await mine.heartbeat()).until);
     assert.deepEqual(log, ["sending", "renewed 4242 true"], "the renewal is stamped when it is sent");
     log.length = 0;

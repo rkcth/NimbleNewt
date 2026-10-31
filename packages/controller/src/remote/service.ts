@@ -15,6 +15,7 @@ import type { NoActor, Principal, PrincipalBody } from "../security/principals.j
 import { redactText } from "../security/redact.js";
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
 import { WORKSPACE_OPERATIONS, type WorkspaceCall } from "../workspace-ops/workspace-ops.js";
+import { checkContract, CONTRACT_LIMIT_NAMES, type ContractEnforcement, type ContractLimitName } from "./contract.js";
 import { WORKER_PROTOCOL, WAITING_FOR_OWNER, REMOTE_LIMITS, ProtocolMismatch, checkRange, negotiateProtocol, type ArtifactListing, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
 
 export const SESSION_KIND = "remote-session";
@@ -83,6 +84,8 @@ export interface PlacementBody {
   readonly inputs: readonly string[];
   readonly outputs: readonly string[];
   readonly checkpoint?: { readonly artifactId: string; readonly sequence: number; readonly digest: string; readonly at: string };
+  /** The dispatch contract sent with the order (card H12a). Until the worker has confirmed this very digest (`launched`) no tool call of the attempt is decided; a refusal ends the run. Rebuilt for every placement. */
+  readonly contract?: { readonly digest: string; readonly bestEffort: boolean; readonly limits?: JsonObject; readonly requires: readonly string[]; readonly launched?: { readonly at: string; readonly sessionId: string; readonly enforcement: readonly ContractEnforcement[] }; readonly refused?: readonly string[] };
   readonly checkpoints: number;
   readonly controlSeq: number;
   readonly control: readonly SequencedControl[];
@@ -217,6 +220,8 @@ export interface RemoteDeps {
   readonly patienceMs?: () => Promise<number | undefined>;
   /** Tells the owner an attempt waits for a decision (a Needs-you notice). Called whenever a worker is seen waiting; the notice ID makes a repeat one notice. A failure is ignored: the next poll calls again. */
   readonly notify?: (notice: ReconnectNotice) => Promise<void>;
+  /** Keeps what a remote launch came to, as for a local agent (card H12a; the owner's launch record). A failure refuses the confirmation: nothing runs unrecorded. */
+  readonly recordLaunch?: (record: { readonly attemptId: string; readonly agentId: string; readonly outcome: "started" | "refused"; readonly requested: JsonObject; readonly bestEffort: boolean; readonly enforcement: readonly { readonly limit: string; readonly value: number; readonly enforced: "full" | "partial" | "none"; readonly by?: string; readonly detail: string }[]; readonly wallTimeMs: number; readonly failed?: readonly { readonly limit: string; readonly enforced: "partial" | "none"; readonly detail: string }[]; readonly reason?: string }) => Promise<void>;
 }
 
 export interface ReconnectNotice { readonly commandId: string; readonly attemptId: string; readonly hostId: string; readonly sessionId: string; readonly detail: string }
@@ -557,6 +562,8 @@ export class RemoteWorkerService {
     const inputs = [...new Set(command.inputs ?? [])];
     if (inputs.length > REMOTE_LIMITS.artifacts) invalid("inputs", `at most ${REMOTE_LIMITS.artifacts} artifacts`);
     const requirements = checkRequirements(command.requirements);
+    const sealed = order.contract === undefined ? undefined : checkContract(order);
+    const contract: PlacementBody["contract"] = sealed === undefined ? undefined : { digest: sealed.digest, bestEffort: sealed.bestEffort, ...(sealed.limits === undefined ? {} : { limits: { ...sealed.limits } as JsonObject }), requires: [...sealed.requires] };
     // The dispatcher's own record decides whether this is the attempt's host: a placement cannot contradict it.
     const dispatch = await this.#deps.dispatch.get(by, attemptId);
     if (dispatch === undefined || dispatch.state !== "running" || dispatch.hostId !== hostId || dispatch.generation !== order.generation || dispatch.taskId !== order.taskId || dispatch.agentId !== order.agentId) {
@@ -585,15 +592,15 @@ export class RemoteWorkerService {
       }
       let next: PlacementBody;
       if (current === undefined) {
-        next = { attemptId, taskId: order.taskId, projectId: order.projectId, agentId: order.agentId, generation: order.generation, hostId, placement: 1, state: "offered", offeredAt: now, ...(order.expiresAt === undefined ? {} : { expiresAt: order.expiresAt }), requirements: placed, inputs, outputs: [], checkpoints: 0, controlSeq: 0, control: [], relocations: 0, history: [] };
+        next = { attemptId, taskId: order.taskId, projectId: order.projectId, agentId: order.agentId, generation: order.generation, hostId, placement: 1, state: "offered", offeredAt: now, ...(order.expiresAt === undefined ? {} : { expiresAt: order.expiresAt }), requirements: placed, inputs, outputs: [], checkpoints: 0, controlSeq: 0, control: [], relocations: 0, history: [], ...(contract === undefined ? {} : { contract }) };
       } else {
         const b = current.body;
         if (b.hostId !== hostId) throw new DomainError("invalid_transition", `attempt ${attemptId} is placed on ${b.hostId}; it moves to ${hostId} only through relocate`, { field: "hostId" });
         if (b.generation !== order.generation) throw new DomainError("fenced", `the placement of attempt ${attemptId} belongs to generation ${b.generation}`, { field: "order" });
         // After a relocation the offer completes the move at the number already fenced; any other second placement is a new run and fences the earlier one.
         const number = b.state === "relocating" ? b.placement : b.placement + 1;
-        const { sessionId: _s, acceptedAt: _a, result: _r, ...rest } = b; void _s; void _a; void _r;
-        next = { ...rest, placement: number, state: "offered", offeredAt: now, ...(order.expiresAt === undefined ? {} : { expiresAt: order.expiresAt }), requirements: placed, inputs: [...new Set([...b.inputs, ...inputs])], control: [], history: b.state === "relocating" ? b.history : pushHistory(b.history, { hostId: b.hostId, placement: b.placement, at: now, reason: "placed again" }) };
+        const { sessionId: _s, acceptedAt: _a, result: _r, contract: _c, ...rest } = b; void _s; void _a; void _r; void _c;
+        next = { ...rest, ...(contract === undefined ? {} : { contract }), placement: number, state: "offered", offeredAt: now, ...(order.expiresAt === undefined ? {} : { expiresAt: order.expiresAt }), requirements: placed, inputs: [...new Set([...b.inputs, ...inputs])], control: [], history: b.state === "relocating" ? b.history : pushHistory(b.history, { hostId: b.hostId, placement: b.placement, at: now, reason: "placed again" }) };
       }
       const storeChanges: Change[] = [];
       const holder: StoreBody = { agentId: order.agentId, ownerHostId: hostId, since: storeBody?.since ?? now, liveAttempt: attemptId, moves: storeBody?.moves ?? 0 };
@@ -1093,7 +1100,10 @@ export class RemoteWorkerService {
   /** The split form of the dispatch contract: the controller decides and records the call; the worker runs it. */
   async begin(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, request: ToolCallRequest): Promise<Awaited<ReturnType<ToolGateway["begin"]>>> {
     if (request === null || typeof request !== "object" || Array.isArray(request)) invalid("request", "must be a tool call request");
-    return (await this.#gateway(host, sessionId, attemptId, placement)).begin(request);
+    const b = await this.#running(host, sessionId, attemptId, placement);
+    // A worker that has not confirmed the dispatch contract of this placement decides nothing: no call is judged, recorded or run for it (card H12a).
+    if (b.contract !== undefined && b.contract.launched === undefined) throw new DomainError("invalid_transition", `attempt ${b.attemptId}: the worker has not confirmed the dispatch contract; confirm it (launched) or refuse the order before any tool call`, { field: "contract" });
+    return (await this.#deps.dispatch.gateway(b.attemptId)).begin(request);
   }
 
   async report(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, operationId: string, outcome: Parameters<ToolGateway["report"]>[1]): Promise<ToolResult> {
@@ -1113,6 +1123,79 @@ export class RemoteWorkerService {
 
   async acknowledgeDecisions(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown): Promise<void> {
     await (await this.#gateway(host, sessionId, attemptId, placement)).acknowledgeDecisions();
+  }
+
+  /**
+   * The worker confirms the dispatch contract of its placement and says how far it enforces each limit (card H12a). Only the digest this placement was given is accepted; the figures must cover every limit the
+   * contract names, and a limit not enforced in full is accepted only when the owner allowed best effort (otherwise the controller itself ends the run, whatever the worker meant to do). The launch is
+   * recorded for the owner before the confirmation counts, so nothing runs unrecorded. The same confirmation again is the same answer.
+   */
+  async launched(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, command: { readonly digest: unknown; readonly enforcement: unknown }): Promise<{ readonly confirmed: boolean; readonly reasons?: readonly string[] }> {
+    const b = await this.#running(host, sessionId, attemptId, placement);
+    const c = b.contract;
+    if (c === undefined) throw new DomainError("invalid_command", `attempt ${b.attemptId} was placed with no dispatch contract`, { field: "contract" });
+    if (typeof command.digest !== "string" || command.digest !== c.digest) throw new DomainError("fenced", `the contract digest is not the one placement ${b.placement} of attempt ${b.attemptId} was given`, { field: "digest" });
+    const reported = checkEnforcement(command.enforcement);
+    if (c.launched !== undefined) {
+      if (canonicalJson(c.launched.enforcement as unknown as JsonObject) === canonicalJson(reported as unknown as JsonObject)) return { confirmed: true };
+      throw new DomainError("fenced", `attempt ${b.attemptId} already confirmed its contract with other figures`);
+    }
+    const limits = (c.limits ?? {}) as Record<string, number>;
+    const reasons: string[] = [];
+    for (const name of Object.keys(limits)) {
+      const got = reported.find((e) => e.limit === name);
+      if (got === undefined) reasons.push(`the confirmation says nothing of the limit ${name}`);
+      else if (got.value !== limits[name]) reasons.push(`the limit ${name} was confirmed at ${got.value}, the contract says ${String(limits[name])}`);
+      else if (got.enforced !== "full" && !c.bestEffort) reasons.push(`the limit ${name} is enforced ${got.enforced === "none" ? "not at all" : "only in part"} and best effort is not allowed`);
+    }
+    for (const e of reported) if (!Object.hasOwn(limits, e.limit)) reasons.push(`the confirmation names the limit ${e.limit}, which the contract does not set`);
+    const wallTimeMs = limits["wallTimeMs"] ?? 0;
+    const record = (outcome: "started" | "refused", why?: string): Promise<void> | undefined => this.#deps.recordLaunch?.({
+      attemptId: b.attemptId, agentId: b.agentId, outcome, requested: limits as JsonObject, bestEffort: c.bestEffort, enforcement: reported.map((e) => ({ limit: e.limit, value: e.value, enforced: e.enforced, by: host.id, detail: e.detail ?? "" })), wallTimeMs,
+      ...(outcome === "refused" ? { failed: reported.filter((e) => e.enforced !== "full").map((e) => ({ limit: e.limit, enforced: e.enforced === "partial" ? "partial" as const : "none" as const, detail: e.detail ?? "" })), reason: why ?? "" } : {}),
+    });
+    if (reasons.length > 0) {
+      await record("refused", reasons.join("; ").slice(0, 300));
+      await this.#end(b, host, reasons);
+      return { confirmed: false, reasons };
+    }
+    await record("started");
+    await this.#changePlacement(b.attemptId, async (current) => {
+      const x = current?.body;
+      if (x === undefined || x.hostId !== host.id || x.placement !== b.placement || x.state !== "accepted" || x.contract?.digest !== c.digest) throw new DomainError("fenced", `the placement of attempt ${b.attemptId} changed`);
+      if (x.contract.launched !== undefined) return undefined;
+      return { next: { ...x, contract: { ...x.contract, launched: { at: this.#runner.now(), sessionId: x.sessionId ?? "", enforcement: reported } } } };
+    }, "launched", { actor: host.id });
+    return { confirmed: true };
+  }
+
+  /** The worker cannot honour the contract it was given: the order is refused with its reasons, the run ends failed and the dispatcher ends the attempt without starting another (card H12a). */
+  async refuseOrder(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, command: { readonly digest: unknown; readonly reasons: unknown }): Promise<void> {
+    const b = await this.#running(host, sessionId, attemptId, placement, ["accepted", "completed"]);
+    if (b.contract === undefined) throw new DomainError("invalid_command", `attempt ${b.attemptId} was placed with no dispatch contract`, { field: "contract" });
+    if (typeof command.digest !== "string" || command.digest !== b.contract.digest) throw new DomainError("fenced", `the contract digest is not the one placement ${b.placement} of attempt ${b.attemptId} was given`, { field: "digest" });
+    const given: unknown = command.reasons;
+    if (!Array.isArray(given) || given.length === 0 || given.length > 10) return invalid("reasons", "must be a short list of reasons");
+    const reasons = (given as unknown[]).map((r, i) => redactText(text(r, `reasons[${i}]`, { min: 1, max: 300 })).slice(0, 300));
+    // A confirmed contract cannot be refused afterwards: the worker already ran under it.
+    if (b.contract.launched !== undefined) throw new DomainError("invalid_transition", `attempt ${b.attemptId} already confirmed its contract`, { field: "contract" });
+    if (b.state === "completed") return;
+    // The owner's launch record says the order was refused, and why.
+    await this.#deps.recordLaunch?.({ attemptId: b.attemptId, agentId: b.agentId, outcome: "refused", requested: (b.contract.limits ?? {}) as JsonObject, bestEffort: b.contract.bestEffort, enforcement: [], wallTimeMs: Number((b.contract.limits as Record<string, unknown> | undefined)?.["wallTimeMs"] ?? 0), reason: reasons.join("; ").slice(0, 300) });
+    await this.#end(b, host, reasons);
+  }
+
+  /** Ends the run as failed because of the contract. Idempotent per placement. */
+  async #end(b: PlacementBody, host: Principal, reasons: readonly string[]): Promise<void> {
+    const result: StoredResult = { status: "failed", error: `the worker refused the dispatch contract: ${reasons.join("; ")}`.slice(0, REMOTE_LIMITS.text) };
+    const done = await this.#changePlacement(b.attemptId, async (current) => {
+      const x = current?.body;
+      if (x === undefined || x.hostId !== host.id || x.placement !== b.placement) throw new DomainError("fenced", `the placement of attempt ${b.attemptId} changed`);
+      if (x.state === "completed") return undefined;
+      if (x.state !== "accepted") throw new DomainError("fenced", `the placement of attempt ${b.attemptId} is ${x.state}`);
+      return { next: { ...x, state: "completed", result, ...(x.contract === undefined ? {} : { contract: { ...x.contract, refused: reasons } }) }, extra: await this.#releaseStore(x) };
+    }, "refuse", { actor: host.id });
+    this.#wake(b.attemptId, done.body.placement, "", done.body.result);
   }
 
   /** The turn is over: the result is recorded on the placement (the checkpoint, if any, as an artifact) and whoever waits for it (`waitForResult`) is given it. */
@@ -1455,6 +1538,23 @@ function checkControl(value: unknown): ControlMessage {
     }
     default: return invalid("kind", "must be tell, restart, checkpoint or stop");
   }
+}
+
+function checkEnforcement(value: unknown): ContractEnforcement[] {
+  if (!Array.isArray(value) || value.length > CONTRACT_LIMIT_NAMES.length) return invalid("enforcement", `must be a list of at most ${CONTRACT_LIMIT_NAMES.length} entries`);
+  const seen = new Set<string>();
+  return value.map((raw, i) => {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return invalid(`enforcement[${i}]`, "must be an object");
+    const e = raw as Record<string, unknown>;
+    onlyKnown(e, ["limit", "value", "enforced", "detail"]);
+    if (typeof e["limit"] !== "string" || !(CONTRACT_LIMIT_NAMES as readonly string[]).includes(e["limit"])) return invalid(`enforcement[${i}].limit`, "must be a limit name");
+    if (seen.has(e["limit"])) return invalid(`enforcement[${i}].limit`, "is named twice");
+    seen.add(e["limit"]);
+    if (typeof e["value"] !== "number" || !Number.isSafeInteger(e["value"])) return invalid(`enforcement[${i}].value`, "must be a whole number");
+    if (e["enforced"] !== "full" && e["enforced"] !== "partial" && e["enforced"] !== "none") return invalid(`enforcement[${i}].enforced`, "must be full, partial or none");
+    const detail = e["detail"] === undefined ? undefined : redactText(text(e["detail"], `enforcement[${i}].detail`, { min: 0, max: 300 })).slice(0, 300);
+    return { limit: e["limit"] as ContractLimitName, value: e["value"], enforced: e["enforced"], ...(detail === undefined ? {} : { detail }) };
+  });
 }
 
 function checkResult(value: unknown): StoredResult {

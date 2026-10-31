@@ -471,6 +471,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       remote = RemoteWorkerService.withEpoch(storage, epoch, {
         principal, hosts, artifacts,
         dispatch: { gateway: (id) => d().gateway(id), get: (by, id) => d().get(by, id), relocate: (by, id, m) => d().relocate(by, id, m), quiesce: (by, id, r, o) => d().quiesce(by, id, r, o), release: (by, id) => d().release(by, id) },
+        ...(i.workerPolicy === undefined ? {} : { recordLaunch: async (r: Parameters<NonNullable<RemoteDeps["recordLaunch"]>>[0]) => { await i.workerPolicy!.recordLaunch(r as never); } }),
         ...(i.options.remote.relocationPolicy === undefined ? {} : { relocationPolicy: i.options.remote.relocationPolicy }),
         ...(i.options.remote.placementPolicy === undefined ? {} : { placementPolicy: i.options.remote.placementPolicy }),
         ...(i.options.remote.reaccept === undefined ? {} : { reaccept: i.options.remote.reaccept }),
@@ -478,7 +479,9 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         // A reconnected worker that waits for the owner is a Needs-you notice (the notice kind is "maintenance"; the owner may change its level like any kind's).
         notify: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "needs-you", ref: { kind: "reconnect", id: n.attemptId }, detail: n.detail }); },
       }, { ...ro, ...(i.options.remote.protocol === undefined ? {} : { protocol: i.options.remote.protocol }), ...(i.options.remote.fileBytes === undefined ? {} : { fileBytes: i.options.remote.fileBytes }), ...(i.options.remote.settleMs === undefined ? {} : { settleMs: i.options.remote.settleMs }) });
-      for (const h of i.options.remote.hosts) workers.push(new RemoteWorkerHost(h.hostId, remote, principal, h));
+      // The owner's limits and best-effort setting reach a remote worker in the dispatch contract, read afresh at every start (card H12a).
+      const ownerPolicy = { limits: async () => (i.workerLimits === undefined ? checkLocalWorkerLimits(i.options.local?.limits) : i.workerLimits()), bestEffort: async () => (i.workerPolicy === undefined ? false : i.workerPolicy.bestEffortAllowed()) };
+      for (const h of i.options.remote.hosts) workers.push(new RemoteWorkerHost(h.hostId, remote, principal, { ...h, ownerPolicy }));
       if (i.quietHosts !== undefined) {
         const r = remote;
         quiet.service = QuietHostService.withEpoch(storage, epoch, {

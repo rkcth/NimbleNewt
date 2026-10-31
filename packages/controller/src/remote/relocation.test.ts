@@ -7,7 +7,7 @@ import { commitOperation } from "../storage/commit.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import type { RelocationPolicyFor } from "./service.js";
 import { RemoteWorkerHandle } from "./host.js";
-import { READ, local, refuses, remoteSuite, wireRefuses, type Ctx } from "./testing/suite.js";
+import { FULL_ABILITIES, READ, local, refuses, remoteSuite, wireRefuses, type Ctx } from "./testing/suite.js";
 import { REMOTE_CAPS, type RemoteHost } from "./testing/world.js";
 
 after(stopServer);
@@ -95,7 +95,7 @@ for (const backend of backends) {
     assert.match(offer.order.resumeNote!, /moved from host:r1 to host:r2: r1 is being retired/);
     assert.notEqual(offer.order.resumeFrom, undefined);
     const next = r2.client.attempt(attemptId, offer.placement);
-    await next.accept();
+    await next.accept(); await next.honorContract(offer.order, FULL_ABILITIES, c.clock.now());
     // It finds the artifacts it needs and they are the bytes that were published.
     const listing = await next.artifacts();
     assert.deepEqual(listing.map((a) => a.id).sort(), [input, out, latest.artifactId].sort());
@@ -350,7 +350,7 @@ for (const backend of backends) {
     assert.deepEqual((await c.tick()).started, [attemptId]);
     const offer = (await r2.client.offers())[0]!;
     const next = r2.client.attempt(attemptId, offer.placement);
-    await next.accept();
+    await next.accept(); await next.honorContract(offer.order, FULL_ABILITIES, c.clock.now());
     assert.equal((await next.call(READ("on-r2"), local("working"))).state, "confirmed");
     // The target is working: the same command asked again is answered and does nothing; a new one says the attempt is there.
     const again = await c.remote.relocate(c.owner, MOVE(c, attemptId, r2, "half-1"));
@@ -394,7 +394,7 @@ for (const backend of backends) {
       await c.tick();
       const offer = (await to.client.offers())[0]!;
       const a = to.client.attempt(attemptId, offer.placement);
-      await a.accept();
+      await a.accept(); await a.honorContract(offer.order, FULL_ABILITIES, c.clock.now());
       return a;
     };
     await next(r2, "move-a");

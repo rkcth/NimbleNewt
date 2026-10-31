@@ -35,7 +35,7 @@ test("the worker client holds a URL and a credential and nothing else: it import
   const source = readFileSync(fileURLToPath(new URL("../../src/remote/client.ts", import.meta.url)), "utf8");
   const imports = [...source.matchAll(/^import (?:type )?[^;]*? fr[o]m "([^"]+)";/gm)].map((m) => m[1]);
   // Node's network modules, the protocol constants and the dispatch contract's types are everything it reaches.
-  assert.deepEqual(imports.filter((i) => !i!.startsWith("node:http") && !i!.startsWith("node:https") && i !== "node:crypto").sort(), ["../dispatch/ports.js", "./protocol.js"]);
+  assert.deepEqual(imports.filter((i) => !i!.startsWith("node:http") && !i!.startsWith("node:https") && i !== "node:crypto").sort(), ["../dispatch/ports.js", "./contract-wire.js", "./protocol.js"]);
   assert.doesNotMatch(source, /\b(?:readFile|writeFile|createReadStream|openSync|sqlite|postgres|Storage)\b/);
   const client = new RemoteWorkerClient({ url: "http://127.0.0.1:1", token: "t".repeat(30), workerVersion: "w" });
   assert.deepEqual(Object.keys(client), []);

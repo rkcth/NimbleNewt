@@ -18,6 +18,30 @@ export interface RecipeSummary {
   readonly limits?: { readonly cpus?: number; readonly memoryMb?: number; readonly diskMb?: number; readonly processes?: number };
 }
 
+/** The limits the owner set for an agent's worker (card H12k); each is a whole number inside the bounds of `LOCAL_WORKER_LIMIT_BOUNDS`. */
+export interface ContractLimits { readonly cpus?: number; readonly memoryMb?: number; readonly diskMb?: number; readonly processes?: number; readonly wallTimeMs?: number }
+
+/**
+ * The dispatch contract of one attempt as it travels to a worker (card H12a): the task contract's ceiling and budget, the owner's limits and best-effort setting as they stood at the launch, and what the worker must itself
+ * enforce. The digest binds it to the order (attempt, generation, route, recipe, expiry), so a worker confirms exactly what it was given and the controller can tell. Plain JSON.
+ */
+export interface DispatchContract {
+  /** The wire format of this object; a worker that does not speak it refuses the order. */
+  readonly format: number;
+  /** The version of the task's contract this was read from. */
+  readonly taskContractVersion: number;
+  /** The task contract's permission ceiling (`tool.<name>`, `class.<class>`); the controller judges every call against it, the worker only shows it to the agent. */
+  readonly permissions: readonly string[];
+  readonly budget?: { readonly maxMinutes?: number; readonly maxAttempts?: number; readonly maxCost?: number; readonly held?: { readonly costMicros?: number; readonly computeMs?: number } };
+  /** The owner's limits for this launch (absent: none were set). A worker that cannot hold them in full refuses, unless `bestEffort`. */
+  readonly limits?: ContractLimits;
+  readonly bestEffort: boolean;
+  /** What the worker must enforce itself (`limits`, `wall-time`); a worker that does not know a name in it refuses the order. */
+  readonly requires: readonly string[];
+  /** SHA-256 over the contract and the order's identity, recipe and expiry (`contractDigest`). */
+  readonly digest: string;
+}
+
 export interface WorkOrder {
   readonly attemptId: string;
   readonly taskId: string;
@@ -39,6 +63,8 @@ export interface WorkOrder {
   readonly resumeFrom?: JsonObject;
   /** Set when the attempt resumes after calls waited for an approval: what to tell the agent (which calls were approved, denied or ran out). */
   readonly resumeNote?: string;
+  /** The dispatch contract (card H12a). A remote worker confirms it before its first tool call; a local host applies the same figures through its own builder. */
+  readonly contract?: DispatchContract;
 }
 
 export interface WorkerTurnResult {

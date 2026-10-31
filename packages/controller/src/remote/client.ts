@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
-import type { ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, TurnUsage, WorkerTurnResult } from "../dispatch/ports.js";
+import type { ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, TurnUsage, WorkOrder, WorkerTurnResult } from "../dispatch/ports.js";
+import { contractProblems, enforcementFor, type WorkerAbilities } from "./contract-wire.js";
 import { DIGEST_HEADER, PROTOCOL_HEADER, SESSION_HEADER, WORKER_PROTOCOL, WAITING_FOR_OWNER, type ArtifactListing, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
 
 type Json = null | boolean | number | string | readonly Json[] | { readonly [key: string]: Json };
@@ -235,6 +236,25 @@ export class RemoteAttempt implements ToolGateway {
     } catch (error) {
       return await this.report(begun.operationId, { state: "failed", error: error instanceof Error ? error.message.slice(0, 300) : "the call failed" });
     }
+  }
+
+  /**
+   * Checks the order's dispatch contract against what this worker can hold and either confirms it to the controller with the figures it really enforces (`ok`) or refuses the order with the reasons (`ok: false`).
+   * Call it before any tool call: the controller decides no call until the confirmation of this placement is on record. A confirmation the controller itself finds short (a limit not enforced in full without best
+   * effort) comes back as `ok: false` too.
+   */
+  async honorContract(order: WorkOrder, abilities: WorkerAbilities, now: string = new Date().toISOString(), key?: string): Promise<{ readonly ok: true } | { readonly ok: false; readonly reasons: readonly string[] }> {
+    const problems = contractProblems(order, abilities, now);
+    const digest = order.contract?.digest;
+    if (problems.length > 0 || order.contract === undefined || digest === undefined) {
+      const reasons = problems.map((p) => p.slice(0, 300)).slice(0, 10);
+      // An order with no contract has no digest to name: the run is ended with a failed result instead.
+      if (digest !== undefined) await this.#post("refuse", { digest, reasons: reasons as unknown as Json });
+      else await this.complete({ status: "failed", error: `the worker refused the order: ${reasons.join("; ")}` });
+      return { ok: false, reasons: problems };
+    }
+    const answer = await this.#post("launched", { digest, enforcement: enforcementFor(order.contract, abilities) as unknown as Json }, key) as { confirmed: boolean; reasons?: string[] };
+    return answer.confirmed ? { ok: true } : { ok: false, reasons: answer.reasons ?? ["the controller did not accept the confirmation"] };
   }
 
   /** The turn is over. */

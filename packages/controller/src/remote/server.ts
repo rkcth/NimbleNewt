@@ -272,7 +272,7 @@ export class WorkerTransport {
       allowed("POST");
       const body = await this.#body(req);
       const p = placementOf(body);
-      this.#only(body, { accept: ["placement"], begin: ["placement", "request"], report: ["placement", "operationId", "outcome"], usage: ["placement", "usage"], heartbeat: ["placement"], acknowledge: ["placement"], complete: ["placement", "result"] }[c] ?? ["placement"]);
+      this.#only(body, { accept: ["placement"], begin: ["placement", "request"], report: ["placement", "operationId", "outcome"], usage: ["placement", "usage"], heartbeat: ["placement"], acknowledge: ["placement"], complete: ["placement", "result"], launched: ["placement", "digest", "enforcement"], refuse: ["placement", "digest", "reasons"] }[c] ?? ["placement"]);
       switch (c) {
         case "accept": return { status: 200, body: await svc.accept(host, session, attempt, p) };
         case "begin": return { status: 200, body: await svc.begin(host, session, attempt, p, body["request"] as never) };
@@ -281,6 +281,8 @@ export class WorkerTransport {
         case "heartbeat": return { status: 200, body: await svc.attemptHeartbeat(host, session, attempt, p) };
         case "acknowledge": await svc.acknowledgeDecisions(host, session, attempt, p); return { status: 204 };
         case "complete": return { status: 200, body: await svc.complete(host, session, attempt, p, { commandId: this.#key(req), result: body["result"] as never }) };
+        case "launched": return { status: 200, body: await svc.launched(host, session, attempt, p, { digest: body["digest"], enforcement: body["enforcement"] ?? [] }) };
+        case "refuse": await svc.refuseOrder(host, session, attempt, p, { digest: body["digest"], reasons: body["reasons"] }); return { status: 204 };
         default: throw new HttpError(404, "not_found", "no such route");
       }
     }

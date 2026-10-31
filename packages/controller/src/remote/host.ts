@@ -1,7 +1,8 @@
 import { DomainError } from "../domain/errors.js";
 import type { JsonObject } from "../storage/types.js";
 import type { Principal } from "../security/index.js";
-import type { HostProbe, RecipeSummary, ToolGateway, WorkOrder, WorkerHandle, WorkerHost, WorkerTurnResult } from "../dispatch/ports.js";
+import { sealContract } from "./contract.js";
+import type { ContractLimits, HostProbe, RecipeSummary, ToolGateway, WorkOrder, WorkerHandle, WorkerHost, WorkerTurnResult } from "../dispatch/ports.js";
 import type { WorkspacePort } from "../workspace-ops/workspace-ops.js";
 import type { RemoteWorkerService, Requirements } from "./service.js";
 
@@ -18,6 +19,11 @@ export interface RemoteWorkerHostOptions {
   readonly pollMs?: number;
   /** How long a workspace request (integration, refresh, quarantine) waits for the host's answer, in ms. Default 300 000 (five minutes); a host that is slower leaves the request recorded as failed, with the operation possibly done there. */
   readonly workspaceWaitMs?: number;
+  /**
+   * The owner's limits and best-effort setting (card H12k), read at every start and carried to the worker in the dispatch contract (card H12a). A read that fails refuses the start: nothing is sent
+   * unlimited. Absent: the order goes with the task contract only (the composed controller always gives it).
+   */
+  readonly ownerPolicy?: { readonly limits: () => Promise<ContractLimits | undefined>; readonly bestEffort: () => Promise<boolean> };
 }
 
 /**
@@ -27,10 +33,12 @@ export interface RemoteWorkerHostOptions {
  */
 export class RemoteWorkerHost implements WorkerHost {
   readonly resources: { readonly cpus: number; readonly memoryMb: number };
+  readonly ownerPolicy: boolean;
   /** The same request the local host answers, carried over the authenticated transport to the host (card H12m): the answer has the same typed outcomes. */
   readonly workspace: WorkspacePort;
   constructor(readonly hostId: string, private readonly remote: RemoteWorkerService, private readonly by: Principal, private readonly options: RemoteWorkerHostOptions) {
     this.resources = options.resources;
+    this.ownerPolicy = options.ownerPolicy !== undefined;
     this.workspace = { run: (call) => this.remote.askWorkspace(this.by, this.hostId, call, { waitMs: this.options.workspaceWaitMs ?? 300_000 }) };
   }
 
@@ -42,7 +50,18 @@ export class RemoteWorkerHost implements WorkerHost {
 
   async release(attemptId: string, reason: string): Promise<void> { await this.remote.end(this.by, attemptId, reason); }
 
-  async start(order: WorkOrder): Promise<WorkerHandle> {
+  /** The order with the owner's limits and best-effort setting in its contract, sealed again. */
+  async #carry(order: WorkOrder): Promise<WorkOrder> {
+    const policy = this.options.ownerPolicy;
+    if (policy === undefined) return order;
+    const limits = await policy.limits();
+    const bestEffort = await policy.bestEffort();
+    const c = order.contract;
+    return sealContract(order, { taskContractVersion: c?.taskContractVersion ?? 0, permissions: c?.permissions ?? [], ...(c?.budget === undefined ? {} : { budget: c.budget }), ...(limits === undefined ? {} : { limits }), bestEffort });
+  }
+
+  async start(given: WorkOrder): Promise<WorkerHandle> {
+    const order = await this.#carry(given);
     const placed = await this.remote.place(this.by, { hostId: this.hostId, order, requirements: this.options.requirements(order), inputs: this.options.inputs?.(order) ?? [] });
     return new RemoteWorkerHandle(this.remote, this.by, order.attemptId, placed.placement, this.options);
   }
