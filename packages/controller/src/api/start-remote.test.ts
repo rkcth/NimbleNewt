@@ -68,7 +68,7 @@ test("a step that fails after the local host was built closes that host again, w
     // The artifact folder cannot be opened (its parent is a file): the local host built just before is closed.
     writeFileSync(join(d, "afile"), "x");
     let closed = 0;
-    const local = { window: () => 8192, close: async () => { closed++; }, build: () => ({ hostId: "host:w1", resources: { cpus: 1, memoryMb: 1024 } }) as never };
+    const local = { acceptUnenforcedLimits: true, window: () => 8192, close: async () => { closed++; }, build: () => ({ hostId: "host:w1", resources: { cpus: 1, memoryMb: 1024 } }) as never };
     const c = await startController({
       storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
       dispatch: { timer: new ManualTimer(), manual: true, local, remote: { blobDirectory: join(d, "afile", "blobs"), hosts: [] } },
@@ -139,7 +139,7 @@ test("a failure after the listener opened (while the driver or the MCP service i
   const refused = (port: number): Promise<boolean> => new Promise((ok) => { const s = net.connect(port, "127.0.0.1"); s.once("connect", () => { s.destroy(); ok(false); }); s.once("error", () => ok(true)); });
   try {
     let closed = 0;
-    const local = { window: () => 8192, close: async () => { closed++; }, build: () => ({ hostId: "host:w1", resources: { cpus: 1, memoryMb: 1024 } }) as never };
+    const local = { acceptUnenforcedLimits: true, window: () => 8192, close: async () => { closed++; }, build: () => ({ hostId: "host:w1", resources: { cpus: 1, memoryMb: 1024 } }) as never };
     // The failure is injected where the listener is already open: the servers that listen are watched, and at the moment of the failure one must be listening on the port.
     const http = await import("node:http");
     const servers: import("node:http").Server[] = [];
