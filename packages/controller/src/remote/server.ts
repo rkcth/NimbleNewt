@@ -7,6 +7,7 @@ import { redactText } from "../security/redact.js";
 import type { JsonObject } from "../storage/types.js";
 import { DIGEST_HEADER, PROTOCOL_HEADER, REMOTE_LIMITS, ProtocolMismatch, SESSION_HEADER } from "./protocol.js";
 import type { RemoteWorkerService } from "./service.js";
+import type { ReleaseService } from "../release/release.js";
 
 export interface WorkerTransportLimits {
   /** The largest JSON request body, and the largest artifact publication, in bytes. */
@@ -31,6 +32,8 @@ export const DEFAULT_WORKER_TRANSPORT_LIMITS: WorkerTransportLimits = { bodyByte
 export interface WorkerTransportOptions {
   readonly remote: RemoteWorkerService;
   readonly principals: PrincipalService;
+  /** Release-test jobs for the hosts the owner authorized (card X09b). Absent: the routes answer not found. */
+  readonly release?: Pick<ReleaseService, "jobsFor" | "pickUp" | "reportFromHost">;
   /** The address to bind. Default 127.0.0.1: local only. */
   readonly host?: string;
   /** Default 0: any free port. */
@@ -246,6 +249,7 @@ export class WorkerTransport {
       const waitMs = wait === null ? 0 : /^\d{1,6}$/.test(wait) ? Number(wait) : -1;
       return { status: 200, body: { offers: await svc.offers(host, await this.#session(req, host), waitMs) } };
     }
+    if (a === "release" && b === "jobs") return this.#releaseRoute(req, host, parts, url, method);
     if (a !== "attempts" || b === undefined || c === undefined) throw new HttpError(404, "not_found", "no such route");
     const session = await this.#session(req, host);
     const attempt = b;
@@ -288,6 +292,33 @@ export class WorkerTransport {
       if (path === null) throw new HttpError(400, "invalid_command", "path is required", {}, "path");
       const r = await svc.fetchFile(host, session, attempt, this.#int(url.searchParams.get("placement"), "placement"), d, path);
       return { status: 200, raw: { bytes: r.bytes, headers: { [DIGEST_HEADER]: r.digest, "content-type": "application/octet-stream" } } };
+    }
+    throw new HttpError(404, "not_found", "no such route");
+  }
+
+  /** `GET /worker/release/jobs`, `POST /worker/release/jobs/{id}/pickup`, `POST /worker/release/jobs/{id}/report`: a host's release-test jobs (card X09b). Same session and idempotency rules as the other routes. */
+  async #releaseRoute(req: IncomingMessage, host: Principal, parts: string[], url: URL, method: string): Promise<Reply> {
+    const release = this.#options.release;
+    if (release === undefined) throw new HttpError(404, "not_found", "no such route");
+    const allowed = (...methods: string[]): void => { if (!methods.includes(method)) throw new HttpError(405, "method_not_allowed", `use ${methods.join(" or ")}`, { allow: methods.join(", ") }); };
+    await this.#session(req, host);
+    if (parts.length === 3) {
+      allowed("GET");
+      for (const key of url.searchParams.keys()) throw new HttpError(400, "invalid_command", `${key}: is not a parameter of this route`);
+      return { status: 200, body: { jobs: await release.jobsFor(host) } };
+    }
+    const id = parts[3];
+    if (parts.length !== 5 || id === undefined || id.length > 80) throw new HttpError(404, "not_found", "no such route");
+    allowed("POST");
+    const body = await this.#body(req);
+    if (parts[4] === "pickup") {
+      this.#only(body, []);
+      return { status: 200, body: await release.pickUp(host, { commandId: this.#key(req), attemptId: id }) };
+    }
+    if (parts[4] === "report") {
+      this.#only(body, ["sourceCommit", "suiteRevision", "artifactHashes", "dependencyLockHashes", "environment", "outcome", "counts", "logDigest", "summary"]);
+      await release.reportFromHost(host, { ...body, commandId: this.#key(req), attemptId: id } as never);
+      return { status: 204 };
     }
     throw new HttpError(404, "not_found", "no such route");
   }

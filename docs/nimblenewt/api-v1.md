@@ -1487,6 +1487,16 @@ Arguments:
 
 Result: `{ item }`: the submission with its revision.
 
+#### `release.settings.get`
+
+Owner only: who besides the owner may start and cancel release tests: agents holding the QA role, and their supervisors. What is set, what counts now (an unset field takes the installation profile's default: owner only in the strict profile, both on in the derived and autonomous ones) and the revision.
+
+Arguments:
+
+- none
+
+Result: `{ item: { revision, set, effective: { qaAgents, bosses, qaRole }, profile } }`.
+
 #### `release.gate`
 
 Owner only: where each platform of a candidate stands (passed, failed, interrupted, running, missing) and whether the release is ready and approved.
@@ -4321,6 +4331,72 @@ Arguments:
 - `commandId`: required
 
 Result: `{ ok }`.
+
+#### `release.start`
+
+Starts the release test of one platform of a candidate on a host the owner authorized for it. Who may: the owner always; an agent holding the QA role and the QA agent's supervisor only as the owner's setting allows (`release.settings.get`). The host picks the job up over the worker protocol and reports its own result; an agent cannot name another worker. Refused while an attempt is open or after the platform passed.
+
+Arguments:
+
+- `candidateId`: the candidate
+- `cell`: { os, arch, osVersion? }
+- `hostId`: the authorized host
+- `workerId` (optional): owner only: a worker other than the host
+- `timeoutSeconds` (optional): whole seconds (default 3600)
+- `memoryMb` (optional): whole megabytes (default 4096)
+- `commandId`: required
+
+Result: `{ attemptId, payload }`.
+
+#### `release.cancel`
+
+Ends an open release-test attempt without a result, for whoever may start one (see `release.start`). It is never a pass; a retry is a new attempt.
+
+Arguments:
+
+- `attemptId`: the attempt
+- `reason`: why
+- `commandId`: required
+
+Result: `{ ok }`.
+
+#### `release.settings.set`
+
+Owner only: sets who besides the owner may start and cancel release tests: `qaAgents` (agents holding the QA role), `bosses` (their supervisors), `qaRole` (the role's name, default `qa`). `null` returns a field to the profile's default. Optional `expectedRevision`.
+
+Arguments:
+
+- `qaAgents` (optional): true, false or null
+- `bosses` (optional): true, false or null
+- `qaRole` (optional): role name or null
+- `expectedRevision` (optional): the revision you read
+- `commandId`: required
+
+Result: `{ revision }`.
+
+#### `release.issuers.enable`
+
+Owner only: lets QA agents, their supervisors, or both start and cancel release tests.
+
+Arguments:
+
+- `who`: qa-agents, bosses or all
+- `expectedRevision` (optional): the revision you read
+- `commandId`: required
+
+Result: `{ revision }`.
+
+#### `release.issuers.disable`
+
+Owner only: stops QA agents, their supervisors, or both from starting and cancelling release tests (the owner still can). Attempts already started stay as they are.
+
+Arguments:
+
+- `who`: qa-agents, bosses or all
+- `expectedRevision` (optional): the revision you read
+- `commandId`: required
+
+Result: `{ revision }`.
 
 #### `release.approve`
 

@@ -84,6 +84,21 @@ export class RemoteWorkerClient {
     return ((await this.#send("GET", path, { session: true, timeoutMs: Math.max(this.#options.timeoutMs ?? 30_000, wait + 10_000) })).body as unknown as { offers: Offer[] }).offers;
   }
 
+  /** The release-test jobs issued to this host, with their payloads (card X09b). */
+  async releaseJobs(): Promise<{ readonly attemptId: string; readonly payload: { readonly [key: string]: Json }; readonly pickedUpAt?: string }[]> {
+    return ((await this.#send("GET", "/worker/release/jobs", { session: true })).body as unknown as { jobs: { attemptId: string; payload: { [key: string]: Json }; pickedUpAt?: string }[] }).jobs;
+  }
+
+  /** Tells the controller the job was fetched and is starting. */
+  async releasePickUp(attemptId: string, key: string = randomUUID()): Promise<{ readonly pickedUpAt: string }> {
+    return (await this.#send("POST", `/worker/release/jobs/${encodeURIComponent(attemptId)}/pickup`, { body: {}, key, session: true })).body as unknown as { pickedUpAt: string };
+  }
+
+  /** The result of a job: what ran, against what, and how it went. The controller takes it only if it matches the candidate exactly. */
+  async releaseReport(attemptId: string, result: { readonly [key: string]: Json }, key: string = randomUUID()): Promise<void> {
+    await this.#send("POST", `/worker/release/jobs/${encodeURIComponent(attemptId)}/report`, { body: result, key, session: true });
+  }
+
   /** One attempt as the worker sees it, under the placement number it was offered. */
   attempt(attemptId: string, placement: number, watchdog?: AttemptWatchdog): RemoteAttempt { return new RemoteAttempt(this, attemptId, placement, watchdog); }
 

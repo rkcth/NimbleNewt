@@ -23,7 +23,7 @@ const linux: Cell = { os: "linux", arch: "x64" };
 const win: Cell = { os: "win32", arch: "x64" };
 
 for (const backend of backends) {
-  const suite = (name: string, body: (c: { rel: ReleaseService; owner: Principal; w1: Principal; w2: Principal; candidate: string }) => Promise<void>) =>
+  const suite = (name: string, body: (c: { rel: ReleaseService; principals: PrincipalService; owner: Principal; w1: Principal; w2: Principal; candidate: string }) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
       const world = await backend.open();
       try {
@@ -35,7 +35,7 @@ for (const backend of backends) {
         const w2 = await worker("rt2", [{ action: "release.report", project: "*" }]);
         const rel = ReleaseService.withEpoch(world.storage, projects.epoch, options);
         const { candidateId } = await rel.submit(owner, { commandId: cid("s"), manifest: manifest() });
-        await body({ rel, owner, w1, w2, candidate: candidateId });
+        await body({ rel, principals, owner, w1, w2, candidate: candidateId });
       } finally { await world.close(); }
     });
 
@@ -135,5 +135,36 @@ for (const backend of backends) {
     await c.rel.approve(c.owner, { commandId: cid("p"), candidateId: c.candidate });
     assert.equal((await c.rel.gate(c.owner, c.candidate)).approved, true);
     await refuses("invalid_command", () => c.rel.approve(c.owner, { commandId: cid("p"), candidateId: c.candidate }), /already approved/);
+  });
+
+  suite("X09b: two settings writes from the same revision cannot both win, a host's two pick-ups at once are one, and a platform has a bounded number of attempts", async (c) => {
+    const [a, b] = await Promise.allSettled([
+      c.rel.setSettings(c.owner, { commandId: cid("ss"), qaAgents: true, expectedRevision: 0 }),
+      c.rel.setSettings(c.owner, { commandId: cid("ss"), bosses: true, expectedRevision: 0 }),
+    ]);
+    assert.deepEqual([a.status, b.status].sort(), ["fulfilled", "rejected"], "one wins; the other is told the setting moved");
+    const lost = [a, b].find((r) => r.status === "rejected") as PromiseRejectedResult;
+    assert.equal((lost.reason as DomainError).code, "stale_revision");
+    await refuses("invalid_command", () => c.rel.setSettings(c.owner, { commandId: cid("ss") }), /at least one/);
+    await refuses("invalid_command", () => c.rel.setSettings(c.owner, { commandId: cid("ss"), qaRole: "Bad Role" }));
+    await refuses("forbidden", () => c.rel.setSettings(c.w1, { commandId: cid("ss"), qaAgents: true }));
+
+    const principals = c.principals;
+    await principals.enroll(c.owner, { commandId: cid("e"), kind: "host", name: "lx1", grants: [] });
+    const host = await principals.authenticate((await principals.issueCredential(c.owner, "host:lx1")).token);
+    await c.rel.authorizeHost(c.owner, { commandId: cid("h"), hostId: host.id, os: "linux", arch: "x64" });
+    const attempt = await c.rel.start(c.owner, { commandId: cid("st"), candidateId: c.candidate, cell: linux, hostId: host.id });
+    const both = await Promise.all([c.rel.pickUp(host, { commandId: cid("pu"), attemptId: attempt.attemptId }), c.rel.pickUp(host, { commandId: cid("pu"), attemptId: attempt.attemptId })]);
+    assert.equal(both[0].pickedUpAt, both[1].pickedUpAt);
+    await refuses("forbidden", () => c.rel.jobsFor(c.owner));
+    await refuses("forbidden", () => c.rel.pickUp(c.w1, { commandId: cid("pu"), attemptId: attempt.attemptId }));
+    // The host is the worker: the job is returned by the host path only, and a different principal's report is refused.
+    await refuses("not_found", () => c.rel.report(c.w1, result(attempt.attemptId)));
+    for (let i = 1; i < 20; i++) {
+      await c.rel.cancel(c.owner, { commandId: cid("cx"), attemptId: (await c.rel.attempts(c.owner, c.candidate)).at(-1)!.id, reason: "again" });
+      await c.rel.start(c.owner, { commandId: cid("st"), candidateId: c.candidate, cell: linux, hostId: host.id });
+    }
+    await c.rel.cancel(c.owner, { commandId: cid("cx"), attemptId: (await c.rel.attempts(c.owner, c.candidate)).at(-1)!.id, reason: "again" });
+    await refuses("invalid_command", () => c.rel.start(c.owner, { commandId: cid("st"), candidateId: c.candidate, cell: linux, hostId: host.id }), /20 attempts/);
   });
 }

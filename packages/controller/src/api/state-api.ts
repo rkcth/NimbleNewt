@@ -102,7 +102,7 @@ export interface StateApiDeps {
   readonly plans?: ProjectPlanService;
   readonly responsibilities?: ResponsibilityService;
   readonly responsibilityChecks?: Pick<ResponsibilityChecks, "pending">;
-  readonly release?: Pick<ReleaseService, "submit" | "authorizeHost" | "issue" | "report" | "interrupt" | "gate" | "approve" | "attempts">;
+  readonly release?: Pick<ReleaseService, "submit" | "authorizeHost" | "issue" | "report" | "interrupt" | "gate" | "approve" | "attempts" | "start" | "cancel" | "settings" | "setSettings" | "changeIssuers">;
   readonly swarm?: Pick<SwarmService, "spawn" | "cancel" | "children">;
   readonly incidents?: Pick<IncidentService, "report" | "resolve" | "list" | "observed">;
   /** Submissions by role (card Q01b). */

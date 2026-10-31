@@ -120,6 +120,13 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "routing.failback.set": { verb: "Change how failed model routes come back", mode: "propose" },
   // How tasks are matched to model profiles decides what they cost and where they run: the profiles are shown first; a task's own difficulty follows the profile.
   "difficulty.set-profiles": { verb: "Replace the difficulty profiles", mode: "propose", revision: "difficulty-profiles" },
+  // Release testing (card X09b). Starting a destructive test on a host is shown first (provisional); cancelling is the safe direction and applies at once (an ended attempt is never a pass). Who besides the owner may start or cancel is a widening
+  // when turned on (shown first) and a narrowing when turned off (applies at once).
+  "release.start": { verb: "Start release test", mode: "propose" },
+  "release.cancel": { verb: "Cancel release test", mode: "apply" },
+  "release.settings.set": { verb: "Change who may start release tests", mode: "propose" },
+  "release.issuers.enable": { verb: "Let QA agents or their supervisors start release tests", mode: "propose" },
+  "release.issuers.disable": { verb: "Stop QA agents or their supervisors starting release tests", mode: "apply" },
   "difficulty.set": { verb: "Set difficulty of task", mode: "profile", revision: "contract", needsProject: true },
 };
 
@@ -239,7 +246,7 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
 }
 
 /** Keys whose values name records or fixed choices; every other text in a command must be in the owner's own words. */
-const EXEMPT = new Set(["taskId", "projectId", "project", "prerequisiteId", "agentId", "supervisorId", "teamId", "parentTeamId", "repositoryId", "resourceId", "responsibilityId", "ownerId", "managed", "access", "landing", "integrator", "requiredChecks", "integration", "refreshRounds", "expectedRevision", "expectedVersion", "requestId", "currency", "level", "to", "state", "workClass", "difficulty", "recovery", "kind", "priority", "itemId", "inquiryId", "occurrenceId", "watchedTaskId", "watchId", "returnAt", "sourceTurnId", "intent", "urgency", "category", "participants", "fingerprint", "attemptId", "sessionId", "waitingSince", "decision", "reaccept", "patienceHours"]);
+const EXEMPT = new Set(["taskId", "projectId", "project", "prerequisiteId", "agentId", "supervisorId", "teamId", "parentTeamId", "repositoryId", "resourceId", "responsibilityId", "ownerId", "managed", "access", "landing", "integrator", "requiredChecks", "integration", "refreshRounds", "expectedRevision", "expectedVersion", "requestId", "currency", "level", "to", "state", "workClass", "difficulty", "recovery", "kind", "priority", "itemId", "inquiryId", "occurrenceId", "watchedTaskId", "watchId", "returnAt", "sourceTurnId", "intent", "urgency", "category", "participants", "fingerprint", "attemptId", "sessionId", "waitingSince", "decision", "reaccept", "patienceHours", "who", "os", "arch", "osVersion"]);
 
 /** The first text value of a command's arguments that is not the owner's own words (and not a record reference or fixed choice), or undefined. */
 export function foreignValue(args: Readonly<Record<string, unknown>>, ownText: string, path = ""): string | undefined {

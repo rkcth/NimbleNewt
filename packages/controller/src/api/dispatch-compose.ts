@@ -1,4 +1,5 @@
 import type { ResumeCheckService } from "../continuation/resume.js";
+import type { ReleaseService } from "../release/release.js";
 import { createHash } from "node:crypto";
 import { framedMcp } from "../dispatch/tools.js";
 import { ProjectResourceService } from "../projects/index.js";
@@ -187,6 +188,8 @@ export interface ComposeInput {
   readonly availability?: (principalId: string) => Promise<Availability>;
   /** Brings an agent the host reports stopped or suspended up for one meeting, after the owner authorized it (card M04f). Absent: the owner's authorization is refused ("no wake path"). */
   readonly meetingWake?: WakeSink;
+  /** Release-test jobs carried to the hosts the owner authorized (card X09b). */
+  readonly release?: Pick<ReleaseService, "jobsFor" | "pickUp" | "reportFromHost">;
   readonly storage: ControllerStorage; readonly epoch: number; readonly options: DispatchStartOptions;
   readonly principals: PrincipalService; readonly grants: GrantService; readonly taskCredentials: TaskCredentialService; readonly projects: ProjectService; readonly assignments: AssignmentService; readonly waits: WaitService;
   readonly contracts: ContractService; readonly catalog: HarnessCatalog; readonly routing: RoutingService; readonly inquiries: InquiryService; readonly agents: AgentService; readonly histories: HistoryService; readonly reviews: ReviewService;
@@ -476,7 +479,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     holder.dispatcher = dispatcher;
     live.dispatcher = dispatcher;
     if (remote !== undefined) {
-      transport = await WorkerTransport.listen({ ...(i.options.remote?.transport ?? {}), remote, principals: i.principals });
+      transport = await WorkerTransport.listen({ ...(i.options.remote?.transport ?? {}), remote, principals: i.principals, ...(i.release === undefined ? {} : { release: i.release }) });
     }
     const driver = new DispatchDriver({
       dispatcher, storage, epoch, record: { storage, options: ro },
