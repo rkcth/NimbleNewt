@@ -16,7 +16,9 @@ export interface SeatbeltOptions {
   /** The program, as an absolute path. Default: `/usr/bin/sandbox-exec`. */
   readonly executable?: string;
   /** Finds the files outside the system that the confined program loads (default on macOS: `otool`, cached; elsewhere none). Given the program and the paths already readable. */
-  readonly libraryReads?: (program: string, alreadyReadable: readonly string[]) => string[];
+  readonly libraryReads?: (program: string, alreadyReadable: readonly string[], writable: readonly string[]) => string[];
+  /** Extra prefixes (beyond Homebrew's and the program's own install root) a dependent library may live under. Used by the default `libraryReads`. */
+  readonly libraryPrefixes?: readonly string[];
 }
 
 /**
@@ -70,19 +72,29 @@ function parameters(recipe: NormalizedRecipe, tmp: string, libraryReads: readonl
  */
 export function seatbeltBackend(options: SeatbeltOptions = {}): SandboxBackend {
   const executable = options.executable ?? "/usr/bin/sandbox-exec";
-  const libraryReadsOf = options.libraryReads ?? (process.platform === "darwin" ? cachedLibraryReads() : () => []);
+  const libraryReadsOf = options.libraryReads ?? (process.platform === "darwin" ? cachedLibraryReads(undefined, options.libraryPrefixes ?? []) : () => []);
   const tmpOf = (recipe: NormalizedRecipe): string => join(recipe.scratch, ".tmp");
 
   const plan = (recipe: NormalizedRecipe, command: readonly string[]): SpawnPlan => {
     const tmp = tmpOf(recipe);
     // Created here, outside the sandbox, as the service user: it must be a plain directory, never a link someone left in the agent's scratch.
     let existing;
-    try { existing = lstatSync(tmp); } catch { existing = undefined; }
-    if (existing !== undefined && (existing.isSymbolicLink() || !existing.isDirectory())) throw new SandboxError("invalid_recipe", `${tmp} is not a plain directory; the agent's temporary directory must be`);
-    if (existing === undefined) mkdirSync(tmp, { mode: 0o700 });
+    try { existing = lstatSync(tmp); } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw new SandboxError("invalid_recipe", "the agent's temporary directory could not be examined", { cause: e });
+      existing = undefined;
+    }
+    if (existing !== undefined && (existing.isSymbolicLink() || !existing.isDirectory())) throw new SandboxError("invalid_recipe", "the agent's temporary directory is not a plain directory; it must be");
+    if (existing === undefined) {
+      try { mkdirSync(tmp, { mode: 0o700 }); } catch (e) {
+        // Someone made it between the look and now: acceptable only if it is a plain directory.
+        let again;
+        try { again = lstatSync(tmp); } catch { again = undefined; }
+        if (again === undefined || again.isSymbolicLink() || !again.isDirectory()) throw new SandboxError("invalid_recipe", "the agent's temporary directory could not be created", { cause: e });
+      }
+    }
     // A program outside the system places (the worker's node from Homebrew, say) is given read access to exactly its dependent libraries; a failure refuses the launch.
     const program = command[0];
-    const libs = program !== undefined && program.startsWith("/") ? libraryReadsOf(program, [recipe.workdir, recipe.home, recipe.scratch, ...recipe.readOnly.map((m) => m.host)]) : [];
+    const libs = program !== undefined && program.startsWith("/") ? libraryReadsOf(program, [recipe.workdir, recipe.home, recipe.scratch, ...recipe.readOnly.map((m) => m.host)], [recipe.workdir, recipe.home, recipe.scratch]) : [];
     const args: string[] = [];
     for (const [name, value] of parameters(recipe, tmp, libs)) args.push("-D", `${name}=${value}`);
     args.push("-p", profileFor(recipe, libs), ...command);
