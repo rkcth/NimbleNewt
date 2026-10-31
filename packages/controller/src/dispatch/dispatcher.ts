@@ -92,7 +92,7 @@ export interface DispatcherDeps {
    * Whether a push or a merge changes a protected branch of the project, decided here and not by the worker (card A07f). Without it the worker's own `branchProtected` flag is used as before, so a controller always passes it.
    */
   /** Told when the approval policy denies a tool call outright (card U11c: repeated denials of one agent can become Urgent). Best effort: a failure never changes the refusal. */
-  readonly denied?: (denial: { readonly agentId: string; readonly projectId: string }) => Promise<unknown>;
+  readonly denied?: (denial: { readonly attemptId?: string; readonly callId?: string; readonly agentId: string; readonly projectId: string }) => Promise<unknown>;
   readonly protectedBranch?: (projectId: string, branch: string | undefined) => Promise<boolean>;
   readonly effects: Pick<EffectService, "intend" | "run" | "get">;
   readonly blockers: Pick<BlockerService, "openBlocker">;
@@ -152,6 +152,8 @@ export interface DispatcherDeps {
   readonly storeOwner?: (agentId: string, attemptId: string) => Promise<{ readonly hostId: string; readonly busy: boolean } | undefined>;
   /** The loops the dispatcher's tick runs after its own work: the services whose callers were said to be "the controller's loop". */
   readonly loops?: readonly DispatcherLoop[];
+  /** The longest a loop may take in one tick before the tick goes on without it (it is reported as failed and not started again until it ends). Default 60 seconds; 0 turns the limit off. */
+  readonly loopTimeoutMs?: number;
 }
 
 /** The dispatcher's own limits; a figure that is absent is not limited. */
@@ -270,6 +272,8 @@ export class DispatcherService {
   readonly #options: Required<Pick<AttemptDispatcherOptions, "leaseMs" | "scanPage" | "expectedMinutes">> & AttemptDispatcherOptions;
   readonly #holder: string;
   readonly #live = new Map<string, Live>();
+  /** Loops that started in an earlier tick and have not ended (a hung one is not started again on top of itself). */
+  readonly #loopsRunning = new Set<string>();
   readonly #path: ToolPath;
   /** Names this dispatcher in the commands of its updates: two dispatchers that read one revision must not share a command (the second would be answered with the first's result). */
   readonly #instance = randomUUID().slice(0, 8);
@@ -316,6 +320,18 @@ export class DispatcherService {
   }
 
   // ---- the tick ----------------------------------------------------------------------------------------------------------------
+
+  /** Runs one loop, giving up on it after `loopTimeoutMs` (default 60 s; 0 = no limit): the tick goes on, and the loop is not started again until it ends. */
+  async #runLoop(loop: DispatcherLoop): Promise<void> {
+    const limit = this.#deps.loopTimeoutMs ?? 60_000;
+    this.#loopsRunning.add(loop.name);
+    const running = loop.run(this.#deps.principal).finally(() => { this.#loopsRunning.delete(loop.name); });
+    if (limit <= 0) { await running; return; }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${loop.name} took longer than ${Math.round(limit / 1000)} seconds; the tick went on without it`)), limit); });
+    running.catch(() => undefined);
+    try { await Promise.race([running, late]); } finally { if (timer !== undefined) clearTimeout(timer); }
+  }
 
   /**
    * One step of the dispatcher, from the injected clock. It: ends the attempts whose lease or time ran out; gives waiting requests the priority their task has now; starts what has got its place;
@@ -407,7 +423,8 @@ export class DispatcherService {
     // 6. The loops of the services that said "the controller's loop must call it". A loop that fails is reported and does not stop the others.
     const loops: { name: string; ok: boolean; error?: string }[] = [];
     for (const loop of this.#deps.loops ?? []) {
-      try { await loop.run(this.#deps.principal); loops.push({ name: loop.name, ok: true }); } catch (error) {
+      if (this.#loopsRunning.has(loop.name)) { loops.push({ name: loop.name, ok: false, error: "still running from an earlier tick" }); continue; }
+      try { await this.#runLoop(loop); loops.push({ name: loop.name, ok: true }); } catch (error) {
         if (isDomainError(error, "stale_epoch")) throw error;
         loops.push({ name: loop.name, ok: false, error: error instanceof Error ? redactText(error.message).slice(0, 200) : "failed" });
       }

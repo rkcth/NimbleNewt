@@ -33,7 +33,8 @@ export interface NotificationSettings {
   /** Days a Notice stays in the inbox before the controller closes it (card U11b); default 7. */
   readonly noticeRetentionDays?: number;
   /** Most Urgent messages the escalation sweep sends outside per hour (default 10); the rest of a burst is collapsed into ONE "N more items escalated" message. */
-  readonly escalationsPerHour?: number;
+  /** Urgent messages an hour (escalations and the controller's own Urgent triggers); the rest are held in the inbox with one summary. `null` turns the limit off. */
+  readonly escalationsPerHour?: number | null;
   /** The least number of seconds between two full sweeps (escalation, settling, expiry) when the dispatcher runs them (default 60). */
   readonly sweepEverySeconds?: number;
   /** Seconds one channel send may take before it is given up on and retried later (default 10). */
@@ -48,6 +49,10 @@ export interface NotificationSettings {
   readonly deniedThreshold?: number | null;
   /** The span the denials are counted in (default 60 minutes). */
   readonly deniedWindowMinutes?: number;
+  /** The least minutes between two interrupting messages about the same record (a host that keeps going down and up is not paged every time); default 30, `null` turns it off (card U11c). */
+  readonly urgentMinGapMinutes?: number | null;
+  /** How many agents' repeated denials may page the owner in one hour; the rest wait in the inbox as Needs you; default 5, `null` turns it off (card U11c). */
+  readonly deniedAlertsPerHour?: number | null;
   /** The owner's own level per kind; it overrides the default level of the kind (a safety stop cannot be set below Urgent). */
   readonly levelByKind?: Readonly<Partial<Record<NotificationKind, NotificationLevel>>>;
 }
@@ -60,6 +65,8 @@ export const DEFAULT_SEND_TIMEOUT_SECONDS = 10;
 export const DEFAULT_BACKUP_MAX_AGE_HOURS = 48;
 export const DEFAULT_HOST_DOWN_AFTER_MINUTES = 10;
 export const DEFAULT_DENIED_WINDOW_MINUTES = 60;
+export const DEFAULT_URGENT_MIN_GAP_MINUTES = 30;
+export const DEFAULT_DENIED_ALERTS_PER_HOUR = 5;
 /** The kinds whose record is a pointer the owner answers (a blocker, a review, a question): they are closed when the record is settled elsewhere. */
 const WAITS_ON_OWNER: ReadonlySet<NotificationKind> = new Set<NotificationKind>(["blocker", "review-request", "owner-question"]);
 
@@ -87,6 +94,10 @@ export interface ItemBody {
   readonly urgent: boolean;
   /** The level the controller set when it reported (never from a producer); a missing or unknown value falls back to the safe side, Needs you. */
   readonly level?: NotificationLevel;
+  /** An interrupting item (an Urgent trigger of the controller) that was not sent because the hourly limit was reached or the same record was told a moment ago; it stays in the inbox, Urgent, and is not sent later. */
+  readonly held?: "limit" | "gap";
+  /** Raised by one of the controller's own Urgent triggers (card U11c); its message counts against the hourly Urgent limit. */
+  readonly trigger?: boolean;
   /** When the controller raised this item to Urgent because it waited too long (card U11b); told once. */
   readonly escalatedAt?: string;
   readonly state: "queued" | "sent" | "answered" | "settled";
@@ -139,7 +150,11 @@ interface StateBody {
   /** The last open item the sweep examined; the next full sweep goes on after it (and starts over at the end). */
   readonly sweepCursor?: string;
   /** Urgent messages the escalation sweep sent in the current hour. */
-  readonly urgentWindow?: { readonly startedAt: string; readonly sent: number };
+  readonly urgentWindow?: { readonly startedAt: string; readonly sent: number; /** Interrupting items held back this hour by the hourly limit and not yet named in the summary. */ readonly held?: number; readonly summarized?: boolean };
+  /** When an interrupting message about a record was last sent (key: kind|project|ref); bounded, oldest dropped. */
+  readonly lastInterrupt?: Readonly<Record<string, string>>;
+  /** Small facts the controller's own watches keep across restarts (for example when "no backup" was first seen). */
+  readonly watch?: Readonly<Record<string, string>>;
 }
 /** What is open, so nothing has to scan every record ever made: unanswered items, open digests, deliveries waiting, and the latest failed deliveries. */
 interface IndexBody { readonly items: readonly string[]; /** Open Notices, kept apart so they never count against the open-item limit. */ readonly notices?: readonly string[]; readonly digests: readonly string[]; readonly deliveries: readonly string[]; readonly failed: readonly string[] }
@@ -214,9 +229,9 @@ export class NotificationService {
   }
 
   /** The owner sets how notifications reach them (owner only; counts from the next notification). */
-  async configure(owner: Principal, command: NoActor & { expectedRevision?: number; channel?: "inbox" | "external"; channelName?: string; digestTimes?: readonly string[]; quietHours?: { start: string; end: string } | null; escalateAfterHours?: number | null; noticeRetentionDays?: number; escalationsPerHour?: number; sweepEverySeconds?: number; sendTimeoutSeconds?: number; urgentInterruptsQuietHours?: boolean; backupMaxAgeHours?: number | null; hostDownAfterMinutes?: number | null; deniedThreshold?: number | null; deniedWindowMinutes?: number; levelByKind?: Readonly<Record<string, NotificationLevel | null>> }): Promise<{ revision: number }> {
+  async configure(owner: Principal, command: NoActor & { expectedRevision?: number; channel?: "inbox" | "external"; channelName?: string; digestTimes?: readonly string[]; quietHours?: { start: string; end: string } | null; escalateAfterHours?: number | null; noticeRetentionDays?: number; escalationsPerHour?: number | null; sweepEverySeconds?: number; sendTimeoutSeconds?: number; urgentInterruptsQuietHours?: boolean; urgentMinGapMinutes?: number | null; deniedAlertsPerHour?: number | null; backupMaxAgeHours?: number | null; hostDownAfterMinutes?: number | null; deniedThreshold?: number | null; deniedWindowMinutes?: number; levelByKind?: Readonly<Record<string, NotificationLevel | null>> }): Promise<{ revision: number }> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner sets how notifications reach them`);
-    onlyKnown(command, ["commandId", "expectedRevision", "channel", "channelName", "digestTimes", "quietHours", "escalateAfterHours", "noticeRetentionDays", "escalationsPerHour", "sweepEverySeconds", "sendTimeoutSeconds", "urgentInterruptsQuietHours", "backupMaxAgeHours", "hostDownAfterMinutes", "deniedThreshold", "deniedWindowMinutes", "levelByKind"]);
+    onlyKnown(command, ["commandId", "expectedRevision", "channel", "channelName", "digestTimes", "quietHours", "escalateAfterHours", "noticeRetentionDays", "escalationsPerHour", "sweepEverySeconds", "sendTimeoutSeconds", "urgentInterruptsQuietHours", "urgentMinGapMinutes", "deniedAlertsPerHour", "backupMaxAgeHours", "hostDownAfterMinutes", "deniedThreshold", "deniedWindowMinutes", "levelByKind"]);
     const current = await this.#runner.get("notification-settings", "installation");
     if ((command.expectedRevision ?? 0) !== (current?.revision ?? 0)) throw new DomainError("stale_revision", `notification settings are at revision ${current?.revision ?? 0}, not ${command.expectedRevision ?? 0}`, ...(current === undefined ? [] : [{ currentRevision: current.revision }]));
     const old = (current?.body as unknown as NotificationSettings | undefined) ?? DEFAULTS;
@@ -251,7 +266,8 @@ export class NotificationService {
       next = { ...next, noticeRetentionDays: command.noticeRetentionDays };
     }
     const whole = (v: unknown, field: string, lo: number, hi: number, unit: string): number => (typeof v === "number" && Number.isSafeInteger(v) && v >= lo && v <= hi ? v : invalid(field, `must be a whole number of ${unit} from ${lo} to ${hi}`));
-    if (command.escalationsPerHour !== undefined) next = { ...next, escalationsPerHour: whole(command.escalationsPerHour, "escalationsPerHour", 1, 1000, "messages") };
+    if (command.escalationsPerHour === null) next = { ...next, escalationsPerHour: null };
+    else if (command.escalationsPerHour !== undefined) next = { ...next, escalationsPerHour: whole(command.escalationsPerHour, "escalationsPerHour", 1, 1000, "messages") };
     if (command.sweepEverySeconds !== undefined) next = { ...next, sweepEverySeconds: whole(command.sweepEverySeconds, "sweepEverySeconds", 5, 3600, "seconds") };
     if (command.sendTimeoutSeconds !== undefined) next = { ...next, sendTimeoutSeconds: whole(command.sendTimeoutSeconds, "sendTimeoutSeconds", 1, 120, "seconds") };
     if (command.urgentInterruptsQuietHours !== undefined) {
@@ -259,7 +275,7 @@ export class NotificationService {
       next = { ...next, urgentInterruptsQuietHours: command.urgentInterruptsQuietHours };
     }
     // The Urgent triggers of card U11c: a number sets one, null turns it off (and a number turns it on again).
-    for (const [field, lo, hi, unit] of [["backupMaxAgeHours", 1, 24 * 365, "hours"], ["hostDownAfterMinutes", 1, 24 * 60, "minutes"], ["deniedThreshold", 2, 10_000, "denials"]] as const) {
+    for (const [field, lo, hi, unit] of [["backupMaxAgeHours", 1, 24 * 365, "hours"], ["hostDownAfterMinutes", 1, 24 * 60, "minutes"], ["deniedThreshold", 2, 10_000, "denials"], ["urgentMinGapMinutes", 1, 24 * 60, "minutes"], ["deniedAlertsPerHour", 1, 1000, "messages"]] as const) {
       const v = command[field];
       if (v === null) next = { ...next, [field]: null };
       else if (v !== undefined) next = { ...next, [field]: whole(v, field, lo, hi, unit) };
@@ -342,22 +358,33 @@ export class NotificationService {
     for (let attempt = 1; ; attempt++) {
       try {
         const index = await this.#index();
-        // The open occurrence of this event, or the first free one (an answered occurrence stays on record).
+        // The open occurrence of this event, or the first free one (an answered occurrence stays on record). With every slot used, the one closed longest ago is used again, so an event that comes and goes
+        // for ever (a host going down and up) is never muted by having used up its slots.
         let occurrence = 0; let found: Awaited<ReturnType<CommandRunner["get"]>>;
+        let oldest: { occurrence: number; found: NonNullable<typeof found>; at: string } | undefined;
         for (; occurrence < NOTIFICATION_LIMITS.occurrences; occurrence++) {
           found = await this.#runner.get("notification-item", derivedId("ntf", `${base}|${occurrence}`));
           if (found === undefined || !["answered", "settled"].includes((found.body as unknown as ItemBody).state)) break;
+          const b = found.body as unknown as ItemBody; const at = b.settledAt ?? b.answeredAt ?? b.lastAt;
+          if (oldest === undefined || at < oldest.at) oldest = { occurrence, found, at };
         }
-        if (occurrence >= NOTIFICATION_LIMITS.occurrences) throw new DomainError("unavailable", "this event has been reported and answered too many times to keep separate records");
+        let reused = false;
+        if (occurrence >= NOTIFICATION_LIMITS.occurrences) {
+          if (oldest === undefined) throw new DomainError("unavailable", "this event has no free record to keep");
+          occurrence = oldest.occurrence; found = oldest.found; reused = true;
+        }
         const itemId = derivedId("ntf", `${base}|${occurrence}`);
-        const old = found?.body as unknown as ItemBody | undefined;
+        const old = reused ? undefined : found?.body as unknown as ItemBody | undefined;
         const coalesced = old !== undefined;
         // Notices live in their own list and never count against the limit that guards what needs the owner.
         if (!coalesced && !interrupts && levelOf({ kind: command.kind, urgent, immediate, level }, settings.levelByKind) !== "notice" && index.body.items.length >= NOTIFICATION_LIMITS.openItems) throw new DomainError("unavailable", `there are ${NOTIFICATION_LIMITS.openItems} unanswered notifications; answer some first`);
-        const sendNow = immediate && (!coalesced || old!.state === "queued");
+        let sendNow = immediate && (!coalesced || old!.state === "queued");
+        // An Urgent trigger of the controller is sent only inside the hourly Urgent limit and not again for the same record within the minimum gap; otherwise it waits in the inbox, still Urgent.
+        let held: ItemBody["held"];
+        if (sendNow && command.interrupt === true) { held = await this.#holdReason(settings, now, `${base}`); if (held !== undefined) sendNow = false; }
         const body: ItemBody = coalesced
-          ? { ...old!, count: old!.count + 1, lastAt: now, immediate: old!.immediate || immediate, urgent: old!.urgent || urgent, ...(RANK[level] > RANK[levelOf(old!, settings.levelByKind)] ? { level } : {}), ...(sendNow ? { state: "sent" as const } : {}) }
-          : { kind: command.kind, ref: { kind: ref.kind, id: ref.id }, ...(record.projectId === undefined ? {} : { projectId: record.projectId }), label: record.label, ...(detail === undefined ? {} : { detail }), reportedBy: actor, answers: [...ANSWERS[command.kind]], immediate, urgent, level, state: sendNow ? "sent" : "queued", count: 1, occurrence, firstAt: now, lastAt: now };
+          ? { ...(sendNow ? (({ held: _h, ...rest }) => { void _h; return rest; })(old!) : old!), count: old!.count + 1, lastAt: now, immediate: old!.immediate || (immediate && held === undefined), urgent: old!.urgent || urgent, ...(command.label === undefined ? {} : { label: record.label }), ...(detail === undefined ? {} : { detail }), ...(RANK[level] > RANK[levelOf(old!, settings.levelByKind)] ? { level } : {}), ...(sendNow ? { state: "sent" as const } : {}), ...(held === undefined ? {} : { held }) }
+          : { kind: command.kind, ref: { kind: ref.kind, id: ref.id }, ...(record.projectId === undefined ? {} : { projectId: record.projectId }), label: record.label, ...(detail === undefined ? {} : { detail }), reportedBy: actor, answers: [...ANSWERS[command.kind]], immediate: immediate && held === undefined, urgent, level, state: sendNow ? "sent" : "queued", count: 1, occurrence, firstAt: now, lastAt: now, ...(command.interrupt === true ? { trigger: true } : {}), ...(held === undefined ? {} : { held }) };
         const isNotice = levelOf(body, settings.levelByKind) === "notice";
         // At the Notice cap the oldest Notice is closed to make room.
         const openNotices = index.body.notices ?? [];
@@ -381,6 +408,7 @@ export class NotificationService {
             contention: async () => new DomainError("stale_revision", "the same notification was reported at the same moment"),
           }),
         }));
+        if (command.interrupt === true && (sendNow || held !== undefined)) await this.#countInterrupt(now, base, sendNow ? "sent" : held!);
         return { itemId, coalesced, immediate: sendNow };
       } catch (error) {
         if (!(error instanceof DomainError) || error.code !== "stale_revision" || error.currentRevision !== undefined || attempt >= 8) throw error;
@@ -436,10 +464,73 @@ export class NotificationService {
       const due = this.#latestDigestTime(settings, now);
       if (due !== undefined && (state.lastDigestAt === undefined || state.lastDigestAt < due) && !quiet && !outOfTime()) digestIds.push(...await this.#collect(settings, now, due));
     } catch (error) { problem ??= error; }
+    try { if (!outOfTime()) await this.#summarizeHeld(settings, now); } catch (error) { problem ??= error; }
     const delivered = await this.#deliverDue(settings, now, quiet, outOfTime);
     problem ??= delivered.problem;
     if (problem !== undefined) throw problem;
     return { digestIds, delivered: delivered.delivered, failed: delivered.failed, retrying: delivered.retrying };
+  }
+
+  /** The current hour's window of Urgent messages (a new one when the hour has passed or the clock went back). */
+  #window(state: StateBody, now: string): { startedAt: string; sent: number; held?: number; summarized?: boolean } {
+    const w = state.urgentWindow;
+    return w === undefined || Date.parse(now) - Date.parse(w.startedAt) >= 3_600_000 || Date.parse(now) < Date.parse(w.startedAt) ? { startedAt: now, sent: 0 } : w;
+  }
+
+  /** Whether an interrupting Urgent trigger may be sent now: not inside the minimum gap after the last one about the same record, and not beyond the hour's Urgent limit. Both limits are the owner's and may be turned off. */
+  async #holdReason(settings: NotificationSettings, now: string, key: string): Promise<"limit" | "gap" | undefined> {
+    const state = await this.#state();
+    const gap = settings.urgentMinGapMinutes === undefined ? DEFAULT_URGENT_MIN_GAP_MINUTES : settings.urgentMinGapMinutes;
+    const last = state.lastInterrupt?.[key];
+    if (gap !== null && last !== undefined) { const since = Date.parse(now) - Date.parse(last); if (since >= 0 && since < gap * 60_000) return "gap"; }
+    const perHour = settings.escalationsPerHour === null ? undefined : settings.escalationsPerHour ?? DEFAULT_ESCALATIONS_PER_HOUR;
+    if (perHour !== undefined && this.#window(state, now).sent >= perHour) return "limit";
+    return undefined;
+  }
+
+  /** Records that an interrupting message was sent (it counts against the hour and starts the gap for its record) or was held back (it is named in the hour's one summary). */
+  async #countInterrupt(now: string, key: string, what: "sent" | "limit" | "gap"): Promise<void> {
+    await this.#patchState((x) => {
+      const w = this.#window(x, now);
+      // Only the hourly limit is named in the summary; an item held for the gap is a repeat of one just told.
+      if (what === "gap") return x;
+      if (what === "limit") return { ...x, urgentWindow: { ...w, held: (w.held ?? 0) + 1 } };
+      const last = { ...(x.lastInterrupt ?? {}), [key]: now };
+      const keys = Object.keys(last);
+      // Bounded: the oldest are forgotten first.
+      if (keys.length > 200) for (const k of keys.sort((a, b) => (last[a]! < last[b]! ? -1 : 1)).slice(0, keys.length - 200)) delete last[k];
+      return { ...x, urgentWindow: { ...w, sent: w.sent + 1 }, lastInterrupt: last };
+    });
+  }
+
+  /** One message names the Urgent items held back in the hour ("N more"), so the owner knows to look at the inbox. Sent once per hour window; the summary is not counted against the limit. */
+  async #summarizeHeld(settings: NotificationSettings, now: string): Promise<void> {
+    const state = await this.#state();
+    const w = state.urgentWindow;
+    if (w === undefined || (w.held ?? 0) === 0 || w.summarized === true) return;
+    const open = (await this.#load<ItemBody>("notification-item", this.#openIds((await this.#index()).body))).find((i) => i.held !== undefined && i.state === "queued");
+    if (open === undefined) return;
+    const text = `URGENT: ${w.held} more Urgent item${w.held === 1 ? "" : "s"} not sent one by one (hourly limit or repeated); open your inbox`;
+    const delivery = this.#delivery(settings, { kind: "item", id: open.id }, text, now, `held-summary|${w.startedAt}`, true);
+    await this.#apply("notification.held-summary", { commandId: `held-summary-${w.startedAt}`, actor: "notifications" }, { window: w.startedAt }, async (index) => ({
+      ref: { kind: "notification-delivery", id: delivery.id }, creates: true,
+      changes: [{ type: "create", ref: { kind: "notification-delivery", id: delivery.id }, body: delivery.body as unknown as JsonObject }, this.#indexChange(index, { deliveries: delivery.body.state === "pending" ? withId(index.body.deliveries, delivery.id) : index.body.deliveries })],
+      detail: { summary: w.held ?? 0 },
+    }));
+    await this.#patchState((x) => (x.urgentWindow?.startedAt === w.startedAt ? { ...x, urgentWindow: { ...x.urgentWindow, summarized: true } } : x));
+  }
+
+  /** What the controller's own watches remember across restarts (for example when "no backup" was first seen). Internal; never exposed through the state API. */
+  async watchMemory(): Promise<Readonly<Record<string, string>>> { return (await this.#state()).watch ?? {}; }
+
+  /** Remembers (or with `null` forgets) one small fact for the controller's watches. */
+  async remember(key: string, value: string | null): Promise<void> {
+    await this.#patchState((x) => { const { [key]: _gone, ...rest } = x.watch ?? {}; void _gone; return { ...x, watch: value === null ? rest : { ...rest, [key]: value } }; });
+  }
+
+  /** The record IDs of the open items that point at records of one kind (a watch uses this to see what it has already raised, also after a restart). */
+  async openRefIds(kind: string): Promise<string[]> {
+    return (await this.#load<ItemBody>("notification-item", this.#openIds((await this.#index()).body))).filter((i) => i.ref.kind === kind && i.state !== "answered" && i.state !== "settled").map((i) => i.ref.id);
   }
 
   async #state(): Promise<StateBody> {
@@ -650,7 +741,7 @@ export class NotificationService {
       } catch (error) { problem ??= error; }
     }
     // The hour's allowance of Urgent messages.
-    const perHour = settings.escalationsPerHour ?? DEFAULT_ESCALATIONS_PER_HOUR;
+    const perHour = settings.escalationsPerHour === null ? Number.MAX_SAFE_INTEGER : settings.escalationsPerHour ?? DEFAULT_ESCALATIONS_PER_HOUR;
     const fresh = state.urgentWindow === undefined || Date.parse(now) - Date.parse(state.urgentWindow.startedAt) >= 3_600_000 || Date.parse(now) < Date.parse(state.urgentWindow.startedAt);
     const window = fresh ? { startedAt: now, sent: 0 } : state.urgentWindow!;
     const room = Math.max(0, perHour - window.sent);
@@ -684,7 +775,7 @@ export class NotificationService {
       } catch (error) { problem ??= error; }
     }
     let next = state;
-    if (sent > 0 || fresh) next = await this.#patchState((x) => ({ ...x, urgentWindow: { startedAt: window.startedAt, sent: window.sent + sent } }));
+    if (sent > 0 || fresh) next = await this.#patchState((x) => ({ ...x, urgentWindow: { ...window, sent: window.sent + sent } }));
     if (problem !== undefined) throw problem;
     return next;
   }
@@ -769,7 +860,16 @@ export class NotificationService {
 
   async #releaseUrgent(settings: NotificationSettings, now: string): Promise<void> {
     for (const item of await this.#load<ItemBody>("notification-item", this.#openIds((await this.#index()).body))) {
-      if (item.state !== "queued" || !item.urgent) continue;
+      if (item.state !== "queued" || !item.urgent || item.held !== undefined) continue;
+      // An Urgent trigger that waited out quiet hours is still held to the hour's limit and the gap.
+      if (item.trigger === true) {
+        const reason = await this.#holdReason(settings, now, `${item.kind}|${item.projectId ?? "-"}|${item.ref.kind}:${item.ref.id}`);
+        if (reason !== undefined) {
+          await this.#apply("notification.hold", { commandId: `hold-${item.id}-${item.firstAt}`, actor: "notifications" }, { id: item.id }, async () => { const cur = await this.#runner.get("notification-item", item.id); if (cur === undefined || (cur.body as unknown as ItemBody).state !== "queued") return undefined; const ref: AggregateRef = { kind: "notification-item", id: item.id }; return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: cur.revision, body: { ...(cur.body as unknown as ItemBody), held: reason } as unknown as JsonObject }], detail: { held: reason } }; });
+          await this.#countInterrupt(now, "", reason);
+          continue;
+        }
+      }
       const delivery = this.#delivery(settings, { kind: "item", id: item.id }, `${item.kind}: ${item.label}`, now, `${item.id}|${item.firstAt}`, true);
       await this.#apply("notification.release", { commandId: `release-${item.id}-${item.firstAt}`, actor: "notifications" }, { id: item.id }, async (index) => {
         const current = await this.#runner.get("notification-item", item.id);
@@ -781,6 +881,7 @@ export class NotificationService {
           this.#indexChange(index, { deliveries: delivery.body.state === "pending" ? withId(index.body.deliveries, delivery.id) : index.body.deliveries }),
         ], detail: { released: true } };
       });
+      if (item.trigger === true) await this.#countInterrupt(now, `${item.kind}|${item.projectId ?? "-"}|${item.ref.kind}:${item.ref.id}`, "sent");
     }
   }
 

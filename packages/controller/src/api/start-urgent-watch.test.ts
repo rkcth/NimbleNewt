@@ -6,6 +6,7 @@ import { test } from "node:test";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import { PI } from "../dispatch/testing/world.js";
+import { HostService } from "../hosts/index.js";
 import { NotificationService } from "../notifications/index.js";
 import { startController } from "./index.js";
 
@@ -47,5 +48,37 @@ test("the running controller raises an Urgent item when no good backup was made 
     await set({ backupMaxAgeHours: null }, "s2");
     clock += 100 * HOUR; await tick();
     assert.equal((await open()).length, 0);
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("a host that stops reporting is found through the real host service in the running controller, raised as Urgent, told through the channel, and closed when it reports again (card U11c review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-urgh-"));
+  let clock = Date.parse("2026-10-31T08:00:00.000Z");
+  const sent: { text: string }[] = [];
+  const channels = { chat: { send: async (m: { deliveryId: string; text: string }) => { sent.push(m); } } };
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+    dispatch: { timer: new ManualTimer(), manual: true, intervalMs: 1000 }, notifications: { channels, clock: () => new Date(clock).toISOString() } });
+  try {
+    assert.ok(c.dispatch !== undefined, c.dispatchProblem);
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = (await c.services.principals.authenticate(boot.token))!;
+    const call = (op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<{ ok: boolean; result?: any }>;
+    const rev = async () => (await call("notifications.settings", {})).result.item.revision as number;
+    assert.ok((await call("notifications.configure", { channel: "external", channelName: "chat", hostDownAfterMinutes: 10, expectedRevision: await rev() }, "s1")).ok);
+    await c.services.principals.enroll(rob, { commandId: "e-host", kind: "host", name: "w1", grants: [] });
+    const hostP = (await c.services.principals.authenticate((await c.services.principals.issueCredential(rob, "host:w1")).token))!;
+    const hosts = HostService.withEpoch(c.storage, c.epoch, c.services.assignments, { clock: () => new Date(clock).toISOString() });
+    await hosts.announce(hostP, { commandId: "an", capabilities: { os: "linux", arch: "x64", harnesses: [{ name: "pi", version: "1.3.0" }], isolation: ["bubblewrap"], tools: [], workspaces: [] } });
+    await hosts.heartbeat(hostP, { commandId: "hb1", sequence: 1 });
+    const open = async () => (await NotificationService.withEpoch(c.storage, c.epoch, { channels, clock: () => new Date(clock).toISOString() }).inbox(rob)).items.filter((i) => i.state !== "answered" && i.state !== "settled" && i.ref.kind === "host-record");
+    const tick = async () => { clock += 61_000; await c.dispatch!.dispatcher.tick(); };
+    await tick();
+    assert.equal((await open()).length, 0, "a host that just reported is fine");
+    clock += 11 * 60_000; await tick(); await tick();
+    assert.equal((await open()).length, 1);
+    assert.equal(sent.filter((m) => /silent for 1\d minutes/.test(m.text)).length, 1, JSON.stringify(sent));
+    await hosts.heartbeat(hostP, { commandId: "hb2", sequence: 2 });
+    await tick();
+    assert.equal((await open()).length, 0, "reporting again closes it");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

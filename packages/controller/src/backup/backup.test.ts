@@ -257,3 +257,25 @@ test("two repeats waiting on a removed backup start exactly one replacement, eve
     assert.equal(x.path, y.path);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("the newest good backup for the Urgent watch is the one the nightly run counts: trusted by its folder name, not a pre-upgrade snapshot, its time from the name and not from the manifest; a missing folder is no backup and an unreadable one is said so (card U11c review)", async () => {
+  const store = new MemoryStorage(); const root = tmp();
+  try {
+    await populate(store);
+    const service = new BackupService(store, { root, version: "t", now: () => new Date(AT) });
+    assert.deepEqual(await new BackupService(store, { root: join(root, "nope"), version: "t" }).lastGood(), {}, "no folder yet: no backup, nothing wrong");
+    assert.deepEqual(await service.lastGood(), {});
+    const manual = await createBackup(store, { root, kind: "manual", version: "t", now: () => new Date("2026-10-20T10:00:00.000Z") });
+    await createBackup(store, { root, kind: "pre-upgrade", version: "t", now: () => new Date("2026-10-28T10:00:00.000Z") });
+    assert.equal((await service.status()).newest?.kind, "pre-upgrade", "the status lists the snapshot as newest");
+    assert.equal((await service.lastGood()).at, "2026-10-20T10:00:00.000Z", "a pre-upgrade snapshot is not a good backup for the watch");
+    // A manifest that says it was made today, in a folder named for another day, is not trusted and its time is not used.
+    const m = JSON.parse(readFileSync(join(manual.path, "manifest.json"), "utf8")); m.createdAt = "2026-10-29T09:00:00.000Z";
+    writeFileSync(join(manual.path, "manifest.json"), JSON.stringify(m));
+    assert.equal((await service.lastGood()).at, undefined, "an altered manifest is not a backup");
+    // A folder that cannot be read.
+    const file = join(root, "plain-file");
+    writeFileSync(file, "x");
+    assert.equal((await new BackupService(store, { root: file, version: "t" }).lastGood()).unreadable, true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

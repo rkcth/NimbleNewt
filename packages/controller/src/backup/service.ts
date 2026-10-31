@@ -1,4 +1,4 @@
-import { stat } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import type { FileBlobStore } from "../artifacts/index.js";
 import type { ControllerStorage } from "../storage/index.js";
 import { type BackupKind, type BackupManifest } from "./format.js";
@@ -123,6 +123,19 @@ export class BackupService {
   async prune(retention?: { daily: number; weekly: number }): Promise<string[]> {
     const result = await pruneBackups(this.#options.root, { ...(this.#options.now === undefined ? {} : { now: this.#options.now }), retention: retention ?? await this.#counts() });
     return result.deleted.map((p) => basename(p));
+  }
+
+  /**
+   * What the Urgent watch needs (card U11c): the time of the newest good backup by the same rule the nightly run uses (not a pre-upgrade snapshot, and trusted by its folder name), taken from the name's time
+   * and not from the manifest's text; `unreadable` when the folder exists but cannot be read (the watch then decides nothing); the last failed run, if the latest run failed.
+   */
+  async lastGood(): Promise<{ readonly at?: string; readonly unreadable?: boolean; readonly lastError?: { at: string; message: string } }> {
+    const lastError = this.#lastError === undefined ? {} : { lastError: this.#lastError };
+    try { await readdir(this.#options.root); } catch (error) { return (error as NodeJS.ErrnoException)?.code === "ENOENT" ? { ...lastError } : { unreadable: true, ...lastError }; }
+    let all: BackupInfo[];
+    try { all = await listBackups(this.#options.root); } catch { return { unreadable: true, ...lastError }; }
+    const good = all.find((b) => b.manifest.kind !== "pre-upgrade" && b.trusted);
+    return { ...(good === undefined ? {} : { at: good.at }), ...lastError };
   }
 
   async status(): Promise<BackupStatus> {

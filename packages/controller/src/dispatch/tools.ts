@@ -159,7 +159,11 @@ export class ToolPath {
     // The generation: a stale one never dispatches. This throws; nothing is recorded for a worker that has lost its task.
     const fence = await this.#deps.assignments.guardFor({ generation: d.generation, attemptId: d.attemptId }).check(d.taskId);
     const verdict = await this.#judge(ready, { policy: true });
-    if (verdict.kind === "refused") return this.#refuse(ready, verdict.reason, fence.changes, verdict.diagnostics);
+    if (verdict.kind === "refused") {
+      // A policy denial is told to the denial hook only by the call that wrote the refusal: a judgement redone after a stale revision, or the same call made twice at once, is not a second denial (card U11c).
+      const told = verdict.denied === true ? () => { void Promise.resolve(this.#deps.denied?.({ attemptId: d.attemptId, callId: c.callId, agentId: d.agentId, projectId: d.projectId })).catch(() => undefined); } : undefined;
+      return this.#refuse(ready, verdict.reason, fence.changes, verdict.diagnostics, told);
+    }
     if (!LOCAL_CLASSES.has(cls) && kind !== "effect") return this.#refuse(ready, `${c.tool.name} acts on the outside (${cls}); it must go through the effect ledger with a bridge, and the call named none`, fence.changes);
     if (verdict.kind === "park") return this.#park(ready, verdict, fence.changes);
     return this.#begin(ready, verdict.decision, fence.changes, verdict.guards);
@@ -167,7 +171,7 @@ export class ToolPath {
 
   /** The judgement of one call: refused (with why), parked for an approval, or allowed. The policy is asked last, and only when `policy` is set (an approved call has had its approval instead). */
   async #judge(ready: Ready, options: { policy: boolean }): Promise<
-    | { kind: "refused"; reason: string; diagnostics?: readonly string[] }
+    | { kind: "refused"; reason: string; diagnostics?: readonly string[]; denied?: true }
     | { kind: "park"; decision: { mode: string; via: string; reasons: readonly string[] }; ownerOnly: boolean }
     | { kind: "allow"; decision: { mode: string; via: string; reasons: readonly string[] }; guards: readonly Change[] }
   > {
@@ -235,7 +239,7 @@ export class ToolPath {
       ...(spent === undefined ? {} : { spentSoFar: spent }),
     });
     const info = { mode: decision.mode, via: decision.via, reasons: decision.reasons.slice(0, 5).map((r) => clip(redactText(r), DISPATCH_LIMITS.diagnostic)) };
-    if (decision.mode === "deny") { void Promise.resolve(this.#deps.denied?.({ agentId: d.agentId, projectId: d.projectId })).catch(() => undefined); return { kind: "refused", reason: `denied by policy: ${info.reasons.join("; ")}` }; }
+    if (decision.mode === "deny") return { kind: "refused", reason: `denied by policy: ${info.reasons.join("; ")}`, denied: true };
     // An exact-operation review (A05: a call that runs a script, or installs something that runs) inside an approved ceiling still goes to the owner; a policy-level agent review stays with any reviewer.
     const exact = (c.script !== undefined || cls === "install-executable") && decision.via === "scope";
     if (exact) return { kind: "park", decision: { mode: "owner", via: "exact-operation", reasons: [`${c.tool.name} needs an exact-operation review, which goes to the owner even inside an approved ceiling`, ...info.reasons].slice(0, 5) }, ownerOnly: true };
@@ -295,10 +299,11 @@ export class ToolPath {
     return created;
   }
 
-  async #refuse(ready: Ready, reason: string, fence: readonly Change[], diagnostics: readonly string[] = []): Promise<Prepared> {
+  async #refuse(ready: Ready, reason: string, fence: readonly Change[], diagnostics: readonly string[] = [], written?: () => void): Promise<Prepared> {
     const body = this.#body(ready, "refused", { endedAt: this.#runner.now(), diagnostics: [clip(redactText(reason), DISPATCH_LIMITS.diagnostic), ...diagnostics].slice(0, DISPATCH_LIMITS.diagnostics), usage: { durationMs: 0, outputBytes: 0 } });
     void fence;
     if (!await this.#write(ready, body, (b) => ({ ...b, calls: b.calls + 1 }), [])) return this.#existing(ready);
+    written?.();
     return { done: true, result: { state: "refused", operationId: ready.opId, reason: clip(redactText(reason), DISPATCH_LIMITS.diagnostic) } };
   }
 

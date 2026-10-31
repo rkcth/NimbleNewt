@@ -226,9 +226,9 @@ export interface ComposeInput {
   readonly probes?: { readonly cutover: Pick<CutoverService, "downTargets" | "probe">; readonly probes: RouteProbes };
   /** The checked resume the dispatcher calls when an attempt brings earlier work back (card L04c). */
   readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "advance" | "retry" | "cancel" | "forTask" | "checkIdFor" | "retryable" | "exhausted" | "cancelledAsStale" | "get"> & Partial<Pick<ResumeCheckService, "hasContinuation">>;
+  /** Told when the approval policy denies an agent's tool call, once the refusal is on record (card U11c). */
+  readonly onDenied?: (denial: { readonly attemptId?: string; readonly callId?: string; readonly agentId: string; readonly projectId: string }) => Promise<unknown>;
   /** Unfinished hand-offs and checked resumes are carried on the same way (cards L03c, L04c). */
-  /** Told when the approval policy denies an agent's tool call (card U11c). */
-  readonly onDenied?: (denial: { readonly agentId: string; readonly projectId: string }) => Promise<unknown>;
   readonly sweeps?: readonly { readonly name: string; readonly sweep: (by: Principal) => Promise<unknown> }[];
   /** The stall detection and the reconciler the controller built; the dispatcher's tick runs them (card L01b). */
   readonly recovery?: { readonly stall: Pick<StallService, "scan"> & Partial<Pick<StallService, "reportFromRelay" | "holdWithOwner">>; readonly reconciler: { runPass(): Promise<unknown> } };

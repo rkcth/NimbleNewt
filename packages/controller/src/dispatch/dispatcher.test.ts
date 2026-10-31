@@ -427,6 +427,28 @@ for (const backend of backends) {
     assert.equal(c.worker.handles[0]!.restarts.length, 0, "a controller-side change applies at the next call with no restart");
   });
 
+  suite("a policy denial is told to the denial hook once, by the call that wrote the refusal: the same call asked again, or twice at once, is not a second denial (card U11c review)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    await c.task("t", ann);
+    const told: { attemptId?: string; callId?: string; agentId: string; projectId: string }[] = [];
+    c.dispatcher = c.restart({
+      denied: async (d) => { told.push(d); },
+      policy: { evaluate: async (input) => ({ ...(await c.policy.evaluate(input)), mode: "deny", via: "restriction", reasons: ["a standing restriction forbids it"] }) },
+    });
+    const out: ToolResult[] = [];
+    c.worker.script = async ({ gateway }) => {
+      out.push(await gateway.call(read("a"), local()));
+      out.push(await gateway.call(read("a"), local()));
+      out.push(...await Promise.all([gateway.call(read("b"), local()), gateway.call(read("b"), local())]));
+      out.push(await gateway.call(read("c"), local()));
+      return { status: "completed", text: "x" };
+    };
+    await c.run();
+    assert.ok(out.every((r) => r.state === "refused" && /denied by policy/.test((r as { reason: string }).reason)), JSON.stringify(out));
+    assert.deepEqual(told.map((t) => t.callId).sort(), ["a", "b", "c"], JSON.stringify(told));
+    assert.deepEqual([told[0]!.agentId, told[0]!.projectId], ["agent:ann", c.project]);
+  });
+
   suite("a worker that lost its generation cannot call; its attempt is not dispatched again", async (c) => {
     const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
     const bob = await c.agent("bob", workGrants(c.project, ["read-file"]));

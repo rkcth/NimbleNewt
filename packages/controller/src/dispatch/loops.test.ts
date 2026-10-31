@@ -20,6 +20,22 @@ for (const backend of backends) {
     } finally { await store.close(); }
   });
 
+  test(`${backend.name}: a loop that hangs is given up on after the limit, the other loops still run, and the hung one is not started again on top of itself (card U11c review)`, async () => {
+    const store = await backend.open();
+    try {
+      const w = await buildWorld(store.storage);
+      let starts = 0; let after = 0;
+      const d = w.restart({ loopTimeoutMs: 30, loops: [{ name: "hung", run: async () => { starts++; await new Promise(() => undefined); } }, { name: "after", run: async () => { after++; } }] });
+      const first = await d.tick();
+      assert.equal(first.loops.find((l) => l.name === "hung")!.ok, false);
+      assert.match(first.loops.find((l) => l.name === "hung")!.error ?? "", /took longer/);
+      assert.equal(first.loops.find((l) => l.name === "after")!.ok, true);
+      const second = await d.tick();
+      assert.match(second.loops.find((l) => l.name === "hung")!.error ?? "", /still running/);
+      assert.deepEqual([starts, after], [1, 2]);
+    } finally { await store.close(); }
+  });
+
   test(`${backend.name}: a tick runs the loops of the services that said "the controller's loop must call this", as the dispatcher's service principal, and a loop that fails does not stop the others`, async () => {
     const store = await backend.open();
     try {

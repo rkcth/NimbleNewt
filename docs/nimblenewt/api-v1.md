@@ -3574,11 +3574,13 @@ Arguments:
 - `levelByKind` (optional): { kind: notice | needs-you | urgent } for blocker, review-request, owner-question, maintenance, presence, safety-stop; null puts a kind back to its default (a safety stop stays urgent)
 - `noticeRetentionDays` (optional): whole days (1 to 365) a Notice stays in the inbox before it is closed (default 7)
 - `escalateAfterHours` (optional): whole hours (1 to 720) before an unanswered item is escalated; null turns escalation off (set a number again to turn it on)
-- `escalationsPerHour` (optional): whole number (1 to 1000) of Urgent messages the escalation sweep sends outside per hour (default 10); more in a burst are told in ONE "N more items escalated" message
-- `sweepEverySeconds` (optional): seconds (5 to 3600) between two full sweeps by the dispatcher (default 60)
+- `escalationsPerHour` (optional): whole number (1 to 1000) of Urgent messages sent outside per hour, escalations and the controller's own Urgent triggers together (default 10); more in a burst are held in the inbox and told in ONE "N more" message; null turns the limit off
+- `sweepEverySeconds` (optional): seconds (5 to 3600) between two full sweeps by the dispatcher, also of the Urgent watch (default 60)
+- `urgentMinGapMinutes` (optional): whole minutes (1 to 1440) before the same record (a host that keeps going down and up) is sent again as Urgent (default 30; the item is still raised in the inbox); null turns it off
+- `deniedAlertsPerHour` (optional): how many agents' repeated refusals (1 to 1000) may send an Urgent message per hour (default 5; the rest are raised in the inbox only); null turns it off
 - `sendTimeoutSeconds` (optional): seconds (1 to 120) one channel send may take before it is retried later (default 10)
 - `urgentInterruptsQuietHours` (optional): true (default): an escalated Urgent item and its retries are also sent in quiet hours; false: they wait for the end of quiet hours
-- `backupMaxAgeHours` (optional): whole hours (1 to 8760) without a good backup before the controller raises an Urgent item (default 48); null turns it off
+- `backupMaxAgeHours` (optional): whole hours (1 to 8760) without a good backup before the controller raises an Urgent item (default 48); null turns it off and closes its open item
 - `hostDownAfterMinutes` (optional): whole minutes (1 to 1440) a host may stay silent before the controller raises an Urgent item (default 10); null turns it off
 - `deniedThreshold` (optional): refusals of one agent (2 to 10000) within deniedWindowMinutes that raise an Urgent item; not set or null: off
 - `deniedWindowMinutes` (optional): whole minutes (1 to 1440) the refusals are counted in (default 60)
