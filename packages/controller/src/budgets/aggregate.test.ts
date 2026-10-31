@@ -16,7 +16,7 @@ const refuses = async (code: string, run: () => Promise<unknown>, match?: RegExp
 };
 
 for (const backend of backends) {
-  interface Ctx { all(): Promise<{ id: string; body: Record<string, unknown> }[]>; totals(): Promise<number>; rewrite(kind: string, id: string, body: Record<string, unknown>): Promise<void>; owner: Principal; host: Principal; svc: BudgetService; at(now: string): BudgetService; notices: AggregateNotice[]; a: string; b: string; t1: string; t2: string; tb: string; reserve(svc: BudgetService, task: string, cost: number, agent?: string): Promise<{ id: string }> }
+  interface Ctx { all(): Promise<{ id: string; body: Record<string, unknown> }[]>; totals(): Promise<number>; rewrite(kind: string, id: string, body: Record<string, unknown>): Promise<void>; slowOnTotals(after: () => Promise<void>): BudgetService; owner: Principal; host: Principal; svc: BudgetService; at(now: string): BudgetService; notices: AggregateNotice[]; a: string; b: string; t1: string; t2: string; tb: string; reserve(svc: BudgetService, task: string, cost: number, agent?: string): Promise<{ id: string }> }
   const suite = (name: string, body: (c: Ctx) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
       const world = await backend.open();
@@ -37,9 +37,17 @@ for (const backend of backends) {
           const found = (await world.storage.getAggregate({ kind, id }))!;
           await world.storage.applyOperation({ operationId: cid("rw"), epoch: projects.epoch, actor: "owner:rob", correlationId: "rw", at: "2026-10-22T21:00:00.000Z", changes: [{ type: "update", ref: { kind, id }, expectedRevision: found.revision, body: b as never }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] });
         };
+        const slowOnTotals = (afterRead: () => Promise<void>) => {
+          const storage = new Proxy(world.storage, { get: (target, key) => {
+            const value = Reflect.get(target, key, target);
+            if (key !== "getAggregate") return typeof value === "function" ? value.bind(target) : value;
+            return async (ref: { kind: string; id: string }) => { const found = await target.getAggregate(ref); if (ref.kind === "budget-aggregate-total") await afterRead(); return found; };
+          } });
+          return BudgetService.withEpoch(storage, projects.epoch, { clock: () => "2026-10-22T21:00:00.000Z", pause, notifyAggregate: async (x) => { notices.push(x); } });
+        };
         const totals = async (): Promise<number> => (await world.storage.listAggregates("budget-aggregate-total", { limit: 1000 })).length;
         const all = async () => (await world.storage.listAggregates("budget-aggregate-total", { limit: 1000 })).map((x) => ({ id: x.id, body: x.body as Record<string, unknown> }));
-        await body({ all, totals, rewrite, owner, host, svc: at("2026-10-22T21:00:00.000Z"), at, notices, a, b, t1, t2, tb, reserve });
+        await body({ all, totals, rewrite, slowOnTotals, owner, host, svc: at("2026-10-22T21:00:00.000Z"), at, notices, a, b, t1, t2, tb, reserve });
       } finally { await world.close(); }
     });
   const open = (c: Ctx, task: string, cost = 1000) => c.svc.open(c.owner, { commandId: cid("o"), taskId: task, currency: "USD", costMicros: cost, computeMs: 0 });
@@ -178,6 +186,24 @@ for (const backend of backends) {
     assert.deepEqual(results.map((r) => r.status).sort(), ["fulfilled", "rejected"]);
     const lost = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
     assert.match(String(lost.reason), /aggregate cap is reached/);
+  });
+
+  suite("forced interleaving: a reservation whose cap check read the totals before another reservation committed is refused, not admitted on a fresh read of the changed totals", async (c) => {
+    await open(c, c.t1); await open(c, c.tb);
+    await cap(c, { enabled: true, scope: "installation", period: "none", amountMicros: 100 });
+    // The first reservation reads the running totals for its check, then waits (before it commits) until the second one has committed.
+    let reached!: () => void; const gateHit = new Promise<void>((r) => { reached = r; });
+    let release!: () => void; const gate = new Promise<void>((r) => { release = r; });
+    // The check reads two totals (spent in the window, then held): the wait comes after the second, so the check is complete before the other reservation commits.
+    let reads = 0;
+    const slow = c.slowOnTotals(async () => { if (++reads !== 2) return; reached(); await gate; });
+    const first = c.reserve(slow, c.t1, 60);
+    await gateHit;
+    await c.reserve(c.svc, c.tb, 60);
+    release();
+    await refuses("invalid_command", () => first, /aggregate cap is reached/);
+    const held60 = (await c.all()).find((t) => t.body.window === "held")!;
+    assert.deepEqual(held60.body.byCurrency, { USD: 60 }, "only the second reservation is held");
   });
 
   suite("a settle racing a reservation is never missed: whichever commits first, the totals the cap reads equal what was spent plus what is held", async (c) => {
