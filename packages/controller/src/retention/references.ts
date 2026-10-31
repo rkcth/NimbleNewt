@@ -1,3 +1,5 @@
+import { canonicalOfPath, versionIdOf } from "../catalog/catalog.js";
+import { DISPATCH_KIND, operationKind } from "../dispatch/model.js";
 import type { Aggregate, ControllerStorage } from "../storage/types.js";
 
 /** The most records of one kind the reference scan reads. Past it the scan is `partial` and nothing it did not see may be treated as unreferenced. */
@@ -89,6 +91,32 @@ export class RetainedMaterial {
         if (live(b.taskId) && typeof b.versionId === "string") out.#add("catalog-version", b.versionId, `tool ${String(b.name).slice(0, 80)} ${String(b.version).slice(0, 20)} was run by task ${b.taskId}, which can still resume or be replayed`);
       });
     }
+    // Everything else that names a tool version a resumable task can still need (card T02c). A tool call of a live task that was pinned to a version before it ran (parked for approval, approved and not yet
+    // started, or running) is read from the attempt's operation records; an environment's skill library; and the dependency records a task wrote.
+    const attempts = new Map<string, string>();
+    await scan(DISPATCH_KIND, (a) => { const b = a.body as { taskId?: unknown; attemptId?: unknown }; if (live(b.taskId) && typeof b.attemptId === "string") attempts.set(b.attemptId, b.taskId); });
+    for (const [attemptId, taskId] of attempts) {
+      await scan(operationKind(attemptId), (a) => {
+        const b = a.body as { tool?: { kind?: unknown; name?: unknown; version?: unknown }; state?: unknown };
+        if (b.tool?.kind !== "catalog" || typeof b.tool.name !== "string" || typeof b.tool.version !== "string") return;
+        out.#add("catalog-version", versionIdOf(canonicalOfPath(b.tool.name), b.tool.version), `a call of ${b.tool.name.slice(0, 80)} ${b.tool.version.slice(0, 20)} (${String(b.state).slice(0, 20)}) is pinned to it by task ${taskId}, which can still resume`);
+      });
+    }
+    const pinned = new Map<string, Set<number>>();
+    await scan("environment-pin", (a) => { const b = a.body as { attemptId?: unknown; agentId?: unknown; revision?: unknown }; if (typeof b.attemptId === "string" && attempts.has(b.attemptId) && typeof b.agentId === "string" && typeof b.revision === "number") { const set = pinned.get(b.agentId) ?? new Set<number>(); set.add(b.revision); pinned.set(b.agentId, set); } });
+    const active = new Map<string, number>();
+    await scan("environment", (a) => { const b = a.body as { agentId?: unknown; active?: unknown }; if (typeof b.agentId === "string" && typeof b.active === "number") active.set(b.agentId, b.active); });
+    await scan("environment-revision", (a) => {
+      const b = a.body as { agentId?: unknown; revision?: unknown; manifest?: { skills?: unknown } };
+      if (typeof b.agentId !== "string" || typeof b.revision !== "number") return;
+      const why = active.get(b.agentId) === b.revision ? `in the skill library of the active environment of ${b.agentId.slice(0, 80)}` : pinned.get(b.agentId)?.has(b.revision) === true ? `in the skill library of environment revision ${b.revision} that an attempt of a resumable task is pinned to` : undefined;
+      if (why !== undefined) for (const id of strings(b.manifest?.skills)) out.#add("catalog-version", id, why);
+    });
+    await scan("dependency-manifest", (a) => {
+      const b = a.body as { taskId?: unknown; entries?: { kind?: unknown; key?: unknown }[] };
+      if (!live(b.taskId)) return;
+      for (const e of Array.isArray(b.entries) ? b.entries : []) if (e?.kind === "tool-version" && typeof e.key === "string") out.#add("catalog-version", e.key, `recorded as a dependency by task ${b.taskId}, which can still resume`);
+    });
     return out;
   }
 }

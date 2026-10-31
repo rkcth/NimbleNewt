@@ -25,6 +25,10 @@ export interface RetentionValues {
   readonly incidentPurgeDays: number | null;
   /** Catalogue tool versions: keep only the newest this many published versions of each tool (the latest, revoked versions and any a resumable task used are always kept); older ones are dropped by the runner. `null`: keep every version (card T02c). */
   readonly catalogVersionsKept: number | null;
+  /** Whether the automatic pass (`autoRun`) may also drop catalogue versions under `catalogVersionsKept` (default off: dropping a version is a larger act than expiring a summary, so a run by hand does it unless this is on). */
+  readonly catalogAutoDrop: boolean;
+  /** A revoked version keeps its record (name, version, digest, manifest, why and when it was revoked) for good; its executable text is blanked this many days after the revocation, unless another live version uses the same text. `null`: keep it. */
+  readonly revokedBytesDays: number | null;
   /** Optional storage quotas in bytes of records written (desk records, notes, summaries, artifacts): per project and per agent. `null`: no quota. */
   readonly quotaProjectBytes: number | null;
   readonly quotaAgentBytes: number | null;
@@ -35,7 +39,7 @@ export interface RetentionValues {
 }
 
 export const RETENTION_DEFAULTS: RetentionValues = {
-  derivedDays: null, autoRun: false, thinkingDays: 14, backupDaily: 7, backupWeekly: 4, incidentArchiveDays: null, incidentPurgeDays: null, catalogVersionsKept: null,
+  derivedDays: null, autoRun: false, thinkingDays: 14, backupDaily: 7, backupWeekly: 4, incidentArchiveDays: null, incidentPurgeDays: null, catalogVersionsKept: null, catalogAutoDrop: false, revokedBytesDays: 90,
   quotaProjectBytes: null, quotaAgentBytes: null, quotaWarnPercent: 80, reserveBytes: 16 * 1024 * 1024,
 };
 
@@ -50,6 +54,8 @@ export const RETENTION_FIELDS: Readonly<Record<keyof RetentionValues, Spec>> = {
   incidentArchiveDays: { kind: "days", min: 7, max: 3650, nullable: true },
   incidentPurgeDays: { kind: "days", min: 30, max: 3650, nullable: true },
   catalogVersionsKept: { kind: "count", min: 1, max: 500, nullable: true },
+  catalogAutoDrop: { kind: "flag", min: 0, max: 1, nullable: false },
+  revokedBytesDays: { kind: "days", min: 7, max: 3650, nullable: true },
   quotaProjectBytes: { kind: "bytes", min: 1024, max: 2 ** 50, nullable: true },
   quotaAgentBytes: { kind: "bytes", min: 1024, max: 2 ** 50, nullable: true },
   quotaWarnPercent: { kind: "percent", min: 50, max: 99, nullable: false },

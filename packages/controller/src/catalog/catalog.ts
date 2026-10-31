@@ -50,6 +50,8 @@ export interface VersionBody {
   readonly digest: string;
   readonly registeredBy: string;
   readonly registeredAt: string;
+  /** Set by retention for the moment between deciding to drop this version and dropping it (card T02c): no new run of it starts meanwhile. A claim older than `CLAIM_MS` is void. */
+  readonly dropping?: string;
 }
 export interface EntryBody { readonly name: string; readonly layer: Layer; readonly kind: ArtifactKind; readonly owner?: string; readonly latest: string; /** Every published version, in publication order. */ readonly versions: readonly string[]; /** The versions revoked. Revoking changes the entry, so a run in flight notices. */ readonly revoked: readonly string[]; /** The versions no longer chosen when no version is named (a newer one was rolled back, or the owner set it aside). They still resolve by name and version, so a paused task resumes silently on the one it used. */ readonly deprecated?: readonly string[] }
 /** What the owner chose for calls of a version that are running when it is revoked (owner decision, 2026-10-30): let them end, or cancel them. Absent: nobody was asked (the caller is not chat, or gave no answer), which means `finish`. */
@@ -88,6 +90,25 @@ const sha = (value: string): string => createHash("sha256").update(value).digest
 
 /** The action a run needs: `tool.<canonical name>` with the namespace's underscore written as a hyphen (an action has no underscore). */
 export const runAction = (canonical: string): string => `tool.${canonical.replace(/^a_/, "a-")}`;
+/** The canonical name behind a tool-path name (the inverse of `runAction`'s underscore rule). */
+export const canonicalOfPath = (pathName: string): string => (pathName.startsWith("a-") ? `a_${pathName.slice(2)}` : pathName);
+/** The record ID of one published version. */
+export const versionIdOf = (canonical: string, version: string): string => derivedId("cav", `${canonical}|${version}`);
+/** How long a retention claim on a version holds new runs off before it is void (a crash between the claim and the drop must not block a tool for good). */
+export const CLAIM_MS = 10 * 60_000;
+/**
+ * The versions retention never drops whatever `keep` says: the highest ever published, the highest one that resolves now (not revoked, not set aside: after a rollback this is an older version the tool really
+ * runs on), and the newest one that is not revoked (so an entry whose latest was revoked still has a version to fall back to).
+ */
+export function protectedVersions(e: Pick<EntryBody, "latest" | "versions" | "revoked" | "deprecated">): Set<string> {
+  const keep = new Set<string>([e.latest]);
+  const sorted = [...e.versions].sort(compare).reverse();
+  const live = sorted.find((v) => !e.revoked.includes(v) && !(e.deprecated ?? []).includes(v));
+  if (live !== undefined) keep.add(live);
+  const unrevoked = sorted.find((v) => !e.revoked.includes(v));
+  if (unrevoked !== undefined) keep.add(unrevoked);
+  return keep;
+}
 /** The personal namespace of a principal: `a_` plus a fixed digest of its ID, so it can be neither chosen nor reused. */
 export const personalNamespace = (principalId: string): string => `a_${sha(`agent-namespace\0${principalId}`).slice(0, 16)}`;
 
@@ -337,7 +358,7 @@ export class CatalogService {
    * The past revocations, newest first (owner only): which version, why, who and when. Never any content. `total` counts them all; at most `limit` (default 50, up to 200) are listed. A revocation whose
    * version record was later dropped by retention still shows (the revocation record is kept as the record of the act).
    */
-  async revocations(owner: Principal, query: { name?: string; limit?: number } = {}): Promise<{ items: { name: string; version: string; reason: string; revokedBy: string; at: string }[]; total: number }> {
+  async revocations(owner: Principal, query: { name?: string; limit?: number } = {}): Promise<{ items: { name: string; version: string; reason: string; revokedBy: string; at: string }[]; total: number; partial?: true }> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner reads past revocations`);
     onlyKnown(query, ["name", "limit"]);
     const limit = query.limit ?? 50;
@@ -345,7 +366,7 @@ export class CatalogService {
     if (query.name !== undefined && parseName(query.name) === null) invalid("name", "is not a canonical name");
     const all: { name: string; version: string; reason: string; revokedBy: string; at: string }[] = [];
     // The entry says which versions of a name were revoked; the revocation record says why. A name is looked at through its entry, so the scan is bounded by the entries.
-    let scanned = 0;
+    let scanned = 0; let partial = false;
     for (let after: string | undefined; ;) {
       const page = await this.#runner.list("catalog-entry", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
       for (const a of page) {
@@ -357,10 +378,11 @@ export class CatalogService {
           if (r !== undefined) all.push({ name: e.name, version: v, reason: r.reason, revokedBy: r.revokedBy, at: r.at });
         }
       }
-      if (page.length < 200 || scanned >= CATALOG_LIMITS.scan) break;
+      if (page.length < 200) break;
+      if (scanned >= CATALOG_LIMITS.scan) { partial = true; break; }
     }
     all.sort((x, y) => (x.at === y.at ? (x.name + x.version < y.name + y.version ? -1 : 1) : x.at < y.at ? 1 : -1));
-    return { items: all.slice(0, limit), total: all.length };
+    return { items: all.slice(0, limit), total: all.length, ...(partial ? { partial: true as const } : {}) };
   }
 
   /**
@@ -380,8 +402,9 @@ export class CatalogService {
         after = a.id; scanned += 1;
         const e = a.body as unknown as EntryBody;
         const ordered = [...e.versions].sort(compare);
+        const protect = protectedVersions(e);
         for (const v of ordered.slice(0, Math.max(0, ordered.length - keep))) {
-          if (v === e.latest || e.revoked.includes(v)) continue;
+          if (protect.has(v) || e.revoked.includes(v)) continue;
           const id = derivedId("cav", `${e.name}|${v}`);
           const found = await this.#runner.get("catalog-version", id);
           if (found === undefined) continue;
@@ -397,34 +420,126 @@ export class CatalogService {
   }
 
   /**
-   * Drops one version for retention (card T02c): the version record and its place in the entry go together in one step, guarded by the revisions retention saw. The latest and a revoked version are refused, and so is a
-   * version that is among the newest `keep` now. Its usage records (what ran, for whom) stay: they are history, not a copy of the version. The caller has already checked that no resumable task uses it.
-   * Returns false when the version changed or is gone since it was listed.
+   * Drops one version for retention (card T02c) in two steps, so a run cannot start on a version while it goes. First the version is CLAIMED: its record is updated (`dropping`), which refuses every new run of it and
+   * makes any run being recorded at that moment fail its revision check. Then `holds` is asked (the caller reads what resumable tasks, parked calls, environments and dependency records still need, now that nothing new can
+   * start); if anything holds the version the claim is lifted and nothing is dropped. Only then are the version record and its place in the entry removed together, guarded by the revisions seen. The latest, the highest live
+   * one (what the tool resolves to), the newest unrevoked one and any revoked one are refused, and so is a version that is among the newest `keep` now. Its usage records stay: they are history, not a copy.
+   * Returns `{ dropped: false }` when it changed or is gone since it was listed, and `held` with the reasons when something still needs it.
    */
-  async dropVersion(by: Principal, drop: { name: string; version: string; revision: number; keep: number }): Promise<boolean> {
+  async dropVersion(by: Principal, drop: { name: string; version: string; revision: number; keep: number }, holds?: (versionId: string) => Promise<readonly string[] | undefined>): Promise<{ dropped: boolean; held?: readonly string[] }> {
     if (by.kind !== "owner" && by.kind !== "service" && by.kind !== "host") throw new DomainError("forbidden", `${by.id} may not drop a version`);
     const versionId = derivedId("cav", `${drop.name}|${drop.version}`);
     const eref: AggregateRef = { kind: "catalog-entry", id: derivedId("cat", drop.name) };
     const vref: AggregateRef = { kind: "catalog-version", id: versionId };
+    const stale = (error: unknown): boolean => error instanceof DomainError && (error.code === "stale_revision" || error.code === "not_found");
+    const eligible = (e: EntryBody): boolean => {
+      const ordered = [...e.versions].sort(compare);
+      return !protectedVersions(e).has(drop.version) && !e.revoked.includes(drop.version) && ordered.slice(0, Math.max(0, ordered.length - drop.keep)).includes(drop.version);
+    };
+    const claimAt = this.#runner.now();
+    let claimed: number;
     try {
-      await this.#runner.command("catalog.retention.drop", { commandId: `rtc-${sha(`${versionId}|${drop.revision}`).slice(0, 40)}`, actor: by.id }, async () => ({
-        payload: { versionId, revision: drop.revision },
+      const done = await this.#runner.command("catalog.retention.claim", { commandId: `rtk-${sha(`${versionId}|${drop.revision}|${claimAt}`).slice(0, 40)}`, actor: by.id }, async () => ({
+        payload: { versionId, revision: drop.revision, at: claimAt },
         build: async () => {
           const entry = await this.#runner.get(eref.kind, eref.id);
           const found = await this.#runner.get(vref.kind, vref.id);
           if (entry === undefined || found === undefined || found.revision !== drop.revision) throw new DomainError("stale_revision", "changed since the preview");
+          if (!eligible(entry.body as unknown as EntryBody)) throw new DomainError("stale_revision", "it is no longer a version retention may drop");
+          const body = { ...(found.body as unknown as VersionBody), dropping: claimAt };
+          return { ref: vref, creates: false, changes: [{ type: "update", ref: vref, expectedRevision: found.revision, body: body as unknown as JsonObject }, { type: "check", ref: eref, expectedRevision: entry.revision }], detail: { name: drop.name, version: drop.version, rule: "catalog-versions-kept", step: "claim" } };
+        },
+      }));
+      claimed = done.revision;
+    } catch (error) {
+      if (stale(error)) return { dropped: false };
+      throw error;
+    }
+    const lift = async (): Promise<void> => {
+      try {
+        await this.#runner.command("catalog.retention.release", { commandId: `rtu-${sha(`${versionId}|${claimed}`).slice(0, 40)}`, actor: by.id }, async () => ({
+          payload: { versionId, revision: claimed },
+          build: async () => {
+            const found = await this.#runner.get(vref.kind, vref.id);
+            if (found === undefined || found.revision !== claimed) throw new DomainError("stale_revision", "already changed");
+            const { dropping: _gone, ...rest } = found.body as unknown as VersionBody;
+            return { ref: vref, creates: false, changes: [{ type: "update", ref: vref, expectedRevision: claimed, body: rest as unknown as JsonObject }], detail: { name: drop.name, version: drop.version, step: "release" } };
+          },
+        }));
+      } catch { /* the claim is void after CLAIM_MS whatever happens here */ }
+    };
+    try {
+      let why: readonly string[] | undefined;
+      try { why = holds === undefined ? undefined : await holds(versionId); } catch { why = ["the check of what still needs it failed, so it is kept"]; }
+      if (why !== undefined) { await lift(); return { dropped: false, held: why }; }
+      await this.#runner.command("catalog.retention.drop", { commandId: `rtc-${sha(`${versionId}|${drop.revision}|${claimAt}`).slice(0, 40)}`, actor: by.id }, async () => ({
+        payload: { versionId, revision: claimed },
+        build: async () => {
+          const entry = await this.#runner.get(eref.kind, eref.id);
+          const found = await this.#runner.get(vref.kind, vref.id);
+          if (entry === undefined || found === undefined || found.revision !== claimed) throw new DomainError("stale_revision", "changed since the claim");
           const e = entry.body as unknown as EntryBody;
-          const ordered = [...e.versions].sort(compare);
-          if (drop.version === e.latest || e.revoked.includes(drop.version) || !ordered.slice(0, Math.max(0, ordered.length - drop.keep)).includes(drop.version)) throw new DomainError("stale_revision", "it is no longer a version retention may drop");
+          if (!eligible(e)) throw new DomainError("stale_revision", "it is no longer a version retention may drop");
           const next: EntryBody = { ...e, versions: e.versions.filter((v) => v !== drop.version), ...(e.deprecated === undefined ? {} : { deprecated: e.deprecated.filter((v) => v !== drop.version) }) };
           return { ref: vref, creates: false, changes: [{ type: "delete", ref: vref, expectedRevision: found.revision }, { type: "update", ref: eref, expectedRevision: entry.revision, body: next as unknown as JsonObject }], detail: { name: drop.name, version: drop.version, rule: "catalog-versions-kept", keep: drop.keep } };
         },
       }));
-      return true;
+      return { dropped: true };
     } catch (error) {
-      if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "not_found")) return false;
+      await lift();
+      if (stale(error)) return { dropped: false };
       throw error;
     }
+  }
+
+  /**
+   * Revoked versions whose executable text retention may blank (card T02c): revoked at least `olderThanDays` ago, with an executable that is not also the text of a version that is not revoked. The version record,
+   * its digest and the revocation stay. Bounded by `limit`; `partial` says more exist or a scan stopped (then nothing is blanked on a guess).
+   */
+  async revokedExecutables(by: Principal, olderThanDays: number, limit: number): Promise<{ items: { name: string; version: string; versionId: string; recordId: string; ageDays: number }[]; partial: boolean }> {
+    if (by.kind !== "owner" && by.kind !== "service" && by.kind !== "host") throw new DomainError("forbidden", `${by.id} may not read what retention would blank`);
+    const now = Date.parse(this.#runner.now());
+    const found: { name: string; version: string; versionId: string; recordId: string; ageDays: number }[] = [];
+    const revokedOf = new Map<string, readonly string[]>();
+    let partial = false; let scanned = 0;
+    for (let after: string | undefined; ;) {
+      const page = await this.#runner.list("catalog-entry", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const a of page) {
+        after = a.id; scanned += 1;
+        const e = a.body as unknown as EntryBody;
+        revokedOf.set(e.name, e.revoked);
+        for (const v of e.revoked) {
+          const id = derivedId("cav", `${e.name}|${v}`);
+          const at = ((await this.#runner.get("catalog-revocation", id))?.body as unknown as RevocationBody | undefined)?.at;
+          const body = (await this.#runner.get("catalog-version", id))?.body as unknown as VersionBody | undefined;
+          if (at === undefined || body?.executable === undefined) continue;
+          const days = Math.floor((now - Date.parse(at)) / 86_400_000);
+          if (!(days >= olderThanDays)) continue;
+          const record = (await this.#runner.get("desk-record", body.executable.recordId))?.body as unknown as { deleted?: unknown } | undefined;
+          if (record === undefined || record.deleted !== undefined) continue;
+          if (found.length >= limit) { partial = true; continue; }
+          found.push({ name: e.name, version: v, versionId: id, recordId: body.executable.recordId, ageDays: days });
+        }
+      }
+      if (page.length < 200) break;
+      if (scanned >= CATALOG_LIMITS.scan) { partial = true; break; }
+    }
+    if (found.length === 0) return { items: [], partial };
+    // A text another version that is not revoked uses (the same record registered again, or released from an agent's record) is not blanked.
+    const shared = new Set<string>(); let seen = 0;
+    for (let after: string | undefined; ;) {
+      const page = await this.#runner.list("catalog-version", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const a of page) {
+        after = a.id; seen += 1;
+        const b = a.body as unknown as VersionBody;
+        if ((revokedOf.get(b.name) ?? []).includes(b.version)) continue;
+        if (b.executable !== undefined) shared.add(b.executable.recordId);
+        shared.add(b.instructional.recordId);
+      }
+      if (page.length < 200) break;
+      if (seen >= 20 * CATALOG_LIMITS.scan) return { items: [], partial: true };
+    }
+    return { items: found.filter((f) => !shared.has(f.recordId)), partial };
   }
 
   /** One version (or the latest live one), if the reader may see it: system and shared artifacts to any authenticated principal with `catalog.read`, a personal one only to its owner and the installation owner. */
@@ -479,7 +594,13 @@ export class CatalogService {
         const eref: AggregateRef = { kind: "catalog-entry", id: derivedId("cat", v.name) };
         const entry = await this.#runner.get(eref.kind, eref.id);
         if (entry === undefined || (entry.body as unknown as EntryBody).revoked.includes(v.version)) throw new DomainError("forbidden", `${v.name} ${v.version} was revoked`);
-        return { ref, creates: true, changes: [{ type: "create", ref, body: usage as unknown as JsonObject }, { type: "check", ref: eref, expectedRevision: entry.revision }], detail: { name: v.name, version: v.version, taskId, projectId }, contention: async () => new DomainError("stale_revision", "the catalog changed at the same moment; ask again") };
+        // Retention drops a version in two steps (claim, then delete). A version that is gone, or claimed for dropping, is not run; the check on its revision makes a claim that lands after this read fail the record.
+        const vref: AggregateRef = { kind: "catalog-version", id: v.id };
+        const current = await this.#runner.get(vref.kind, vref.id);
+        if (current === undefined || !(entry.body as unknown as EntryBody).versions.includes(v.version)) throw new DomainError("not_found", `${v.name} ${v.version} is no longer in the catalog`);
+        const claim = (current.body as unknown as VersionBody).dropping;
+        if (claim !== undefined && Date.parse(this.#runner.now()) - Date.parse(claim) < CLAIM_MS) throw new DomainError("unavailable", `${v.name} ${v.version} is being checked for removal by retention; ask again in a moment`);
+        return { ref, creates: true, changes: [{ type: "create", ref, body: usage as unknown as JsonObject }, { type: "check", ref: eref, expectedRevision: entry.revision }, { type: "check", ref: vref, expectedRevision: current.revision }], detail: { name: v.name, version: v.version, taskId, projectId }, contention: async () => new DomainError("stale_revision", "the catalog changed at the same moment; ask again") };
       },
     }));
     return { ready: true, versionId: v.id, version: v.version, digest: v.digest };
@@ -514,6 +635,7 @@ export class CatalogService {
     if (source === undefined) throw new DomainError("not_found", `${name} has no ${part}`);
     // Read as the registrant would: the desk's own rule about who may read a record applies to the registrant, and the catalog serves what was registered.
     const record = (await this.#runner.get("desk-record", source.recordId))?.body as unknown as { body: string } | undefined;
+    if ((record as { deleted?: unknown } | undefined)?.deleted !== undefined) throw new DomainError("not_found", `${name} ${version}: the ${part} text was removed (retention keeps the record and digest of a revoked version, not its text)`);
     if (record === undefined || sha(record.body) !== source.digest) throw new DomainError("invalid_command", `${name} ${version}: the recorded ${part} is missing or has changed since it was registered`);
     return record.body;
   }

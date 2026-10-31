@@ -148,9 +148,9 @@ export interface StartOptions {
   readonly notifications?: { readonly channels?: Record<string, ChannelAdapter>; readonly clock?: () => string };
   /**
    * The protected tool bridge for catalogue tools (card T06, wired by T02b): the script runner and which hosts are this machine. Off unless given (and it needs `dispatch`). The service is built ONCE here, over the controller's one
-   * catalogue, so a revocation reaches the calls it runs; `revocationPolicy` is only the fallback for a revocation that carried no owner choice.
+   * catalogue, so a revocation reaches the calls it runs; `revocationPolicy` is the operator\'s own answer for a revocation that carried no owner choice: it beats the owner\'s setting, and `catalog.policy.get` says so (`source: operator`). `pauseTask` and `notice` replace the built-in pause and owner notice (tests).
    */
-  readonly tools?: Pick<ToolExecutionDeps, "runner" | "isLocalHost" | "facts" | "revocationPolicy">;
+  readonly tools?: Pick<ToolExecutionDeps, "runner" | "isLocalHost" | "facts" | "revocationPolicy" | "pauseTask" | "notice">;
   /**
    * Where the artifact files are kept (card U05b). Given, the status answers check each delivered artifact against its files and say whether they match, are damaged, or were not checked; absent: they are shown as not checked and never as verified.
    * This controller only reads through it (it publishes nothing here), but opening creates the folder if it is missing, so a mistyped path shows every artifact as not matching until it is corrected. Not defaulted from the remote hosts' blob folder: name it explicitly.
@@ -459,7 +459,8 @@ export async function startController(options: StartOptions): Promise<Controller
     // ONE catalogue for the whole controller: its revocation listeners live on the instance, so the revoke path and the tool bridge must share it.
     const catalogService = CatalogService.withEpoch(storage, epoch, desks);
     // The standing answer for running calls when a revoke names none (card T02c); an operator-given `tools.revocationPolicy` wins over it.
-    const catalogPolicy = CatalogPolicyService.withEpoch(storage, epoch);
+    const operatorPolicy = options.tools?.revocationPolicy;
+    const catalogPolicy = CatalogPolicyService.withEpoch(storage, epoch, "finish", {}, operatorPolicy);
     const catalogRevocation: CatalogRevocationPort = { revoke: (owner, command) => catalogService.revoke(owner, command), revocations: (owner, query) => catalogService.revocations(owner, query), running: async (_owner, name, version) => ({ calls: toolsLive?.runningCalls(name, version) ?? [], total: toolsLive?.runningTotal(name, version) ?? 0 }) };
     const commands = CommandService.withEpoch(storage, epoch, BUILTIN_COMMANDS.source(catalogSource(catalogService)));
     const integration = IntegrationPolicyService.withEpoch(storage, epoch);
@@ -743,7 +744,7 @@ export async function startController(options: StartOptions): Promise<Controller
       const ro = {};
       tools = toolsLive = new ToolExecutionService({
         principal: dispatch.principal, credentials: taskCredentials, dispatch: { get: (...a) => dispatch!.dispatcher.get(...a), toolOperation: (...a) => dispatch!.dispatcher.toolOperation(...a) }, assignments, catalog: catalogService,
-        hosts: HostService.withEpoch(storage, epoch, assignments, ro), admission: AdmissionService.withEpoch(storage, epoch, ro), pauses, desks, revocationPolicy: () => catalogPolicy.effective(), pauseTask: (owner, taskId, reason, commandId) => pauses.pause(owner, { commandId, scope: { kind: "task", id: taskId }, reason }), ...options.tools,
+        hosts: HostService.withEpoch(storage, epoch, assignments, ro), admission: AdmissionService.withEpoch(storage, epoch, ro), pauses, desks, pauseTask: (owner, taskId, reason, commandId) => pauses.pause(owner, { commandId, scope: { kind: "task", id: taskId }, reason }), notice: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "needs-you", ref: { kind: "task", id: n.taskId }, detail: n.text }); }, ...options.tools, revocationPolicy: () => catalogPolicy.effective(),
       });
     }
     const transport = options.conversationTransport === undefined ? undefined : await ConversationTransport.listen({ ...options.conversationTransport, conversations, principals });

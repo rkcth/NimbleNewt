@@ -222,7 +222,7 @@ interface NeedItem { text: string; cites: Cite[]; taskId?: string; since: string
 
 export interface StatusDeps {
   /** Past revocations of catalogue tool versions (card T02c). Absent: the view is not offered. */
-  readonly revocations?: { list(by: Principal, query: { name?: string; limit?: number }): Promise<{ readonly items: readonly { name: string; version: string; reason: string; revokedBy: string; at: string }[]; readonly total: number }> };
+  readonly revocations?: { list(by: Principal, query: { name?: string; limit?: number }): Promise<{ readonly items: readonly { name: string; version: string; reason: string; revokedBy: string; at: string }[]; readonly total: number; readonly partial?: boolean }> };
   readonly assignments: AssignmentService;
   readonly waits: WaitService;
   readonly blockers: BlockerService;
@@ -427,9 +427,10 @@ export class StatusService {
       throw error;
     }
     const at = this.#runner.now();
-    if (found.total === 0) return { observedAt: at, lines: [line(query.name === undefined ? "No tool version has been revoked." : `No version of ${shown(query.name, 80)} has been revoked.`, cite("installation", "installation"))] };
+    if (found.total === 0 && found.partial !== true) return { observedAt: at, lines: [line(query.name === undefined ? "No tool version has been revoked." : `No version of ${shown(query.name, 80)} has been revoked.`, cite("installation", "installation"))] };
     const lines: Line[] = found.items.map((r) => line(`${shown(r.name, 80)} ${shown(r.version, 20)} was revoked at ${shown(r.at, 40)} by ${shown(r.revokedBy, 80)}: ${shown(r.reason, 200)}.`, cite("catalog-revocation", derivedId("cav", `${r.name}|${r.version}`))));
     if (found.total > found.items.length) lines.push(line(`${found.total - found.items.length} more revocation(s) are not shown.`, cite("installation", "installation")));
+    if (found.partial === true) lines.push(line("The catalogue is larger than was looked through; there may be more revocations than this list shows (name a tool to look at one).", cite("installation", "installation")));
     return { observedAt: at, lines };
   }
 

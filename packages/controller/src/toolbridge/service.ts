@@ -79,10 +79,12 @@ export interface ToolExecutionDeps {
   readonly assignments: Pick<AssignmentService, "getAssignment">;
   readonly catalog: Pick<CatalogService, "get" | "list" | "register" | "content" | "authorizeRun"> & Partial<Pick<CatalogService, "onRevoked">>;
   /**
-   * The `pause` policy (card T02c): pauses the task of a running call when its version is revoked (the owner who revoked is the actor). The call itself is not aborted; the pause stops what the agent writes until the owner resumes.
-   * Absent: `pause` falls back to `cancel` (a revocation is a safety act and the owner must not be left with a call nobody holds).
+   * The `pause` policy (card T02c): the running call is aborted (what a revoked tool writes never reaches the agent) AND the task of each running call is paused (the owner who revoked is the actor), so the agent does
+   * nothing more until the owner resumes it. Absent, or a task that cannot be paused: the call is aborted all the same and the owner is told through `notice`.
    */
   readonly pauseTask?: (owner: Principal, taskId: string, reason: string, commandId: string) => Promise<unknown>;
+  /** Tells the owner something that needs them (a task that could not be paused). Never throws into the revocation. */
+  readonly notice?: (notice: { readonly commandId: string; readonly taskId: string; readonly text: string }) => Promise<unknown>;
   /**
    * What happens to a catalogue tool call already running when its version is revoked (card T02b): `finish` (the provisional default: the run ends on the bytes it started with; new runs are refused either way)
    * or `cancel` (the run's signal is aborted and the call ends as failed). Read at the moment of revocation so a setting change applies at once; if it cannot be read, or answers anything else, the run is cancelled (a revocation is a safety act).
@@ -108,7 +110,8 @@ export interface ToolExecutionDeps {
 /** The bound gateway of the attempt the request came through. */
 export type BoundGateway = Pick<ToolGateway, "attemptId" | "call">;
 
-const WRITES: ReadonlySet<BridgeOperation> = new Set(["desk.write", "task.update", "task.transition", "message.send", "tool.register"]);
+/** What a pause refuses: everything the agent writes, and starting a tool (a paused task runs nothing new). */
+const WRITES: ReadonlySet<BridgeOperation> = new Set(["desk.write", "task.update", "task.transition", "message.send", "tool.register", "tool.invoke"]);
 const refusal = (code: string, message: string): BridgeResponse => ({ ok: false, code, message: redactText(message).slice(0, 600) });
 const ok = (result: JsonObject): BridgeResponse => ({ ok: true, result });
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
@@ -173,6 +176,8 @@ export class ToolExecutionService {
   /** Runs of the catalogue that have been handed to the runner (or are about to be), by `name|version`, so a revocation can cancel them. */
   readonly #running = new Map<string, Set<{ readonly ctl: AbortController; readonly attemptId: string; readonly callId: string; readonly taskId: string; readonly agentId: string }>>();
   readonly #unsubscribe: (() => void) | undefined;
+  /** What was decided for running calls when a version was revoked (`name|version`), bounded. A call not yet launched when it was decided reads it. */
+  readonly #decided = new Map<string, "finish" | "cancel" | "pause">();
 
   constructor(deps: ToolExecutionDeps) {
     this.#deps = deps;
@@ -199,22 +204,36 @@ export class ToolExecutionService {
    * anything else, cancels (a revocation is a safety act).
    */
   async #revoked(name: string, version: string, choice: "finish" | "cancel" | "pause" | undefined, owner: Principal): Promise<void> {
-    const live = this.#running.get(`${name}|${version}`);
-    if (live === undefined || live.size === 0) return;
+    const key = `${name}|${version}`;
+    const live = this.#running.get(key);
     let policy: unknown = choice;
-    if (policy === undefined) { try { policy = await (this.#deps.revocationPolicy?.() ?? "finish"); } catch { policy = "cancel"; } }
+    if (policy === undefined && live !== undefined && live.size > 0) { try { policy = await (this.#deps.revocationPolicy?.() ?? "finish"); } catch { policy = "cancel"; } }
+    // What was decided is kept, so a call registered but not yet launched asks it again just before it launches.
+    this.#decided.set(key, policy === "finish" || policy === "cancel" || policy === "pause" ? policy : policy === undefined ? "finish" : "cancel");
+    if (this.#decided.size > 500) this.#decided.delete(this.#decided.keys().next().value as string);
+    const runs = this.#running.get(key);
+    if (runs === undefined || runs.size === 0) return;
     if (policy === "finish") return;
-    if (policy === "pause" && this.#deps.pauseTask !== undefined) {
-      // Each task once. A task that cannot be paused (gone, not allowed) has its call cancelled: nothing is left running under a revoked version with nobody holding it.
-      const tasks = new Set([...live].map((r) => r.taskId));
-      const failed = new Set<string>();
-      for (const taskId of tasks) {
-        try { await this.#deps.pauseTask(owner, taskId, `${name} ${version} was revoked while a call of it ran; resume the task when you have decided`.slice(0, 300), `rvp-${createHash("sha256").update(`${name}|${version}|${taskId}`).digest("hex").slice(0, 40)}`); } catch { failed.add(taskId); }
+    const why = new Error(`${name} ${version} was revoked while it ran`);
+    // Aborted first and at once: nothing the revoked tool writes from now on reaches the agent. A `pause` pauses the tasks after that, so the agent does nothing further either.
+    const tasks = new Set([...runs].map((r) => r.taskId));
+    for (const run of [...runs]) run.ctl.abort(why);
+    if (policy !== "pause") return;
+    for (const taskId of tasks) {
+      const reason = `${name} ${version} was revoked while a call of it ran; the call was stopped; resume the task when you have decided`.slice(0, 300);
+      let held = false;
+      try {
+        // A task that is already paused (or stopping) is held already; pausing it again would only fail.
+        held = (await this.#deps.pauses.guard(taskId)).blockedBy.length > 0;
+      } catch { held = false; }
+      if (!held && this.#deps.pauseTask !== undefined) {
+        try { await this.#deps.pauseTask(owner, taskId, reason, `rvp-${createHash("sha256").update(`${name}|${version}|${taskId}`).digest("hex").slice(0, 40)}`); held = true; } catch { held = false; }
       }
-      for (const run of [...live]) if (failed.has(run.taskId)) run.ctl.abort(new Error(`${name} ${version} was revoked while it ran`));
-      return;
+      if (!held) {
+        // The call is already stopped; the task could not be held, so the owner is told instead of left believing it is paused.
+        try { await this.#deps.notice?.({ commandId: `rvn-${createHash("sha256").update(`${name}|${version}|${taskId}`).digest("hex").slice(0, 40)}`, taskId, text: `${name} ${version} was revoked; its running call was stopped, but task ${taskId} could not be paused. Check the task.`.slice(0, 200) }); } catch { /* the revocation stands */ }
+      }
     }
-    for (const run of [...live]) run.ctl.abort(new Error(`${name} ${version} was revoked while it ran`));
   }
 
   /**
@@ -469,6 +488,10 @@ export class ToolExecutionService {
           const ready = await this.#deps.catalog.authorizeRun(c.agent, { commandId: `bridge-run:${c.attemptId}:${c.callId}`, name: v.name, version: v.version, taskId: c.taskId, projectId: c.projectId, host: facts });
           if (!ready.ready) throw new Error(ready.reasons.join("; "));
           if (ready.digest !== v.digest) throw new Error(`${v.name} ${v.version} changed after it was checked`);
+          if (own.signal.aborted) throw new Error(`${v.name} ${v.version} was revoked before it started`);
+          // Revoked between the record above and the launch: a call that was not running when the owner chose is held to the choice now (`finish` lets it start; anything else, or no decision yet, does not).
+          const nowVersion = await this.#deps.catalog.get(c.agent, v.name, v.version);
+          if (nowVersion === undefined || (nowVersion.revoked !== undefined && this.#decided.get(`${v.name}|${v.version}`) !== "finish")) throw new Error(`${v.name} ${v.version} was revoked before it started`);
           if (own.signal.aborted) throw new Error(`${v.name} ${v.version} was revoked before it started`);
           const out = await this.#deps.runner.run(launch, guardedSignal(AbortSignal.any([signal, own.signal])));
           if (own.signal.aborted) throw new Error(`${v.name} ${v.version} was revoked while it ran`);

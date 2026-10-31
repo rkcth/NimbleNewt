@@ -45,7 +45,8 @@ export interface IncidentPort {
 }
 export interface CatalogRetentionPort {
   retentionCandidates(by: Principal, keep: number, limit: number): Promise<{ items: { name: string; version: string; versionId: string; revision: number; ageDays: number }[]; partial: boolean }>;
-  dropVersion(by: Principal, drop: { name: string; version: string; revision: number; keep: number }): Promise<boolean>;
+  revokedExecutables(by: Principal, olderThanDays: number, limit: number): Promise<{ items: { name: string; version: string; versionId: string; recordId: string; ageDays: number }[]; partial: boolean }>;
+  dropVersion(by: Principal, drop: { name: string; version: string; revision: number; keep: number }, holds?: (versionId: string) => Promise<readonly string[] | undefined>): Promise<{ dropped: boolean; held?: readonly string[] }>;
 }
 
 export interface RetentionDeps {
@@ -104,6 +105,8 @@ export interface RunReport {
   readonly incidents?: { archiveDays: number | null; purgeDays: number | null; archived?: number; purged?: number };
   /** The old-versions rule for the tool catalogue (off unless `catalogVersionsKept` is set): what it would drop (or dropped), and the versions kept because a resumable task used them. */
   readonly catalogVersions?: { keep: number; candidates: { name: string; version: string; ageDays: number }[]; retained: { name: string; version: string; reasons: string[] }[]; removed: number; partial: boolean };
+  /** Executable text of revoked versions (off when `revokedBytesDays` is null): what it would blank (or blanked). The record, digest and revocation stay. */
+  readonly revokedBytes?: { days: number; candidates: { name: string; version: string; ageDays: number }[]; blanked: number; partial: boolean };
   readonly runId?: string;
 }
 
@@ -240,21 +243,27 @@ export class RetentionService {
     const keepVersions = values.catalogVersionsKept;
     let versions: { items: { name: string; version: string; versionId: string; revision: number; ageDays: number }[]; partial: boolean } | undefined;
     const versionsRetained: { name: string; version: string; reasons: string[] }[] = [];
-    if (keepVersions !== null && this.#deps.catalog !== undefined) {
+    if (keepVersions !== null && this.#deps.catalog !== undefined && (!auto || values.catalogAutoDrop)) {
       const found = await this.#deps.catalog.retentionCandidates(by, keepVersions, limit);
       const material = await RetainedMaterial.build(this.#runner.storage);
       const free = found.items.filter((v) => { const why = material.why("catalog-version", v.versionId); if (why !== undefined) { if (versionsRetained.length < 200) versionsRetained.push({ name: v.name, version: v.version, reasons: why }); return false; } return true; });
       versions = { items: free, partial: found.partial };
       if (found.partial) partial = true;
     }
+    let revoked: { items: { name: string; version: string; versionId: string; recordId: string; ageDays: number }[]; partial: boolean } | undefined;
+    if (values.revokedBytesDays !== null && this.#deps.catalog !== undefined) {
+      revoked = await this.#deps.catalog.revokedExecutables(by, values.revokedBytesDays, limit);
+      if (revoked.partial) partial = true;
+    }
     const counts = { daily: values.backupDaily, weekly: values.backupWeekly };
     const backupsPort = this.#deps.backups;
     const wouldDelete = backupsPort === undefined ? undefined : await backupsPort.preview(counts);
-    const digest = digestOf({ c: candidates.map((c) => `${c.kind}/${c.id}@${c.revision}`), b: wouldDelete ?? [], i: [values.incidentArchiveDays, values.incidentPurgeDays], v: versions === undefined ? null : [keepVersions, ...versions.items.map((v) => `${v.versionId}@${v.revision}`)] });
+    const digest = digestOf({ c: candidates.map((c) => `${c.kind}/${c.id}@${c.revision}`), b: wouldDelete ?? [], i: [values.incidentArchiveDays, values.incidentPurgeDays], v: versions === undefined ? null : [keepVersions, ...versions.items.map((v) => `${v.versionId}@${v.revision}`)], x: revoked === undefined ? null : [values.revokedBytesDays, ...revoked.items.map((r) => r.recordId)] });
     const base: RunReport = {
       dryRun, enabled: values.derivedDays !== null, derivedDays: values.derivedDays, candidates, removed: 0, retained, partial,
       ...(backupsPort === undefined ? {} : { backups: { kept: (await backupsPort.list()).length - (wouldDelete?.length ?? 0), ...(dryRun ? { wouldDelete: wouldDelete ?? [] } : {}), counts } }),
       ...(this.#deps.incidents === undefined ? {} : { incidents: { archiveDays: values.incidentArchiveDays, purgeDays: values.incidentPurgeDays } }),
+      ...(revoked === undefined ? {} : { revokedBytes: { days: values.revokedBytesDays!, candidates: revoked.items.map((r) => ({ name: r.name, version: r.version, ageDays: r.ageDays })), blanked: 0, partial: revoked.partial } }),
       ...(versions === undefined ? {} : { catalogVersions: { keep: keepVersions!, candidates: versions.items.map((v) => ({ name: v.name, version: v.version, ageDays: v.ageDays })), retained: versionsRetained, removed: 0, partial: versions.partial } }),
     };
     if (dryRun) return { ...base, digest };
@@ -281,10 +290,15 @@ export class RetentionService {
         for (const v of versions.items.slice(i, i + REMOVE_BATCH)) {
           const why = material.why("catalog-version", v.versionId);
           if (why !== undefined) { if (versionsRetained.length < 200) versionsRetained.push({ name: v.name, version: v.version, reasons: why }); continue; }
-          if (await this.#deps.catalog.dropVersion(by, { name: v.name, version: v.version, revision: v.revision, keep: keepVersions })) { versionsRemoved += 1; removedIds.push(`catalog-version/${v.versionId}`); }
+          // The holds are read once more inside the drop, after the version is claimed and nothing new can start on it (a call or a task can take a version between the batch's read and here).
+          const dropped = await this.#deps.catalog.dropVersion(by, { name: v.name, version: v.version, revision: v.revision, keep: keepVersions }, async (versionId) => (await RetainedMaterial.build(this.#runner.storage)).why("catalog-version", versionId));
+          if (dropped.held !== undefined && versionsRetained.length < 200) versionsRetained.push({ name: v.name, version: v.version, reasons: [...dropped.held] });
+          if (dropped.dropped) { versionsRemoved += 1; removedIds.push(`catalog-version/${v.versionId}`); }
         }
       }
     }
+    let blanked = 0;
+    if (revoked !== undefined) for (const r of revoked.items) if (await this.#blankExecutable(by, r)) { blanked += 1; removedIds.push(`desk-record/${r.recordId}`); }
     let deleted: string[] | undefined;
     if (backupsPort !== undefined) deleted = await backupsPort.prune(counts);
     let archived: number | undefined; let purged: number | undefined;
@@ -309,9 +323,37 @@ export class RetentionService {
     return {
       ...base, dryRun: false, removed: removedIds.length, runId,
       ...(versions === undefined ? {} : { catalogVersions: { ...base.catalogVersions!, retained: versionsRetained, removed: versionsRemoved } }),
+      ...(revoked === undefined ? {} : { revokedBytes: { ...base.revokedBytes!, blanked } }),
       ...(backupsPort === undefined ? {} : { backups: { kept: (await backupsPort.list()).length, deleted: deleted ?? [], counts } }),
       ...(this.#deps.incidents === undefined ? {} : { incidents: { archiveDays: values.incidentArchiveDays, purgeDays: values.incidentPurgeDays, ...(archived === undefined ? {} : { archived }), ...(purged === undefined ? {} : { purged }) } }),
     };
+  }
+
+  /** Blanks the executable text of one revoked version's record (title and body gone, a marker left), guarded by the revision read now; the deletion ledger is written first so a restore of an older backup blanks it again. */
+  async #blankExecutable(by: Principal, r: { name: string; version: string; versionId: string; recordId: string }): Promise<boolean> {
+    const found = await this.#runner.get("desk-record", r.recordId);
+    if (found === undefined) return false;
+    const body = found.body as Record<string, unknown>;
+    if (body["deleted"] !== undefined) return false;
+    const at = this.#runner.now();
+    const deletionId = cmdId("rtb", r.versionId, r.recordId);
+    try {
+      await this.#deps.ledger?.append({ deletionId, at, by: by.id, reason: `executable of revoked ${r.name} ${r.version}`.slice(0, 200), desk: [r.recordId], compactions: [], removed: [] });
+      await this.#runner.command("retention.revoked-bytes", { commandId: cmdId("rtb", r.versionId, found.revision), actor: by.id }, async () => ({
+        payload: { versionId: r.versionId, recordId: r.recordId, revision: found.revision },
+        build: async (): Promise<Built> => {
+          const fresh = await this.#runner.get("desk-record", r.recordId);
+          if (fresh === undefined || fresh.revision !== found.revision) throw new DomainError("stale_revision", "changed since the preview");
+          const ref = { kind: "desk-record", id: r.recordId };
+          const stub = stubDeskBody(body, { at, by: by.id, reason: `executable of revoked ${r.name} ${r.version}`.slice(0, 200), contentDigest: digestOf({ title: body["title"] ?? "", body: body["body"] ?? "" }) });
+          return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: fresh.revision, body: stub as JsonObject }], detail: { rule: "revoked-bytes-days", name: r.name, version: r.version } };
+        },
+      }));
+      return true;
+    } catch (error) {
+      if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "not_found")) return false;
+      throw error;
+    }
   }
 
   /** One guarded removal, recorded. A record that changed or is gone since the preview is skipped. */

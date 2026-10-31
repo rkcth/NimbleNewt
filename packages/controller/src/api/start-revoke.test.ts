@@ -41,8 +41,8 @@ interface Run {
  */
 async function scenario(act: (x: {
   c: Awaited<ReturnType<typeof startController>>; name: string; owner: string; agent: string; call: (token: string, op: string, args: Record<string, unknown>, commandId?: string) => Promise<Reply>;
-  say: (id: string, text: string, intents: unknown[]) => Promise<{ turnId: string; outcomes: any[] }>; ownerPrincipal: any; callsBefore: () => Promise<any[]>;
-}) => Promise<void>, extra: { revocationPolicy?: "finish" | "cancel" | "pause"; run?: Run; second?: boolean } = {}) {
+  say: (id: string, text: string, intents: unknown[]) => Promise<{ turnId: string; outcomes: any[] }>; ownerPrincipal: any; callsBefore: () => Promise<any[]>; /** Lets the long call end now. */ release: () => void;
+}) => Promise<void>, extra: { revocationPolicy?: "finish" | "cancel" | "pause"; run?: Run; second?: boolean; pauseTask?: unknown; notice?: (n: { commandId: string; taskId: string; text: string }) => Promise<unknown>; /** Runs once the controller is up (a test may wrap a service). */ install?: (c: Awaited<ReturnType<typeof startController>>, owner: () => any) => void; slowPolicyMs?: number; /** The call is expected never to launch. */ noLaunch?: boolean } = {}) {
   const d = mkdtempSync(join(tmpdir(), "nn-revoke-"));
   const out: { aborted: boolean; running?: Record<string, any>; later?: BridgeResponse; failure?: unknown; name?: string } = { aborted: false };
   const sayText: Record<string, unknown[]> = {};
@@ -62,13 +62,14 @@ async function scenario(act: (x: {
     storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
     chat: { interpreter: new ScriptedInterpreter((input) => sayText[input.text] ?? []) },
     dispatch: { timer: new ManualTimer(), manual: true, workers: [worker] },
-    tools: { runner, isLocalHost: (h) => h === "host:w1", facts: async () => ({ os: "linux", arch: "x64", interpreters: { node: "22.19.0" }, packages: {}, cpus: 8, memoryMb: 16_384 }), ...(extra.revocationPolicy === undefined ? {} : { revocationPolicy: () => extra.revocationPolicy! }) },
+    tools: { runner, isLocalHost: (h) => h === "host:w1", facts: async () => ({ os: "linux", arch: "x64", interpreters: { node: "22.19.0" }, packages: {}, cpus: 8, memoryMb: 16_384 }), ...(extra.revocationPolicy === undefined ? {} : { revocationPolicy: async () => { if (extra.slowPolicyMs !== undefined) await sleep(extra.slowPolicyMs); return extra.revocationPolicy!; } }), ...("pauseTask" in extra ? { pauseTask: extra.pauseTask as never } : {}), ...(extra.notice === undefined ? {} : { notice: extra.notice }) },
   });
   try {
     assert.ok(c.dispatch !== undefined && c.tools !== undefined, c.dispatchProblem);
     const s = c.services;
     const boot = await s.principals.bootstrapOwner({ name: "rob" });
     const rob = await s.principals.authenticate(boot.token);
+    extra.install?.(c, () => rob);
     // The route, the host and the autonomous profile the dispatcher needs to start an attempt.
     await s.routing.setTable(rob, { commandId: "rt", expectedRevision: 0, table: { ...ROUTING_TABLE, roles: { coordinator: "r-cloud", "safety-supervisor": "r-cloud" } } } as never);
     await DifficultyService.withEpoch(c.storage, c.epoch, s.routing, s.contracts).setProfiles(rob, { commandId: "sp", expectedRevision: 0, profiles: EXEC_PROFILES } as never);
@@ -105,8 +106,8 @@ async function scenario(act: (x: {
         const review = (await s.reviews.get(rob, first["reviewId"] as string))!;
         await s.reviews.decide(rob, { commandId: "dec", requestId: review.id, expectedRevision: review.revision, verdict: "allow", reason: "fine" } as never);
         const running = send("tool.invoke", args, "long-call");
-        await hasStarted;
-        await act({ c, name, owner: boot.token, agent: annToken, call, say, ownerPrincipal: rob, callsBefore: async () => (await call(boot.token, "catalog.running", { name, version: "1.0.0" })).result.items });
+        if (extra.noLaunch === true) await Promise.race([hasStarted, sleep(400)]); else await hasStarted;
+        await act({ c, name, owner: boot.token, agent: annToken, call, say, ownerPrincipal: rob, release, callsBefore: async () => (await call(boot.token, "catalog.running", { name, version: "1.0.0" })).result.items });
         await sleep(30);
         release();
         out.running = good(await running);
@@ -324,7 +325,7 @@ test("startController refuses tools without dispatch, with a clear message (card
 
 const reasonOf = (r: Reply): string => JSON.stringify(r);
 
-test("pause is a third choice for running calls: the task of each is paused, the call is not aborted, and the pause stays until the owner resumes (card T02c)", async () => {
+test("pause stops the running call AND pauses its task: what the revoked tool writes never reaches the agent, the pause stays until the owner resumes, and a paused task starts no tool (card T02c)", async () => {
   const seen: Record<string, any> = {};
   const out = await scenario(async ({ c, name, owner, call, callsBefore }) => {
     const [running] = await callsBefore();
@@ -334,10 +335,57 @@ test("pause is a third choice for running calls: the task of each is paused, the
     await sleep(30);
     seen.blockedBy = (await c.services.pauses.guard(running.taskId)).blockedBy;
   });
-  assert.equal(out.aborted, false, "a paused call is not aborted");
-  assert.equal(out.running["state"], "confirmed", JSON.stringify(out.running));
+  assert.equal(out.aborted, true, "pause stops the call as well");
+  assert.equal(out.running["state"], "failed", `its output does not reach the agent: ${JSON.stringify(out.running)}`);
   assert.deepEqual(seen.blockedBy.map((b: any) => [b.kind, b.id]), [["task", seen.taskId]]);
-  assert.equal(out.later.ok, false, "a later call of the revoked version is refused");
+  assert.equal(out.later.ok, false);
+  assert.equal((out.later as { code: string }).code, "paused", "a paused task starts no tool, revoked or not");
+});
+
+test("when the task cannot be paused the call is stopped all the same and the owner is told; a task that is already paused is held already and needs no notice; with no pause available the owner is told (card T02c fix)", async () => {
+  const notices: { taskId: string; text: string }[] = [];
+  const notice = async (n: { commandId: string; taskId: string; text: string }): Promise<void> => { notices.push({ taskId: n.taskId, text: n.text }); };
+  const failing = await scenario(async ({ owner, name, call }) => { assert.ok((await call(owner, "catalog.revoke", { name, version: "1.0.0", reason: "bad", runningCalls: "pause" }, "rv-f")).ok); await sleep(30); }, { pauseTask: async () => { throw new Error("cannot pause"); }, notice });
+  assert.equal(failing.aborted, true, "the call is stopped although the pause failed");
+  assert.equal(failing.running["state"], "failed");
+  assert.equal(notices.length, 1);
+  assert.match(notices[0]!.text, /could not be paused/);
+  notices.length = 0;
+  const absent = await scenario(async ({ owner, name, call }) => { assert.ok((await call(owner, "catalog.revoke", { name, version: "1.0.0", reason: "bad", runningCalls: "pause" }, "rv-a")).ok); await sleep(30); }, { pauseTask: undefined, notice });
+  assert.equal(absent.aborted, true);
+  assert.equal(notices.length, 1, "no pause available: the owner is told");
+  notices.length = 0;
+  // Already paused (by the owner, before): held already, so nothing to tell, and pauseTask is not even needed.
+  const already = await scenario(async ({ c, owner, name, call, callsBefore, ownerPrincipal }) => {
+    const [running] = await callsBefore();
+    await c.services.pauses.pause(ownerPrincipal, { commandId: "pre-pause", scope: { kind: "task", id: running.taskId }, reason: "owner paused it" });
+    assert.ok((await call(owner, "catalog.revoke", { name, version: "1.0.0", reason: "bad", runningCalls: "pause" }, "rv-p")).ok);
+    await sleep(30);
+  }, { pauseTask: async () => { throw new Error("already paused"); }, notice });
+  assert.equal(already.aborted, true);
+  assert.deepEqual(notices, [], "a task that is paused already is held, nothing to tell");
+});
+
+test("a call that is recorded but has not launched when its version is revoked does not launch: the revocation is read again just before the launch, even while the owner's choice is still being worked out (card T02c fix)", async () => {
+  let launched = 0;
+  const out = await scenario(async () => undefined, {
+    noLaunch: true,
+    run: { hook: () => { launched += 1; } },
+    // The standing policy answers late, as a slow setting read would: the revocation is visible before the choice is.
+    revocationPolicy: "cancel", slowPolicyMs: 150,
+    install: (c, owner) => {
+      const catalog = c.services.catalog;
+      const original = catalog.authorizeRun.bind(catalog);
+      (catalog as { authorizeRun: typeof original }).authorizeRun = async (...args) => {
+        const ready = await original(...args);
+        // The owner revokes (no choice named) after the run is recorded and before it launches.
+        await catalog.revoke(owner(), { commandId: "rv-window", name: args[1].name, version: "1.0.0", reason: "bad" });
+        return ready;
+      };
+    },
+  });
+  assert.equal(launched, 0, "the tool never launched");
+  assert.equal(out.running["state"], "failed");
 });
 
 test("the standing policy for running calls is a setting: owner only, race-safe, chat-settable; a revoke with no choice follows it and an explicit choice beats it (card T02c)", async () => {
@@ -352,11 +400,17 @@ test("the standing policy for running calls is a setting: owner only, race-safe,
     seen.replay = (await call(owner, "catalog.policy.change", { runningCalls: "cancel", expectedRevision: 0 }, "p1")).result;
     seen.after = (await call(owner, "catalog.policy.get", {})).result.item;
     assert.ok((await call(owner, "catalog.revoke", { name, version: "1.0.0", reason: "bad" }, "rv-follow")).ok);
+    // The setting moves on; a replay of the first command still answers with what it replaced (null), not with what the record holds now.
+    seen.p3 = (await call(owner, "catalog.policy.change", { runningCalls: "pause", expectedRevision: 1 }, "p3")).result;
+    assert.ok((await call(owner, "catalog.policy.change", { runningCalls: "finish", expectedRevision: 2 }, "p4")).ok);
+    seen.replayLater = (await call(owner, "catalog.policy.change", { runningCalls: "pause", expectedRevision: 1 }, "p3")).result;
   });
   assert.deepEqual([seen.initial.revision, seen.initial.runningCalls, seen.initial.effective, seen.initial.default], [0, null, "finish", "finish"]);
   assert.deepEqual([seen.agentGet, seen.agentSet, seen.bad, seen.stale], ["forbidden", "forbidden", "invalid_command", "stale_revision"]);
   assert.deepEqual([seen.set.revision, seen.set.old, seen.set.new, seen.after.effective, seen.after.revision], [1, null, "cancel", "cancel", 1]);
   assert.equal(seen.replay.revision, 1, "the same command answers again");
+  assert.deepEqual([seen.replayLater.old, seen.replayLater.new, seen.replayLater.revision], ["cancel", "pause", 2], "a replay tells the old value truthfully, not the current one");
+  assert.deepEqual([seen.set.effective, seen.set.source], ["cancel", "setting"]);
   assert.equal(cancelled.aborted, true, "no choice named: the standing policy cancels");
   assert.equal(cancelled.running["state"], "failed");
 
@@ -368,7 +422,7 @@ test("the standing policy for running calls is a setting: owner only, race-safe,
     seen.pausedBy = (await c.services.pauses.guard(running.taskId)).blockedBy.length;
   });
   assert.equal(seen.pausedBy, 1);
-  assert.equal(paused.aborted, false);
+  assert.equal(paused.aborted, true, "pause stops the call as well as the task");
 
   const explicit = await scenario(async ({ owner, name, call }) => {
     assert.ok((await call(owner, "catalog.policy.change", { runningCalls: "cancel" }, "pc")).ok);
@@ -421,4 +475,36 @@ test("past revocations are read by the owner through the API and in chat; the po
   assert.deepEqual([seen.afterAccept.runningCalls, seen.afterAccept.revision], ["pause", 1]);
   assert.notEqual(seen.stale.status, "applied", reasonOf(seen.stale));
   assert.equal(seen.final, "finish", "the stale proposal did not overwrite the owner's later change");
+});
+
+test("catalog.policy.get reports the policy in force: an operator's startup answer beats the owner's setting and says so; chat tells it, and with no call running the revoke follows it instead of assuming finish (card T02c fix)", async () => {
+  const seen: Record<string, any> = {};
+  const out = await scenario(async ({ owner, name, call, say }) => {
+    seen.set = (await call(owner, "catalog.policy.change", { runningCalls: "pause" }, "op1")).result;
+    seen.get = (await call(owner, "catalog.policy.get", {})).result.item;
+    const text = "from now on let running calls finish when I revoke a tool";
+    const proposed = await say("o1", text, [{ kind: "command", op: "catalog.policy.change", args: { runningCalls: "finish" }, evidence: text, basis: "owner" }]);
+    seen.preview = proposed.outcomes[0].preview;
+    // The revoke follows the operator's answer (cancel), not the setting (pause) and not an assumed finish.
+    assert.ok((await call(owner, "catalog.revoke", { name, version: "1.0.0", reason: "bad" }, "rv-op")).ok);
+  }, { revocationPolicy: "cancel" });
+  assert.deepEqual([seen.get.runningCalls, seen.get.effective, seen.get.source], ["pause", "cancel", "operator"]);
+  assert.deepEqual([seen.set.effective, seen.set.source], ["cancel", "operator"], "the answer to a change says it does not apply");
+  assert.match(seen.preview.join("\n"), /operator set this at startup \(cancel\)/);
+  assert.equal(out.aborted, true);
+});
+
+test("in chat a revoke with no call running does not assume finish: the preview says what a call that slips in will get, and no choice is recorded (card T02c fix)", async () => {
+  const seen: Record<string, any> = {};
+  await scenario(async ({ name, say, call, owner, release }) => {
+    release(); await sleep(150);
+    assert.equal((await call(owner, "catalog.running", { name, version: "1.0.0" })).result.total, 0, "nothing is running");
+    assert.ok((await call(owner, "catalog.policy.change", { runningCalls: "cancel" }, "idle-1")).ok);
+    const text = `revoke ${name} 1.0.0 because it is bad`;
+    const said = await say("i1", text, [{ kind: "command", op: "catalog.revoke", args: { name, version: "1.0.0", reason: "it is bad" }, evidence: text, basis: "owner" }]);
+    seen.status = said.outcomes[0].status; seen.preview = said.outcomes[0].preview;
+  });
+  assert.equal(seen.status, "proposed", JSON.stringify(seen));
+  assert.match(seen.preview.join("\n"), /follows the standing policy: cancel/);
+  assert.doesNotMatch(seen.preview.join("\n"), /runningCalls=finish/);
 });

@@ -775,12 +775,18 @@ export class ChatService {
       const listed = running.slice(0, 10).map((r) => `call ${String(r.callId).slice(0, 40)} of task ${String(r.taskId).slice(0, 60)} (agent ${String(r.agentId).slice(0, 60)})`);
       const more = total > listed.length ? ` and ${total - listed.length} more` : "";
       if (total > 0) notes.push(`${total} running ${total === 1 ? "call" : "calls"} of ${args["name"].slice(0, 80)} ${args["version"].slice(0, 20)}: ${listed.join("; ")}${more}.`.slice(0, CHAT_LIMITS.line - 10));
-      notes.push("A version is revoked once: choosing finish cannot be changed to cancel later. Cancel reaches every running call when it is carried out, including calls that start before you accept.");
+      notes.push("A version is revoked once: choosing finish cannot be changed to cancel later. Cancel and pause reach every running call when they are carried out, including calls that start before you accept.");
       if (args["runningCalls"] === undefined) {
-        if (total > 0) return { ok: false, kind: "ask", question: `${notes[0]!.slice(0, 380)} Should they finish, be cancelled, or should their tasks be paused? (A cancelled call ends as failed; a pause leaves the call running and stops what the agent writes until you resume the task.)`, options: ["finish: let them end on the version they started with", "cancel: stop them now; each ends as failed", "pause: pause the task of each; you decide when to resume"], field: "runningCalls", choices: ["finish", "cancel", "pause"] };
-        // Nothing is running now: the choice is recorded as finish, so a call that slips in before the owner accepts is not cancelled without being asked.
-        args["runningCalls"] = "finish";
+        if (total > 0) return { ok: false, kind: "ask", question: `${notes[0]!.slice(0, 380)} Should they finish, be cancelled, or should their tasks be paused? (A cancelled call ends as failed. A pause stops the call too, so nothing the revoked tool writes reaches the agent, and it also pauses the task: the agent does nothing more until you resume it.)`, options: ["finish: let them end on the version they started with", "cancel: stop them now; each ends as failed", "pause: stop each call and pause its task; you decide when to resume"], field: "runningCalls", choices: ["finish", "cancel", "pause"] };
+        // Nothing is running now: no choice is recorded, so a call that slips in before the owner accepts follows the standing policy in force (the owner's setting, or the operator's), which is told here.
+        const standing = await this.#get(token, "catalog.policy.get", {});
+        const effective = typeof standing?.["effective"] === "string" ? String(standing["effective"]) : "cancel";
+        notes.push(`No call is running now; one that starts before you accept follows the standing policy: ${effective}${standing?.["source"] === "operator" ? " (set by the operator at startup)" : ""}.`);
       }
+    }
+    if (intent.op === "catalog.policy.change") {
+      const standing = await this.#get(token, "catalog.policy.get", {});
+      if (standing?.["source"] === "operator") notes.push(`The operator set this at startup (${String(standing["effective"])}); your setting is saved but does not apply until that startup option is removed.`);
     }
     if (intent.op === "handoff.prepare" || intent.op === "handoff.takeover") {
       const named = args["toAgentName"];
