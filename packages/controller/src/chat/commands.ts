@@ -61,6 +61,10 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // What happens when a host stops reporting is where work runs and when it moves: shown first in every profile (owner decision 2026-10-30). The owner's own order to move the work off a host applies at once, but only when their own words say the move and name the host.
   "host.quiet.change": { verb: "Change what happens when a host stops reporting", mode: "propose" },
   "host.move-work": { verb: "Move the work off a host", mode: "apply" },
+  // Reviewing and deciding on a deliverable (card Q01): the owner's decision on the work. Accepting or rejecting is first shown in every profile (provisional: it lets dependent work go on); starting a review changes nothing else.
+  "deliverable.review.start": { verb: "Start reviewing a deliverable", mode: "apply" },
+  "deliverable.accept": { verb: "Accept a deliverable", mode: "propose" },
+  "deliverable.reject": { verb: "Reject a deliverable", mode: "propose" },
   "workers.limits.change": { verb: "Change the limits for local agents", mode: "propose" },
   "workers.limits.besteffort": { verb: "Allow or forbid local agents to start when a limit cannot be fully enforced on this system (enable or disable best effort)", mode: "propose" },
   // How many attempts may run at once for one project, one agent or one supervisor is a resource decision: shown first in every profile; all caps are off unless the owner turns them on.

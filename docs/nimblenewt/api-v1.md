@@ -1476,6 +1476,39 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `deliverable.record.get`
+
+One deliverable with its newest (or the named) version: state, content, review, and the state of every version. Hidden as not found where the caller may not read it (the task's read right, narrowed or widened by the access scope).
+
+Arguments:
+
+- `id`: the deliverable
+- `version` (optional): an older version
+
+Result: `{ item }`.
+
+#### `deliverable.record.list`
+
+The deliverables of a task that the caller may read, in creation order (at most 100 per task).
+
+Arguments:
+
+- `taskId`: the task
+
+Result: `{ items }`.
+
+#### `deliverable.record.events`
+
+The events of a deliverable in order: draft, submitted, under-review, accepted, rejected, superseded and invalidated, each with its version, who and when. History is never rewritten.
+
+Arguments:
+
+- `id`: the deliverable
+- `after` (optional): the `next` of the previous page
+- `limit` (optional): 1 to 100, default 50
+
+Result: `{ items, next? }`.
+
 #### `submission.list`
 
 The submissions recorded for a task, in ID order, visible exactly as `submission.get`: the owner sees all; an agent that may read the task sees the ones it made and the ones it was asked to review (a reviewer sees only the submission its review request names). A task the caller may not read is `not_found`. A listing is not a feed: IDs are hash-ordered, so new records can land before a cursor you hold and pages are not a stable snapshot; page through to collect, do not poll for news.
@@ -4264,6 +4297,139 @@ Arguments:
 - `commandId`: required
 
 Result: `{ id, replayed }`.
+
+#### `deliverable.draft`
+
+Starts a deliverable of a task in `draft` (version 1): its type, title, responsible agent, audience and access scope, and optionally its content (artifacts of the task, grouped as `source` or `exported`; the code or document submissions it is; for an operational outcome the verified reference, system version and observation time). An agent holding the author, docs or qa role creates its own; the owner may name the responsible agent. Access scope `owner`: the owner and the responsible agent read it; `task` (default): also agents that may read the task; `project`: also any agent holding a role in the project. Audience `external`: only the owner can accept it. Repeating the same command ID records once.
+
+Arguments:
+
+- `commandId`: required
+- `taskId`: the task
+- `type`: `code`, `document`, `report`, `design` or `operational-outcome`
+- `title`: a short title
+- `audience` (optional): list of `owner`, `director`, `reviewers`, `project`, `external`; default `project`
+- `accessScope` (optional): `owner`, `task` or `project`; default `task`
+- `responsibleAgent` (optional): owner only: the agent (agent:name) answerable for it
+- `artifacts` (optional): [{ artifactId, role?: `source` or `exported`, exportedFrom? }]
+- `submissionIds` (optional): code or document submissions of the task
+- `outcome` (optional): { reference, systemVersion, observedAt } (UTC time)
+- `note` (optional): free text
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `deliverable.revise`
+
+Replaces the content of the version still in `draft` (the responsible agent or the owner). A version that was submitted is changed only by starting a new version.
+
+Arguments:
+
+- `commandId`: required
+- `id`: the deliverable
+- `expectedRevision`: the revision you read
+- `artifacts` (optional): see `deliverable.draft`
+- `submissionIds` (optional): see `deliverable.draft`
+- `outcome` (optional): see `deliverable.draft`
+- `note` (optional): free text
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `deliverable.version.new`
+
+Starts the next version (in `draft`) with new content. The earlier version becomes `superseded`, except a rejected one, which stays rejected: its history is kept. Responsible agent or owner.
+
+Arguments:
+
+- `commandId`: required
+- `id`: the deliverable
+- `expectedRevision`: the revision you read
+- `artifacts` (optional): see `deliverable.draft`
+- `submissionIds` (optional): see `deliverable.draft`
+- `outcome` (optional): see `deliverable.draft`
+- `note` (optional): free text
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `deliverable.submit`
+
+Submits the draft version for review (draft to submitted). The artifacts are checked against their bytes, the version must be complete for its type, and `contractVersion` must be the task contract version now in force (a stale one is `stale_revision` with the current version). Responsible agent or owner. Submitting is not acceptance.
+
+Arguments:
+
+- `commandId`: required
+- `id`: the deliverable
+- `expectedRevision`: the revision you read
+- `contractVersion`: the task contract version you worked against (0 when it has none)
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `deliverable.review.start`
+
+Starts the review of the submitted version (submitted to under-review). The owner, or a director or reviewer that did none of the work behind it (no self-review; where the project has one agent only the owner can). The artifacts are checked first.
+
+Arguments:
+
+- `commandId`: required
+- `id`: the deliverable
+- `version`: the version to review (the newest)
+- `expectedRevision` (optional): the revision you read
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `deliverable.accept`
+
+Accepts the version under review (under-review to accepted). Only the owner, a director, or the reviewer that started the review, and never an agent that did the work; a deliverable for an external audience is accepted by the owner only. The artifacts are checked again: a missing or changed one voids the review (event `invalidated`, version back to `submitted`) and the call fails with `integrity`. Finishing a task by a tool never accepts it.
+
+Arguments:
+
+- `commandId`: required
+- `id`: the deliverable
+- `version`: the version to accept (the newest)
+- `expectedRevision` (optional): the revision you read
+- `reason` (optional): why
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `deliverable.reject`
+
+Rejects the version under review (under-review to rejected) with a reason; same authority as `deliverable.accept`. The rejected version and its reason stay on the record; the work continues in a new version.
+
+Arguments:
+
+- `commandId`: required
+- `id`: the deliverable
+- `version`: the version to reject (the newest)
+- `reason`: why
+- `expectedRevision` (optional): the revision you read
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `deliverable.check`
+
+Checks the newest version's artifacts against their bytes. If something is missing or changed while the version is under review or accepted, the review (or acceptance) is voided with an `invalidated` event and the version returns to `submitted`. The owner, the responsible agent, a director or a reviewer.
+
+Arguments:
+
+- `commandId`: required
+- `id`: the deliverable
+
+Result: `{ id, ok, problems, invalidated }`.
+
+Completion: finished when accepted (`completed: true`).
 
 #### `submission.record`
 

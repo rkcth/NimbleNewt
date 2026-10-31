@@ -8,7 +8,7 @@ import type { WatchService } from "../events/handling.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
 import type { ReleaseService } from "../release/index.js";
-import type { SubmissionService } from "../submissions/index.js";
+import type { AcceptanceService, SubmissionService } from "../submissions/index.js";
 import type { SwarmService } from "../swarm/index.js";
 import type { CoverageService, CoverageSettingsService, IncidentService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
 import type { ContextBranchService } from "../branches/index.js";
@@ -108,6 +108,8 @@ export interface StateApiDeps {
   readonly incidents?: Pick<IncidentService, "report" | "resolve" | "list" | "observed">;
   /** Submissions by role (card Q01b). */
   readonly submissions?: Pick<SubmissionService, "record" | "get" | "list">;
+  /** Versioned deliverables and their acceptance (card Q01). */
+  readonly acceptance?: Pick<AcceptanceService, "draft" | "revise" | "newVersion" | "submit" | "startReview" | "accept" | "reject" | "check" | "get" | "list" | "events">;
   /** When present, agenda items can be captured, corrected and listed through the API (cards M01 and M03). */
   readonly meetings?: MeetingService;
   /** When present, integration, checkout refresh and quarantine of a task's work can be requested (cards H12l, H12d). */
@@ -251,6 +253,7 @@ export class StateApi {
         ...(this.#deps.responsibilityChecks === undefined ? {} : { responsibilityChecks: this.#deps.responsibilityChecks }),
         ...(this.#deps.incidents === undefined ? {} : { incidents: this.#deps.incidents }),
         ...(this.#deps.submissions === undefined ? {} : { submissions: this.#deps.submissions }),
+        ...(this.#deps.acceptance === undefined ? {} : { acceptance: this.#deps.acceptance }),
         ...(this.#deps.release === undefined ? {} : { release: this.#deps.release }),
         ...(this.#deps.swarm === undefined ? {} : { swarm: this.#deps.swarm }),
         ...(this.#deps.meetings === undefined ? {} : { meetings: this.#deps.meetings }),
