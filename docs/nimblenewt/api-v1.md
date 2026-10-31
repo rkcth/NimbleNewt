@@ -1692,14 +1692,14 @@ Completion: finished when accepted (`completed: true`).
 
 #### `cleanup.settings.change`
 
-The owner changes the scratch cleanup (owner only). `set` has `scratch`: `after-handoff` or `keep`; `enable` (`["scratch"]`) is `after-handoff`; `disable` is `keep`; `unset` forgets the entry so the start-up default applies. Name `scratch` once. It counts from the next attempt that ends; a cleanup already decided stays as recorded. This is the form the chat uses.
+The owner changes the scratch cleanup (owner only). `set` has `scratch`: `after-handoff` or `keep`; `enable` (`["scratch"]`) is `after-handoff`; `disable` is `keep`; `unset` forgets the entry so the start-up default applies. `awaitStopHours` (1 to 8760, or null for never) is how long scratch waits for a worker to confirm it stopped before the supervisor or owner is told it is kept; `disable` is never, `enable` is 24, `unset` is the default of 24. Name each setting once. It counts from the next attempt that ends; a cleanup already decided stays as recorded. This is the form the chat uses.
 
 Arguments:
 
-- `set` (optional): for example `{ "scratch": "keep" }`
-- `enable` (optional): `["scratch"]`
-- `disable` (optional): `["scratch"]`
-- `unset` (optional): `["scratch"]`
+- `set` (optional): for example `{ "scratch": "keep" }` or `{ "awaitStopHours": 48 }`
+- `enable` (optional): `["scratch"]` or `["awaitStopHours"]`
+- `disable` (optional): `["scratch"]` or `["awaitStopHours"]`
+- `unset` (optional): `["scratch"]` or `["awaitStopHours"]`
 - `expectedRevision` (optional): the revision of the setting you read
 
 Result: `{ revision }`.

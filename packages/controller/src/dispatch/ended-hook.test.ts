@@ -75,3 +75,30 @@ test("a worker whose stop succeeded is recorded as confirmed stopped", async () 
     assert.equal((await c.dispatcher.get(c.owner, attemptId!) as unknown as { workerStopped?: boolean }).workerStopped, true);
   } finally { await store.close(); }
 });
+
+test("a hook that outlives its timeout is told to stop (the signal is aborted) and shutdown waits for it", async () => {
+  const store = await backends[0]!.open();
+  try {
+    const c = await buildWorld(store.storage);
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    c.dispatcher = c.restart({}, { leaseMs: 40 * HOUR, limits: async () => ({ attemptMs: HOUR }), endedHookMs: 30, onError: () => undefined } as never);
+    c.worker.script = async () => { throw new Error("the worker broke"); };
+    const seen: { abortedAtStart: boolean; abortedLater: boolean }[] = [];
+    let finishedHook = false;
+    c.dispatcher.onEnded(async (_id, how) => {
+      const entry = { abortedAtStart: how.signal.aborted, abortedLater: false };
+      seen.push(entry);
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      entry.abortedLater = how.signal.aborted;
+      finishedHook = true;
+    });
+    await c.task("t", ann);
+    await c.dispatcher.tick();
+    await c.dispatcher.idle();
+    await c.dispatcher.endedIdle();
+    assert.equal(finishedHook, false, "the hook is still running after its timeout");
+    await c.dispatcher.shutdown();
+    assert.equal(finishedHook, true, "shutdown waited for the hook that was cut off");
+    assert.deepEqual(seen, [{ abortedAtStart: false, abortedLater: true }], "the hook was told to stop when it timed out");
+  } finally { await store.close(); }
+});

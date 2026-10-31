@@ -239,10 +239,13 @@ for (const backend of backends) {
     await w.quiet.sweep(c.dispatcherPrincipal);
     await recover();
     assert.equal(((await c.storage.getAggregate({ kind: QUIET_HOST_KIND, id: w.r1.id }))!.body as { state: string }).state, "recovered");
+    // With automatic moves off there is no timer to tell, so the notice interval holds the second notice back.
+    await w.settings.change(c.owner, { commandId: "off", autoMove: false });
     await pass(c, 7 * MIN, [w.r2]);
     await w.quiet.sweep(c.dispatcherPrincipal);
     const now = (await c.storage.getAggregate({ kind: QUIET_HOST_KIND, id: w.r1.id }))!.body as { state: string; warnedAt?: string };
     assert.deepEqual([now.state, now.warnedAt !== undefined, w.notices.length], ["quiet", true, 1], "a second episode within 6 hours: the grace period runs, the owner is not told again");
+    await w.settings.change(c.owner, { commandId: "on", autoMove: true });
     await recover();
     await pass(c, 7 * HOUR, [w.r2]);
     assert.equal((await w.quiet.sweep(c.dispatcherPrincipal)).warned, 1, "past the interval the owner is told again");
@@ -496,5 +499,86 @@ for (const backend of backends) {
     for (const who of [c.owner, w.r2.principal]) await refuses("forbidden", () => w.quiet.sweep(who));
     await refuses("forbidden", () => w.quiet.episodes(w.r2.principal));
     assert.deepEqual(await w.quiet.episodes(c.owner), []);
+  }, { policy: open });
+
+  suite("one stale sample of a host that has been reporting neither breaks its recovery run nor moves its work (9 minutes healthy, then a late heartbeat)", async (c) => {
+    const w = await world(c);
+    await pass(c, 6 * MIN, [w.r2]);
+    await w.quiet.sweep(c.dispatcherPrincipal); // warned: the episode is open
+    // The host reports again: three sightings over nine minutes, an unbroken run that is not yet the recovery period of 10 minutes.
+    for (let i = 0; i < 3; i++) { await pass(c, 3 * MIN, [w.r1, w.r2]); await w.quiet.sweep(c.dispatcherPrincipal); }
+    const run = (await w.quiet.episodes(c.owner))[0]!;
+    assert.ok(run.freshSince !== undefined && (run.freshSightings ?? 0) >= 2, "a run of fresh sightings is under way");
+    // A heartbeat 100 s late: stale, but heard from within the quiet threshold.
+    await pass(c, 100_000, [w.r2]);
+    assert.equal((await c.hosts.status(c.dispatcherPrincipal, w.r1.id))!.freshness, "stale");
+    await w.quiet.sweep(c.dispatcherPrincipal);
+    const after1 = (await w.quiet.episodes(c.owner))[0]!;
+    assert.equal(after1.freshSince, run.freshSince, "one stale sample does not break the run");
+    // The same blip long after the warning (grace elapsed) moves nothing either.
+    await pass(c, 13 * HOUR, [w.r1, w.r2]);
+    await pass(c, 100_000, [w.r2]);
+    assert.equal((await w.quiet.sweep(c.dispatcherPrincipal)).moved, 0, "a late heartbeat is not a quiet host");
+    assert.equal((await w.where()).hostId, w.r1.id);
+    // Genuinely unheard for the threshold: now it moves.
+    await pass(c, 6 * MIN, [w.r2]);
+    assert.equal((await w.quiet.sweep(c.dispatcherPrincipal)).moved, 1);
+    assert.equal((await w.where()).hostId, w.r2.id);
+  }, { policy: open });
+
+  suite("attempts that cannot move do not use up the move budget or starve another host: host a has 12 unmovable attempts, host b one movable", async (c) => {
+    const nowIso = (): string => c.clock.now();
+    const seen = new Map<string, string>([["host:a", new Date(Date.parse(nowIso()) - 2 * HOUR).toISOString()], ["host:b", new Date(Date.parse(nowIso()) - 2 * HOUR).toISOString()]]);
+    const attempts = [...Array.from({ length: 12 }, (_, i) => ({ attemptId: `a-${String(i).padStart(2, "0")}`, host: "host:a" })), { attemptId: "b-0", host: "host:b" }];
+    const moved: string[] = [];
+    const place = (a: { attemptId: string; host: string }) => ({ attemptId: a.attemptId, taskId: "t", projectId: "p", agentId: "agent:x", hostId: a.host, placement: 1, state: "accepted", requirements: {}, history: [] }) as never;
+    const svc = QuietHostService.withEpoch(c.storage, c.epoch, {
+      principal: c.dispatcherPrincipal,
+      settings: { effective: async () => ({ graceHours: 1, autoMove: true, recoverMinutes: 10, noticeHours: 6 }) },
+      hosts: { status: async (_p: unknown, id: string) => ({ hostId: id, identity: "active", freshness: "stale", lastSeenAt: seen.get(id)! }) as never },
+      remote: {
+        placement: async (_b: unknown, id: string) => place(attempts.find((a) => a.attemptId === id)!),
+        candidates: async (_b: unknown, q: { attemptId?: string }) => ({ eligible: (q.attemptId ?? "").startsWith("a-") ? [] : ["host:z"], excluded: [], waiting: "nowhere" }) as never,
+        relocate: async (_b: unknown, m: { attemptId: string }) => { moved.push(m.attemptId); return {} as never; },
+      },
+      liveAttempts: async () => attempts.map((a) => ({ attemptId: a.attemptId, state: "running" })), attemptState: async () => "running",
+      notify: async () => undefined,
+    }, timed(c));
+    c.clock.advance(6 * MIN);
+    await svc.sweep(c.dispatcherPrincipal); // judged: both open and warned
+    c.clock.advance(2 * HOUR);
+    for (const k of seen.keys()) seen.set(k, new Date(Date.parse(nowIso()) - 3 * HOUR).toISOString());
+    for (let i = 0; i < 3 && !moved.includes("b-0"); i++) await svc.sweep(c.dispatcherPrincipal);
+    assert.ok(moved.includes("b-0"), "the movable attempt of host b moved though host a's twelve could not");
+    assert.equal(moved.filter((m) => m.startsWith("a-")).length, 0);
+  }, { policy: open });
+
+  suite("a new episode of a host told about a short while ago still gets the notice that carries the timer; the cannot-move notice is not held back past the grace period", async (c) => {
+    const w = await world(c);
+    await pass(c, 6 * MIN, [w.r2]);
+    await w.quiet.sweep(c.dispatcherPrincipal);
+    assert.equal(w.notices.length, 1);
+    for (const ms of [3 * MIN, 3 * MIN, 8 * MIN]) { await pass(c, ms, [w.r1, w.r2]); await w.quiet.sweep(c.dispatcherPrincipal); }
+    assert.equal((await w.quiet.episodes(c.owner))[0]!.state, "recovered");
+    await pass(c, 6 * MIN, [w.r2]);
+    await w.quiet.sweep(c.dispatcherPrincipal); // a second episode within the notice interval
+    assert.equal(w.notices.length, 2, "the restarted grace period is told");
+    assert.match(w.notices[1]!.detail, /moves after 12h/);
+  }, { policy: open });
+
+  suite("the notice interval cannot hold back the cannot-move notice past the grace period", async (c) => {
+    const w = await world(c);
+    await w.settings.change(c.owner, { commandId: "nb", graceHours: 1, noticeHours: 48 });
+    const noR2 = QuietHostService.withEpoch(c.storage, c.epoch, {
+      principal: c.dispatcherPrincipal, settings: w.settings, hosts: c.hosts,
+      remote: { placement: (b, id) => c.remote.placement(b, id), candidates: async (b, q) => ({ ...(await c.remote.candidates(b, q)), eligible: [] }), relocate: (b, m) => c.remote.relocate(b, m) },
+      liveAttempts: () => live(c), attemptState: stateOf(c), notify: async (n) => { w.notices.push(n); },
+    }, timed(c));
+    await pass(c, 6 * MIN, [w.r2]);
+    await noR2.sweep(c.dispatcherPrincipal);
+    await pass(c, 61 * MIN, [w.r2]);
+    assert.equal((await noR2.sweep(c.dispatcherPrincipal)).blocked, 1);
+    assert.equal(w.notices.length, 2);
+    assert.match(w.notices[1]!.detail, /cannot move/);
   }, { policy: open });
 }

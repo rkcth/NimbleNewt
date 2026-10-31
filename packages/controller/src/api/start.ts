@@ -66,7 +66,7 @@ import { JobService } from "../jobs/index.js";
 import { ContinuationService, ResumeCheckService, ResumeSettingsService, controllerResumePorts } from "../continuation/index.js";
 import { DependencyService } from "../dependencies/index.js";
 import { ActivityService } from "../activity/index.js";
-import { WorkEndService, checkpointByAttempt, dispatcherEndingPorts, stagedSubmit, type EndingAttempt, type Landed, type StagedWork } from "../work-end/index.js";
+import { WorkEndService, checkpointVerdict, dispatcherEndingPorts, stagedSubmit, type EndingAttempt, type Landed, type StagedWork } from "../work-end/index.js";
 import { HandoffService, PauseService, StopService, agentsUnder, controllerHandoffSources, dispatchStopPorts, type LocalWork } from "../lifecycle/index.js";
 import { SubmissionService, attemptOfAssignments } from "../submissions/index.js";
 import { ReviewService } from "../review/index.js";
@@ -397,8 +397,14 @@ export async function startController(options: StartOptions): Promise<Controller
     const submissions = SubmissionService.withEpoch(storage, epoch, (_id, scope, by) => agents.rolesOfPrincipalIn(by, scope.projectId, new Date().toISOString()), { reviewersAvailableIn: (projectId, workerId) => agents.reviewersAvailableIn(projectId, workerId, new Date().toISOString()), attemptOf: (() => { const of = attemptOfAssignments(assignments); /* the dispatcher names an attempt's owner by its bare agent id, the principals by `agent:<id>`: the same identity either way */ return async (taskId: string) => { const a = await of(taskId); return a === undefined ? undefined : { ...a, ownerId: a.ownerId.startsWith("agent:") ? a.ownerId : `agent:${a.ownerId}` }; }; })() });
     const cleanupSettings = CleanupSettingsService.withEpoch(storage, epoch, options.cleanupDefault, { warn: async (d) => { await notifications.emitFromController({ commandId: `cleanup-settings-damaged:${d.revision}`, kind: "maintenance", level: "needs-you", ref: { kind: "cleanup-settings", id: "main" }, detail: d.detail }); } });
     // The leftovers of a finished attempt (installed or still running, never removed by the controller) go to the agent's boss as a needs-you message; with no boss, or one who cannot be told about the task, to the owner.
+    let workEndLate: WorkEndService | undefined;
     const scratchCleanup = ScratchCleanupService.withEpoch(storage, epoch, {
       mode: async () => (await cleanupSettings.effective()).scratch,
+      patienceHours: async () => (await cleanupSettings.effective()).awaitStopHours,
+      before: async (a) => workEndLate?.droppedReason(a.attemptId),
+      decide: async (attemptId) => workEndLate?.scratchDecision(attemptId),
+      workerStopped: async (a) => (dispatch === undefined ? false : dispatch.dispatcher.confirmStopped(dispatch.principal, a.attemptId)),
+      stuck: async (a, hours, key) => { await notifications.emitFromController({ commandId: key, kind: "maintenance", level: "needs-you", ref: { kind: "scratch-cleanup", id: `${scratchRecordId(a.attemptId)}-stuck` }, projectId: a.projectId, detail: `Scratch of attempt ${a.attemptId} is kept: its worker never confirmed it stopped within ${hours} hour(s), so nothing was removed. Check the host; the cleanup goes on by itself once the stop is confirmed.`.slice(0, 200) }); },
       ...(options.scratchHost === undefined ? {} : { order: options.scratchHost.remove }),
       report: async (a, leftovers, _key) => {
         // To the supervisor AGENT: the host's words framed as quoted untrusted data (see `supervisorNotice`). With no boss, or one who cannot be told about the task, to the owner in notices that fit the notification's detail limit.
@@ -416,8 +422,9 @@ export async function startController(options: StartOptions): Promise<Controller
     const workEnd = WorkEndService.withEpoch(storage, epoch, { attempts: dispatcherEndingPorts(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal })), landing: options.landing === undefined ? async () => undefined : (taskId) => options.landing!(taskId), ...(options.stage === undefined ? {} : { submit: stagedSubmit({ stage: options.stage, submissions, principalOf: async (agentId) => { const p = await principals.get(agentId.startsWith("agent:") ? agentId : `agent:${agentId}`); return p === undefined || p.state !== "active" ? undefined : ((await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString())) as Principal); } }) }), blockers: BlockerService.withEpoch(storage, epoch), paused: (taskId) => pauses.isPaused(taskId), scratch: { cleanup: scratchCleanup, checkpointRecorded: async (a) => {
       if (dispatch === undefined) return false;
       const attempt = await dispatch.dispatcher.get(dispatch.principal, a.attemptId).catch(() => undefined);
-      return attempt !== undefined && checkpointByAttempt(await continuations.latest(dispatch.principal, a.taskId).catch(() => undefined), attempt);
+      return attempt === undefined ? false : checkpointVerdict(await continuations.latest(dispatch.principal, a.taskId).catch(() => undefined), attempt);
     } } });
+    workEndLate = workEnd;
     const stops = stopsLive = StopService.withEpoch(storage, epoch, pauses, dispatchStopPorts(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal }), () => (options.dispatch === undefined ? "none" : "pending"), (scope) => agentsUnder(storage, scope), (_by, taskId) => jobs.unfinishedOf(taskId), options.localWork, { dropEnding: (id, why, reason) => workEnd.drop(id, why, reason) }), { onSettled: async (by, e) => { if (e.scope.kind !== "task") return; await activity.record(by, { commandId: `${e.intentId}-act`, taskId: e.scope.id, kind: "lifecycle", summary: `${e.mode === "suspend" ? "Suspension" : "Stop"} ${e.outcome.state}${e.outcome.graceful ? "" : " (not graceful)"}${e.outcome.unresolved.length > 0 ? `; unresolved: ${e.outcome.unresolved.slice(0, 5).join(", ")}` : ""}.`, manifest: { refs: [{ kind: "stop-intent", id: e.intentId }] } } as never); } });
 
     // Provider drain and cutover (card R04b): the owner's controls gate every route choice made through the fallback service, which the cutover cancels running calls on.
@@ -602,7 +609,7 @@ export async function startController(options: StartOptions): Promise<Controller
     // Endings still open when the controller went down are completed once, from their first undone step (the tick's sweep does the same for what is left).
     // The dispatcher asks the ending before it ends an attempt for any reason: a stop drops it with its true reason, the turn completing after work.end completes it with the agent's result.
     dispatch?.dispatcher.onEnd((attemptId, how) => workEnd.resolveOnEnd(attemptId, how));
-    dispatch?.dispatcher.onEnded((attemptId) => workEnd.cleanupAfterEnd(attemptId));
+    dispatch?.dispatcher.onEnded((attemptId, how) => workEnd.cleanupAfterEnd(attemptId, how.signal));
     if (dispatch !== undefined) await workEnd.recover().catch((error: unknown) => { options.onInternalError?.(error); });
     let tools: ToolExecutionService | undefined;
     if (options.tools !== undefined && dispatch !== undefined) {

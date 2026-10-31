@@ -17,7 +17,7 @@ const MIN_MS = 60_000;
 const HOUR_MS = 3_600_000;
 
 /** Work done in one pass or one call, so a large backlog is worked off over several passes and no pass runs for ever. */
-export const QUIET_HOST_LIMITS = { liveAttempts: 2000, hosts: 100, records: 1000, movesPerPass: 10, ownerMoves: 25, pending: 100, pendingAgeMs: 24 * HOUR_MS, targets: 5, deletesPerPass: 20 } as const;
+export const QUIET_HOST_LIMITS = { liveAttempts: 2000, hosts: 100, records: 1000, movesPerPass: 10, ownerMoves: 25, pending: 100, pendingAgeMs: 24 * HOUR_MS, targets: 5, deletesPerPass: 20, attemptsPerPass: 60, cursorEvery: 20 } as const;
 /** A record of a host that recovered is kept this long (and at least a day past the notice interval, which it carries) and then deleted, so the records stay as many as the hosts that are or were recently quiet. Provisional: 7 days. */
 export const QUIET_HOST_RETENTION_MS = 7 * 24 * HOUR_MS;
 /** A host not heard from for this long while it holds work is quiet. Provisional: well past the 90 s freshness window, so a restart or a network blip is not an episode. */
@@ -108,6 +108,13 @@ export class QuietHostService {
   /** When this process began to judge hosts (re-set by a clock jump), and when the last pass ran. */
   #upSince: number;
   #lastPass: number | undefined;
+  /** Rotating start positions (in memory) for the move stage and the pending-finish stage, so a host whose attempts cannot move does not hold the others up pass after pass. */
+  #moveRound = 0;
+  #pendingRound = 0;
+  /** The cursor is kept in memory and written only now and then (every `cursorEvery` passes) or when it is reset, so a long host list does not write every tick. */
+  #cursor: string | undefined;
+  #cursorWritten: string | undefined;
+  #cursorPasses = 0;
 
   private constructor(runner: CommandRunner, deps: QuietHostDeps, quietAfterMs: number, maxGapMs: number) {
     this.#runner = runner; this.#deps = deps; this.#quietAfterMs = quietAfterMs; this.#maxGapMs = maxGapMs;
@@ -140,12 +147,16 @@ export class QuietHostService {
     if (this.#lastPass !== undefined && (nowMs < this.#lastPass || nowMs - this.#lastPass > this.#maxGapMs)) this.#upSince = nowMs;
     this.#lastPass = nowMs;
     const bodies = new Map((await this.#records()).map((r) => [r.body.hostId, r.body] as const));
+    // The budget counts moves made; a separate bound counts tries, so attempts that cannot move (no host, changed, transient) neither use up the moves nor run the pass for ever.
     let budget: number = QUIET_HOST_LIMITS.movesPerPass;
-    // Moves that were started and not finished (a restart or an error in the middle) come first, within the pass's move budget (an entry that is done or never happened is dropped without using any of it).
-    for (const hostId of [...bodies.keys()].sort()) {
-      if (budget <= 0) break;
-      if (bodies.get(hostId)!.pending.length === 0) continue;
-      budget -= await this.#finishPending(hostId, budget);
+    let tries: number = QUIET_HOST_LIMITS.attemptsPerPass;
+    // Moves that were started and not finished (a restart or an error in the middle) come first (an entry that is done or never happened is dropped without using any of it). The start rotates.
+    const withPending = [...bodies.keys()].sort().filter((h) => bodies.get(h)!.pending.length > 0);
+    const pendingOffset = withPending.length === 0 ? 0 : this.#pendingRound++ % withPending.length;
+    for (const hostId of [...withPending.slice(pendingOffset), ...withPending.slice(0, pendingOffset)]) {
+      if (budget <= 0 || tries <= 0) break;
+      const r = await this.#finishPending(hostId, Math.min(budget, tries));
+      budget -= r.done; tries -= r.worked;
       const fresh = await this.#record(hostId);
       if (fresh !== undefined) bodies.set(hostId, fresh.body); else bodies.delete(hostId);
     }
@@ -162,12 +173,17 @@ export class QuietHostService {
     }
     // The hosts to look at: those that hold work and those with an open episode, from where the last pass stopped (so a long list is worked through, not cut at the same place every time).
     const all = [...new Set<string>([...live.keys(), ...[...bodies.values()].filter((b) => b.state === "quiet").map((b) => b.hostId)])].sort();
-    const cursor = (await this.#runner.get(CURSOR_KIND, "main"))?.body as { after?: string } | undefined;
-    const start = all.findIndex((h) => h > (cursor?.after ?? ""));
+    if (this.#cursor === undefined) { this.#cursor = ((await this.#runner.get(CURSOR_KIND, "main"))?.body as { after?: string } | undefined)?.after ?? ""; this.#cursorWritten = this.#cursor; }
+    const start = all.findIndex((h) => h > this.#cursor!);
     const rotated = start <= 0 ? all : [...all.slice(start), ...all.slice(0, start)];
     const batch = rotated.slice(0, QUIET_HOST_LIMITS.hosts);
-    await this.#setCursor(rotated.length > batch.length ? batch[batch.length - 1]! : "", cursor?.after ?? "");
-    for (const hostId of batch) {
+    const nextCursor = rotated.length > batch.length ? batch[batch.length - 1]! : "";
+    // The move stage starts at a rotating position in the batch.
+    const offset = batch.length === 0 ? 0 : this.#moveRound++ % batch.length;
+    const order = [...batch.slice(offset), ...batch.slice(0, offset)];
+    let failure: unknown;
+    for (const hostId of order) {
+     try {
       const status = await this.#deps.hosts.status(this.#deps.principal, hostId);
       let current = bodies.get(hostId);
       const keepBody = (b: QuietHostBody | undefined): QuietHostBody | undefined => { if (b !== undefined) bodies.set(hostId, b); return b; };
@@ -188,7 +204,11 @@ export class QuietHostService {
         }
         continue;
       }
-      // Not fresh: a run of fresh sightings is broken.
+      // Not fresh. A host heard from within the quiet threshold is only blipping (a late heartbeat): neither a run of fresh sightings is broken nor anything moved or opened by one stale sample.
+      const lastHeard = status.lastSeenAt === undefined ? undefined : Date.parse(status.lastSeenAt);
+      const unheard = lastHeard === undefined || nowMs - lastHeard >= this.#quietAfterMs;
+      if (!unheard) continue;
+      // Genuinely unheard: a run of fresh sightings is broken.
       if (current?.state === "quiet" && current.freshSince !== undefined) current = keepBody(await this.#write(hostId, (cur) => (cur !== undefined && cur.state === "quiet" && cur.freshSince !== undefined ? { ...without(cur, "freshSince", "freshSightings"), updatedAt: this.#runner.now() } : undefined), "relapsed")) ?? current;
       const attempts = live.get(hostId) ?? [];
       if (current?.state === "quiet") {
@@ -208,8 +228,8 @@ export class QuietHostService {
       if (current.warnedAt === undefined && attempts.length > 0) {
         // The notification text is at most 200 characters.
         const detail = (figures.autoMove ? timerText : `${hostId} stopped reporting and holds ${attempts.length} attempt(s). Automatic moves are off. Say "move the work off ${hostId}" to move it.`).slice(0, 200);
-        if (noticeLimited) {
-          // The owner was told about this host a short while ago: the grace period starts, no second notice.
+        if (noticeLimited && !figures.autoMove) {
+          // The owner was told about this host a short while ago and there is no timer to tell: the warning is recorded, no second notice. (A timer, "the work will be moved after Xh", is always told, once per episode: it bypasses the notice interval.)
           keepBody(await this.#write(hostId, (cur) => (cur !== undefined && cur.episode === episode && cur.warnedAt === undefined ? { ...cur, warnedAt: now, warnedAutoMove: figures.autoMove, updatedAt: now } : undefined), "warned-quiet"));
           continue;
         }
@@ -227,25 +247,34 @@ export class QuietHostService {
         continue;
       }
       if (!figures.autoMove || current.warnedAt === undefined || attempts.length === 0) continue;
+      if (current.freshSince !== undefined) continue;
       if (nowMs < Date.parse(current.warnedAt) + figures.graceHours * HOUR_MS) continue;
-      // The last look before moving: a host that reported in the meantime keeps its work.
+      // The last look before moving: a host that reported in the meantime keeps its work (it must be genuinely unheard, not just not fresh at this instant).
       const again = await this.#deps.hosts.status(this.#deps.principal, hostId);
       if (again === undefined || again.freshness === "fresh") continue;
+      if (again.lastSeenAt !== undefined && nowMs - Date.parse(again.lastSeenAt) < this.#quietAfterMs) continue;
       let blocked = 0;
       for (const p of attempts) {
-        if (budget <= 0) break;
-        budget--;
+        if (budget <= 0 || tries <= 0) break;
+        tries--;
         const r = await this.#moveOne(p, digest(hostId, episode), `${hostId} has been quiet since ${current.quietSince} and the owner did not answer the warning within ${figures.graceHours} hour(s)`);
-        if (r.ok) out.moved++; else if (r.kind === "no-host") blocked++;
+        if (r.ok) { out.moved++; budget--; } else if (r.kind === "no-host") blocked++;
       }
       if (blocked > 0 && current.blockedAt === undefined) {
-        // Held back like any other notice: tried again on a later pass.
-        if (noticeLimited) continue;
+        // Held back like any other notice (but never for longer than the grace period, whatever the notice interval): tried again on a later pass.
+        if (current.lastNoticeAt !== undefined && nowMs - Date.parse(current.lastNoticeAt) < Math.min(figures.noticeHours, figures.graceHours) * HOUR_MS) continue;
         try { await this.#deps.notify({ commandId: `quiet-host-blocked:${hostName(hostId)}:${digest(hostId, episode)}`.slice(0, 120), hostId, detail: `${hostId} is still quiet past the grace period; ${blocked} attempt(s) cannot move: no other allowed host can take them now.`.slice(0, 200) }); } catch { continue; }
         keepBody(await this.#write(hostId, (cur) => (cur !== undefined && cur.episode === episode && cur.blockedAt === undefined ? { ...cur, blockedAt: this.#runner.now(), lastNoticeAt: this.#runner.now(), updatedAt: this.#runner.now() } : undefined), "blocked"));
         out.blocked++;
       }
+     } catch (error) { failure ??= error; }
     }
+    this.#cursor = nextCursor;
+    this.#cursorPasses++;
+    if (nextCursor !== this.#cursorWritten && (nextCursor === "" || this.#cursorPasses % QUIET_HOST_LIMITS.cursorEvery === 1)) {
+      try { await this.#setCursor(nextCursor, this.#cursorWritten ?? ""); this.#cursorWritten = nextCursor; } catch (error) { failure ??= error; }
+    }
+    if (failure !== undefined) throw failure;
     return out;
   }
 
@@ -346,10 +375,10 @@ export class QuietHostService {
   }
 
   /** Finishes the moves a record still lists, at most `budget` of them: one that stopped half way is finished by repeating it; one that is done, or never happened, is dropped (that costs nothing). Returns how many it worked on. */
-  async #finishPending(hostId: string, budget: number): Promise<number> {
+  async #finishPending(hostId: string, budget: number): Promise<{ worked: number; done: number }> {
     const rec = await this.#record(hostId);
-    if (rec === undefined) return 0;
-    let worked = 0;
+    if (rec === undefined) return { worked: 0, done: 0 };
+    let worked = 0; let done = 0;
     for (const entry of rec.body.pending) {
       const p = await this.#deps.remote.placement(this.#deps.principal, entry.attemptId).catch(() => undefined);
       const stale = Date.parse(this.#runner.now()) - Date.parse(entry.at) > QUIET_HOST_LIMITS.pendingAgeMs;
@@ -360,9 +389,10 @@ export class QuietHostService {
       try {
         await this.#deps.remote.relocate(this.#deps.principal, { commandId: entry.commandId, attemptId: entry.attemptId, toHostId: entry.to, reason: "finishing a move that was started" });
         await this.#drop(hostId, entry.attemptId);
+        done++;
       } catch { /* kept: the next pass tries again, until it is stale */ }
     }
-    return worked;
+    return { worked, done };
   }
 
   async #drop(hostId: string, attemptId: string): Promise<void> {

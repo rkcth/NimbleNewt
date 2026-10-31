@@ -245,9 +245,11 @@ export class DispatcherService {
   readonly #usageSeq = new Map<string, number>();
   readonly #ending = new Set<Promise<unknown>>();
   #endHook: EndHook | undefined;
-  #endedHook: ((attemptId: string, how: { readonly outcome: "succeeded" | "failed" | "abandoned"; readonly workerStopped: boolean }) => Promise<void>) | undefined;
+  #endedHook: ((attemptId: string, how: { readonly outcome: "succeeded" | "failed" | "abandoned"; readonly workerStopped: boolean; readonly signal: AbortSignal }) => Promise<void>) | undefined;
   /** Ended hooks still running. Apart from `#ending` on purpose: `idle()` and the blocker for a failure never wait for a hook. */
   readonly #endedRunning = new Set<Promise<unknown>>();
+  /** The hook calls themselves, which go on after their timeout (the signal they were given is aborted then; they must stop at their next check). `shutdown` waits for them (bounded: a hook that never answers does not hold it). */
+  readonly #endedCalls = new Set<Promise<unknown>>();
   readonly #endingBy = new Map<string, Promise<{ readmitted?: string }>>();
   /** Consecutive ticks an attempt pinned to a host has waited for it (in memory: a restart starts the count again). */
   readonly #pinnedWaits = new Map<string, number>();
@@ -408,8 +410,25 @@ export class DispatcherService {
         errors.push(`${id}: ${errorText(error)}`);
       }
     }
+    // Ended hooks still running get their time (each is cut off by its own timeout) before the process goes on to close the store.
+    await Promise.race([Promise.allSettled([...this.#endedCalls]), new Promise<void>((resolve) => { setTimeout(resolve, (this.#options.endedHookMs ?? this.#options.endHookMs ?? 30_000) + 1000).unref(); })]);
     await this.dropWorkers();
     return { closed, errors };
+  }
+
+  /**
+   * Whether the worker of a FINISHED attempt is confirmed stopped now. One recorded as stopped is. Otherwise the host that held it is asked to let go again (a release is repeatable); an answer without error is the confirmation and is recorded.
+   * An attempt that is not finished, or has no host that can release, is not confirmed. Used by the scratch cleanup's sweep.
+   */
+  async confirmStopped(_by: Principal, attemptId: string): Promise<boolean> {
+    const d = await this.#load(attemptId);
+    if (d === undefined || d.body.state !== "finished") return false;
+    if (d.body.workerStopped === true) return true;
+    const host = this.#deps.workers.find((w) => w.hostId === d.body.hostId);
+    if (host?.release === undefined) return false;
+    const ok = await host.release(attemptId, "confirming the worker of a finished attempt is stopped").then(() => true, () => false);
+    if (ok) await this.#update(attemptId, (x) => ({ ...x, workerStopped: true })).catch(() => undefined);
+    return ok;
   }
 
   /** Ends the workers this process holds, with no write to the store (a fenced controller does not own the attempts any more; the new one finds them in the live list and their leases). */
@@ -1353,7 +1372,7 @@ export class DispatcherService {
    * Called once an attempt is finished (never before), with whether its worker is CONFIRMED stopped (`workerStopped`: its handle stopped, or the host that held it confirmed the release; a stop that failed or a host that cannot release is not a confirmation).
    * It runs apart from the end: after the failure's blocker is open, not awaited by the end or by `idle()`, and cut off after `endedHookMs` (default: `endHookMs`, else 30 s). A failure or a timeout is reported and changes nothing. The scratch cleanup uses it.
    */
-  onEnded(hook: ((attemptId: string, how: { readonly outcome: "succeeded" | "failed" | "abandoned"; readonly workerStopped: boolean }) => Promise<void>) | undefined): void { this.#endedHook = hook; }
+  onEnded(hook: ((attemptId: string, how: { readonly outcome: "succeeded" | "failed" | "abandoned"; readonly workerStopped: boolean; readonly signal: AbortSignal }) => Promise<void>) | undefined): void { this.#endedHook = hook; }
   /** Waits for the ended hooks now running (tests and shutdown; each is bounded by its own timeout). */
   async endedIdle(): Promise<void> { while (this.#endedRunning.size > 0) await Promise.allSettled([...this.#endedRunning]); }
 
@@ -1363,9 +1382,11 @@ export class DispatcherService {
     const limit = this.#options.endedHookMs ?? this.#options.endHookMs ?? 30_000;
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<"timeout">((resolve) => { timer = setTimeout(() => resolve("timeout"), limit); });
-    const call = (async () => hook(attemptId, { outcome, workerStopped }))();
-    call.catch((error: unknown) => { this.#options.onError?.(error); });
-    const run: Promise<unknown> = Promise.race([call, timeout]).then((r) => { if (r === "timeout") this.#options.onError?.(new Error(`the ended hook of attempt ${attemptId} did not answer within ${limit} ms; it is left to the sweep`)); }, () => undefined).finally(() => { if (timer !== undefined) clearTimeout(timer); this.#endedRunning.delete(run); });
+    const abort = new AbortController();
+    const call = (async () => hook(attemptId, { outcome, workerStopped, signal: abort.signal }))();
+    this.#endedCalls.add(call);
+    call.then(() => undefined, (error: unknown) => { this.#options.onError?.(error); }).finally(() => { this.#endedCalls.delete(call); });
+    const run: Promise<unknown> = Promise.race([call, timeout]).then((r) => { if (r === "timeout") abort.abort(); if (r === "timeout") this.#options.onError?.(new Error(`the ended hook of attempt ${attemptId} did not answer within ${limit} ms; it is left to the sweep`)); }, () => undefined).finally(() => { if (timer !== undefined) clearTimeout(timer); this.#endedRunning.delete(run); });
     this.#endedRunning.add(run);
   }
 
@@ -1547,6 +1568,9 @@ export class DispatcherService {
     const d = await this.#load(attemptId);
     if (live === undefined || d === undefined) return undefined;
     const checkpoint = await live.handle.checkpoint();
+    // Fenced by placement: a checkpoint that comes back after the attempt was moved (or its worker replaced) is the old placement's and is discarded, so it never overwrites the record the new placement continues from.
+    const after = await this.#load(attemptId);
+    if (this.#live.get(attemptId) !== live || after === undefined || after.body.hostId !== d.body.hostId || after.body.state === "finished") return undefined;
     await this.#deps.checkpoints?.({ attemptId, taskId: d.body.taskId, agentId: d.body.agentId, reason, checkpoint });
     return checkpoint;
   }

@@ -11,7 +11,7 @@ after(stopServer);
 const CAPS = { os: "linux", arch: "x64", harnesses: [{ name: "pi", version: "1.3.0" }], isolation: ["bubblewrap"], tools: [], workspaces: [] };
 
 for (const backend of backends) {
-  const rig = async (checkpoint: () => Promise<Record<string, never>>, ignoreStop = false) => {
+  const rig = async (checkpoint: () => Promise<Record<string, never>>, ignoreStop = false, onCheckpoint?: () => void) => {
     const store = await backend.open();
     const w = await buildWorld(store.storage);
     await w.principals.enroll(w.owner, { commandId: "eh", kind: "host", name: "local", grants: [] });
@@ -38,7 +38,7 @@ for (const backend of backends) {
       } },
     });
     await local.register(w.hosts, self);
-    const d = w.restart({ workers: [local] });
+    const d = w.restart({ workers: [local], ...(onCheckpoint === undefined ? {} : { checkpoints: async () => { onCheckpoint(); } }) });
     const ann = await w.agent("ann", workGrants(w.project, ["read-file"]));
     const { attemptId, taskId } = await w.task("t", ann);
     const coordinator = new QuiesceCoordinator({ dispatcher: d, blockers: w.blockers, principal: w.owner });
@@ -148,6 +148,25 @@ for (const backend of backends) {
       assert.equal((await r.d.get(r.w.owner, r.attemptId))!.frozen, undefined);
       r.turn.release?.();
       await r.d.idle();
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: a checkpoint that comes back after the attempt was moved belongs to the old placement and is discarded`, async () => {
+    let handed = 0;
+    let open: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { open = resolve; });
+    const r = await rig(async () => { await gate; return {}; }, false, () => { handed++; });
+    try {
+      r.turn.second = async () => { await gate; return "later"; };
+      await r.d.tick();
+      await r.inCall;
+      const quiet = r.d.quiesce(r.w.owner, r.attemptId, "relocation").catch(() => undefined);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await r.d.relocate(r.w.owner, r.attemptId, { hostId: "host:other", note: "moved while the old host was still taking its checkpoint" });
+      open();
+      const out = await quiet;
+      assert.equal(handed, 0, "the late checkpoint was not handed on");
+      assert.equal(out === undefined || out.checkpoint === undefined, true, "and not returned");
     } finally { await r.store.close(); }
   });
 }
