@@ -41,3 +41,4 @@ export { RELEASE_LIMITS, ReleaseService, jobPayload as releaseJobPayload, type J
 export { CATALOG_LIMITS, CatalogService, checkHost, checkManifest, personalNamespace, runAction, type HostFacts, type Manifest } from "./catalog/index.js";
 export { COMMAND_ALIASES, COMMAND_LIMITS, CommandResolver, CommandService, catalogSource, parseInvocation, type CommandContext, type CommandSource, type Resolution as CommandResolution, type Target as CommandTarget } from "./commands/index.js";
 export * from "./backup/index.js";
+export * from "./transfer/index.js";

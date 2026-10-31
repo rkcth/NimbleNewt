@@ -98,6 +98,9 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // A restore replaces everything with an older copy: always a proposal with the exact preview (backup.restore.preview) shown first, never applied from an interpreter's words, in every profile (card K01h).
   "backup.restore.apply": { verb: "Restore a backup (replaces all current data)", mode: "propose" },
   // Withdrawing a prepared restore only puts things back as they were: the safe direction.
+  // Moving the controller database fences the current one and needs a restart: always a proposal with the exact preview shown first, never applied from an interpreter's words, in every profile (card F04e). Rolling it back is a proposal too.
+  "database.transfer.apply": { verb: "Move the controller database (fences the current one; needs a restart)", mode: "propose" },
+  "database.transfer.rollback": { verb: "Roll back a database transfer", mode: "propose" },
   "backup.restore.cancel": { verb: "Withdraw a prepared restore", mode: "apply" },
   // Release staging and activation (card K02). Staging copies verified files and changes nothing running, so it applies at once. Activating and rolling back change what runs: always shown first, the owner's word is the confirmation.
   // Requiring an approved candidate narrows and applies at once; dropping the requirement and any other setting change widens or is shown first (provisional, see the notes).

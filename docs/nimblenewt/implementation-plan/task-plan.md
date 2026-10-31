@@ -29,7 +29,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | --- | --- |
 | N00 / AII-250 | Owner-controlled implementation activation gate |
 | N01 / AII-251 | G01, G04, G07, G08 |
-| N02 / AII-252 | F01, F02, F03, F04a, F04b, F04c, F04d, F04, F04f, F04g, F04h, F04i, F04j, F04k, F04e, F09 |
+| N02 / AII-252 | F01, F02, F03, F04a, F04b, F04c, F04d, F04, F04f, F04g, F04h, F04i, F04j, F04k, F04e, F04l, F04m, F09 |
 | N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06, C06b |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
 | N05 / AII-255 | L05, L05b, L05c, L01, L01b, L02, L02b, L02c, L02d, L03, L03b, L03c, L03d, L03e, L03f, L03g, L03h, L03i, L03j, L04, L04b, L04c, L06, L06b, H08, H08b |
@@ -295,6 +295,22 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Blockers:** F04, K01, F06.
 - **Deliverable:** SQLite to PostgreSQL and reverse logical transfer with maintenance journal.
 - **Acceptance and verification:** Drain work and fence admissions; validate IDs, policy, receipts, uncertain effects, timers, artifacts and Pi checkpoint references; injected transfer failures preserve source; destination authority is unique; reverse transfer checks capacity; no unsafe rollback after new effects.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### F04l — Read database transfer targets from configuration and check Pi conversation stores
+
+- **Parent:** N02 / AII-252.
+- **Blockers:** F04e, F02.
+- **Deliverable:** Split from F04e (2026-10-31): the engine, journal, authority file, owner operations and chat proposal exist, but targets are only passed to startController by the host in code; the production start reads them from the configuration (a PostgreSQL address as a secret reference, a SQLite path, a name each), with a PostgreSQL target that reports free room and empties its schema, and the Pi conversation stores are checked against the recovery points' checkpoints.
+- **Acceptance and verification:** A real start with a configured transfer target moves the database from chat; the PostgreSQL address never appears in chat, logs or the journal; a recovery point whose conversation checkpoint is missing refuses the transfer; capacity of a PostgreSQL destination is read from the server.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### F04m — Finish database transfer hand-over: restart, chat message path, resumable copy and protected journal
+
+- **Parent:** N02 / AII-252.
+- **Blockers:** F04e.
+- **Deliverable:** Split from F04e (2026-10-31): after the switch the controller waits for the host to restart it (no automatic restart); an apply_proposal inside a chat message (not applyProposal) records its turn in the fenced database and fails with stale_epoch; a failed copy starts over; the journal and authority file carry no integrity mark; a PostgreSQL controller without a data directory cannot run transfers.
+- **Acceptance and verification:** The host restarts onto the new database by itself when it opts in; the message path reports the move as applied; an interrupted copy resumes or is cleaned without the owner emptying the destination; the authority file and journal are rejected when changed by anything else; transfers are available without a data directory by a configured state folder.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### F05 — Implement pinned Pi adapter submission contract
@@ -3087,7 +3103,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** T05b, D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, H12t, L05c, U14, M02g, M02h, M03g, M03h, M04g, M04h, L03i, L03j, T02c, T02d, U11c, U11d, K06c, P03b, K01i.
+- **Blockers:** T05b, D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, H12t, L05c, U14, M02g, M02h, M03g, M03h, M04g, M04h, L03i, L03j, T02c, T02d, U11c, U11d, K06c, P03b, K01i, F04l, F04m.
 - **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
 - **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

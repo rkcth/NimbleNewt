@@ -485,7 +485,7 @@ export class ChatService {
       // Every text in the command must be the owner's own words (or a record, or a fixed choice): a model cannot add content the owner never said.
       if (hasRefMarker(intent.args)) { push({ i, kind: "refused", code: "invalid_command", message: "$ref is reserved for steps the controller builds" }); continue; }
       // The reason recorded with a right is the owner's message, set by the chat. A gate is always shown to the owner first, so its kind and its (fixed) topic need not be words of the message: the wording still must be.
-      const unchecked = intent.op === "release.activate" ? ["digest"] : intent.op === "backup.restore.apply" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
+      const unchecked = intent.op === "release.activate" ? ["digest"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
       const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined);
       if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: foreign.startsWith("reassignResponsibilities") ? `${foreign} is not in your message, so it was not done. Responsibilities move with a hand-off only by the IDs you give (the rsp- IDs the hand-off package lists); say them in your message.` : `${foreign} is not in your message, so it was not done. Say what it should be.` }); continue; }
       const landing = intent.op === "project.create" ? (intent.args["integration"] as { landing?: unknown } | undefined)?.landing : intent.args["landing"];
@@ -605,6 +605,18 @@ export class ChatService {
       const plan = found.result["item"] as { token: string; expiresAt?: string; name: string; createdAt: string; kind: string; rows: number; artifactFiles: number; piStores: number; piFiles: number; piStateIncluded: boolean; changesSinceBackup?: number; effectsToMarkUncertain?: number; deliveriesToResend?: number; steps: string[]; warnings: string[] };
       args["confirm"] = plan.token;
       fillNotes.push(`Restore plan, worked out just now from the backup ${plan.name} (made ${plan.createdAt}, ${plan.kind}): ${plan.rows} records, ${plan.artifactFiles} artifact files, ${plan.piStateIncluded ? `${plan.piFiles} conversation files in ${plan.piStores} stores` : "NO conversation state (Pi state not included)"}${plan.changesSinceBackup === undefined ? "" : `; about ${plan.changesSinceBackup} changes made since then will be lost`}${plan.effectsToMarkUncertain === undefined ? "" : `; ${plan.effectsToMarkUncertain} intended actions come back as uncertain`}${plan.deliveriesToResend === undefined ? "" : `; ${plan.deliveriesToResend} undelivered messages are sent again`}. ${plan.expiresAt === undefined ? "" : `Your approval is good until ${plan.expiresAt}. `}Steps: ${plan.steps.join(" ")} Warnings: ${plan.warnings.join(" ")}`);
+    }
+    // A database transfer is proposed with the plan the controller computes NOW; the approval token comes from that plan (never from the interpreter's words).
+    if (intent.op === "database.transfer.apply") {
+      delete args["confirm"];
+      const wanted = args["target"];
+      if (typeof wanted !== "string") return refuse("invalid_command", "say which database to move to, by the name database.transfer.status shows");
+      const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "database.transfer.preview", args: { target: wanted } });
+      if (!found.ok) return refuse(found.error.code, found.error.message);
+      const plan = found.result["item"] as { token: string; direction: string; to: { name: string }; totalRows: number; ok: boolean; claimsReleased: number; uncertainEffects: number; findings: { severity: string; text: string }[]; steps: string[] };
+      if (!plan.ok) return refuse("invalid_transition", `the database cannot be moved now: ${plan.findings.filter((f) => f.severity === "error").map((f) => f.text).join("; ")}`);
+      args["confirm"] = plan.token;
+      fillNotes.push(`Transfer plan, worked out just now (${plan.direction}, to ${plan.to.name}): ${plan.totalRows} records; ${plan.claimsReleased} claims are released; ${plan.uncertainEffects} uncertain actions stay uncertain. Steps: ${plan.steps.join(" ")} Warnings: ${plan.findings.filter((f) => f.severity === "warning").map((f) => f.text).join(" ") || "none"}`);
     }
     const labels: Record<string, string> = {};
     const pins: ChatPin[] = [];
@@ -1482,6 +1494,8 @@ export class ChatService {
         },
       }));
     } catch (error) {
+      // A database transfer fences the database this record lives in (card F04e): the move was made, and the note that it was cannot be written to the database that was just retired. The owner is told it was applied (restart required).
+      if (error instanceof DomainError && error.code === "stale_epoch" && body.steps.some((s) => s.op === "database.transfer.apply") && results.some((r) => r.op === "database.transfer.apply")) return { proposalId, applied: true, replayed: false, results };
       if (!(error instanceof DomainError) || error.code !== "stale_revision") throw error;
       found = await this.#runner.get("chat-proposal", proposalId);
       body = found?.body as unknown as ChatProposalBody | undefined;

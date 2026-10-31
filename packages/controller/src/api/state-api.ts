@@ -196,6 +196,7 @@ export interface StateApiDeps {
   readonly backupEncryption?: Pick<BackupEncryption, "status" | "verify">;
   readonly backupKeyPin?: Pick<BackupKeyPinService, "get" | "rekey">;
   readonly backupRestore?: Context["backupRestore"];
+  readonly databaseTransfer?: Context["databaseTransfer"];
   /** While it says true (the maintenance barrier is up, card K01h) every command except the restore's own and the owner's reads is refused as unavailable. */
   readonly maintenanceHeld?: () => string | undefined;
   readonly improvements?: Pick<ImprovementService, "propose" | "group" | "decide" | "bringToStandup" | "get" | "open">;
@@ -325,6 +326,7 @@ export class StateApi {
         ...(this.#deps.backupEncryption === undefined ? {} : { backupEncryption: this.#deps.backupEncryption }),
         ...(this.#deps.backupKeyPin === undefined ? {} : { backupKeyPin: this.#deps.backupKeyPin }),
         ...(this.#deps.backupRestore === undefined ? {} : { backupRestore: this.#deps.backupRestore }),
+        ...(this.#deps.databaseTransfer === undefined ? {} : { databaseTransfer: this.#deps.databaseTransfer }),
         ...(this.#deps.improvements === undefined ? {} : { improvements: this.#deps.improvements }),
         ...(this.#deps.watchControl === undefined ? {} : { watchControl: this.#deps.watchControl }),
         ...(this.#deps.standups === undefined ? {} : { standups: this.#deps.standups }),
@@ -353,7 +355,7 @@ export class StateApi {
         },
       };
       const held = operation.kind === "command" ? this.#deps.maintenanceHeld?.() : undefined;
-      if (held !== undefined && operation.name !== "backup.restore.cancel") throw new DomainError("unavailable", `the installation is in maintenance (${held}); commands are refused until it is over`);
+      if (held !== undefined && operation.name !== "backup.restore.cancel" && operation.name !== "database.transfer.rollback") throw new DomainError("unavailable", `the installation is in maintenance (${held}); commands are refused until it is over`);
       const result = await operation.run(context, args, request.commandId);
       if (operation.kind === "query") return { v: API_VERSION, op: request.op, ok: true, result };
       const deferred = operation.completion?.kind === "deferred";

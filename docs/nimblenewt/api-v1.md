@@ -918,6 +918,26 @@ Arguments:
 
 Result: `{ item: { pending?, barrier, markerProblem? } }`; `pending.failed` says a start tried the swap and it was rolled back (cancel it, then prepare it again).
 
+#### `database.transfer.status`
+
+Owner only: which database the controller runs on, the databases it may be moved to (configured by the host; a PostgreSQL address holds a password and never comes from chat), the last transfer and whether it can still be rolled back.
+
+Arguments:
+
+- none
+
+Result: `{ item: { source, targets: [{ name, kind, direction }], authority?, journal?, barrier } }`.
+
+#### `database.transfer.preview`
+
+Owner only: exactly what moving the controller database to a configured target would do: record counts per table, whether the source passes the checks (IDs, sequences, policy records, receipts, uncertain actions, timers, artifact and checkpoint references), whether the destination is empty, the right schema version and has room, and the `token` that confirms it. Changes nothing.
+
+Arguments:
+
+- `target`: the target's name, as database.transfer.status lists it
+
+Result: `{ item: { token, direction, from, to, schemaVersion, rows, totalRows, bytes, bytesNeeded, freeBytes?, uncertainEffects, intendedEffects, claimsReleased, ok, findings: [{ severity, text }], steps } }`; `ok: false` means an error finding blocks the transfer.
+
 #### `backup.list`
 
 Owner only: the complete backups, newest first, and whether the last one failed.
@@ -3509,6 +3529,27 @@ Arguments:
 - none
 
 Result: `{ cancelled, leftovers? }`; also clears a restore that a start tried and rolled back, and puts back what a half-done swap had moved.
+
+#### `database.transfer.apply`
+
+Owner only, a dangerous action: moves the controller database to the target. `confirm` must be the token of the preview the owner approved. The maintenance barrier is raised (agent attempts must have ended), every record is copied and read back, the current database is fenced, and the target becomes the only database a controller will start on; the controller then waits to be restarted on it. A failure before the fence leaves the current database exactly as it was. The chat only proposes this; it is never applied from an interpreter's words.
+
+Arguments:
+
+- `target`: the target's name
+- `confirm`: the token from database.transfer.preview
+
+Result: `{ item: { id, direction, to, rows, claimsReleased, uncertainEffects, restartRequired: true, findings } }`.
+
+#### `database.transfer.rollback`
+
+Owner only: puts the previous database back as the only one a controller will start on. Allowed only while the new database has recorded nothing since the switch; otherwise records exist only there and the way back is a transfer in the other direction.
+
+Arguments:
+
+- none
+
+Result: `{ item: { id, to, restartRequired: true } }`.
 
 #### `message.send`
 

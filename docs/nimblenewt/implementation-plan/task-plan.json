@@ -665,6 +665,41 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "F04l",
+      "parent": "N02",
+      "existing_issue": "AII-252",
+      "title": "Read database transfer targets from configuration and check Pi conversation stores",
+      "depends_on": [
+        "F04e",
+        "F02"
+      ],
+      "deliverable": "Split from F04e (2026-10-31): the engine, journal, authority file, owner operations and chat proposal exist, but targets are only passed to startController by the host in code; the production start reads them from the configuration (a PostgreSQL address as a secret reference, a SQLite path, a name each), with a PostgreSQL target that reports free room and empties its schema, and the Pi conversation stores are checked against the recovery points' checkpoints",
+      "acceptance_and_verification": "A real start with a configured transfer target moves the database from chat; the PostgreSQL address never appears in chat, logs or the journal; a recovery point whose conversation checkpoint is missing refuses the transfer; capacity of a PostgreSQL destination is read from the server",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "F04m",
+      "parent": "N02",
+      "existing_issue": "AII-252",
+      "title": "Finish database transfer hand-over: restart, chat message path, resumable copy and protected journal",
+      "depends_on": [
+        "F04e"
+      ],
+      "deliverable": "Split from F04e (2026-10-31): after the switch the controller waits for the host to restart it (no automatic restart); an apply_proposal inside a chat message (not applyProposal) records its turn in the fenced database and fails with stale_epoch; a failed copy starts over; the journal and authority file carry no integrity mark; a PostgreSQL controller without a data directory cannot run transfers",
+      "acceptance_and_verification": "The host restarts onto the new database by itself when it opts in; the message path reports the move as applied; an interrupted copy resumes or is cleaned without the owner emptying the destination; the authority file and journal are rejected when changed by anything else; transfers are available without a data directory by a configured state folder",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "F05",
       "parent": "N03",
       "existing_issue": "AII-253",
@@ -8725,7 +8760,9 @@
         "U11d",
         "K06c",
         "P03b",
-        "K01i"
+        "K01i",
+        "F04l",
+        "F04m"
       ],
       "deliverable": "Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete",
       "acceptance_and_verification": "D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards",
