@@ -61,6 +61,22 @@ for (const backend of backends) {
     } finally { await store.close(); }
   });
 
+  test(`${backend.name}: an attempt whose sandbox still holds a process counts as busy for a workspace operation, though no call is in flight, and a sandbox that cannot say makes the look fail (card H12q review)`, async () => {
+    let closed = false;
+    let fail = false;
+    const sandbox: SandboxPort = { open: async (recipe: RecipeSummary) => ({ revision: recipe.revision, close: async () => { closed = true; }, work: async () => { if (fail) throw new Error("backend down"); return { processes: closed ? [{ ref: "pid-9 (writing)", kind: "process" as const, state: "running" as const }] : [] }; } }) };
+    const { store, w, local, d } = await setup({ sandbox });
+    try {
+      const ann = await w.agent("ann", workGrants(w.project, ["read-file"]));
+      const { attemptId } = await w.task("t", ann);
+      await d.tick();
+      await d.idle();
+      assert.deepEqual(await local.busyAttempts(), [attemptId!], "no call is in flight, but a process of the attempt is still running in its sandbox");
+      fail = true;
+      await assert.rejects(local.busyAttempts(), /backend down/);
+    } finally { await store.close(); }
+  });
+
   test(`${backend.name}: the local worker registers from its own facts, runs an attempt in a sandbox with every call through the gateway, and closes both`, async () => {
     const { store, w, local, self, d, log } = await setup();
     try {

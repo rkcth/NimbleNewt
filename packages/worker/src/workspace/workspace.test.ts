@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { link, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ABSENT, BRIDGE_LIMITS, WorkspaceBridge, WorkspaceError, collisions, fold, isGitName, nameProblem, resolveSafe, splitRelative, touchesGit, versionOf } from "./index.js";
+import { ABSENT, BRIDGE_LIMITS, WorkspaceBridge, isProtectedPath, WorkspaceError, collisions, fold, isGitName, nameProblem, resolveSafe, splitRelative, touchesGit, versionOf } from "./index.js";
 import { resolveInside } from "./paths.js";
 
 const isWindows = process.platform === "win32";
@@ -265,4 +265,38 @@ test("short-name aliases and hashed 8.3 names are Git's too, and refused on Wind
   assert.equal(isGitName("gift~1x"), false);
   assert.ok(nameProblem("PROGRA~1", true) !== undefined && nameProblem("report~12.txt", true) !== undefined);
   assert.equal(nameProblem("report~12.txt", false), undefined);
+});
+
+test("a set of files is written all together or not at all: a held or moved file stops every write, and a failure part-way puts the written files back (card H12q review)", { skip: isWindows ? "POSIX permissions" : false }, async () => {
+  const w = await world();
+  try {
+    const a = Buffer.from("export const x = 1;\n");
+    const v = versionOf(a);
+    // One file moved since the base: nothing at all is written, and that file is kept.
+    const moved = await w.bridge.writeSet({ changes: [{ path: "src/main.ts", op: "write", expectedVersion: v, content: Buffer.from("new\n") }, { path: "README.md", op: "write", expectedVersion: versionOf(Buffer.from("different\n")), content: Buffer.from("r\n") }], author: "a", reason: "r" });
+    assert.equal(moved.status, "kept");
+    assert.equal(await readFile(join(w.shared, "src", "main.ts"), "utf8"), "export const x = 1;\n");
+    assert.equal((await w.bridge.pending()).length, 1);
+    // A failure in the second step: the first rename is undone. (A delete inside a folder that cannot be written fails after the earlier file was renamed into place.)
+    if (process.getuid?.() === 0) return;
+    await mkdir(join(w.shared, "zlocked"), { recursive: true });
+    await writeFile(join(w.shared, "zlocked", "x.txt"), "x\n");
+    await chmod(join(w.shared, "zlocked"), 0o555);
+    try {
+      await assert.rejects(w.bridge.writeSet({ changes: [{ path: "src/main.ts", op: "write", expectedVersion: v, content: Buffer.from("changed\n") }, { path: "zlocked/x.txt", op: "delete", expectedVersion: versionOf(Buffer.from("x\n")) }], author: "a", reason: "r" }));
+      assert.equal(await readFile(join(w.shared, "src", "main.ts"), "utf8"), "export const x = 1;\n", "the file already renamed was put back");
+      assert.deepEqual((await readdir(join(w.shared, "src"))).filter((n) => n.includes(".nn-")), [], "no temporary file is left");
+    } finally { await chmod(join(w.shared, "zlocked"), 0o755); }
+    // And when nothing is in the way, all of them are written.
+    const ok = await w.bridge.writeSet({ changes: [{ path: "src/main.ts", op: "write", expectedVersion: v, content: Buffer.from("changed\n") }, { path: "zlocked/x.txt", op: "delete", expectedVersion: versionOf(Buffer.from("x\n")) }, { path: "new/dir/f.txt", op: "write", expectedVersion: ABSENT, content: Buffer.from("f\n") }], author: "a", reason: "r" });
+    assert.deepEqual(ok, { status: "written", count: 3 });
+    assert.equal(await readFile(join(w.shared, "new", "dir", "f.txt"), "utf8"), "f\n");
+  } finally { await chmod(join(w.shared, "zlocked"), 0o755).catch(() => undefined); await w.done(); }
+});
+
+test("protected paths: CI configuration, hooks and Git attributes match anywhere they act, ordinary files do not, and the list is replaceable", () => {
+  for (const p of [".gitattributes", "sub/.gitattributes", ".GITMODULES", ".github/workflows/ci.yml", ".github/Workflows/deep/x.yml", ".husky/pre-commit", ".gitlab-ci.yml", "Jenkinsfile", ".circleci/config.yml"]) assert.equal(isProtectedPath(p), true, p);
+  for (const p of ["src/a.ts", ".github/CODEOWNERS", "docs/.husky/x", "workflows/ci.yml", ".gitignore"]) assert.equal(isProtectedPath(p), false, p);
+  assert.equal(isProtectedPath("src/a.ts", ["src/a.ts"]), true);
+  assert.equal(isProtectedPath(".gitattributes", []), false);
 });

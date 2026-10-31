@@ -105,7 +105,7 @@ export class RemoteWorkerClient {
     await this.#send("POST", `/worker/release/jobs/${encodeURIComponent(attemptId)}/report`, { body: result, key, session: true });
   }
 
-  /** The workspace requests (integration, refresh, quarantine) the controller has for this host and has not had an answer to (card H12m). */
+  /** The workspace requests (integration, landing, refresh, quarantine) the controller has for this host and has not had an answer to (card H12m). */
   async workspaceRequests(): Promise<WorkspaceAsk[]> {
     return (await this.workspaceList()).requests;
   }

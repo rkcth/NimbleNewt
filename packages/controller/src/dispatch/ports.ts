@@ -128,7 +128,7 @@ export interface WorkerHost {
    * throws when it cannot look (the stop then shows one unknown item instead of a clean stop).
    */
   localWork?(attemptIds: readonly string[]): Promise<HostLocalWork>;
-  /** The host's side of integration, checkout refresh and quarantine for the checkouts it holds (cards H12l, H12m). A host with none leaves it out and those requests are refused for it. */
+  /** The host's side of integration, landing, checkout refresh and quarantine for the checkouts it holds (cards H12l, H12m). A host with none leaves it out and those requests are refused for it. */
   readonly workspace?: WorkspacePort;
 }
 

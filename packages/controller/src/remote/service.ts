@@ -382,7 +382,7 @@ export class RemoteWorkerService {
   // ---- workspace operations on a remote host (card H12m) -------------------------------------------------------------------------
 
   /**
-   * Carries a workspace request (integration, refresh, quarantine) to the host that holds the checkout and waits for its answer, which has the same typed shape a local host gives. Only the owner and the dispatcher may ask (the
+   * Carries a workspace request (integration, landing, refresh, quarantine) to the host that holds the checkout and waits for its answer, which has the same typed shape a local host gives. Only the owner and the dispatcher may ask (the
    * workspace service does, after its own rights check, its record and the quiesce). Nothing is sent to a host that is not connected, revoked or not heard from lately: that is a refusal saying nothing was sent. A host that does not
    * answer within `waitMs` leaves the request as it is: this throws `unavailable` (the operation may or may not have been carried out) and the ask is withdrawn, so the host does not start it later; an answer that comes after is
    * accepted and dropped. The same request ID asked again joins the first ask and gets the same answer.

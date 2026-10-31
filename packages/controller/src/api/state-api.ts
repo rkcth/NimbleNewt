@@ -119,7 +119,7 @@ export interface StateApiDeps {
   readonly acceptance?: Pick<AcceptanceService, "draft" | "revise" | "newVersion" | "submit" | "startReview" | "accept" | "reject" | "check" | "get" | "list" | "events">;
   /** When present, agenda items can be captured, corrected and listed through the API (cards M01 and M03). */
   readonly meetings?: MeetingService;
-  /** When present, integration, checkout refresh and quarantine of a task's work can be requested (cards H12l, H12d). */
+  /** When present, integration, landing, checkout refresh and quarantine of a task's work can be requested (cards H12l, H12d). */
   readonly workspaceOps?: Pick<WorkspaceOpService, "request" | "get">;
   /** When present, the status views (task, overview, noticeboard, changes, tools, delivered, failed events) can be asked through the API (card U05b). */
   readonly status?: Pick<StatusService, "ask" | "attention">;

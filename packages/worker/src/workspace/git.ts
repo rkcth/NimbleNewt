@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { WorkspaceBridge, ABSENT, versionOf, type WriteResult } from "./bridge.js";
 import { WorkspaceError } from "./errors.js";
-import { touchesGit } from "./names.js";
+import { splitRelative, touchesGit } from "./names.js";
 import { NOFOLLOW, resolveSafe, sameFile } from "./paths.js";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
@@ -430,6 +430,72 @@ export class GitBridge {
     const head = (await this.#run(["rev-parse", "--verify", "HEAD"], { gitDir: options.gitDir })).stdout.trim();
     await this.#run(["update-ref", "refs/nn/base", head], { gitDir: options.gitDir });
     return { moved: true, differing: [] };
+  }
+
+  /**
+   * The state of the shared working tree that a landing depends on (card H12q review): the branch it is on (`undefined` when detached), its head commit, and every changed or new file that no ignore rule hides. A landing
+   * leaves its files uncommitted in this tree and the head does not move, so the head alone cannot say whether another landing came before; this does.
+   */
+  async sharedTree(shared: string): Promise<{ branch: string | undefined; head: string; entries: { code: string; path: string }[] }> {
+    const real = await realpath(shared);
+    const gitDir = await this.#sharedGitDir(shared);
+    const head = (await this.#run(["rev-parse", "--verify", "HEAD^{commit}"], { gitDir })).stdout.trim();
+    const branch = await this.#run(["symbolic-ref", "-q", "--short", "HEAD"], { gitDir }).then((r) => r.stdout.trim() || undefined, () => undefined);
+    const out = (await this.#run(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"], { gitDir, workTree: real })).stdout;
+    return { branch, head, entries: out.split("\0").filter(Boolean).map((e) => ({ code: e.slice(0, 2), path: e.slice(3) })) };
+  }
+
+  /**
+   * What a landing would carry, planned once from the checkout's committed objects (card H12q review): the difference between the base commit and the checkout's head commit, with the head's blobs. The live working tree
+   * is never read, so a file written after the checks (by a process still running in the sandbox) cannot change what is landed. A Git-named path, a link or submodule, a path with a name problem, a file over the size limit
+   * and too many files refuse the whole plan. A change of mode alone is listed as `modeOnly` (not carried).
+   */
+  async landingPlan(options: { gitDir: string }): Promise<{ base: string; head: string; files: { path: string; op: "write" | "delete"; expectedVersion: string; content?: Buffer; modeOnly: boolean }[] }> {
+    const base = await this.#base(options.gitDir);
+    const head = (await this.#run(["rev-parse", "--verify", "HEAD^{commit}"], { gitDir: options.gitDir })).stdout.trim();
+    if (base === head) return { base, head, files: [] };
+    const listing = (await this.#run(["diff", "--raw", "--no-abbrev", "-z", "--no-renames", base, head], { gitDir: options.gitDir })).stdout.split("\0").filter(Boolean);
+    if (listing.length / 2 > GIT_LIMITS.files) throw new WorkspaceError("invalid_path", `more than ${GIT_LIMITS.files} files changed`);
+    const files: { path: string; op: "write" | "delete"; expectedVersion: string; content?: Buffer; modeOnly: boolean }[] = [];
+    let total = 0;
+    for (let i = 0; i + 1 < listing.length; i += 2) {
+      const [oldMode = "", newMode = "", oldSha = "", newSha = "", status = ""] = listing[i]!.slice(1).split(" ");
+      const path = listing[i + 1]!;
+      if (touchesGit(path.split("/"))) throw new WorkspaceError("protected_path", `${JSON.stringify(path.slice(0, 80))} is or lies inside Git's own data; the whole change was refused`);
+      if (status === "T" || newMode === "120000" || newMode === "160000" || oldMode === "120000" || oldMode === "160000") throw new WorkspaceError("link_refused", `${JSON.stringify(path.slice(0, 80))} is a link or a submodule entry, which the bridge does not carry`);
+      try { splitRelative(path, { forWindows: true }); } catch (error) { throw new WorkspaceError("invalid_path", `${JSON.stringify(path.slice(0, 80))} cannot be carried: ${(error as Error).message}`); }
+      const baseBytes = status === "A" ? undefined : await this.#blobAt(options.gitDir, base, path);
+      const expectedVersion = baseBytes === undefined ? ABSENT : versionOf(baseBytes);
+      if (status === "D") { files.push({ path, op: "delete", expectedVersion, modeOnly: false }); continue; }
+      if (oldSha === newSha) { files.push({ path, op: "write", expectedVersion, modeOnly: true }); continue; }
+      const content = await this.#blobAt(options.gitDir, head, path);
+      if (content === undefined) throw new WorkspaceError("invalid_path", `${JSON.stringify(path.slice(0, 80))} could not be read at the checkout's head`);
+      total += content.length;
+      if (total > 64 * 1024 * 1024) throw new WorkspaceError("invalid_path", "the change is larger than 64 MiB in total");
+      files.push({ path, op: "write", expectedVersion, content, modeOnly: false });
+    }
+    return { base, head, files };
+  }
+
+  /** The commits between the base and the checkout's head (oldest last, as git lists them) that do not carry the commit permit's marks for this task: the `NimbleNewt-Request:` and `NimbleNewt-Task:` trailers the review gate adds (A06). */
+  async unpermitted(options: { gitDir: string; taskId: string }): Promise<string[]> {
+    const base = await this.#base(options.gitDir);
+    const out = (await this.#run(["log", "--format=%H%x1f%B%x1e", `${base}..HEAD`], { gitDir: options.gitDir })).stdout.split("\x1e").map((x) => x.trim()).filter(Boolean);
+    return out.flatMap((entry) => {
+      const [sha = "", message = ""] = entry.split("\x1f");
+      const request = /^NimbleNewt-Request: \S+$/m.test(message);
+      const task = message.split("\n").some((l) => l === `NimbleNewt-Task: ${options.taskId}`);
+      return request && task ? [] : [sha];
+    });
+  }
+
+  /** After a landing was written: the base moves to `commit`, but only if the checkout's head still is `commit` (a compare-and-swap, so nothing is marked that was not landed). */
+  async markLanded(options: { gitDir: string; commit: string }): Promise<boolean> {
+    if (!COMMIT.test(options.commit)) throw new WorkspaceError("invalid_path", "a landing names a full commit ID");
+    const head = (await this.#run(["rev-parse", "--verify", "HEAD^{commit}"], { gitDir: options.gitDir })).stdout.trim();
+    if (head !== options.commit) return false;
+    await this.#run(["update-ref", "refs/nn/base", options.commit], { gitDir: options.gitDir });
+    return true;
   }
 
   /** The ID of a commit in the shared repository's current head (the controller's own read). */

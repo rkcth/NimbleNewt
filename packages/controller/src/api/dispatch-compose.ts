@@ -149,7 +149,7 @@ export interface DispatchHandle {
   /** The dispatcher's own service principal: the staff identity the lifecycle (Suspend, Stop) acts through (card L02). */
   readonly principal: Principal;
   readonly driver: DispatchDriver;
-  /** Makes an agent's attempts quiet around an integration, refresh, release or quarantine of its work (card H12d). */
+  /** Makes an agent's attempts quiet around an integration, landing, refresh, release or quarantine of its work (card H12d). */
   readonly quiesce: QuiesceCoordinator;
   /** Shuts down the local worker host the operator built, if it gave a way to. */
   readonly closeWorkers: () => Promise<void>;

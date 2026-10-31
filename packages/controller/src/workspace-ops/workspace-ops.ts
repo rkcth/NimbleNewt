@@ -259,12 +259,21 @@ export class WorkspaceOpService {
     const stopped: string[] = [];
     const told: string[] = [];
     let changed = false;
+    let notLanded: string | undefined;
     try {
       const outcome = await this.#deps.quiesce.around({ taskId: body.taskId }, body.operation, async (quiet) => {
         quietAttempts = quiet.attempts.map((a) => a.attemptId);
         const answer = await port!.run({ requestId: id, operation: body.operation, taskId: body.taskId, projectId: body.projectId, reason: body.reason, quietAttempts, ...(body.assignee === undefined ? {} : { assignee: body.assignee }) });
         if (answer !== null && typeof answer === "object" && answer.ok === true) {
-          changed = (answer.detail as { changed?: unknown } | undefined)?.changed !== false;
+          const found = (answer.detail ?? {}) as { changed?: unknown; landed?: unknown; written?: unknown; kept?: unknown; keptFiles?: unknown; partial?: unknown };
+          changed = found.changed !== false;
+          // A landing that did not land is not told as landed: the agent hears exactly what was written and what was kept (done can mean not landed).
+          if (body.operation === "landing" && found.landed !== true) {
+            const names = Array.isArray(found.keptFiles) ? found.keptFiles.flatMap((k) => (k !== null && typeof k === "object" && typeof (k as { path?: unknown }).path === "string" ? [(k as { path: string }).path] : [])).slice(0, 5) : [];
+            const written = typeof found.written === "number" ? found.written : 0, kept = typeof found.kept === "number" ? found.kept : 0;
+            if (written > 0 || kept > 0) notLanded = `was NOT landed: ${written} file(s) were written to the shared workspace and ${kept} were kept for the owner's review${names.length === 0 ? "" : ` (${names.join(", ")})`}${found.partial === true ? "; the shared workspace changed during the landing, so the owner checks it" : "; a landing is all or nothing, so the rest needs the owner's decision or a new landing"}`;
+            changed = false;
+          }
           // A quarantined checkout is gone from under the agent: while it is still quiet its attempt is stopped (it would only fail on a missing folder), and the task is left as it is.
           if (body.operation === "quarantine" && this.#deps.attempts?.stop !== undefined) {
             for (const attemptId of quietAttempts) {
@@ -274,8 +283,9 @@ export class WorkspaceOpService {
         }
         return answer;
       }, async (attemptId) => {
+        if (notLanded !== undefined && this.#deps.attempts?.tell !== undefined) { if (await this.#deps.attempts.tell(attemptId, `[workspace] Your checkout ${notLanded} (request ${id}).`)) told.push(attemptId); return; }
         if (!changed || body.operation === "quarantine" || this.#deps.attempts?.tell === undefined) return;
-        const what = body.operation === "refresh" ? "was refreshed to the shared workspace's current head: files in it may differ from what you read earlier, so read them again before you rely on them" : body.operation === "landing" ? "was landed on the landing branch" : "was integrated into the shared workspace";
+        const what = body.operation === "refresh" ? "was refreshed to the shared workspace's current head: files in it may differ from what you read earlier, so read them again before you rely on them" : body.operation === "landing" ? "was landed on the landing branch (the landed files wait, uncommitted, to be committed by the integrator or owner)" : "was integrated into the shared workspace";
         if (await this.#deps.attempts.tell(attemptId, `[workspace] Your checkout ${what} (request ${id}).`)) told.push(attemptId);
       }, id, status);
       const more: Partial<WorkspaceRecordBody> = { quietAttempts, ...(told.length === 0 ? {} : { told }), ...(stopped.length === 0 ? {} : { stopped }) };

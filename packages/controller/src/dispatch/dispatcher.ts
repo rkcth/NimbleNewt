@@ -102,7 +102,7 @@ export interface DispatcherDeps {
   readonly heldBy?: (taskId: string) => Promise<string | undefined>;
   readonly decisions?: DecisionGuard;
   /**
-   * Whether an operation on the task's checkout (integration, refresh, quarantine) is running or left open (card H12m): an attempt of such a task is not started until it ends, and waits instead. A failure to
+   * Whether an operation on the task's checkout (integration, landing, refresh, quarantine) is running or left open (card H12m): an attempt of such a task is not started until it ends, and waits instead. A failure to
    * ask counts as busy (the safe side). Absent: nothing is ever held back.
    */
   readonly workspaceBusy?: (taskId: string) => Promise<boolean>;
@@ -1247,7 +1247,7 @@ export class DispatcherService {
       return pre;
     }
     if (pre.kind !== "ok") return { kind: "waiting" };
-    // An operation on the task's checkout (integration, refresh, quarantine) is running: the attempt waits for it, holding no place, and the next tick looks again (card H12m).
+    // An operation on the task's checkout (integration, landing, refresh, quarantine) is running: the attempt waits for it, holding no place, and the next tick looks again (card H12m).
     if (this.#deps.workspaceBusy !== undefined) {
       let busy = true;
       try { busy = await this.#deps.workspaceBusy(b.taskId); } catch { busy = true; }

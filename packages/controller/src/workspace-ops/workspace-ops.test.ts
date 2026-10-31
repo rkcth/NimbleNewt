@@ -237,6 +237,27 @@ for (const backend of backends) {
     } finally { await r.store.close(); }
   });
 
+  test(`${backend.name}: a landing that kept files for review is recorded as done but not landed, and the agent is told exactly that, never that it was landed (card H12q review)`, async () => {
+    const r = await rig(async () => ({}));
+    try {
+      const stay = keepAlive(r);
+      await r.d.tick();
+      await r.inCall;
+      const told: string[] = [];
+      const detail = { written: 0, kept: 1, keptFiles: [{ path: ".github/workflows/ci.yml", pendingId: "p1" }], skipped: 0, changed: false, landed: false };
+      const port: WorkspacePort = { run: async () => ({ ok: true, summary: "nothing was written: 1 of 2 file(s) were kept for review", detail }) };
+      const svc = WorkspaceOpService.withEpoch(r.w.storage, r.w.epoch, { quiesce: r.coordinator, portOf: async () => port, attempts: { ...control(r), tell: async (_id: string, text: string) => { told.push(text); return true; } } }, { clock: r.w.clock.now });
+      const answer = await svc.request(r.w.owner, { commandId: "land-kept", operation: "landing", taskId: r.taskId, reason: "land it" });
+      assert.deepEqual([answer.state, (answer.detail as { landed?: boolean }).landed], ["done", false]);
+      assert.equal(told.length, 1);
+      assert.match(told[0]!, /was NOT landed: 0 file\(s\) were written to the shared workspace and 1 were kept for the owner's review \(\.github\/workflows\/ci\.yml\)/);
+      assert.ok(!/was landed/.test(told[0]!));
+      await r.d.release(r.w.owner, r.attemptId).catch(() => undefined);
+      stay();
+      await r.d.idle();
+    } finally { await r.store.close(); }
+  });
+
   test(`${backend.name}: a landing that was running when the controller stopped is recovered like the others: its freeze is lifted (card H12q)`, async () => {
     const r = await rig(async () => ({}));
     try {

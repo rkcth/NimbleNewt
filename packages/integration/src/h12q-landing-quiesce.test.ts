@@ -29,7 +29,7 @@ test("landing waits for the running attempt's call in flight to settle, is done 
   sh(shared, "add", "-A"); sh(shared, "commit", "-q", "-m", "first");
   const git = await GitBridge.create({ scratch: join(dir, "scratch") });
   let local: LocalWorker | undefined;
-  const ws = new LocalWorkspaces({ root: join(dir, "work"), git, shared: () => shared, busy: () => local?.busyAttempts() ?? [] });
+  const ws = new LocalWorkspaces({ root: join(dir, "work"), git, shared: () => shared, busy: () => local?.busyAttempts() ?? [], landing: () => ({ branch: "main", requirePermit: false }) });
   // What happened at the host, in order.
   const log: string[] = [];
   let callEnded = false;
@@ -106,7 +106,7 @@ test("landing waits for the running attempt's call in flight to settle, is done 
     await turns[0];
     let giveUp: NodeJS.Timeout | undefined;
     try { await Promise.race([inCall, new Promise<void>((_, no) => { giveUp = setTimeout(() => no(new Error(`the call never started: ${log.join(" | ")}`)), 5000); })]); } finally { clearTimeout(giveUp); }
-    busyInCall = local!.busyAttempts();
+    busyInCall = await local!.busyAttempts();
     assert.deepEqual(busyInCall, [A.attempt], "the local worker reports the attempt with a call in flight as busy");
     const head = sh(shared, "rev-parse", "HEAD");
 
@@ -121,11 +121,19 @@ test("landing waits for the running attempt's call in flight to settle, is done 
     assert.deepEqual(landing.result.told, [A.attempt]);
     assert.ok(log.some((l) => /landed on the landing branch/.test(l)), "the running agent is told its work was landed");
     assert.equal((await state(A.attempt)).frozen, undefined, "the attempt is released and goes on");
-    assert.deepEqual(local!.busyAttempts(), [], "and nothing is in flight now");
+    assert.deepEqual(await local!.busyAttempts(), [], "and nothing is in flight now");
 
     // ---- the landing branch moves: a second landing of work based on the old head is refused and writes nothing ---------------------
+    // The landed file waits, uncommitted, in the shared tree: until the integrator commits it no landing is made (and the head has not moved, so the head alone would not have said so).
+    const waiting = await api(c, boot.token, "workspace.request", { operation: "landing", taskId: A.task, reason: "too early" }, "land-1b");
+    assert.equal(waiting.result.state, "refused", JSON.stringify(waiting));
+    assert.match(waiting.result.summary, /uncommitted file/);
+    sh(shared, "add", "src/a.ts"); sh(shared, "commit", "-q", "-m", "integrator commits the landed file");
+    const committed = sh(shared, "rev-parse", "HEAD");
+    assert.notEqual(committed, head, "the landing branch really has a new commit");
     await writeFile(join(shared, "src", "c.ts"), "export const c = 1;\n");
-    sh(shared, "add", "-A"); sh(shared, "commit", "-q", "-m", "second");
+    sh(shared, "add", "src/c.ts"); sh(shared, "commit", "-q", "-m", "second");
+    assert.notEqual(sh(shared, "rev-parse", "HEAD"), committed);
     await writeFile(join(made.checkout, "src", "a.ts"), "export const a = 3;\n");
     sh(made.checkout, ...inCheckout, "add", "-A"); sh(made.checkout, ...inCheckout, "commit", "-q", "-m", "more work");
     const sharedBefore = [sh(shared, "rev-parse", "HEAD"), sh(shared, "status", "--porcelain=v1")].join("|");

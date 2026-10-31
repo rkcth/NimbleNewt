@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { GitBridge, WorkspaceHost, type CheckoutLocation, type HostWorkspaceCall } from "./index.js";
+import { GitBridge, WorkspaceBridge, WorkspaceHost, type CheckoutLocation, type HostWorkspaceCall } from "./index.js";
 
 // Card H12m: the host side of integration, refresh and quarantine, against a real checkout with real git.
 const hasGit = (() => { try { execFileSync("git", ["--version"], { stdio: "ignore" }); return true; } catch { return false; } })();
@@ -30,12 +30,15 @@ async function world(extra: Partial<ConstructorParameters<typeof WorkspaceHost>[
   const git = await GitBridge.create({ scratch: join(dir, "scratch") });
   const where: CheckoutLocation = { shared, checkout: join(dir, "checkout"), gitDir: join(dir, "task.git"), bridgeState: join(dir, "state"), quarantineRoot: join(dir, "quarantine") };
   await git.createCheckout({ shared, commit: await git.head(shared), gitDir: where.gitDir, checkout: where.checkout });
+  // A second task on the same shared tree (its own checkout and git directory, the bridge's state shared as the production layout has it).
+  const where2: CheckoutLocation = { ...where, checkout: join(dir, "checkout2"), gitDir: join(dir, "task2.git") };
+  await git.createCheckout({ shared, commit: await git.head(shared), gitDir: where2.gitDir, checkout: where2.checkout });
   const located: string[] = [];
-  const host = new WorkspaceHost({ git, journal: join(dir, "journal"), locate: ({ taskId }) => { located.push(taskId); return taskId === "tsk-one" ? where : undefined; }, clock: () => "2026-10-30T10:00:00.000Z", ...extra });
+  const host = new WorkspaceHost({ git, journal: join(dir, "journal"), locate: ({ taskId }) => { located.push(taskId); return taskId === "tsk-one" ? where : taskId === "tsk-second" ? where2 : undefined; }, clock: () => "2026-10-30T10:00:00.000Z", landing: () => ({ branch: "main", requirePermit: false }), ...extra });
   /** Everything about the shared repository that a refresh or quarantine must leave alone. */
   const sharedState = (): string => [sh(shared, "rev-parse", "HEAD"), sh(shared, "status", "--porcelain=v1", "--ignored"), sh(shared, "for-each-ref")].join("|");
   // A quarantined tree is read-only on purpose; the test makes it writable again to clean up.
-  return { dir, shared, git, where, host, located, sharedState, done: async () => { try { execFileSync("chmod", ["-R", "u+rwX", dir]); } catch { /* nothing to make writable */ } await rm(dir, { recursive: true, force: true }); } };
+  return { dir, shared, git, where, where2, host, located, sharedState, done: async () => { try { execFileSync("chmod", ["-R", "u+rwX", dir]); } catch { /* nothing to make writable */ } await rm(dir, { recursive: true, force: true }); } };
 }
 
 test("refresh moves a clean checkout to the shared head and leaves the shared repository exactly as it was", { skip }, async () => {
@@ -276,6 +279,12 @@ test("landing carries committed work into the shared working tree on the landing
     assert.equal(await readFile(join(w.shared, "src", "a.ts"), "utf8"), "export const a = 2;\n");
     assert.equal(sh(w.shared, "rev-parse", "HEAD"), head, "landing makes no commit; promotion is another step");
     // The base moved to the landed commit, so it is no longer the landing branch's head: a second landing of the same work is refused rather than repeated (a repeat of the same request ID gets the recorded answer).
+    // And while the landed files wait uncommitted in the shared tree, no landing is made at all.
+    const waiting = await w.host.run(call("landing"));
+    assert.equal(waiting.ok, false);
+    assert.match(reasonOf(waiting), /uncommitted file\(s\) \(landed changes waiting to be committed/);
+    assert.equal(detailOf(r)["waitingToCommit"], true);
+    sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "integrator commits the landed files");
     const again = await w.host.run(call("landing"));
     assert.equal(again.ok, false);
     assert.match(reasonOf(again), /refreshes onto the head first/);
@@ -309,15 +318,183 @@ test("landing is refused, with nothing written, when the landing branch moved si
   } finally { await w.done(); }
 });
 
-test("a landing that finds the shared file moved is kept for review and is not reported as landed (card H12q)", { skip }, async () => {
+test("a landing that finds a shared file moved (changed after the checks) keeps it for review, writes nothing and is not reported as landed (card H12q)", { skip }, async () => {
+  const w = await world({ hooks: { afterCleanCheck: async () => { await writeFile(join(w.shared, "src", "b.ts"), "export const b = 99; // somebody else\n"); } } });
+  try {
+    await writeFile(join(w.where.checkout, "src", "a.ts"), "export const a = 2;\n");
+    await writeFile(join(w.where.checkout, "src", "b.ts"), "export const b = 2;\n");
+    commitCheckout(w, "agent work");
+    const r = await w.host.run(call("landing"));
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.deepEqual([detailOf(r)["written"], detailOf(r)["kept"], detailOf(r)["landed"], detailOf(r)["changed"]], [0, 1, false, false]);
+    assert.match((r as { summary: string }).summary, /nothing was written: 1 of 2/);
+    assert.equal(await readFile(join(w.shared, "src", "a.ts"), "utf8"), "export const a = 1;\n", "the other file is not written either: all or nothing");
+    assert.equal(await readFile(join(w.shared, "src", "b.ts"), "utf8"), "export const b = 99; // somebody else\n");
+  } finally { await w.done(); }
+});
+
+const permitted = (message: string, task = "tsk-one"): string => `${message}\n\nReviewed-by: owner\nNimbleNewt-Request: req-1\nNimbleNewt-Task: ${task}`;
+
+test("two tasks landing on one shared tree run one after the other: the second is refused because the first's files wait uncommitted there, and is never written over it (card H12q review)", { skip }, async () => {
+  let calls = 0; let release!: () => void; const gate = new Promise<void>((ok) => { release = ok; });
+  const w = await world({ attemptsQuiet: async () => { calls++; if (calls === 1) await gate; return true; } });
+  try {
+    for (const [where, name, text] of [[w.where, "one.ts", "export const one = 1;\n"], [w.where2, "two.ts", "export const two = 2;\n"]] as const) {
+      await writeFile(join(where.checkout, "src", name), text);
+      sh(where.checkout, "--git-dir", where.gitDir, "--work-tree", where.checkout, "add", "-A"); sh(where.checkout, "--git-dir", where.gitDir, "--work-tree", where.checkout, "commit", "-q", "-m", name);
+    }
+    const first = w.host.run(call("landing", { taskId: "tsk-one" }));
+    const second = w.host.run(call("landing", { taskId: "tsk-second" }));
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(calls, 1, "the second landing has not even begun while the first is in the shared tree's order");
+    release();
+    const [a, b] = [await first, await second];
+    assert.equal(a.ok, true, JSON.stringify(a)); assert.equal(detailOf(a)["landed"], true);
+    assert.equal(b.ok, false, JSON.stringify(b));
+    assert.match(reasonOf(b), /uncommitted file\(s\)/);
+    assert.equal(existsSync(join(w.shared, "src", "two.ts")), false);
+    assert.equal(await readFile(join(w.shared, "src", "one.ts"), "utf8"), "export const one = 1;\n");
+  } finally { await w.done(); }
+});
+
+test("the same file changed by two tasks on one head: the second landing is refused or kept, never silently written over the first (card H12q review)", { skip }, async () => {
+  const w = await world();
+  try {
+    for (const [where, text] of [[w.where, "export const a = 'one';\n"], [w.where2, "export const a = 'two';\n"]] as const) {
+      await writeFile(join(where.checkout, "src", "a.ts"), text);
+      sh(where.checkout, "--git-dir", where.gitDir, "--work-tree", where.checkout, "add", "-A"); sh(where.checkout, "--git-dir", where.gitDir, "--work-tree", where.checkout, "commit", "-q", "-m", "a");
+    }
+    const [x, y] = await Promise.all([w.host.run(call("landing", { taskId: "tsk-one" })), w.host.run(call("landing", { taskId: "tsk-second" }))]);
+    assert.equal([x, y].filter((r) => r.ok && detailOf(r)["landed"] === true).length, 1);
+    assert.equal(await readFile(join(w.shared, "src", "a.ts"), "utf8"), "export const a = 'one';\n");
+  } finally { await w.done(); }
+});
+
+test("a landing needs a clean shared tree on the named landing branch: another branch, a detached head, untracked files and no policy all refuse and write nothing (card H12q review)", { skip }, async () => {
   const w = await world();
   try {
     await writeFile(join(w.where.checkout, "src", "a.ts"), "export const a = 2;\n");
     commitCheckout(w, "agent work");
-    await writeFile(join(w.shared, "src", "a.ts"), "export const a = 99; // somebody else, not committed\n");
+    const before = w.sharedState();
+    // An untracked file in the shared tree (not ignored) counts: the tree is not clean.
+    await writeFile(join(w.shared, "stray.txt"), "x\n");
+    const stray = await w.host.run(call("landing"));
+    assert.match(reasonOf(stray), /uncommitted file\(s\)/);
+    await rm(join(w.shared, "stray.txt"));
+    sh(w.shared, "checkout", "-q", "-b", "feature");
+    const other = await w.host.run(call("landing"));
+    assert.match(reasonOf(other), /branch "feature", not on the landing branch "main"/);
+    sh(w.shared, "checkout", "-q", "--detach");
+    assert.match(reasonOf(await w.host.run(call("landing"))), /detached head, not on the landing branch/);
+    sh(w.shared, "checkout", "-q", "main"); sh(w.shared, "branch", "-D", "feature");
+    assert.equal(w.sharedState(), before);
+    const noPolicy = await world({ landing: () => undefined });
+    try { assert.match(reasonOf(await noPolicy.host.run(call("landing"))), /no landing branch set/); } finally { await noPolicy.done(); }
+    assert.equal(detailOf(await w.host.run(call("landing")))["landed"], true, "with everything in place it lands");
+  } finally { await w.done(); }
+});
+
+test("a checkout with an untracked file, or with a file an ignore rule hides, is not landed (card H12q review)", { skip }, async () => {
+  const w = await world();
+  try {
+    await writeFile(join(w.where.checkout, ".gitignore"), "*.log\n");
+    await writeFile(join(w.where.checkout, "src", "a.ts"), "export const a = 2;\n");
+    commitCheckout(w, "agent work");
+    await writeFile(join(w.where.checkout, "src", "new.ts"), "export const n = 1;\n");
+    assert.match(reasonOf(await w.host.run(call("landing"))), /not committed/);
+    await rm(join(w.where.checkout, "src", "new.ts"));
+    await writeFile(join(w.where.checkout, "build.log"), "ignored but there\n");
+    assert.match(reasonOf(await w.host.run(call("landing"))), /not committed/);
+    await rm(join(w.where.checkout, "build.log"));
+    assert.equal(detailOf(await w.host.run(call("landing")))["landed"], true);
+  } finally { await w.done(); }
+});
+
+test("what lands is what was committed: a file written in the checkout after the dirty check is not landed, because the change is planned from the committed objects (card H12q review)", { skip }, async () => {
+  const w = await world({ hooks: { afterCleanCheck: async () => { await writeFile(join(w.where.checkout, "src", "a.ts"), "export const a = 666; // written late\n"); await writeFile(join(w.where.checkout, "src", "late.ts"), "late\n"); } } });
+  try {
+    await writeFile(join(w.where.checkout, "src", "a.ts"), "export const a = 2;\n");
+    commitCheckout(w, "agent work");
     const r = await w.host.run(call("landing"));
     assert.equal(r.ok, true, JSON.stringify(r));
-    assert.deepEqual([detailOf(r)["kept"], detailOf(r)["landed"]], [1, false]);
-    assert.equal(await readFile(join(w.shared, "src", "a.ts"), "utf8"), "export const a = 99; // somebody else, not committed\n");
+    assert.equal(await readFile(join(w.shared, "src", "a.ts"), "utf8"), "export const a = 2;\n");
+    assert.equal(existsSync(join(w.shared, "src", "late.ts")), false);
+  } finally { await w.done(); }
+});
+
+test("a commit in the shared tree between the checks and the writes stops the landing before the first write; one after the writes is reported as partial, not landed (card H12q review)", { skip }, async () => {
+  const w = await world({ hooks: { afterCleanCheck: async () => { await writeFile(join(w.shared, "elsewhere.txt"), "x\n"); sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "someone commits"); } } });
+  try {
+    await writeFile(join(w.where.checkout, "src", "a.ts"), "export const a = 2;\n");
+    commitCheckout(w, "agent work");
+    const r = await w.host.run(call("landing"));
+    assert.equal(r.ok, false, JSON.stringify(r));
+    assert.match(reasonOf(r), /moved from .* during the landing; nothing was landed/);
+    assert.equal(await readFile(join(w.shared, "src", "a.ts"), "utf8"), "export const a = 1;\n");
+  } finally { await w.done(); }
+  const late = await world({ hooks: { afterWrite: async () => { sh(late.shared, "add", "-A"); sh(late.shared, "commit", "-q", "-m", "someone commits the landed file"); } } });
+  try {
+    await writeFile(join(late.where.checkout, "src", "a.ts"), "export const a = 2;\n");
+    commitCheckout(late, "agent work");
+    const r = await late.host.run(call("landing"));
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.deepEqual([detailOf(r)["landed"], detailOf(r)["partial"], detailOf(r)["written"]], [false, true, 1]);
+    assert.equal(await late.git.baseOf(late.where.gitDir) !== sh(late.where.checkout, "--git-dir", late.where.gitDir, "rev-parse", "HEAD"), true, "the checkout is not marked as landed");
+  } finally { await late.done(); }
+});
+
+test("a landing is all or nothing: a protected path (CI configuration) is kept for review and nothing else is written, and the protected list is the project's setting (card H12q review)", { skip }, async () => {
+  const w = await world();
+  try {
+    await mkdir(join(w.where.checkout, ".github", "workflows"), { recursive: true });
+    await writeFile(join(w.where.checkout, ".github", "workflows", "ci.yml"), "on: push\n");
+    await writeFile(join(w.where.checkout, "src", "a.ts"), "export const a = 2;\n");
+    commitCheckout(w, "agent work");
+    const r = await w.host.run(call("landing"));
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.deepEqual([detailOf(r)["written"], detailOf(r)["kept"], detailOf(r)["landed"]], [0, 1, false]);
+    assert.equal(detailOf(r)["keptFiles"][0].path, ".github/workflows/ci.yml");
+    assert.equal(await readFile(join(w.shared, "src", "a.ts"), "utf8"), "export const a = 1;\n");
+    assert.equal(existsSync(join(w.shared, ".github")), false);
+    assert.equal((await new WorkspaceBridge({ shared: w.shared, state: w.where.bridgeState }).pending()).length, 1);
+  } finally { await w.done(); }
+  // The list is a setting: with it emptied the same change lands; with another path named, that path is held.
+  const open = await world({ landing: () => ({ branch: "main", requirePermit: false, protectedPaths: ["src/a.ts"] }) });
+  try {
+    await mkdir(join(open.where.checkout, ".github", "workflows"), { recursive: true });
+    await writeFile(join(open.where.checkout, ".github", "workflows", "ci.yml"), "on: push\n");
+    commitCheckout(open, "agent work");
+    assert.equal(detailOf(await open.host.run(call("landing")))["landed"], true);
+  } finally { await open.done(); }
+});
+
+test("a landing needs the commit permit of the review gate on the checkout's commits unless the project says otherwise (card H12q review)", { skip }, async () => {
+  const w = await world({ landing: () => ({ branch: "main" }) });
+  try {
+    await writeFile(join(w.where.checkout, "src", "a.ts"), "export const a = 2;\n");
+    commitCheckout(w, "agent work, no permit");
+    assert.match(reasonOf(await w.host.run(call("landing"))), /do not carry the commit permit/);
+    assert.equal(await readFile(join(w.shared, "src", "a.ts"), "utf8"), "export const a = 1;\n");
+  } finally { await w.done(); }
+  const ok = await world({ landing: () => ({ branch: "main" }) });
+  try {
+    await writeFile(join(ok.where.checkout, "src", "a.ts"), "export const a = 2;\n");
+    sh(ok.where.checkout, "--git-dir", ok.where.gitDir, "--work-tree", ok.where.checkout, "add", "-A"); sh(ok.where.checkout, "--git-dir", ok.where.gitDir, "--work-tree", ok.where.checkout, "commit", "-q", "-m", permitted("reviewed work"));
+    assert.equal(detailOf(await ok.host.run(call("landing")))["landed"], true);
+    // A permit for another task does not count.
+  } finally { await ok.done(); }
+  const other = await world({ landing: () => ({ branch: "main" }) });
+  try {
+    await writeFile(join(other.where.checkout, "src", "a.ts"), "export const a = 2;\n");
+    sh(other.where.checkout, "--git-dir", other.where.gitDir, "--work-tree", other.where.checkout, "add", "-A"); sh(other.where.checkout, "--git-dir", other.where.gitDir, "--work-tree", other.where.checkout, "commit", "-q", "-m", permitted("reviewed work", "tsk-other"));
+    assert.match(reasonOf(await other.host.run(call("landing"))), /do not carry the commit permit/);
+  } finally { await other.done(); }
+});
+
+test("task and project names are checked as folder names on every system: no ':' or trailing '.', no device names (card H12q review)", { skip }, async () => {
+  const w = await world();
+  try {
+    for (const bad of ["tsk:one", "tsk-one.", "CON", "a b", "tsk~1"]) assert.match(reasonOf(await w.host.run(call("refresh", { taskId: bad }))), /malformed/, bad);
+    assert.match(reasonOf(await w.host.run(call("refresh", { projectId: "prj:one" }))), /malformed/);
   } finally { await w.done(); }
 });

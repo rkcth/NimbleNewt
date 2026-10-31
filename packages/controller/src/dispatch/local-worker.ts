@@ -147,16 +147,22 @@ export class LocalWorker implements WorkerHost {
   }
 
   /**
+   * The attempts of this host that have a tool call or a model call in flight right now, or a process of theirs still running in a sandbox (L02d: `localWork`, which asks every sandbox session the attempt has had). A workspace
+   * host (the worker's `WorkspaceHost.attemptsQuiet`) refuses to change a checkout under any of these: the controller's quiesce has settled the calls first, so this is the host's own check that it really is quiet (card H12q).
+   * A sandbox that cannot answer makes this throw, and the host then treats the attempt as not quiet.
+   */
+  async busyAttempts(): Promise<string[]> {
+    const busy = new Set([...this.#busy].filter(([, count]) => count() > 0).map(([id]) => id));
+    const work = await this.localWork([...this.#sessions.keys()]);
+    for (const p of work.processes) if (p.attemptId !== undefined) busy.add(p.attemptId);
+    return [...busy];
+  }
+
+  /**
    * What Stop needs from this host (card L02d): asked for the attempts it knows, answered from all their sandbox sessions (a replaced sandbox's processes are still reported until it is empty; the cost is the sum over the
    * attempt's sessions). A session that cannot say is left out; one that fails to answer fails the whole look (the stop then names an unknown item). `known` lists the attempts this process has a record of, so a caller can tell
    * "nothing runs" from "this host has forgotten the attempt" (a restart of the controller).
    */
-  /**
-   * The attempts of this host that have a tool call or a model call in flight right now. A workspace host (the worker's `WorkspaceHost.attemptsQuiet`) refuses to change a checkout under any of these: the controller's quiesce has
-   * settled them first, so this is the host's own check that it really is quiet (card H12q).
-   */
-  busyAttempts(): string[] { return [...this.#busy].filter(([, busy]) => busy() > 0).map(([id]) => id); }
-
   async localWork(attemptIds: readonly string[]): Promise<HostLocalWork> {
     const processes: Mutable<HostLocalWork["processes"]> = [];
     const costs: Mutable<NonNullable<HostLocalWork["costs"]>> = [];

@@ -99,7 +99,7 @@ export interface Offer { readonly placement: number; readonly order: import("../
 /** The result a worker reports for a turn, as it is kept on the placement (the checkpoint goes to its own artifact). */
 export type StoredResult = Omit<WorkerTurnResult, "checkpoint">;
 
-/** A request for the host that holds a task's checkout (card H12m): integration, refresh or quarantine, carried over the authenticated channel. The same fields as the controller's `WorkspaceCall`. */
+/** A request for the host that holds a task's checkout (card H12m): integration, landing, refresh or quarantine, carried over the authenticated channel. The same fields as the controller's `WorkspaceCall`. */
 export interface WorkspaceAsk {
   readonly requestId: string;
   readonly operation: "integration" | "landing" | "refresh" | "release" | "quarantine";

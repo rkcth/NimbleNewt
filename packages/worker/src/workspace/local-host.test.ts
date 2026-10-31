@@ -24,7 +24,7 @@ async function world(busy: () => readonly string[] = () => []) {
   sh(shared, "add", "-A"); sh(shared, "commit", "-q", "-m", "first");
   const git = await GitBridge.create({ scratch: join(dir, "scratch") });
   const root = join(dir, "work");
-  const ws = new LocalWorkspaces({ root, git, shared: (p) => (p === "prj-one" ? shared : undefined), busy, clock: () => "2026-10-31T10:00:00.000Z" });
+  const ws = new LocalWorkspaces({ root, git, shared: (p) => (p === "prj-one" ? shared : undefined), busy, landing: () => ({ branch: "main", requirePermit: false }), clock: () => "2026-10-31T10:00:00.000Z" });
   return { dir, shared, root, git, ws, done: async () => { try { execFileSync("chmod", ["-R", "u+rwX", dir]); } catch { /* nothing */ } await rm(dir, { recursive: true, force: true }); } };
 }
 
@@ -48,7 +48,8 @@ test("the checkout an attempt works in is the one the operations find: one layou
       await assert.rejects(w.ws.ensure(bad), /plain name/, JSON.stringify(bad));
       assert.equal(w.ws.locate(bad), undefined);
     }
-    assert.deepEqual((await readdir(w.root)).sort(), ["prj-one"]);
+    assert.deepEqual((await readdir(w.root)).sort(), [".making", "prj-one"]);
+    assert.deepEqual(await readdir(join(w.root, ".making")), [], "nothing is left over from the making");
   } finally { await w.done(); }
 });
 
@@ -99,4 +100,39 @@ test("a request is not carried out while an attempt it names has a call in fligh
 
 test("the workspace root must be an absolute, normalised path", () => {
   assert.throws(() => new LocalWorkspaces({ root: "relative/work", git: undefined as never, shared: () => undefined, busy: () => [] }), /absolute/);
+});
+
+test("a checkout half made by a crash is never used, and two callers asking at once get one checkout (card H12q review)", { skip }, async () => {
+  const w = await world();
+  try {
+    // A crash between the making of the git directory and the filling of the checkout: the git bridge does the first step and then fails.
+    const crashing = { head: (shared: string) => w.git.head(shared), createCheckout: async (o: { gitDir: string; checkout: string }) => { await mkdir(o.gitDir, { recursive: true }); await mkdir(o.checkout, { recursive: true }); throw new Error("power cut"); } } as unknown as GitBridge;
+    const broken = new LocalWorkspaces({ root: w.root, git: crashing, shared: () => w.shared, busy: () => [] });
+    await assert.rejects(broken.ensure({ taskId: "tsk-one", projectId: "prj-one" }), /power cut/);
+    assert.equal(broken.locate({ taskId: "tsk-one", projectId: "prj-one" }), undefined, "nothing that looks like a checkout was left");
+    assert.equal(existsSync(join(w.root, "prj-one", "tsk-one")), false);
+    // A folder without the completion mark (made by an older crash) is refused, not adopted.
+    await mkdir(join(w.root, "prj-one", "tsk-half", "task.git"), { recursive: true });
+    await assert.rejects(w.ws.ensure({ taskId: "tsk-half", projectId: "prj-one" }), /never finished/);
+    assert.equal(w.ws.locate({ taskId: "tsk-half", projectId: "prj-one" }), undefined);
+    // Concurrent asks (the same process, and a second host object over the same folders) end with one complete checkout.
+    const other = new LocalWorkspaces({ root: w.root, git: w.git, shared: () => w.shared, busy: () => [] });
+    const made = await Promise.all([w.ws.ensure({ taskId: "tsk-one", projectId: "prj-one" }), w.ws.ensure({ taskId: "tsk-one", projectId: "prj-one" }), other.ensure({ taskId: "tsk-one", projectId: "prj-one" })]);
+    assert.deepEqual([made[1], made[2]], [made[0], made[0]]);
+    assert.equal(await readFile(join(made[0]!.checkout, "src", "a.ts"), "utf8"), "export const a = 1;\n");
+    assert.equal(existsSync(join(w.root, "prj-one", "tsk-one", "complete")), true);
+  } finally { await w.done(); }
+});
+
+test("two tasks of a project share the bridge's state, and names that differ only in case or form are not two tasks (card H12q review)", { skip }, async () => {
+  const w = await world();
+  try {
+    await w.ws.ensure({ taskId: "tsk-one", projectId: "prj-one" });
+    await w.ws.ensure({ taskId: "tsk-two", projectId: "prj-one" });
+    assert.equal(w.ws.locate({ taskId: "tsk-one", projectId: "prj-one" })!.bridgeState, w.ws.locate({ taskId: "tsk-two", projectId: "prj-one" })!.bridgeState, "one state per shared tree");
+    await assert.rejects(w.ws.ensure({ taskId: "TSK-ONE", projectId: "prj-one" }), /differs only in case/);
+    assert.equal(w.ws.locate({ taskId: "TSK-ONE", projectId: "prj-one" }), undefined);
+    for (const bad of ["tsk:one", "tsk-one.", "CON"]) await assert.rejects(w.ws.ensure({ taskId: bad, projectId: "prj-one" }), /plain name/, bad);
+    await assert.rejects(w.ws.ensure({ taskId: "tsk-x", projectId: "journal" }), /plain name/, "a project cannot take the name of the host's own folders");
+  } finally { await w.done(); }
 });

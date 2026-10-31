@@ -17,7 +17,7 @@ export interface RemoteWorkerHostOptions {
   readonly checkpointWaitMs?: number;
   /** Wait between looks for the checkpoint, in milliseconds. Default 100. */
   readonly pollMs?: number;
-  /** How long a workspace request (integration, refresh, quarantine) waits for the host's answer, in ms. Default 300 000 (five minutes); a host that is slower leaves the request recorded as failed, with the operation possibly done there. */
+  /** How long a workspace request (integration, landing, refresh, quarantine) waits for the host's answer, in ms. Default 300 000 (five minutes); a host that is slower leaves the request recorded as failed, with the operation possibly done there. */
   readonly workspaceWaitMs?: number;
   /**
    * The owner's limits and best-effort setting (card H12k), read at every start and carried to the worker in the dispatch contract (card H12a). A read that fails refuses the start: nothing is sent

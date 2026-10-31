@@ -38,6 +38,13 @@ export function nameProblem(component: string, forWindows = process.platform ===
 }
 
 /**
+ * Whether a task or project name can be a folder name on every system NimbleNewt runs on (card H12q review): the same checks a path component gets (no `:` or other Windows-bad character, no trailing dot or space, no
+ * device name, no short name), no `..` anywhere and not Git's own name. Case-fold collisions between two names are the caller's to check against what exists (`collisionKey`).
+ */
+export const plainName = (value: unknown): value is string =>
+  typeof value === "string" && value.length >= 1 && value.length <= 120 && /^[A-Za-z0-9._-]+$/.test(value) && !value.includes("..") && nameProblem(value, true) === undefined && !isGitName(value);
+
+/**
  * Splits and checks a path the agent or the bridge was given: a plain relative path of `/`-separated names, nothing absolute (a leading `/` or `\`, a drive such as `C:`, a UNC or `\\?\` prefix), no
  * `.` or `..`, no empty parts, no NUL, no name problems, and not longer than the limits (Windows' shorter total applies when `forWindows` is set). Returns the parts.
  */

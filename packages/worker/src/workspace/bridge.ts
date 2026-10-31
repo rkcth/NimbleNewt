@@ -31,7 +31,7 @@ export type WriteResult =
   | { readonly status: "written"; readonly version: string }
   | { readonly status: "rejected"; readonly pendingId: string; readonly foundVersion: string };
 
-export const BRIDGE_LIMITS = { fileBytes: 8 * 1024 * 1024, pending: 1000, lockMs: 5_000, staleLockMs: 60_000, reasonChars: 500 } as const;
+export const BRIDGE_LIMITS = { fileBytes: 8 * 1024 * 1024, pending: 1000, lockMs: 5_000, setFiles: 500, setBytes: 64 * 1024 * 1024, staleLockMs: 60_000, reasonChars: 500 } as const;
 
 /**
  * Where an agent's changes reach shared files (card A04, mediated workspace editing): the agent edits only its own host-side checkout, and a change to the shared workspace goes through here as a
@@ -91,6 +91,85 @@ export class WorkspaceBridge {
       return { status: "written", version: ABSENT };
     });
   }
+
+  /**
+   * Several files as one step (card H12q review): all of them are written or none is. Every path is locked (in a fixed order), every file is read, and when any file is not at its expected version, or is named in `hold` (a
+   * path that must be reviewed before it changes), nothing is written and those files are kept for review. Otherwise every new content is first made beside its file, then renamed into place; if one step fails the
+   * ones already made are put back as they were. `guard` is asked inside the locks just before the first rename and may refuse. Folders made on the way stay (they are empty).
+   */
+  async writeSet(request: { changes: readonly { path: string; op: "write" | "delete"; expectedVersion: string; content?: Buffer; hold?: string }[]; author: string; reason: string; guard?: () => Promise<void> }): Promise<{ status: "written"; count: number } | { status: "kept"; kept: { path: string; pendingId: string; foundVersion: string; why: "moved" | "held" }[] }> {
+    const { changes } = request;
+    if (changes.length > BRIDGE_LIMITS.setFiles) throw new WorkspaceError("invalid_path", `more than ${BRIDGE_LIMITS.setFiles} files cannot be written as one step`);
+    let total = 0;
+    for (const c of changes) {
+      this.#check(c.expectedVersion, request.author, request.reason);
+      if (c.op === "write") {
+        if (!Buffer.isBuffer(c.content) || c.content.length > BRIDGE_LIMITS.fileBytes) throw new WorkspaceError("invalid_path", `a file is at most ${BRIDGE_LIMITS.fileBytes} bytes`);
+        total += c.content.length;
+      } else if (c.expectedVersion === ABSENT) throw new WorkspaceError("not_found", "there is nothing to delete at version absent");
+      await resolveSafe(this.#shared, c.path, { forWrite: true }).catch((e: unknown) => { if (!(e instanceof WorkspaceError && e.code === "not_found")) throw e; });
+    }
+    if (total > BRIDGE_LIMITS.setBytes) throw new WorkspaceError("invalid_path", `more than ${BRIDGE_LIMITS.setBytes} bytes cannot be written as one step`);
+    const keys = changes.map((c) => collisionKey(splitRelative(c.path)));
+    if (new Set(keys).size !== keys.length) throw new WorkspaceError("invalid_path", "two paths of the set are the same file on a case-insensitive filesystem");
+    const order = changes.map((c, i) => ({ c, key: keys[i]! })).sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)).map((x) => x.c);
+    const inLocks = async (i: number): Promise<{ status: "written"; count: number } | { status: "kept"; kept: { path: string; pendingId: string; foundVersion: string; why: "moved" | "held" }[] }> => {
+      if (i < order.length) return this.#locked(order[i]!.path, () => inLocks(i + 1));
+      const found: { c: (typeof order)[number]; safe: Awaited<ReturnType<typeof resolveSafe>> | undefined; version: string; old: Buffer | undefined }[] = [];
+      for (const c of order) {
+        const safe = await resolveSafe(this.#shared, c.path, { forWrite: true }).catch((e: unknown) => { if (e instanceof WorkspaceError && e.code === "not_found") return undefined; throw e; });
+        if (safe?.exists === "directory") throw new WorkspaceError("invalid_path", "that is a directory");
+        const old = safe === undefined || safe.exists === "missing" ? undefined : await this.#readNoFollow(safe.absolute);
+        found.push({ c, safe, version: old === undefined ? ABSENT : versionOf(old), old });
+      }
+      const stopped = found.filter((f) => f.c.hold !== undefined || f.version !== f.c.expectedVersion);
+      if (stopped.length > 0) {
+        const kept: { path: string; pendingId: string; foundVersion: string; why: "moved" | "held" }[] = [];
+        for (const f of stopped) {
+          const why = f.c.hold !== undefined ? "held" as const : "moved" as const;
+          const kind = await this.#keep(f.c.path, f.c.op, { expectedVersion: f.c.expectedVersion, author: request.author, reason: f.c.hold !== undefined ? `${request.reason} (held for review: ${f.c.hold})`.slice(0, BRIDGE_LIMITS.reasonChars) : request.reason, content: f.c.content }, f.version);
+          if (kind.status === "rejected") kept.push({ path: f.c.path, pendingId: kind.pendingId, foundVersion: kind.foundVersion, why });
+        }
+        return { status: "kept", kept };
+      }
+      await request.guard?.();
+      // Phase one: every new content is made beside its file. Nothing in place has changed yet.
+      const made: { absolute: string; temporary?: string; old: Buffer | undefined; mode: number; exists: boolean; done: boolean }[] = [];
+      try {
+        for (const f of found) {
+          const c = f.c;
+          if (c.op === "delete") { made.push({ absolute: f.safe!.absolute, old: f.old, mode: 0o644, exists: true, done: false }); continue; }
+          const safe = f.safe === undefined || f.safe.exists !== "file" ? await resolveSafe(this.#shared, c.path, { forWrite: true, createParents: true }) : f.safe;
+          const exists = safe.exists === "file";
+          const mode = exists ? (await lstat(safe.absolute)).mode & 0o777 : 0o644;
+          const temporary = `${safe.absolute}.nn-${randomBytes(8).toString("hex")}.tmp`;
+          const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NOFOLLOW, mode);
+          made.push({ absolute: safe.absolute, temporary, old: f.old, mode, exists, done: false });
+          try { await handle.writeFile(c.content!); await handle.sync(); } finally { await handle.close(); }
+          if (process.platform !== "win32") await chmod(temporary, mode);
+        }
+        // Phase two: the renames. A failure puts back what was already changed.
+        for (const m of made) {
+          if (m.temporary === undefined) await rm(m.absolute, { force: true }); else await rename(m.temporary, m.absolute);
+          m.done = true;
+        }
+      } catch (error) {
+        for (const m of made) {
+          try {
+            if (m.temporary !== undefined) await rm(m.temporary, { force: true });
+            if (!m.done) continue;
+            if (m.old === undefined) await rm(m.absolute, { force: true }); else await this.#replace(m.absolute, m.old, false);
+          } catch { /* the rest is still put back */ }
+        }
+        throw error instanceof WorkspaceError ? error : new WorkspaceError("unavailable", "the files could not be written together; the ones already changed were put back");
+      }
+      return { status: "written", count: made.length };
+    };
+    return inLocks(0);
+  }
+
+  /** One holder at a time for something larger than a file (the whole shared tree): the same kind of lock outside the shared tree, shared by every process that uses this state. */
+  async exclusive<T>(name: string, body: () => Promise<T>): Promise<T> { return this.#locked(`decision/${name}`, body); }
 
   /** The changes kept for review, oldest first: those still waiting by default, or those already `applied` or `discarded`. */
   async pending(state: PendingChange["state"] = "pending"): Promise<PendingChange[]> {
