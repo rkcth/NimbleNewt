@@ -122,6 +122,18 @@ Result: `{ item }`: `revision` and `limits`, which has any of `raiseMaxCostMicro
 
 Completion: finished when accepted (`completed: true`).
 
+#### `reconnect.settings.get`
+
+Whether a worker that reconnects may take its still-owned attempt up again by itself (owner only): the owner's choice, the approval profile that gives the default (autonomous: auto; strict and derived: owner) and the one in force.
+
+Arguments:
+
+- none
+
+Result: `{ item }`: `revision`, `reaccept` (auto, owner or null), `profile`, `effective`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `resume.settings.get`
 
 How many blocked rounds a stalled resume check retries before the owner is told (owner only): the owner's figure, the default and the effective one.
@@ -1535,6 +1547,33 @@ Arguments:
 - `expectedRevision` (optional): the revision of the setting you read
 
 Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `reconnect.settings.set`
+
+The owner enables (`auto`) or disables (`owner`) automatic re-accept of attempts by reconnected workers (owner only), or clears the choice with null so the approval profile decides. With `owner`, a reconnected worker's attempt waits until `reconnect.reaccept` approves it. It counts from the next decision. This is the form the chat uses.
+
+Arguments:
+
+- `reaccept`: auto, owner or null
+- `expectedRevision` (optional): the revision of the setting you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `reconnect.reaccept`
+
+The owner decides on an attempt whose worker reconnected and waits for approval (owner only): `approve` lets that worker's next accept in its current session succeed, `stop` ends the attempt so the worker is fenced. The decision is for the named placement and for the session that asked; a newer session asks again.
+
+Arguments:
+
+- `attemptId`: the attempt
+- `placement`: its current placement number
+- `decision`: approve or stop
+
+Result: `{ state }`: approved or stopped.
 
 Completion: finished when accepted (`completed: true`).
 

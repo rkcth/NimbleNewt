@@ -38,6 +38,8 @@ import type { WorkerLimitsSettingsService } from "./worker-limits-settings.js";
 import type { DispatchLimitsSettingsService } from "./dispatch-limits-settings.js";
 import type { CleanupSettingsService } from "../work-end/cleanup-settings.js";
 import type { PlacementSettingsService } from "../remote/placement-settings.js";
+import type { ReconnectSettingsService } from "../remote/reconnect-settings.js";
+import type { RemoteWorkerService } from "../remote/service.js";
 import type { EventSourceSettingsService } from "../events/source-settings.js";
 import type { ProtectedBranchService } from "../policy/protected-branches.js";
 import type { PolicyService } from "../policy/policy.js";
@@ -97,6 +99,8 @@ export interface Context {
   readonly branches?: ContextBranchService;
   /** Absent when the controller runs without remote workers (card H07c). */
   readonly placement?: Pick<PlacementSettingsService, "get" | "set" | "change">;
+  /** The reconnect setting and the owner's decision on a reconnected worker's attempt (card H09b). */
+  readonly reconnect?: Pick<ReconnectSettingsService, "get" | "set"> & Pick<RemoteWorkerService, "decideReaccept">;
   readonly workerLimits?: Pick<WorkerLimitsSettingsService, "get" | "set" | "change">;
   /** Absent when the controller runs without the setup readiness view (card U14). */
   readonly setup?: Pick<SetupReadinessService, "check">;
@@ -250,6 +254,7 @@ const dispatchLimitsOf = (c: Context): NonNullable<Context["dispatchLimits"]> =>
 const workerLimitsOf = (c: Context): NonNullable<Context["workerLimits"]> => c.workerLimits ?? unavailable("worker limits");
 const agreedLimitsOf = (c: Context): NonNullable<Context["agreedLimits"]> => c.agreedLimits ?? unavailable("agreed limits");
 const setupOf = (c: Context): NonNullable<Context["setup"]> => c.setup ?? unavailable("the setup readiness view");
+const reconnectOf = (c: Context): NonNullable<Context["reconnect"]> => c.reconnect ?? unavailable("reconnect settings");
 const placementOf = (c: Context): NonNullable<Context["placement"]> => c.placement ?? unavailable("placement settings");
 const grantsOf = (c: Context): NonNullable<Context["grants"]> => c.grants ?? unavailable("rights");
 const eventsOf = (c: Context): NonNullable<Context["events"]> => c.events ?? unavailable("events");
@@ -394,6 +399,12 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, []); return asJson({ item: await agreedLimitsOf(c).get(c.principal) }); } },
   { name: "agreed.limits.change", kind: "command", summary: "The owner sets or clears ceilings on agreed raises and grants (owner only; none by default). `set` has any of `raiseMaxCostMicros` (most money one raise carried out by the approval policy may add, in millionths, 1 to 1e15), `raiseMaxComputeMs` (most compute time one such raise may add, 1 to 1e12 ms) and `grantMaxDays` (longest a right granted by a decision may last, 1 to 3650); `unset` lists ceilings to remove. A ceiling counts from the next carry-out; the rights re-check at carry-out and every other check stay.", args: { "set?": "for example `{ \"grantMaxDays\": 90 }`", "unset?": "ceiling names to remove", "expectedRevision?": "the revision of the setting you read" }, result: "`{ revision }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["set", "unset", "expectedRevision"]); return asJson({ ...(await agreedLimitsOf(c).change(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
+  { name: "reconnect.settings.get", kind: "query", summary: "Whether a worker that reconnects may take its still-owned attempt up again by itself (owner only): the owner's choice, the approval profile that gives the default (autonomous: auto; strict and derived: owner) and the one in force.", args: {}, result: "`{ item }`: `revision`, `reaccept` (auto, owner or null), `profile`, `effective`.", completion: { kind: "completed" },
+    run: async (c, a) => { only(a, []); return asJson({ item: await reconnectOf(c).get(c.principal) }); } },
+  { name: "reconnect.settings.set", kind: "command", summary: "The owner enables (`auto`) or disables (`owner`) automatic re-accept of attempts by reconnected workers (owner only), or clears the choice with null so the approval profile decides. With `owner`, a reconnected worker's attempt waits until `reconnect.reaccept` approves it. It counts from the next decision. This is the form the chat uses.", args: { reaccept: "auto, owner or null", "expectedRevision?": "the revision of the setting you read" }, result: "`{ revision }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["reaccept", "expectedRevision"]); return asJson({ ...(await reconnectOf(c).set(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
+  { name: "reconnect.reaccept", kind: "command", summary: "The owner decides on an attempt whose worker reconnected and waits for approval (owner only): `approve` lets that worker's next accept in its current session succeed, `stop` ends the attempt so the worker is fenced. The decision is for the named placement and for the session that asked; a newer session asks again.", args: { attemptId: "the attempt", placement: "its current placement number", decision: "approve or stop" }, result: "`{ state }`: approved or stopped.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["attemptId", "placement", "decision"]); return asJson({ ...(await reconnectOf(c).decideReaccept(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
   { name: "resume.settings.get", kind: "query", summary: "How many blocked rounds a stalled resume check retries before the owner is told (owner only): the owner's figure, the default and the effective one.", args: {}, result: "`{ item }`: `revision`, `maxRounds` (the owner's, or null), `default`, `effective`.", completion: { kind: "completed" },
     run: async (c, a) => { only(a, []); return asJson({ item: await resumeSettingsOf(c).get(c.principal) }); } },
   { name: "resume.settings.set", kind: "command", summary: "The owner sets how many blocked rounds a stalled resume check retries before the owner is told (owner only): `maxRounds` is a whole number from 1 to 10, or null to clear it so the default (3) applies. It counts for checks started afterwards; a check already running keeps the figure it started with. This is the form the chat uses.", args: { maxRounds: "1 to 10, or null to clear", "expectedRevision?": "the revision of the setting you read" }, result: "`{ revision }`.", completion: { kind: "completed" },

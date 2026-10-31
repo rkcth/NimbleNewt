@@ -87,10 +87,12 @@ export interface RemoteWorld extends DispatchWorld {
   tick(): ReturnType<DispatcherService["tick"]>;
   /** The dispatcher tries this host first from now on (it still skips one that is stale or lacks the harness). */
   prefer(host: RemoteHost): void;
+  /** The mode the remote service re-accepts by (card H09b); change `mode` in a test. */
+  readonly reaccept: { mode: "auto" | "owner" };
   done(): Promise<void>;
 }
 
-export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?: RelocationPolicyFor; /** The placement policy; absent: every host of the world may hold local-only data; null: no policy hook at all (the product default). */ placement?: PlacementPolicyFor | null; protocol?: VersionRange; fileBytes?: number; settleMs?: number; transport?: Partial<WorkerTransportOptions> } = {}): Promise<RemoteWorld> {
+export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?: RelocationPolicyFor; /** The placement policy; absent: every host of the world may hold local-only data; null: no policy hook at all (the product default). */ placement?: PlacementPolicyFor | null; protocol?: VersionRange; fileBytes?: number; settleMs?: number; transport?: Partial<WorkerTransportOptions>; /** How a reconnected worker is re-accepted (card H09b); default auto, and a test may change it with `world.reaccept.mode`. */ reaccept?: "auto" | "owner" } = {}): Promise<RemoteWorld> {
   const w = await buildWorld(storage);
   const dir = mkdtempSync(join(tmpdir(), "nn remote-"));
   const blobs = await FileBlobStore.open({ directory: join(dir, "blobs") });
@@ -98,9 +100,11 @@ export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?:
   const holder: { dispatcher: DispatcherService } = { dispatcher: w.dispatcher };
   const workers: RemoteTestHost[] = [];
   const workerIds = (): string[] => workers.map((x) => x.hostId);
+  const reaccept: { mode: "auto" | "owner" } = { mode: o.reaccept ?? "auto" };
   const remote = RemoteWorkerService.withEpoch(storage, w.epoch, {
     principal: w.dispatcherPrincipal, hosts: w.hosts, artifacts,
     dispatch: { gateway: (id) => holder.dispatcher.gateway(id), get: (by, id) => holder.dispatcher.get(by, id), relocate: (by, id, m) => holder.dispatcher.relocate(by, id, m), quiesce: (by, id, r, opt) => holder.dispatcher.quiesce(by, id, r, opt), release: (by, id) => holder.dispatcher.release(by, id) },
+    reaccept: async () => reaccept.mode,
     ...(o.policy === undefined ? {} : { relocationPolicy: o.policy }),
     ...(o.placement === null ? {} : { placementPolicy: o.placement ?? (async () => ({ dataHosts: workerIds() })) }),
   }, { ...w.options, ...(o.protocol === undefined ? {} : { protocol: o.protocol }), ...(o.fileBytes === undefined ? {} : { fileBytes: o.fileBytes }), ...(o.settleMs === undefined ? {} : { settleMs: o.settleMs }) });
@@ -109,7 +113,7 @@ export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?:
   const transport = await listen();
   let n = 0;
   const world: RemoteWorld = Object.assign(w, {
-    remote, artifacts, blobs, transport,
+    remote, artifacts, blobs, transport, reaccept,
     current: holder.dispatcher,
     listen,
     prefer: (host: RemoteHost) => { const i = workers.indexOf(host.worker); if (i > 0) { workers.splice(i, 1); workers.unshift(host.worker); } },

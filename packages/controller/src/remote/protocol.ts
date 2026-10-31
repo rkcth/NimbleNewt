@@ -57,6 +57,8 @@ export const REMOTE_LIMITS = {
   history: 20,
   /** Orders a host may be offered at once (also the most the controller keeps in memory per host). */
   offers: 32,
+  /** Attempts a reconnecting worker may list in one recovery handshake (card H09b). */
+  held: 64,
   /** The longest an offers poll may be held open by the controller, in milliseconds (card H07). */
   pollMs: 25_000,
   text: 2000,

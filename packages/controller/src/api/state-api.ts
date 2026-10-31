@@ -32,6 +32,8 @@ import type { SetupReadinessService } from "../setup/index.js";
 import type { DispatchLimitsSettingsService } from "./dispatch-limits-settings.js";
 import type { CleanupSettingsService } from "../work-end/cleanup-settings.js";
 import type { PlacementSettingsService } from "../remote/placement-settings.js";
+import type { ReconnectSettingsService } from "../remote/reconnect-settings.js";
+import type { RemoteWorkerService } from "../remote/service.js";
 import type { ProtectedBranchService } from "../policy/protected-branches.js";
 import type { EventSourceSettingsService } from "../events/source-settings.js";
 import type { PolicyService } from "../policy/policy.js";
@@ -119,6 +121,7 @@ export interface StateApiDeps {
   readonly grants?: Pick<GrantService, "grant" | "revoke" | "getGrant" | "list">;
   /** When present, the owner can say which hosts may hold local-only data through the API (card H07c). */
   readonly placement?: Pick<PlacementSettingsService, "get" | "set" | "change">;
+  readonly reconnect?: Pick<ReconnectSettingsService, "get" | "set"> & Pick<RemoteWorkerService, "decideReaccept">;
   readonly workerLimits?: Pick<WorkerLimitsSettingsService, "get" | "set" | "change">;
   /** When present, the owner can read what is set up and what is missing before a first agent can work (card U14). */
   readonly setup?: Pick<SetupReadinessService, "check">;
@@ -249,6 +252,7 @@ export class StateApi {
         ...(this.#deps.decisions === undefined ? {} : { decisions: this.#deps.decisions }),
         ...(this.#deps.grants === undefined ? {} : { grants: this.#deps.grants }),
         ...(this.#deps.placement === undefined ? {} : { placement: this.#deps.placement }),
+        ...(this.#deps.reconnect === undefined ? {} : { reconnect: this.#deps.reconnect }),
         ...(this.#deps.agreedLimits === undefined ? {} : { agreedLimits: this.#deps.agreedLimits }),
         ...(this.#deps.resumeSettings === undefined ? {} : { resumeSettings: this.#deps.resumeSettings }),
         ...(this.#deps.quietHostSettings === undefined ? {} : { quietHostSettings: this.#deps.quietHostSettings }),

@@ -80,6 +80,8 @@ export interface RemoteStartOptions {
   readonly relocationPolicy?: RemoteDeps["relocationPolicy"];
   /** Which hosts may hold local-only data, see the repository or be given the task credential (card H07). Default: local-only data is never placed on a remote host. */
   readonly placementPolicy?: RemoteDeps["placementPolicy"];
+  /** Whether a reconnected worker may take its attempt up again by itself (card H09b). Default: the owner decides. */
+  readonly reaccept?: RemoteDeps["reaccept"];
   /** The remote hosts attempts may be placed on, with what each attempt asks of them and what it needs. */
   readonly hosts: readonly ({ readonly hostId: string } & RemoteWorkerHostOptions)[];
 }
@@ -436,6 +438,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         dispatch: { gateway: (id) => d().gateway(id), get: (by, id) => d().get(by, id), relocate: (by, id, m) => d().relocate(by, id, m), quiesce: (by, id, r, o) => d().quiesce(by, id, r, o), release: (by, id) => d().release(by, id) },
         ...(i.options.remote.relocationPolicy === undefined ? {} : { relocationPolicy: i.options.remote.relocationPolicy }),
         ...(i.options.remote.placementPolicy === undefined ? {} : { placementPolicy: i.options.remote.placementPolicy }),
+        ...(i.options.remote.reaccept === undefined ? {} : { reaccept: i.options.remote.reaccept }),
       }, { ...ro, ...(i.options.remote.protocol === undefined ? {} : { protocol: i.options.remote.protocol }), ...(i.options.remote.fileBytes === undefined ? {} : { fileBytes: i.options.remote.fileBytes }), ...(i.options.remote.settleMs === undefined ? {} : { settleMs: i.options.remote.settleMs }) });
       for (const h of i.options.remote.hosts) workers.push(new RemoteWorkerHost(h.hostId, remote, principal, h));
       if (i.quietHosts !== undefined) {

@@ -69,6 +69,11 @@ export class RemoteWorkerClient {
     await this.#send("POST", "/worker/session/heartbeat", { body: { sequence }, key, session: true });
   }
 
+  /** The recovery handshake after a reconnect (card H09b): lists the attempts this worker still holds and learns, per attempt, whether to stop, hold, accept again or wait. Nothing resumes by itself. */
+  async reconcile(held: readonly { readonly attemptId: string; readonly placement: number }[], key: string = randomUUID()): Promise<{ sessionId: string; mode: "auto" | "owner"; verdicts: { attemptId: string; placement: number; verdict: "stop" | "hold" | "reaccept" | "pending" | "unknown"; reason: string }[] }> {
+    return (await this.#send("POST", "/worker/session/reconcile", { body: { held: held as unknown as Json }, key, session: true })).body as never;
+  }
+
   /** The attempts offered to this host and not yet accepted, with their work orders. */
   async offers(options: { readonly waitMs?: number } = {}): Promise<Offer[]> {
     const wait = options.waitMs ?? 0;

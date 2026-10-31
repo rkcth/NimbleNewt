@@ -19,6 +19,7 @@ import { WORKER_PROTOCOL, REMOTE_LIMITS, ProtocolMismatch, checkRange, negotiate
 export const SESSION_KIND = "remote-session";
 export const PLACEMENT_KIND = "remote-placement";
 export const STORE_KIND = "remote-store";
+export const RECONCILE_KIND = "remote-reconcile";
 
 const ATTEMPT = /^att-[a-z2-7]{20}$/;
 const HOST = /^host:[a-z0-9][a-z0-9-]{0,39}$/;
@@ -72,6 +73,8 @@ export interface PlacementBody {
   readonly state: PlacementState;
   /** The worker session that accepted the placement (absent until it does). */
   readonly sessionId?: string;
+  /** The controller's decision on taking the attempt up again in a newer session (card H09b): absent until a reconnected worker asks. It names the session it is for; a later session starts over. */
+  readonly reaccept?: { readonly sessionId: string; readonly state: "pending" | "approved"; readonly at: string; readonly by?: string };
   readonly offeredAt: string;
   readonly acceptedAt?: string;
   readonly expiresAt?: string;
@@ -168,6 +171,8 @@ export interface RemoteDeps {
   readonly relocationPolicy?: RelocationPolicyFor;
   /** Where an attempt may be placed in the first place (data location, repository access, who may hold the credential). Absent: only what a host can do decides. */
   readonly placementPolicy?: PlacementPolicyFor;
+  /** Whether a worker that reconnected may take its still-owned attempt up again by itself (`auto`) or only once the owner approves (`owner`), card H09b. Absent or failing: `owner`. Read at every decision. */
+  readonly reaccept?: () => Promise<"auto" | "owner">;
 }
 
 export interface RemoteOptions extends RunnerOptions {
@@ -179,6 +184,8 @@ export interface RemoteOptions extends RunnerOptions {
   readonly settleMs?: number;
 }
 
+export interface ReconcileVerdict { readonly attemptId: string; readonly placement: number; readonly verdict: "stop" | "hold" | "reaccept" | "pending" | "unknown"; readonly reason: string }
+export interface ReconcileReport { readonly sessionId: string; readonly mode: "auto" | "owner"; readonly verdicts: readonly ReconcileVerdict[] }
 export interface Placed { readonly placement: number; readonly state: PlacementState }
 export interface RelocationResult {
   readonly attemptId: string;
@@ -704,13 +711,123 @@ export class RemoteWorkerService {
     this.#holds(host, b, placement);
     if (b!.state !== "offered" && b!.state !== "accepted") throw new DomainError("fenced", `the placement of attempt ${id} is ${b!.state}`);
     if (b!.expiresAt !== undefined && b!.expiresAt <= this.#runner.now()) throw new DomainError("fenced", `attempt ${id} has expired`);
+    const mode = await this.#reacceptMode();
+    let waiting = false;
     const done = await this.#changePlacement(id, async (current) => {
       const x = current?.body;
       if (x === undefined || x.hostId !== host.id || x.placement !== b!.placement || (x.state !== "offered" && x.state !== "accepted")) throw new DomainError("fenced", `the placement of attempt ${id} changed`);
-      return { next: { ...x, state: "accepted", sessionId: session.sessionId, acceptedAt: x.acceptedAt ?? this.#runner.now() } };
+      // An attempt accepted in an older session is taken up again only by the controller's decision (card H09b): `auto` is that decision made by setting, otherwise the owner's approval for this very session.
+      const again = x.state === "accepted" && x.sessionId !== undefined && x.sessionId !== session.sessionId;
+      if (again && mode !== "auto" && !(x.reaccept?.sessionId === session.sessionId && x.reaccept.state === "approved")) {
+        waiting = true;
+        if (x.reaccept?.sessionId === session.sessionId && x.reaccept.state === "pending") return undefined;
+        return { next: { ...x, reaccept: { sessionId: session.sessionId, state: "pending", at: this.#runner.now() } } };
+      }
+      waiting = false;
+      const { reaccept: _decided, ...rest } = x;
+      return { next: { ...rest, state: "accepted", sessionId: session.sessionId, acceptedAt: x.acceptedAt ?? this.#runner.now() } };
     }, "accept", { actor: host.id });
+    if (waiting) throw new DomainError("unavailable", `attempt ${id} was taken up in another session; it waits for the owner to approve taking it up again`);
     this.#offers.delete(id);
     return { placement: done.body.placement, ...(done.body.expiresAt === undefined ? {} : { expiresAt: done.body.expiresAt }), controlSeq: done.body.controlSeq, ...(done.body.checkpoint === undefined ? {} : { checkpoint: { artifactId: done.body.checkpoint.artifactId, sequence: done.body.checkpoint.sequence } }) };
+  }
+
+  async #reacceptMode(): Promise<"auto" | "owner"> {
+    try { return (await this.#deps.reaccept?.()) === "auto" ? "auto" : "owner"; } catch { return "owner"; }
+  }
+
+  /**
+   * The recovery handshake (card H09b). A worker that reconnected lists the attempts it still holds; the controller compares them with its own records and answers each one:
+   * `stop` (moved, ended, completed, expired or never accepted: fenced, stop work), `hold` (already current in this session), `reaccept` (still owned and approved for this session: call accept), `pending` (still owned, waiting for
+   * the owner's approval under the `owner` setting) or `unknown` (the controller has no such attempt for this host, or a placement number it never issued; recorded, nothing is resumed). Nothing here resumes work:
+   * the worker takes an attempt up only with `accept`, after this decision. A held list is bounded; the answer never reveals another host's attempts (an attempt that was never this host's is `unknown`). The last write is a record of
+   * the handshake under the controller's epoch, so a controller that lost the epoch (an old primary) answers `stale_epoch` instead of verdicts from its stale reads.
+   */
+  async reconcile(host: Principal, sessionId: unknown, command: NoActor & { held: unknown }): Promise<ReconcileReport> {
+    const session = await this.#session(host, sessionId);
+    onlyKnown(command, ["commandId", "held"]);
+    checkCommandId(command.commandId);
+    if (!Array.isArray(command.held) || command.held.length > REMOTE_LIMITS.held) invalid("held", `must be a list of at most ${REMOTE_LIMITS.held} attempts`);
+    const seen = new Set<string>();
+    const held = (command.held as unknown[]).map((x, i) => {
+      if (x === null || typeof x !== "object" || Array.isArray(x)) return invalid(`held[${i}]`, "must be an object with attemptId and placement");
+      onlyKnown(x as Record<string, unknown>, ["attemptId", "placement"]);
+      const o = x as { attemptId?: unknown; placement?: unknown };
+      const attemptId = attemptIdOf(o.attemptId);
+      if (typeof o.placement !== "number" || !Number.isSafeInteger(o.placement) || o.placement < 1) invalid(`held[${i}].placement`, "must be a whole number of at least 1");
+      if (seen.has(attemptId)) invalid(`held[${i}]`, `attempt ${attemptId} is listed twice`);
+      seen.add(attemptId);
+      return { attemptId, placement: o.placement as number };
+    });
+    const mode = await this.#reacceptMode();
+    const verdicts: ReconcileVerdict[] = [];
+    for (const h of held) verdicts.push(await this.#verdict(host, session, mode, h.attemptId, h.placement));
+    const counts: Record<string, number> = {};
+    for (const v of verdicts) counts[v.verdict] = (counts[v.verdict] ?? 0) + 1;
+    await this.#runner.command("remote.reconcile", { commandId: scopedCommandId(host.id, `reconcile:${String(command.commandId)}`), actor: host.id }, async () => ({
+      payload: { sessionId: session.sessionId, held: held.map((h) => `${h.attemptId}:${h.placement}`) },
+      build: async () => {
+        const ref: AggregateRef = { kind: RECONCILE_KIND, id: host.id };
+        const current = await this.#runner.get(RECONCILE_KIND, host.id);
+        const body = { hostId: host.id, sessionId: session.sessionId, at: this.#runner.now(), mode, counts, unknown: verdicts.filter((v) => v.verdict === "unknown").map((v) => v.attemptId) };
+        const change: Change = current === undefined ? { type: "create", ref, body: body as unknown as JsonObject } : { type: "update", ref, expectedRevision: current.revision, body: body as unknown as JsonObject };
+        return { ref, creates: current === undefined, changes: [change], detail: { host: host.id, held: held.length, ...counts } };
+      },
+    }));
+    return { sessionId: session.sessionId, mode, verdicts };
+  }
+
+  async #verdict(host: Principal, session: SessionBody, mode: "auto" | "owner", attemptId: string, placement: number): Promise<ReconcileVerdict> {
+    const say = (verdict: ReconcileVerdict["verdict"], reason: string): ReconcileVerdict => ({ attemptId, placement, verdict, reason });
+    const b = (await this.#runner.get(PLACEMENT_KIND, attemptId))?.body as unknown as PlacementBody | undefined;
+    if (b === undefined) return say("unknown", "the controller has no such attempt");
+    if (b.hostId !== host.id) return b.history.some((h) => h.hostId === host.id) ? say("stop", "the attempt was moved to another host: stop work on it") : say("unknown", "the controller has no such attempt");
+    if (placement > b.placement) return say("unknown", `the controller never issued placement ${placement}`);
+    if (placement < b.placement) return say("stop", "the attempt was placed again: this holding is over");
+    if (b.state !== "accepted") return say("stop", b.state === "offered" ? "the attempt was never accepted: take it from the offers" : `the placement is ${b.state}`);
+    if (b.expiresAt !== undefined && b.expiresAt <= this.#runner.now()) return say("stop", "the attempt's lease has expired");
+    if (b.sessionId === session.sessionId) return say("hold", "already taken up in this session");
+    try {
+      const done = await this.#changePlacement(attemptId, async (current) => {
+        const x = current?.body;
+        if (x === undefined || x.hostId !== host.id || x.placement !== placement || x.state !== "accepted") throw new DomainError("fenced", "the placement changed");
+        if (x.sessionId === session.sessionId) return undefined;
+        if (x.reaccept?.sessionId === session.sessionId && (x.reaccept.state === "approved" || mode === "owner")) return undefined;
+        return { next: { ...x, reaccept: { sessionId: session.sessionId, state: mode === "auto" ? "approved" : "pending", at: this.#runner.now() } as const } };
+      }, "reconcile", { actor: host.id });
+      const r = done.body.reaccept;
+      if (done.body.sessionId === session.sessionId) return say("hold", "already taken up in this session");
+      return r?.sessionId === session.sessionId && r.state === "approved" ? say("reaccept", "still yours: call accept to take it up again") : say("pending", "waiting for the owner to approve taking it up again");
+    } catch (error) {
+      if (isDomainError(error, "fenced")) return say("stop", "the placement changed while it was checked: stop work on it");
+      throw error;
+    }
+  }
+
+  /** The owner decides on a reconnected worker's attempt that waits (card H09b): `approve` lets that worker's accept in this session succeed; `stop` ends the attempt (fenced). Bound to the placement and to the session that asked. */
+  async decideReaccept(owner: Principal, command: NoActor & { attemptId: string; placement: number; decision: "approve" | "stop" }): Promise<{ state: "approved" | "stopped" }> {
+    if (owner.kind !== "owner" || owner.taskScope !== undefined) throw new DomainError("forbidden", `${owner.id} may not decide on taking an attempt up again`);
+    onlyKnown(command, ["commandId", "attemptId", "placement", "decision"]);
+    checkCommandId(command.commandId);
+    const id = attemptIdOf(command.attemptId);
+    if (typeof command.placement !== "number" || !Number.isSafeInteger(command.placement) || command.placement < 1) invalid("placement", "must be a whole number of at least 1");
+    if (command.decision !== "approve" && command.decision !== "stop") invalid("decision", "must be approve or stop");
+    const by = { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id };
+    const b = (await this.#runner.get(PLACEMENT_KIND, id))?.body as unknown as PlacementBody | undefined;
+    if (b === undefined) throw new DomainError("not_found", "no such attempt");
+    if (b.placement !== command.placement) throw new DomainError("fenced", `placement ${command.placement} of attempt ${id} is not the current one`, { field: "placement" });
+    if (b.state !== "accepted" || b.reaccept === undefined) throw new DomainError("invalid_transition", `nothing waits for a decision on attempt ${id}`);
+    if (command.decision === "stop") {
+      await this.end(owner, id, "stopped by the owner after the worker reconnected", command.placement);
+      return { state: "stopped" };
+    }
+    await this.#changePlacement(id, async (current) => {
+      const x = current?.body;
+      if (x === undefined || x.placement !== command.placement || x.state !== "accepted" || x.reaccept === undefined) throw new DomainError("fenced", `attempt ${id} no longer waits for a decision`);
+      if (x.reaccept.state === "approved") return undefined;
+      return { next: { ...x, reaccept: { ...x.reaccept, state: "approved", at: this.#runner.now(), by: owner.id } } };
+    }, "reaccept", by);
+    return { state: "approved" };
   }
 
   /** The placement must exist, be held by this host, and be the number the message names: a former holder is told it is fenced, anyone else that nothing is there. */

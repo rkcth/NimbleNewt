@@ -1,5 +1,5 @@
 export { PROTOCOL_HEADER, SESSION_HEADER, DIGEST_HEADER, REMOTE_LIMITS, WORKER_PROTOCOL, ProtocolMismatch, checkRange, negotiateProtocol, type ArtifactListing, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange } from "./protocol.js";
-export { PLACEMENT_KIND, RemoteWorkerService, SESSION_KIND, STORE_KIND, capabilityReasons, policyReasons, type PlacementPolicy, type PlacementPolicyFor, type Placed, type PlacementBody, type PlacementState, type RelocationPolicy, type RelocationPolicyFor, type RelocationResult, type RemoteDeps, type RemoteOptions, type Requirements, type SessionBody, type StoreBody } from "./service.js";
+export { PLACEMENT_KIND, RECONCILE_KIND, type ReconcileReport, type ReconcileVerdict, RemoteWorkerService, SESSION_KIND, STORE_KIND, capabilityReasons, policyReasons, type PlacementPolicy, type PlacementPolicyFor, type Placed, type PlacementBody, type PlacementState, type RelocationPolicy, type RelocationPolicyFor, type RelocationResult, type RemoteDeps, type RemoteOptions, type Requirements, type SessionBody, type StoreBody } from "./service.js";
 export { DEFAULT_WORKER_TRANSPORT_LIMITS, WorkerTransport, type WorkerTransportLimits, type WorkerTransportOptions } from "./server.js";
 export { RemoteAttempt, RemoteWorkerClient, WorkerRequestError, type AttemptWatchdog, type RemoteWorkerClientOptions } from "./client.js";
 export { RemoteWorkerHandle, RemoteWorkerHost, type RemoteWorkerHostOptions } from "./host.js";
@@ -7,3 +7,4 @@ export { HostPoller, type PollerOptions } from "./poller.js";
 export { PlacementSettingsService, dataHostsFor, type PlacementSettingsBody } from "./placement-settings.js";
 export { QUIET_HOST, QuietHostSettingsService, type QuietHostFigures, type QuietHostSettingsBody } from "./quiet-host-settings.js";
 export { DEFAULT_MAX_GAP_MS, DEFAULT_QUIET_AFTER_MS, QUIET_HOST_KIND, QUIET_HOST_LIMITS, QUIET_HOST_RETENTION_MS, QuietHostService, type MoveWorkResult, type QuietHostBody, type QuietHostDeps, type QuietHostNotice, type QuietHostOptions, type QuietHostPass } from "./quiet-hosts.js";
+export { ReconnectSettingsService, profileReaccept, type ReacceptMode, type ReconnectSettingsBody } from "./reconnect-settings.js";

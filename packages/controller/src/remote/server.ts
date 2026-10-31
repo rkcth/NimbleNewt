@@ -65,7 +65,7 @@ interface Reply { readonly status: number; readonly body?: unknown; readonly raw
  * task or reads the controller's records: a worker's whole surface is its own session, its offers and the attempts placed on it. Local by default; a remote listener has to be asked for and needs TLS.
  *
  * Routes (all JSON unless noted; `Idempotency-Key` on those that change state, so a retry applies once; every request after `connect` names the session and the negotiated protocol version):
- * `POST /worker/connect`, `POST /worker/session/heartbeat`, `GET /worker/session/offers`, `POST /worker/attempts/{id}/{accept|begin|report|usage|heartbeat|acknowledge|complete}`,
+ * `POST /worker/connect`, `POST /worker/session/heartbeat`, `POST /worker/session/reconcile`, `GET /worker/session/offers`, `POST /worker/attempts/{id}/{accept|begin|report|usage|heartbeat|acknowledge|complete}`,
  * `PUT /worker/attempts/{id}/checkpoint`, `GET /worker/attempts/{id}/control`, `GET /worker/attempts/{id}/artifacts`, `GET /worker/attempts/{id}/artifacts/{artifact}/file` (bytes), `POST /worker/attempts/{id}/artifacts`.
  */
 export class WorkerTransport {
@@ -232,6 +232,12 @@ export class WorkerTransport {
       const body = this.#only(await this.#body(req), ["sequence"]);
       const r = await svc.heartbeat(host, session, { ...body, commandId: this.#key(req) } as never);
       return { status: 200, body: r };
+    }
+    if (a === "session" && b === "reconcile" && parts.length === 3) {
+      allowed("POST");
+      const session = await this.#session(req, host);
+      const body = this.#only(await this.#body(req), ["held"]);
+      return { status: 200, body: await svc.reconcile(host, session, { ...body, commandId: this.#key(req) } as never) };
     }
     if (a === "session" && b === "offers" && parts.length === 3) {
       allowed("GET");
