@@ -1,4 +1,5 @@
 import type { SnapshotTable } from "../storage/index.js";
+import type { BackupSeal } from "./crypto.js";
 
 /**
  * A backup is a folder (card K01): one JSON-lines file per table of the store, and `manifest.json`, written last, which names each file with its row count, size and SHA-256. A folder with a
@@ -14,9 +15,14 @@ export interface BackupFileEntry { readonly table: SnapshotTable; readonly file:
 
 /** The artifact bytes in a backup (card K01): `artifacts.jsonl` lists each blob's digest and size, and the blob is the file `artifacts/<digest>`, whose name is the SHA-256 of its content. */
 export interface BackupArtifacts { readonly index: BackupIndexEntry; readonly blobs: number; readonly bytes: number; /** Blobs the store listed that were corrupt or vanished while the copy was made, and so are not in it. */ readonly skipped: readonly { readonly digest: string; readonly why: "corrupt" | "missing" }[] }
+/** An artifact index line: a sealed backup keeps each blob under a number (`file`), so the digest, which names the content, is only inside the sealed index. */
+export interface BlobIndexLine { readonly digest: string; readonly size: number; readonly file?: string }
 export interface BackupIndexEntry { readonly file: string; readonly rows: number; readonly bytes: number; readonly sha256: string }
 export const ARTIFACT_INDEX = "artifacts.jsonl";
 export const ARTIFACT_FOLDER = "artifacts";
+export const SEALED_SUFFIX = ".enc";
+/** The file a table is kept in: sealed backups add `.enc`. */
+export const tableFile = (table: string, sealed: boolean): string => `${table}.jsonl${sealed ? SEALED_SUFFIX : ""}`;
 
 export interface BackupManifest {
   readonly format: typeof BACKUP_FORMAT;
@@ -33,6 +39,10 @@ export interface BackupManifest {
   readonly files: readonly BackupFileEntry[];
   /** Present when the installation has an artifact store: its blobs are in the backup. */
   readonly artifacts?: BackupArtifacts;
+  /** Present when the backup is encrypted (card K01b): the key it was made for, the public ephemeral half and the wrapped copies of the private key. Every table file and blob is sealed; digests below are keyed, not plain SHA-256. */
+  readonly encryption?: BackupSeal;
+  /** Present on an encrypted backup, written last: the keyed MAC over every other field of this manifest. */
+  readonly mac?: string;
   /** What the owner should know about what is and is not in the copy. */
   readonly notes: readonly string[];
   readonly complete: true;
@@ -43,3 +53,15 @@ export const BACKUP_NOTES: readonly string[] = [
   "Secret values kept outside the database (the secret store) are not in this backup.",
   "Effects that were intended but not confirmed at that moment are restored as uncertain: they are reconciled with the outside world, never run again.",
 ];
+
+/** A marker the backups folder gets the first time an encrypted backup is made in it: afterwards a plain backup in that folder is refused by the command line unless the owner says `--allow-plain yes`. */
+export const ENCRYPTION_MARKER = "encryption-set-up";
+
+const NAME = /^backup-(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z-(manual|scheduled|pre-upgrade)$/;
+/** The time and kind a backup's folder name carries (the name is the one thing retention can check without a secret), or undefined for a name that is not a backup's. */
+export function parseBackupName(name: string): { at: string; kind: BackupKind } | undefined {
+  const m = NAME.exec(name);
+  if (m === null) return undefined;
+  const at = `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}.000Z`;
+  return Number.isNaN(Date.parse(at)) ? undefined : { at, kind: m[7] as BackupKind };
+}

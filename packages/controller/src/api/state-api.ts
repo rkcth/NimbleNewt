@@ -10,7 +10,7 @@ import type { ContractService, WaitGraphService } from "../planning/index.js";
 import type { ReleaseService } from "../release/index.js";
 import type { SubmissionService } from "../submissions/index.js";
 import type { SwarmService } from "../swarm/index.js";
-import type { IncidentService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
+import type { CoverageService, CoverageSettingsService, IncidentService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
 import type { ContextBranchService } from "../branches/index.js";
 import type { InvitationInbox, MeetingService } from "../meetings/index.js";
 import type { AgentMessageService } from "../messaging/index.js";
@@ -26,6 +26,8 @@ import type { DecisionService } from "../decisions/index.js";
 import { SecureApi } from "../security/secured.js";
 import type { GrantService } from "../security/grants.js";
 import type { EscalationLadderService } from "../health/escalation-ladder.js";
+import type { RecoveryLadderService } from "../health/recovery-ladder.js";
+import type { StallService } from "../health/stall.js";
 import type { AgreedLimitsSettingsService } from "./agreed-limits-settings.js";
 import type { WorkerLimitsSettingsService } from "./worker-limits-settings.js";
 import type { SetupReadinessService } from "../setup/index.js";
@@ -41,7 +43,7 @@ import type { WorkingNoteService } from "../context/notes.js";
 import type { WorkEndService } from "../work-end/index.js";
 import type { PauseService } from "../lifecycle/pause.js";
 import type { StopService } from "../lifecycle/stop.js";
-import type { BackupService } from "../backup/index.js";
+import type { BackupEncryption, BackupKeyPinService, BackupService } from "../backup/index.js";
 import type { ImprovementService } from "../standups/improvements.js";
 import type { MeetingRecordService } from "../meetings/record.js";
 import type { AttendanceService } from "../meetings/attendance.js";
@@ -127,10 +129,15 @@ export interface StateApiDeps {
   readonly setup?: Pick<SetupReadinessService, "check">;
   /** How long an undecided stall concern waits at each level of the supervisor ladder (owner decision 2026-10-30, supervisor ladder). */
   readonly escalationLadder?: Pick<EscalationLadderService, "get" | "set">;
+  /** Which recovery actions are allowed at which level (card V02c), and the recovery step itself. */
+  readonly recoveryLadder?: Pick<RecoveryLadderService, "get" | "set">;
+  readonly recoveryStep?: Pick<StallService, "recover">;
   readonly agreedLimits?: Pick<AgreedLimitsSettingsService, "get" | "change">;
   readonly resumeSettings?: Pick<ResumeSettingsService, "get" | "set">;
   readonly quietHostSettings?: Pick<QuietHostSettingsService, "get" | "change">;
   readonly quietHosts?: Pick<QuietHostService, "moveWork">;
+  readonly coverage?: Pick<CoverageService, "report">;
+  readonly coverageSettings?: Pick<CoverageSettingsService, "get" | "set">;
   readonly dispatchLimits?: Pick<DispatchLimitsSettingsService, "get" | "change">;
   readonly cleanupSettings?: Pick<CleanupSettingsService, "get" | "change">;
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set" | "change">;
@@ -162,6 +169,8 @@ export interface StateApiDeps {
   readonly policyForward?: Pick<PolicyEditService, "forward">;
   readonly deliverables?: Pick<DeliverableService, "list" | "get">;
   readonly backups?: Pick<BackupService, "backUpNow" | "backUpFor" | "list" | "status">;
+  readonly backupEncryption?: Pick<BackupEncryption, "status" | "verify">;
+  readonly backupKeyPin?: Pick<BackupKeyPinService, "get" | "rekey">;
   readonly improvements?: Pick<ImprovementService, "propose" | "group" | "decide" | "bringToStandup" | "get" | "open">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep" | "readiness">;
 
@@ -257,9 +266,13 @@ export class StateApi {
         ...(this.#deps.resumeSettings === undefined ? {} : { resumeSettings: this.#deps.resumeSettings }),
         ...(this.#deps.quietHostSettings === undefined ? {} : { quietHostSettings: this.#deps.quietHostSettings }),
         ...(this.#deps.quietHosts === undefined ? {} : { quietHosts: this.#deps.quietHosts }),
+        ...(this.#deps.coverage === undefined ? {} : { coverage: this.#deps.coverage }),
+        ...(this.#deps.coverageSettings === undefined ? {} : { coverageSettings: this.#deps.coverageSettings }),
         ...(this.#deps.workerLimits === undefined ? {} : { workerLimits: this.#deps.workerLimits }),
         ...(this.#deps.setup === undefined ? {} : { setup: this.#deps.setup }),
         ...(this.#deps.escalationLadder === undefined ? {} : { escalationLadder: this.#deps.escalationLadder }),
+        ...(this.#deps.recoveryLadder === undefined ? {} : { recoveryLadder: this.#deps.recoveryLadder }),
+        ...(this.#deps.recoveryStep === undefined ? {} : { recoveryStep: this.#deps.recoveryStep }),
         ...(this.#deps.dispatchLimits === undefined ? {} : { dispatchLimits: this.#deps.dispatchLimits }),
         ...(this.#deps.cleanupSettings === undefined ? {} : { cleanupSettings: this.#deps.cleanupSettings }),
         ...(this.#deps.branchSettings === undefined ? {} : { branchSettings: this.#deps.branchSettings }),
@@ -271,6 +284,8 @@ export class StateApi {
         ...(this.#deps.stops === undefined ? {} : { stops: this.#deps.stops }),
         ...(this.#deps.policyForward === undefined ? {} : { policyForward: this.#deps.policyForward }),
         ...(this.#deps.backups === undefined ? {} : { backups: this.#deps.backups }),
+        ...(this.#deps.backupEncryption === undefined ? {} : { backupEncryption: this.#deps.backupEncryption }),
+        ...(this.#deps.backupKeyPin === undefined ? {} : { backupKeyPin: this.#deps.backupKeyPin }),
         ...(this.#deps.improvements === undefined ? {} : { improvements: this.#deps.improvements }),
         ...(this.#deps.watchControl === undefined ? {} : { watchControl: this.#deps.watchControl }),
         ...(this.#deps.standups === undefined ? {} : { standups: this.#deps.standups }),

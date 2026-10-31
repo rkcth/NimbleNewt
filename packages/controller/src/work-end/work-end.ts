@@ -66,6 +66,9 @@ export interface EndingAttempt {
   readonly stopped?: { readonly by: "owner" | "emergency" | "other"; readonly reason: string };
   /** True when the worker was confirmed stopped (its handle stopped, or the host that held it confirmed the release) when the attempt was finished. Anything else, or absent: not confirmed, so its scratch is not removed. */
   readonly workerStopped?: boolean;
+  /** Where the attempt ran and its generation, passed on to the host with a scratch order (the scratch location is unique to the attempt; see `ScratchOrder`). */
+  readonly hostId?: string;
+  readonly generation?: number;
 }
 
 export interface SettleReport {
@@ -77,6 +80,8 @@ export interface WorkEndDeps {
   readonly attempts: {
     get(attemptId: string): Promise<EndingAttempt | undefined>;
     freeze(attemptId: string, reason: string): Promise<void>;
+    /** Whether the worker of the finished attempt is confirmed stopped now (the host is asked to let go again). Used by the scratch cleanup's sweep. */
+    confirmStopped?(attemptId: string): Promise<boolean>;
     /** Lets the calls settle and kills those that hang, with a reason. */
     settle(attemptId: string): Promise<SettleReport>;
     /** Ends the attempt with the agent's result; the task outcome is the submission's, not this call's. */
@@ -97,7 +102,7 @@ export interface WorkEndDeps {
    * The scratch cleanup (owner decision 2026-10-30): after the attempt is finished and what matters was handed onward, the controller-created scratch workspace may be removed (step `cleanup.scratch`). Absent: scratch is never touched.
    * `checkpointRecorded` says whether a complete checkpoint/continuation was recorded BY THIS ATTEMPT (taken while it ran: one from an earlier attempt of the task says nothing about this attempt's own work), which a failed or stopped attempt's successor continues from; absent means no (the scratch stays unless a submission carries the work).
    */
-  readonly scratch?: { readonly cleanup: Pick<ScratchCleanupService, "run">; readonly checkpointRecorded?: (attempt: ScratchAttempt) => Promise<boolean> };
+  readonly scratch?: { readonly cleanup: Pick<ScratchCleanupService, "run" | "begin">; readonly checkpointRecorded?: (attempt: ScratchAttempt) => Promise<boolean | string> };
 }
 
 export interface WorkEndRecord {
@@ -348,10 +353,13 @@ export class WorkEndService {
     // cleanup.scratch: only after the attempt is finished, and then only when what matters was handed onward (see `#missing`). A drop that landed meanwhile is respected before the order goes out.
     if (this.#deps.scratch !== undefined && body.steps?.["cleanup.scratch"] === undefined) {
       await this.#guard(attemptId);
-      const scratchAttempt: ScratchAttempt = { attemptId, taskId: body.taskId, projectId: body.projectId, agentId: body.agentId };
+      // The cleanup exists (listed, open) before anything that can fail is read, so the sweep can always finish it.
+      await this.#deps.scratch.cleanup.begin(attemptId);
       const now = await this.#deps.attempts.get(attemptId);
-      const dropped = async (): Promise<string | undefined> => ((await this.#get(idOf(attemptId)))?.body.state === "dropped" ? "the ending was dropped before the order went out" : undefined);
-      const ran = await this.#deps.scratch.cleanup.run(scratchAttempt, await this.#missing(body, scratchAttempt, now), dropped);
+      const scratchAttempt: ScratchAttempt = { attemptId, taskId: body.taskId, projectId: body.projectId, agentId: body.agentId, ...(now?.hostId === undefined ? {} : { hostId: now.hostId }), ...(now?.generation === undefined ? {} : { generation: now.generation }) };
+      const dropped = async (): Promise<string | undefined> => this.droppedReason(attemptId);
+      const m = await this.#missing(body, scratchAttempt, now);
+      const ran = await this.#deps.scratch.cleanup.run(scratchAttempt, m.missing, dropped, { workerStopped: m.workerStopped });
       body = (await step("cleanup.scratch", { state: ran.state === "removed" ? "removed" : "kept", ...(ran.why === undefined ? {} : { why: ran.why }) })).body;
     }
     const written = await this.#mutate(attemptId, "workend.finish", (b) => {
@@ -368,33 +376,54 @@ export class WorkEndService {
    * What is not yet handed onward (empty: all of it is): the worker must be confirmed stopped, no write call may have been killed, the product (a submission, or else a checkpoint recorded by this attempt) and the message must be done.
    * `finished` is false for an attempt that ended another way, where the attempt's own ending steps are not the measure.
    */
-  async #missing(b: WorkEndRecord | undefined, attempt: ScratchAttempt, now: EndingAttempt | undefined): Promise<string[]> {
+  async #missing(b: WorkEndRecord | undefined, attempt: ScratchAttempt, now: EndingAttempt | undefined): Promise<{ missing: string[]; workerStopped: boolean }> {
     const s = b?.steps, out: string[] = [];
-    if (now?.workerStopped !== true) out.push("the worker was not confirmed stopped");
     if (s?.settled?.summary !== undefined || (s?.settled?.killedWrites ?? 0) > 0) out.push("a write call had to be killed");
     if (b?.submit === true && s?.submitted?.submissionId === undefined) out.push("no submission was opened");
-    if (s?.submitted?.submissionId === undefined && !(await this.#deps.scratch?.checkpointRecorded?.(attempt).catch(() => false))) out.push("no checkpoint is recorded");
+    if (s?.submitted?.submissionId === undefined) {
+      const c = await this.#deps.scratch?.checkpointRecorded?.(attempt).catch(() => false);
+      if (c !== true) out.push(typeof c === "string" ? c : "no checkpoint is recorded");
+    }
     if (b?.message !== undefined && s?.told !== true) out.push("the message was not passed on");
-    return out;
+    return { missing: out, workerStopped: now?.workerStopped === true };
+  }
+
+  /** A reason to keep scratch when the attempt's ending was dropped (checked right before an order goes out, by the completed path and by the sweep). */
+  async droppedReason(attemptId: string): Promise<string | undefined> {
+    return (await this.#get(idOf(attemptId)))?.body.state === "dropped" ? "the ending was dropped before the order went out" : undefined;
+  }
+
+  /**
+   * The scratch decision for an attempt that ended some other way than through its own completed ending, worked out from what is recorded now: the attempt, what is missing, whether the worker is confirmed stopped. `undefined`: the ending is still open
+   * (the completed path cleans up after it) or the cleanup is already done.
+   */
+  async scratchDecision(attemptId: string): Promise<{ attempt: ScratchAttempt; missing: string[]; workerStopped: boolean } | undefined> {
+    const rec = await this.#get(idOf(attemptId));
+    const attempt = await this.#deps.attempts.get(attemptId);
+    const a: ScratchAttempt | undefined = attempt !== undefined ? { attemptId, taskId: attempt.taskId, projectId: attempt.projectId, agentId: attempt.agentId, ...(attempt.hostId === undefined ? {} : { hostId: attempt.hostId }), ...(attempt.generation === undefined ? {} : { generation: attempt.generation }) } : rec === undefined ? undefined : { attemptId, taskId: rec.body.taskId, projectId: rec.body.projectId, agentId: rec.body.agentId };
+    if (a === undefined) return undefined;
+    // An ending of this attempt still open is the completed path's to clean up (after it finished); a done one has done so.
+    if (rec !== undefined && OPEN_STATES.includes(rec.body.state)) return undefined;
+    if (rec?.body.state === "done" && rec.body.steps?.["cleanup.scratch"] !== undefined) return undefined;
+    const m = await this.#missing(rec?.body, a, attempt);
+    return { attempt: a, ...m };
   }
 
   /**
    * An attempt ended some other way than through its own completed ending (a failure, a stop, a turn that ended, an ending dropped): the scratch is removed only under the same conditions as after a completed ending (see `#missing`): a checkpoint of
-   * this attempt is recorded so the next attempt can continue from it, no write call was killed, any message was passed on, and the worker is confirmed stopped.
-   * Never throws into the caller (a failed report is retried by the sweep).
+   * this attempt is recorded so the next attempt can continue from it, no write call was killed, any message was passed on, and the worker is confirmed stopped (else the cleanup waits for the sweep to confirm it).
+   * The cleanup record exists before anything is read. Never throws into the caller (the sweep finishes what is left open); `signal` is the dispatcher's cut-off: once aborted nothing more is started.
    */
-  async cleanupAfterEnd(attemptId: string): Promise<void> {
+  async cleanupAfterEnd(attemptId: string, signal?: AbortSignal): Promise<void> {
     const sc = this.#deps.scratch;
     if (sc === undefined) return;
     try {
-      const rec = await this.#get(idOf(attemptId));
-      const attempt = await this.#deps.attempts.get(attemptId);
-      const a: ScratchAttempt | undefined = attempt !== undefined ? { attemptId, taskId: attempt.taskId, projectId: attempt.projectId, agentId: attempt.agentId } : rec === undefined ? undefined : { attemptId, taskId: rec.body.taskId, projectId: rec.body.projectId, agentId: rec.body.agentId };
-      if (a === undefined) return;
-      // An ending of this attempt still open is the completed path's to clean up (after it finished); a done one has done so.
-      if (rec !== undefined && OPEN_STATES.includes(rec.body.state)) return;
-      if (rec?.body.state === "done" && rec.body.steps?.["cleanup.scratch"] !== undefined) return;
-      await sc.cleanup.run(a, await this.#missing(rec?.body, a, attempt));
+      await sc.cleanup.begin(attemptId);
+      const d = await this.scratchDecision(attemptId);
+      if (d === undefined) return;
+      const cutOff = (): never => { throw new DomainError("unavailable", "the cleanup was cut off (timeout); the sweep finishes it"); };
+      if (signal?.aborted === true) cutOff();
+      await sc.cleanup.run(d.attempt, d.missing, async () => { if (signal?.aborted === true) cutOff(); return undefined; }, { workerStopped: d.workerStopped });
     } catch { /* kept; the sweep tries again for what is left open */ }
   }
 

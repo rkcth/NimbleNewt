@@ -5,7 +5,8 @@ import { PlacementSettingsService } from "../remote/placement-settings.js";
 import { QuietHostSettingsService } from "../remote/quiet-host-settings.js";
 import { ReconnectSettingsService } from "../remote/reconnect-settings.js";
 import { InvitationInbox, MEETING_LIMITS, MEETING_SETTINGS, MeetingService, meetingWakeSink, checkMeetingWakeTimeout, type HostWakeRequest } from "../meetings/index.js";
-import { BackupService, createBackup } from "../backup/index.js";
+import { BackupEncryption, BackupKeyPinService, BackupService, createBackup, readKeyringFile } from "../backup/index.js";
+import { readFile } from "node:fs/promises";
 import { defaultEventSources } from "./default-sources.js";
 import { ImprovementService } from "../standups/improvements.js";
 import { shareableCite } from "../meetings/shareable.js";
@@ -14,7 +15,7 @@ import { MeetingRecordService, budgetRaiseApplier, grantApplier, taskReassignApp
 import { EventService, EventSourceSettingsService, type EventSource } from "../events/index.js";
 import { BudgetService, holderNotice, type NotifyAggregate } from "../budgets/index.js";
 import { NotificationService } from "../notifications/index.js";
-import { EscalationLadderService, StallService, type StallOptions } from "../health/index.js";
+import { EscalationLadderService, RecoveryLadderService, StallService, type RecoveryEffects, type StallOptions } from "../health/index.js";
 import { DomainError } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { AssignmentService } from "../domain/assignments.js";
@@ -36,7 +37,7 @@ import { BlockerService } from "../domain/blockers.js";
 import { ContractService, WaitGraphService } from "../planning/index.js";
 import { ReleaseService } from "../release/index.js";
 import { SwarmService } from "../swarm/index.js";
-import { IncidentService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
+import { CoverageService, CoverageSettingsService, IncidentService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
 import { InquiryService } from "../inquiries/index.js";
 import { GrantService, PrincipalService, TaskCredentialService, type Principal } from "../security/index.js";
 import { SqliteStorage, probeSqliteLibrary } from "../storage/sqlite/index.js";
@@ -67,7 +68,7 @@ import { JobService } from "../jobs/index.js";
 import { ContinuationService, ResumeCheckService, ResumeSettingsService, controllerResumePorts } from "../continuation/index.js";
 import { DependencyService } from "../dependencies/index.js";
 import { ActivityService } from "../activity/index.js";
-import { WorkEndService, checkpointByAttempt, dispatcherEndingPorts, stagedSubmit, type EndingAttempt, type Landed, type StagedWork } from "../work-end/index.js";
+import { WorkEndService, checkpointVerdict, dispatcherEndingPorts, stagedSubmit, type EndingAttempt, type Landed, type StagedWork } from "../work-end/index.js";
 import { HandoffService, PauseService, StopService, agentsUnder, controllerHandoffSources, dispatchStopPorts, type LocalWork } from "../lifecycle/index.js";
 import { SubmissionService, attemptOfAssignments } from "../submissions/index.js";
 import { ReviewService } from "../review/index.js";
@@ -166,7 +167,9 @@ export interface StartOptions {
   readonly scratchHost?: { readonly remove: NonNullable<ScratchPorts["order"]> };
   readonly cleanupDefault?: ScratchMode;
   readonly routeProbes?: { readonly run: RouteProbes["run"]; readonly intervalMs?: number; readonly enabled?: boolean };
-  readonly backup?: { readonly directory: string; readonly everyMs?: number; readonly retention?: { readonly daily: number; readonly weekly: number }; readonly version?: string; readonly now?: () => Date };
+  readonly backup?: { readonly directory: string; readonly everyMs?: number; readonly retention?: { readonly daily: number; readonly weekly: number }; readonly version?: string; readonly now?: () => Date;
+    /** Encrypted backups (card K01b). Off unless given. `keyringFile` is made on the host by `backup encryption-setup`; the passcode and recovery files are the out-of-band files the owner points the proof at (never the chat). If the keyring cannot be read the controller does not start: it never falls back to plain backups. */
+    readonly encryption?: { readonly keyringFile: string; readonly passcodeFile?: string; readonly recoveryFile?: string } };
   /**
    * Owner chat (card U03): the interpreter that reads the owner's messages (a model behind the routed client in production; a scripted one in tests) and, optionally, the persistent coordinator's model and credential. Absent: no chat service is built.
    * The approval profile (A07), status explanations (U05) and conversational policy edits (U04) are composed in. The coordinator is controller-managed and nothing depends on it: when it is paused, stopped or its routes fail, the chat and the rest of the controller carry on.
@@ -263,10 +266,15 @@ export async function startController(options: StartOptions): Promise<Controller
   }
   for (const line of check.output) print(line);
 
+  let backupEncryption: BackupEncryption | undefined;
+  if (options.backup?.encryption !== undefined) {
+    const e = options.backup.encryption;
+    try { backupEncryption = new BackupEncryption({ keyring: await readKeyringFile(e.keyringFile), keyringFile: e.keyringFile, ...(e.passcodeFile === undefined ? {} : { passcodeFile: e.passcodeFile }), ...(e.recoveryFile === undefined ? {} : { recoveryFile: e.recoveryFile }), ...(options.backup.now === undefined ? {} : { now: options.backup.now }) }); } catch { throw new Error("backups are set to be encrypted but the keyring file cannot be read or is not valid; no backup is made without it"); }
+  }
   let storage: ControllerStorage;
   // An existing database that is about to be upgraded to a newer schema is copied first, when backups are configured (card K01): if the copy cannot be made, the upgrade does not happen.
   const beforeUpgrade: BeforeUpgrade | undefined = options.backup === undefined ? undefined : async (notice) => {
-    await createBackup({ snapshot: notice.snapshot }, { root: options.backup!.directory, kind: "pre-upgrade", version: options.backup!.version ?? "0.0.0", ...(options.backup!.now === undefined ? {} : { now: options.backup!.now }) });
+    await createBackup({ snapshot: notice.snapshot }, { root: options.backup!.directory, kind: "pre-upgrade", version: options.backup!.version ?? "0.0.0", ...(options.backup!.now === undefined ? {} : { now: options.backup!.now }), ...(backupEncryption === undefined ? {} : { encryption: backupEncryption.keyring }) });
     print(`The database is being upgraded from schema ${notice.from} to ${notice.to}; a backup of it as it was is in ${options.backup!.directory}.`);
   };
   if (options.storage.kind === "postgres") {
@@ -289,6 +297,13 @@ export async function startController(options: StartOptions): Promise<Controller
   try {
     const projects = await ProjectService.open(storage, { holder: options.holder ?? "controller" });
     const epoch = projects.epoch;
+    // The backup public key is pinned the first time it is loaded; a different one is refused until the owner approved its fingerprint (card K01b).
+    const backupKeyPin = backupEncryption === undefined ? undefined : BackupKeyPinService.withEpoch(storage, epoch);
+    if (backupEncryption !== undefined) {
+      const pinned = await backupKeyPin!.check(backupEncryption.keyring);
+      print(pinned.first ? `Backups are encrypted; the backup key (fingerprint ${pinned.fingerprint}) is now pinned to this installation.` : pinned.approved ? `The backup key was replaced with the one the owner approved (fingerprint ${pinned.fingerprint}).` : `Backups are encrypted (fingerprint ${pinned.fingerprint}).`);
+      for (const warning of backupEncryption.warnings()) print(`Warning: ${warning}.`);
+    }
     // Card F04k: the workspaces are the checkouts of the registered projects, so their file systems are checked at every start, not only for roots the caller listed. Registered checkouts exist only once the
     // storage is open, so the decision is made again with these problems added: refused unless the F04h override was given, and then audited with the rest.
     const roots = await checkoutRoots(storage, new Set((options.workspaceRoots ?? []).map((r) => resolve(r))));
@@ -337,7 +352,10 @@ export async function startController(options: StartOptions): Promise<Controller
     };
     // How long an undecided concern waits at each level of the supervisor ladder: the owner's setting, else the installation's `stall.escalateAfterMs`, else 24 hours (owner decision 2026-10-30, supervisor ladder).
     const escalationLadder = EscalationLadderService.withEpoch(storage, epoch);
-    const stall = StallService.withEpoch(storage, epoch, assignments, waits, { ...(options.stall ?? {}), ladderHours: () => escalationLadder.hours(), ladderDamaged: async (n) => { await notifications.emitFromController({ commandId: n.id, kind: "maintenance", level: "needs-you", ref: { kind: "principal", id: "dispatcher" }, detail: n.detail }); }, declaredSpeed, isPaused: (taskId) => pauses.isPaused(taskId) });
+    // The recovery action ladder (card V02c): its effects are bound below, once the services they use are built.
+    const recoveryLadder = RecoveryLadderService.withEpoch(storage, epoch);
+    let recoveryRun: RecoveryEffects | undefined;
+    const stall = StallService.withEpoch(storage, epoch, assignments, waits, { ...(options.stall ?? {}), recoveryPolicy: () => recoveryLadder.policy(), recoveryEffects: { run: (action, ctx) => (recoveryRun ?? (() => { throw new DomainError("unavailable", "recovery steps are not available yet"); })()).run(action, ctx), unavailable: (action, ctx) => (recoveryRun?.unavailable?.(action, ctx) ?? Promise.resolve(undefined)) }, ladderHours: () => escalationLadder.hours(), ladderDamaged: async (n) => { await notifications.emitFromController({ commandId: n.id, kind: "maintenance", level: "needs-you", ref: { kind: "principal", id: "dispatcher" }, detail: n.detail }); }, declaredSpeed, isPaused: (taskId) => pauses.isPaused(taskId) });
     // Durable job records (card T07): a permitted background job's result goes to the pause service; no MCP connection check is bound until an MCP client exists, so no MCP operation is admitted.
     // The time a job or a review took is charged to its task by the dispatcher's budget service once that is built; a charge that fails is reported, and the job or review stands (card R05f).
     const charged = async (usage: { commandId: string; activity: "review" | "background-job"; taskId: string; agentId?: string; computeMs: number }): Promise<void> => { try { await dispatch?.chargeUse(usage); } catch (error) { options.onInternalError?.(error); } };
@@ -361,6 +379,8 @@ export async function startController(options: StartOptions): Promise<Controller
     const responsibilities = ResponsibilityService.withEpoch(storage, epoch);
     const responsibilityChecks = ResponsibilityChecks.withEpoch(storage, epoch, responsibilities);
     const incidents = IncidentService.withEpoch(storage, epoch, responsibilities);
+    const coverageSettings = CoverageSettingsService.withEpoch(storage, epoch);
+    const coverage = CoverageService.withEpoch(storage, epoch, coverageSettings);
     // Questions to the owner (card U12): agents ask through the API, the owner sees and answers them; the owner is told through the notifications.
     const notifications = NotificationService.withEpoch(storage, epoch);
     const messages = AgentMessageService.withEpoch(storage, epoch, {
@@ -397,8 +417,14 @@ export async function startController(options: StartOptions): Promise<Controller
     const submissions = SubmissionService.withEpoch(storage, epoch, (_id, scope, by) => agents.rolesOfPrincipalIn(by, scope.projectId, new Date().toISOString()), { reviewersAvailableIn: (projectId, workerId) => agents.reviewersAvailableIn(projectId, workerId, new Date().toISOString()), attemptOf: (() => { const of = attemptOfAssignments(assignments); /* the dispatcher names an attempt's owner by its bare agent id, the principals by `agent:<id>`: the same identity either way */ return async (taskId: string) => { const a = await of(taskId); return a === undefined ? undefined : { ...a, ownerId: a.ownerId.startsWith("agent:") ? a.ownerId : `agent:${a.ownerId}` }; }; })() });
     const cleanupSettings = CleanupSettingsService.withEpoch(storage, epoch, options.cleanupDefault, { warn: async (d) => { await notifications.emitFromController({ commandId: `cleanup-settings-damaged:${d.revision}`, kind: "maintenance", level: "needs-you", ref: { kind: "cleanup-settings", id: "main" }, detail: d.detail }); } });
     // The leftovers of a finished attempt (installed or still running, never removed by the controller) go to the agent's boss as a needs-you message; with no boss, or one who cannot be told about the task, to the owner.
+    let workEndLate: WorkEndService | undefined;
     const scratchCleanup = ScratchCleanupService.withEpoch(storage, epoch, {
       mode: async () => (await cleanupSettings.effective()).scratch,
+      patienceHours: async () => (await cleanupSettings.effective()).awaitStopHours,
+      before: async (a) => workEndLate?.droppedReason(a.attemptId),
+      decide: async (attemptId) => workEndLate?.scratchDecision(attemptId),
+      workerStopped: async (a) => (dispatch === undefined ? false : dispatch.dispatcher.confirmStopped(dispatch.principal, a.attemptId)),
+      stuck: async (a, hours, key) => { await notifications.emitFromController({ commandId: key, kind: "maintenance", level: "needs-you", ref: { kind: "scratch-cleanup", id: `${scratchRecordId(a.attemptId)}-stuck` }, projectId: a.projectId, detail: `Scratch of attempt ${a.attemptId} is kept: its worker never confirmed it stopped within ${hours} hour(s), so nothing was removed. Check the host; the cleanup goes on by itself once the stop is confirmed.`.slice(0, 200) }); },
       ...(options.scratchHost === undefined ? {} : { order: options.scratchHost.remove }),
       report: async (a, leftovers, _key) => {
         // To the supervisor AGENT: the host's words framed as quoted untrusted data (see `supervisorNotice`). With no boss, or one who cannot be told about the task, to the owner in notices that fit the notification's detail limit.
@@ -416,8 +442,9 @@ export async function startController(options: StartOptions): Promise<Controller
     const workEnd = WorkEndService.withEpoch(storage, epoch, { attempts: dispatcherEndingPorts(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal })), landing: options.landing === undefined ? async () => undefined : (taskId) => options.landing!(taskId), ...(options.stage === undefined ? {} : { submit: stagedSubmit({ stage: options.stage, submissions, principalOf: async (agentId) => { const p = await principals.get(agentId.startsWith("agent:") ? agentId : `agent:${agentId}`); return p === undefined || p.state !== "active" ? undefined : ((await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString())) as Principal); } }) }), blockers: BlockerService.withEpoch(storage, epoch), paused: (taskId) => pauses.isPaused(taskId), scratch: { cleanup: scratchCleanup, checkpointRecorded: async (a) => {
       if (dispatch === undefined) return false;
       const attempt = await dispatch.dispatcher.get(dispatch.principal, a.attemptId).catch(() => undefined);
-      return attempt !== undefined && checkpointByAttempt(await continuations.latest(dispatch.principal, a.taskId).catch(() => undefined), attempt);
+      return attempt === undefined ? false : checkpointVerdict(await continuations.latest(dispatch.principal, a.taskId).catch(() => undefined), attempt);
     } } });
+    workEndLate = workEnd;
     const stops = stopsLive = StopService.withEpoch(storage, epoch, pauses, dispatchStopPorts(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal }), () => (options.dispatch === undefined ? "none" : "pending"), (scope) => agentsUnder(storage, scope), (_by, taskId) => jobs.unfinishedOf(taskId), options.localWork, { dropEnding: (id, why, reason) => workEnd.drop(id, why, reason) }), { onSettled: async (by, e) => { if (e.scope.kind !== "task") return; await activity.record(by, { commandId: `${e.intentId}-act`, taskId: e.scope.id, kind: "lifecycle", summary: `${e.mode === "suspend" ? "Suspension" : "Stop"} ${e.outcome.state}${e.outcome.graceful ? "" : " (not graceful)"}${e.outcome.unresolved.length > 0 ? `; unresolved: ${e.outcome.unresolved.slice(0, 5).join(", ")}` : ""}.`, manifest: { refs: [{ kind: "stop-intent", id: e.intentId }] } } as never); } });
 
     // Provider drain and cutover (card R04b): the owner's controls gate every route choice made through the fallback service, which the cutover cancels running calls on.
@@ -471,15 +498,16 @@ export async function startController(options: StartOptions): Promise<Controller
     const resumes = ResumeCheckService.withEpoch(storage, epoch, { continuations, dependencies: DependencyService.withEpoch(storage, epoch), blockers: BlockerService.withEpoch(storage, epoch), ports: controllerResumePorts(storage) }, { rounds: () => resumeSettings.effective() });
     // The identity that carries out what a meeting decided and was allowed: a service with no grants of its own (the carrying agent's rights are checked separately).
     const meetingController = { id: "service:meeting-records", kind: "service", name: "meeting-records", grants: [] } as Principal;
+    const reassignApplier = taskReassignApplier(assignments, projects, principals,
+        // The rights the work needs, checked the way the services check them (the agent's own effective grants): the ones it lacks.
+        async (agentId, projectId, taskId) => { const p = await principals.get(agentId); if (p === undefined || p.state !== "active") return ["task.read", "attempt.work"]; const eff = await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); return ["attempt.work", "task.read"].filter((a) => !allows(eff as never, a, projectId, { resource: { kind: "task", id: taskId } })); },
+        // Owner decision 2026-10-30: a reassignment is made at once; a new holder without the rights is reported to the owner (and the chair), once per change (the notification's command ID comes from the change's).
+        reassignWarningSink({ notifications, storage, messages }));
     const records = MeetingRecordService.withEpoch(storage, epoch, { meetings, decisions }, {
       // A cited record may be shown to a meeting's readers only when it is a project-visible kind and exists; desks, scratch and unknown kinds stay private (card M02e).
       shareable: shareableCite(storage),
       // A meeting may retitle or reword a task; the change is made by the project service as the agent that holds the right, and only once (card M02c).
-      appliers: { "task.update": taskUpdateApplier(projects), "task.reassign": taskReassignApplier(assignments, projects, principals,
-        // The rights the work needs, checked the way the services check them (the agent's own effective grants): the ones it lacks.
-        async (agentId, projectId, taskId) => { const p = await principals.get(agentId); if (p === undefined || p.state !== "active") return ["task.read", "attempt.work"]; const eff = await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); return ["attempt.work", "task.read"].filter((a) => !allows(eff as never, a, projectId, { resource: { kind: "task", id: taskId } })); },
-        // Owner decision 2026-10-30: a reassignment is made at once; a new holder without the rights is reported to the owner (and the chair), once per change (the notification's command ID comes from the change's).
-        reassignWarningSink({ notifications, storage, messages })), "budget.raise": budgetRaiseApplier(budgets, meetingController, projects), "grant.add": grantApplier(grants, meetingController, projects) },
+      appliers: { "task.update": taskUpdateApplier(projects), "task.reassign": reassignApplier, "budget.raise": budgetRaiseApplier(budgets, meetingController, projects), "grant.add": grantApplier(grants, meetingController, projects) },
       // Changes that widen rights or spend (a budget raise and a grant are both registered) are carried out without the owner only when the approval policy lets their class through: the profile, with a specific setting overriding it (owner decision 2026-10-29).
       widening: async (cls, projectId) => {
         const cell = await PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }).classMode(projectId, cls);
@@ -513,7 +541,7 @@ export async function startController(options: StartOptions): Promise<Controller
     // Forwarding goes through the policy-edit service, which exists only when chat is configured and after the API (it uses the API).
     let policyEditsLive: PolicyEditService | undefined;
     const policyForward = { forward: async (by: Principal, request: { commandId: string; threadId: string; seq: number }) => { if (policyEditsLive === undefined) throw new DomainError("unavailable", "forwarding owner messages needs chat to be configured"); return policyEditsLive.forward(by, request); } };
-    const backups = options.backup === undefined ? undefined : new BackupService(storage, { root: options.backup.directory, version: options.backup.version ?? "0.0.0", ...(options.backup.everyMs === undefined ? {} : { everyMs: options.backup.everyMs }), ...(options.backup.retention === undefined ? {} : { retention: options.backup.retention }), ...(options.backup.now === undefined ? {} : { now: options.backup.now }), ...(blobStore === undefined ? {} : { blobs: blobStore }) });
+    const backups = options.backup === undefined ? undefined : new BackupService(storage, { root: options.backup.directory, version: options.backup.version ?? "0.0.0", ...(options.backup.everyMs === undefined ? {} : { everyMs: options.backup.everyMs }), ...(options.backup.retention === undefined ? {} : { retention: options.backup.retention }), ...(options.backup.now === undefined ? {} : { now: options.backup.now }), ...(blobStore === undefined ? {} : { blobs: blobStore }), ...(backupEncryption === undefined ? {} : { encryption: backupEncryption.keyring }) });
     const improvements = ImprovementService.withEpoch(storage, epoch, { meetings });
     // Which of the event sources the owner has turned off (card H13f); the list is the host's, or the built-in one.
     const eventSourceList = options.eventSources ?? defaultEventSources(projects);
@@ -522,7 +550,42 @@ export async function startController(options: StartOptions): Promise<Controller
     const workerLimits = WorkerLimitsSettingsService.withEpoch(storage, epoch, checkLocalWorkerLimits(options.dispatch?.local?.limits));
     // How long an attempt may run and how many attempts are admitted: off unless the owner (or a start-up option) turns them on.
     const dispatchLimits = DispatchLimitsSettingsService.withEpoch(storage, epoch, { ...(options.dispatch?.dispatcher?.attemptMs === undefined ? {} : { attemptMs: options.dispatch.dispatcher.attemptMs }), ...(options.dispatch?.dispatcher?.maxAttempts === undefined ? {} : { maxAttempts: options.dispatch.dispatcher.maxAttempts }) });
-    const api = new StateApi({ reconnect, quietHostSettings, quietHosts: { moveWork: async (owner, command) => { const hosts = dispatch?.quietHosts; if (hosts === undefined) throw new DomainError("unavailable", "this controller runs without remote hosts"); return hosts.moveWork(owner, command); } }, catalogRevocation, setup: SetupReadinessService.withEpoch(storage, epoch), eventSourceSettings, resumeSettings, workerLimits, agreedLimits, escalationLadder, dispatchLimits, cleanupSettings, workEnd, submissions, deliverables: DeliverableService.withEpoch(storage, epoch), release: ReleaseService.withEpoch(storage, epoch), responsibilityChecks, incidents, swarm: SwarmService.withEpoch(storage, epoch, { projects, contracts, budgets, stops }), status, branchSettings, improvements, ...(backups === undefined ? {} : { backups }), policyForward, watchControl, standups, attendance, records, policyContext: PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }), activity, resumes, handoffs, cutover, modelBudget: fallback, commands, integration, notes, stops, pauses, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size) }, watches: watchService, events: EventService.withEpoch(storage, epoch), notifications, budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
+    recoveryRun = {
+      // The existing services do the work as the caller, so their own rights checks apply; each is keyed by the step (`ctx.key`, made from concern, rung and episode), so a repeat of the step does it once.
+      // The agent is the one the concern is about (pinned when it was opened), and pause and stop act on the concern's task, not on the agent's other work.
+      run: async (action, ctx) => {
+        const asg = await assignments.getAssignment(ctx.taskId);
+        const holder = asg?.state === "assigned" && asg.owner?.kind === "agent" ? asg.owner.id : undefined;
+        const agent = ctx.agent ?? holder;
+        const scope = { kind: "task" as const, id: ctx.taskId };
+        if (action === "nudge" || action === "rebrief") {
+          if (agent === undefined) throw new DomainError("invalid_transition", "the task has no agent working on it");
+          await messages.noticeFromController({ commandId: ctx.key, taskId: ctx.taskId, to: `agent:${agent}`, purpose: action === "nudge" ? "A nudge from your supervisor" : "A new brief from your supervisor", text: ctx.text });
+          return {};
+        }
+        if (action === "pause") { await pauses.pause(ctx.by, { commandId: ctx.key, scope, reason: ctx.text }); return {}; }
+        if (action === "stop") { await stops.request(ctx.by, { commandId: ctx.key, scope, mode: "stop", reason: ctx.text }); return {}; }
+        // Reassign: the caller was found fit to decide the concern and the ladder allows the rung, so no further right is asked of them. A task with a running attempt moves by a prepared hand-off (the attempt is suspended first and the package collected),
+        // which finishes when the hand-off is completed; otherwise the meeting path's rules apply (moved at once; rights the new holder lacks are warned about).
+        const to = ctx.to!;
+        if (asg !== undefined && asg.activeAttemptId !== undefined) {
+          await handoffs.prepare(ctx.by, { commandId: ctx.key, taskId: ctx.taskId, to: { kind: "agent", id: to.slice("agent:".length) }, reason: ctx.text });
+          return { warnings: [`${to} takes the task by a hand-off: the running attempt is being suspended and the task moves when the hand-off is completed`] };
+        }
+        await reassignApplier.apply({ commandId: ctx.key, actor: ctx.by.id, target: { kind: "task", id: ctx.taskId }, expectedRevision: 0, patch: { toAgent: to, from: holder === undefined ? null : `agent:${holder}`, via: "recovery", ...(asg === undefined ? {} : { generation: asg.generation, revision: asg.revision }) } as never, agreedBy: ctx.by.id } as never);
+        const target = await principals.get(to);
+        const eff = target === undefined || target.state !== "active" ? undefined : await grants.effective({ id: target.id, kind: target.kind, name: target.name, grants: target.grants }, new Date().toISOString());
+        const missing = eff === undefined ? ["task.read", "attempt.work"] : ["attempt.work", "task.read"].filter((x) => !allows(eff as never, x, ctx.projectId, { resource: { kind: "task", id: ctx.taskId } }));
+        return missing.length === 0 ? {} : { warnings: [`${to} lacks ${missing.join(" and ")} for this task; the work waits until the owner grants it`] };
+      },
+      // Whether the actor can take the rung at all; a rung they cannot take is passed on the ladder, with the reason.
+      unavailable: async (action, ctx) => {
+        if (action === "nudge" || action === "rebrief") return ctx.agent === undefined && (await assignments.getAssignment(ctx.taskId))?.owner?.kind !== "agent" ? "the task has no agent working on it" : undefined;
+        if (action === "reassign") return undefined;
+        try { await pauses.authorizeControl(ctx.by, { kind: "task", id: ctx.taskId }); return undefined; } catch (error) { return error instanceof DomainError ? `${ctx.by.id} may not ${action} the task: ${error.message}`.slice(0, 200) : undefined; }
+      },
+    };
+    const api = new StateApi({ reconnect, coverage, coverageSettings, quietHostSettings, quietHosts: { moveWork: async (owner, command) => { const hosts = dispatch?.quietHosts; if (hosts === undefined) throw new DomainError("unavailable", "this controller runs without remote hosts"); return hosts.moveWork(owner, command); } }, catalogRevocation, setup: SetupReadinessService.withEpoch(storage, epoch), eventSourceSettings, resumeSettings, workerLimits, agreedLimits, escalationLadder, recoveryLadder, recoveryStep: stall, dispatchLimits, cleanupSettings, workEnd, submissions, deliverables: DeliverableService.withEpoch(storage, epoch), release: ReleaseService.withEpoch(storage, epoch), responsibilityChecks, incidents, swarm: SwarmService.withEpoch(storage, epoch, { projects, contracts, budgets, stops }), status, branchSettings, improvements, ...(backups === undefined ? {} : { backups }), ...(backupEncryption === undefined ? {} : { backupEncryption }), ...(backupKeyPin === undefined ? {} : { backupKeyPin }), policyForward, watchControl, standups, attendance, records, policyContext: PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }), activity, resumes, handoffs, cutover, modelBudget: fallback, commands, integration, notes, stops, pauses, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size) }, watches: watchService, events: EventService.withEpoch(storage, epoch), notifications, budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
     let chat: ChatService | undefined;
     let coordinator: CoordinatorService | undefined;
     if (options.chat !== undefined) {
@@ -546,7 +609,7 @@ export async function startController(options: StartOptions): Promise<Controller
     let dispatchProblem: string | undefined;
     if (options.dispatch !== undefined) {
       try {
-        dispatch = await composeDispatch({ quietHosts: { settings: quietHostSettings, ...(options.dispatch?.quietHosts === undefined ? {} : { options: options.dispatch.quietHosts }) }, notifyAggregate, storage, epoch, workspaceOps, stops, records, responsibilities: { checks: responsibilityChecks, incidents, notify: async (e) => {
+        dispatch = await composeDispatch({ quietHosts: { settings: quietHostSettings, ...(options.dispatch?.quietHosts === undefined ? {} : { options: options.dispatch.quietHosts }) }, notifyAggregate, storage, epoch, workspaceOps, stops, records, responsibilities: { checks: responsibilityChecks, incidents, coverage: { service: coverage, notify: async (g) => { const more = (n: number): string => `; and ${n} more`; let list = ""; let shown = 0; for (const x of g.items) { const next = `${list}${shown === 0 ? "" : "; "}${x.title.slice(0, 30)}`; if (next.length > 110) break; list = next; shown++; } await notifications.emitFromController({ commandId: g.alertId, kind: "maintenance", level: "needs-you", ref: { kind: "responsibility", id: g.items[0]!.responsibilityId }, projectId: g.projectId, detail: `${g.count} responsibilit${g.count === 1 ? "y is" : "ies are"} without coverage: ${list}${g.count > shown ? more(g.count - shown) : ""}. See responsibility.coverage.`.slice(0, 200) }); } }, notify: async (e) => {
           // The text must not change between ticks (no alert count): the command ids are fixed, so a retry after a failed markNotified must carry the same payload.
           const detail = `An incident on a responsibility (${e.signature}) is still open past its escalation time.`;
           if (e.escalatedTo === "owner") await notifications.emitFromController({ commandId: `inc-esc-${e.id}`, kind: "maintenance", level: "needs-you", ref: { kind: "responsibility-incident", id: e.id }, projectId: e.projectId, detail });
@@ -566,7 +629,7 @@ export async function startController(options: StartOptions): Promise<Controller
     // Endings still open when the controller went down are completed once, from their first undone step (the tick's sweep does the same for what is left).
     // The dispatcher asks the ending before it ends an attempt for any reason: a stop drops it with its true reason, the turn completing after work.end completes it with the agent's result.
     dispatch?.dispatcher.onEnd((attemptId, how) => workEnd.resolveOnEnd(attemptId, how));
-    dispatch?.dispatcher.onEnded((attemptId) => workEnd.cleanupAfterEnd(attemptId));
+    dispatch?.dispatcher.onEnded((attemptId, how) => workEnd.cleanupAfterEnd(attemptId, how.signal));
     if (dispatch !== undefined) await workEnd.recover().catch((error: unknown) => { options.onInternalError?.(error); });
     let tools: ToolExecutionService | undefined;
     if (options.tools !== undefined && dispatch !== undefined) {

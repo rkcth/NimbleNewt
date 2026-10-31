@@ -47,10 +47,16 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "events.sources.change": { verb: "Change which event sources are watched", mode: "propose" },
   // What a local agent may use is a resource decision (card H12k): shown first in every profile (provisional).
   // How long a stuck agent's concern waits at each supervisor before it climbs is an escalation policy (owner decision 2026-10-30, supervisor ladder): shown first in every profile (provisional).
+  // Which recovery actions may be taken on a stuck agent (pausing, stopping, giving its task away) is authority over work: shown first in every profile (provisional, card V02c). Turning the steps off only narrows; on widens.
+  "recovery.ladder.set": { verb: "Change which recovery actions may be taken on a stuck agent at each level", mode: "propose" },
+  "recovery.ladder.enable": { verb: "Let supervisors take recovery steps on a stuck agent", mode: "propose" },
+  "recovery.ladder.disable": { verb: "Stop supervisors taking recovery steps on a stuck agent", mode: "apply" },
   "escalation.ladder.set": { verb: "Change how long a stuck agent waits at each level of supervisors", mode: "propose" },
   // A ceiling on agreed raises and grants widens or narrows what a decision may carry out: shown first in every profile (owner decision 2026-10-30).
   "agreed.limits.change": { verb: "Change the limits on agreed raises and grants", mode: "propose" },
   // How long a stalled resume is retried before the owner is told is a work-and-spend decision: shown first in every profile.
+  // The coverage-lapse alert is off by default and only tells the owner; turning it on or off, or changing its period, is reversible and applies at once (provisional, see the notes).
+  "coverage.settings.set": { verb: "Change the coverage-lapse alert", mode: "apply" },
   "resume.settings.set": { verb: "Change how many blocked rounds a resume retries", mode: "propose" },
   // What happens when a host stops reporting is where work runs and when it moves: shown first in every profile (owner decision 2026-10-30). The owner's own order to move the work off a host applies at once, but only when their own words say the move and name the host.
   "host.quiet.change": { verb: "Change what happens when a host stops reporting", mode: "propose" },
@@ -63,6 +69,10 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // Whether a reconnected worker takes its attempt up again by itself, and the owner's decision on one that waits, are authority over running work: shown first in every profile (card H09b, provisional).
   "reconnect.settings.set": { verb: "Change whether reconnected workers take their attempts up again by themselves", mode: "propose" },
   "reconnect.reaccept": { verb: "Decide on a reconnected worker's attempt", mode: "propose" },
+  // Proving a backup unlock method still works reads a secret file on the host and changes nothing but the record of the proof; it carries no secret in the chat (card K01b).
+  "backup.encryption.verify": { verb: "Check that a backup unlock method still works", mode: "apply" },
+  // Approving a new backup key decides who can read every later backup: always a proposal, shown first in every profile.
+  "backup.encryption.rekey": { verb: "Approve a new backup key", mode: "propose" },
   "placement.change": { verb: "Change where local-only data may go", mode: "propose" },
   // How finished work lands (card P08b): where work reaches the codebase is authority, so it is shown first in every profile. The record and the rules are the same as through the API.
   "integration.set": { verb: "Change how finished work lands", mode: "propose" },
@@ -227,7 +237,7 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
 }
 
 /** Keys whose values name records or fixed choices; every other text in a command must be in the owner's own words. */
-const EXEMPT = new Set(["taskId", "projectId", "project", "prerequisiteId", "agentId", "supervisorId", "teamId", "parentTeamId", "repositoryId", "resourceId", "responsibilityId", "ownerId", "managed", "access", "landing", "integrator", "requiredChecks", "integration", "refreshRounds", "expectedRevision", "expectedVersion", "requestId", "currency", "level", "to", "state", "workClass", "difficulty", "recovery", "kind", "priority", "itemId", "inquiryId", "occurrenceId", "watchedTaskId", "watchId", "returnAt", "sourceTurnId", "intent", "urgency", "category", "participants", "attemptId", "sessionId", "waitingSince", "decision", "reaccept", "patienceHours"]);
+const EXEMPT = new Set(["taskId", "projectId", "project", "prerequisiteId", "agentId", "supervisorId", "teamId", "parentTeamId", "repositoryId", "resourceId", "responsibilityId", "ownerId", "managed", "access", "landing", "integrator", "requiredChecks", "integration", "refreshRounds", "expectedRevision", "expectedVersion", "requestId", "currency", "level", "to", "state", "workClass", "difficulty", "recovery", "kind", "priority", "itemId", "inquiryId", "occurrenceId", "watchedTaskId", "watchId", "returnAt", "sourceTurnId", "intent", "urgency", "category", "participants", "fingerprint", "attemptId", "sessionId", "waitingSince", "decision", "reaccept", "patienceHours"]);
 
 /** The first text value of a command's arguments that is not the owner's own words (and not a record reference or fixed choice), or undefined. */
 export function foreignValue(args: Readonly<Record<string, unknown>>, ownText: string, path = ""): string | undefined {

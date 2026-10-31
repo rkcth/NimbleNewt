@@ -147,6 +147,18 @@ Result: `{ items, next? }`: each with `attemptId`, `placement`, `hostId`, `sessi
 
 Completion: finished when accepted (`completed: true`).
 
+#### `recovery.ladder.get`
+
+Which recovery actions a stalled task's concern may take at which level of the supervisor ladder, and whether agents may take recovery steps at all (owner only).
+
+Arguments:
+
+- none
+
+Result: `{ item }`: `revision`, `enabled`, `levels` (the owner's actions for level 0, 1, 2 ...; a level not listed uses the defaults), `owner` (actions at the owner's level) and `defaults`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `resume.settings.get`
 
 How many blocked rounds a stalled resume check retries before the owner is told (owner only): the owner's figure, the default and the effective one.
@@ -705,6 +717,16 @@ Arguments:
 - `limit`: most items
 
 Result: `{ item: { items, next? } }`.
+
+#### `backup.encryption.status`
+
+Owner only: whether backups are encrypted (off unless the host set it up), the key ID and its fingerprint (the SHA-256 of the backup public key, which the installation pins), what is pinned and what the owner approved for the next start, how many unlock methods the key has by kind, the last proof, and warnings (a recovery file left on the host). It never holds a passcode, a recovery key or any key material. Encryption is switched on and off on the host, because it needs the passcode and recovery file, which never travel through chat.
+
+Arguments:
+
+- none
+
+Result: `{ item: { enabled, scope, keyId, createdAt, fingerprint, warnings, pinned?, approvedNext?, unlockMethods: { passcode, recovery }, lastProof? } }`, or `{ item: { enabled: false } }`.
 
 #### `backup.list`
 
@@ -1408,6 +1430,28 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `responsibility.coverage`
+
+The active responsibilities of a project with a coverage gap: no active holder, no recent check (none yet, or older than twice the period) or no check schedule, with how long (from when the lapse was first seen, kept: an edit of the responsibility does not move it) and whether it is beyond the alert period. A responsibility driven by event sources is not counted as having no schedule. Paged by responsibility ID; one call looks at a bounded number of records and, when it stops there, says `partial` and gives `next` to go on from. `alert.status` is `on`, `off` or `damaged` (a damaged setting is not off: set it again with coverage.settings.set). A paused or retired responsibility is not listed.
+
+Arguments:
+
+- `projectId`: the project
+- `afterId` (optional): the `next` of the previous page
+- `limit` (optional): 1 to 100 (default 50)
+
+Result: `{ items, next?, partial?, asOf, alert }`.
+
+#### `coverage.settings.get`
+
+Owner only: whether the coverage-lapse alert is on (off by default), after how many minutes of a lapse the owner is told, the default, and the revision to quote when changing it.
+
+Arguments:
+
+- none
+
+Result: `{ item }`.
+
 #### `submission.list`
 
 The submissions recorded for a task, in ID order, visible exactly as `submission.get`: the owner sees all; an agent that may read the task sees the ones it made and the ones it was asked to review (a reviewer sees only the submission its review request names). A task the caller may not read is `not_found`. A listing is not a feed: IDs are hash-ordered, so new records can land before a cursor you hold and pages are not a stable snapshot; page through to collect, do not poll for news.
@@ -1593,6 +1637,62 @@ Result: `{ state }`: approved or stopped.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `recovery.ladder.set`
+
+The owner sets which recovery actions a supervisor may take on a stalled task at each level of the supervisor ladder (owner only). The actions, lowest rung first, are `nudge`, `rebrief`, `reassign`, `pause`, `stop` and `hand-to-owner`; a concern climbs them one rung at a time. `levels` lists the allowed actions for level 0 (the first supervisor), level 1 and so on, at most 16 levels (an empty list clears them; unlisted levels use the defaults); `owner` lists the actions allowed while the owner holds the concern; `enabled` turns agents' recovery steps on or off. Fields left out stay.
+
+Arguments:
+
+- `levels` (optional): for example `[["nudge"], ["nudge", "reassign"]]`
+- `owner` (optional): for example `["stop"]`
+- `enabled` (optional): true or false
+- `minGapMinutes` (optional): the least minutes between two recovery steps by agents on one concern; 0 or null for none (the default)
+- `expectedRevision` (optional): the revision you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `recovery.ladder.enable`
+
+The owner lets agents (supervisors and holders of `assignment.manage`) take recovery steps on stalled tasks within the ladder (owner only). This is the default.
+
+Arguments:
+
+- `expectedRevision` (optional): the revision you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `recovery.ladder.disable`
+
+The owner stops agents taking recovery steps on stalled tasks (owner only); the owner can still take them.
+
+Arguments:
+
+- `expectedRevision` (optional): the revision you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `recovery.step`
+
+Takes the next recovery step on a stall concern: `nudge` (a message to the agent), `rebrief` (a new brief), `reassign` (to the agent in `to`, at once; a warning names rights the new holder lacks), `pause` or `stop` the agent, or `hand-to-owner`. Allowed for the supervisor it was routed to, its current holder and holders of `assignment.manage` (not the task's own owner nor the agent it is about). What an agent may take is the installation's list for the ACTOR's own level; the step is the lowest allowed rung above the last one, except that a rung the actor cannot take, or that is refused on a precondition, is passed and recorded as skipped with the reason. Pause and stop act on the concern's task. A step is recorded as pending first and finished after its effect, so a retry does it once; a repeat of a finished command is answered as recorded.
+
+Arguments:
+
+- `concernId`: the concern
+- `expectedRevision`: the revision you read
+- `action`: nudge, rebrief, reassign, pause, stop or hand-to-owner
+- `text` (optional): the message, brief or reason (required except for hand-to-owner)
+- `to` (optional): agent:<name>, for reassign only
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `resume.settings.set`
 
 The owner sets how many blocked rounds a stalled resume check retries before the owner is told (owner only): `maxRounds` is a whole number from 1 to 10, or null to clear it so the default (3) applies. It counts for checks started afterwards; a check already running keeps the figure it started with. This is the form the chat uses.
@@ -1679,14 +1779,14 @@ Completion: finished when accepted (`completed: true`).
 
 #### `cleanup.settings.change`
 
-The owner changes the scratch cleanup (owner only). `set` has `scratch`: `after-handoff` or `keep`; `enable` (`["scratch"]`) is `after-handoff`; `disable` is `keep`; `unset` forgets the entry so the start-up default applies. Name `scratch` once. It counts from the next attempt that ends; a cleanup already decided stays as recorded. This is the form the chat uses.
+The owner changes the scratch cleanup (owner only). `set` has `scratch`: `after-handoff` or `keep`; `enable` (`["scratch"]`) is `after-handoff`; `disable` is `keep`; `unset` forgets the entry so the start-up default applies. `awaitStopHours` (1 to 8760, or null for never) is how long scratch waits for a worker to confirm it stopped before the supervisor or owner is told it is kept; `disable` is never, `enable` is 24, `unset` is the default of 24. Name each setting once. It counts from the next attempt that ends; a cleanup already decided stays as recorded. This is the form the chat uses.
 
 Arguments:
 
-- `set` (optional): for example `{ "scratch": "keep" }`
-- `enable` (optional): `["scratch"]`
-- `disable` (optional): `["scratch"]`
-- `unset` (optional): `["scratch"]`
+- `set` (optional): for example `{ "scratch": "keep" }` or `{ "awaitStopHours": 48 }`
+- `enable` (optional): `["scratch"]` or `["awaitStopHours"]`
+- `disable` (optional): `["scratch"]` or `["awaitStopHours"]`
+- `unset` (optional): `["scratch"]` or `["awaitStopHours"]`
 - `expectedRevision` (optional): the revision of the setting you read
 
 Result: `{ revision }`.
@@ -2876,6 +2976,31 @@ Arguments:
 
 Result: `{ item: { name, createdAt, kind, schemaVersion, epoch, rows } }`.
 
+#### `backup.encryption.rekey`
+
+Owner only: approves a new backup key by its fingerprint (as `backup encryption-setup` printed it, 64 hexadecimal characters), or withdraws the approval with null. The installation pins the backup key it first used and refuses to start with a different one; this is the owner's word that the change is meant. Do it while the controller runs with the old keyring, then replace the keyring file and restart. It never changes the pin itself, and old backups stay readable only with the old key's passcode or recovery file.
+
+Arguments:
+
+- `fingerprint`: the new key's fingerprint, or null
+- `expectedRevision` (optional): the pinRevision you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `backup.encryption.verify`
+
+Owner only: proves that a passcode or the recovery file still opens the backup key. The secret is NOT an argument: the owner puts it in the file the host was told about (mode 600), and this reads it for the moment of the proof; it says only ok or that it failed. One proof at a time, at most one every 10 seconds. The server sees the passcode at that moment and drops the unwrapped key at once.
+
+Arguments:
+
+- `method`: `passcode` or `recovery`
+
+Result: `{ ok, method, at }`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `message.send`
 
 Sends a message (or a reply) about a task. Information and advice wait for the agent's next check-in; a request or blocking message is kept for it; only an urgent one with the right can interrupt.
@@ -4030,6 +4155,20 @@ Arguments:
 - `taskId` (optional): the task it produced
 
 Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `coverage.settings.set`
+
+Owner only: turns the coverage-lapse alert on or off (`enabled`) and/or sets after how many minutes a responsibility without coverage is told to the owner (`afterMinutes`, 1 to 525600; null for the default of 1440). Only the fields given change. Off by default. This is the form the chat uses.
+
+Arguments:
+
+- `enabled` (optional): true or false
+- `afterMinutes` (optional): whole minutes, or null for the default
+- `expectedRevision` (optional): the revision you read (0 when none was set yet)
+
+Result: `{ revision }`.
 
 Completion: finished when accepted (`completed: true`).
 

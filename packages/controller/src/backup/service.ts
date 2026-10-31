@@ -3,6 +3,7 @@ import type { FileBlobStore } from "../artifacts/index.js";
 import type { ControllerStorage } from "../storage/index.js";
 import { type BackupKind, type BackupManifest } from "./format.js";
 import { DEFAULT_RETENTION, listBackups, pruneBackups, type BackupInfo } from "./retention.js";
+import type { Keyring } from "./crypto.js";
 import { createBackup } from "./write.js";
 
 export interface BackupServiceOptions {
@@ -17,6 +18,8 @@ export interface BackupServiceOptions {
   readonly pageSize?: number;
   /** The artifact store, if the installation has one: its blobs are part of each backup. */
   readonly blobs?: FileBlobStore;
+  /** Encrypt each backup for this key (card K01b): the public keyring only. */
+  readonly encryption?: Keyring;
 }
 
 export interface BackupStatus { readonly root: string; readonly newest?: { name: string; createdAt: string; kind: BackupKind }; readonly count: number; readonly running: boolean; readonly lastError?: { at: string; message: string } }
@@ -65,7 +68,7 @@ export class BackupService {
     if (this.#running !== undefined) return this.#running;
     const run = (async () => {
       try {
-        const made = await createBackup(this.#storage, { root: this.#options.root, kind, version: this.#options.version, ...(this.#options.now === undefined ? {} : { now: this.#options.now }), ...(this.#options.pageSize === undefined ? {} : { pageSize: this.#options.pageSize }), ...(this.#options.blobs === undefined ? {} : { blobs: this.#options.blobs }) });
+        const made = await createBackup(this.#storage, { root: this.#options.root, kind, version: this.#options.version, ...(this.#options.now === undefined ? {} : { now: this.#options.now }), ...(this.#options.pageSize === undefined ? {} : { pageSize: this.#options.pageSize }), ...(this.#options.blobs === undefined ? {} : { blobs: this.#options.blobs }), ...(this.#options.encryption === undefined ? {} : { encryption: this.#options.encryption }) });
         this.#lastError = undefined;
         await pruneBackups(this.#options.root, { ...(this.#options.now === undefined ? {} : { now: this.#options.now }), retention: this.#options.retention ?? DEFAULT_RETENTION }).catch((error) => { this.#lastError = { at: this.#now().toISOString(), message: `old backups could not be removed: ${error instanceof Error ? error.message : String(error)}` }; });
         return made;
@@ -84,13 +87,13 @@ export class BackupService {
     // After a failed run, wait before trying again: a full disk would otherwise be hit with a new copy every tick.
     if (this.#lastError !== undefined && this.#now().getTime() - Date.parse(this.#lastError.at) < (this.#options.retryAfterMs ?? 3_600_000)) return false;
     let newest;
-    try { newest = (await listBackups(this.#options.root)).find((b) => b.manifest.kind !== "pre-upgrade"); } catch (error) {
+    try { newest = (await listBackups(this.#options.root)).find((b) => b.manifest.kind !== "pre-upgrade" && b.trusted); } catch (error) {
       // A backups folder that cannot be read is a failed run: it shows in the status and is not retried every tick.
       this.#lastError = { at: this.#now().toISOString(), message: error instanceof Error ? error.message.slice(0, 300) : "the backups folder could not be read" };
       return false;
     }
     const every = this.#options.everyMs ?? 24 * 3_600_000;
-    if (newest !== undefined && this.#now().getTime() - Date.parse(newest.manifest.createdAt) < every) return false;
+    if (newest !== undefined && this.#now().getTime() - Date.parse(newest.at) < every) return false;
     try { await this.backUpNow("scheduled"); } catch { return false; } // the failure is kept in `status`
     return true;
   }

@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, open, rename, rm } from "node:fs/promises";
+import { mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { SNAPSHOT_TABLES, TABLE_SPECS, type ControllerStorage, type SnapshotRow, type SnapshotTable } from "../storage/index.js";
+import { SNAPSHOT_TABLES, TABLE_SPECS, canonicalJson, type ControllerStorage, type SnapshotRow, type SnapshotTable } from "../storage/index.js";
 import type { FileBlobStore } from "../artifacts/index.js";
-import { ARTIFACT_FOLDER, ARTIFACT_INDEX, BACKUP_FORMAT, BACKUP_NOTES, MANIFEST_FILE, PARTIAL_SUFFIX, type BackupArtifacts, type BackupFileEntry, type BackupKind, type BackupManifest } from "./format.js";
+import { beginSeal, hasherFor, openSink, type BackupCipher, type BackupSeal, type Keyring } from "./crypto.js";
+import { ARTIFACT_FOLDER, ARTIFACT_INDEX, BACKUP_FORMAT, ENCRYPTION_MARKER, BACKUP_NOTES, MANIFEST_FILE, PARTIAL_SUFFIX, SEALED_SUFFIX, tableFile, type BackupArtifacts, type BackupFileEntry, type BackupKind, type BackupManifest } from "./format.js";
 
 export interface BackupOptions {
   /** The folder the backups live in; each backup is a folder of its own inside it. */
@@ -17,6 +18,8 @@ export interface BackupOptions {
   readonly pageSize?: number;
   /** The artifact store, when the installation has one: its blobs go into the backup too. */
   readonly blobs?: FileBlobStore;
+  /** Encrypt the backup for this key (the public keyring only: no secret is needed, so a scheduled backup runs unattended). */
+  readonly encryption?: Keyring;
 }
 
 const stamp = (d: Date): string => d.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
@@ -39,17 +42,21 @@ async function write(storage: Pick<ControllerStorage, "snapshot">, options: Back
   const final = join(options.root, name);
   const staging = `${final}${PARTIAL_SUFFIX}`;
   const pageSize = options.pageSize ?? 500;
+  const sealing = options.encryption === undefined ? undefined : beginSeal(options.encryption);
+  const cipher = sealing?.cipher;
   const snapshot = await storage.snapshot();
   try {
     await mkdir(options.root, { recursive: true, mode: 0o700 });
     await rm(staging, { recursive: true, force: true });
     await mkdir(staging, { mode: 0o700 });
+    // The folder remembers that encrypted backups are kept in it, so a plain one that turns up later is not taken for one of them without being asked (the command line checks this).
+    if (options.encryption !== undefined) await writeFile(join(options.root, ENCRYPTION_MARKER), `${JSON.stringify({ keyId: options.encryption.keyId, at: at.toISOString() })}\n`, { flag: "wx", mode: 0o600 }).catch(() => undefined);
     const files: BackupFileEntry[] = [];
     let epoch = 0;
     for (const table of SNAPSHOT_TABLES) {
-      const file = `${table}.jsonl`;
-      const handle = await open(join(staging, file), "wx", 0o600);
-      const hash = createHash("sha256");
+      const file = tableFile(table, cipher !== undefined);
+      const handle = await openSink(join(staging, file), cipher, file);
+      const hash = hasherFor(cipher);
       let rows = 0;
       let bytes = 0;
       try {
@@ -66,12 +73,14 @@ async function write(storage: Pick<ControllerStorage, "snapshot">, options: Back
           if (table === "state" || page.length < pageSize) break;
           after = page[page.length - 1];
         }
-        await handle.sync();
-      } finally { await handle.close(); }
+        await handle.finish();
+      } catch (error) { await handle.abort().catch(() => undefined); throw error; }
       files.push({ table, file, rows, bytes, sha256: hash.digest("hex") });
     }
-    const artifacts = options.blobs === undefined ? undefined : await copyBlobs(options.blobs, staging);
-    const manifest: BackupManifest = { format: BACKUP_FORMAT, product: "nimblenewt", name, createdAt: at.toISOString(), kind: options.kind, version: options.version, schemaVersion: snapshot.schemaVersion, epoch, files, ...(artifacts === undefined ? {} : { artifacts }), notes: BACKUP_NOTES, complete: true };
+    const artifacts = options.blobs === undefined ? undefined : await copyBlobs(options.blobs, staging, cipher);
+    const unsigned: BackupManifest = { format: BACKUP_FORMAT, product: "nimblenewt", name, createdAt: at.toISOString(), kind: options.kind, version: options.version, schemaVersion: snapshot.schemaVersion, epoch, files, ...(artifacts === undefined ? {} : { artifacts }), ...(sealing === undefined ? {} : { encryption: sealing.seal }), notes: BACKUP_NOTES, complete: true };
+    // An encrypted backup's manifest ends with a keyed MAC over all of it, so the name, time, kind, epoch, notes, skipped list and file list cannot be changed by whoever only has the folder.
+    const manifest: BackupManifest = cipher === undefined ? unsigned : { ...unsigned, mac: cipher.manifestMac(canonicalJson(unsigned as never)) };
     const manifestHandle = await open(join(staging, MANIFEST_FILE), "wx", 0o600);
     try { await manifestHandle.write(`${JSON.stringify(manifest, null, 2)}\n`); await manifestHandle.sync(); } finally { await manifestHandle.close(); }
     await rename(staging, final);
@@ -90,7 +99,7 @@ async function write(storage: Pick<ControllerStorage, "snapshot">, options: Back
  */
 class CopyWriteError extends Error { constructor(override readonly cause: unknown) { super("write failed"); } }
 
-async function copyBlobs(blobs: FileBlobStore, staging: string): Promise<BackupArtifacts> {
+async function copyBlobs(blobs: FileBlobStore, staging: string, cipher: BackupCipher | undefined): Promise<BackupArtifacts> {
   const folder = join(staging, ARTIFACT_FOLDER);
   await mkdir(folder, { mode: 0o700 });
   return (async () => {
@@ -98,7 +107,9 @@ async function copyBlobs(blobs: FileBlobStore, staging: string): Promise<BackupA
     const skipped: { digest: string; why: "corrupt" | "missing" }[] = [];
     let bytes = 0;
     for (const info of await blobs.list()) {
-      const target = await open(join(folder, info.digest), "wx", 0o600);
+      // A sealed backup names a blob by its number, not its digest (the digest names the content); the digest is only in the sealed index.
+      const stored = cipher === undefined ? info.digest : `blob-${lines.length + skipped.length}${SEALED_SUFFIX}`;
+      const target = await openSink(join(folder, stored), cipher, `${ARTIFACT_FOLDER}/${stored}`);
       const hash = createHash("sha256");
       let size = 0;
       let why: "corrupt" | "missing" | undefined;
@@ -108,16 +119,17 @@ async function copyBlobs(blobs: FileBlobStore, staging: string): Promise<BackupA
           for await (const chunk of createReadStream(blobs.pathOf(info.digest))) { const buffer = chunk as Buffer; hash.update(buffer); await target.write(buffer).catch((error) => { throw new CopyWriteError(error); }); size += buffer.length; }
         } catch (error) { if (error instanceof CopyWriteError) throw error.cause; why = "missing"; }
         if (why === undefined && hash.digest("hex") !== info.digest) why = "corrupt";
-        if (why === undefined) await target.sync();
-      } finally { await target.close(); }
-      if (why !== undefined) { await rm(join(folder, info.digest), { force: true }); skipped.push({ digest: info.digest, why }); continue; }
-      lines.push(`${JSON.stringify({ digest: info.digest, size })}\n`);
+        if (why === undefined) await target.finish(); else await target.abort();
+      } catch (error) { await target.abort().catch(() => undefined); throw error; }
+      if (why !== undefined) { await rm(join(folder, stored), { force: true }); skipped.push({ digest: info.digest, why }); continue; }
+      lines.push(`${JSON.stringify(cipher === undefined ? { digest: info.digest, size } : { digest: info.digest, size, file: stored })}\n`);
       bytes += size;
     }
     const text = Buffer.from(lines.join(""), "utf8");
-    const index = await open(join(staging, ARTIFACT_INDEX), "wx", 0o600);
-    try { await index.write(text); await index.sync(); } finally { await index.close(); }
-    return { index: { file: ARTIFACT_INDEX, rows: lines.length, bytes: text.length, sha256: createHash("sha256").update(text).digest("hex") }, blobs: lines.length, bytes, skipped };
+    const indexFile = cipher === undefined ? ARTIFACT_INDEX : `${ARTIFACT_INDEX}${SEALED_SUFFIX}`;
+    const index = await openSink(join(staging, indexFile), cipher, indexFile);
+    try { await index.write(text); await index.finish(); } catch (error) { await index.abort().catch(() => undefined); throw error; }
+    return { index: { file: indexFile, rows: lines.length, bytes: text.length, sha256: hasherFor(cipher).update(text).digest("hex") }, blobs: lines.length, bytes, skipped };
   })();
 }
 

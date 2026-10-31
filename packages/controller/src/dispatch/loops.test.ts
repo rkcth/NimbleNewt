@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { DomainError } from "../domain/errors.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
-import { activeAgents, assignedTaskIn, attendanceLoops, budgetNoticeLoops, decisionLoops, eventLoops, meetingLoops, messageLoops, projectIds, recordLoops, responsibilityLoops, archiveLoops, untoldImprovementLoops, attemptWaker, wakeLoops, recoveryLoops, standupLoops, sourceLoops } from "./loops.js";
+import { activeAgents, assignedTaskIn, attendanceLoops, coverageLoops, budgetNoticeLoops, decisionLoops, eventLoops, meetingLoops, messageLoops, projectIds, recordLoops, responsibilityLoops, archiveLoops, untoldImprovementLoops, attemptWaker, wakeLoops, recoveryLoops, standupLoops, sourceLoops } from "./loops.js";
 import { buildWorld, workGrants } from "./testing/world.js";
 
 after(stopServer);
@@ -259,4 +259,15 @@ test("archive loop: one project's failure does not skip the others and is raised
   const [loop] = archiveLoops({ archive: async (_by, o) => { seen.push(o.projectId!); if (o.projectId === "proj-a") throw new Error("boom"); return 0; } }, async () => ["proj-a", "proj-b"]);
   await assert.rejects(loop!.run({ id: "svc" } as never), /boom/);
   assert.deepEqual(seen, ["proj-a", "proj-b"]);
+});
+
+test("the coverage loop tells each project\'s notice once, marks it told only after it was sent, counts an already-sent id as sent, and a failing notice does not skip the others (card P04)", async () => {
+  const told: string[] = [];
+  const marked: string[] = [];
+  const notice = (id: string, p: string) => ({ alertId: id, projectId: p, count: 1, items: [{ responsibilityId: `r-${id}`, title: "t", reasons: ["no-holder"], since: "2026-10-22T10:00:00.000Z", lapsedMinutes: 90 }], covered: [`r-${id}`] });
+  const [loop] = coverageLoops({ sweep: async () => [notice("x", "proj-a"), notice("y", "proj-b"), notice("z", "proj-c")], markTold: async (_by, n) => { marked.push(n.alertId); } }, async (g) => { told.push(g.alertId); if (g.alertId === "x") throw new DomainError("command_conflict", "already"); if (g.alertId === "y") throw new Error("boom"); });
+  assert.equal(loop!.name, "responsibilities.coverage");
+  await assert.rejects(loop!.run({ id: "service:dispatcher", kind: "service" } as never), /boom/);
+  assert.deepEqual(told, ["x", "y", "z"]);
+  assert.deepEqual(marked, ["x", "z"], "a notice that failed is not marked told, so it comes again");
 });

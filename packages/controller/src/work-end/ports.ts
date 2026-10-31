@@ -5,7 +5,7 @@ import type { Principal } from "../security/principals.js";
 import type { SubmissionService } from "../submissions/index.js";
 import type { EndingAttempt, WorkEndDeps } from "./work-end.js";
 
-type Dispatcher = Pick<DispatcherService, "get" | "freeze" | "settle" | "operations" | "finishWith">;
+type Dispatcher = Pick<DispatcherService, "get" | "freeze" | "settle" | "operations" | "finishWith" | "confirmStopped">;
 
 /**
  * The attempt port of the ending (card H12n) bound to the real dispatcher: the attempt's state, its freeze, the settling of calls in flight (with the calls that had to be cut, and whether each could have changed the checkout), and its end
@@ -18,7 +18,7 @@ export function dispatcherEndingPorts(dispatch: () => { readonly dispatcher: Dis
       const h = need();
       const d = await h.dispatcher.get(h.principal, attemptId);
       if (d === undefined) return undefined;
-      return { attemptId: d.attemptId, taskId: d.taskId, projectId: d.projectId, agentId: d.agentId, live: d.state !== "finished", ...(d.workerStopped === true ? { workerStopped: true } : {}), ...(d.stopped === undefined ? {} : { stopped: { by: d.stopped.by, reason: d.stopped.reason } }) };
+      return { attemptId: d.attemptId, taskId: d.taskId, projectId: d.projectId, agentId: d.agentId, live: d.state !== "finished", hostId: d.hostId, generation: d.generation, ...(d.workerStopped === true ? { workerStopped: true } : {}), ...(d.stopped === undefined ? {} : { stopped: { by: d.stopped.by, reason: d.stopped.reason } }) };
     },
     freeze: async (attemptId, reason) => { const h = need(); await h.dispatcher.freeze(h.principal, attemptId, reason, { ending: true }); },
     settle: async (attemptId) => {
@@ -34,6 +34,7 @@ export function dispatcherEndingPorts(dispatch: () => { readonly dispatcher: Dis
       const ops = (await h.dispatcher.operations(h.principal, attemptId)) ?? [];
       return { killed: ops.filter((o) => running.has(o.callId) && (o.state === "cancelled" || o.state === "uncertain")).map((o) => ({ callId: o.callId, write: o.state === "uncertain" && !o.readOnly, reason: o.state === "uncertain" ? "its outcome is not known" : "it was told to stop" })) };
     },
+    confirmStopped: async (attemptId) => { const h = need(); return h.dispatcher.confirmStopped(h.principal, attemptId); },
     finish: async (attemptId, result, _key, confirm) => { const h = need(); return h.dispatcher.finishWith(h.principal, attemptId, { ...result, ...(confirm === undefined ? {} : { confirm }) }); },
   };
 }
@@ -67,14 +68,24 @@ export function stagedSubmit(deps: {
   };
 }
 
+/** How far before the attempt's last sign of life a checkpoint may lie and still count as covering its work (a checkpoint is taken as the attempt winds down; a few minutes of heartbeat lag is not lost work). */
+export const CHECKPOINT_WINDOW_MS = 2 * 60_000;
+
 /**
- * Whether a recorded continuation was taken BY THIS ATTEMPT: by the attempt's agent, at or after the moment the attempt started. A continuation of an earlier attempt of the same task says nothing about this attempt's own work, which a
- * later attempt would lose with its scratch (card H12n, owner decision 2026-10-30; provisional: the start of the attempt is the cut, since the dispatcher keeps no time of the last write).
+ * Whether a recorded continuation covers THIS ATTEMPT's work: taken by the attempt's agent, at or after the start of the attempt, and not older than the attempt's last sign of life (its last heartbeat; else the time it ended) less a small window.
+ * A checkpoint taken a minute after the start, followed by hours of work and a crash or a lost worker, does not cover that work, so its scratch is kept (card H12n, owner decision 2026-10-30; the dispatcher records no time of the last write, the heartbeat is the nearest it has).
+ * Returns true, or the reason it does not cover.
  */
-export function checkpointByAttempt(continuation: { readonly capturedAt: string; readonly agent: string } | undefined, attempt: { readonly agentId: string; readonly startedAt?: string; readonly claimedAt: string }): boolean {
-  if (continuation === undefined) return false;
+export function checkpointVerdict(continuation: { readonly capturedAt: string; readonly agent: string } | undefined, attempt: { readonly agentId: string; readonly startedAt?: string; readonly claimedAt: string; readonly lastHeartbeatAt?: string; readonly outcome?: { readonly at?: string } }): true | string {
+  if (continuation === undefined) return "no checkpoint is recorded";
   const bare = (id: string): string => (id.startsWith("agent:") ? id.slice("agent:".length) : id);
-  if (bare(continuation.agent) !== bare(attempt.agentId)) return false;
+  if (bare(continuation.agent) !== bare(attempt.agentId)) return "no checkpoint of this attempt is recorded: the last one is another agent's";
   const since = Date.parse(attempt.startedAt ?? attempt.claimedAt), at = Date.parse(continuation.capturedAt);
-  return Number.isFinite(since) && Number.isFinite(at) && at >= since;
+  if (!Number.isFinite(since) || !Number.isFinite(at) || at < since) return "no checkpoint of this attempt is recorded: the last one is from before it";
+  const lastSign = Date.parse(attempt.lastHeartbeatAt ?? attempt.outcome?.at ?? "");
+  if (Number.isFinite(lastSign) && at < lastSign - CHECKPOINT_WINDOW_MS) return `no checkpoint covers the attempt: the last (${continuation.capturedAt}) is older than the attempt's last activity (${new Date(lastSign).toISOString()}), so later work is not covered`;
+  return true;
+}
+export function checkpointByAttempt(continuation: Parameters<typeof checkpointVerdict>[0], attempt: Parameters<typeof checkpointVerdict>[1]): boolean {
+  return checkpointVerdict(continuation, attempt) === true;
 }

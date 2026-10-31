@@ -3,7 +3,7 @@ import { after, test } from "node:test";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import type { Principal } from "../security/principals.js";
 import { buildWorld } from "../dispatch/testing/world.js";
-import { ScratchCleanupService, SCRATCH_LIMITS, WorkEndService, checkpointByAttempt, ownerNotices, supervisorNotice, type EndingAttempt, type Leftover, type ScratchMode, type ScratchOrder, type ScratchReport, type SettleReport, type WorkEndDeps } from "./index.js";
+import { ScratchCleanupService, SCRATCH_LIMITS, WorkEndService, checkpointByAttempt, checkpointVerdict, ownerNotices, supervisorNotice, type EndingAttempt, type Leftover, type ScratchMode, type ScratchOrder, type ScratchReport, type SettleReport, type WorkEndDeps } from "./index.js";
 
 after(stopServer);
 
@@ -12,7 +12,9 @@ for (const backend of backends) {
     mode?: ScratchMode; checkpoint?: boolean; settle?: SettleReport; submitFails?: boolean; noHost?: boolean; hostThrows?: boolean;
     report?: ScratchReport; reportFailsOnce?: boolean; stopped?: boolean; unconfirmed?: boolean; finishFails?: boolean; modeHook?: () => Promise<void>;
     /** A continuation recorded for the task (real rule: `checkpointByAttempt`), instead of a plain yes/no. */
-    continuation?: { capturedAt: string; agent: string }; startedAt?: string;
+    continuation?: { capturedAt: string; agent: string }; startedAt?: string; lastHeartbeatAt?: string;
+    /** The sweep's port: whether the worker is confirmed stopped now, the patience (hours, null = never tell), and how often the stuck notice was sent. */
+    stopNow?: () => boolean; patience?: number | null; attemptsGetThrows?: () => boolean;
   }
   const rig = async (opts: Opts = {}) => {
     const store = await backend.open();
@@ -20,15 +22,18 @@ for (const backend of backends) {
     await w.principals.enroll(w.owner, { commandId: "en-ann", kind: "agent", name: "ann", grants: [] });
     const ann: Principal = await w.principals.authenticate((await w.principals.issueCredential(w.owner, "agent:ann")).token);
     const { taskId } = await w.task("t", { aid: "ann" });
-    const s = { attempt: { attemptId: "att-1", taskId, projectId: w.project, agentId: "agent:ann", live: true, ...(opts.unconfirmed ? {} : { workerStopped: true }), ...(opts.stopped ? { stopped: { by: "owner" as const, reason: "stop" } } : {}) } as EndingAttempt, finished: 0, orders: [] as { order: ScratchOrder; finishedAtOrder: number }[], reports: [] as { leftovers: readonly Leftover[]; key: string }[], mode: opts.mode ?? "after-handoff", checkpoint: opts.checkpoint ?? false, reportFailed: false, reportCalls: 0 };
+    const s = { attempt: { attemptId: "att-1", taskId, projectId: w.project, agentId: "agent:ann", live: true, ...(opts.unconfirmed ? {} : { workerStopped: true }), ...(opts.stopped ? { stopped: { by: "owner" as const, reason: "stop" } } : {}) } as EndingAttempt, finished: 0, orders: [] as { order: ScratchOrder; finishedAtOrder: number }[], reports: [] as { leftovers: readonly Leftover[]; key: string }[], mode: opts.mode ?? "after-handoff", checkpoint: opts.checkpoint ?? false, reportFailed: false, reportCalls: 0, stuck: [] as string[] };
+    let late: WorkEndService | undefined;
     const cleanup = ScratchCleanupService.withEpoch(w.storage, w.epoch, {
       mode: async () => { await opts.modeHook?.(); return s.mode; },
       ...(opts.noHost ? {} : { order: async (order: ScratchOrder) => { s.orders.push({ order, finishedAtOrder: s.finished }); if (opts.hostThrows) throw new Error("host down"); return opts.report ?? { removed: true, leftovers: [] }; } }),
+      workerStopped: async () => opts.stopNow?.() === true, patienceHours: async () => (opts.patience === undefined ? 24 : opts.patience), stuck: async (_a, hours, key) => { s.stuck.push(`${hours}:${key}`); },
+      before: async (a) => late?.droppedReason(a.attemptId), decide: async (id) => late?.scratchDecision(id),
       report: async (_a, leftovers, key) => { s.reportCalls++; if (opts.reportFailsOnce && !s.reportFailed) { s.reportFailed = true; throw new Error("supervisor inbox busy"); } s.reports.push({ leftovers, key }); },
     }, { clock: w.clock.now });
     const deps: WorkEndDeps = {
       attempts: {
-        get: async (id) => (id === "att-1" ? s.attempt : undefined),
+        get: async (id) => { if (opts.attemptsGetThrows?.()) throw new Error("dispatcher unavailable"); return id === "att-1" ? s.attempt : undefined; },
         freeze: async () => undefined,
         settle: async () => opts.settle ?? { killed: [] },
         finish: async () => { if (opts.finishFails) throw new Error("finish failed"); s.finished++; s.attempt = { ...s.attempt, live: false }; },
@@ -36,10 +41,11 @@ for (const backend of backends) {
       landing: async () => ({ base: "h1", head: "h1", mine: ["a.ts"], landed: [] }),
       submit: async () => { if (opts.submitFails) throw new Error("git said no"); return { submissionId: "sub-1" }; },
       blockers: { openBlocker: async (c) => w.blockers.openBlocker(c) },
-      scratch: { cleanup, checkpointRecorded: async () => (opts.continuation !== undefined ? checkpointByAttempt(opts.continuation, { agentId: "agent:ann", ...(opts.startedAt === undefined ? { claimedAt: "2026-01-01T00:00:00.000Z" } : { startedAt: opts.startedAt, claimedAt: opts.startedAt }) }) : s.checkpoint) },
+      scratch: { cleanup, checkpointRecorded: async () => (opts.continuation !== undefined ? checkpointVerdict(opts.continuation, { agentId: "agent:ann", ...(opts.lastHeartbeatAt === undefined ? {} : { lastHeartbeatAt: opts.lastHeartbeatAt }), ...(opts.startedAt === undefined ? { claimedAt: "2026-01-01T00:00:00.000Z" } : { startedAt: opts.startedAt, claimedAt: opts.startedAt }) }) : s.checkpoint) },
     };
     const make = () => WorkEndService.withEpoch(w.storage, w.epoch, deps, { clock: w.clock.now });
-    return { store, w, ann, s, cleanup, service: make(), make };
+    late = make();
+    return { store, w, ann, s, cleanup, service: make(), make, late };
   };
 
   test(`${backend.name}: scratch is ordered only after the attempt is finished and the work was submitted, once, and a replay or a second instance orders nothing more`, async () => {
@@ -165,14 +171,15 @@ for (const backend of backends) {
       await r.service.request(r.ann, { commandId: "e1", attemptId: "att-1", submit: true, result: "done" });
       const done = await r.service.complete("att-1");
       assert.equal(done.steps?.["cleanup.scratch"]?.state, "kept");
-      assert.match(done.steps?.["cleanup.scratch"]?.why ?? "", /worker was not confirmed stopped/);
+      assert.match(done.steps?.["cleanup.scratch"]?.why ?? "", /worker to confirm it stopped/, "waits for the confirmation");
+      assert.equal((await r.cleanup.get("att-1"))?.state, "awaiting-stop");
       assert.equal(r.s.orders.length, 0);
     } finally { await r.store.close(); }
     const q = await rig({ unconfirmed: true, stopped: true, checkpoint: true });
     try {
       await q.service.cleanupAfterEnd("att-1");
       assert.equal(q.s.orders.length, 0);
-      assert.match((await q.cleanup.get("att-1"))?.why ?? "", /worker was not confirmed stopped/);
+      assert.match((await q.cleanup.get("att-1"))?.why ?? "", /worker to confirm it stopped/);
     } finally { await q.store.close(); }
   });
 
@@ -282,6 +289,9 @@ for (const backend of backends) {
       assert.equal(await r.cleanup.recover(), 0, "a decision that is only seconds old is left to the run that may still be going");
       assert.equal(r.s.orders.length, 0);
       r.w.clock.advance(SCRATCH_LIMITS.staleMs + 1000);
+      assert.equal(await r.cleanup.recover(), 0, "the hung run still holds the order's lease: the sweep does not send the same order at the same time (and counts nothing done)");
+      assert.equal(r.s.orders.length, 0);
+      r.w.clock.advance(SCRATCH_LIMITS.leaseMs);
       assert.equal(await r.cleanup.recover(), 1);
       assert.equal(r.s.orders.length, 1);
       assert.equal(r.s.orders[0]!.order.key, "scratch:att-1");
@@ -311,5 +321,136 @@ for (const backend of backends) {
       assert.equal(last.reported, true);
       assert.match(last.gaveUp ?? "", /could not be reported/);
     } finally { await g.store.close(); }
+  });
+
+  const plain = (r: { w: { project: string } }, extra: Partial<{ hostId: string; generation: number; attemptId: string }> = {}) => ({ attemptId: "att-1", taskId: "t", projectId: r.w.project, agentId: "agent:ann", ...extra });
+
+  test(`${backend.name}: a checkpoint taken a minute after the start, followed by hours of work, does not cover the work: the scratch is kept and the reason recorded`, async () => {
+    const start = "2026-03-01T10:00:00.000Z";
+    const rec = { capturedAt: "2026-03-01T10:01:00.000Z", agent: "agent:ann" };
+    const att = { agentId: "agent:ann", startedAt: start, claimedAt: start, lastHeartbeatAt: "2026-03-01T13:00:00.000Z" };
+    assert.equal(checkpointByAttempt(rec, att), false);
+    assert.match(String(checkpointVerdict(rec, att)), /older than the attempt's last activity/);
+    assert.equal(checkpointByAttempt({ capturedAt: "2026-03-01T12:59:00.000Z", agent: "agent:ann" }, att), true, "a checkpoint taken as the attempt wound down covers it");
+    assert.equal(checkpointByAttempt(rec, { ...att, lastHeartbeatAt: "2026-03-01T10:02:00.000Z" }), true, "a short attempt: the checkpoint is within the window");
+    const r = await rig({ continuation: rec, startedAt: start, lastHeartbeatAt: att.lastHeartbeatAt });
+    try {
+      await r.service.request(r.ann, { commandId: "e1", attemptId: "att-1", result: "blocked" });
+      const done = await r.service.complete("att-1");
+      assert.equal(r.s.orders.length, 0, "no order: the work after the checkpoint would be lost");
+      assert.equal(done.steps?.["cleanup.scratch"]?.state, "kept");
+      assert.match(done.steps?.["cleanup.scratch"]?.why ?? "", /older than the attempt's last activity/);
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: a worker that never confirmed stopping: the cleanup waits (listed), the sweep asks again and orders once the stop is confirmed; after the patience the owner is told once`, async () => {
+    let stopped = false;
+    const r = await rig({ checkpoint: true, unconfirmed: true, stopNow: () => stopped, patience: 24 });
+    try {
+      await r.service.request(r.ann, { commandId: "e1", attemptId: "att-1", result: "blocked" });
+      const done = await r.service.complete("att-1");
+      assert.equal(done.state, "done");
+      assert.equal((await r.cleanup.get("att-1"))?.state, "awaiting-stop");
+      assert.equal(r.s.orders.length, 0);
+      // Still not stopped: nothing is ordered, and nothing is said before the patience has run out.
+      r.w.clock.advance(SCRATCH_LIMITS.recheckMs + 1000);
+      await r.cleanup.recover();
+      assert.equal(r.s.orders.length, 0);
+      assert.deepEqual(r.s.stuck, []);
+      r.w.clock.advance(25 * 3_600_000);
+      await r.cleanup.recover();
+      await r.cleanup.recover();
+      assert.deepEqual(r.s.stuck, ["24:scratch-stuck:att-1"], "told once, with the patience that applied");
+      assert.equal((await r.cleanup.get("att-1"))?.state, "awaiting-stop", "kept, still open");
+      // The stop is confirmed later: the order goes out and the scratch is removed.
+      stopped = true;
+      r.w.clock.advance(SCRATCH_LIMITS.recheckMs + 1000);
+      await r.cleanup.recover();
+      assert.equal(r.s.orders.length, 1);
+      assert.equal((await r.cleanup.get("att-1"))?.state, "removed");
+    } finally { await r.store.close(); }
+    // With the patience off nobody is told, however long it takes.
+    const off = await rig({ checkpoint: true, unconfirmed: true, patience: null });
+    try {
+      await off.service.request(off.ann, { commandId: "e1", attemptId: "att-1", result: "blocked" });
+      await off.service.complete("att-1");
+      off.w.clock.advance(100 * 3_600_000);
+      await off.cleanup.recover();
+      assert.deepEqual(off.s.stuck, []);
+    } finally { await off.store.close(); }
+  });
+
+  test(`${backend.name}: the cleanup record exists before anything that can throw: an attempt that cannot be read leaves a deciding record the sweep finishes`, async () => {
+    let down = true;
+    const r = await rig({ checkpoint: true, attemptsGetThrows: () => down });
+    try {
+      await r.late.cleanupAfterEnd("att-1");
+      assert.equal((await r.cleanup.get("att-1"))?.state, "deciding", "recorded and listed before the attempt was read");
+      assert.equal(r.s.orders.length, 0);
+      down = false;
+      r.w.clock.advance(SCRATCH_LIMITS.staleMs + 1000);
+      assert.equal(await r.cleanup.recover(), 1);
+      assert.equal(r.s.orders.length, 1);
+      assert.equal((await r.cleanup.get("att-1"))?.state, "removed");
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: two runs for one record never send the same order at once; a busy host answer is not a refusal; a removal is never overwritten by a later 'kept'`, async () => {
+    const r = await rig();
+    try {
+      let release: (v: ScratchReport) => void = () => undefined;
+      const gate = new Promise<ScratchReport>((resolve) => { release = resolve; });
+      const sent: ScratchOrder[] = [];
+      const slow = ScratchCleanupService.withEpoch(r.w.storage, r.w.epoch, { mode: async () => "after-handoff", order: (o) => { sent.push(o); return gate; }, report: async () => undefined }, { clock: r.w.clock.now });
+      const first = slow.run(plain(r), []);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const second = await slow.run(plain(r), []);
+      assert.equal(second.state, "ordering", "the second run finds the order claimed and leaves it");
+      assert.equal(sent.length, 1);
+      release({ removed: true, leftovers: [] });
+      assert.equal((await first).state, "removed");
+      assert.equal(sent.length, 1);
+    } finally { await r.store.close(); }
+    const b = await rig();
+    try {
+      let n = 0;
+      const host = ScratchCleanupService.withEpoch(b.w.storage, b.w.epoch, { mode: async () => "after-handoff", order: async () => (++n === 1 ? { removed: false, busy: true, detail: "busy", leftovers: [] } : { removed: true, leftovers: [] }), report: async () => undefined }, { clock: b.w.clock.now });
+      assert.equal((await host.run(plain(b), [])).state, "ordering", "busy: nothing is decided");
+      assert.equal((await host.run(plain(b), [])).state, "removed", "asked again: removed");
+    } finally { await b.store.close(); }
+  });
+
+  test(`${backend.name}: the order names the attempt, its host and generation, and a replay for an older attempt never touches a successor's scratch`, async () => {
+    const r = await rig();
+    try {
+      // A host that keeps scratch per attempt, as the contract says.
+      const scratch = new Map<string, boolean>([["att-1", true], ["att-2", true]]);
+      const orders: ScratchOrder[] = [];
+      const host = ScratchCleanupService.withEpoch(r.w.storage, r.w.epoch, {
+        mode: async () => "after-handoff", report: async () => undefined,
+        order: async (o) => { orders.push(o); const had = scratch.get(o.attemptId) === true; scratch.set(o.attemptId, false); return had ? { removed: true, leftovers: [] } : { removed: false, alreadyRemoved: true, leftovers: [] }; },
+      }, { clock: r.w.clock.now });
+      await host.run(plain(r, { hostId: "host:r1", generation: 3 }), []);
+      assert.deepEqual([orders[0]!.attemptId, orders[0]!.hostId, orders[0]!.generation, orders[0]!.key], ["att-1", "host:r1", 3, "scratch:att-1"]);
+      // The same task's successor attempt has scratch of its own; a replay for att-1 (a restart) leaves it alone.
+      await host.run(plain(r, { hostId: "host:r1", generation: 3 }), []);
+      assert.equal(orders.length, 1, "a recorded cleanup is not ordered again");
+      assert.equal(scratch.get("att-2"), true, "the successor's scratch is untouched");
+      await host.run(plain(r, { hostId: "host:r2", generation: 4, attemptId: "att-2" }), []);
+      assert.deepEqual([orders[1]!.attemptId, orders[1]!.key, orders[1]!.generation], ["att-2", "scratch:att-2", 4]);
+      assert.equal(scratch.get("att-2"), false);
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: what the host says keeps letters of any script, marks, digits, spaces and common path punctuation; control characters, backticks and double quotes do not survive`, async () => {
+    const r = await rig({ report: { removed: true, leftovers: [{ kind: "installed", what: "/home/zoë/My  Projects (v2)/[x]/it's & $HOME!;\n`rm -rf`\"q\"\u0007 日本語/ñ" }] } });
+    try {
+      await r.service.request(r.ann, { commandId: "e1", attemptId: "att-1", submit: true, result: "done" });
+      await r.service.complete("att-1");
+      const what = r.s.reports[0]!.leftovers[0]!.what;
+      assert.match(what, /zoë\/My {2}Projects \(v2\)\/\[x\]\/it's & \$HOME!;/);
+      assert.match(what, /日本語\/ñ/);
+      assert.doesNotMatch(what, /[`"\u0007]/);
+    } finally { await r.store.close(); }
   });
 }

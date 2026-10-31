@@ -104,8 +104,9 @@ export function taskReassignApplier(
     action: "assignment.manage",
     async project(target) { return target.kind === "task" ? (await projects.getTask(target.id))?.projectId : undefined; },
     async apply(change) {
-      const patch = change.patch as { toAgent?: unknown; from?: unknown; generation?: unknown; revision?: unknown };
-      if (Object.keys(patch).some((k) => !["toAgent", "from", "generation", "revision"].includes(k)) || typeof patch.toAgent !== "string" || !AGENT.test(patch.toAgent)) bad("a reassignment names toAgent (agent:<name>), the assignment it observed (from, generation, revision) and nothing else");
+      const patch = change.patch as { toAgent?: unknown; from?: unknown; generation?: unknown; revision?: unknown; via?: unknown };
+      if (patch.via !== undefined && patch.via !== "recovery") bad("via, when given, is recovery");
+      if (Object.keys(patch).some((k) => !["toAgent", "from", "generation", "revision", "via"].includes(k)) || typeof patch.toAgent !== "string" || !AGENT.test(patch.toAgent)) bad("a reassignment names toAgent (agent:<name>), the assignment it observed (from, generation, revision) and nothing else");
       const toAgent = patch.toAgent as string;
       if (!(patch.from === null || (typeof patch.from === "string" && AGENT.test(patch.from)))) bad("a reassignment names from: the agent that held the task when it was decided, or null when it was released or never assigned");
       if ((patch.generation === undefined) !== (patch.revision === undefined) || (patch.generation !== undefined && (!whole1(patch.generation) || !whole1(patch.revision)))) bad("a reassignment names the observed generation and revision together, as positive whole numbers, or neither (never assigned)");
@@ -117,7 +118,7 @@ export function taskReassignApplier(
       const to = { kind: "agent", id: toAgent.slice("agent:".length) };
       const taskId = change.target.id;
       const current = await assignments.getAssignment(taskId);
-      const reason = `agreed in a meeting (${change.agreedBy}); ${change.commandId}`.slice(0, 500);
+      const reason = (patch.via === "recovery" ? `recovery step (${change.agreedBy}); ${change.commandId}` : `agreed in a meeting (${change.agreedBy}); ${change.commandId}`).slice(0, 500);
       const holder = current !== undefined && current.state === "assigned" && current.owner !== undefined ? `${current.owner.kind}:${current.owner.id}` : null;
       const generation = current === undefined ? 0 : current.generation;
       // The owner's warning is part of the change: a failure to record it propagates, the change stays "applying" and is replayed (the move is already done then, and the warning is made again under its own stable command ID).
