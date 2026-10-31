@@ -439,6 +439,7 @@ export async function startController(options: StartOptions): Promise<Controller
     // The host's workspace port is reached only through this closure, which the dispatch composer fills in (card H12m): there is no other way to it from outside the workspace service.
     let workspacePort: ((taskId: string) => Promise<WorkspacePort | undefined>) | undefined;
     const workspaceOps = WorkspaceOpService.withEpoch(storage, epoch, {
+      notify: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "needs-you", ref: { kind: "task", id: n.taskId }, detail: n.text }); },
       quiesce: { around: (scope, operation, run, after, tag, status) => dispatch === undefined ? run({ attempts: [] }) : dispatch.quiesce.around(scope, operation, run, after, tag, status) },
       portOf: async (taskId) => workspacePort?.(taskId),
       assignee: async (taskId) => { const a = await assignments.getAssignment(taskId); return a?.state === "assigned" ? a.owner?.id : undefined; },

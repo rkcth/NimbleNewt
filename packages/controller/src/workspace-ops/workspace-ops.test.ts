@@ -258,6 +258,31 @@ for (const backend of backends) {
     } finally { await r.store.close(); }
   });
 
+  test(`${backend.name}: a landing that leaves its files waiting uncommitted, or is refused because the shared tree is not clean, tells the owner once (needs-you notice) (card H12q re-review)`, async () => {
+    const r = await rig(async () => ({}));
+    try {
+      const stay = keepAlive(r);
+      await r.d.tick();
+      await r.inCall;
+      const notices: { commandId: string; taskId: string; text: string }[] = [];
+      let answer: WorkspaceOutcome = { ok: true, summary: "1 file(s) landed, uncommitted", detail: { written: 1, kept: 0, changed: true, landed: true, waitingToCommit: true } };
+      const svc = WorkspaceOpService.withEpoch(r.w.storage, r.w.epoch, { quiesce: r.coordinator, portOf: async () => ({ run: async () => answer }), notify: async (n) => { notices.push(n); } }, { clock: r.w.clock.now });
+      await svc.request(r.w.owner, { commandId: "wn1", operation: "landing", taskId: r.taskId, reason: "land it" });
+      assert.equal(notices.length, 1);
+      assert.match(notices[0]!.text, /waits there, uncommitted/);
+      answer = { ok: false, reason: "the shared workspace holds 1 uncommitted file(s) (landed changes waiting to be committed, or other work); the integrator or owner commits or clears them first; nothing was landed" };
+      await svc.request(r.w.owner, { commandId: "wn2", operation: "landing", taskId: r.taskId, reason: "land more" });
+      assert.equal(notices.length, 2);
+      assert.match(notices[1]!.text, /refused because the shared workspace holds uncommitted files/);
+      answer = { ok: true, summary: "refresh done", detail: { changed: true } };
+      await svc.request(r.w.owner, { commandId: "wn3", operation: "refresh", taskId: r.taskId, reason: "x" });
+      assert.equal(notices.length, 2, "other operations tell nothing");
+      await r.d.release(r.w.owner, r.attemptId).catch(() => undefined);
+      stay();
+      await r.d.idle();
+    } finally { await r.store.close(); }
+  });
+
   test(`${backend.name}: a landing that was running when the controller stopped is recovered like the others: its freeze is lifted (card H12q)`, async () => {
     const r = await rig(async () => ({}));
     try {

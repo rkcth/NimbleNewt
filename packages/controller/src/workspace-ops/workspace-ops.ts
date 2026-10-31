@@ -77,6 +77,8 @@ export interface WorkspaceDeps {
   readonly portOf: (taskId: string) => Promise<WorkspacePort | undefined>;
   /** The live attempts of a task, what an attempt's freeze says (`undefined`: not frozen), and lifting it. For recovery. `tell` puts a text before a running agent (returns whether it reached a worker) and `stop` ends an attempt (card H12m). */
   readonly attempts?: { live(taskId: string): Promise<string[]>; frozenReason(attemptId: string): Promise<string | undefined>; release(attemptId: string): Promise<void>; tell?(attemptId: string, text: string): Promise<boolean>; stop?(attemptId: string, reason: string): Promise<void> };
+  /** Tells the owner (a needs-you notice, once per request): landed files wait uncommitted in the shared tree, or a landing was refused because the tree is not clean. */
+  readonly notify?: (notice: { commandId: string; taskId: string; text: string }) => Promise<void>;
   /** The agent the task is assigned to, if anyone is. */
   readonly assignee?: (taskId: string) => Promise<string | undefined>;
 }
@@ -288,6 +290,15 @@ export class WorkspaceOpService {
         const what = body.operation === "refresh" ? "was refreshed to the shared workspace's current head: files in it may differ from what you read earlier, so read them again before you rely on them" : body.operation === "landing" ? "was landed on the landing branch (the landed files wait, uncommitted, to be committed by the integrator or owner)" : "was integrated into the shared workspace";
         if (await this.#deps.attempts.tell(attemptId, `[workspace] Your checkout ${what} (request ${id}).`)) told.push(attemptId);
       }, id, status);
+      // A landing leaves its files uncommitted in the shared tree, and refuses while an earlier one's files wait there: somebody has to commit or clear them, so the owner is told (the integrator is whoever holds that role; the notice goes to the owner's inbox).
+      if (body.operation === "landing" && this.#deps.notify !== undefined) {
+        const waiting = outcome !== null && typeof outcome === "object" && outcome.ok === true && (outcome.detail as { waitingToCommit?: unknown } | undefined)?.waitingToCommit === true;
+        const dirty = outcome !== null && typeof outcome === "object" && outcome.ok === false && /uncommitted file\(s\)/.test(String((outcome as { reason?: unknown }).reason ?? ""));
+        if (waiting || dirty) {
+          const text = waiting ? `Task ${body.taskId}: its work was landed in the shared workspace and waits there, uncommitted. Commit or clear those files so the next landing can go ahead.` : `Task ${body.taskId}: a landing was refused because the shared workspace holds uncommitted files (an earlier landing's, or other work). Commit or clear them, then ask again.`;
+          try { await this.#deps.notify({ commandId: `wsn-${id}`, taskId: body.taskId, text: text.slice(0, 400) }); } catch { /* the outcome is recorded either way; the notice is retried by a repeat of the request only */ }
+        }
+      }
       const more: Partial<WorkspaceRecordBody> = { quietAttempts, ...(told.length === 0 ? {} : { told }), ...(stopped.length === 0 ? {} : { stopped }) };
       if (outcome !== null && typeof outcome === "object" && outcome.ok === true) {
         const detail = boundedDetail(outcome.detail);
