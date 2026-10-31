@@ -189,7 +189,8 @@ for (const backend of backends) {
   test(`${backend.name}: agentOf is refused once the credential has expired`, async () => {
     const store = await backend.open();
     try {
-      const w = await buildWorld(store.storage);
+      // The time cap is off unless the owner turns it on (attempts have no time limit by default), so this test turns it on: the credential ends with the attempt's time.
+      const w = await buildWorld(store.storage, { options: { attemptMs: 4 * 60 * 60_000 } as never });
       const ann = await w.agent("ann", workGrants(w.project));
       await w.task("t", ann);
       let result: unknown;
