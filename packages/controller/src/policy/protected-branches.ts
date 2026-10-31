@@ -106,6 +106,46 @@ export class ProtectedBranchService {
     return { revision: result.revision };
   }
 
+  /**
+   * The owner adds branches to the protected list and takes named ones off it, leaving the others as they are (the form the chat uses, so a request that waits does only what it says). `landing` is set or cleared (null) as in `set`.
+   * `expectedRevision` is optional. Taking a branch off a list that is only the default (`main`, `master`) first writes the default out, so the other default stays protected.
+   */
+  async change(owner: Principal, command: NoActor & { projectId: string; add?: readonly string[]; remove?: readonly string[]; landing?: string | null; expectedRevision?: number }): Promise<{ revision: number }> {
+    if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} may not change a project's branch settings`);
+    const unknown = Object.keys(command).filter((k) => !["commandId", "projectId", "add", "remove", "landing", "expectedRevision"].includes(k));
+    if (unknown.length > 0) throw new DomainError("invalid_command", `${unknown[0]}: is not a field of this command`, { field: unknown[0]! });
+    const id = this.#id(command.projectId);
+    const names = (value: unknown, field: string): string[] => {
+      if (value === undefined) return [];
+      if (!Array.isArray(value) || value.length > MAX_PROTECTED) throw new DomainError("invalid_command", `${field}: must be a list of at most ${MAX_PROTECTED} branch names`, { field });
+      for (const b of value) if (typeof b !== "string" || !PATTERN.test(b) || b.includes("..")) throw new DomainError("invalid_command", `${field}: ${String(b).slice(0, 40)} is not a branch name or a prefix such as release/*`, { field });
+      return [...new Set(value as string[])].sort();
+    };
+    const add = names(command.add, "add");
+    const remove = names(command.remove, "remove");
+    for (const b of add) if (remove.includes(b)) throw new DomainError("invalid_command", `remove: ${b} is also in add; a branch is named once`, { field: "remove" });
+    const landing = command.landing;
+    if (typeof landing === "string" && (!NAME.test(landing) || landing.includes(".."))) throw new DomainError("invalid_command", "landing: is not a branch name", { field: "landing" });
+    if (add.length + remove.length === 0 && landing === undefined) throw new DomainError("invalid_command", "add: name branches to protect or unprotect, or the landing branch", { field: "add" });
+    if (command.expectedRevision !== undefined && (!Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 0)) throw new DomainError("invalid_command", "expectedRevision: must be a whole number", { field: "expectedRevision" });
+    const result = await this.#runner.command("branch-settings.change", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
+      payload: { projectId: id, add, remove, landing: landing ?? null, expectedRevision: command.expectedRevision ?? null },
+      build: async () => {
+        const ref = { kind: KIND, id };
+        const current = await this.#runner.get(KIND, id);
+        const before = current?.body as unknown as BranchSettingsBody | undefined;
+        if (command.expectedRevision !== undefined && (current?.revision ?? 0) !== command.expectedRevision) throw new DomainError("stale_revision", `the branch settings are at revision ${current?.revision ?? 0}, not ${command.expectedRevision}`);
+        const merged = [...new Set([...(before?.protected ?? DEFAULT_PROTECTED), ...add])].filter((b) => !remove.includes(b)).sort();
+        if (merged.length > MAX_PROTECTED) throw new DomainError("invalid_command", `add: at most ${MAX_PROTECTED} protected branches`, { field: "add" });
+        const keptLanding = landing === undefined ? before?.landing : landing === null ? undefined : landing;
+        const next: BranchSettingsBody = { protected: merged, ...(keptLanding === undefined ? {} : { landing: keptLanding }), updatedBy: owner.id, updatedAt: this.#runner.now() };
+        const change = current === undefined ? { type: "create" as const, ref, body: next as unknown as JsonObject } : { type: "update" as const, ref, expectedRevision: current.revision, body: next as unknown as JsonObject };
+        return { ref, creates: current === undefined, changes: [change], detail: { projectId: id, protected: next.protected.length } };
+      },
+    }));
+    return { revision: result.revision };
+  }
+
   async #list(projectId: string): Promise<readonly string[]> {
     return ((await this.#runner.get(KIND, this.#id(projectId)))?.body as unknown as BranchSettingsBody | undefined)?.protected ?? DEFAULT_PROTECTED;
   }

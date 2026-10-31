@@ -124,7 +124,7 @@ export interface StateApiDeps {
   readonly agreedLimits?: Pick<AgreedLimitsSettingsService, "get" | "change">;
   readonly resumeSettings?: Pick<ResumeSettingsService, "get" | "set">;
   readonly dispatchLimits?: Pick<DispatchLimitsSettingsService, "get" | "change">;
-  readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set">;
+  readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set" | "change">;
   /** Which event sources are watched (card H13f). */
   readonly eventSourceSettings?: Pick<EventSourceSettingsService, "get" | "set" | "change">;
   /** Absent when the controller runs without the agent's ending (card H12n). */
@@ -164,7 +164,7 @@ export interface StateApiDeps {
   /** When present, the owner can read and set notification settings through the API (card U11b). */
   readonly notifications?: Pick<NotificationService, "configure" | "settings">;
   /** When present, budgets can be read, asked for and decided through the API (card R05c). */
-  readonly budgets?: Pick<BudgetService, "report" | "usage" | "request" | "pending" | "requestMore" | "decide">;
+  readonly budgets?: Pick<BudgetService, "report" | "usage" | "request" | "pending" | "requestMore" | "decide" | "open" | "raise" | "close" | "aggregate" | "setAggregate">;
   /** When present, difficulty profiles, delegation and escalation can be used through the API (card R03). */
   readonly difficulty?: Pick<DifficultyService, "profiles" | "setProfiles" | "decisions" | "decision" | "delegate" | "reassignParent" | "delegation" | "setDifficulty" | "escalate" | "decide" | "escalations">;
   /** When present, owner decisions can be recorded, read and corrected through the API (card C08). */

@@ -13,7 +13,7 @@ import type { Principal, PrincipalService } from "../security/principals.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { Cite, StatusRequest } from "../status/index.js";
 import type { CoordinatorService } from "./coordinator.js";
-import { saysMainAutomatic, CHAT_OPS, TITLE_KEYS, acceptedArgs, describe, foreignValue, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { saysMainAutomatic, CHAT_OPS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
@@ -585,6 +585,7 @@ export class ChatService {
 
     // The project: named, or the one in focus.
     let projectId: string | undefined;
+    if (PROJECT_AS_PROJECT.has(intent.op) && typeof args["project"] === "string" && args["projectId"] === undefined) { args["projectId"] = args["project"]; delete args["project"]; }
     if (args["projectName"] !== undefined) {
       if (typeof args["projectName"] !== "string") return refuse("invalid_command", "projectName must be text");
       const found = await this.#projectByIntent(token, undefined, args["projectName"]);
@@ -604,6 +605,8 @@ export class ChatService {
       if (spec.needsProject === true) args["projectId"] = projectId;
     }
     if (projectId === undefined && needsScope) return await this.#askProject();
+    // These operations name the project as `project`, not `projectId`: it was read as `projectId` above and is named back here.
+    if (PROJECT_AS_PROJECT.has(intent.op)) { delete args["projectId"]; if (projectId !== undefined) args["project"] = projectId; }
 
     // Tasks named by title: exactly one match in the project, or a question.
     for (const [titleKey, idKey] of Object.entries(TITLE_KEYS)) {
@@ -898,6 +901,11 @@ export class ChatService {
         // Settings never made have no revision to expect (the operation takes that as 0).
         const item = await this.#get(token, "notifications.settings", {});
         return item === undefined || typeof item["revision"] !== "number" ? { ok: true } : { ok: true, name: "expectedRevision", value: item["revision"] + ahead("notifications") };
+      }
+      case "difficulty-profiles": {
+        // Never set: the operation takes 0.
+        const item = await this.#get(token, "difficulty.profiles", {});
+        return { ok: true, name: "expectedRevision", value: (typeof item?.["revision"] === "number" ? (item["revision"] as number) : 0) + ahead("difficulty-profiles") };
       }
       case "contract": {
         const item = typeof args["taskId"] === "string" ? await this.#get(token, "contract.get", { taskId: args["taskId"] }) : undefined;
@@ -1426,7 +1434,8 @@ function recordOf(step: ChatStep): string | undefined {
     // A new repository also changes the project's own record, so a later project command of the same message expects the next revision.
     case "resource.bind": return a["kind"] === "repository" ? `project:${a["projectId"] as string}` : undefined;
     case "agent.update": return `agent:${a["agentId"] as string}`;
-    case "contract.set": return `contract:${a["taskId"] as string}`;
+    case "contract.set": case "difficulty.set": return `contract:${a["taskId"] as string}`;
+    case "difficulty.set-profiles": return "difficulty-profiles";
     case "decision.record": return `decision:${a["projectId"] as string}:${normalTopic(String(a["topic"] ?? ""))}:${typeof a["taskId"] === "string" ? a["taskId"] : "*"}`;
     case "agenda.correct": return `agenda:${a["itemId"] as string}`;
     case "notifications.configure": return "notifications";

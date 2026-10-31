@@ -7,6 +7,7 @@ import { allows, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
+import { AGGREGATE_SCOPES, checkAggregateFields, isOn, windowStart, type AggregateBody } from "./aggregate.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 
 /** Provider money in millionths of the tree's currency, and local compute as occupied worker-slot milliseconds. The two are never converted into each other. */
@@ -33,7 +34,7 @@ interface Node {
   openRequests: string[];
 }
 interface Reservation { readonly id: string; readonly taskId: string; readonly agentId?: string; readonly amounts: Amounts; readonly purpose: string; readonly activity: Activity; readonly by: string; readonly at: string; state: "open" | "uncertain"; uncertainReason?: string }
-interface TreeBody { readonly rootTaskId: string; readonly projectId: string; readonly currency: string; nodes: Record<string, Node>; reservations: Record<string, Reservation> }
+interface TreeBody { /** Set by the owner closing the budget: no further reservation, delegation, request or new money. */ closed?: boolean; readonly rootTaskId: string; readonly projectId: string; readonly currency: string; nodes: Record<string, Node>; reservations: Record<string, Reservation> }
 
 /** What the endpoint's cache did for one call, as read from its response (cached_tokens, cache_n and prompt_n, cache_read_input_tokens). For Claude, `writtenTokens` is a subset of `computedTokens` (computed, then written to the cache), not an addition. */
 export interface CacheUsage { readonly backend: string; readonly route: string; readonly cachedTokens: number; readonly computedTokens: number; readonly writtenTokens: number }
@@ -68,6 +69,10 @@ export function holderNotice(n: RequestNotice): { purpose: string; text: string 
   return { purpose: `budget request ${n.requestId}`, text: `${n.requestedBy} asked for more budget for task ${n.taskId} (${n.costMicros} millionths, ${n.computeMs} ms of compute). It is addressed to you: find it with budget.pending and decide it with budget.decide.` };
 }
 export type NotifyRequest = (notice: RequestNotice) => Promise<void>;
+/** Told once per scope, window and setting revision when the owner's aggregate cap refuses a reservation. */
+export interface AggregateNotice { readonly noticeId: string; readonly taskId: string; readonly scope: string; readonly scopeKey: string; readonly period: string; readonly amountMicros: number; readonly usedMicros: number; readonly wantMicros: number; readonly text: string }
+interface AggregateRefusal { readonly error: DomainError; readonly key: string; readonly notice: Omit<AggregateNotice, "noticeId" | "text"> }
+export type NotifyAggregate = (notice: AggregateNotice) => Promise<void>;
 
 export interface BudgetReport {
   readonly taskId: string;
@@ -122,6 +127,9 @@ const TREE = "budget-tree";
 const LINK = "budget-link";
 const ENTRY = "budget-entry";
 const REQUEST = "budget-request";
+const AGGREGATE = "budget-aggregate";
+const AGG_NOTICE = "budget-aggregate-notice";
+const AGG_REASON = "budget: the owner's aggregate cap";
 const PRINCIPAL = /^(?:owner|agent|host):[a-z0-9][a-z0-9-]{0,39}$/;
 const ACTIVITIES: readonly Activity[] = ["model-call", "background-job", "meeting", "supervision", "review"];
 const CURRENCY = /^[A-Z]{3,8}$/;
@@ -186,13 +194,14 @@ export class BudgetService {
   readonly #pause: (attempt: number) => Promise<void>;
 
   readonly #notify: NotifyRequest | undefined;
+  readonly #notifyAggregate: NotifyAggregate | undefined;
 
   readonly #limits: AgreedLimitsReader | undefined;
-  private constructor(runner: CommandRunner, pause: (attempt: number) => Promise<void>, notify: NotifyRequest | undefined, limits?: AgreedLimitsReader) { this.#runner = runner; this.#pause = pause; this.#notify = notify; this.#limits = limits; }
+  private constructor(runner: CommandRunner, pause: (attempt: number) => Promise<void>, notify: NotifyRequest | undefined, notifyAggregate: NotifyAggregate | undefined, limits?: AgreedLimitsReader) { this.#runner = runner; this.#pause = pause; this.#notify = notify; this.#notifyAggregate = notifyAggregate; this.#limits = limits; }
 
   /** `notify` tells the addressee of a new request for more budget (the owner, or the delegated holder); a failing notice never fails the request, which is stored and shown by `pending` whatever happens. */
-  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions & { notify?: NotifyRequest; agreedLimits?: AgreedLimitsReader } = {}): BudgetService {
-    return new BudgetService(new CommandRunner(storage, epoch, options), options.pause ?? ((attempt) => new Promise((resolve) => setTimeout(resolve, Math.random() * Math.min(25, attempt * 2)))), options.notify, options.agreedLimits);
+  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions & { notify?: NotifyRequest; notifyAggregate?: NotifyAggregate; agreedLimits?: AgreedLimitsReader } = {}): BudgetService {
+    return new BudgetService(new CommandRunner(storage, epoch, options), options.pause ?? ((attempt) => new Promise((resolve) => setTimeout(resolve, Math.random() * Math.min(25, attempt * 2)))), options.notify, options.notifyAggregate, options.agreedLimits);
   }
 
   /** The owner gives a task a root allowance of its own (new money). The task must exist and not already be in a budget tree. */
@@ -241,6 +250,7 @@ export class BudgetService {
         const tree = clone(found.body);
         const parent = tree.nodes[parentId];
         if (parent === undefined || !this.#manages(by, parent)) throw refused();
+        this.#mustBeOpen(tree);
         // Looked up only after the caller is known to hold the parent, so a caller without rights cannot tell a missing task from an existing one.
         if ((await this.#projectOf(childId)) !== tree.projectId) invalid("childTaskId", "must be a task of the same project");
         if ((await this.#runner.get(LINK, childId)) !== undefined) invalid("childTaskId", "already has a budget");
@@ -302,6 +312,31 @@ export class BudgetService {
     })));
   }
 
+  /**
+   * The owner closes a task's budget (its root): nothing more may be reserved, delegated, requested or added to it, and it no longer counts as an open tree. Spending already recorded stays in the ledger and in reports.
+   * Refused while a reservation is open or uncertain (settle or release those first) so no call is left without its allowance. Closing twice is the same as closing once. Owner only; it cannot be undone (open a budget on another task).
+   */
+  async close(owner: Principal, command: NoActor & { taskId: string }): Promise<void> {
+    this.#owner(owner, "closes a budget");
+    onlyKnown(command, ["commandId", "taskId"]);
+    const taskId = checkTaskId(command.taskId);
+    const treeId = await this.#treeIdOf(taskId, () => new DomainError("not_found", "that task has no budget"));
+    if (treeId !== taskId) invalid("taskId", "only the task a budget was opened on can close it; this task's allowance belongs to a larger budget");
+    const treeRef: AggregateRef = { kind: TREE, id: treeId };
+    if ((await this.#tree(treeId)).body.closed === true) return;
+    await this.#retrying(() => this.#runner.command("budget.close", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
+      payload: { taskId },
+      build: async () => {
+        const found = await this.#tree(treeId);
+        const tree = clone(found.body);
+        if (Object.keys(tree.reservations).length > 0) invalid("taskId", "budget: calls are still holding allowance in this budget; settle or release them first");
+        for (const n of Object.values(tree.nodes)) if (n.openRequests.length > 0) invalid("taskId", "budget: requests for more budget are still open; decide them first");
+        tree.closed = true;
+        return { ref: treeRef, creates: false, changes: [{ type: "update", ref: treeRef, expectedRevision: found.revision, body: tree as unknown as JsonObject }], detail: { taskId } };
+      },
+    })));
+  }
+
   /** Takes back what a finished child has not used: its limit falls to what it has spent, holds and handed on, and the parent's available figure rises by the difference. */
   async reclaim(by: Principal, command: NoActor & { taskId: string }): Promise<Amounts> {
     onlyKnown(command, ["commandId", "taskId"]);
@@ -341,7 +376,9 @@ export class BudgetService {
     const treeId = await this.#treeIdOf(taskId, () => new DomainError("not_found", "that task has no budget"));
     const treeRef: AggregateRef = { kind: TREE, id: treeId };
     const id = derivedId("bgr", scopedCommandId(by.id, command.commandId));
-    const result = await this.#retrying(() => this.#runner.command("budget.reserve", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
+    let refused: AggregateRefusal | undefined;
+    let result: Awaited<ReturnType<CommandRunner["command"]>>;
+    try { result = await this.#retrying(() => this.#runner.command("budget.reserve", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
       payload: { taskId, want: want as unknown as JsonObject, agentId: agentId ?? null, purpose, activity },
       build: async () => {
         const found = await this.#tree(treeId);
@@ -349,14 +386,116 @@ export class BudgetService {
         const node = tree.nodes[taskId];
         if (node === undefined) throw new DomainError("not_found", "that task has no budget");
         if (Object.keys(tree.reservations).length >= BUDGET_LIMITS.reservations) throw new DomainError("invalid_command", `budget: ${BUDGET_LIMITS.reservations} reservations are already open in this tree; settle some`, { field: "costMicros" });
+        this.#mustBeOpen(tree);
         const have = free(node);
         if (!fits(want, have)) throw new DomainError("invalid_command", `budget: task ${taskId} cannot reserve that (${short(want, have)}); ask for more with requestMore`, { field: "costMicros" });
+        const aggregate = await this.#aggregateRefusal(tree, want, agentId, taskId);
+        if (aggregate !== undefined) { refused = aggregate; throw aggregate.error; }
         addTo(node.reserved, want);
         tree.reservations[id] = { id, taskId, ...(agentId === undefined ? {} : { agentId }), amounts: want, purpose, activity, by: by.id, at: this.#runner.now(), state: "open" };
         return { ref: treeRef, creates: false, changes: [{ type: "update", ref: treeRef, expectedRevision: found.revision, body: tree as unknown as JsonObject }, { type: "create", ref: { kind: "budget-reservation", id }, body: { treeId } }], detail: { taskId, reservationId: id, ...want }, contention: async () => new DomainError("stale_revision", "the budget changed meanwhile") };
       },
-    })));
+    }))); } catch (error) { if (refused !== undefined && error === refused.error) await this.#tellAggregate(by, refused); throw error; }
     return { id, replayed: result.replayed };
+  }
+
+  // ---- the owner's optional aggregate cap -------------------------------------------------------------------------------------
+
+  /** The aggregate cap as set: `body` is absent until the owner sets one, and a cap that is off (`enabled: false`) keeps its figures for turning on again. Owner only. */
+  async aggregate(by: Principal): Promise<{ revision: number; enabled: boolean; scope?: string; period?: string; amountMicros?: number }> {
+    this.#owner(by, "reads the aggregate cap");
+    const found = await this.#runner.get(AGGREGATE, "main");
+    const b = found?.body as unknown as AggregateBody | undefined;
+    return { revision: found?.revision ?? 0, enabled: b?.enabled === true, ...(b?.scope === undefined ? {} : { scope: b.scope }), ...(b?.period === undefined ? {} : { period: b.period }), ...(b?.amountMicros === undefined ? {} : { amountMicros: b.amountMicros }) };
+  }
+
+  /**
+   * The owner sets, changes, turns on or turns off the aggregate money cap; only the fields named change (merge), the others keep their value. Turning it on needs a scope, a period and an amount (named now or kept from before).
+   * With no cap set, or with `enabled: false`, reservations are not affected at all. `expectedRevision` is optional.
+   */
+  async setAggregate(owner: Principal, command: NoActor & { enabled?: boolean; scope?: string; period?: string; amountMicros?: number; expectedRevision?: number }): Promise<{ revision: number }> {
+    this.#owner(owner, "sets the aggregate cap");
+    onlyKnown(command, ["commandId", "enabled", "scope", "period", "amountMicros", "expectedRevision"]);
+    const named = checkAggregateFields(command);
+    if (Object.keys(named).length === 0) invalid("enabled", "name what to change: enabled, scope, period or amountMicros");
+    if (command.expectedRevision !== undefined && (!Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 0)) invalid("expectedRevision", "must be a whole number");
+    const ref: AggregateRef = { kind: AGGREGATE, id: "main" };
+    const result = await this.#retrying(() => this.#runner.command("budget.aggregate.set", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
+      payload: { ...named, expectedRevision: command.expectedRevision ?? null } as unknown as JsonObject,
+      build: async () => {
+        const current = await this.#runner.get(AGGREGATE, "main");
+        if (command.expectedRevision !== undefined && (current?.revision ?? 0) !== command.expectedRevision) throw new DomainError("stale_revision", `the aggregate cap is at revision ${current?.revision ?? 0}, not ${command.expectedRevision}`, { currentRevision: current?.revision ?? 0 });
+        const before = current?.body as unknown as AggregateBody | undefined;
+        const next: AggregateBody = { enabled: named.enabled ?? before?.enabled ?? false, ...(named.scope ?? before?.scope ? { scope: (named.scope ?? before?.scope)! } : {}), ...(named.period ?? before?.period ? { period: (named.period ?? before?.period)! } : {}), ...((named.amountMicros ?? before?.amountMicros) !== undefined ? { amountMicros: (named.amountMicros ?? before?.amountMicros)! } : {}), updatedBy: owner.id, updatedAt: this.#runner.now() };
+        if (next.enabled && (next.scope === undefined || next.period === undefined || next.amountMicros === undefined)) invalid("enabled", "a cap needs a scope (installation, project or agent), a period (day, month or none) and an amount in millionths");
+        const change = current === undefined ? { type: "create" as const, ref, body: next as unknown as JsonObject } : { type: "update" as const, ref, expectedRevision: current.revision, body: next as unknown as JsonObject };
+        return { ref, creates: current === undefined, changes: [change], detail: { enabled: next.enabled } };
+      },
+    })));
+    return { revision: result.revision };
+  }
+
+  /**
+   * Whether this reservation would take the money used in its scope and period above the owner's cap. Used = ledger entries in the window plus money held by open and uncertain reservations of every open (not closed) budget
+   * tree. At most `BUDGET_LIMITS.scan` ledger entries and as many trees are read; when either is cut short the cap cannot be checked and the reservation is refused (fail closed), saying so. The check reads other trees without
+   * guarding them, so two reservations in different trees at the same moment can each pass: the cap is a ceiling for the next reservation, not a lock (see `BUDGET_ENFORCEMENT`).
+   * Returns the refusal (with the key that makes its notice once-only), or undefined when there is no cap, the cap is off, or the reservation fits.
+   */
+  async #aggregateRefusal(tree: TreeBody, want: Amounts, agentId: string | undefined, taskId: string): Promise<AggregateRefusal | undefined> {
+    const found = await this.#runner.get(AGGREGATE, "main");
+    const b = found?.body as unknown as AggregateBody | undefined;
+    if (!isOn(b) || want.costMicros === 0) return undefined;
+    const damaged = !(AGGREGATE_SCOPES as readonly string[]).includes(b.scope as string) || (b.period !== "day" && b.period !== "month" && b.period !== "none") || !Number.isSafeInteger(b.amountMicros);
+    if (damaged) return { error: new DomainError("invalid_command", `${AGG_REASON} is switched on but its setting is unreadable; the owner must set it again or turn it off`, { field: "costMicros" }), key: `damaged:${found!.revision}`, notice: { taskId, scope: "unknown", scopeKey: "unknown", period: "unknown", amountMicros: 0, usedMicros: 0, wantMicros: want.costMicros } };
+    const now = this.#runner.now();
+    const since = windowStart(b.period, now);
+    const mine = b.scope === "installation" ? "installation" : b.scope === "project" ? tree.projectId : (agentId ?? "unattributed");
+    const keyOf = (project: string | undefined, agent: string | undefined): string => (b.scope === "installation" ? "installation" : b.scope === "project" ? project ?? "none" : agent ?? "unattributed");
+    let used = 0, scanned = 0, truncated = false;
+    for (let after: string | undefined; !truncated;) {
+      const page = await this.#runner.list(ENTRY, { ...(after === undefined ? {} : { afterId: after }), limit: BUDGET_LIMITS.page });
+      for (const a of page) {
+        after = a.id;
+        if (++scanned > BUDGET_LIMITS.scan) { truncated = true; break; }
+        const e = a.body as unknown as UsageEntry;
+        if (keyOf(e.projectId, e.agentId) !== mine || (since !== undefined && !(e.at >= since))) continue;
+        used += e.costMicros;
+      }
+      if (page.length < BUDGET_LIMITS.page) break;
+    }
+    scanned = 0;
+    for (let after: string | undefined; !truncated;) {
+      const page = await this.#runner.list(TREE, { ...(after === undefined ? {} : { afterId: after }), limit: BUDGET_LIMITS.page });
+      for (const a of page) {
+        after = a.id;
+        if (++scanned > BUDGET_LIMITS.scan) { truncated = true; break; }
+        const t = a.body as unknown as TreeBody;
+        if (t.closed === true) continue;
+        for (const r of Object.values(t.reservations)) if (keyOf(t.projectId, r.agentId) === mine) used += r.amounts.costMicros;
+      }
+      if (page.length < BUDGET_LIMITS.page) break;
+    }
+    const base = { taskId, scope: b.scope, scopeKey: mine, period: b.period, amountMicros: b.amountMicros, usedMicros: used, wantMicros: want.costMicros };
+    const window = since ?? "all";
+    const key = `${found!.revision}:${b.scope}:${mine}:${window}`;
+    if (truncated) return { error: new DomainError("invalid_command", `${AGG_REASON} cannot be checked: more than ${BUDGET_LIMITS.scan} records would have to be read; the owner can turn it off or choose a shorter period`, { field: "costMicros" }), key: `scan:${key}`, notice: base };
+    if (used + want.costMicros <= b.amountMicros) return undefined;
+    return { error: new DomainError("invalid_command", `${AGG_REASON} is reached: ${b.scope === "installation" ? "everything" : `${b.scope} ${mine}`} has used ${used} of ${b.amountMicros} millionths${b.period === "none" ? "" : ` this ${b.period}`}, and this call needs ${want.costMicros}; the owner can raise or turn off the cap (budget.aggregate.set)`, { field: "costMicros" }), key, notice: base };
+  }
+
+  /** Tells the owner once per key (scope, window and setting revision): the first call writes the notice record and sends; repeats find the record and say nothing. A failing send never fails the reservation's refusal. */
+  async #tellAggregate(by: Principal, refusal: AggregateRefusal): Promise<void> {
+    if (this.#notifyAggregate === undefined) return;
+    const noticeId = derivedId("bgl", refusal.key);
+    const ref: AggregateRef = { kind: AGG_NOTICE, id: noticeId };
+    try {
+      const first = await this.#runner.command("budget.aggregate.notice", { commandId: `bgn-${noticeId}`, actor: by.id }, async () => ({
+        payload: { key: refusal.key },
+        build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: { key: refusal.key, at: this.#runner.now() } }], detail: { key: refusal.key } }),
+      }));
+      if (first.replayed) return;
+      await this.#notifyAggregate({ ...refusal.notice, noticeId, text: refusal.error.message });
+    } catch { /* the refusal stands; the owner also sees the cap in the attempt's skipped reason */ }
   }
 
   /** The outcome of the call is not known (the dispatcher lost it). The reservation is held at its full amount and shown as uncertain until `settle`. */
@@ -499,6 +638,7 @@ export class BudgetService {
         const found = await this.#tree(treeId);
         const tree = clone(found.body);
         const node = tree.nodes[taskId];
+        if (node !== undefined && tree.closed === true && inTaskScope(by, node.projectId)) this.#mustBeOpen(tree);
         if (node === undefined || !inTaskScope(by, node.projectId) || !(allows(by, "attempt.work", node.projectId, { resource: { kind: "task", id: taskId } }) || allows(by, "budget.manage", node.projectId, { resource: { kind: "task", id: taskId } }))) throw refused();
         if (node.openRequests.length >= BUDGET_LIMITS.openRequestsPerTask) throw new DomainError("invalid_command", `that task already has ${BUDGET_LIMITS.openRequestsPerTask} open requests for more budget`, { field: "taskId" });
         const parent = node.parentId === undefined ? undefined : tree.nodes[node.parentId];
@@ -749,9 +889,11 @@ export class BudgetService {
       n = parent;
     }
   }
+  #mustBeOpen(tree: TreeBody): void { if (tree.closed === true) throw new DomainError("invalid_command", `budget: the budget of task ${tree.rootTaskId} is closed; open a new one on another task`, { field: "taskId" }); }
   #depth(tree: TreeBody, taskId: string): number { let d = 1; for (let n = tree.nodes[taskId]; n?.parentId !== undefined; n = tree.nodes[n.parentId]) d++; return d; }
   /** New money for a task: its limit and every ancestor's limit and delegated rise together, so no available figure above it falls. */
   #grow(tree: TreeBody, taskId: string, add: Amounts): void {
+    this.#mustBeOpen(tree);
     const node = tree.nodes[taskId]!;
     addTo(node.limit, add);
     for (let n = node; n.parentId !== undefined;) { const p = tree.nodes[n.parentId]!; addTo(p.limit, add); addTo(p.delegated, add); n = p; }
