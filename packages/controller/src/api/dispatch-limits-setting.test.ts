@@ -63,3 +63,30 @@ test("the owner sets the dispatcher's time and attempt limits: off by default, o
     rmSync(d, { recursive: true, force: true });
   }
 });
+
+test("a damaged dispatcher limits record can be repaired by the owner: a change that sets, unsets or disables each damaged limit replaces it; one that leaves it alone or only enables it is refused", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-dlim-dmg-"));
+  const c = await startController({
+    storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [],
+    dispatch: { timer: new ManualTimer(), manual: true },
+  } as never);
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const call = (op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<any>;
+    assert.ok((await call("dispatch.limits.change", { set: { maxAttempts: 3 } }, "g0")).ok);
+    const ref = { kind: "dispatch-limits-settings", id: "main" };
+    const damage = async (body: unknown, op: string) => {
+      const rec = (await c.storage.getAggregate(ref))!;
+      await c.storage.applyOperation({ operationId: op, epoch: c.epoch, actor: "owner:rob", correlationId: op, at: new Date().toISOString(), changes: [{ type: "update", ref, expectedRevision: rec.revision, body }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
+    };
+    await damage({ attemptMinutes: { enabled: true, value: "soon" }, maxAttempts: { enabled: true, value: 3 }, updatedBy: "owner:rob", updatedAt: "x" }, "dmg1");
+    assert.equal((await call("dispatch.limits.get", {})).error?.code, "integrity", "the damage is loud");
+    assert.equal((await call("dispatch.limits.change", { set: { maxAttempts: 4 } }, "g1")).error?.code, "invalid_command", "the damaged limit is not named, so it would be dropped silently");
+    assert.equal((await call("dispatch.limits.change", { enable: ["attemptMinutes"] }, "g2")).error?.code, "invalid_command");
+    assert.ok((await call("dispatch.limits.change", { unset: ["attemptMinutes"] }, "g3")).ok, "unsetting the damaged limit repairs the record");
+    assert.deepEqual((await call("dispatch.limits.get", {})).result.item.limits, { maxAttempts: { enabled: true, value: 3 } });
+    await damage({ attemptMinutes: "x", maxAttempts: null }, "dmg2");
+    assert.ok((await call("dispatch.limits.change", { set: { attemptMinutes: 60, maxAttempts: 2 } }, "g4")).ok, "a record whose entries are all junk is replaced when every limit is set");
+    assert.equal((await call("dispatch.limits.get", {})).result.item.effective.attemptMinutes, 60);
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});

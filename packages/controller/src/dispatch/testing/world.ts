@@ -51,6 +51,8 @@ export class ScriptedWorker implements WorkerHost {
   readonly starts: WorkOrder[] = [];
   readonly handles: ScriptedHandle[] = [];
   failToStart: Error | undefined;
+  /** When set, `start` waits for it (a host that is slow to answer). */
+  startGate: Promise<void> | undefined;
   /** Attempts the dispatcher asked this host to let go of with no handle in hand (a restarted controller). */
   readonly released: { attemptId: string; reason: string }[] = [];
   async release(attemptId: string, reason: string): Promise<void> { this.released.push({ attemptId, reason }); }
@@ -58,6 +60,7 @@ export class ScriptedWorker implements WorkerHost {
   async start(order: WorkOrder): Promise<WorkerHandle> {
     if (this.failToStart !== undefined) throw this.failToStart;
     this.starts.push(order);
+    if (this.startGate !== undefined) await this.startGate;
     const handle = new ScriptedHandle(order, (c) => this.script(c), this.version);
     this.handles.push(handle);
     return handle;

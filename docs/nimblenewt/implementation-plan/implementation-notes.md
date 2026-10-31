@@ -3582,3 +3582,11 @@ Owner rule: limits are optional and every setting can be changed and switched of
 - The composer's per-attempt cache and relay maps no longer expire after 24 h for an attempt with no expiry: they are kept while the dispatcher still has the attempt unfinished, and dropped (checked at most every ten minutes) once it has finished. Test: `api/dispatch-retention.test.ts`.
 - `HostProbe.expiresAt` is optional and omitted when the attempt has none (it used to be stamped with the current time).
 - Merge note: this branch was rebased onto main (escalation ladder and agreed limits); both sides of the conflicts in operations, state-api, start and these notes were kept.
+
+### Dispatcher limits, second review round (provisional choices)
+
+- A damaged dispatcher limits setting no longer halts the tick. Step 1 of the tick now catches per attempt (the failure is in the report, the other attempts are still checked). A damaged record (integrity error) is treated as NO limits wherever figures are read (start, cap, re-admission), and the owner gets ONE needs-you notice per damage episode (notice ID carries the record revision). Any other read failure (storage down) still stops the end so it is tried again.
+- `dispatch.limits.change` repairs a damaged record: a damaged limit must be named in `set`, `unset` or `disable` (or the change is refused, naming it); damage in a limit the change replaces is tolerated. `dispatch.limits.get` stays loud (integrity error) while the record is damaged.
+- The attempt-time cap is measured from the attempt's start (`startedAt`, the time it began running), falling back to `claimedAt` for a record without one. An attempt that waited for a place is not charged for the wait.
+- Known race closed: a stop that lands between `#start` writing "running" and `host.start` answering now stops the new handle and has the host release its place; `#endInner` also stops a worker registered while it was running.
+- The dispatch-retention test now uses valid attempt IDs and real dispatch records, and awaits the sweep; it asserts a live attempt's relay is kept and a finished one's is forgotten.

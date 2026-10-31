@@ -298,15 +298,23 @@ export class DispatcherService {
     const live = await this.#liveIds();
     // 1. Leases and time. A worker that stopped beating, or an attempt past its expiry, is over; its calls are settled through the ledger first.
     for (const id of live) {
-      const d = await this.#load(id);
-      if (d === undefined || (d.body.state !== "running" && d.body.state !== "parked")) continue;
-      // An attempt that started without a time limit is held to the owner's attempt time from its start once that is switched on (provisional: the owner's figure only, not the configuration's or the contract's).
-      const cap = d.body.expiresAt === undefined && d.body.state === "running" ? await this.#capNow() : undefined;
-      const expired = d.body.expiresAt !== undefined ? d.body.expiresAt <= at : cap !== undefined && Date.parse(d.body.claimedAt) + cap <= Date.parse(at);
-      if (expired || (d.body.state === "running" && d.body.lease !== undefined && d.body.lease.until <= at)) {
-        const result = await this.#end(id, "abandoned", expired ? "the attempt ran past its expiry" : "the worker stopped beating; its lease ran out", { readmit: !expired, lost: !expired });
-        lost.push(id);
-        if (result.readmitted !== undefined) readmitted.push(result.readmitted);
+      // One attempt that cannot be ended or checked (a ledger that is down, a record that cannot be read) is told in the report and tried again next tick; it never stops the others from being looked at.
+      let taskId = "";
+      try {
+        const d = await this.#load(id);
+        if (d === undefined || (d.body.state !== "running" && d.body.state !== "parked")) continue;
+        taskId = d.body.taskId;
+        // An attempt that started without a time limit is held to the owner's attempt time from the moment it started running (`startedAt`; the claim time for a record that has none), once that is switched on (provisional: the owner's figure only, not the configuration's or the contract's).
+        const cap = d.body.expiresAt === undefined && d.body.state === "running" ? await this.#capNow() : undefined;
+        const expired = d.body.expiresAt !== undefined ? d.body.expiresAt <= at : cap !== undefined && Date.parse(d.body.startedAt ?? d.body.claimedAt) + cap <= Date.parse(at);
+        if (expired || (d.body.state === "running" && d.body.lease !== undefined && d.body.lease.until <= at)) {
+          const result = await this.#end(id, "abandoned", expired ? "the attempt ran past its expiry" : "the worker stopped beating; its lease ran out", { readmit: !expired, lost: !expired });
+          lost.push(id);
+          if (result.readmitted !== undefined) readmitted.push(result.readmitted);
+        }
+      } catch (error) {
+        if (isDomainError(error, "stale_epoch")) throw error;
+        failures.push({ taskId, attemptId: id, error: errorText(error) });
       }
     }
     // 2. The priority the contract has now, for every request that still waits (no stored contract version is rewritten).
@@ -1020,12 +1028,33 @@ export class DispatcherService {
   }
 
   /** The owner's attempt time as it is now; `undefined` when none is set or the setting cannot be read (the scan then leaves the attempt alone and looks again next tick). */
-  async #capNow(): Promise<number | undefined> { try { return (await this.#figures()).attemptMs; } catch { return undefined; } }
+  async #capNow(): Promise<number | undefined> { try { return (await this.#figures()).attemptMs; } catch (error) { await this.#limitsDamaged(error); return undefined; } }
+
+  /**
+   * The figures for starting and re-admitting attempts. A DAMAGED limits setting must not stop attempts from starting or ending (it would abort every tick for ever, and the owner could not repair it from a running system): they
+   * then run with NO limits and the owner is told once per damage episode (the record's revision) that the setting needs repairing. Any other failure (storage down) still throws, so the end is tried again.
+   */
+  async #figuresOrNone(): Promise<DispatcherLimitFigures> {
+    try { return await this.#figures(); } catch (error) { if (!await this.#limitsDamaged(error)) throw error; return {}; }
+  }
+
+  readonly #damageNoticed = new Set<number>();
+  /** True when the error is a damaged limits setting (and the owner has been told, once per episode: the notice ID carries the damaged record's revision). */
+  async #limitsDamaged(error: unknown): Promise<boolean> {
+    if (!isDomainError(error, "integrity")) return false;
+    const revision = error.currentRevision ?? 0;
+    if (this.#damageNoticed.has(revision)) return true;
+    try {
+      await this.#deps.notifications?.emitFromController({ commandId: `dpa-limits-dmg-${revision}`, kind: "maintenance", level: "needs-you", ref: { kind: "dispatch-limits", id: "main" }, detail: `The dispatcher limits setting is damaged (${error.message.slice(0, 200)}), so attempts run with no time or count limit until it is repaired. Set or clear the limits again (dispatch.limits.change) to repair it.` });
+      this.#damageNoticed.add(revision);
+    } catch (notifyError) { this.#options.onError?.(notifyError); }
+    return true;
+  }
 
   /** How long an attempt of this task may run: the smallest of what is set (owner's figure, configuration, contract); `undefined` when nothing limits it. */
   async #attemptLimitMs(taskId: string, contractMinutes: number | undefined): Promise<number | undefined> {
     const configured = this.#options.configuredMinutes === undefined ? undefined : await this.#options.configuredMinutes(taskId);
-    const all = [(await this.#figures()).attemptMs, configured === undefined ? undefined : configured * 60_000, contractMinutes === undefined ? undefined : contractMinutes * 60_000].filter((x): x is number => x !== undefined);
+    const all = [(await this.#figuresOrNone()).attemptMs, configured === undefined ? undefined : configured * 60_000, contractMinutes === undefined ? undefined : contractMinutes * 60_000].filter((x): x is number => x !== undefined);
     return all.length === 0 ? undefined : Math.min(...all);
   }
 
@@ -1203,6 +1232,12 @@ export class DispatcherService {
     await this.#update(b.attemptId, (x) => ({ ...x, workerVersion: handle.workerVersion, recipeRevision: recipe.revision }));
     await this.#stepOf(b.attemptId, "model", "model-selected", `Attempt ${b.attemptId} runs on route ${b.route}.`, [{ kind: "dispatch", id: b.attemptId }]);
     if (b.harness !== undefined) await this.#stepOf(b.attemptId, "harness", "harness-selected", `Attempt ${b.attemptId} runs in the ${b.harness} harness.`, [{ kind: "dispatch", id: b.attemptId }]);
+    // A stop may have landed while the worker was starting (the record says running before the host answers): the attempt is over, so the worker that came up is let go instead of left live and unowned. No await between this check and `#live.set`.
+    if ((await this.#load(b.attemptId))?.body.state !== "running") {
+      await handle.stop().catch(() => undefined);
+      await host.release?.(b.attemptId, "the attempt ended while its worker was starting").catch(() => undefined);
+      return { kind: "skipped", check: "host", reason: "the attempt ended while its worker was starting" };
+    }
     const turn = this.#run(b.attemptId, handle);
     this.#live.set(b.attemptId, { handle, host, turn });
     return { kind: "started" };
@@ -1345,8 +1380,8 @@ export class DispatcherService {
     await this.#path.settle(attemptId, true).catch(() => undefined);
     await this.#path.cancelParked(attemptId).catch(() => undefined);
     const b = (await this.#load(attemptId))!.body;
-    // The owner's figures are read before anything is finished: an unreadable setting throws here, the attempt stays unfinished and the end is tried again, so the replacement is never lost.
-    const figures = options.readmit ? await this.#figures() : undefined;
+    // The owner's figures are read before anything is finished: a setting that cannot be read (storage down) throws here, the attempt stays unfinished and the end is tried again, so the replacement is never lost. A damaged setting is not an obstacle: no limits apply and the owner is told.
+    const figures = options.readmit ? await this.#figuresOrNone() : undefined;
     await this.#settleReservation(b, options.lost === true);
     const assignment = await this.#deps.assignments.getAssignment(b.taskId);
     // The attempt is finished in the assignment only if it is still the active one; a superseded attempt was ended by whoever transferred the task.
@@ -1360,6 +1395,9 @@ export class DispatcherService {
     // Before the attempt is marked finished, so a crash in between leaves the end to be done again (every command here is derived from the task and the attempt). A superseded attempt does not count against the task or take the hand-off head.
     if (active) await this.#contextAtEnd(b, outcome, summary, options.partial === true);
     await this.#update(attemptId, (x) => ({ ...x, state: "finished", inFlight: [], parked: [], outcome: { status: outcome, summary: summary.slice(0, 500), at: this.#runner.now() } }), () => this.#liveChange(attemptId, false));
+    // A worker registered while this end was running (its start answered after the end began) is let go too.
+    const late = this.#live.get(attemptId);
+    if (late !== undefined && late.handle !== live?.handle) await late.handle.stop().catch(() => undefined);
     this.#live.delete(attemptId);
     this.#usageSeq.delete(attemptId);
     if (outcome === "failed") {

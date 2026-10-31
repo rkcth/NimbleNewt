@@ -27,19 +27,28 @@ const names = (v: unknown, field: string): Name[] => {
   return [...new Set(v.map((k) => (typeof k === "string" && (NAMES as string[]).includes(k) ? (k as Name) : invalid(field, `${String(k).slice(0, 30)} is not a limit (attemptMinutes, maxAttempts)`))))].sort();
 };
 
-/** Reads a stored record; a damaged one throws (the caller must not run with a guess). */
-function entries(body: unknown): Partial<Record<Name, DispatchLimitEntry>> {
-  if (body === undefined) return {};
-  const out: Partial<Record<Name, DispatchLimitEntry>> = {};
+/** Reads a stored record leniently: the entries that are sound, and the names that are damaged (every name when the record is not an object at all). */
+function readEntries(body: unknown): { readonly ok: Partial<Record<Name, DispatchLimitEntry>>; readonly damaged: Name[] } {
+  if (body === undefined) return { ok: {}, damaged: [] };
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return { ok: {}, damaged: [...NAMES] };
+  const ok: Partial<Record<Name, DispatchLimitEntry>> = {};
+  const damaged: Name[] = [];
   for (const n of NAMES) {
     const e = (body as Record<string, unknown>)[n];
     if (e === undefined) continue;
-    if (e === null || typeof e !== "object" || typeof (e as { enabled?: unknown }).enabled !== "boolean") throw new DomainError("integrity", `the dispatcher limits setting is damaged at ${n}`);
-    const v = (e as { value?: unknown }).value;
-    if (v === undefined && (e as { enabled: boolean }).enabled) throw new DomainError("integrity", `the dispatcher limits setting is damaged at ${n}`);
-    out[n] = { enabled: (e as { enabled: boolean }).enabled, ...(v === undefined ? {} : { value: figure(n, v, n) }) };
+    const v = e !== null && typeof e === "object" ? (e as { value?: unknown }).value : undefined;
+    const enabled = e !== null && typeof e === "object" ? (e as { enabled?: unknown }).enabled : undefined;
+    if (typeof enabled !== "boolean" || (v === undefined && enabled)) { damaged.push(n); continue; }
+    try { ok[n] = { enabled, ...(v === undefined ? {} : { value: figure(n, v, n) }) }; } catch { damaged.push(n); }
   }
-  return out;
+  return { ok, damaged };
+}
+
+/** Reads a stored record; a damaged one throws (the caller must not run with a guess). The error carries the record's revision, so one damage episode is told to the owner once. */
+function entries(body: unknown, revision?: number): Partial<Record<Name, DispatchLimitEntry>> {
+  const { ok, damaged } = readEntries(body);
+  if (damaged.length > 0) throw new DomainError("integrity", `the dispatcher limits setting is damaged at ${damaged.join(", ")}`, revision === undefined ? {} : { currentRevision: revision });
+  return ok;
 }
 
 /**
@@ -62,7 +71,7 @@ export class DispatchLimitsSettingsService {
     const found = await this.#runner.get(REF.kind, REF.id);
     const e = await this.effective();
     const startup = { ...(this.#startup.attemptMs === undefined ? {} : { attemptMinutes: Math.ceil(this.#startup.attemptMs / 60_000) }), ...(this.#startup.maxAttempts === undefined ? {} : { maxAttempts: this.#startup.maxAttempts }) };
-    return { revision: found?.revision ?? 0, limits: entries(found?.body), startup, effective: { ...(e.attemptMs === undefined ? {} : { attemptMinutes: Math.ceil(e.attemptMs / 60_000) }), ...(e.maxAttempts === undefined ? {} : { maxAttempts: e.maxAttempts }) } };
+    return { revision: found?.revision ?? 0, limits: entries(found?.body, found?.revision), startup, effective: { ...(e.attemptMs === undefined ? {} : { attemptMinutes: Math.ceil(e.attemptMs / 60_000) }), ...(e.maxAttempts === undefined ? {} : { maxAttempts: e.maxAttempts }) } };
   }
 
   /**
@@ -93,7 +102,12 @@ export class DispatchLimitsSettingsService {
       build: async () => {
         const current = await this.#runner.get(REF.kind, REF.id);
         if (command.expectedRevision !== undefined && (current?.revision ?? 0) !== command.expectedRevision) throw new DomainError("stale_revision", `the dispatcher limits are at revision ${current?.revision ?? 0}, not ${command.expectedRevision}`, { currentRevision: current?.revision ?? 0 });
-        const merged: Partial<Record<Name, DispatchLimitEntry>> = { ...entries(current?.body) };
+        // A damaged record can be repaired: what this change sets, unsets or turns off replaces the damaged entry; one it only turns on, or leaves alone, would need the damaged figure, so it is refused.
+        const read = readEntries(current?.body);
+        const mended = new Set<Name>([...setNames, ...unset, ...disable]);
+        const stuck = read.damaged.filter((n) => !mended.has(n));
+        if (stuck.length > 0) invalid("set", `the dispatcher limits setting is damaged at ${stuck.join(", ")}: set, unset or disable ${stuck.length === 1 ? "it" : "each of them"} in this change to repair it`);
+        const merged: Partial<Record<Name, DispatchLimitEntry>> = { ...read.ok };
         for (const n of setNames) merged[n] = { enabled: true, value: set[n]! };
         for (const n of enable) {
           const kept = merged[n]?.value;
@@ -113,7 +127,7 @@ export class DispatchLimitsSettingsService {
   /** What the dispatcher uses now, per figure: the owner's entry (a figure when on, none when off) or else the start-up option, or else no limit. */
   async effective(): Promise<DispatcherLimitFigures> {
     const found = await this.#runner.get(REF.kind, REF.id);
-    const e = entries(found?.body);
+    const e = entries(found?.body, found?.revision);
     const minutes = e.attemptMinutes === undefined ? this.#startup.attemptMs : e.attemptMinutes.enabled ? e.attemptMinutes.value! * 60_000 : undefined;
     const attempts = e.maxAttempts === undefined ? this.#startup.maxAttempts : e.maxAttempts.enabled ? e.maxAttempts.value! : undefined;
     return { ...(minutes === undefined ? {} : { attemptMs: minutes }), ...(attempts === undefined ? {} : { maxAttempts: attempts }) };

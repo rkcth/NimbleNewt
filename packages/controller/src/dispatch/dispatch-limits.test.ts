@@ -3,6 +3,9 @@ import { after, test } from "node:test";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import type { DispatcherLimitFigures } from "./dispatcher.js";
 import { buildWorld, workGrants } from "./testing/world.js";
+import { DomainError } from "../domain/errors.js";
+import { DISPATCH_KIND } from "./model.js";
+import { derivedId } from "../domain/ids.js";
 
 after(stopServer);
 
@@ -188,7 +191,8 @@ test("an unreadable limits setting while a lost attempt is being ended leaves it
     await c.dispatcher.tick();
     c.clock.advance(LONG_LEASE + 1000);
     broken = true;
-    await c.dispatcher.tick().catch(() => undefined);
+    const report = await c.dispatcher.tick(); // one attempt that cannot be ended is a failure in the report, not a tick that throws
+    assert.deepEqual(report.failures.map((f) => f.attemptId), [attemptId]);
     assert.equal((await c.dispatcher.get(c.owner, attemptId!))!.state !== "finished", true, "not finished while the figures cannot be read");
     broken = false;
     await c.heartbeatHost();
@@ -218,5 +222,79 @@ test("the probe a host is asked about carries no expiry when the attempt has non
     await c.dispatcher.tick();
     assert.equal(probes.length > 0, true);
     assert.equal("expiresAt" in (probes[0] as object), false);
+  } finally { await store.close(); }
+});
+
+test("one attempt that cannot be ended does not stop the others from being checked in the same tick", async () => {
+  let broken: string | undefined;
+  const { c, ann, store } = await world({ limits: async () => { if (broken !== undefined) throw new Error("setting unreadable"); return {}; } });
+  try {
+    const a = await c.task("t1", ann);
+    await c.dispatcher.tick();
+    const b = await c.task("t2", ann);
+    await c.dispatcher.tick();
+    c.clock.advance(LONG_LEASE + 1000);
+    broken = a.attemptId;
+    const report = await c.dispatcher.tick();
+    assert.equal(report.failures.length, 2, "both fail to end (the setting is unreadable) and both are told, neither aborts the tick");
+    assert.deepEqual(report.failures.map((f) => f.attemptId).sort(), [a.attemptId!, b.attemptId!].sort());
+  } finally { await store.close(); }
+});
+
+test("a DAMAGED limits setting does not halt the tick: the lost attempt is replaced with no limits and the owner is told once per damage episode", async () => {
+  let revision = 3;
+  const told: { commandId: string; level?: string }[] = [];
+  const { c, ann, store } = await world({ limits: async () => { throw new DomainError("integrity", "the dispatcher limits setting is damaged at attemptMinutes", { currentRevision: revision }); } });
+  c.dispatcher = c.restart({ notifications: { emitFromController: async (e: { commandId: string; level?: string }) => { told.push(e); return { itemId: "x", coalesced: false, immediate: false }; } } as never }, { leaseMs: LONG_LEASE, limits: async () => { throw new DomainError("integrity", "the dispatcher limits setting is damaged at attemptMinutes", { currentRevision: revision }); } });
+  try {
+    const { attemptId } = await c.task("t", ann);
+    await c.dispatcher.tick();
+    c.clock.advance(LONG_LEASE + 1000);
+    await c.heartbeatHost();
+    const report = await c.dispatcher.tick();
+    assert.deepEqual(report.failures, []);
+    assert.equal(report.readmitted.length, 1, "the replacement is admitted with no limits");
+    assert.equal((await c.dispatcher.get(c.owner, attemptId!))!.state, "finished");
+    assert.deepEqual(told.map((t) => [t.commandId, t.level]), [["dpa-limits-dmg-3", "needs-you"]]);
+    await c.dispatcher.tick();
+    assert.equal(told.length, 1, "one notice for the episode, not one per tick");
+    revision = 5;
+    await c.dispatcher.tick(); await c.dispatcher.tick();
+  } finally { await store.close(); }
+});
+
+test("the attempt time cap is measured from the attempt's start, not from when it was claimed", async () => {
+  let figures: DispatcherLimitFigures = {};
+  const { c, ann, store } = await world({ limits: async () => figures });
+  try {
+    const { attemptId } = await c.task("t", ann);
+    await c.dispatcher.tick();
+    // The claim is three hours older than the start (the attempt waited for a place).
+    const ref = { kind: DISPATCH_KIND, id: derivedId("dpa", attemptId!) };
+    const rec = (await store.storage.getAggregate(ref))!;
+    const body = rec.body as unknown as { claimedAt: string };
+    await store.storage.applyOperation({ operationId: "backdate", epoch: c.epoch, actor: "owner:rob", correlationId: "backdate", at: c.clock.now(), changes: [{ type: "update", ref, expectedRevision: rec.revision, body: { ...rec.body, claimedAt: new Date(Date.parse(body.claimedAt) - 3 * HOUR).toISOString() } }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
+    figures = { attemptMs: HOUR };
+    c.clock.advance(30 * 60_000);
+    assert.deepEqual((await c.dispatcher.tick()).lost, [], "half an hour into a one hour cap");
+    c.clock.advance(31 * 60_000);
+    assert.deepEqual((await c.dispatcher.tick()).lost, [attemptId]);
+  } finally { await store.close(); }
+});
+
+test("a stop that lands while the host is still starting the worker lets the worker go when the host answers", async () => {
+  const { c, ann, store } = await world({});
+  try {
+    const { attemptId } = await c.task("t", ann);
+    let open!: () => void;
+    c.worker.startGate = new Promise<void>((r) => { open = r; });
+    const ticking = c.dispatcher.tick();
+    while (c.worker.starts.length === 0) await new Promise((r) => setTimeout(r, 5));
+    await c.dispatcher.stop(c.owner, attemptId!, { emergency: true, reason: "owner stop" });
+    open();
+    await ticking;
+    assert.equal((await c.dispatcher.get(c.owner, attemptId!))!.state, "finished");
+    assert.equal(c.worker.handles[0]!.stopped >= 1, true, "the worker that came up after the stop was stopped");
+    assert.equal(c.worker.released.some((r) => r.attemptId === attemptId), true, "and the host let go of its place");
   } finally { await store.close(); }
 });

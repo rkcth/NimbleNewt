@@ -8,6 +8,8 @@ import type { RuntimeGuards, WorkerHost } from "../dispatch/index.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import { PI } from "../dispatch/testing/world.js";
 import { startController } from "./index.js";
+import { DISPATCH_KIND } from "../dispatch/index.js";
+import { derivedId } from "../domain/ids.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
@@ -23,9 +25,17 @@ test("the relay of an attempt with no time limit is kept past 24 hours, as long 
       void ({} as RuntimeGuards); return worker; } } },
   } as never);
   try {
-    const order = { attemptId: "att-unlimited", route: "llama/local" }; // no expiresAt
-    const first = relays!(order);
+    // Valid attempt IDs (the dispatcher answers only for those): one live attempt, one that is finished.
+    const live = "att-aaaaaaaaaaaaaaaaaaaa", over = "att-bbbbbbbbbbbbbbbbbbbb";
+    for (const [id, state] of [[live, "running"], [over, "finished"]] as const) {
+      await c.storage.applyOperation({ operationId: `mk-${id}`, epoch: c.epoch, actor: "owner:rob", correlationId: id, at: new Date().toISOString(), changes: [{ type: "create", ref: { kind: DISPATCH_KIND, id: derivedId("dpa", id) }, body: { attemptId: id, state, taskId: "task-aaaaaaaaaaaaaaaaaaaa", projectId: "proj-aaaaaaaaaaaaaaaaaaaa", agentId: "agt-aaaaaaaaaaaaaaaaaaaa" } }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
+    }
+    const first = relays!({ attemptId: live, route: "llama/local" }); // no expiresAt
+    const firstOver = relays!({ attemptId: over, route: "llama/local" });
     now += 48 * 3_600_000;
-    assert.equal(relays!(order), first, "the same relay two days on");
+    relays!({ attemptId: live, route: "llama/local" }); // starts the sweep
+    await new Promise((r) => setTimeout(r, 200)); // the sweep asks the dispatcher and forgets asynchronously
+    assert.equal(relays!({ attemptId: live, route: "llama/local" }), first, "the same relay two days on while the attempt is live");
+    assert.notEqual(relays!({ attemptId: over, route: "llama/local" }), firstOver, "an attempt that finished is forgotten by the sweep (so the sweep did run)");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
