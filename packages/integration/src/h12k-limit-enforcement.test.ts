@@ -205,7 +205,8 @@ test("the real launcher refuses a disk limit it cannot enforce in full, before a
     if (!real.capacity.available) return t.skip(`no confined launch on this machine: ${real.capacity.reason}`);
     const records: LaunchEnforcement[] = [];
     const parts = localWorkerParts<unknown>({
-      launcher: real, app: { node: { root: nodeRoot, executable: "bin/node" }, mounts: [], entry: "/opt/app/main.js" }, protectedPaths: [],
+      launcher: real, app: { node: { root: nodeRoot, executable: "bin/node" }, mounts: [], entry: "/opt/app/main.js", hostEntry: join(dir, "main.js") }, protectedPaths: [],
+      guestPaths: process.platform === "darwin" ? "host" : "private", // the macOS launcher shows host paths: the real node, not /opt/node, is what it finds
       workspace: () => dirs, limits: () => ({ diskMb: 10 }), bestEffort: () => false, onLaunch: (r) => { records.push(r); },
       model: () => ({ alias: "m0", provider: "llama", api: "openai-completions", modelId: "local", contextWindow: 32768, maxTokens: 1024, reasoning: false, input: ["text"] }),
       namespaceId: () => "abcdef0123456789", bridge: async () => ({ ok: true, result: {} }), relay: async () => { throw new Error("not used"); },

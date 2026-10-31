@@ -60,8 +60,9 @@ for (const backend of backends) {
     assert.match((never as { reason: string }).reason, /nothing was sent/);
     assert.equal(idle.client.session, undefined);
     // Four wait, a fifth is not sent.
-    const waits = [0, 1, 2, 3].map(() => c.remote.askWorkspace(c.dispatcherPrincipal, "host:r1", call(), { waitMs: 300 }).catch((e: Error) => e));
-    await new Promise((ok) => setTimeout(ok, 50));
+    const waits = [0, 1, 2, 3].map(() => c.remote.askWorkspace(c.dispatcherPrincipal, "host:r1", call(), { waitMs: 2000 }).catch((e: Error) => e));
+    // Wait until all four are really listed (a slow machine may take long), well inside their 2 s, before the fifth.
+    for (let i = 0; i < 100 && (await r1.client.workspaceRequests()).length < 4; i++) await new Promise((ok) => setTimeout(ok, 10));
     const fifth = await c.remote.askWorkspace(c.dispatcherPrincipal, "host:r1", call(), { waitMs: 100 });
     assert.equal(fifth.ok, false);
     assert.match((fifth as { reason: string }).reason, /already has 4 workspace requests waiting/);
