@@ -2186,7 +2186,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 
 - **Parent:** N12 / AII-262.
 - **Blockers:** M02g.
-- **Deliverable:** Split from M02g (2026-10-31): the steward agent for decisions no coded rule covers (decidedBy steward), the narrator, chat commands for meetings (moving and voting, not only reading the log), learning auto-apply rules from the log once production data exists, and a cap across decisions on policy-agreed grants and raises (the per-decision limit is M02g).
+- **Deliverable:** Split from M02g (2026-10-31): the steward agent for decisions no coded rule covers (decidedBy steward), the narrator, chat commands for meetings (moving and voting, not only reading the log), learning auto-apply rules from the log once production data exists, and a cap across decisions on policy-agreed grants and raises, so splitting a list across several decisions cannot get round the per-decision limit of M02g.
 - **Acceptance and verification:** Unforeseen decisions go to a capable agent under the same widening policy; the commands are reachable through chat.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
