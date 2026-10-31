@@ -15,6 +15,8 @@ export interface RetentionValues {
   readonly derivedDays: number | null;
   /** Recorded model replies (generation runs: their text and tool arguments may hold personal or confidential data) that ended, failed or were interrupted are removed this many days after their last change. `null`: keep them (default). A run still streaming, or holding a call that could still be admitted, is never removed. */
   readonly generationRunDays: number | null;
+  /** Route-change records (the text cut from a task's startup context when it moved to a smaller route, and the decisions) are removed this many days after their last change (card C07f). `null`: kept (the default). */
+  readonly contextRouteDays: number | null;
   /** The dispatcher runs the retention runner by itself each tick. Off: it runs only when the owner asks. */
   readonly autoRun: boolean;
   /** Stored model thinking is deleted this many days after the task is done (owner decision 2026-10-22: 14). Recorded here; the deletion itself needs adapter support (card K06c). */
@@ -47,7 +49,7 @@ export interface RetentionValues {
 }
 
 export const RETENTION_DEFAULTS: RetentionValues = {
-  derivedDays: null, generationRunDays: null, autoRun: false, thinkingDays: 14, backupDaily: 7, backupWeekly: 4, preRestoreKept: null, restoreConfirmMinutes: 30, incidentArchiveDays: null, incidentPurgeDays: null, catalogVersionsKept: null, catalogAutoDrop: false, revokedBytesDays: 90, revokedBytesBlank: false,
+  derivedDays: null, generationRunDays: null, contextRouteDays: null, autoRun: false, thinkingDays: 14, backupDaily: 7, backupWeekly: 4, preRestoreKept: null, restoreConfirmMinutes: 30, incidentArchiveDays: null, incidentPurgeDays: null, catalogVersionsKept: null, catalogAutoDrop: false, revokedBytesDays: 90, revokedBytesBlank: false,
   quotaProjectBytes: null, quotaAgentBytes: null, quotaWarnPercent: 80, reserveBytes: 16 * 1024 * 1024,
 };
 
@@ -56,6 +58,7 @@ interface Spec { readonly kind: Kind; readonly min: number; readonly max: number
 export const RETENTION_FIELDS: Readonly<Record<keyof RetentionValues, Spec>> = {
   derivedDays: { kind: "days", min: 7, max: 3650, nullable: true },
   generationRunDays: { kind: "days", min: 1, max: 3650, nullable: true },
+  contextRouteDays: { kind: "days", min: 1, max: 3650, nullable: true },
   autoRun: { kind: "flag", min: 0, max: 1, nullable: false },
   thinkingDays: { kind: "days", min: 1, max: 365, nullable: false },
   backupDaily: { kind: "count", min: 1, max: 365, nullable: false },

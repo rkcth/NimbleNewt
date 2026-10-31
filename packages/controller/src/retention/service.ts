@@ -252,6 +252,20 @@ export class RetentionService {
       if (!complete) partial = true;
       if (candidates.length > limit) { candidates.length = limit; partial = true; }
     }
+    if (values.contextRouteDays !== null) {
+      // Route-change records of the context (card C07f): the archive of cut text and the decisions of a route move (not a first-call admission, which calibration reads).
+      const cutoff = now - values.contextRouteDays * DAY;
+      for (const kind of ["ctx-route-archive", "ctx-admission"]) {
+        const complete = await scan(this.#runner, kind, (a) => {
+          if (Date.parse(a.updatedAt) >= cutoff) return;
+          if (kind === "ctx-admission" && (a.body as { type?: unknown }).type !== "route-change") return;
+          const projectId = (a.body as { projectId?: unknown }).projectId;
+          candidates.push({ kind, id: a.id, revision: a.revision, projectId: typeof projectId === "string" ? projectId : undefined, ageDays: Math.floor((now - Date.parse(a.updatedAt)) / DAY) });
+        });
+        if (!complete) partial = true;
+      }
+      if (candidates.length > limit) { candidates.length = limit; partial = true; }
+    }
     const keepVersions = values.catalogVersionsKept;
     let versions: { items: { name: string; version: string; versionId: string; revision: number; ageDays: number }[]; partial: boolean } | undefined;
     const versionsRetained: { name: string; version: string; reasons: string[] }[] = [];
@@ -275,7 +289,7 @@ export class RetentionService {
     const wouldDelete = backupsPort === undefined ? undefined : await backupsPort.preview(counts);
     const digest = digestOf({ c: candidates.map((c) => `${c.kind}/${c.id}@${c.revision}`), b: wouldDelete ?? [], i: [values.incidentArchiveDays, values.incidentPurgeDays], v: versions === undefined ? null : [keepVersions, ...versions.items.map((v) => `${v.versionId}@${v.revision}`)], x: revoked === undefined ? null : [values.revokedBytesDays, ...revoked.items.map((r) => r.recordId)] });
     const base: RunReport = {
-      dryRun, enabled: values.derivedDays !== null || values.generationRunDays !== null, derivedDays: values.derivedDays, candidates, removed: 0, retained, partial,
+      dryRun, enabled: values.derivedDays !== null || values.generationRunDays !== null || values.contextRouteDays !== null, derivedDays: values.derivedDays, candidates, removed: 0, retained, partial,
       ...(backupsPort === undefined ? {} : { backups: { kept: (await backupsPort.list()).length - (wouldDelete?.length ?? 0), ...(dryRun ? { wouldDelete: wouldDelete ?? [] } : {}), counts } }),
       ...(this.#deps.incidents === undefined ? {} : { incidents: { archiveDays: values.incidentArchiveDays, purgeDays: values.incidentPurgeDays } }),
       ...(revoked === undefined ? {} : { revokedBytes: { days: values.revokedBytesDays!, candidates: revoked.items.map((r) => ({ name: r.name, version: r.version, ageDays: r.ageDays })), blanked: 0, partial: revoked.partial } }),
@@ -292,7 +306,7 @@ export class RetentionService {
       for (const c of candidates.slice(i, i + REMOVE_BATCH)) {
         const why = material.why(c.kind, c.id);
         if (why !== undefined) { if (retained.length < 200) retained.push({ kind: c.kind, id: c.id, reasons: why }); continue; }
-        const done = await this.#removeOne(by, c, c.kind === "generation-run" ? values.generationRunDays! : values.derivedDays!);
+        const done = await this.#removeOne(by, c, c.kind === "generation-run" ? values.generationRunDays! : c.kind === "ctx-route-archive" || c.kind === "ctx-admission" ? values.contextRouteDays! : values.derivedDays!);
         if (done) removedIds.push(`${c.kind}/${c.id}`);
       }
     }
@@ -389,7 +403,7 @@ export class RetentionService {
           const arc = await this.#runner.get("retention-archive", archiveIdOf(c.id));
           const changes: Change[] = [{ type: "delete", ref, expectedRevision: fresh.revision }];
           if (arc !== undefined) changes.push({ type: "delete", ref: { kind: "retention-archive", id: arc.id }, expectedRevision: arc.revision });
-          return { ref, creates: false, changes, ...(arc === undefined ? {} : { audit: [{ type: "retention.expire.archive", subject: { kind: "retention-archive", id: arc.id }, detail: { with: c.id } }] }), detail: { rule: c.kind === "generation-run" ? "generation-run-days" : "derived-days", days, ageDays: c.ageDays, ...(c.projectId === undefined ? {} : { projectId: c.projectId }) } };
+          return { ref, creates: false, changes, ...(arc === undefined ? {} : { audit: [{ type: "retention.expire.archive", subject: { kind: "retention-archive", id: arc.id }, detail: { with: c.id } }] }), detail: { rule: c.kind === "generation-run" ? "generation-run-days" : c.kind === "ctx-route-archive" || c.kind === "ctx-admission" ? "context-route-days" : "derived-days", days, ageDays: c.ageDays, ...(c.projectId === undefined ? {} : { projectId: c.projectId }) } };
         },
       }));
       return !r.replayed;

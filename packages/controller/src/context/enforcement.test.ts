@@ -26,7 +26,7 @@ for (const backend of backends) {
     note(by: Principal, title: string, body: string, visibility?: "shared" | "private"): Promise<SourceRef>;
     setup(task?: string): Promise<void>;
   }
-  const suite = (name: string, body: (c: Ctx) => Promise<void>, enforcement: { maxOverflows?: number; summary?: { timeoutMs: number } } = {}) =>
+  const suite = (name: string, body: (c: Ctx) => Promise<void>, enforcement: { maxOverflows?: number; summary?: { timeoutMs: number }; routeSettings?: { effective(): Promise<{ check: boolean; floorChars: number }> } } = {}) =>
     test(`${backend.name}: ${name}`, async () => {
       const world = await backend.open();
       try {
@@ -196,6 +196,125 @@ for (const backend of backends) {
     assert.equal(blocked.rebuilt, false);
     assert.match(blocked.reason!, /essential constraints do not fit the 8192-token route/);
     assert.equal((await blockers.getBlocker(blocked.blockerId!))!.type, "context_overflow");
+  });
+
+  const at2 = (i: number): string => new Date(Date.UTC(2026, 9, 1, 0, i)).toISOString();
+  const manyItems = (kind: StartupItem["kind"] = "report"): StartupItem[] => {
+    const items: StartupItem[] = [{ id: "g", kind: "goal", text: "Goal: ship v1.", at: at2(0) }, { id: "h", kind: "human", text: "Merge the branch.", at: at2(1) }];
+    for (let i = 0; i < 20; i++) items.push({ id: `r${i}`, kind, text: `${kind} ${i} `.repeat(600), at: at2(i + 2) });
+    return items;
+  };
+  const small = { systemPromptChars: 100, toolSchemaChars: 100, startupTokens: 100, replyReserveTokens: 100 };
+
+  suite("the same attempt asked again with another window or route is a new decision, never a command conflict; raising the window after a refusal works (findings 1, 4)", async ({ enf, owner, blockers, t }) => {
+    const items = manyItems();
+    const first = await enf.routeMoved(owner, { taskId: t, attemptId: "att-1", route: "local/small", window: 131_072, items });
+    assert.equal(first.rebuilt, true);
+    // Same attempt, same route, another window (the owner raised the route's contextTokens): a different decision, not command_conflict.
+    const wider = await enf.routeMoved(owner, { taskId: t, attemptId: "att-1", route: "local/small", window: 262_144, items });
+    assert.equal(wider.replayed, false);
+    assert.notEqual(wider.id, first.id);
+    assert.ok(wider.startup.tokens > first.startup.tokens, "more fits in the wider window");
+    // Same attempt, another route: also a new decision; repeating either is the recorded one.
+    const other = await enf.routeMoved(owner, { taskId: t, attemptId: "att-1", route: "cloud/other", window: 262_144, items });
+    assert.notEqual(other.id, wider.id);
+    assert.equal((await enf.routeMoved(owner, { taskId: t, attemptId: "att-1", route: "cloud/other", window: 262_144, items })).replayed, true);
+    assert.equal((await enf.routeMoved(owner, { taskId: t, attemptId: "att-1", route: "local/small", window: 131_072, items })).replayed, true);
+    // changeRoute itself: the same call with a changed window or fixed figure is a new decision as well (the archive batches too).
+    const a = await enf.changeRoute(owner, { taskId: t, attemptId: "att-9", window: 131_072, fixedTokens: 3_000, items });
+    const b = await enf.changeRoute(owner, { taskId: t, attemptId: "att-9", window: 262_144, fixedTokens: 3_000, items });
+    const c = await enf.changeRoute(owner, { taskId: t, attemptId: "att-9", window: 262_144, fixedTokens: 4_000, items });
+    assert.equal(new Set([a.id, b.id, c.id]).size, 3);
+    // A refusal: the blocker names the ways out; the owner raises the window, resolves the blocker, and the same attempt goes through.
+    const refused = await enf.routeMoved(owner, { taskId: t, attemptId: "att-2", route: "tiny/one", window: 4_096, items });
+    assert.equal(refused.rebuilt, false);
+    const blocker = (await blockers.getBlocker(refused.blockerId!))!;
+    assert.match(blocker.summary, /larger window.*task contract.*supersede.*reassign/s);
+    await blockers.resolveBlocker({ commandId: "res-1", actor: owner.id, blockerId: blocker.id, expectedRevision: blocker.revision, resolution: "raised the window of tiny/one" });
+    const raised = await enf.routeMoved(owner, { taskId: t, attemptId: "att-2", route: "tiny/one", window: 131_072, items });
+    assert.equal(raised.rebuilt, true);
+    assert.equal(await blockers.openFor("context_overflow", { kind: "task", id: t }), undefined);
+  });
+
+  suite("a task back on the route it ran on closes the stale route blocker, and only that one (finding 4)", async ({ enf, owner, blockers, t, t2 }) => {
+    const refused = await enf.routeMoved(owner, { taskId: t, attemptId: "att-1", route: "tiny/one", window: 4_096, items: manyItems() });
+    assert.ok(refused.blockerId);
+    assert.equal((await enf.admit(owner, { taskId: t, attemptId: "att-1", window: 65_536, call: small })).admit, false, "nothing is admitted while it is open");
+    assert.deepEqual(await enf.routeKept(owner, { taskId: t }), { closed: refused.blockerId });
+    assert.equal(await blockers.openFor("context_overflow", { kind: "task", id: t }), undefined);
+    assert.deepEqual(await enf.routeKept(owner, { taskId: t }), {}, "nothing left to close");
+    assert.equal((await enf.admit(owner, { taskId: t, attemptId: "att-2", window: 65_536, call: small })).admit, true);
+    // A context blocker that is not a route change stays.
+    const big = await enf.admit(owner, { taskId: t2, attemptId: "att-1", window: 8_192, call: { systemPromptChars: 90_000, toolSchemaChars: 90_000, startupTokens: 9_000, replyReserveTokens: 1_000 } });
+    assert.ok(big.blockerId);
+    assert.deepEqual(await enf.routeKept(owner, { taskId: t2 }), {});
+    assert.equal((await blockers.openFor("context_overflow", { kind: "task", id: t2 }))?.id, big.blockerId);
+  });
+
+  suite("the route's fixed part is written beside the admission and never fails it: concurrent first calls on a new route all pass (finding 2)", async ({ enf, owner, t, t2 }) => {
+    const route = contextRouteKey("local/new");
+    const results = await Promise.all([t, t2, t, t2].map((task, i) => enf.admit(owner, { taskId: task, attemptId: `att-${i}`, window: 65_536, route, call: { systemPromptChars: 12_000 + i * 1_000, toolSchemaChars: 9_000, startupTokens: 500, replyReserveTokens: 1_000 } })));
+    assert.deepEqual(results.map((r) => r.admit), [true, true, true, true]);
+    for (const r of results) assert.equal(r.blockerId, undefined);
+    const fixed = await enf.fixedPartOf("local/new", 65_536);
+    assert.ok(fixed !== undefined, "a figure was kept");
+    assert.ok(fixed.systemPromptChars >= 12_000 && fixed.systemPromptChars <= 15_000);
+  });
+
+  suite("a refused admission leaves the route's figure alone; the figure is per route and harness, the largest of the latest few (finding 3)", async ({ enf, owner, t, t2 }) => {
+    const route = contextRouteKey("local/fig");
+    const refused = await enf.admit(owner, { taskId: t, attemptId: "att-1", window: 8_192, route, harness: "pi", call: { systemPromptChars: 400_000, toolSchemaChars: 400_000, startupTokens: 500, replyReserveTokens: 1_000 } });
+    assert.equal(refused.admit, false);
+    assert.equal(await enf.fixedPartOf("local/fig", 65_536, "pi"), undefined, "a refused call writes nothing");
+    const sized = (chars: number) => ({ systemPromptChars: chars, toolSchemaChars: 5_000, startupTokens: 500, replyReserveTokens: 1_000 });
+    await enf.admit(owner, { taskId: t2, attemptId: "att-1", window: 65_536, route, harness: "pi", call: sized(20_000) });
+    assert.equal((await enf.fixedPartOf("local/fig", 65_536, "pi"))?.systemPromptChars, 20_000);
+    assert.equal(await enf.fixedPartOf("local/fig", 65_536, "hermes"), undefined, "per harness");
+    assert.equal(await enf.fixedPartOf("local/fig", 65_536), undefined, "per harness");
+    for (let i = 2; i <= 5; i++) await enf.admit(owner, { taskId: t2, attemptId: `att-${i}`, window: 65_536, route, harness: "pi", call: sized(8_000) });
+    assert.equal((await enf.fixedPartOf("local/fig", 65_536, "pi"))?.systemPromptChars, 20_000, "the largest of the recent ones");
+    await enf.admit(owner, { taskId: t2, attemptId: "att-6", window: 65_536, route, harness: "pi", call: sized(8_000) });
+    assert.equal((await enf.fixedPartOf("local/fig", 65_536, "pi"))?.systemPromptChars, 8_000, "the old one aged out");
+  });
+
+  const floorBox = { chars: 14_000 };
+  suite("a route nobody measured counts a floor, not 0; the floor comes from the setting and can be turned off (finding 6)", async ({ enf, owner, t }) => {
+    const items = manyItems();
+    const on = await enf.routeMoved(owner, { taskId: t, attemptId: "att-1", route: "local/unknown", window: 65_536, items });
+    assert.equal(on.measured, false);
+    floorBox.chars = 0;
+    const off = await enf.routeMoved(owner, { taskId: t, attemptId: "att-2", route: "local/unknown", window: 65_536, items });
+    assert.ok(off.startup.tokens > on.startup.tokens, "with the floor less is left for the context");
+    floorBox.chars = 4_000_000;
+    const huge = await enf.routeMoved(owner, { taskId: t, attemptId: "att-3", route: "local/unknown", window: 65_536, items });
+    assert.equal(huge.rebuilt, false, "a floor larger than the window leaves no room for the essentials");
+    floorBox.chars = 14_000;
+  }, { routeSettings: { effective: async () => ({ check: true, floorChars: floorBox.chars }) } });
+
+  suite("the cut text of project-wide items is read back only with the right to read the project's history; the rest by whoever works on the task (finding 7)", async ({ enf, owner, ann, t }) => {
+    const items: StartupItem[] = [{ id: "g", kind: "goal", text: "Goal.", at: at2(0) }, { id: "h", kind: "human", text: "Do it.", at: at2(1) }];
+    for (let i = 0; i < 12; i++) items.push({ id: `d${i}`, kind: "decision", text: `decision ${i} `.repeat(300), at: at2(i + 2) }, { id: `r${i}`, kind: "report", text: `report ${i} `.repeat(300), at: at2(i + 2) });
+    const moved = await enf.changeRoute(owner, { taskId: t, attemptId: "att-1", window: 65_536, fixedTokens: 1_000, items });
+    const cutOf = (kind: StartupItem["kind"]) => moved.startup.cuts.find((c) => c.kind === kind);
+    const decision = cutOf("decision"), report = cutOf("report");
+    assert.ok(decision && report, "both kinds were cut");
+    assert.ok(await enf.routeArchive(owner, { taskId: t, digest: decision.digest }), "the owner reads it");
+    assert.equal(await enf.routeArchive(ann, { taskId: t, digest: decision.digest }), undefined, "an agent that only works on the task does not read project-wide decision text");
+    assert.equal((await enf.routeArchive(ann, { taskId: t, digest: report.digest }))?.digest, report.digest);
+  });
+
+  suite("a route name keeps its identity: a/b and a:b are two routes, long names stay apart, and the result is a valid route key (finding 9)", async ({ enf, owner, t2 }) => {
+    assert.notEqual(contextRouteKey("a/b"), contextRouteKey("a:b"));
+    assert.notEqual(contextRouteKey("a b"), contextRouteKey("a_b"));
+    assert.notEqual(contextRouteKey("a~b"), contextRouteKey("a/b"));
+    const long1 = `${"x".repeat(90)}1`, long2 = `${"x".repeat(90)}2`;
+    assert.notEqual(contextRouteKey(long1), contextRouteKey(long2));
+    for (const r of ["a/b", "a:b", "/leading", long1, "ünï/cödé", "provider/model:tag"]) assert.match(contextRouteKey(r), /^[A-Za-z0-9][A-Za-z0-9._:~-]{0,79}$/);
+    assert.equal(contextRouteKey("plain-route.1"), "plain-route.1");
+    // Measured under one name is not found under the other.
+    await enf.admit(owner, { taskId: t2, attemptId: "att-1", window: 65_536, route: contextRouteKey("a/b"), call: { systemPromptChars: 5_000, toolSchemaChars: 1_000, startupTokens: 100, replyReserveTokens: 100 } });
+    assert.ok(await enf.fixedPartOf("a/b", 65_536));
+    assert.equal(await enf.fixedPartOf("a:b", 65_536), undefined);
   });
 
   suite("one compressor per context: a second is refused at registration, the same one again is a no-op, and only the registered one compacts", async ({ enf, owner, note, ann, t, t2 }) => {

@@ -242,6 +242,18 @@ Result: `{ item }`: `revision`, `limits` (the owner's entries `{ enabled, value?
 
 Completion: finished when accepted (`completed: true`).
 
+#### `context.route.get`
+
+The route-change check's settings (owner only): `check` (on by default: when a task is about to run on another model route than it last ran on, the dispatcher builds its context again for that route's window and refuses to start it if what must stay whole does not fit) and `floorChars` (the characters counted as the fixed part, system prompt and tool schemas, of a route nobody has measured yet; default 14000, 8000 for the prompt and 6000 for the tool schemas). Shows the entries, the defaults and what applies now.
+
+Arguments:
+
+- none
+
+Result: `{ item }`: `revision`, `settings`, `defaults`, `effective` (`check`, `floorChars`; 0 is off).
+
+Completion: finished when accepted (`completed: true`).
+
 #### `generation.stream.get`
 
 The switches for feeding the model stream into revision-bound generation (owner only): `record` (each model call's stream is recorded against the generation it began under) and `cut` (a reply whose generation was interrupted, by a cancel, a correction or a newer generation, is held back from the worker, with the reason). Also `failClosed` (on by default; shown as `onStoreFailure` (closed or open)): when the generation store cannot answer, a call is not sent and a reply being read is cut, with the reason; off, the call and the reply go on unrecorded. And the limits `storeTimeoutMs`, `batchMs`, `batchChars` and `heldBufferBytes` (0 turns a limit off). The switches are on unless the owner turns them off.
@@ -2150,6 +2162,22 @@ Arguments:
 - `disable` (optional): limit names to turn off
 - `unset` (optional): limit names to forget
 - `expectedRevision` (optional): the revision of the setting you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `context.route.change`
+
+The owner changes the route-change check (owner only), leaving the other as it is: `enable` or `disable` name `check` or `floorChars` (a disabled floor counts nothing for an unmeasured route; the figure is kept); `set` gives `floorChars` a figure (1 to 4000000); `unset` returns a setting to its default. With `check` off a task that moves to another route starts as before, and the first call on the route is still checked by admission.
+
+Arguments:
+
+- `enable` (optional): list of `check`, `floorChars`
+- `disable` (optional): list of `check`, `floorChars`
+- `set` (optional): for example `{ "floorChars": 14000 }`
+- `unset` (optional): list of names
+- `expectedRevision` (optional): the revision you read
 
 Result: `{ revision }`.
 
@@ -4651,7 +4679,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `retention.settings.set`
 
-Owner only: changes retention values; only the fields given change, `null` clears an optional one and "default" returns a field to the installation default. `derivedDays` (7 to 3650) expires derived summaries (off unless set); `generationRunDays` (1 to 3650) removes recorded model replies (generation runs, which may hold personal data) that are over, that many days after their last change (off unless set: they are kept); `autoRun` lets the dispatcher run it by itself; `thinkingDays` (default 14) is how long stored model thinking is kept after a task is done (recorded; deleting it needs card K06c); `backupDaily` and `backupWeekly` are the backup counts kept (7 and 4); `preRestoreKept` (1 to 1000, null keeps all, the default) keeps only that many of the newest snapshots taken before a restore; `restoreConfirmMinutes` (1 to 10080, default 30, null for no expiry) is how long the owner's approval of a restore stays good; `incidentArchiveDays` and `incidentPurgeDays` archive and then remove old resolved incidents (off); `catalogVersionsKept` (1 to 500, off) keeps only that many of the newest versions of each catalogue tool: the latest, the one a tool resolves to now, the newest unrevoked one, revoked ones and any a resumable task ran, has parked or approved to run, or lists in an environment or dependency record stay, older ones are dropped by the runner (by hand always; by the automatic pass only when `catalogAutoDrop` is true, default false); `revokedBytesBlank` (true or false, default false) is the switch for blanking the executable text of revoked versions, and `revokedBytesDays` (7 to 3650, default 90, null keeps them) is how long after the revocation, applied only while the switch is on; only a record whose text is still exactly what was registered and that no resumable task, dependency or checkpoint cites is blanked (the record, digest and revocation stay); `quotaProjectBytes` and `quotaAgentBytes` are optional storage quotas (off), warned at `quotaWarnPercent` (80); `reserveBytes` is the room kept for shutdown and recovery records (16 MiB; 0 for none). The answer names each old and new value. This is the form the chat uses.
+Owner only: changes retention values; only the fields given change, `null` clears an optional one and "default" returns a field to the installation default. `derivedDays` (7 to 3650) expires derived summaries (off unless set); `contextRouteDays` (1 to 3650) removes the records of a task's move to another model route (the text cut from its context, and the decisions) that many days after their last change (off unless set: they are kept); `generationRunDays` (1 to 3650) removes recorded model replies (generation runs, which may hold personal data) that are over, that many days after their last change (off unless set: they are kept); `autoRun` lets the dispatcher run it by itself; `thinkingDays` (default 14) is how long stored model thinking is kept after a task is done (recorded; deleting it needs card K06c); `backupDaily` and `backupWeekly` are the backup counts kept (7 and 4); `preRestoreKept` (1 to 1000, null keeps all, the default) keeps only that many of the newest snapshots taken before a restore; `restoreConfirmMinutes` (1 to 10080, default 30, null for no expiry) is how long the owner's approval of a restore stays good; `incidentArchiveDays` and `incidentPurgeDays` archive and then remove old resolved incidents (off); `catalogVersionsKept` (1 to 500, off) keeps only that many of the newest versions of each catalogue tool: the latest, the one a tool resolves to now, the newest unrevoked one, revoked ones and any a resumable task ran, has parked or approved to run, or lists in an environment or dependency record stay, older ones are dropped by the runner (by hand always; by the automatic pass only when `catalogAutoDrop` is true, default false); `revokedBytesBlank` (true or false, default false) is the switch for blanking the executable text of revoked versions, and `revokedBytesDays` (7 to 3650, default 90, null keeps them) is how long after the revocation, applied only while the switch is on; only a record whose text is still exactly what was registered and that no resumable task, dependency or checkpoint cites is blanked (the record, digest and revocation stay); `quotaProjectBytes` and `quotaAgentBytes` are optional storage quotas (off), warned at `quotaWarnPercent` (80); `reserveBytes` is the room kept for shutdown and recovery records (16 MiB; 0 for none). The answer names each old and new value. This is the form the chat uses.
 
 Arguments:
 

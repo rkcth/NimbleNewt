@@ -60,3 +60,38 @@ for (const backend of backends) {
     } finally { await store.close(); }
   });
 }
+
+for (const backend of backends) {
+  test(`${backend.name}: an accepted route change is not rebuilt on every tick while the start waits for a host; a task back on its route has the stale refusal closed once`, async () => {
+    const store = await backend.open();
+    try {
+      let current = "cloud/big";
+      const w = await buildWorld(store.storage, { route: async () => choice(current) });
+      const calls: string[] = []; const kept: string[] = [];
+      const dispatcher = w.restart({ routeChange: async (c) => { calls.push(`${c.previousRoute}>${c.route}`); return { ok: true }; }, routeKept: async (k) => { kept.push(k.taskId); } }, {});
+      const ann = await w.agent("ann", workGrants(w.project, []));
+      const made = await w.task("Prune roses", ann);
+      const again = async (): Promise<void> => {
+        const a = (await w.assignments.getAssignment(made.taskId))!;
+        await w.assignments.admitAttempt({ commandId: `again-${Math.random().toString(36).slice(2)}`, actor: "inbox", taskId: made.taskId, expectedRevision: a.revision, generation: a.generation, owner: { kind: "agent", id: "ann" }, harness: "pi" });
+      };
+      await w.heartbeatHost(); await dispatcher.tick(); await dispatcher.idle();
+      const started = w.worker.starts.length;
+      assert.ok(started >= 1);
+      // The route changes and the host is gone: the attempt waits at the host step, tick after tick; the context is asked once.
+      current = "local/small";
+      await again(); w.clock.advance(10 * 60_000);
+      for (let i = 0; i < 4; i++) { await dispatcher.tick(); await dispatcher.idle(); }
+      assert.equal(w.worker.starts.length, started, "nothing started without a host");
+      assert.deepEqual(calls, ["cloud/big>local/small"], "asked once, not on every tick");
+      await w.heartbeatHost(); await dispatcher.tick(); await dispatcher.idle();
+      assert.ok(w.worker.starts.length > started);
+      assert.equal(calls.length, 1);
+      // Back on the route it ran on: the stale-refusal hook is called (once for the attempt), the change hook is not.
+      current = "local/small";
+      await again(); await w.heartbeatHost(); await dispatcher.tick(); await dispatcher.idle(); await dispatcher.tick(); await dispatcher.idle();
+      assert.deepEqual(kept, [made.taskId]);
+      assert.equal(calls.length, 1);
+    } finally { await store.close(); }
+  });
+}

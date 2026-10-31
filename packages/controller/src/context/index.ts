@@ -8,3 +8,4 @@ export { NOTE_CATEGORIES, NOTE_LIMITS, WorkingNoteService, type NoteCategory, ty
 export * from "./dispatch.js";
 export { ENFORCEMENT_LIMITS, ContextEnforcementService, contextRouteKey, type AdmissionBody, type CompactionBody, type CompactionOutcome, type EnforcementOptions, type HandoffBody, type OverflowAction, type OverflowBody } from "./enforcement.js";
 export { THINKING_LIMITS, THINKING_RETENTION_DAYS, ThinkingService, deleteAfter, type ReadBlock, type ThinkingBlock, type ThinkingDropBody, type ThinkingExportPolicyBody, type ThinkingLookBody, type ThinkingSource } from "./thinking.js";
+export { ContextRouteSettingsService, DEFAULT_ROUTE_FLOOR_CHARS, ROUTE_FLOOR_DEFAULTS, type RouteSettingsEffective } from "./route-settings.js";

@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { resumeDecision } from "../context/budget.js";
-import type { ContextEnforcementService } from "../context/index.js";
+import { contextRouteKey, type ContextEnforcementService } from "../context/index.js";
 import type { PauseService } from "../lifecycle/index.js";
 import type { AgentMessageService } from "../messaging/index.js";
 import type { Principal } from "../security/principals.js";
@@ -53,7 +53,7 @@ export function controllerGuards(binding: GuardBinding): RuntimeGuards {
       async admit(order, call, round, retry, launch) {
         const window = binding.window(order);
         if (window === undefined) return { admit: true, reasons: [] };
-        const decision = await context.admit(binding.system, { taskId: order.taskId, attemptId: order.attemptId, round, ...(launch === undefined ? {} : { launch }), window, route: order.route.replace(/[^A-Za-z0-9._:-]/g, ":").slice(0, 80), call, ...(retry === true ? { retry: true } : {}) });
+        const decision = await context.admit(binding.system, { taskId: order.taskId, attemptId: order.attemptId, round, ...(launch === undefined ? {} : { launch }), window, route: contextRouteKey(order.route), ...(order.harness === undefined ? {} : { harness: order.harness }), call, ...(retry === true ? { retry: true } : {}) });
         if (decision.admit) rounds.set(order.attemptId, { round, ...(launch === undefined ? {} : { launch }) });
         return { admit: decision.admit, reasons: decision.reasons };
       },

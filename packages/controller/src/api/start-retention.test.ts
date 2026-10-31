@@ -387,3 +387,29 @@ test("recorded model replies (generation runs) are kept by default; with generat
     assert.equal(await has(ids.callable), true, "a run with a call that could still be admitted is kept");
   } finally { await c.close(); clean(d); }
 });
+
+test("route-change records (cut text and decisions) are kept by default; with contextRouteDays set the runner removes the old ones, and a first-call admission is never touched (card C07f, K06)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-ret-ctxroute-"));
+  const { c, boot, call, project, put } = await world(d);
+  try {
+    await put("ctx-route-archive", "ctx-aaaaaaaaaaaaaaaaaaaa", { taskId: "tsk-aaaaaaaaaaaaaaaaaaaa", projectId: project, itemId: "r1", kind: "report", digest: "sha256:x", text: "cut text" });
+    await put("ctx-admission", "adm-aaaaaaaaaaaaaaaaaaaa", { type: "route-change", taskId: "tsk-aaaaaaaaaaaaaaaaaaaa", projectId: project });
+    await put("ctx-admission", "adm-bbbbbbbbbbbbbbbbbbbb", { type: "first-call", taskId: "tsk-aaaaaaaaaaaaaaaaaaaa", projectId: project });
+    const old = new Date(Date.now() - 40 * 86_400_000).toISOString();
+    const realGet = c.storage.getAggregate.bind(c.storage); const realList = c.storage.listAggregates.bind(c.storage);
+    const back = (a: any) => (a?.kind === "ctx-route-archive" || a?.kind === "ctx-admission" ? { ...a, updatedAt: old } : a);
+    c.storage.getAggregate = async (ref) => back(await realGet(ref));
+    c.storage.listAggregates = (async (k: string, o: any) => (await realList(k, o)).map(back)) as never;
+    const has = async (kind: string, id: string) => (await c.storage.getAggregate({ kind, id })) !== undefined;
+    assert.equal((await call(boot.token, "retention.settings.get", {})).result.item.effective.contextRouteDays, null, "off by default: everything is kept");
+    assert.equal((await call(boot.token, "retention.run", {}, "x0")).result.candidates.length, 0);
+    assert.ok((await call(boot.token, "retention.settings.set", { contextRouteDays: 30 }, "x1")).ok);
+    const preview = (await call(boot.token, "retention.run", {}, "x2")).result;
+    assert.deepEqual(preview.candidates.map((x: { id: string }) => x.id).sort(), ["adm-aaaaaaaaaaaaaaaaaaaa", "ctx-aaaaaaaaaaaaaaaaaaaa"]);
+    assert.ok((await call(boot.token, "retention.run", { dryRun: false, confirm: preview.digest }, "x3")).ok);
+    assert.equal(await has("ctx-route-archive", "ctx-aaaaaaaaaaaaaaaaaaaa"), false);
+    assert.equal(await has("ctx-admission", "adm-aaaaaaaaaaaaaaaaaaaa"), false);
+    assert.equal(await has("ctx-admission", "adm-bbbbbbbbbbbbbbbbbbbb"), true, "a first-call admission is kept");
+    assert.ok((await call(boot.token, "retention.settings.set", { contextRouteDays: null }, "x4")).ok, "off again");
+  } finally { await c.close(); clean(d); }
+});

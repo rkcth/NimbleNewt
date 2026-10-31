@@ -146,7 +146,9 @@ export interface DispatcherDeps {
    * A task that ran on one route is about to run on another (a fallback, a cutover, a re-admitted attempt) (card C07f): the startup context is built again for the new route. `ok: false` keeps the attempt from starting, with the reason shown.
    * It is asked at every pass while the attempt waits, so it must answer the same for the same facts. An error leaves the attempt waiting (it is asked again).
    */
-  readonly routeChange?: (change: { readonly taskId: string; readonly projectId: string; readonly attemptId: string; readonly route: string; readonly previousRoute: string }) => Promise<{ readonly ok: true } | { readonly ok: false; readonly reason: string }>;
+  readonly routeChange?: (change: { readonly taskId: string; readonly projectId: string; readonly attemptId: string; readonly route: string; readonly harness?: string; readonly previousRoute: string }) => Promise<{ readonly ok: true } | { readonly ok: false; readonly reason: string }>;
+  /** The task is on the same route it last ran on: a refusal that an earlier move to another route left behind is closed (card C07f). */
+  readonly routeKept?: (kept: { readonly taskId: string }) => Promise<void>;
   readonly handoffFacts?: (info: { taskId: string; attemptId: string; endedBecause: string }) => Promise<Omit<HandoffFacts, "endedBecause">>;
   /** Called when a checkpoint is taken for an attempt (the composer connects C04's `ContinuationService.capture` here). */
   readonly checkpoints?: (info: { attemptId: string; taskId: string; agentId: string; reason: string; checkpoint: JsonObject }) => Promise<void>;
@@ -295,6 +297,9 @@ export class DispatcherService {
   readonly #endedAborts = new Set<AbortController>();
   readonly #endingBy = new Map<string, Promise<{ readmitted?: string }>>();
   /** Consecutive ticks an attempt pinned to a host has waited for it (in memory: a restart starts the count again). */
+  /** Per attempt: the route move the context already accepted (card C07f), so a start that waits does not rebuild the context every tick. Bounded. */
+  readonly #routeOk = new Map<string, string>();
+  #remember(attemptId: string, value: string): void { this.#routeOk.delete(attemptId); this.#routeOk.set(attemptId, value); if (this.#routeOk.size > 2000) this.#routeOk.delete(this.#routeOk.keys().next().value!); }
   readonly #pinnedWaits = new Map<string, number>();
   /** Consecutive ticks an attempt was refused by every host that could run it (card H07e). */
   readonly #refusedWaits = new Map<string, number>();
@@ -1094,15 +1099,6 @@ export class DispatcherService {
     // 5b. A checked resume (card L04c): an attempt that carries earlier work back is checked first, with the model it is about to run on.
     const resumed = await this.#resumeCheck(attemptId, taskId, chosen.route);
     if (resumed !== undefined) return skip("resume", resumed);
-    // 5c. A task that last ran on another route has its context built again for this one (card C07f); essential constraints that do not fit keep the attempt from starting.
-    if (this.#deps.routeChange !== undefined) {
-      const previous = ((await this.#runner.get(PLACED_KIND, taskId))?.body as unknown as { route?: string } | undefined)?.route;
-      if (previous !== undefined && previous !== chosen.route) {
-        let moved: Awaited<ReturnType<NonNullable<DispatcherDeps["routeChange"]>>>;
-        try { moved = await this.#deps.routeChange({ taskId, projectId: task.projectId, attemptId, route: chosen.route, previousRoute: previous }); } catch (error) { this.#options.onError?.(error); return skip("route", `the context for route ${chosen.route} could not be rebuilt yet: ${String((error as Error)?.message ?? error).slice(0, 300)}`); }
-        if (!moved.ok) return block("route", "dispatch_blocked", moved.reason.slice(0, 800));
-      }
-    }
     // 6. Budget, from accounting.
     if (this.#deps.budgets !== undefined) {
       const report = await this.#deps.budgets.accounting(this.#deps.principal, taskId);
@@ -1120,6 +1116,22 @@ export class DispatcherService {
     const contract = await this.#contractOf(taskId);
     const missing = await this.#missingGrants(agentId, task.projectId, taskId, contract.tools);
     if (missing.length > 0) return block("grant", "grant_needed", `the task needs ${missing.join(", ")} and no one has given ${missing.length === 1 ? "it" : "them"} to ${agentId}`);
+    // 5c. A task that last ran on another route has its context built again for this one (card C07f); essential constraints that do not fit keep the attempt from starting.
+    // It comes after the cheap checks (budget, grants), and an answer of "fits" is kept for the attempt, the route and the configuration it was given for, so a start that waits for a host does not read the owner's decisions again every tick.
+    if (this.#deps.routeChange !== undefined) {
+      const previous = ((await this.#runner.get(PLACED_KIND, taskId))?.body as unknown as { route?: string } | undefined)?.route;
+      if (previous !== undefined && previous === chosen.route) {
+        if (this.#deps.routeKept !== undefined && this.#routeOk.get(attemptId) !== "kept") { try { await this.#deps.routeKept({ taskId }); this.#remember(attemptId, "kept"); } catch (error) { this.#options.onError?.(error); } }
+      } else if (previous !== undefined) {
+        const cacheKey = `${previous}>${chosen.route}@${key}`;
+        if (this.#routeOk.get(attemptId) !== cacheKey) {
+          let moved: Awaited<ReturnType<NonNullable<DispatcherDeps["routeChange"]>>>;
+          try { moved = await this.#deps.routeChange({ taskId, projectId: task.projectId, attemptId, route: chosen.route, ...(chosen.harness === undefined ? {} : { harness: chosen.harness }), previousRoute: previous }); } catch (error) { this.#options.onError?.(error); return skip("route", `the context for route ${chosen.route} could not be rebuilt yet: ${String((error as Error)?.message ?? error).slice(0, 300)}`); }
+          if (!moved.ok) return block("route", "dispatch_blocked", moved.reason.slice(0, 800));
+          this.#remember(attemptId, cacheKey);
+        }
+      }
+    }
     // 8. The host: an enrolled, unrevoked, recently heard-from host that supports the harness.
     let pinned = (await this.#load(attemptId))?.body.pinnedHost;
     if (this.#deps.storeOwner !== undefined) {
