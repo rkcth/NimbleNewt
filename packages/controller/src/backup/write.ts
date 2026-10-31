@@ -4,6 +4,7 @@ import { mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { SNAPSHOT_TABLES, TABLE_SPECS, canonicalJson, type ControllerStorage, type SnapshotRow, type SnapshotTable } from "../storage/index.js";
 import type { FileBlobStore } from "../artifacts/index.js";
+import { copyPiState, type PiStateSource } from "./pi-state.js";
 import { beginSeal, hasherFor, openSink, type BackupCipher, type BackupSeal, type Keyring } from "./crypto.js";
 import { ARTIFACT_FOLDER, ARTIFACT_INDEX, BACKUP_FORMAT, ENCRYPTION_MARKER, BACKUP_NOTES, MANIFEST_FILE, PARTIAL_SUFFIX, SEALED_SUFFIX, tableFile, type BackupArtifacts, type BackupFileEntry, type BackupKind, type BackupManifest } from "./format.js";
 
@@ -20,6 +21,8 @@ export interface BackupOptions {
   readonly blobs?: FileBlobStore;
   /** Encrypt the backup for this key (the public keyring only: no secret is needed, so a scheduled backup runs unattended). */
   readonly encryption?: Keyring;
+  /** The agents' own conversation stores on this machine (card K01h): their files go into the backup too. */
+  readonly piState?: PiStateSource;
 }
 
 const stamp = (d: Date): string => d.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
@@ -78,7 +81,8 @@ async function write(storage: Pick<ControllerStorage, "snapshot">, options: Back
       files.push({ table, file, rows, bytes, sha256: hash.digest("hex") });
     }
     const artifacts = options.blobs === undefined ? undefined : await copyBlobs(options.blobs, staging, cipher);
-    const unsigned: BackupManifest = { format: BACKUP_FORMAT, product: "nimblenewt", name, createdAt: at.toISOString(), kind: options.kind, version: options.version, schemaVersion: snapshot.schemaVersion, epoch, files, ...(artifacts === undefined ? {} : { artifacts }), ...(sealing === undefined ? {} : { encryption: sealing.seal }), notes: BACKUP_NOTES, complete: true };
+    const piState = options.piState === undefined ? undefined : await copyPiState(options.piState, staging, cipher);
+    const unsigned: BackupManifest = { format: BACKUP_FORMAT, product: "nimblenewt", name, createdAt: at.toISOString(), kind: options.kind, version: options.version, schemaVersion: snapshot.schemaVersion, epoch, files, ...(artifacts === undefined ? {} : { artifacts }), ...(piState === undefined ? {} : { piState }), ...(sealing === undefined ? {} : { encryption: sealing.seal }), notes: BACKUP_NOTES, complete: true };
     // An encrypted backup's manifest ends with a keyed MAC over all of it, so the name, time, kind, epoch, notes, skipped list and file list cannot be changed by whoever only has the folder.
     const manifest: BackupManifest = cipher === undefined ? unsigned : { ...unsigned, mac: cipher.manifestMac(canonicalJson(unsigned as never)) };
     const manifestHandle = await open(join(staging, MANIFEST_FILE), "wx", 0o600);

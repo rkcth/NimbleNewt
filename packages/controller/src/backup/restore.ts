@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { SNAPSHOT_TABLES, canonicalJson, type ControllerStorage, type SnapshotRow } from "../storage/index.js";
 import { cipherOf, blobFile, readAll, verifyBackup } from "./verify.js";
+import { parsePiIndex, writePiState } from "./pi-state.js";
 import { readPlain, type BackupKey } from "./crypto.js";
 import { ledgerFilter, type LedgerEntry } from "../retention/ledger.js";
 import { ARTIFACT_FOLDER, type BackupManifest, type BlobIndexLine } from "./format.js";
@@ -23,6 +24,9 @@ export interface RestoreResult {
   readonly blobsRestored: number;
   /** Records the deletion ledger blanked or removed again, so a backup older than a deletion does not bring the text back (card K06). */
   readonly deletionsReapplied: number;
+  /** Conversation stores and files of the agents' own Pi state written back (card K01h). */
+  readonly piStoresRestored: number;
+  readonly piFilesRestored: number;
 }
 
 const RESTORED_EVIDENCE = canonicalJson({ restoredFromBackup: true, note: "this effect was intended when the backup was taken; whether it happened afterwards is not known, so it must be reconciled with the outside world and is never run again" });
@@ -31,12 +35,13 @@ const RESTORED_EVIDENCE = canonicalJson({ restoredFromBackup: true, note: "this 
  * Restores a backup into an empty store (one no controller has owned). The backup is verified first, against its manifest and the store's schema version; nothing is written when it fails. An interrupted restore leaves
  * a partly filled store, which the caller discards (a restore always starts from a new, empty database), because the state row that makes a store look used is written last.
  */
-export async function restoreBackup(path: string, storage: ControllerStorage, options: { pageSize?: number; /** Where the backup's artifact blobs go; required when the backup has any. */ blobs?: FileBlobStore; /** The unlocked key, for an encrypted backup. */ unlock?: BackupKey; /** The deletions recorded outside the database (`DeletionLedger.read`): applied to the rows as they are restored. */ deletions?: readonly LedgerEntry[]; /** Refuse a backup that is not encrypted. */ requireEncrypted?: boolean } = {}): Promise<RestoreResult> {
+export async function restoreBackup(path: string, storage: ControllerStorage, options: { pageSize?: number; /** Where the backup's artifact blobs go; required when the backup has any. */ blobs?: FileBlobStore; /** The unlocked key, for an encrypted backup. */ unlock?: BackupKey; /** The deletions recorded outside the database (`DeletionLedger.read`): applied to the rows as they are restored. */ deletions?: readonly LedgerEntry[]; /** Refuse a backup that is not encrypted. */ requireEncrypted?: boolean; /** Where the conversation store `id` goes (an empty or missing folder); required when the backup has Pi state. */ piTarget?: (id: string) => string } = {}): Promise<RestoreResult> {
   const check = await verifyBackup(path, { ...(options.unlock === undefined ? {} : { unlock: options.unlock }), ...(options.requireEncrypted === undefined ? {} : { requireEncrypted: options.requireEncrypted }) });
   if (!check.ok || check.manifest === undefined) throw new RestoreRefused(`the backup cannot be restored: ${check.problems.join("; ")}`);
   const manifest = check.manifest;
   const cipher = cipherOf(manifest, options.unlock);
   if (manifest.artifacts !== undefined && manifest.artifacts.blobs > 0 && options.blobs === undefined) throw new RestoreRefused("the backup holds artifact files, and no artifact store was given to put them in");
+  if (manifest.piState !== undefined && manifest.piState.files > 0 && options.piTarget === undefined) throw new RestoreRefused("the backup holds the agents' conversation stores, and no folder was given to put them in");
   if ((await storage.currentEpoch()) !== 0) throw new RestoreRefused("the target is not empty: a controller has already owned it. Restore into a new, empty database.");
   const probe = await storage.snapshot();
   const targetVersion = probe.schemaVersion;
@@ -53,6 +58,12 @@ export async function restoreBackup(path: string, storage: ControllerStorage, op
       if (put.digest !== e.digest) throw new RestoreRefused(`artifact ${e.digest.slice(0, 12)} did not come back as the same bytes`);
       blobs += 1;
     }
+  }
+  let piStores = 0, piFiles = 0;
+  if (manifest.piState !== undefined && options.piTarget !== undefined) {
+    const parsed = parsePiIndex((await readAll(join(path, manifest.piState.index.file), cipher)).toString("utf8"), cipher !== undefined);
+    if (parsed.problems.length > 0) throw new RestoreRefused(`the backup cannot be restored: ${parsed.problems.join("; ")}`);
+    try { const done = await writePiState(path, parsed.lines, cipher, options.piTarget); piStores = done.stores; piFiles = done.files; } catch (error) { throw new RestoreRefused(`the conversation stores could not be restored: ${error instanceof Error ? error.message : "failed"}`); }
   }
   const pageSize = options.pageSize ?? 500;
   let total = 0;
@@ -74,5 +85,5 @@ export async function restoreBackup(path: string, storage: ControllerStorage, op
     }
     await flush();
   }
-  return { manifest, rows: total, effectsMarkedUncertain: marked, deliveriesToResend: resend, blobsRestored: blobs, deletionsReapplied: ledger.touched() };
+  return { manifest, rows: total, effectsMarkedUncertain: marked, deliveriesToResend: resend, blobsRestored: blobs, deletionsReapplied: ledger.touched(), piStoresRestored: piStores, piFilesRestored: piFiles };
 }

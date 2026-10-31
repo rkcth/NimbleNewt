@@ -7437,8 +7437,25 @@
       "depends_on": [
         "K01g"
       ],
-      "deliverable": "Split from K01g (2026-10-29): Pi native state, a maintenance barrier across stores, an owner restore from inside the running controller",
+      "deliverable": "Split from K01g (2026-10-29), narrowed 2026-10-31: the agents' conversation stores (Pi Durable folders on this machine, supplied by a port) in every backup, sealed when encrypted, verified and restored; a maintenance barrier (participants held in order, released in reverse) that pauses the dispatcher and backups, refuses commands and refuses while agent work runs; an owner restore from inside the running controller for SQLite (preview with a token, chat proposal only, staged beside the live data, pre-restore snapshot, swapped in at the next start, nothing deleted, cancellable)",
       "acceptance_and_verification": "A restore is verified end to end including Pi state",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "K01i",
+      "parent": "N17",
+      "existing_issue": "AII-267",
+      "title": "Finish backup: PostgreSQL restore, remote Pi state, production wiring",
+      "depends_on": [
+        "K01h"
+      ],
+      "deliverable": "Split from K01h (2026-10-31). Remaining: a staged in-controller restore for PostgreSQL (a new schema swapped in), the Pi state of remote hosts (only this machine's stores are listed), composing the local worker host's conversation folders as the production `piState` source and `piFinal` mapping, holding the remaining writers (retention runner, notification sweeps, hand-off and resume sweeps) as barrier participants instead of relying on the dispatcher pause and the command refusal, and an owner-visible restart instruction or automatic restart",
+      "acceptance_and_verification": "A restore on PostgreSQL and a multi-host installation is verified end to end including every host's Pi state",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -8576,7 +8593,8 @@
         "U11c",
         "U11d",
         "K06c",
-        "P03b"
+        "P03b",
+        "K01i"
       ],
       "deliverable": "Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete",
       "acceptance_and_verification": "D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards",

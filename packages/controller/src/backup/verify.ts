@@ -3,7 +3,8 @@ import { readFile, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { SNAPSHOT_TABLES, canonicalJson } from "../storage/index.js";
 import { MAX_JSON_BYTES, UnlockFailed, hasherFor, parseKeyring, readPlain, type BackupCipher, type BackupKey } from "./crypto.js";
-import { ARTIFACT_FOLDER, BACKUP_FORMAT, MANIFEST_FILE, tableFile, type BackupManifest, type BlobIndexLine } from "./format.js";
+import { parsePiIndex } from "./pi-state.js";
+import { ARTIFACT_FOLDER, PI_FOLDER, PI_INDEX, SEALED_SUFFIX, BACKUP_FORMAT, MANIFEST_FILE, tableFile, type BackupManifest, type BlobIndexLine } from "./format.js";
 
 export interface BackupCheck { readonly ok: boolean; readonly manifest?: BackupManifest; readonly problems: readonly string[] }
 
@@ -73,6 +74,7 @@ export async function verifyBackup(path: string, options: { unlock?: BackupKey; 
     else if (lines !== entry.rows) problems.push(`${entry.table}: ${lines} rows, the manifest says ${entry.rows}`);
   }
   if (manifest.artifacts !== undefined) problems.push(...await verifyArtifacts(path, manifest, cipher));
+  if (manifest.piState !== undefined) problems.push(...await verifyPiState(path, manifest, cipher));
   return { ok: problems.length === 0, manifest, problems };
 }
 
@@ -94,6 +96,25 @@ async function verifyArtifacts(path: string, manifest: BackupManifest, cipher: B
     let size = 0;
     try { for await (const chunk of readPlain(join(path, ARTIFACT_FOLDER, stored), cipher, `${ARTIFACT_FOLDER}/${stored}`)) { const b = chunk as Buffer; hash.update(b); size += b.length; } } catch { problems.push(`artifacts: blob ${e.digest.slice(0, 12)} is missing`); continue; }
     if (size !== e.size || hash.digest("hex") !== e.digest) problems.push(`artifacts: blob ${e.digest.slice(0, 12)} is not what its name says`);
+  }
+  return problems;
+}
+
+/** The conversation-store index matches the manifest, and every file it lists is there with the size and digest it says. */
+export async function verifyPiState(path: string, manifest: BackupManifest, cipher: BackupCipher | undefined): Promise<string[]> {
+  const a = manifest.piState!;
+  if (a === null || typeof a !== "object" || a.index === undefined || a.index.file !== (cipher === undefined ? PI_INDEX : `${PI_INDEX}${SEALED_SUFFIX}`)) return ["pi state: the index file name is not the expected one"];
+  let text: Buffer;
+  try { text = await readAll(join(path, a.index.file), cipher); } catch { return ["pi state: the index is missing or was changed"]; }
+  if (text.length !== a.index.bytes || hasherFor(cipher).update(text).digest("hex") !== a.index.sha256) return ["pi state: the index does not match the manifest"];
+  const parsed = parsePiIndex(text.toString("utf8"), cipher !== undefined);
+  const problems = [...parsed.problems];
+  if (parsed.lines.length !== a.index.rows || a.files !== parsed.lines.length) problems.push(`pi state: ${parsed.lines.length} files listed, the manifest says ${a.files}`);
+  for (const l of parsed.lines) {
+    const hash = hasherFor(cipher);
+    let size = 0;
+    try { for await (const c of readPlain(join(path, PI_FOLDER, l.file!), cipher, `${PI_FOLDER}/${l.file!}`)) { hash.update(c); size += c.length; } } catch { problems.push(`pi state: a file of ${l.store} is missing or was changed`); continue; }
+    if (size !== l.size || hash.digest("hex") !== l.sha256) problems.push(`pi state: a file of ${l.store} is not what the index says`);
   }
   return problems;
 }

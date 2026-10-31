@@ -238,6 +238,8 @@ export interface ComposeInput {
   /** The owner's quiet-host figures (grace hours, automatic moves): given, the dispatcher's tick warns the owner about a host that stopped reporting and re-places its work as the figures say (needs remote hosts). */
   readonly quietHosts?: { readonly settings: Pick<QuietHostSettingsService, "effective">; /** The pass's own timing (tests, operators): see `QuietHostOptions`. */ readonly options?: Pick<QuietHostOptions, "quietAfterMs" | "maxGapMs"> };
   readonly onError?: (error: unknown) => void;
+  /** True while the maintenance barrier is up (card K01h): the driver skips its ticks. */
+  readonly hold?: () => boolean;
   /** The `meeting.leadMinutes` setting (card M01d), already defaulted by the caller: how long before a meeting its occurrence is made and its agents are invited and kept free. */
   readonly leadMinutes?: () => Promise<number | undefined>;
 }
@@ -533,6 +535,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       ...(i.options.intervalMs === undefined ? {} : { intervalMs: i.options.intervalMs }), ...(i.options.timer === undefined ? {} : { timer: i.options.timer }), ...(i.options.clock === undefined ? {} : { clock: i.options.clock }),
       ...(i.onError === undefined ? {} : { onError: i.onError }),
       enabled: async () => (await i.principals.get(DISPATCHER_PRINCIPAL))?.state === "active",
+      ...(i.hold === undefined ? {} : { hold: i.hold }),
       onDisabled: async (why) => { await tell(why); },
     });
     const mcpService = i.options.mcp === undefined ? undefined : McpService.withEpoch(storage, epoch, { ...ro, ...(i.options.mcp?.gate === undefined ? {} : { gate: i.options.mcp.gate }) });

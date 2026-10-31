@@ -862,6 +862,26 @@ Arguments:
 
 Result: `{ item: { enabled, scope, keyId, createdAt, fingerprint, warnings, pinned?, approvedNext?, unlockMethods: { passcode, recovery }, lastProof? } }`, or `{ item: { enabled: false } }`.
 
+#### `backup.restore.preview`
+
+Owner only: exactly what restoring a backup would do (rows, artifact files, conversation files, actions that come back uncertain, messages sent again, the steps and warnings) and the `token` that confirms it. Changes nothing and needs no secret. A restore replaces ALL current data with the backup's.
+
+Arguments:
+
+- `name`: the backup's name, as backup.list shows it
+
+Result: `{ item: { token, name, createdAt, kind, version, schemaVersion, encrypted, rows, artifactFiles, piStores, piFiles, effectsToMarkUncertain?, deliveriesToResend?, steps, warnings } }`.
+
+#### `backup.restore.status`
+
+Owner only: whether a restore is prepared and waits for the restart, and the maintenance barrier's state.
+
+Arguments:
+
+- none
+
+Result: `{ item: { pending?, barrier } }`.
+
 #### `backup.list`
 
 Owner only: the complete backups, newest first, and whether the last one failed.
@@ -3414,6 +3434,28 @@ Arguments:
 Result: `{ ok, method, at }`.
 
 Completion: finished when accepted (`completed: true`).
+
+#### `backup.restore.apply`
+
+Owner only, a dangerous action: restores a backup. `confirm` must be the token of the preview the owner approved; the call prepares the restore beside the live data, takes a snapshot of the current state, raises the maintenance barrier (every other command is refused) and waits for the controller to be restarted, which swaps the data in (the old data is kept beside). Refused while agent work is running. For an encrypted backup the passcode or recovery file is read from the host file (never an argument); `method` says which. The chat only proposes this; it is never applied from an interpreter's words.
+
+Arguments:
+
+- `name`: the backup's name
+- `confirm`: the token from backup.restore.preview
+- `method` (optional): passcode or recovery, for an encrypted backup (default passcode)
+
+Result: `{ item: { name, restartRequired: true, safetyCopy, rows, blobsRestored, piStoresRestored, piFilesRestored, effectsMarkedUncertain, deliveriesToResend } }`.
+
+#### `backup.restore.cancel`
+
+Owner only: withdraws a prepared restore that the restart has not applied yet. The staged copy is removed, the maintenance barrier comes down and the live data is exactly as it was.
+
+Arguments:
+
+- none
+
+Result: `{ cancelled }`.
 
 #### `message.send`
 

@@ -18,6 +18,11 @@ export interface BackupArtifacts { readonly index: BackupIndexEntry; readonly bl
 /** An artifact index line: a sealed backup keeps each blob under a number (`file`), so the digest, which names the content, is only inside the sealed index. */
 export interface BlobIndexLine { readonly digest: string; readonly size: number; readonly file?: string }
 export interface BackupIndexEntry { readonly file: string; readonly rows: number; readonly bytes: number; readonly sha256: string }
+/** The agents' own conversation stores in a backup (card K01h): `pi-state.jsonl` lists each file (store, relative path with forward slashes, size, digest, stored name) and the file is `pi-state/f-<n>`. */
+export interface BackupPiState { readonly index: BackupIndexEntry; readonly stores: number; readonly files: number; readonly bytes: number }
+export interface PiIndexLine { readonly store: string; readonly rel: string; readonly size: number; readonly sha256: string; readonly file?: string }
+export const PI_INDEX = "pi-state.jsonl";
+export const PI_FOLDER = "pi-state";
 export const ARTIFACT_INDEX = "artifacts.jsonl";
 export const ARTIFACT_FOLDER = "artifacts";
 export const SEALED_SUFFIX = ".enc";
@@ -39,6 +44,8 @@ export interface BackupManifest {
   readonly files: readonly BackupFileEntry[];
   /** Present when the installation has an artifact store: its blobs are in the backup. */
   readonly artifacts?: BackupArtifacts;
+  /** Present when the installation lists conversation stores (card K01h): the agents' own Pi state is in the backup. */
+  readonly piState?: BackupPiState;
   /** Present when the backup is encrypted (card K01b): the key it was made for, the public ephemeral half and the wrapped copies of the private key. Every table file and blob is sealed; digests below are keyed, not plain SHA-256. */
   readonly encryption?: BackupSeal;
   /** Present on an encrypted backup, written last: the keyed MAC over every other field of this manifest. */

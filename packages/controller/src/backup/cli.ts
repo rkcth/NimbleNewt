@@ -19,7 +19,7 @@ const USAGE = [
   "  backup list <backups folder>",
   "  backup verify <backup folder> [--passcode-file <file> | --recovery-file <file>] [--require-encrypted yes] [--allow-plain yes]",
   "  backup encryption-setup <new keyring file> --passcode-file <file holding the passcode> --recovery-out <new recovery file>",
-  "  backup restore <backup folder> [--passcode-file <file> | --recovery-file <file>] [--require-encrypted yes] [--allow-plain yes] (--sqlite <new database file> | --postgres <connection url> [--schema <name>]) [--artifacts <new artifact folder>]",
+  "  backup restore <backup folder> [--passcode-file <file> | --recovery-file <file>] [--require-encrypted yes] [--allow-plain yes] (--sqlite <new database file> | --postgres <connection url> [--schema <name>]) [--pi-state <new folder for the agents' conversation stores>] [--artifacts <new artifact folder>]",
   "Secrets are only ever read from files (mode 600) and written to new files; none is taken on the command line or printed.",
   "Giving a passcode or recovery file means the backup must be encrypted. A folder that has held encrypted backups refuses a plain one unless you give --allow-plain yes.",
   "The passcode and recovery files are for the moment of the command: put them there, run it, and remove them; keep the recovery file off this machine.",
@@ -76,7 +76,7 @@ export async function runBackupCli(argv: readonly string[], print: (line: string
       for (const p of check.problems) print(`problem: ${p}`);
       return 1;
     }
-    const opts = options(rest, ["sqlite", "postgres", "schema", "artifacts", "passcode-file", "recovery-file", "require-encrypted", "allow-plain", "deletions"]);
+    const opts = options(rest, ["sqlite", "postgres", "schema", "artifacts", "pi-state", "passcode-file", "recovery-file", "require-encrypted", "allow-plain", "deletions"]);
     if (typeof opts === "string") { print(opts); print(USAGE); return 2; }
     if ((opts.get("sqlite") === undefined) === (opts.get("postgres") === undefined)) { print("give exactly one of --sqlite and --postgres"); return 2; }
     if (opts.get("schema") !== undefined && opts.get("postgres") === undefined) { print("--schema goes with --postgres"); return 2; }
@@ -90,8 +90,9 @@ export async function runBackupCli(argv: readonly string[], print: (line: string
       const blobs = opts.get("artifacts") === undefined ? undefined : await FileBlobStore.open({ directory: opts.get("artifacts")! });
       // Deletions the owner asked for after this backup was made are re-applied, so restoring an old backup does not bring a deleted record's text back.
       const ledgerPath = opts.get("deletions") ?? join(dirname(resolve(folder)), LEDGER_FILE);
-      const done = await restoreBackup(folder, storage, { ...(blobs === undefined ? {} : { blobs }), ...unlocked, deletions: await new DeletionLedger(ledgerPath).read() });
+      const done = await restoreBackup(folder, storage, { ...(blobs === undefined ? {} : { blobs }), ...(opts.get("pi-state") === undefined ? {} : { piTarget: (id: string) => join(opts.get("pi-state")!, id) }), ...unlocked, deletions: await new DeletionLedger(ledgerPath).read() });
       print(`restored ${done.rows} rows${done.blobsRestored > 0 ? ` and ${done.blobsRestored} artifact files` : ""} from ${done.manifest.name}`);
+      if (done.piFilesRestored > 0) print(`${done.piFilesRestored} conversation files of ${done.piStoresRestored} agent stores were put back`);
       if (done.deletionsReapplied > 0) print(`${done.deletionsReapplied} records deleted at your request after this backup was made were blanked or removed again`);
       if (done.effectsMarkedUncertain > 0) print(`${done.effectsMarkedUncertain} actions on the outside were only intended when the backup was taken; they are marked uncertain and are never run again, so check what really happened`);
       if (done.deliveriesToResend > 0) print(`${done.deliveriesToResend} messages had not been delivered when the backup was taken; they will be sent again`);

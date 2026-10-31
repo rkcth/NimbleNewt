@@ -46,6 +46,8 @@ export interface DriverOptions {
   /** Asked before every tick: false when the owner disabled the dispatcher principal. The driver then closes the attempts it holds, stops for good and calls `onDisabled` (the owner is told). */
   readonly enabled?: () => Promise<boolean>;
   readonly onDisabled?: (reason: string) => Promise<void>;
+  /** True while the maintenance barrier is up (card K01h): the tick is skipped, with nothing recorded as a failure, and the loop carries on once the barrier comes down. */
+  readonly hold?: () => boolean;
   /** Where the errors are also written, so they survive a restart (bounded: one record, the last `errorsKept`). Failure to write is itself kept in memory. */
   readonly record?: { readonly storage: ControllerStorage; readonly options?: RunnerOptions };
 }
@@ -113,6 +115,9 @@ export class DispatchDriver {
     try { return await run; } finally { this.#running = undefined; }
   }
 
+  /** Resolves when no tick is running (the maintenance barrier waits for it after the hold is set, so no attempt is admitted meanwhile). */
+  async settle(): Promise<void> { await this.#running?.catch(() => undefined); }
+
   /** Graceful shutdown. Safe to call twice. A fenced or disabled driver never closes attempts in the store (they are not its to close); its local workers were ended when it was fenced. */
   async stop(): Promise<void> {
     if (this.#state === "stopped") return;
@@ -147,6 +152,7 @@ export class DispatchDriver {
   async #once(): Promise<TickReport | undefined> {
     try {
       if ((await this.#o.storage.currentEpoch()) !== this.#o.epoch) return await this.#fence("another controller instance holds the primary epoch");
+      if (this.#o.hold?.() === true) return undefined;
       if (this.#o.enabled !== undefined && !(await this.#o.enabled())) return await this.#disable();
       const report = await this.#o.dispatcher.tick();
       this.#ticks++;

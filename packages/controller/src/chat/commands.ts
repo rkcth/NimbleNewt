@@ -93,6 +93,10 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "backup.encryption.verify": { verb: "Check that a backup unlock method still works", mode: "apply" },
   // Approving a new backup key decides who can read every later backup: always a proposal, shown first in every profile.
   "backup.encryption.rekey": { verb: "Approve a new backup key", mode: "propose" },
+  // A restore replaces everything with an older copy: always a proposal with the exact preview (backup.restore.preview) shown first, never applied from an interpreter's words, in every profile (card K01h).
+  "backup.restore.apply": { verb: "Restore a backup (replaces all current data)", mode: "propose" },
+  // Withdrawing a prepared restore only puts things back as they were: the safe direction.
+  "backup.restore.cancel": { verb: "Withdraw a prepared restore", mode: "apply" },
   // Release staging and activation (card K02). Staging copies verified files and changes nothing running, so it applies at once. Activating and rolling back change what runs: always shown first, the owner's word is the confirmation.
   // Requiring an approved candidate narrows and applies at once; dropping the requirement and any other setting change widens or is shown first (provisional, see the notes).
   "release.stage": { verb: "Stage a release", mode: "apply" },

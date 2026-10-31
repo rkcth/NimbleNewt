@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { readSecretFile, SecretFileRefused } from "./secret-file.js";
-import { MAX_JSON_BYTES, UnlockFailed, keyringFingerprint, parseKeyring, unlockWithPasscode, unlockWithRecovery, type Keyring } from "./crypto.js";
+import { MAX_JSON_BYTES, UnlockFailed, type BackupKey, keyringFingerprint, parseKeyring, unlockWithPasscode, unlockWithRecovery, type Keyring } from "./crypto.js";
 
 export interface EncryptionOptions {
   /** The keyring (public key and wrapped copies of the private key) read from the host's keyring file. */
@@ -72,6 +72,27 @@ export class BackupEncryption {
     if (rec !== undefined && ring !== undefined && dirname(resolve(rec)) === dirname(resolve(ring))) out.push("the recovery file is in the same folder as the keyring: keep it off this machine and give the controller a copy only for the moment of a proof");
     else if (rec !== undefined && existsSync(rec)) out.push("a recovery file is on this host right now: it should exist only while a proof runs, and be kept off this machine otherwise");
     return out;
+  }
+
+  /**
+   * The unlocked key for one operation (a restore, card K01h): read from the same host file a proof reads, rate limited like a proof, and returned for the caller to use and drop. The key is held in memory only for that operation;
+   * nothing secret is returned to any API or written anywhere.
+   */
+  async unlock(method: UnlockMethod): Promise<BackupKey> {
+    if (method !== "passcode" && method !== "recovery") throw new ProofRefused("failed", "the method is passcode or recovery");
+    const file = method === "passcode" ? this.#o.passcodeFile : this.#o.recoveryFile;
+    if (file === undefined) throw new ProofRefused("not_supplied", `no ${method} file is set on the host`);
+    const now = this.#now();
+    if (this.#running || now.getTime() - this.#lastAttemptMs < (this.#o.minIntervalMs ?? 10_000)) throw new ProofRefused("rate_limited", "an unlock was just tried: wait a few seconds");
+    this.#running = true;
+    try {
+      this.#lastAttemptMs = now.getTime();
+      let secret: string;
+      try { secret = await readSecretFile(file); } catch (error) { throw new ProofRefused("unreadable", error instanceof SecretFileRefused ? error.message : "the file cannot be read"); }
+      try { return method === "passcode" ? await unlockWithPasscode(this.#o.keyring, secret) : unlockWithRecovery(this.#o.keyring, JSON.parse(secret)); } catch (error) {
+        throw new ProofRefused("failed", error instanceof UnlockFailed ? error.message : "could not unlock with that file");
+      }
+    } finally { this.#running = false; }
   }
 
   async verify(method: UnlockMethod): Promise<{ ok: true; method: UnlockMethod; at: string }> {

@@ -8,3 +8,6 @@ export { BackupCipher, BackupKey, PasscodeRefused, SealedFileBad, UnlockFailed, 
 export { BackupKeyPinService, KeyPinMismatch } from "./pin.js";
 export { SecretFileRefused, readSecretFile } from "./secret-file.js";
 export { BackupEncryption, ProofRefused, readKeyringFile, type EncryptionOptions, type EncryptionStatus, type UnlockMethod } from "./encryption.js";
+export { MaintenanceBarrier, BarrierRefused, type BarrierParticipant, type BarrierState } from "./barrier.js";
+export { PI_LIMITS, copyPiState, validRel, validStoreId, writePiState, type PiStateSource, type PiStateStore } from "./pi-state.js";
+export { PENDING_FILE, STAGING_DIR, StagedRestore, applyPendingRestore, type PendingRestore, type RestorePlan, type StagedRestoreOptions } from "./staged-restore.js";

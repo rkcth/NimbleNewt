@@ -193,6 +193,9 @@ export interface StateApiDeps {
   readonly backups?: Pick<BackupService, "backUpNow" | "backUpFor" | "list" | "status">;
   readonly backupEncryption?: Pick<BackupEncryption, "status" | "verify">;
   readonly backupKeyPin?: Pick<BackupKeyPinService, "get" | "rekey">;
+  readonly backupRestore?: Context["backupRestore"];
+  /** While it says true (the maintenance barrier is up, card K01h) every command except the restore's own and the owner's reads is refused as unavailable. */
+  readonly maintenanceHeld?: () => string | undefined;
   readonly improvements?: Pick<ImprovementService, "propose" | "group" | "decide" | "bringToStandup" | "get" | "open">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep" | "readiness">;
 
@@ -318,6 +321,7 @@ export class StateApi {
         ...(this.#deps.backups === undefined ? {} : { backups: this.#deps.backups }),
         ...(this.#deps.backupEncryption === undefined ? {} : { backupEncryption: this.#deps.backupEncryption }),
         ...(this.#deps.backupKeyPin === undefined ? {} : { backupKeyPin: this.#deps.backupKeyPin }),
+        ...(this.#deps.backupRestore === undefined ? {} : { backupRestore: this.#deps.backupRestore }),
         ...(this.#deps.improvements === undefined ? {} : { improvements: this.#deps.improvements }),
         ...(this.#deps.watchControl === undefined ? {} : { watchControl: this.#deps.watchControl }),
         ...(this.#deps.standups === undefined ? {} : { standups: this.#deps.standups }),
@@ -345,6 +349,8 @@ export class StateApi {
           return answered.ok ? { ok: true as const, result: answered.result } : { ok: false as const, code: answered.error.code, message: answered.error.message };
         },
       };
+      const held = operation.kind === "command" ? this.#deps.maintenanceHeld?.() : undefined;
+      if (held !== undefined && operation.name !== "backup.restore.cancel") throw new DomainError("unavailable", `the installation is in maintenance (${held}); commands are refused until it is over`);
       const result = await operation.run(context, args, request.commandId);
       if (operation.kind === "query") return { v: API_VERSION, op: request.op, ok: true, result };
       const deferred = operation.completion?.kind === "deferred";

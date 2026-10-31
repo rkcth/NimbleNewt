@@ -1,3 +1,4 @@
+import { DomainError } from "../domain/errors.js";
 import { readdir, stat } from "node:fs/promises";
 import type { FileBlobStore } from "../artifacts/index.js";
 import type { ControllerStorage } from "../storage/index.js";
@@ -6,6 +7,7 @@ import { basename } from "node:path";
 import { DEFAULT_RETENTION, chooseKept, listBackups, pruneBackups, type BackupInfo } from "./retention.js";
 import type { Keyring } from "./crypto.js";
 import { createBackup } from "./write.js";
+import type { PiStateSource } from "./pi-state.js";
 
 export interface BackupServiceOptions {
   readonly root: string;
@@ -23,6 +25,8 @@ export interface BackupServiceOptions {
   readonly blobs?: FileBlobStore;
   /** Encrypt each backup for this key (card K01b): the public keyring only. */
   readonly encryption?: Keyring;
+  /** The agents' own conversation stores on this machine (card K01h): copied into each backup. */
+  readonly piState?: PiStateSource;
 }
 
 export interface BackupStatus { readonly root: string; readonly newest?: { name: string; createdAt: string; kind: BackupKind }; readonly count: number; readonly running: boolean; readonly lastError?: { at: string; message: string } }
@@ -66,12 +70,19 @@ export class BackupService {
     return run;
   }
 
+  /** The snapshot taken inside the maintenance barrier before a restore replaces the data (card K01h): not stopped by the hold, kept like a pre-upgrade snapshot. */
+  async safetyCopy(): Promise<{ path: string; manifest: BackupManifest }> {
+    await this.finish();
+    return createBackup(this.#storage, { root: this.#options.root, kind: "pre-upgrade", version: this.#options.version, ...(this.#options.now === undefined ? {} : { now: this.#options.now }), ...(this.#options.pageSize === undefined ? {} : { pageSize: this.#options.pageSize }), ...(this.#options.blobs === undefined ? {} : { blobs: this.#options.blobs }), ...(this.#options.encryption === undefined ? {} : { encryption: this.#options.encryption }), ...(this.#options.piState === undefined ? {} : { piState: this.#options.piState }) });
+  }
+
   /** Takes a backup now. A backup already running is the answer to a second ask. */
   backUpNow(kind: BackupKind = "manual"): Promise<{ path: string; manifest: BackupManifest }> {
+    if (this.#held) return Promise.reject(new DomainError("unavailable", "the installation is in maintenance: a backup is not started now"));
     if (this.#running !== undefined) return this.#running;
     const run = (async () => {
       try {
-        const made = await createBackup(this.#storage, { root: this.#options.root, kind, version: this.#options.version, ...(this.#options.now === undefined ? {} : { now: this.#options.now }), ...(this.#options.pageSize === undefined ? {} : { pageSize: this.#options.pageSize }), ...(this.#options.blobs === undefined ? {} : { blobs: this.#options.blobs }), ...(this.#options.encryption === undefined ? {} : { encryption: this.#options.encryption }) });
+        const made = await createBackup(this.#storage, { root: this.#options.root, kind, version: this.#options.version, ...(this.#options.now === undefined ? {} : { now: this.#options.now }), ...(this.#options.pageSize === undefined ? {} : { pageSize: this.#options.pageSize }), ...(this.#options.blobs === undefined ? {} : { blobs: this.#options.blobs }), ...(this.#options.encryption === undefined ? {} : { encryption: this.#options.encryption }), ...(this.#options.piState === undefined ? {} : { piState: this.#options.piState }) });
         this.#lastError = undefined;
         await pruneBackups(this.#options.root, { ...(this.#options.now === undefined ? {} : { now: this.#options.now }), retention: await this.#counts() }).catch((error) => { this.#lastError = { at: this.#now().toISOString(), message: `old backups could not be removed: ${error instanceof Error ? error.message : String(error)}` }; });
         return made;
@@ -86,6 +97,7 @@ export class BackupService {
 
   /** The nightly run: makes a scheduled backup when the newest scheduled or manual one is older than the interval (or there is none). Returns whether one was made. */
   async runScheduled(): Promise<boolean> {
+    if (this.#held) return false;
     if (this.#running !== undefined) return false;
     // After a failed run, wait before trying again: a full disk would otherwise be hit with a new copy every tick.
     if (this.#lastError !== undefined && this.#now().getTime() - Date.parse(this.#lastError.at) < (this.#options.retryAfterMs ?? 3_600_000)) return false;
@@ -99,6 +111,14 @@ export class BackupService {
     if (newest !== undefined && this.#now().getTime() - Date.parse(newest.at) < every) return false;
     try { await this.backUpNow("scheduled"); } catch { return false; } // the failure is kept in `status`
     return true;
+  }
+
+  #held = false;
+  /** The maintenance barrier's hold (card K01h): no backup is started, and the one running is waited for; the returned function lets backups go on. */
+  async hold(): Promise<() => void> {
+    this.#held = true;
+    await this.finish();
+    return () => { this.#held = false; };
   }
 
   /** Resolves when no backup is running (a failure is already in the status). Called at shutdown, so the store is not closed in the middle of a copy. */
