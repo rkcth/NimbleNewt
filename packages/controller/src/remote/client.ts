@@ -165,7 +165,7 @@ export class RemoteAttempt implements ToolGateway {
   }
 
   /** Takes the offer (or takes the attempt up again after a reconnect). `fenced` means the attempt was moved or ended: drop it. */
-  async accept(): Promise<{ placement: number; expiresAt: string; controlSeq: number; checkpoint?: { artifactId: string; sequence: number } }> {
+  async accept(): Promise<{ placement: number; expiresAt?: string; controlSeq: number; checkpoint?: { artifactId: string; sequence: number } }> {
     return await this.#post("accept", {}) as never;
   }
   async begin(request: ToolCallRequest): ReturnType<ToolGateway["begin"]> { await this.watchdog?.assertProductive(); return await this.#post("begin", { request: request as unknown as Json }) as never; }

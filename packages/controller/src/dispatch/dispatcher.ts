@@ -140,6 +140,9 @@ export interface DispatcherDeps {
   readonly loops?: readonly DispatcherLoop[];
 }
 
+/** The dispatcher's own limits; a figure that is absent is not limited. */
+export interface DispatcherLimitFigures { readonly attemptMs?: number; readonly maxAttempts?: number }
+
 export interface AttemptDispatcherOptions extends RunnerOptions {
   /** Names this dispatcher in the lease. */
   readonly holder?: string;
@@ -152,10 +155,14 @@ export interface AttemptDispatcherOptions extends RunnerOptions {
   readonly reserveCostMicros?: number;
   /** A worker that does not beat within this time is taken as lost. Default one minute. */
   readonly leaseMs?: number;
-  /** How long an attempt may run (shortened by the contract's `maxMinutes`). Default four hours. */
+  /** How long an attempt may run (shortened by the contract's `maxMinutes`). Default: no limit. The owner's dispatcher-limits setting (`limits`) wins over this start-up figure. */
   readonly attemptMs?: number;
-  /** Attempts the dispatcher itself admits after a lost one (contract `maxAttempts` wins). Default 3 in all. */
+  /** Attempts the dispatcher itself admits after a lost one (contract `maxAttempts` wins). Default: no limit. The owner's dispatcher-limits setting (`limits`) wins over this start-up figure. */
   readonly maxAttempts?: number;
+  /** The owner's dispatcher-limits setting (card O-limits), read on every claim and every re-admission so a change counts from the next one. It throws when unreadable and the step then fails (nothing starts) rather than running unbounded by mistake. */
+  readonly limits?: () => Promise<DispatcherLimitFigures>;
+  /** The longest an attempt may run for this task according to configuration (`time.maxMinutes`, minutes); `undefined` when none is set. Read on every claim. */
+  readonly configuredMinutes?: (taskId: string) => Promise<number | undefined>;
   /** After this many ticks in a row in which an attempt pinned to a host could not start because that host was unavailable, a blocker names the owner (who can move it). Default 5. */
   readonly pinnedStaleTicks?: number;
   /** How long the end hook (the agent's ending) may take before the attempt ends with the dispatcher's own outcome and the hook's delay is reported through `onError`. Default 30 seconds. */
@@ -222,7 +229,7 @@ interface Live { readonly handle: WorkerHandle; readonly host: WorkerHost; reado
 export class DispatcherService {
   readonly #runner: CommandRunner;
   readonly #deps: DispatcherDeps;
-  readonly #options: Required<Pick<AttemptDispatcherOptions, "leaseMs" | "attemptMs" | "maxAttempts" | "scanPage" | "expectedMinutes">> & AttemptDispatcherOptions;
+  readonly #options: Required<Pick<AttemptDispatcherOptions, "leaseMs" | "scanPage" | "expectedMinutes">> & AttemptDispatcherOptions;
   readonly #holder: string;
   readonly #live = new Map<string, Live>();
   readonly #path: ToolPath;
@@ -246,7 +253,7 @@ export class DispatcherService {
   private constructor(runner: CommandRunner, deps: DispatcherDeps, options: AttemptDispatcherOptions) {
     this.#runner = runner;
     this.#deps = deps;
-    this.#options = { leaseMs: DISPATCH_LIMITS.leaseMs, attemptMs: DISPATCH_LIMITS.attemptMs, maxAttempts: DISPATCH_LIMITS.maxAttempts, scanPage: DISPATCH_LIMITS.scanPage, expectedMinutes: 30, ...options };
+    this.#options = { leaseMs: DISPATCH_LIMITS.leaseMs, scanPage: DISPATCH_LIMITS.scanPage, expectedMinutes: 30, ...options };
     this.#holder = options.holder ?? "dispatcher";
     this.#path = new ToolPath(runner, deps, {
       catalog: options.catalog ?? ActionCatalog.default,
@@ -289,7 +296,7 @@ export class DispatcherService {
     for (const id of live) {
       const d = await this.#load(id);
       if (d === undefined || (d.body.state !== "running" && d.body.state !== "parked")) continue;
-      const expired = d.body.expiresAt <= at;
+      const expired = d.body.expiresAt !== undefined && d.body.expiresAt <= at;
       if (expired || (d.body.state === "running" && d.body.lease !== undefined && d.body.lease.until <= at)) {
         const result = await this.#end(id, "abandoned", expired ? "the attempt ran past its expiry" : "the worker stopped beating; its lease ran out", { readmit: !expired, lost: !expired });
         lost.push(id);
@@ -738,12 +745,12 @@ export class DispatcherService {
     if (pre.kind !== "ok") return pre;
     const now = this.#runner.now();
     const contract = await this.#contractOf(taskId);
-    const minutes = contract.maxMinutes === undefined ? this.#options.attemptMs : Math.min(this.#options.attemptMs, contract.maxMinutes * 60_000);
+    const limit = await this.#attemptLimitMs(taskId, contract.maxMinutes);
     const body: DispatchBody = {
       attemptId, taskId, projectId: task.projectId, agentId: pre.agentId, generation: attempt.generation, state: "waiting",
       ...(pre.harness === undefined ? {} : { harness: pre.harness }), route: pre.route.route, role: pre.route.role, request: pre.route.request,
       revisions: await this.#revisions(task.projectId, taskId, contract.version, pre.route),
-      hostId: pre.host.hostId, claimedAt: now, expiresAt: new Date(Date.parse(now) + minutes).toISOString(), heartbeats: 0, inFlight: [], parked: [], calls: 0,
+      hostId: pre.host.hostId, claimedAt: now, ...(limit === undefined ? {} : { expiresAt: new Date(Date.parse(now) + limit).toISOString() }), heartbeats: 0, inFlight: [], parked: [], calls: 0,
     };
     const ref: AggregateRef = { kind: DISPATCH_KIND, id: derivedId("dpa", attemptId) };
     try {
@@ -998,6 +1005,20 @@ export class DispatcherService {
     return ((await this.#runner.get("decision-context", projectId))?.body as unknown as { version?: number } | undefined)?.version ?? 0;
   }
 
+  /** The figures now: the setting's when a setting is attached (it carries the start-up figures itself), else the start-up options; nothing set is no limit. */
+  async #figures(): Promise<DispatcherLimitFigures> {
+    const set = this.#options.limits === undefined ? undefined : await this.#options.limits();
+    if (set !== undefined) return set; // the setting service already put the start-up figures under the owner's
+    return { ...(this.#options.attemptMs === undefined ? {} : { attemptMs: this.#options.attemptMs }), ...(this.#options.maxAttempts === undefined ? {} : { maxAttempts: this.#options.maxAttempts }) };
+  }
+
+  /** How long an attempt of this task may run: the smallest of what is set (owner's figure, configuration, contract); `undefined` when nothing limits it. */
+  async #attemptLimitMs(taskId: string, contractMinutes: number | undefined): Promise<number | undefined> {
+    const configured = this.#options.configuredMinutes === undefined ? undefined : await this.#options.configuredMinutes(taskId);
+    const all = [(await this.#figures()).attemptMs, configured === undefined ? undefined : configured * 60_000, contractMinutes === undefined ? undefined : contractMinutes * 60_000].filter((x): x is number => x !== undefined);
+    return all.length === 0 ? undefined : Math.min(...all);
+  }
+
   async #contractOf(taskId: string): Promise<{ version: number; maxMinutes?: number; maxAttempts?: number; tools: readonly string[] }> {
     const c = (await this.#runner.get("task-contract", taskId))?.body as unknown as { version: number; budget?: { maxMinutes?: number; maxAttempts?: number }; permissions?: readonly string[] } | undefined;
     return {
@@ -1021,7 +1042,7 @@ export class DispatcherService {
     const current = assignment.generation === b.generation && assignment.state === "assigned" && assignment.activeAttemptId === b.attemptId && attempt.state === "active";
     // The attempt was superseded, released or finished elsewhere while it waited: the claim is closed, its place given back.
     if (!current) { await this.#end(b.attemptId, "abandoned", "the attempt is no longer the task's active attempt at the current generation", { readmit: false }); return { kind: "skipped", check: "generation", reason: "the attempt was superseded while it waited" }; }
-    if (b.expiresAt <= this.#runner.now()) { await this.#end(b.attemptId, "abandoned", "the attempt expired before it was started", { readmit: false }); return { kind: "skipped", check: "expired", reason: "the attempt expired before it started" }; }
+    if (b.expiresAt !== undefined && b.expiresAt <= this.#runner.now()) { await this.#end(b.attemptId, "abandoned", "the attempt expired before it was started", { readmit: false }); return { kind: "skipped", check: "expired", reason: "the attempt expired before it started" }; }
     const pre = await this.#checks(task, true, b.attemptId, b.agentId);
     if (pre.kind === "skipped" || pre.kind === "blocked") {
       // A passing reason gives the place back (nothing waits on a place for work that may not start); a lasting one is already a blocker.
@@ -1063,7 +1084,9 @@ export class DispatcherService {
       if (report === undefined) return undefined; // the task has no budget: nothing is held
       const contract = await this.#contractOf(d.body.taskId);
       // Only a dimension that has a limit is held (a limit of 0 states none), and no more than is still available: the contract's time, the attempt's own expiry and the allowance agree on the smallest.
-      const ms = Math.min(this.#options.attemptMs ?? 4 * 3_600_000, contract.maxMinutes === undefined ? Number.MAX_SAFE_INTEGER : contract.maxMinutes * 60_000);
+      // The attempt's own limit as it was set at the claim (none: the whole free allowance is held), cut by the contract's time.
+      const own = d.body.expiresAt === undefined ? Number.MAX_SAFE_INTEGER : Math.max(0, Date.parse(d.body.expiresAt) - Date.parse(d.body.claimedAt));
+      const ms = Math.min(own, contract.maxMinutes === undefined ? Number.MAX_SAFE_INTEGER : contract.maxMinutes * 60_000);
       const wantCost = this.#options.reserveCostMicros ?? 0;
       const cost = report.limit.costMicros > 0 && wantCost > 0 ? Math.min(wantCost, report.available.costMicros) : 0;
       const compute = report.limit.computeMs > 0 ? Math.min(ms, report.available.computeMs) : 0;
@@ -1150,14 +1173,14 @@ export class DispatcherService {
       throw error;
     }
     await this.#assertCurrent(b);
-    const credential = await this.#deps.credentials.issueForAttempt(this.#deps.principal, { commandId: `dpa-cred:${b.attemptId}`, attemptId: b.attemptId, expiresAt: b.expiresAt });
+    const credential = await this.#deps.credentials.issueForAttempt(this.#deps.principal, { commandId: `dpa-cred:${b.attemptId}`, attemptId: b.attemptId, ...(b.expiresAt === undefined ? {} : { expiresAt: b.expiresAt }) });
     const credentialId = credential.token.slice(0, credential.token.lastIndexOf("."));
     const environment = await this.#pin(b);
     await this.#update(b.attemptId, (x) => ({ ...x, credentialId, revisions: { ...x.revisions, ...(environment === undefined ? {} : { environment }) } }));
     const recipe: RecipeSummary = { revision: `r-${b.attemptId.slice(4, 16)}`, reach: [] };
     const order: WorkOrder = {
       attemptId: b.attemptId, taskId: b.taskId, projectId: b.projectId, agentId: b.agentId, generation: b.generation, ...(b.harness === undefined ? {} : { harness: b.harness }), route: b.route, credential: credential.token, recipe,
-      content: await this.#contentOf(b.taskId) + await this.#policyNote(b), requestId: `cmd:adm:${b.attemptId}`, expiresAt: b.expiresAt,
+      content: await this.#contentOf(b.taskId) + await this.#policyNote(b), requestId: `cmd:adm:${b.attemptId}`, ...(b.expiresAt === undefined ? {} : { expiresAt: b.expiresAt }),
       ...(b.resumeFrom === undefined ? {} : { resumeFrom: b.resumeFrom }), ...(b.resumeNote === undefined ? {} : { resumeNote: b.resumeNote }),
     };
     let handle: WorkerHandle;
@@ -1386,8 +1409,8 @@ export class DispatcherService {
       return {};
     }
     const contract = await this.#contractOf(b.taskId);
-    const allowed = contract.maxAttempts ?? this.#options.maxAttempts;
-    if (assignment.attempts >= allowed) {
+    const allowed = contract.maxAttempts ?? (await this.#figures()).maxAttempts;
+    if (allowed !== undefined && assignment.attempts >= allowed) {
       const opened = await this.#deps.blockers.openBlocker({ commandId: `dpa-blk:attempts:${b.taskId}:${assignment.attempts}`, actor: DISPATCHER_ACTOR, type: "dispatch_blocked", subject: { kind: "task", id: b.taskId }, summary: `${assignment.attempts} attempts were made and the task allows ${allowed}; no further attempt starts by itself.`, resolver: "owner" });
       await this.#deps.notifications?.emitFromController({ commandId: `dpa-ntf:${opened.id}`, kind: "blocker", ref: { kind: "blocker", id: opened.id }, projectId: b.projectId }).catch(() => undefined);
       return {};

@@ -278,6 +278,14 @@ export class ConfigurationService {
     const fresh = await this.#fresh(by.id, by.taskScope);
     const ownScope = scope.agentId !== undefined && fresh?.kind === "agent" && by.taskScope === undefined && by.id === `agent:${scope.agentId}`;
     if (!(by.kind === "owner" || ownScope || (fresh !== undefined && (allows(fresh, "config.read", "*") || allows(fresh, "config.write", "*"))))) return undefined;
+    const built = await this.#chainOf(scope);
+    if (built === undefined) return undefined;
+    const { chain, complete } = built;
+    return { ...(await this.#combined(chain)), complete };
+  }
+
+  /** The layers that apply to an agent and/or a task, widest first; `undefined` when the agent or task does not exist. */
+  async #chainOf(scope: Scope): Promise<{ chain: Link[]; complete: boolean } | undefined> {
     const chain: Link[] = [await this.#link("installation", "installation")];
     // A task asked about without an agent is read for the agent now working it, if there is one.
     const agentId = scope.agentId ?? (scope.taskId === undefined ? undefined : await this.#agentOfTask(scope.taskId));
@@ -293,7 +301,14 @@ export class ConfigurationService {
       if ((await this.#runner.get("task", scope.taskId)) === undefined) return undefined;
       chain.push(await this.#link("task", scope.taskId));
     }
-    return { ...(await this.#combined(chain)), complete };
+    return { chain, complete };
+  }
+
+  /** One setting's value as it applies to a task (installation, the working agent's team and agent, the task), for the controller's own reading; no rights check. `undefined` when unset, not known or the task is missing. */
+  async taskValue(key: string, taskId: string): Promise<unknown> {
+    if (!TASK_ID.test(taskId)) return undefined;
+    const built = await this.#chainOf({ taskId });
+    return built === undefined ? undefined : (await this.#combined(built.chain)).values[key]?.value;
   }
 
   /** One setting's installation-level value, for the controller's own reading (no rights check: it is not an answer to a caller). `undefined` when the setting is not known or unset. */

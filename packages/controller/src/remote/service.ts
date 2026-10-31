@@ -74,7 +74,7 @@ export interface PlacementBody {
   readonly sessionId?: string;
   readonly offeredAt: string;
   readonly acceptedAt?: string;
-  readonly expiresAt: string;
+  readonly expiresAt?: string;
   readonly requirements: Requirements;
   readonly inputs: readonly string[];
   readonly outputs: readonly string[];
@@ -431,7 +431,7 @@ export class RemoteWorkerService {
       }
       let next: PlacementBody;
       if (current === undefined) {
-        next = { attemptId, taskId: order.taskId, projectId: order.projectId, agentId: order.agentId, generation: order.generation, hostId, placement: 1, state: "offered", offeredAt: now, expiresAt: order.expiresAt, requirements: placed, inputs, outputs: [], checkpoints: 0, controlSeq: 0, control: [], relocations: 0, history: [] };
+        next = { attemptId, taskId: order.taskId, projectId: order.projectId, agentId: order.agentId, generation: order.generation, hostId, placement: 1, state: "offered", offeredAt: now, ...(order.expiresAt === undefined ? {} : { expiresAt: order.expiresAt }), requirements: placed, inputs, outputs: [], checkpoints: 0, controlSeq: 0, control: [], relocations: 0, history: [] };
       } else {
         const b = current.body;
         if (b.hostId !== hostId) throw new DomainError("invalid_transition", `attempt ${attemptId} is placed on ${b.hostId}; it moves to ${hostId} only through relocate`, { field: "hostId" });
@@ -439,7 +439,7 @@ export class RemoteWorkerService {
         // After a relocation the offer completes the move at the number already fenced; any other second placement is a new run and fences the earlier one.
         const number = b.state === "relocating" ? b.placement : b.placement + 1;
         const { sessionId: _s, acceptedAt: _a, result: _r, ...rest } = b; void _s; void _a; void _r;
-        next = { ...rest, placement: number, state: "offered", offeredAt: now, expiresAt: order.expiresAt, requirements: placed, inputs: [...new Set([...b.inputs, ...inputs])], control: [], history: b.state === "relocating" ? b.history : pushHistory(b.history, { hostId: b.hostId, placement: b.placement, at: now, reason: "placed again" }) };
+        next = { ...rest, placement: number, state: "offered", offeredAt: now, ...(order.expiresAt === undefined ? {} : { expiresAt: order.expiresAt }), requirements: placed, inputs: [...new Set([...b.inputs, ...inputs])], control: [], history: b.state === "relocating" ? b.history : pushHistory(b.history, { hostId: b.hostId, placement: b.placement, at: now, reason: "placed again" }) };
       }
       const storeChanges: Change[] = [];
       const holder: StoreBody = { agentId: order.agentId, ownerHostId: hostId, since: storeBody?.since ?? now, liveAttempt: attemptId, moves: storeBody?.moves ?? 0 };
@@ -489,7 +489,7 @@ export class RemoteWorkerService {
   /** Whether an attempt's placement is still live (not ended, completed or expired). */
   async #isLive(attemptId: string): Promise<boolean> {
     const found = (await this.#runner.get(PLACEMENT_KIND, attemptId))?.body as unknown as PlacementBody | undefined;
-    return found !== undefined && LIVE.has(found.state) && found.expiresAt > this.#runner.now();
+    return found !== undefined && LIVE.has(found.state) && (found.expiresAt === undefined || found.expiresAt > this.#runner.now());
   }
 
   /** What a read of a placement shows the owner or dispatcher. */
@@ -682,21 +682,21 @@ export class RemoteWorkerService {
    * The worker takes the offer it was made, binding the placement to its current session. Also how a worker that reconnected after a partition takes its work up again: if the attempt was moved or ended meanwhile,
    * this is where it learns (`fenced`). The offer (and with it the credential) is dropped once accepted.
    */
-  async accept(host: Principal, sessionId: unknown, attemptId: string, placement: unknown): Promise<{ placement: number; expiresAt: string; controlSeq: number; checkpoint?: { artifactId: string; sequence: number } }> {
+  async accept(host: Principal, sessionId: unknown, attemptId: string, placement: unknown): Promise<{ placement: number; expiresAt?: string; controlSeq: number; checkpoint?: { artifactId: string; sequence: number } }> {
     const session = await this.#session(host, sessionId);
     const id = attemptIdOf(attemptId);
     const found = await this.#runner.get(PLACEMENT_KIND, id);
     const b = found?.body as unknown as PlacementBody | undefined;
     this.#holds(host, b, placement);
     if (b!.state !== "offered" && b!.state !== "accepted") throw new DomainError("fenced", `the placement of attempt ${id} is ${b!.state}`);
-    if (b!.expiresAt <= this.#runner.now()) throw new DomainError("fenced", `attempt ${id} has expired`);
+    if (b!.expiresAt !== undefined && b!.expiresAt <= this.#runner.now()) throw new DomainError("fenced", `attempt ${id} has expired`);
     const done = await this.#changePlacement(id, async (current) => {
       const x = current?.body;
       if (x === undefined || x.hostId !== host.id || x.placement !== b!.placement || (x.state !== "offered" && x.state !== "accepted")) throw new DomainError("fenced", `the placement of attempt ${id} changed`);
       return { next: { ...x, state: "accepted", sessionId: session.sessionId, acceptedAt: x.acceptedAt ?? this.#runner.now() } };
     }, "accept", { actor: host.id });
     this.#offers.delete(id);
-    return { placement: done.body.placement, expiresAt: done.body.expiresAt, controlSeq: done.body.controlSeq, ...(done.body.checkpoint === undefined ? {} : { checkpoint: { artifactId: done.body.checkpoint.artifactId, sequence: done.body.checkpoint.sequence } }) };
+    return { placement: done.body.placement, ...(done.body.expiresAt === undefined ? {} : { expiresAt: done.body.expiresAt }), controlSeq: done.body.controlSeq, ...(done.body.checkpoint === undefined ? {} : { checkpoint: { artifactId: done.body.checkpoint.artifactId, sequence: done.body.checkpoint.sequence } }) };
   }
 
   /** The placement must exist, be held by this host, and be the number the message names: a former holder is told it is fenced, anyone else that nothing is there. */
@@ -718,7 +718,7 @@ export class RemoteWorkerService {
     this.#holds(host, b, placement);
     if (!states.includes(b.state)) throw new DomainError("fenced", `the placement of attempt ${id} is ${b.state}`);
     if (b.state !== "offered" && b.sessionId !== session.sessionId) throw new DomainError("fenced", "the attempt was taken up in another session; accept it again", { field: "session" });
-    if (b.expiresAt <= this.#runner.now()) throw new DomainError("fenced", `attempt ${id} has expired`);
+    if (b.expiresAt !== undefined && b.expiresAt <= this.#runner.now()) throw new DomainError("fenced", `attempt ${id} has expired`);
     return b;
   }
 

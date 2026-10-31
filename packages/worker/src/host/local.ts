@@ -24,7 +24,7 @@ export interface HostOrder {
   readonly route: string;
   readonly credential: string;
   readonly recipe: { readonly revision: string; readonly reach: readonly string[] };
-  readonly expiresAt: string;
+  readonly expiresAt?: string;
   readonly resumeFrom?: JsonObj;
 }
 
@@ -155,7 +155,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
       // The conversation is kept in the agent's home on this host. A checkpoint to continue from with no such store (another host, a wiped home) would silently start from nothing: refused instead.
       if (from?.["pi"] !== undefined && !existsSync(join(entry.workspace.home, "pi"))) throw new Error("the attempt resumes from a checkpoint but this host no longer holds the conversation");
       await entry.process?.close().catch(() => undefined);
-      const remaining = Math.min(MAX_RUN_MS, Math.max(1000, Date.parse(order.expiresAt) - clock()));
+      const remaining = Math.min(MAX_RUN_MS, order.expiresAt === undefined ? Number.MAX_SAFE_INTEGER : Math.max(1000, Date.parse(order.expiresAt) - clock()));
       const process = await WorkerProcess.launch(options.launcher, {
         recipe: entry.recipe,
         command: [`/opt/node/${options.app.node.executable}`, options.app.entry],

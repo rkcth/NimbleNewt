@@ -96,6 +96,11 @@ for (const backend of backends) {
     // Loosen the installation layer, tighten a task: allowed. Then tighten the installation below the task's value: the task's value stops counting.
     await put(c, c.owner, "installation", undefined, { "time.maxMinutes": 30 });
     assert.equal((await value(c, "time.maxMinutes", { taskId: c.task }))!.value, 30);
+    // The controller's own reading for a task (the dispatcher's claim) sees the same combined value, and nothing for a key that is unset or a bad ID.
+    assert.equal(await c.config.taskValue("time.maxMinutes", c.task), 30);
+    assert.equal(await c.config.taskValue("time.maxMinutes", "task-aaaaaaaaaaaaaaaaaaaa"), undefined);
+    assert.equal(await c.config.taskValue("time.maxMinutes", "nope"), undefined);
+    assert.equal(await c.config.taskValue("budget.maxCostPerTask", c.task), undefined, "the unenforced cost key was removed");
     // A list restriction narrows by intersection, and a wider list is refused.
     await put(c, c.owner, "installation", undefined, { "permissions.allowedTools": ["read-file", "run-script", "search"] });
     await refuses("invalid_command", () => stageNow(c, c.owner, "agent", c.agentA, { set: { "permissions.allowedTools": ["read-file", "deploy"] } }));
@@ -331,8 +336,8 @@ for (const backend of backends) {
     assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
     assert.equal((await c.config.history(c.owner, "agent", c.agentA))!.length, 1);
     // An installation lock and an agent change racing: either the lock lands first (and the change is refused) or the change lands and the lock then ignores it; never an agent value that counts under a lock.
-    for (let round = 0; round < 4; round++) {
-      const key = ["budget.maxCostPerTask", "resources.maxCpus", "resources.maxMemoryMb", "time.maxMinutes"][round]!;
+    for (let round = 0; round < 3; round++) {
+      const key = ["resources.maxCpus", "resources.maxMemoryMb", "time.maxMinutes"][round]!;
       const value = round === 0 ? 5 : 8;
       const layer = (await c.config.layer(c.owner, "installation"));
       const lockStage = await c.config.stage(c.owner, { commandId: cid("st"), layer: "installation", ...(layer === undefined ? {} : { expectedRevision: layer.revision }), set: { [key]: value + 100 }, lock: [key] });

@@ -13,7 +13,7 @@ import { CachePolicies, type AttemptCache, type CachePolicyDeps } from "../dispa
 import { MarkerService } from "../inference-cache/index.js";
 import { checkLocalWorkerLimits, type LocalWorkerLimits } from "./worker-limits.js";
 import type { WorkspaceOpService, WorkspacePort } from "../workspace-ops/index.js";
-import { DispatchDriver, DispatcherService, QuiesceCoordinator, controllerGuards, type RuntimeGuards, type WorkOrder, activeAgents, attendanceLoops, budgetNoticeLoops, workspaceLoops, decisionLoops, meetingLoops, eventLoops, watchLoops, wakeLoops, attemptWaker, recordLoops, responsibilityLoops, probeLoops, sourceLoops, improvementOutcomeLoops, untoldImprovementLoops, type RouteProbes, recoveryLoops, reviewLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLoop, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
+import { DispatchDriver, DispatcherService, QuiesceCoordinator, controllerGuards, type RuntimeGuards, type WorkOrder, activeAgents, attendanceLoops, budgetNoticeLoops, workspaceLoops, decisionLoops, meetingLoops, eventLoops, watchLoops, wakeLoops, attemptWaker, recordLoops, responsibilityLoops, probeLoops, sourceLoops, improvementOutcomeLoops, untoldImprovementLoops, type RouteProbes, recoveryLoops, reviewLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLimitFigures, type DispatcherLoop, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
 import type { CutoverService } from "../routing/cutover.js";
 import { DomainError } from "../domain/errors.js";
 import type { AssignmentService } from "../domain/assignments.js";
@@ -190,6 +190,10 @@ export interface ComposeInput {
   readonly eventSources?: readonly EventSource[];
   /** The limits for the next local agent: the start-up figures with the owner's setting over them (card H12k). Throws when unreadable. */
   readonly workerLimits?: () => Promise<LocalWorkerLimits | undefined>;
+  /** The owner's dispatcher limits (attempt time, attempts), read on every claim and re-admission; absent: the start-up options. */
+  readonly dispatchLimits?: () => Promise<DispatcherLimitFigures>;
+  /** The configured `time.maxMinutes` of a task, for the claim; absent: not applied. */
+  readonly taskMinutes?: (taskId: string) => Promise<number | undefined>;
   /** The sources the owner turned off, read at every tick (card H13f). */
   readonly eventSourcesOff?: () => Promise<ReadonlySet<string>>;
   /** Health probes of failed-over routes (card R04c): off unless given, and then only while `enabled()` says so. */
@@ -322,7 +326,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
           if (found === undefined) {
             const pin = o.pinMarker?.(order);
             const cache = policies.forAttempt({ projectId: order.projectId, route: order.route }, pin === undefined ? {} : { pinMarker: pin });
-            found = { cache, until: Date.parse(order.expiresAt) + 60_000 };
+            found = { cache, until: (order.expiresAt === undefined ? now() + 24 * 3_600_000 : Date.parse(order.expiresAt)) + 60_000 };
             made.set(order.attemptId, found);
             cache.catch(() => made.delete(order.attemptId));
           }
@@ -372,7 +376,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       for (const [id, entry] of relays) if (entry.until < clock()) relays.delete(id);
       let found = relays.get(order.attemptId);
       if (found === undefined) {
-        found = { relay: relay.forAttempt({ route: order.route, ...(options.model === undefined ? {} : { model: options.model }), onFirstUsage: (usage) => { void confirmFirstCall(order, usage); }, ...(monitorOf === undefined ? {} : { monitor: monitorOf(order) }) }, options.cache), until: (Number.isFinite(Date.parse(order.expiresAt)) ? Date.parse(order.expiresAt) : clock() + 4 * 60 * 60_000) + 60_000 };
+        found = { relay: relay.forAttempt({ route: order.route, ...(options.model === undefined ? {} : { model: options.model }), onFirstUsage: (usage) => { void confirmFirstCall(order, usage); }, ...(monitorOf === undefined ? {} : { monitor: monitorOf(order) }) }, options.cache), until: (Number.isFinite(Date.parse(order.expiresAt ?? "")) ? Date.parse(order.expiresAt!) : clock() + 24 * 60 * 60_000) + 60_000 };
         relays.set(order.attemptId, found);
       }
       return found.relay;
@@ -403,7 +407,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       activity: async (step) => { await ActivityService.withEpoch(storage, epoch, ro).record(principal, { commandId: step.commandId, taskId: step.taskId, kind: step.kind, summary: step.summary, manifest: { refs: step.refs } } as never); }, routing: i.routing, pauses, decisions, ...(i.resumes === undefined ? {} : { resumes: i.resumes }), prerequisites: async (taskId: string) => { const deps = await i.contracts.prerequisitesOf(taskId); if (deps === undefined) throw new DomainError("unavailable", "the task's dependencies could not be read"); const open: string[] = []; const dead: string[] = []; for (const e of deps.dependsOn) { if (e.state === undefined) dead.push(`${e.taskId} (missing)`); else if (e.state === "cancelled") dead.push(`${e.taskId} (cancelled)`); else if (e.state !== "done") open.push(`${e.taskId} (${e.state})`); } return { open, dead }; }, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
       ...(i.options.local === undefined ? {} : { toolWindow: (route: string) => { try { return i.options.local!.window({ route } as WorkOrder); } catch { return undefined; } } }),
       ...(remote === undefined ? {} : { storeOwner: (agentId: string, attemptId: string) => remote!.storeOwner(principal, agentId, attemptId) }),
-    }, { ...ro, holder: "dispatcher", ...(i.onError === undefined ? {} : { onError: i.onError }), ...(i.options.dispatcher ?? {}) });
+    }, { ...ro, holder: "dispatcher", ...(i.onError === undefined ? {} : { onError: i.onError }), ...(i.options.dispatcher ?? {}), ...(i.dispatchLimits === undefined ? {} : { limits: i.dispatchLimits }), ...(i.taskMinutes === undefined ? {} : { configuredMinutes: i.taskMinutes }) });
     holder.dispatcher = dispatcher;
     live.dispatcher = dispatcher;
     if (remote !== undefined) {

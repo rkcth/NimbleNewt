@@ -48,6 +48,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // How long a stalled resume is retried before the owner is told is a work-and-spend decision: shown first in every profile.
   "resume.settings.set": { verb: "Change how many blocked rounds a resume retries", mode: "propose" },
   "workers.limits.change": { verb: "Change the limits for local agents", mode: "propose" },
+  // How long an attempt may run and how many attempts are admitted are resource decisions: shown first in every profile (provisional). Both limits are off unless the owner turns them on.
+  "dispatch.limits.change": { verb: "Change the dispatcher's time and attempt limits", mode: "propose" },
   "placement.change": { verb: "Change where local-only data may go", mode: "propose" },
   // How finished work lands (card P08b): where work reaches the codebase is authority, so it is shown first in every profile. The record and the rules are the same as through the API.
   "integration.set": { verb: "Change how finished work lands", mode: "propose" },

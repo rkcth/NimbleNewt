@@ -31,8 +31,8 @@ export interface WorkOrder {
   /** The text of the task and the request ID of the turn: the same attempt always names the same request, so a restart finds the original. */
   readonly content: string;
   readonly requestId: string;
-  /** The attempt is over at this time whatever the worker does. */
-  readonly expiresAt: string;
+  /** The attempt is over at this time whatever the worker does. Absent: no time limit was set. */
+  readonly expiresAt?: string;
   /** Set when the attempt resumes earlier work: the conversation checkpoint to continue from. */
   readonly resumeFrom?: JsonObject;
   /** Set when the attempt resumes after calls waited for an approval: what to tell the agent (which calls were approved, denied or ran out). */

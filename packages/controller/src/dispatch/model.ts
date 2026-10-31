@@ -56,8 +56,8 @@ export interface DispatchBody {
   readonly requestId?: string;
   readonly requests?: number;
   readonly claimedAt: string;
-  /** After this time the attempt is over whatever the worker says (the attempt's own expiry). */
-  readonly expiresAt: string;
+  /** After this time the attempt is over whatever the worker says (the attempt's own expiry). Absent: the attempt has no time limit (the worker's lease still has to be kept). */
+  readonly expiresAt?: string;
   readonly startedAt?: string;
   readonly workerVersion?: string;
   readonly credentialId?: string;
@@ -142,7 +142,7 @@ export interface ToolOperationBody {
   readonly judgedAt: { readonly policy: { readonly installation: number; readonly project?: number }; readonly decisions: number };
 }
 
-export const DISPATCH_LIMITS = { inFlight: 32, parked: 20, summary: 300, diagnostic: 300, diagnostics: 10, name: 80, version: 80, callId: 120, leaseMs: 60_000, attemptMs: 4 * 60 * 60_000, maxAttempts: 3, scanPage: 100, resultSummary: 300 } as const;
+export const DISPATCH_LIMITS = { inFlight: 32, parked: 20, summary: 300, diagnostic: 300, diagnostics: 10, name: 80, version: 80, callId: 120, leaseMs: 60_000, scanPage: 100, resultSummary: 300 } as const;
 export const DISPATCHER_ACTOR = "dispatcher";
 
 const TOOL_NAME = /^[a-z][a-z0-9-]{0,39}(?:\.[a-z0-9-]{1,39})?$/;

@@ -146,6 +146,18 @@ Result: `{ item }`: `revision`, `limits` (the owner's), `startup`, `effective`; 
 
 Completion: finished when accepted (`completed: true`).
 
+#### `dispatch.limits.get`
+
+The dispatcher's two limits (owner only): the owner's entries (on or off, with the kept figure), the start-up options, and what applies now. Both are off (no limit) unless set.
+
+Arguments:
+
+- none
+
+Result: `{ item }`: `revision`, `limits` (the owner's entries `{ enabled, value? }` for `attemptMinutes`, `maxAttempts`), `startup`, `effective` (a figure that is absent is not limited).
+
+Completion: finished when accepted (`completed: true`).
+
 #### `events.sources.get`
 
 Which event sources the controller watches (owner only): every source the host configured with its type and whether the owner left it on, and the list of those turned off.
@@ -1515,6 +1527,22 @@ Arguments:
 
 - `set` (optional): for example `{ "memoryMb": 4096 }`
 - `unset` (optional): figure names to clear, for example `["processes"]`
+- `expectedRevision` (optional): the revision of the setting you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `dispatch.limits.change`
+
+The owner changes the dispatcher's limits (owner only), leaving the others as they are: `attemptMinutes` (1 to 525600: how long an attempt may run) and `maxAttempts` (1 to 1000: attempts admitted after a lost one). Both are off by default. `set` turns the named limits on with a figure (a null figure turns the limit off), `disable` turns them off keeping the figure, `enable` turns them on again with the kept figure, `unset` forgets the entry so the start-up option or no limit applies. A task's contract `maxMinutes`/`maxAttempts` still applies. It counts from the next attempt claimed or re-admitted; an attempt already running keeps the expiry it was given. This is the form the chat uses.
+
+Arguments:
+
+- `set` (optional): for example `{ "attemptMinutes": 240, "maxAttempts": 3 }`
+- `enable` (optional): limit names to turn on again
+- `disable` (optional): limit names to turn off
+- `unset` (optional): limit names to forget
 - `expectedRevision` (optional): the revision of the setting you read
 
 Result: `{ revision }`.

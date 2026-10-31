@@ -35,6 +35,7 @@ import type { GrantService } from "../security/grants.js";
 import type { EscalationLadderService } from "../health/escalation-ladder.js";
 import type { AgreedLimitsSettingsService } from "./agreed-limits-settings.js";
 import type { WorkerLimitsSettingsService } from "./worker-limits-settings.js";
+import type { DispatchLimitsSettingsService } from "./dispatch-limits-settings.js";
 import type { PlacementSettingsService } from "../remote/placement-settings.js";
 import type { EventSourceSettingsService } from "../events/source-settings.js";
 import type { ProtectedBranchService } from "../policy/protected-branches.js";
@@ -99,6 +100,7 @@ export interface Context {
   readonly escalationLadder?: Pick<EscalationLadderService, "get" | "set">;
   readonly agreedLimits?: Pick<AgreedLimitsSettingsService, "get" | "change">;
   readonly resumeSettings?: Pick<ResumeSettingsService, "get" | "set">;
+  readonly dispatchLimits?: Pick<DispatchLimitsSettingsService, "get" | "change">;
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set">;
   readonly eventSourceSettings?: Pick<EventSourceSettingsService, "get" | "set" | "change">;
   /** Absent when the controller runs without the agent's ending (card H12n). */
@@ -224,6 +226,7 @@ const branchSettingsOf = (c: Context): NonNullable<Context["branchSettings"]> =>
 const commandsOf = (c: Context): CommandService => c.commands ?? unavailable("typed commands");
 const escalationLadderOf = (c: Context): NonNullable<Context["escalationLadder"]> => c.escalationLadder ?? unavailable("the escalation ladder");
 const resumeSettingsOf = (c: Context): NonNullable<Context["resumeSettings"]> => c.resumeSettings ?? unavailable("resume settings");
+const dispatchLimitsOf = (c: Context): NonNullable<Context["dispatchLimits"]> => c.dispatchLimits ?? unavailable("dispatcher limits");
 const workerLimitsOf = (c: Context): NonNullable<Context["workerLimits"]> => c.workerLimits ?? unavailable("worker limits");
 const agreedLimitsOf = (c: Context): NonNullable<Context["agreedLimits"]> => c.agreedLimits ?? unavailable("agreed limits");
 const setupOf = (c: Context): NonNullable<Context["setup"]> => c.setup ?? unavailable("the setup readiness view");
@@ -381,6 +384,10 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => { only(a, ["limits", "expectedRevision"]); return asJson({ ...(await workerLimitsOf(c).set(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
   { name: "workers.limits.change", kind: "command", summary: "The owner changes some of the limits for local agents, leaving the others as they are (owner only): `set` has any of `cpus`, `memoryMb`, `diskMb`, `processes` (same bounds as `workers.limits.set`) and `unset` lists figures to clear so the start-up figure applies. This is the form the chat uses, so a request that waits to be accepted does only what it says and keeps a figure changed meanwhile. It counts from the next agent launched.", args: { "set?": "for example `{ \"memoryMb\": 4096 }`", "unset?": "figure names to clear, for example `[\"processes\"]`", "expectedRevision?": "the revision of the setting you read" }, result: "`{ revision }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["set", "unset", "expectedRevision"]); return asJson({ ...(await workerLimitsOf(c).change(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
+  { name: "dispatch.limits.get", kind: "query", summary: "The dispatcher's two limits (owner only): the owner's entries (on or off, with the kept figure), the start-up options, and what applies now. Both are off (no limit) unless set.", args: {}, result: "`{ item }`: `revision`, `limits` (the owner's entries `{ enabled, value? }` for `attemptMinutes`, `maxAttempts`), `startup`, `effective` (a figure that is absent is not limited).", completion: { kind: "completed" },
+    run: async (c, a) => { only(a, []); return asJson({ item: await dispatchLimitsOf(c).get(c.principal) }); } },
+  { name: "dispatch.limits.change", kind: "command", summary: "The owner changes the dispatcher's limits (owner only), leaving the others as they are: `attemptMinutes` (1 to 525600: how long an attempt may run) and `maxAttempts` (1 to 1000: attempts admitted after a lost one). Both are off by default. `set` turns the named limits on with a figure (a null figure turns the limit off), `disable` turns them off keeping the figure, `enable` turns them on again with the kept figure, `unset` forgets the entry so the start-up option or no limit applies. A task's contract `maxMinutes`/`maxAttempts` still applies. It counts from the next attempt claimed or re-admitted; an attempt already running keeps the expiry it was given. This is the form the chat uses.", args: { "set?": "for example `{ \"attemptMinutes\": 240, \"maxAttempts\": 3 }`", "enable?": "limit names to turn on again", "disable?": "limit names to turn off", "unset?": "limit names to forget", "expectedRevision?": "the revision of the setting you read" }, result: "`{ revision }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["set", "enable", "disable", "unset", "expectedRevision"]); return asJson({ ...(await dispatchLimitsOf(c).change(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
   { name: "events.sources.get", kind: "query", summary: "Which event sources the controller watches (owner only): every source the host configured with its type and whether the owner left it on, and the list of those turned off.", args: {}, result: "`{ item }`: `revision`, `disabled` (source IDs), and `sources` (`id`, `type`, `enabled`, `critical`).", completion: { kind: "completed" },
     run: async (c, a) => { only(a, []); return asJson({ item: await eventSourceSettingsOf(c).get(c.principal) }); } },
   { name: "events.sources.set", kind: "command", summary: "The owner names the event sources to leave off (owner only); the list replaces the earlier one and an empty list turns all on. Each must be a source this controller has. A source not listed, including one added later, is watched. A turned-off source is not polled from the next tick and keeps its saved position, so what happened meanwhile is reported when it is turned on again.", args: { disabled: "source IDs to leave off, for example `[\"service-health\"]`", "expectedRevision?": "the revision of the setting you read" }, result: "`{ revision, warning? }`: `warning` says when a source turned off will lose events older than its window. A source the controller relies on (critical) cannot be turned off.", completion: { kind: "completed" },

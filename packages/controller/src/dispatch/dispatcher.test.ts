@@ -57,7 +57,7 @@ for (const backend of backends) {
     assert.equal(d.state, "finished");
     assert.deepEqual([d.harness, d.route, d.workerVersion, d.hostId], ["pi", "localp/small", "worker-1.0.0", "host:w1"]);
     assert.ok(d.revisions.routing !== undefined && d.revisions.profiles !== undefined && d.revisions.decisions === 0 && d.revisions.policy.installation === 0 && d.revisions.contract === 0, JSON.stringify(d.revisions));
-    assert.ok(d.expiresAt > c.clock.now(), "an expiry is recorded");
+    assert.ok(d.expiresAt === undefined, "no limit is set, so no expiry is recorded");
     // The attempt ended as succeeded, its place was given back and its credential ended with it; the task itself was not moved.
     assert.equal((await c.assignments.getAttempt(attemptId!))!.state, "succeeded");
     assert.equal((await c.admission.snapshot()).running.length, 0);
@@ -738,6 +738,7 @@ for (const backend of backends) {
   });
 
   suite("a worker that stops beating is lost: its calls are settled, its place and credential end, the task is unchanged and the next attempt is admitted within the allowed number", async (c) => {
+    c.dispatcher = c.restart({}, { maxAttempts: 3 }); // attempts are unlimited unless a figure is set
     const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
     const { taskId, attemptId } = await c.task("t", ann);
     const hang = deferred();
