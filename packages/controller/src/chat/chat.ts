@@ -1495,7 +1495,7 @@ export class ChatService {
       }));
     } catch (error) {
       // A database transfer fences the database this record lives in (card F04e): the move was made, and the note that it was cannot be written to the database that was just retired. The owner is told it was applied (restart required).
-      if (error instanceof DomainError && error.code === "stale_epoch" && body.steps.some((s) => s.op === "database.transfer.apply") && results.some((r) => r.op === "database.transfer.apply")) return { proposalId, applied: true, replayed: false, results };
+      if (error instanceof DomainError && error.code === "stale_epoch" && body.steps.some((s) => s.op === "database.transfer.apply" || s.op === "database.transfer.rollback") && results.some((r) => r.op === "database.transfer.apply" || r.op === "database.transfer.rollback")) return { proposalId, applied: true, replayed: false, results };
       if (!(error instanceof DomainError) || error.code !== "stale_revision") throw error;
       found = await this.#runner.get("chat-proposal", proposalId);
       body = found?.body as unknown as ChatProposalBody | undefined;

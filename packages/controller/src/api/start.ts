@@ -89,7 +89,7 @@ import { WorkspaceOpService, type WorkspacePort } from "../workspace-ops/index.j
 import { ArtifactService, DeliverableService, FileBlobStore, TaskArtifactPublisher } from "../artifacts/index.js";
 import { ServiceOperations, type ServiceTarget } from "../service-ops/index.js";
 import { composeDispatch, type DispatchHandle, type DispatchStartOptions } from "./dispatch-compose.js";
-import { DatabaseTransferService, assertStorageAuthority, postgresFingerprint, resolveAtStart, sqliteFingerprint, type TransferPoint, type TransferSource, type TransferTarget } from "../transfer/index.js";
+import { DatabaseTransferService, assertNotFenced, guardStart, postgresFingerprint, recordFirstStart, sqliteFingerprint, type TransferPoint, type TransferSource, type TransferTarget } from "../transfer/index.js";
 import { ConversationTransport, MCP_ENABLED_SETTING, type TransportOptions } from "../transport/index.js";
 
 export type StorageChoice =
@@ -102,7 +102,7 @@ export interface StartOptions {
    * Moving the controller database to another one from chat (card F04e). The databases a transfer may go to are named here by the host (a PostgreSQL address holds a password, so it is never typed in chat); with none given
    * the transfer commands answer "not configured". Needs a data directory (the transfer journal and the authority file live there). `inject` is a test hook.
    */
-  readonly transfer?: { readonly targets: readonly TransferTarget[]; readonly inject?: (point: TransferPoint) => void | Promise<void>; readonly onSwitched?: () => void };
+  readonly transfer?: { /** ONE fixed folder for the transfer journal and authority file, independent of every database path (mandatory when targets are given). */ readonly stateDirectory?: string; readonly targets: readonly TransferTarget[]; readonly inject?: (point: TransferPoint) => void | Promise<void>; readonly onSwitched?: () => void };
   /** Where releases are staged and activated (card K02): off unless given. The release root holds `incoming`, `releases` and the activation pointer; the launcher reads the pointer. */
   readonly releases?: Omit<ActivationOptions, "runner">;
   /** The command line and environment of the process: the operator's override is read from them (`--allow-unsupported-environment`, `NIMBLENEWT_ALLOW_UNSUPPORTED_ENVIRONMENT=1`). */
@@ -335,11 +335,12 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
   // A restore the owner prepared from inside the previous run is swapped in now, before the database is opened (card K01h).
   const dataLock = takeLock === undefined ? undefined : await takeLock();
   // A database transfer (card F04e) decides which database is the authoritative one: an interrupted transfer is settled and a start on any other database is refused, before anything is opened.
-  const sourcePlace: TransferSource | undefined = dataDirectory === undefined ? undefined : options.storage.kind === "sqlite" ? { kind: "sqlite", fingerprint: await sqliteFingerprint(options.storage.path), name: "the SQLite database" } : { kind: "postgres", fingerprint: postgresFingerprint(options.storage.url, options.storage.schema), name: "the PostgreSQL database" };
-  if (dataDirectory !== undefined && sourcePlace !== undefined) {
-    const settled = await resolveAtStart(dataDirectory, sourcePlace);
+  const sourcePlace: TransferSource = options.storage.kind === "sqlite" ? { kind: "sqlite", fingerprint: await sqliteFingerprint(options.storage.path), name: "the SQLite database" } : { kind: "postgres", fingerprint: postgresFingerprint(options.storage.url, options.storage.schema), name: "the PostgreSQL database" };
+  const stateDirectory = options.transfer?.stateDirectory;
+  if (options.transfer !== undefined && options.transfer.targets.length > 0 && stateDirectory === undefined) throw new Error("database transfer targets are configured without a transfer state directory (transfer.stateDirectory): the journal and the authority file need one fixed place that does not depend on a database path");
+  if (stateDirectory !== undefined) {
+    const settled = await guardStart(stateDirectory, sourcePlace);
     if (settled.note !== undefined) print(settled.note);
-    await assertStorageAuthority(dataDirectory, sourcePlace);
   }
   const piState = options.backup?.piState ?? options.dispatch?.local?.piState?.source;
   const piFinal = options.backup?.restore?.piFinal ?? options.dispatch?.local?.piState?.final;
@@ -364,6 +365,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     storage = await SqliteStorage.open({ path: options.storage.path, allowNetworkFilesystem: override, ...(beforeUpgrade === undefined ? {} : { beforeUpgrade }) });
   }
 
+  // A database a transfer left stays fenced inside the database itself: it starts only if the authority file names it for that transfer (checked before the epoch is taken).
+  try { await assertNotFenced(stateDirectory, sourcePlace, storage); } catch (error) { await storage.close().catch(() => undefined); throw error; }
   // Retention in front of writes (card K06): the disk-full reserve and the optional quotas. The meter reads the unwrapped storage; the settings the guard consults are wired below once the epoch is known.
   const reserve = dataDirectory === undefined ? undefined : new ReserveFile(join(dataDirectory, ".nn-reserve"));
   const quotaMeter = new QuotaMeter(storage);
@@ -716,8 +719,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const barrier = new MaintenanceBarrier();
     if (backups !== undefined) barrier.add({ name: "backups", hold: async () => backups.hold() });
     barrier.add({ name: "dispatcher", hold: async () => { await dispatch?.driver.settle(); const live = dispatch === undefined ? [] : await dispatch.dispatcher.liveAttempts(dispatch.principal); if (live.length > 0) throw new Error(`${live.length} agent attempt(s) are still running: stop or pause the work first`); return () => undefined; } });
-    const databaseTransfer = options.transfer === undefined || options.transfer.targets.length === 0 || dataDirectory === undefined || sourcePlace === undefined ? undefined : new DatabaseTransferService({
-      storage, source: sourcePlace, targets: () => options.transfer!.targets, dataDirectory, barrier,
+    const databaseTransfer = options.transfer === undefined || options.transfer.targets.length === 0 || stateDirectory === undefined ? undefined : new DatabaseTransferService({
+      storage, source: sourcePlace, targets: () => options.transfer!.targets, stateDirectory, barrier, enabled: async () => (await configuration.installationValue("database.transfer.enabled")) !== false,
       references: { ...(blobStore === undefined ? {} : { artifacts: async (digests: readonly string[]) => { const missing: string[] = []; for (const d of digests) if (!(await blobStore.has(d))) missing.push(d); return missing; } }) },
       ...(options.transfer.inject === undefined ? {} : { inject: options.transfer.inject }), ...(options.transfer.onSwitched === undefined ? {} : { onSwitched: () => options.transfer!.onSwitched!() }),
     });
@@ -859,6 +862,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       void (options.maintenance?.tickMs !== undefined ? Promise.resolve(options.maintenance.tickMs) : maintenance.tickMs()).catch(() => 30_000).then((ms) => { if (!maintenanceStopped) { maintenanceTimer = setTimeout(maintenanceRound, ms); maintenanceTimer.unref(); } });
     };
     void maintenance.tickMs().catch(() => 30_000).then((first) => { if (!maintenanceStopped) { maintenanceTimer = setTimeout(maintenanceRound, options.maintenance?.tickMs ?? first); maintenanceTimer.unref(); } });
+    if (stateDirectory !== undefined) await recordFirstStart(stateDirectory, sourcePlace, storage);
     return {
       api, storage, epoch, check, filesystems, prerequisites, services: { maintenance, retention, retentionSettings, ...(backups === undefined ? {} : { backups }), acceptance, catalog: catalogService, workEnd, scratchCleanup, records, activity, continuations, resumes, handoffs, cutover, fallback, principals, taskCredentials, grants, projects, assignments, waits, stall, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing, pauses, branches, jobs },
       ...(chat === undefined ? {} : { chat }), ...(coordinator === undefined ? {} : { coordinator }),

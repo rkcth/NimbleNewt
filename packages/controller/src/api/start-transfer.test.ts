@@ -13,16 +13,16 @@ import { startController } from "./index.js";
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
 
-test("the owner moves the controller database from the running controller: preview, approve, barrier, a start on the old database is refused, a start on the new one works (card F04e)", async () => {
+test("the owner moves the controller database from the running controller: preview, approve, barrier, the old database never starts again (separate folders), the new one does, and the owner rolls back from there (card F04e)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-xfs-"));
-  const oldPath = join(d, "c.sqlite"), newPath = join(d, "moved.sqlite");
-  const open = async (path: string, withTarget: boolean) => startController({ storage: { kind: "sqlite", path }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer() },
-    ...(withTarget ? { transfer: { targets: [await sqliteTarget({ name: "moved", path: newPath, open: () => SqliteStorage.open({ path: newPath }) })] } } : {}) } as never);
-  let c = await open(oldPath, true);
+  const oldPath = join(d, "a", "c.sqlite"), newPath = join(d, "b", "moved.sqlite"), state = join(d, "state");
+  const open = async (path: string, other: { name: string; path: string }) => startController({ storage: { kind: "sqlite", path }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer() },
+    transfer: { stateDirectory: state, targets: [await sqliteTarget({ name: other.name, path: other.path, open: () => SqliteStorage.open({ path: other.path }) })] } } as never);
+  let c = await open(oldPath, { name: "moved", path: newPath });
   try {
     const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
     const rob = await c.services.principals.authenticate(boot.token);
-    const call = async (token: string, op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    let call = async (token: string, op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
     await call(boot.token, "project.create", { name: "Garden" }, "p1");
     await c.services.principals.enroll(rob, { commandId: "e-zed", kind: "agent", name: "zed", grants: [] });
     const zed = (await c.services.principals.issueCredential(rob, "agent:zed")).token;
@@ -30,30 +30,63 @@ test("the owner moves the controller database from the running controller: previ
     assert.equal((await call(zed, "database.transfer.preview", { target: "moved" })).error.code, "forbidden");
     assert.equal((await call(zed, "database.transfer.apply", { target: "moved", confirm: "x" }, "t0")).error.code, "forbidden");
     assert.equal((await call(zed, "database.transfer.rollback", {}, "t00")).error.code, "forbidden");
-
     const status = await call(boot.token, "database.transfer.status", {});
     assert.deepEqual(status.result.item.targets, [{ name: "moved", kind: "sqlite", direction: "sqlite to sqlite" }]);
     const preview = await call(boot.token, "database.transfer.preview", { target: "moved" });
-    assert.ok(preview.ok, JSON.stringify(preview));
-    assert.equal(preview.result.item.ok, true, JSON.stringify(preview.result.item.findings));
+    assert.equal(preview.result.item.ok, true, JSON.stringify(preview));
     assert.equal((await call(boot.token, "database.transfer.apply", { target: "moved", confirm: "wrong" }, "t1")).error.code, "invalid_command");
     const applied = await call(boot.token, "database.transfer.apply", { target: "moved", confirm: preview.result.item.token }, "t2");
     assert.ok(applied.ok, JSON.stringify(applied));
     assert.equal(applied.result.item.restartRequired, true);
-    // Commands are refused while the barrier is up; the owner can still read the status and roll back.
     const refused = await call(boot.token, "project.create", { name: "Blocked" }, "p2");
     assert.equal(refused.error.code, "unavailable"); assert.match(refused.error.message, /maintenance/);
     assert.equal((await call(boot.token, "database.transfer.status", {})).result.item.authority.active.name, "moved");
     await c.close();
-    // The old configuration is refused, loudly and before anything is opened; the new one starts with the data.
-    await assert.rejects(open(oldPath, false), /moved to moved .* Point controller\.storage at moved/);
-    c = await open(newPath, false);
-    const listed = JSON.stringify(await call(boot.token, "project.list", {}));
-    assert.ok(listed.includes("Garden"));
-    assert.equal((await call(boot.token, "project.create", { name: "After" }, "p3")).ok, true);
-    // Now that the new database has recorded work, the transfer cannot be rolled back (the controller there has no target to check against, and says so).
-    assert.equal((await call(boot.token, "database.transfer.rollback", {}, "t3")).error.code, "unavailable");
-    assert.equal((await readAuthority(d))?.generation, 1);
+    // The old database does not start again: not with the transfer state, and not with NO transfer configuration either (the fence is inside the database).
+    await assert.rejects(open(oldPath, { name: "moved", path: newPath }), /moved to moved .* Point controller\.storage at moved/);
+    await assert.rejects(startController({ storage: { kind: "sqlite", path: oldPath }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer() } } as never), /left by database transfer/);
+    // The new one starts, with the data, and the owner can roll back from it while it has recorded no work.
+    c = await open(newPath, { name: "previous", path: oldPath });
+    call = async (token: string, op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    assert.ok(JSON.stringify(await call(boot.token, "project.list", {})).includes("Garden"));
+    const back = await call(boot.token, "database.transfer.rollback", {}, "t3");
+    assert.ok(back.ok, JSON.stringify(back));
+    assert.equal((await readAuthority(state))?.active.kind, "sqlite"); assert.equal((await readAuthority(state))?.generation, 2);
+    await c.close();
+    await assert.rejects(open(newPath, { name: "previous", path: oldPath }), /moved to the SQLite database|moved to previous|moved to/);
+    c = await open(oldPath, { name: "moved", path: newPath });
+    call = async (token: string, op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    assert.equal((await call(boot.token, "project.create", { name: "Back home" }, "p3")).ok, true);
+    assert.ok(JSON.stringify(await call(boot.token, "project.list", {})).includes("Garden"));
+  } finally { await c.close().catch(() => undefined); rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }
+});
+
+test("once the new database has recorded work the transfer cannot be rolled back from it, and the owner's switch turns transfers off (card F04e)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-xfw-"));
+  const oldPath = join(d, "a", "c.sqlite"), newPath = join(d, "b", "moved.sqlite"), state = join(d, "state");
+  const open = async (path: string, other: { name: string; path: string }) => startController({ storage: { kind: "sqlite", path }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer() },
+    transfer: { stateDirectory: state, targets: [await sqliteTarget({ name: other.name, path: other.path, open: () => SqliteStorage.open({ path: other.path }) })] } } as never);
+  let c = await open(oldPath, { name: "moved", path: newPath });
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    let call = async (op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    const preview = await call("database.transfer.preview", { target: "moved" });
+    // The owner's switch (installation setting, on by default): off refuses, on again allows.
+    const owner = await c.services.principals.authenticate(boot.token);
+    const set = async (value: boolean, id: string): Promise<void> => { const layer = await c.services.configuration.layer(owner, "installation", undefined); const staged = await c.services.configuration.stage(owner, { commandId: `st-${id}`, layer: "installation", ...(layer === undefined ? {} : { expectedRevision: layer.revision }), set: { "database.transfer.enabled": value } } as never); await c.services.configuration.apply(owner, { commandId: `ap-${id}`, layer: "installation", expectedRevision: staged.revision } as never); };
+    await set(false, "a");
+    const switchedOff = await call("database.transfer.preview", { target: "moved" });
+    assert.equal(switchedOff.error.code, "unavailable"); assert.match(switchedOff.error.message, /switched off/);
+    await set(true, "b");
+    const plan = preview.result.item;
+    assert.ok((await call("database.transfer.apply", { target: "moved", confirm: plan.token }, "t1")).ok);
+    await c.close();
+    c = await open(newPath, { name: "previous", path: oldPath });
+    call = async (op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    assert.equal((await call("project.create", { name: "New work" }, "p1")).ok, true);
+    const refused = await call("database.transfer.rollback", {}, "t2");
+    assert.equal(refused.error.code, "invalid_transition"); assert.match(refused.error.message, /recorded work since it started/);
+    assert.equal((await readAuthority(state))?.active.name, "moved");
   } finally { await c.close().catch(() => undefined); rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }
 });
 
@@ -75,7 +108,7 @@ test("the chat proposes a database move with the plan the controller works out; 
   let free = 1e12;
   const open = async () => startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer() },
     chat: { interpreter: new ScriptedInterpreter((input) => say[input.text] ?? []) },
-    transfer: { targets: [{ ...(await sqliteTarget({ name: "moved", path: newPath, open: () => SqliteStorage.open({ path: newPath }) })), freeBytes: async () => free }] } } as never);
+    transfer: { stateDirectory: d, targets: [{ ...(await sqliteTarget({ name: "moved", path: newPath, open: () => SqliteStorage.open({ path: newPath }) })), freeBytes: async () => free }] } } as never);
   const c = await open();
   try {
     const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
