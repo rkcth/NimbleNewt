@@ -477,6 +477,79 @@ Arguments:
 
 Result: `{ steps: [{ taskId, seq, kind, summary, actor, at }], scanned, truncated }`.
 
+#### `activity.replay.open`
+
+Opens a task's replay: a summary first (steps by kind, outcome, branch line and actor; unavailable ranges; redacted, replaced and corrected steps), then a window of steps as they were recorded. Read only: nothing is run, sent, submitted or asked of a model.
+
+Arguments:
+
+- `taskId`: the task
+- `from` (optional): first step number of the window (default 1)
+- `limit` (optional): 1 to 50, default 20
+- `lane` (optional): only this branch line (`main` for the main line)
+- `actor` (optional): only this actor's steps
+- `kind` (optional): only this kind of step
+- `withContent` (optional): true to include stored content you may read
+
+Result: `{ taskId, projectId, summary, entries: [step | { seq, unavailable }], next?, note? }`. `summary.range` says which step numbers were read, out of how many; `next` is the NEXT step to show (pass it as `from`). A step: `{ seq, at, actor, kind, summary, lane, laneStatus (main, controller, verified or unverified; an unverified line has `laneNote`), outcome (proposed, dispatched, confirmed, uncertain or not-recorded), outcomeNote? (for example `reported by agent`: the outcome is the recorder's claim, not checked by the controller), versionsThen, authority (current or superseded), supersedes?, supersededBy?, content (size and redaction count only for a reader who may read the text), corrections, previousInLane?, nextInLane?, links }`.
+
+#### `activity.replay.step`
+
+One step of a replay in full: the step, the explanations written at the time and those asked for afterwards (apart, each labelled), and, for the owner, whether the model's thinking was removed by retention. Read only.
+
+Arguments:
+
+- `taskId`: the task
+- `seq`: the step number
+- `withContent` (optional): true to include stored content you may read
+
+Result: `{ step, explanations: { contemporaneous: { label, items }, retrospective: { label, items } }, thinking? }`.
+
+#### `activity.replay.led`
+
+What evidence and instruction led to a step, as links: the context it was given, the evidence written at the time, the nearest earlier instructions, messages and approvals on its line, and what it replaces. Links, not reasons. Read only.
+
+Arguments:
+
+- `taskId`: the task
+- `seq`: the step number
+
+Result: `{ seq, links: [{ relation, kind?, id?, version?, seq?, note? }], grounded, note, scanLimited? }`; a step on a side line also links the owner's instructions on the main line.
+
+#### `activity.replay.search`
+
+Finds steps of a task whose summary contains some words. Stored content is not searched. Same checks as reading the steps. Read only.
+
+Arguments:
+
+- `taskId`: the task
+- `query`: the words
+- `limit` (optional): 1 to 50, default 20
+
+Result: `{ matches: [step], scanLimited, range: { first, last, of } }`.
+
+#### `activity.replay.export`
+
+The whole replay of a task as data to keep: every step, gaps marked, explanations by kind. Stored content and the model's thinking are never in it. Same checks as reading the steps. Read only.
+
+Arguments:
+
+- `taskId`: the task
+
+Result: `{ format, exportedAt, taskId, projectId, summary, entries, truncated: { entries, explanations }, explanations: { contemporaneous: { label, items }, retrospective: { label, items } }, content, thinking }`; `truncated` says a read bound cut it short (see `replay.limits.get`).
+
+#### `replay.limits.get`
+
+How much of a task's record one replay reads (owner only): whether the bounds are on, the figures and the defaults. The bounds are generous by default and can be turned off.
+
+Arguments:
+
+- none
+
+Result: `{ item }`: `revision`, `enabled`, `values` (`scan` steps, `exportPages` and `stepPages` of 100 explanations) and `defaults`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `activity.payload`
 
 The stored content of one step (redacted). Sensitive content needs the owner or a history grant.
@@ -865,7 +938,7 @@ Result: `{ item }`.
 
 #### `status.ask`
 
-A status view from the records, each line citing its records: `task`, `overview`, `noticeboard`, `changes`, `tools`, `delivered` (artifacts are checked against their files when the controller keeps them), `failed_events`, `failed_event`, `handoff` (the hand-off going on for a task: `{ kind: "handoff", taskId }`), `timeline` (a project's recent steps across its tasks: `{ kind: "timeline", projectId, agent?, since?, limit? }`), `shutdown` (whether the installation could be stopped now, owner only: `{ kind: "shutdown" }`), `meetings` (a project's planned meetings with their rosters: `{ kind: "meetings", projectId, limit? }`), `agenda` (a project's open stand-up topics in meeting order: `{ kind: "agenda", projectId, limit? }`), `explanations` (what agents wrote about their choices on a task: `{ kind: "explanations", taskId, seq?, limit? }`), `activity` (a task's recorded steps in plain lines: `{ kind: "activity", taskId, latest?, after?, limit? }`) and `owner_questions` (owner only: the questions agents have put to the owner, `{ kind: "owner_questions", limit? }`), `needs_you` (owner only: everything waiting for the owner's decision, questions, approvals and blockers, with what each holds up, `{ kind: "needs_you", limit? }`). What the caller may not read reads as missing.
+A status view from the records, each line citing its records: `task`, `overview`, `noticeboard`, `changes`, `tools`, `delivered` (artifacts are checked against their files when the controller keeps them), `failed_events`, `failed_event`, `handoff` (the hand-off going on for a task: `{ kind: "handoff", taskId }`), `timeline` (a project's recent steps across its tasks: `{ kind: "timeline", projectId, agent?, since?, limit? }`), `shutdown` (whether the installation could be stopped now, owner only: `{ kind: "shutdown" }`), `meetings` (a project's planned meetings with their rosters: `{ kind: "meetings", projectId, limit? }`), `agenda` (a project's open stand-up topics in meeting order: `{ kind: "agenda", projectId, limit? }`), `explanations` (what agents wrote about their choices on a task: `{ kind: "explanations", taskId, seq?, limit? }`), `activity` (a task's recorded steps in plain lines: `{ kind: "activity", taskId, latest?, after?, limit? }`), `replay` (step through a task's activity as it was recorded, read only: a summary and a window of steps with `{ kind: "replay", taskId, from?, limit?, lane?, agent? }`, or one step in full with what led to it with `{ kind: "replay", taskId, seq }`; ask for a task by its title with `taskTitle` and the chat finds the task) and `owner_questions` (owner only: the questions agents have put to the owner, `{ kind: "owner_questions", limit? }`), `needs_you` (owner only: everything waiting for the owner's decision, questions, approvals and blockers, with what each holds up, `{ kind: "needs_you", limit? }`). What the caller may not read reads as missing.
 
 Arguments:
 
@@ -2571,9 +2644,66 @@ Arguments:
 - `summary`: one line
 - `manifest` (optional): { refs: [{ kind, id, version? }], summaryId? } or { missing: true, reason }
 - `payload` (optional): { text, sensitive? } or { missing: true, reason }
+- `outcome` (optional): proposed, dispatched, confirmed or uncertain; leave out when not known
+- `branch` (optional): the branch line the step belongs to (leave out for the main line)
+- `supersedes` (optional): the number of an earlier step this one replaces
 - `commandId`: required
 
 Result: `{ id, seq, replayed }`.
+
+#### `activity.replay.thinking`
+
+Owner only: expands the model's thinking for a task. It is a recorded look with a reason, shown labelled as model output (not an explanation of any decision). After retention removed it, the answer says so.
+
+Arguments:
+
+- `taskId`: the task
+- `reason`: why you are looking
+- `after` (optional): { entryId, block } from the previous page
+- `limit` (optional): blocks per page
+- `commandId`: required
+
+Result: `{ collapsed, state: stored | removed-by-retention | unavailable, label, blocks?, next?, lookId? }`; `unavailable` means this controller runs without the thinking store or the retention marker (not wired), which is not the same as there being none.
+
+#### `replay.limits.set`
+
+The owner sets how much of a task's record one replay reads (owner only): `scan` (steps in one view), `exportPages` and `stepPages` (pages of 100 explanations); a figure of null goes back to the default; `enabled` turns every bound on or off. Fields left out stay. A replay that stopped at a bound says so.
+
+Arguments:
+
+- `enabled` (optional): true or false
+- `scan` (optional): whole number or null
+- `exportPages` (optional): whole number or null
+- `stepPages` (optional): whole number or null
+- `expectedRevision` (optional): the revision you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `replay.limits.enable`
+
+The owner turns the replay read bounds on (owner only). This is the default.
+
+Arguments:
+
+- `expectedRevision` (optional): the revision you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `replay.limits.disable`
+
+The owner turns every replay read bound off (owner only): a replay then reads the whole record of a task.
+
+Arguments:
+
+- `expectedRevision` (optional): the revision you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
 
 #### `activity.explain`
 
@@ -3404,15 +3534,15 @@ Completion: finished when accepted (`completed: true`).
 
 #### `workspace.request`
 
-Integrates, refreshes or quarantines a task's checkout on the host that holds it (the local worker or a remote one, which answer the same typed outcomes). The task's running attempts are made quiet first (new calls refused, calls in flight settled, a checkpoint taken) and go on afterwards; if one cannot be made quiet nothing runs and a blocker says why. A refresh is refused for a checkout that holds changes; an integration carries the changes into the shared workspace through the expected-version bridge (a file that moved is kept for review) and makes no commit; a quarantine moves the checkout to the owner-only quarantine and stops the task's running attempts. A running agent is told when its checkout was refreshed or its changes integrated. An attempt of the task does not start while a request is running. `release` (committing reviewed work) is accepted and run behind the same quiet, but a host answers it with a refusal: the commit has its own permit.
+Integrates, lands, refreshes or quarantines a task's checkout on the host that holds it (the local worker or a remote one, which answer the same typed outcomes). The task's running attempts are made quiet first (new calls refused, calls in flight settled, a checkpoint taken) and go on afterwards; if one cannot be made quiet nothing runs and a blocker says why. A refresh is refused for a checkout that holds changes; an integration carries the changes into the shared workspace through the expected-version bridge (a file that moved is kept for review) and makes no commit; a landing is an integration of committed work that is made only while the checkout's base is the landing branch's current head (otherwise it is refused and nothing is written; the author refreshes first) and reports `detail.landed` (all or nothing: it is planned from the checkout's committed objects, needs a clean shared tree on the named landing branch and, unless the project says otherwise, the review gate's commit permit on the checkout's commits; protected paths such as CI configuration, hooks and Git attributes are kept for review; the landed files stay uncommitted in the shared tree until the integrator or owner commits them, and no further landing is made before); a quarantine moves the checkout to the owner-only quarantine and stops the task's running attempts. A running agent is told when its checkout was refreshed or its changes integrated or landed. An attempt of the task does not start while a request is running. `release` (committing reviewed work) is accepted and run behind the same quiet, but a host answers it with a refusal: the commit has its own permit.
 
 Arguments:
 
-- `operation`: `integration`, `refresh`, `release` or `quarantine`
+- `operation`: `integration`, `landing`, `refresh`, `release` or `quarantine`
 - `taskId`: the task
 - `reason`: why
 
-Result: `{ id, state, operation, taskId, requestedBy, assignee?, summary?, detail?, blocker?, quietAttempts?, told?, stopped?, held?, replayed }`; `assignee` is the agent the task was assigned to (the request is recorded against it); `detail` is the host's bounded figures (files written or kept for review, the new base, the quarantine ID); `told` and `stopped` name the attempts told their checkout changed or stopped by a quarantine; `held` names attempts whose freeze could not be lifted (a blocker says so; the recovery lifts it); `state` is `done`, `refused`, `failed` or `uncertain` (a repeat while the host was still working: check the checkout before asking again).
+Result: `{ id, state, operation, taskId, requestedBy, assignee?, summary?, detail?, blocker?, quietAttempts?, told?, stopped?, held?, replayed }`; `assignee` is the agent the task was assigned to (the request is recorded against it); `detail` is the host's bounded figures (files written or kept for review, the new base, the quarantine ID; for a landing `landed` is true only when every file was written and the checkout marked, so `state` `done` can mean not landed: look at `detail.landed`, `kept` and `partial`, and `waitingToCommit` says the landed files wait to be committed); `told` and `stopped` name the attempts told their checkout changed or stopped by a quarantine; `held` names attempts whose freeze could not be lifted (a blocker says so; the recovery lifts it); `state` is `done`, `refused`, `failed` or `uncertain` (a repeat while the host was still working: check the checkout before asking again).
 
 Completion: finished when accepted (`completed: true`).
 
