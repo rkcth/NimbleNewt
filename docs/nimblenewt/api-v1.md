@@ -1903,6 +1903,7 @@ The owner enables (`auto`) or disables (`owner`) automatic re-accept of attempts
 Arguments:
 
 - `reaccept` (optional): auto, owner or null (left out: unchanged)
+- `confirmWindowMinutes` (optional): how many minutes a remote worker's heartbeats are accepted before it has confirmed its dispatch contract (a slow sandbox start, or after a restart with a changed recipe): 1 to 1440, or null for the attempt lease (left out: unchanged)
 - `patienceHours` (optional): how many hours an attempt that waits for your decision keeps its lease, so moving it does not race your decision: a number above 0, off, or null for the default of 24 (left out: unchanged)
 - `expectedRevision` (optional): the revision of the setting you read
 
@@ -5097,6 +5098,9 @@ Arguments:
 - `requireApproval` (optional): true or false
 - `maxStagedBytes` (optional): whole bytes, or null for no cap
 - `keepStaged` (optional): keep only the newest N staged releases (1-200; never the current, the previous or one being switched to), or null to keep all (the default)
+- `maxStaged` (optional): the most releases staged at once (default 200), or null
+- `maxFiles` (optional): the most artifacts of one release (default 100), or null
+- `maxFileBytes` (optional): the largest artifact in bytes (default 4 GiB), or null
 - `expectedRevision` (optional): the revision you read (0 when none was set yet)
 - `commandId`: required
 
@@ -5265,7 +5269,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `maintenance.settings.set`
 
-Owner only: sets any of `requests`, `bosses`, `rules` (true, false, or null for the profile's default), `bossKinds` (the kinds supervisors may decide: package, extension, mount, network; none by default, and a supervisor never decides for an agent it created or whose supervisor it set), `leaseMinutes` (how long an application claim lasts without a heartbeat; default 30), `requestsPerDay` (requests per agent per day, default 200; the owner is exempt), `sites` (`{ "pypi.org": "allow" | "deny" | null }`; a key may be `host:port` or, for an allow, `*.host`; a deny on a host also covers its subdomains and every port unless a port is named), `catalogueAdd` and `catalogueRemove` (lists of `{ name, version, digest, source, installScripts? }`). A narrowing counts for requests already made, judged by the next maintenance tick (not inside this call): a request approved for a site now denied is rejected and an applied one is reverted. Removing a catalogue entry or switching `rules` off only stops future automatic approvals: packages already applied stay until revoked. Optional `expectedRevision`.
+Owner only: sets any of `requests`, `bosses`, `rules` (true, false, or null for the profile's default), `bossKinds` (the kinds supervisors may decide: package, extension, mount, network; none by default, and a supervisor never decides for an agent it created or whose supervisor it set), `leaseMinutes` (how long an application claim lasts without a heartbeat; default 30), `requestsPerDay` (requests per agent per day; no cap by default, 0 or null for none; the owner is exempt), `pendingPerAgent` (requests of one agent waiting at once, default 20, 0 = no cap), `attempts` (application tries before a request fails, default 5), `applyTimeoutMinutes` (how long an application may run before it is marked uncertain and verified or reverted, default 60, 0 = no timeout), `closeWaitSeconds` (how long a shutdown waits for running applications, default 30, 0 = until they end), `maxApplies` (applications at once, default 4), `tickSeconds` (how often maintenance work is looked at, default 30); null returns any of them to its default, `sites` (`{ "pypi.org": "allow" | "deny" | null }`; a key may be `host:port` or, for an allow, `*.host`; a deny on a host also covers its subdomains and every port unless a port is named), `catalogueAdd` and `catalogueRemove` (lists of `{ name, version, digest, source, installScripts? }`). A narrowing counts for requests already made, judged by the next maintenance tick (not inside this call): a request approved for a site now denied is rejected and an applied one is reverted. Removing a catalogue entry or switching `rules` off only stops future automatic approvals: packages already applied stay until revoked. Optional `expectedRevision`.
 
 Arguments:
 
@@ -5274,7 +5278,13 @@ Arguments:
 - `rules` (optional): true, false or null
 - `bossKinds` (optional): list of kinds supervisors may decide, or null
 - `leaseMinutes` (optional): 1 to 1440 or null
-- `requestsPerDay` (optional): 1 to 10000 or null
+- `requestsPerDay` (optional): 0 to 100000 or null (no cap)
+- `pendingPerAgent` (optional): 1 to 1000, 0 for no cap, or null
+- `attempts` (optional): 1 to 20 or null
+- `applyTimeoutMinutes` (optional): 1 to 1440, 0 for none, or null
+- `closeWaitSeconds` (optional): 1 to 3600, 0 for until they end, or null
+- `maxApplies` (optional): 1 to 32 or null
+- `tickSeconds` (optional): 5 to 3600 or null
 - `sites` (optional): map of site to allow, deny or null
 - `catalogueAdd` (optional): entries to preapprove
 - `catalogueRemove` (optional): entries to remove

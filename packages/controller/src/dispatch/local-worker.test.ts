@@ -185,7 +185,8 @@ for (const backend of backends) {
       await d.tick();
       const first = Object.keys(held)[0]!;
       held[first]!.push({ ref: "pid-first" });
-      for (let i = 1; i <= 10; i++) { await d.changeRecipe(w.owner, attemptId!, { kind: "narrow", recipe: { revision: `r-n${i}`, reach: [] } }); await local.localWork([attemptId!]); }
+      for (let i = 1; i <= 10; i++) { await d.changeRecipe(w.owner, attemptId!, { kind: "narrow", recipe: { revision: `r-n${i}`, reach: [] } }); }
+      assert.ok(Object.keys(held).length >= 10, `sandboxes opened: ${Object.keys(held).length}`);
       const all = await local.localWork([attemptId!]);
       assert.ok(all.processes.some((p) => p.ref === "pid-first"), "the oldest sandbox still holds a process and is still asked about");
       turn.release?.();
