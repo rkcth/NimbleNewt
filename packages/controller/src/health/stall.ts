@@ -8,6 +8,7 @@ import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import type { WaitService } from "../domain/waits.js";
 import { AGENT_LIMITS, type AgentBody } from "../agents/agents.js";
 import { DEFAULT_LADDER_HOURS } from "./escalation-ladder.js";
+import { RECOVERY_ACTIONS, allowedAt, rungOf, type RecoveryAction, type RecoveryEffects, type RecoveryPolicy } from "./recovery-ladder.js";
 import { DEFAULT_HOST_STALE_AFTER_MS, hostFreshness, type HostBody } from "../hosts/hosts.js";
 import { DEFAULT_CONTRACT, DIFFICULTIES, type ContractBody, type Difficulty } from "../planning/contracts.js";
 import { allows, allowsExactly } from "../security/access.js";
@@ -60,7 +61,13 @@ export interface ConcernBody {
   readonly escalationLevel?: number;
   /** The climbs so far, newest last and bounded: the level reached, who got it, when, and the supervisors passed over with the reason each was skipped. */
   readonly escalationTrail?: readonly EscalationStep[];
+  /** The rung (index in `RECOVERY_ACTIONS`) of the last recovery step taken (card V02c); the next step must be a higher one. Absent: none taken. */
+  readonly recoveryRung?: number;
+  /** The recovery steps taken, newest last and bounded (card V02c). */
+  readonly recoverySteps?: readonly RecoveryStep[];
 }
+
+export interface RecoveryStep { readonly n: number; readonly action: RecoveryAction; readonly by: string; readonly at: string; readonly level: number | "owner"; readonly text?: string; readonly to?: string; readonly warnings?: readonly string[] }
 
 export interface EscalationStep { readonly level: number; readonly to: string; readonly at: string; readonly skipped?: readonly { readonly id: string; readonly reason: string }[] }
 const TRAIL_KEEP = 20;
@@ -101,6 +108,10 @@ export interface StallOptions extends RunnerOptions {
   /** The owner's per-level hours (the `escalation.ladder` setting), read at each pass; a throw stops that pass's escalation. */
   readonly ladderHours?: () => Promise<readonly number[]>;
   /** Told, once for each episode of the ladder setting being unreadable (the episode ends when it reads again), so the owner can mend it; the notice's `id` is stable for the episode. */
+  /** The installation's recovery action ladder (card V02c), read at each step; a throw refuses the step. Absent: recovery steps are unavailable. */
+  readonly recoveryPolicy?: () => Promise<RecoveryPolicy>;
+  /** What each recovery action does (nudge, re-brief, reassign, pause, stop), through the existing services. Absent: recovery steps are unavailable. */
+  readonly recoveryEffects?: RecoveryEffects;
   readonly ladderDamaged?: (notice: { id: string; detail: string }) => Promise<void>;
   /** Whether a pause gate (card L01) applies to the task. A paused task is assessed as `paused`: its silence is expected, and a concern already suspected is cleared. */
   readonly isPaused?: (taskId: string) => Promise<boolean>;
@@ -281,6 +292,8 @@ export class StallService {
   readonly #dismissForMs: number;
   readonly #escalateAfterMs: number;
   readonly #ladderHours: (() => Promise<readonly number[]>) | undefined;
+  readonly #recoveryPolicy: (() => Promise<RecoveryPolicy>) | undefined;
+  readonly #recoveryEffects: RecoveryEffects | undefined;
   readonly #ladderDamaged: ((notice: { id: string; detail: string }) => Promise<void>) | undefined;
   /** The start time of the current episode of an unreadable ladder setting (undefined: the setting reads fine, or the owner has not been told yet). */
   #damageEpisode: string | undefined;
@@ -300,6 +313,8 @@ export class StallService {
     this.#escalateAfterMs = options.escalateAfterMs ?? DEFAULT_LADDER_HOURS * 3_600_000;
     this.#ladderHours = options.ladderHours;
     this.#ladderDamaged = options.ladderDamaged;
+    this.#recoveryPolicy = options.recoveryPolicy;
+    this.#recoveryEffects = options.recoveryEffects;
     if (!Number.isSafeInteger(this.#escalateAfterMs) || this.#escalateAfterMs < 1000) throw new DomainError("invalid_command", "escalateAfterMs: must be a whole number of at least 1000", { field: "escalateAfterMs" });
     this.#isPaused = options.isPaused;
     if (!Number.isSafeInteger(this.#hostStaleAfterMs) || this.#hostStaleAfterMs < 1000) throw new DomainError("invalid_command", "hostStaleAfterMs: must be a whole number of at least 1000", { field: "hostStaleAfterMs" });
@@ -461,12 +476,12 @@ export class StallService {
             // Only a change of route rewrites a suspected concern: the stored detail does not vary with time, so a supervisor's revision stays good across scans.
             if (sameRoute(body.route, facts.route)) continue;
             // The ladder starts again for the new route: a holder up the old chain (or a mark of an escalation) must not stay on a concern routed elsewhere.
-            const { escalatedAt: _ea, notifiedAt: _na, escalatedTo: _et, escalationLevel: _el, escalationTrail: _tr, ...fresh } = body;
+            const { escalatedAt: _ea, notifiedAt: _na, escalatedTo: _et, escalationLevel: _el, escalationTrail: _tr, recoveryRung: _rr, recoverySteps: _rs, ...fresh } = body;
             await this.#write(by, id, found.revision, { ...fresh, route: facts.route, lastChangedAt: this.#runner.now() });
             continue;
           }
           // Cleared, or a dismissal that has run out: it came back.
-          const { dismissedUntil: _d, clearedBecause: _c, decidedBy: _b, decidedAt: _a, decision: _n, escalatedAt: _e, notifiedAt: _f, escalatedTo: _g, escalationLevel: _h, escalationTrail: _i, ...rest } = body;
+          const { dismissedUntil: _d, clearedBecause: _c, decidedBy: _b, decidedAt: _a, decision: _n, escalatedAt: _e, notifiedAt: _f, escalatedTo: _g, escalationLevel: _h, escalationTrail: _i, recoveryRung: _j, recoverySteps: _k, ...rest } = body;
           await this.#write(by, id, found.revision, { ...rest, state: "suspected", detail: concern.detail, difficulty: facts.difficulty, route: facts.route, lastChangedAt: this.#runner.now(), reopened: body.reopened + 1 });
           counts.reopened++;
         } catch (error) { if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict")) counts.contended++; else throw error; }
@@ -532,6 +547,68 @@ export class StallService {
           ? { ...body, state: "confirmed", decidedBy: by.id, decidedAt: at, decision: reason, lastChangedAt: at }
           : { ...body, state: "dismissed", decidedBy: by.id, decidedAt: at, decision: reason, dismissedUntil: new Date(Date.parse(at) + this.#dismissForMs).toISOString(), lastChangedAt: at };
         return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject }], detail: { taskId: body.taskId, kind: body.kind, state: next.state, generation: body.generation } };
+      },
+    }));
+  }
+
+  /**
+   * One step of the recovery action ladder on a concern (card V02c): `nudge` (a message to the agent), `rebrief` (a new brief), `reassign` (to another agent, at once, with a warning naming rights the new holder lacks), `pause` or `stop` the agent,
+   * `hand-to-owner`. Who may: the same people who may decide the concern (never the task's own owner on its own concern, except the owner). The step must be the next rung up: the lowest action the installation allows at the concern's
+   * level (`recovery.ladder`: level = how often it climbed, or the owner's level) above the last step taken; the owner is not held to the level lists or the on/off switch, but still only goes up. The effect is made through the existing
+   * services as the caller (their own rights checks apply), under a key made from the command, inside the command that records the step: a repeat of the command does it once and is answered as recorded, and an effect that fails records nothing.
+   * Only a suspected or confirmed concern. At most one step per revision of the concern.
+   */
+  async recover(by: Principal, command: NoActor & { concernId: string; expectedRevision: number; action: RecoveryAction; text?: string; to?: string }): Promise<{ id: string; revision: number; replayed: boolean; step?: RecoveryStep }> {
+    onlyKnown(command, ["commandId", "concernId", "expectedRevision", "action", "text", "to"]);
+    if (this.#recoveryPolicy === undefined || this.#recoveryEffects === undefined) throw new DomainError("unavailable", "recovery steps are not available");
+    const found = await this.#concern(command.concernId);
+    if (found === undefined || !(await this.#mayRead(by, found.projectId, found.taskId, found.escalatedTo))) throw new DomainError("not_found", "no such concern");
+    if (typeof command.action !== "string" || !(RECOVERY_ACTIONS as readonly string[]).includes(command.action)) invalid("action", `must be one of ${RECOVERY_ACTIONS.join(", ")}`);
+    const action = command.action;
+    if (!Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 1) invalid("expectedRevision", "must be a whole number of at least 1");
+    const noText = action === "hand-to-owner" && command.text === undefined;
+    const reason = noText ? undefined : safe(command.text, "text", 500);
+    if (action === "reassign") { if (typeof command.to !== "string" || !/^agent:[A-Za-z0-9_.-]{1,64}$/.test(command.to)) invalid("to", "reassign names the agent to give the task to, such as agent:ann"); } else if (command.to !== undefined) invalid("to", "only a reassignment names an agent");
+    const assignment = await this.#assignments.getAssignment(found.taskId);
+    const supervisor = (found.route.via === "supervisor" && `agent:${found.route.to.id}` === by.id) || found.escalatedTo === by.id;
+    const manager = by.kind === "owner" || allows(by, "assignment.manage", found.projectId);
+    if (!(by.kind === "owner" || (!isOwner(assignment?.owner, by.id) && (supervisor || manager)))) throw new DomainError("forbidden", `${by.id} may not take recovery steps on that concern`);
+    const policy = await this.#recoveryPolicy();
+    if (by.kind !== "owner" && !policy.enabled) throw new DomainError("forbidden", "recovery steps by agents are switched off (the owner can switch them on)");
+    const ref: AggregateRef = { kind: "stall-concern", id: found.id };
+    const effects = this.#recoveryEffects;
+    return this.#runner.command("stall.recover", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
+      payload: { concernId: found.id, expectedRevision: command.expectedRevision, action, text: reason ?? null, to: command.to ?? null },
+      build: async () => {
+        const current = await this.#runner.get(ref.kind, ref.id);
+        if (current === undefined) throw new DomainError("not_found", "no such concern");
+        if (current.revision !== command.expectedRevision) throw new DomainError("stale_revision", `the concern is at revision ${current.revision}`, { currentRevision: current.revision });
+        const body = readConcern(current.body as unknown as ConcernBody);
+        if (body.state !== "suspected" && body.state !== "confirmed") throw new DomainError("invalid_transition", `the concern is ${body.state}; only a suspected or confirmed one can be acted on`);
+        const level: number | "owner" = body.escalatedTo === "owner" || body.route.via === "owner" ? "owner" : body.escalationLevel ?? 0;
+        const last = body.recoveryRung ?? -1;
+        const allowed = allowedAt(policy, level);
+        const rung = rungOf(action);
+        if (by.kind !== "owner") {
+          const next = RECOVERY_ACTIONS.find((a) => rungOf(a) > last && allowed.includes(a));
+          if (!allowed.includes(action)) throw new DomainError("forbidden", `${action} is not allowed at ${level === "owner" ? "the owner's level" : `level ${level}`}${next === undefined ? "; no further step is allowed there" : `; the next step there is ${next}`}`);
+          if (action !== next) throw new DomainError("invalid_transition", `the next step is ${next ?? "none"}, not ${action}`);
+        } else if (rung <= last) throw new DomainError("invalid_transition", `${RECOVERY_ACTIONS[last]} was already taken; take a higher step`);
+        const at = this.#runner.now();
+        const key = createHash("sha256").update(`${scopedCommandId(by.id, command.commandId)}|${found.id}`).digest("hex").slice(0, 32);
+        let warnings: readonly string[] | undefined;
+        if (action !== "hand-to-owner") warnings = (await effects.run(action, { by, key: `rec-${key}`, taskId: body.taskId, projectId: body.projectId, concernId: found.id, text: reason!, ...(command.to === undefined ? {} : { to: command.to }) })).warnings;
+        const n = (body.recoverySteps?.at(-1)?.n ?? 0) + 1;
+        const step: RecoveryStep = { n, action, by: by.id, at, level, ...(reason === undefined ? {} : { text: reason }), ...(command.to === undefined ? {} : { to: command.to }), ...(warnings === undefined || warnings.length === 0 ? {} : { warnings: warnings.slice(0, 5).map((w) => w.slice(0, 200)) }) };
+        let next: ConcernBody = { ...body, recoveryRung: rung, recoverySteps: [...(body.recoverySteps ?? []), step].slice(-TRAIL_KEEP), lastChangedAt: at };
+        // Handing the concern to the owner parks it there and has the owner told once (the same notice as a climb to the owner, keyed by the time and level).
+        if (action === "hand-to-owner" && body.escalatedTo !== "owner") {
+          const { notifiedAt: _n, ...rest } = next;
+          const climb: EscalationStep = { level: (body.escalationLevel ?? 0) + 1, to: "owner", at };
+          next = { ...rest, escalatedAt: at, escalatedTo: "owner", escalationLevel: climb.level, escalationTrail: [...(body.escalationTrail ?? []), climb].slice(-TRAIL_KEEP) };
+        }
+        const { id: _i, revision: _r, ...stored } = next as ConcernBody & { id?: string; revision?: number };
+        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: stored as unknown as JsonObject }], detail: { taskId: body.taskId, kind: body.kind, state: body.state, generation: body.generation, action, step: n } };
       },
     }));
   }

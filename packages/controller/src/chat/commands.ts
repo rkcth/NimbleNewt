@@ -47,6 +47,10 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "events.sources.change": { verb: "Change which event sources are watched", mode: "propose" },
   // What a local agent may use is a resource decision (card H12k): shown first in every profile (provisional).
   // How long a stuck agent's concern waits at each supervisor before it climbs is an escalation policy (owner decision 2026-10-30, supervisor ladder): shown first in every profile (provisional).
+  // Which recovery actions may be taken on a stuck agent (pausing, stopping, giving its task away) is authority over work: shown first in every profile (provisional, card V02c). Turning the steps off only narrows; on widens.
+  "recovery.ladder.set": { verb: "Change which recovery actions may be taken on a stuck agent at each level", mode: "propose" },
+  "recovery.ladder.enable": { verb: "Let supervisors take recovery steps on a stuck agent", mode: "propose" },
+  "recovery.ladder.disable": { verb: "Stop supervisors taking recovery steps on a stuck agent", mode: "apply" },
   "escalation.ladder.set": { verb: "Change how long a stuck agent waits at each level of supervisors", mode: "propose" },
   // A ceiling on agreed raises and grants widens or narrows what a decision may carry out: shown first in every profile (owner decision 2026-10-30).
   "agreed.limits.change": { verb: "Change the limits on agreed raises and grants", mode: "propose" },

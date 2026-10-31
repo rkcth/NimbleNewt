@@ -33,6 +33,8 @@ import type { AgentMessageService } from "../messaging/index.js";
 import { shownLines } from "../standups/standups.js";
 import type { GrantService } from "../security/grants.js";
 import type { EscalationLadderService } from "../health/escalation-ladder.js";
+import type { RecoveryLadderService } from "../health/recovery-ladder.js";
+import type { StallService } from "../health/stall.js";
 import type { AgreedLimitsSettingsService } from "./agreed-limits-settings.js";
 import type { WorkerLimitsSettingsService } from "./worker-limits-settings.js";
 import type { DispatchLimitsSettingsService } from "./dispatch-limits-settings.js";
@@ -101,6 +103,8 @@ export interface Context {
   /** Absent when the controller runs without the setup readiness view (card U14). */
   readonly setup?: Pick<SetupReadinessService, "check">;
   readonly escalationLadder?: Pick<EscalationLadderService, "get" | "set">;
+  readonly recoveryLadder?: Pick<RecoveryLadderService, "get" | "set">;
+  readonly recoveryStep?: Pick<StallService, "recover">;
   readonly agreedLimits?: Pick<AgreedLimitsSettingsService, "get" | "change">;
   readonly resumeSettings?: Pick<ResumeSettingsService, "get" | "set">;
   readonly quietHostSettings?: Pick<QuietHostSettingsService, "get" | "change">;
@@ -244,6 +248,8 @@ const commandsOf = (c: Context): CommandService => c.commands ?? unavailable("ty
 const escalationLadderOf = (c: Context): NonNullable<Context["escalationLadder"]> => c.escalationLadder ?? unavailable("the escalation ladder");
 const quietHostSettingsOf = (c: Context): NonNullable<Context["quietHostSettings"]> => c.quietHostSettings ?? unavailable("the quiet-host setting");
 const quietHostsOf = (c: Context): NonNullable<Context["quietHosts"]> => c.quietHosts ?? unavailable("remote hosts");
+const recoveryLadderOf = (c: Context): NonNullable<Context["recoveryLadder"]> => c.recoveryLadder ?? unavailable("the recovery ladder");
+const recoveryStepOf = (c: Context): NonNullable<Context["recoveryStep"]> => c.recoveryStep ?? unavailable("recovery steps");
 const resumeSettingsOf = (c: Context): NonNullable<Context["resumeSettings"]> => c.resumeSettings ?? unavailable("resume settings");
 const cleanupSettingsOf = (c: Context): NonNullable<Context["cleanupSettings"]> => c.cleanupSettings ?? unavailable("cleanup settings");
 const dispatchLimitsOf = (c: Context): NonNullable<Context["dispatchLimits"]> => c.dispatchLimits ?? unavailable("dispatcher limits");
@@ -394,6 +400,16 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, []); return asJson({ item: await agreedLimitsOf(c).get(c.principal) }); } },
   { name: "agreed.limits.change", kind: "command", summary: "The owner sets or clears ceilings on agreed raises and grants (owner only; none by default). `set` has any of `raiseMaxCostMicros` (most money one raise carried out by the approval policy may add, in millionths, 1 to 1e15), `raiseMaxComputeMs` (most compute time one such raise may add, 1 to 1e12 ms) and `grantMaxDays` (longest a right granted by a decision may last, 1 to 3650); `unset` lists ceilings to remove. A ceiling counts from the next carry-out; the rights re-check at carry-out and every other check stay.", args: { "set?": "for example `{ \"grantMaxDays\": 90 }`", "unset?": "ceiling names to remove", "expectedRevision?": "the revision of the setting you read" }, result: "`{ revision }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["set", "unset", "expectedRevision"]); return asJson({ ...(await agreedLimitsOf(c).change(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
+  { name: "recovery.ladder.get", kind: "query", summary: "Which recovery actions a stalled task's concern may take at which level of the supervisor ladder, and whether agents may take recovery steps at all (owner only).", args: {}, result: "`{ item }`: `revision`, `enabled`, `levels` (the owner's actions for level 0, 1, 2 ...; a level not listed uses the defaults), `owner` (actions at the owner's level) and `defaults`.", completion: { kind: "completed" },
+    run: async (c, a) => { only(a, []); return asJson({ item: await recoveryLadderOf(c).get(c.principal) }); } },
+  { name: "recovery.ladder.set", kind: "command", summary: "The owner sets which recovery actions a supervisor may take on a stalled task at each level of the supervisor ladder (owner only). The actions, lowest rung first, are `nudge`, `rebrief`, `reassign`, `pause`, `stop` and `hand-to-owner`; a concern climbs them one rung at a time. `levels` lists the allowed actions for level 0 (the first supervisor), level 1 and so on, at most 16 levels (an empty list clears them; unlisted levels use the defaults); `owner` lists the actions allowed while the owner holds the concern; `enabled` turns agents' recovery steps on or off. Fields left out stay.", args: { "levels?": "for example `[[\"nudge\"], [\"nudge\", \"reassign\"]]`", "owner?": "for example `[\"stop\"]`", "enabled?": "true or false", "expectedRevision?": "the revision you read" }, result: "`{ revision }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["levels", "owner", "enabled", "expectedRevision"]); return asJson({ ...(await recoveryLadderOf(c).set(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
+  { name: "recovery.ladder.enable", kind: "command", summary: "The owner lets agents (supervisors and holders of `assignment.manage`) take recovery steps on stalled tasks within the ladder (owner only). This is the default.", args: { "expectedRevision?": "the revision you read" }, result: "`{ revision }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["expectedRevision"]); return asJson({ ...(await recoveryLadderOf(c).set(c.principal, { commandId: need(id), enabled: true, ...(a as object) } as never)) }); } },
+  { name: "recovery.ladder.disable", kind: "command", summary: "The owner stops agents taking recovery steps on stalled tasks (owner only); the owner can still take them.", args: { "expectedRevision?": "the revision you read" }, result: "`{ revision }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["expectedRevision"]); return asJson({ ...(await recoveryLadderOf(c).set(c.principal, { commandId: need(id), enabled: false, ...(a as object) } as never)) }); } },
+  { name: "recovery.step", kind: "command", summary: "Takes the next recovery step on a stall concern: `nudge` (a message to the agent), `rebrief` (a new brief), `reassign` (to the agent in `to`, at once; a warning names rights the new holder lacks), `pause` or `stop` the agent, or `hand-to-owner`. Allowed for the concern's holder and holders of `assignment.manage` (not the task's own owner), only the next rung the installation allows at the concern's level.", args: { concernId: "the concern", expectedRevision: "the revision you read", action: "nudge, rebrief, reassign, pause, stop or hand-to-owner", "text?": "the message, brief or reason (required except for hand-to-owner)", "to?": "agent:<name>, for reassign only" }, result: "`{ id, revision, replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["concernId", "expectedRevision", "action", "text", "to"]); return asJson({ ...(await recoveryStepOf(c).recover(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
   { name: "resume.settings.get", kind: "query", summary: "How many blocked rounds a stalled resume check retries before the owner is told (owner only): the owner's figure, the default and the effective one.", args: {}, result: "`{ item }`: `revision`, `maxRounds` (the owner's, or null), `default`, `effective`.", completion: { kind: "completed" },
     run: async (c, a) => { only(a, []); return asJson({ item: await resumeSettingsOf(c).get(c.principal) }); } },
   { name: "resume.settings.set", kind: "command", summary: "The owner sets how many blocked rounds a stalled resume check retries before the owner is told (owner only): `maxRounds` is a whole number from 1 to 10, or null to clear it so the default (3) applies. It counts for checks started afterwards; a check already running keeps the figure it started with. This is the form the chat uses.", args: { maxRounds: "1 to 10, or null to clear", "expectedRevision?": "the revision of the setting you read" }, result: "`{ revision }`.", completion: { kind: "completed" },

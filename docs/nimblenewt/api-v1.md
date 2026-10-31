@@ -122,6 +122,18 @@ Result: `{ item }`: `revision` and `limits`, which has any of `raiseMaxCostMicro
 
 Completion: finished when accepted (`completed: true`).
 
+#### `recovery.ladder.get`
+
+Which recovery actions a stalled task's concern may take at which level of the supervisor ladder, and whether agents may take recovery steps at all (owner only).
+
+Arguments:
+
+- none
+
+Result: `{ item }`: `revision`, `enabled`, `levels` (the owner's actions for level 0, 1, 2 ...; a level not listed uses the defaults), `owner` (actions at the owner's level) and `defaults`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `resume.settings.get`
 
 How many blocked rounds a stalled resume check retries before the owner is told (owner only): the owner's figure, the default and the effective one.
@@ -1535,6 +1547,61 @@ Arguments:
 - `expectedRevision` (optional): the revision of the setting you read
 
 Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `recovery.ladder.set`
+
+The owner sets which recovery actions a supervisor may take on a stalled task at each level of the supervisor ladder (owner only). The actions, lowest rung first, are `nudge`, `rebrief`, `reassign`, `pause`, `stop` and `hand-to-owner`; a concern climbs them one rung at a time. `levels` lists the allowed actions for level 0 (the first supervisor), level 1 and so on, at most 16 levels (an empty list clears them; unlisted levels use the defaults); `owner` lists the actions allowed while the owner holds the concern; `enabled` turns agents' recovery steps on or off. Fields left out stay.
+
+Arguments:
+
+- `levels` (optional): for example `[["nudge"], ["nudge", "reassign"]]`
+- `owner` (optional): for example `["stop"]`
+- `enabled` (optional): true or false
+- `expectedRevision` (optional): the revision you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `recovery.ladder.enable`
+
+The owner lets agents (supervisors and holders of `assignment.manage`) take recovery steps on stalled tasks within the ladder (owner only). This is the default.
+
+Arguments:
+
+- `expectedRevision` (optional): the revision you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `recovery.ladder.disable`
+
+The owner stops agents taking recovery steps on stalled tasks (owner only); the owner can still take them.
+
+Arguments:
+
+- `expectedRevision` (optional): the revision you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `recovery.step`
+
+Takes the next recovery step on a stall concern: `nudge` (a message to the agent), `rebrief` (a new brief), `reassign` (to the agent in `to`, at once; a warning names rights the new holder lacks), `pause` or `stop` the agent, or `hand-to-owner`. Allowed for the concern's holder and holders of `assignment.manage` (not the task's own owner), only the next rung the installation allows at the concern's level.
+
+Arguments:
+
+- `concernId`: the concern
+- `expectedRevision`: the revision you read
+- `action`: nudge, rebrief, reassign, pause, stop or hand-to-owner
+- `text` (optional): the message, brief or reason (required except for hand-to-owner)
+- `to` (optional): agent:<name>, for reassign only
+
+Result: `{ id, revision, replayed }`.
 
 Completion: finished when accepted (`completed: true`).
 

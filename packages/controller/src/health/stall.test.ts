@@ -10,7 +10,7 @@ import { HostService } from "../hosts/index.js";
 import { ContractService } from "../planning/contracts.js";
 import { GrantService, PrincipalService, type Grant, type Principal } from "../security/index.js";
 import type { Difficulty } from "../planning/contracts.js";
-import { EscalationLadderService, StallService, assessStall, DEFAULT_THRESHOLDS, type StallEvent, type StallOptions } from "./index.js";
+import { EscalationLadderService, RecoveryLadderService, StallService, type RecoveryAction, type RecoveryEffects, assessStall, DEFAULT_THRESHOLDS, type StallEvent, type StallOptions } from "./index.js";
 
 after(stopServer);
 
@@ -1121,5 +1121,78 @@ for (const backend of backends) {
     assert.equal(assessStall({ ...base, running: false }).status, "not_running");
     assert.equal(assessStall({ ...base, waiting: true }).status, "waiting");
     assert.equal(assessStall({ ...base, now: T0 + MIN }).status, "healthy");
+  });
+
+  suite("recovery ladder: the next rung only, allowed at the concern's level, by the people who may decide it, recorded, replay-safe, bounded (card V02c)", async (c) => {
+    const { boss, mid, ann, concernId } = await ladderWorld(c);
+    const setting = RecoveryLadderService.withEpoch(c.storage, c.projects.epoch, options);
+    const calls: string[] = [];
+    let failNext = false;
+    const effects: RecoveryEffects = { run: async (action, ctx) => { if (failNext) { failNext = false; throw new DomainError("unavailable", "the message service is down"); } calls.push(`${action}:${ctx.key}`); return action === "reassign" ? { warnings: ["agent:x lacks task.read"] } : {}; } };
+    const rec = () => c.service({ recoveryPolicy: () => setting.policy(), recoveryEffects: effects });
+    const svc = rec();
+    const rev = async () => (await svc.get(c.owner, concernId))!.revision;
+    const take = async (by: Principal, action: RecoveryAction, commandId: string, more: { text?: string; to?: string } = {}) => svc.recover(by, { commandId, concernId, expectedRevision: await rev(), action, text: "please look", ...more });
+    // Without the wiring there is nothing to take.
+    await refuses("unavailable", async () => c.stall.recover(boss.principal, { commandId: cid("r"), concernId, expectedRevision: 1, action: "nudge", text: "x" }));
+    // Who: the routed supervisor yes; the task's own owner, a skipped supervisor and a stranger no.
+    const stranger = await c.plain("nobody");
+    await refuses("forbidden", async () => take(ann.principal, "nudge", cid("r")));
+    await refuses("not_found", async () => take(mid.principal, "nudge", cid("r")));
+    await refuses("not_found", async () => take(stranger, "nudge", cid("r")));
+    assert.deepEqual(calls, [], "refused steps do nothing");
+    // Level 0 default: nudge, rebrief, hand-to-owner. Rungs are climbed in order, one at a time.
+    await refuses("forbidden", async () => take(boss.principal, "reassign", cid("r"), { to: "agent:other" }), (e) => assert.match(e.message, /next step there is nudge/));
+    await refuses("invalid_command", async () => take(boss.principal, "nudge", cid("r"), { text: "" }));
+    await refuses("invalid_command", async () => take(boss.principal, "nudge", cid("r"), { to: "agent:other" }));
+    const first = await take(boss.principal, "nudge", "n1");
+    assert.equal(calls.length, 1);
+    // Replay: the same command is answered as recorded, the effect is not made again, and the stale revision does not matter.
+    const again = await svc.recover(boss.principal, { commandId: "n1", concernId, expectedRevision: 1, action: "nudge", text: "please look" } as never).catch((e) => e);
+    void again;
+    const same = await svc.recover(boss.principal, { commandId: "n1", concernId, expectedRevision: (first.revision - 1), action: "nudge", text: "please look" });
+    assert.equal(same.replayed, true);
+    assert.equal(calls.length, 1);
+    await refuses("command_conflict", async () => svc.recover(boss.principal, { commandId: "n1", concernId, expectedRevision: first.revision - 1, action: "nudge", text: "different" }));
+    await refuses("invalid_transition", async () => take(boss.principal, "nudge", cid("r")), (e) => assert.match(e.message, /next step is rebrief/));
+    await refuses("stale_revision", async () => svc.recover(boss.principal, { commandId: cid("r"), concernId, expectedRevision: 1, action: "rebrief", text: "x" }));
+    // A failing effect records nothing and keeps the rung.
+    failNext = true;
+    await refuses("unavailable", async () => take(boss.principal, "rebrief", cid("r")));
+    assert.equal((await svc.get(c.owner, concernId))!.recoverySteps!.length, 1);
+    const second = await take(boss.principal, "rebrief", cid("r"));
+    assert.equal(second.replayed, false);
+    const steps = (await svc.get(c.owner, concernId))!.recoverySteps!;
+    assert.deepEqual(steps.map((x) => [x.n, x.action, x.by, x.level]), [[1, "nudge", boss.principal.id, 0], [2, "rebrief", boss.principal.id, 0]]);
+    // The owner sets the ladder: level 0 may nudge-after-rebrief only stop; chat-settable through the same service. Agents are held to it, the owner is not.
+    await refuses("forbidden", async () => setting.set(boss.principal, { commandId: cid("s"), levels: [["stop"]] }));
+    await refuses("invalid_command", async () => setting.set(c.owner, { commandId: cid("s"), levels: [["fly"]] }));
+    await refuses("invalid_command", async () => setting.set(c.owner, { commandId: cid("s"), levels: Array.from({ length: 17 }, () => []) }));
+    await setting.set(c.owner, { commandId: cid("s"), levels: [["stop", "hand-to-owner"]] });
+    await refuses("forbidden", async () => take(boss.principal, "reassign", cid("r"), { to: "agent:other" }));
+    await setting.set(c.owner, { commandId: cid("s"), enabled: false });
+    await refuses("forbidden", async () => take(boss.principal, "stop", cid("r")), (e) => assert.match(e.message, /switched off/));
+    await setting.set(c.owner, { commandId: cid("s"), enabled: true });
+    await refuses("stale_revision", async () => setting.set(c.owner, { commandId: cid("s"), enabled: false, expectedRevision: 1 }));
+    // The owner is not held to the level lists: reassign (a rung above the last) with the warning kept in the step.
+    const owned = await take(c.owner, "reassign", cid("r"), { to: "agent:other" });
+    assert.ok(owned.revision > second.revision);
+    assert.deepEqual((await svc.get(c.owner, concernId))!.recoverySteps!.at(-1)!.warnings, ["agent:x lacks task.read"]);
+    await refuses("invalid_transition", async () => take(c.owner, "rebrief", cid("r")), (e) => assert.match(e.message, /already taken/));
+    await refuses("invalid_command", async () => take(c.owner, "reassign", cid("r"), { to: "somebody" }));
+    // The agent's turn: stop is the next rung allowed at level 0; hand-to-owner parks the concern with the owner and has the owner told once, without text.
+    await take(boss.principal, "stop", cid("r"));
+    const last = await svc.recover(boss.principal, { commandId: cid("r"), concernId, expectedRevision: await rev(), action: "hand-to-owner" });
+    assert.equal(last.replayed, false);
+    const held = (await svc.get(c.owner, concernId))!;
+    assert.equal(held.escalatedTo, "owner");
+    assert.equal(held.notifiedAt, undefined);
+    assert.equal((await svc.escalateUndecided(c.owner)).length, 1, "the owner's notice is owed");
+    // Nothing is left to take: bounded by the number of rungs, and the record keeps at most the trail limit.
+    await refuses("invalid_transition", async () => take(boss.principal, "hand-to-owner", cid("r")));
+    assert.ok(held.recoverySteps!.length <= 6);
+    // A dismissed concern is not acted on.
+    await svc.decide(c.owner, { commandId: cid("d"), concernId, expectedRevision: await rev(), decision: "dismiss", reason: "fine" });
+    await refuses("invalid_transition", async () => take(c.owner, "hand-to-owner", cid("r")));
   });
 }

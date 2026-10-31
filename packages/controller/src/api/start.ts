@@ -13,7 +13,7 @@ import { MeetingRecordService, budgetRaiseApplier, grantApplier, taskReassignApp
 import { EventService, EventSourceSettingsService, type EventSource } from "../events/index.js";
 import { BudgetService, holderNotice, type NotifyAggregate } from "../budgets/index.js";
 import { NotificationService } from "../notifications/index.js";
-import { EscalationLadderService, StallService, type StallOptions } from "../health/index.js";
+import { EscalationLadderService, RecoveryLadderService, StallService, type RecoveryEffects, type StallOptions } from "../health/index.js";
 import { DomainError } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { AssignmentService } from "../domain/assignments.js";
@@ -336,7 +336,10 @@ export async function startController(options: StartOptions): Promise<Controller
     };
     // How long an undecided concern waits at each level of the supervisor ladder: the owner's setting, else the installation's `stall.escalateAfterMs`, else 24 hours (owner decision 2026-10-30, supervisor ladder).
     const escalationLadder = EscalationLadderService.withEpoch(storage, epoch);
-    const stall = StallService.withEpoch(storage, epoch, assignments, waits, { ...(options.stall ?? {}), ladderHours: () => escalationLadder.hours(), ladderDamaged: async (n) => { await notifications.emitFromController({ commandId: n.id, kind: "maintenance", level: "needs-you", ref: { kind: "principal", id: "dispatcher" }, detail: n.detail }); }, declaredSpeed, isPaused: (taskId) => pauses.isPaused(taskId) });
+    // The recovery action ladder (card V02c): its effects are bound below, once the services they use are built.
+    const recoveryLadder = RecoveryLadderService.withEpoch(storage, epoch);
+    let recoveryRun: RecoveryEffects["run"] | undefined;
+    const stall = StallService.withEpoch(storage, epoch, assignments, waits, { ...(options.stall ?? {}), recoveryPolicy: () => recoveryLadder.policy(), recoveryEffects: { run: (action, ctx) => (recoveryRun ?? (() => { throw new DomainError("unavailable", "recovery steps are not available yet"); }))(action, ctx) }, ladderHours: () => escalationLadder.hours(), ladderDamaged: async (n) => { await notifications.emitFromController({ commandId: n.id, kind: "maintenance", level: "needs-you", ref: { kind: "principal", id: "dispatcher" }, detail: n.detail }); }, declaredSpeed, isPaused: (taskId) => pauses.isPaused(taskId) });
     // Durable job records (card T07): a permitted background job's result goes to the pause service; no MCP connection check is bound until an MCP client exists, so no MCP operation is admitted.
     // The time a job or a review took is charged to its task by the dispatcher's budget service once that is built; a charge that fails is reported, and the job or review stands (card R05f).
     const charged = async (usage: { commandId: string; activity: "review" | "background-job"; taskId: string; agentId?: string; computeMs: number }): Promise<void> => { try { await dispatch?.chargeUse(usage); } catch (error) { options.onInternalError?.(error); } };
@@ -468,15 +471,16 @@ export async function startController(options: StartOptions): Promise<Controller
     const resumes = ResumeCheckService.withEpoch(storage, epoch, { continuations, dependencies: DependencyService.withEpoch(storage, epoch), blockers: BlockerService.withEpoch(storage, epoch), ports: controllerResumePorts(storage) }, { rounds: () => resumeSettings.effective() });
     // The identity that carries out what a meeting decided and was allowed: a service with no grants of its own (the carrying agent's rights are checked separately).
     const meetingController = { id: "service:meeting-records", kind: "service", name: "meeting-records", grants: [] } as Principal;
+    const reassignApplier = taskReassignApplier(assignments, projects, principals,
+        // The rights the work needs, checked the way the services check them (the agent's own effective grants): the ones it lacks.
+        async (agentId, projectId, taskId) => { const p = await principals.get(agentId); if (p === undefined || p.state !== "active") return ["task.read", "attempt.work"]; const eff = await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); return ["attempt.work", "task.read"].filter((a) => !allows(eff as never, a, projectId, { resource: { kind: "task", id: taskId } })); },
+        // Owner decision 2026-10-30: a reassignment is made at once; a new holder without the rights is reported to the owner (and the chair), once per change (the notification's command ID comes from the change's).
+        reassignWarningSink({ notifications, storage, messages }));
     const records = MeetingRecordService.withEpoch(storage, epoch, { meetings, decisions }, {
       // A cited record may be shown to a meeting's readers only when it is a project-visible kind and exists; desks, scratch and unknown kinds stay private (card M02e).
       shareable: shareableCite(storage),
       // A meeting may retitle or reword a task; the change is made by the project service as the agent that holds the right, and only once (card M02c).
-      appliers: { "task.update": taskUpdateApplier(projects), "task.reassign": taskReassignApplier(assignments, projects, principals,
-        // The rights the work needs, checked the way the services check them (the agent's own effective grants): the ones it lacks.
-        async (agentId, projectId, taskId) => { const p = await principals.get(agentId); if (p === undefined || p.state !== "active") return ["task.read", "attempt.work"]; const eff = await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); return ["attempt.work", "task.read"].filter((a) => !allows(eff as never, a, projectId, { resource: { kind: "task", id: taskId } })); },
-        // Owner decision 2026-10-30: a reassignment is made at once; a new holder without the rights is reported to the owner (and the chair), once per change (the notification's command ID comes from the change's).
-        reassignWarningSink({ notifications, storage, messages })), "budget.raise": budgetRaiseApplier(budgets, meetingController, projects), "grant.add": grantApplier(grants, meetingController, projects) },
+      appliers: { "task.update": taskUpdateApplier(projects), "task.reassign": reassignApplier, "budget.raise": budgetRaiseApplier(budgets, meetingController, projects), "grant.add": grantApplier(grants, meetingController, projects) },
       // Changes that widen rights or spend (a budget raise and a grant are both registered) are carried out without the owner only when the approval policy lets their class through: the profile, with a specific setting overriding it (owner decision 2026-10-29).
       widening: async (cls, projectId) => {
         const cell = await PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }).classMode(projectId, cls);
@@ -519,7 +523,28 @@ export async function startController(options: StartOptions): Promise<Controller
     const workerLimits = WorkerLimitsSettingsService.withEpoch(storage, epoch, checkLocalWorkerLimits(options.dispatch?.local?.limits));
     // How long an attempt may run and how many attempts are admitted: off unless the owner (or a start-up option) turns them on.
     const dispatchLimits = DispatchLimitsSettingsService.withEpoch(storage, epoch, { ...(options.dispatch?.dispatcher?.attemptMs === undefined ? {} : { attemptMs: options.dispatch.dispatcher.attemptMs }), ...(options.dispatch?.dispatcher?.maxAttempts === undefined ? {} : { maxAttempts: options.dispatch.dispatcher.maxAttempts }) });
-    const api = new StateApi({ quietHostSettings, quietHosts: { moveWork: async (owner, command) => { const hosts = dispatch?.quietHosts; if (hosts === undefined) throw new DomainError("unavailable", "this controller runs without remote hosts"); return hosts.moveWork(owner, command); } }, catalogRevocation, setup: SetupReadinessService.withEpoch(storage, epoch), eventSourceSettings, resumeSettings, workerLimits, agreedLimits, escalationLadder, dispatchLimits, cleanupSettings, workEnd, submissions, deliverables: DeliverableService.withEpoch(storage, epoch), release: ReleaseService.withEpoch(storage, epoch), responsibilityChecks, incidents, swarm: SwarmService.withEpoch(storage, epoch, { projects, contracts, budgets, stops }), status, branchSettings, improvements, ...(backups === undefined ? {} : { backups }), policyForward, watchControl, standups, attendance, records, policyContext: PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }), activity, resumes, handoffs, cutover, modelBudget: fallback, commands, integration, notes, stops, pauses, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size) }, watches: watchService, events: EventService.withEpoch(storage, epoch), notifications, budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
+    recoveryRun = async (action, ctx) => {
+      // The existing services do the work as the caller, so their own rights checks apply; each is keyed by the step (`ctx.key`), so a repeat of the step does it once.
+      const asg = await assignments.getAssignment(ctx.taskId);
+      const holder = asg?.state === "assigned" && asg.owner?.kind === "agent" ? asg.owner.id : undefined;
+      const agentOf = (): string => holder === undefined ? ((): never => { throw new DomainError("invalid_transition", "the task has no agent working on it"); })() : holder;
+      const scope = { kind: "agent" as const, id: `agent:${agentOf()}` };
+      if (action === "nudge" || action === "rebrief") {
+        await messages.noticeFromController({ commandId: ctx.key, taskId: ctx.taskId, to: `agent:${agentOf()}`, purpose: action === "nudge" ? "A nudge from your supervisor" : "A new brief from your supervisor", text: ctx.text });
+        return {};
+      }
+      if (action === "pause") { await pauses.pause(ctx.by, { commandId: ctx.key, scope, reason: ctx.text }); return {}; }
+      if (action === "stop") { await stops.request(ctx.by, { commandId: ctx.key, scope, mode: "stop", reason: ctx.text }); return {}; }
+      // Reassign: the meeting path's rules (moved at once; rights the new holder lacks are warned about), after checking the caller may manage the assignment.
+      if (!(ctx.by.kind === "owner" || allows(ctx.by, "assignment.manage", ctx.projectId, { resource: { kind: "task", id: ctx.taskId } }))) throw new DomainError("forbidden", `${ctx.by.id} may not reassign the task`);
+      const to = ctx.to!;
+      await reassignApplier.apply({ commandId: ctx.key, actor: ctx.by.id, target: { kind: "task", id: ctx.taskId }, expectedRevision: 0, patch: { toAgent: to, from: holder === undefined ? null : `agent:${holder}`, ...(asg === undefined ? {} : { generation: asg.generation, revision: asg.revision }) } as never, agreedBy: ctx.by.id } as never);
+      const target = await principals.get(to);
+      const eff = target === undefined || target.state !== "active" ? undefined : await grants.effective({ id: target.id, kind: target.kind, name: target.name, grants: target.grants }, new Date().toISOString());
+      const missing = eff === undefined ? ["task.read", "attempt.work"] : ["attempt.work", "task.read"].filter((x) => !allows(eff as never, x, ctx.projectId, { resource: { kind: "task", id: ctx.taskId } }));
+      return missing.length === 0 ? {} : { warnings: [`${to} lacks ${missing.join(" and ")} for this task; the work waits until the owner grants it`] };
+    };
+    const api = new StateApi({ quietHostSettings, quietHosts: { moveWork: async (owner, command) => { const hosts = dispatch?.quietHosts; if (hosts === undefined) throw new DomainError("unavailable", "this controller runs without remote hosts"); return hosts.moveWork(owner, command); } }, catalogRevocation, setup: SetupReadinessService.withEpoch(storage, epoch), eventSourceSettings, resumeSettings, workerLimits, agreedLimits, escalationLadder, recoveryLadder, recoveryStep: stall, dispatchLimits, cleanupSettings, workEnd, submissions, deliverables: DeliverableService.withEpoch(storage, epoch), release: ReleaseService.withEpoch(storage, epoch), responsibilityChecks, incidents, swarm: SwarmService.withEpoch(storage, epoch, { projects, contracts, budgets, stops }), status, branchSettings, improvements, ...(backups === undefined ? {} : { backups }), policyForward, watchControl, standups, attendance, records, policyContext: PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }), activity, resumes, handoffs, cutover, modelBudget: fallback, commands, integration, notes, stops, pauses, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size) }, watches: watchService, events: EventService.withEpoch(storage, epoch), notifications, budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
     let chat: ChatService | undefined;
     let coordinator: CoordinatorService | undefined;
     if (options.chat !== undefined) {
