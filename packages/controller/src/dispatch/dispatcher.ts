@@ -1673,7 +1673,7 @@ export class DispatcherService {
     await this.#deps.credentials.endForAttempt(this.#deps.principal, { commandId: `dpa-end-cred:${attemptId}`, attemptId, reason: summary.slice(0, 280) }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
     // Before the attempt is marked finished, so a crash in between leaves the end to be done again (every command here is derived from the task and the attempt). A superseded attempt does not count against the task or take the hand-off head.
     if (active) await this.#contextAtEnd(b, outcome, summary, options.partial === true);
-    await this.#update(attemptId, (x) => ({ ...x, state: "finished", workerStopped, inFlight: [], parked: [], outcome: { status: outcome, summary: summary.slice(0, 500), at: this.#runner.now() } }), () => this.#liveChange(attemptId, false));
+    await this.#update(attemptId, (x) => ({ ...withoutFreeze(x, true), state: "finished", workerStopped, inFlight: [], parked: [], outcome: { status: outcome, summary: summary.slice(0, 500), at: this.#runner.now() } }), () => this.#liveChange(attemptId, false));
     // A worker registered while this end was running (its start answered after the end began) is let go too.
     const late = this.#live.get(attemptId);
     if (late !== undefined && late.handle !== live?.handle && !(await late.handle.stop().then(() => true, () => false))) { workerStopped = false; await this.#update(attemptId, (x) => ({ ...x, workerStopped: false })).catch(() => undefined); }

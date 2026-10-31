@@ -106,6 +106,23 @@ for (const backend of backends) {
     } finally { await r.store.close(); }
   });
 
+  test(`${backend.name}: an attempt that ends while it is frozen is not left marked frozen (a release of a finished attempt finds nothing to lift)`, async () => {
+    const r = await rig(async () => ({}));
+    try {
+      r.turn.second = async () => "x";
+      await r.d.tick();
+      await r.inCall;
+      await r.d.freeze(r.w.owner, r.attemptId, "quiesce: the agent's work is being changed");
+      assert.notEqual((await r.d.get(r.w.owner, r.attemptId))!.frozen, undefined);
+      await r.d.stop(r.w.owner, r.attemptId, { reason: "ended while frozen" });
+      await r.d.idle();
+      const ended = (await r.d.get(r.w.owner, r.attemptId))!;
+      assert.equal(ended.state, "finished");
+      assert.equal(ended.frozen, undefined, "a finished attempt carries no freeze: nothing can lift it any more");
+      r.turn.release?.();
+    } finally { await r.store.close(); }
+  });
+
   test(`${backend.name}: a call that ignores the stop signal blocks the operation: it is not taken as settled`, async () => {
     const r = await rig(async () => ({}), true);
     try {

@@ -204,7 +204,7 @@ test("remote host: the same requests cross the authenticated transport to a work
     dispatch: {
       manual: true,
       route: async () => ({ route: "cloud/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: true } }),
-      remote: { blobDirectory: join(dir, "blobs"), hosts: [{ hostId: "host:pc", checkpointWaitMs: 30_000, pollMs: 10, workspaceWaitMs: 2500, resources: { cpus: 1, memoryMb: 256 }, requirements: () => ({ data: "cloud-allowed" as const, harness: "pi" }) }] },
+      remote: { blobDirectory: join(dir, "blobs"), hosts: [{ hostId: "host:pc", checkpointWaitMs: 30_000, pollMs: 10, workspaceWaitMs: 15_000, resources: { cpus: 1, memoryMb: 256 }, requirements: () => ({ data: "cloud-allowed" as const, harness: "pi" }) }] },
     },
   });
   let pumping = true;

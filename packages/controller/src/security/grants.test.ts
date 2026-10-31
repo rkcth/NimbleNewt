@@ -78,9 +78,11 @@ for (const backend of backends) {
     await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), expiresAt: undefined } as never));
     await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), agreedBy: "the agent said so" }));
     await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), source: "standing" } as never));
-    for (const action of ["*", "task.*", "approve.effect", "approve.*", "tool.run", "principal.manage", "budget.manage", "task.nonsense", "review.policy.write", "project.participants.write", "effect.perform", "meeting.manage", "responsibility.assign", "resource.scope.write", "config.write", "config.read"]) {
+    for (const action of ["*", "task.*", "approve.effect", "approve.*", "tool.run", "principal.manage", "budget.manage", "task.nonsense", "review.policy.write", "project.participants.write", "meeting.manage", "responsibility.assign", "resource.scope.write", "config.write", "config.read"]) {
       await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), action }), (e) => assert.equal(e.field, "action"));
     }
+    // effect.perform is grantable by a decision only on one named service resource; without one the refusal names the resource (P03).
+    await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), action: "effect.perform" }), (e) => assert.equal(e.field, "resource"));
     await refuses("invalid_command", () => grants.grantAgreed(controller, { ...base, commandId: cid("ag"), expiresAt: "2026-10-21T09:00:00.000Z" }), (e) => assert.match(e.message, /past/));
     // No limit on how long it lasts unless the owner set one (owner decision 2026-10-30).
     await grants.grantAgreed(controller, { ...base, commandId: cid("ag"), expiresAt: "2027-12-31T00:00:00.000Z" });

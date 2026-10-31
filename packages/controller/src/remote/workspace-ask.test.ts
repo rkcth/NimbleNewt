@@ -51,7 +51,7 @@ for (const backend of backends) {
     const annPrincipal = await c.principals.authenticate((await c.principals.issueCredential(c.owner, ann.id)).token);
     await refuses("forbidden", () => c.remote.askWorkspace(annPrincipal, "host:r1", call(), { waitMs: 100 }));
     await refuses("forbidden", () => c.remote.askWorkspace(r1.principal, "host:r1", call(), { waitMs: 100 }));
-    for (const bad of [{ requestId: "wsr-nope" }, { operation: "landing" }, { taskId: "a/b" }, { reason: "" }, { quietAttempts: ["x"] }, { assignee: "../x" }] as Partial<WorkspaceCall>[]) {
+    for (const bad of [{ requestId: "wsr-nope" }, { operation: "deploy" as never }, { taskId: "a/b" }, { reason: "" }, { quietAttempts: ["x"] }, { assignee: "../x" }] as Partial<WorkspaceCall>[]) {
       await refuses("invalid_command", () => c.remote.askWorkspace(c.dispatcherPrincipal, "host:r1", call(bad), { waitMs: 100 }));
     }
     await refuses("invalid_command", () => c.remote.askWorkspace(c.dispatcherPrincipal, "r1", call(), { waitMs: 100 }));

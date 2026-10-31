@@ -208,11 +208,9 @@ describe("the composed controller runs the real worker process (cards H12b, H12f
       assert.equal(gate2.observed?.state, "paused");
       assert.equal(gate2.observed?.boundary, "finished");
       assert.equal((await state()).state, "finished");
-      // The model saw the first interrupt on its next call, as another party's words from the owner; never the second.
-      assert.equal(answer.seen.length >= 2, true);
-      assert.match(requestText(answer, 1), /stop writing to the shared folder/);
-      assert.match(requestText(answer, 1), /from the owner/);
-      assert.equal(requestText(answer, answer.seen.length - 1).includes("second thing"), false);
+      // The task is paused (L05b): a paused task begins no new generation, so the turn's next model call is refused at the relay and the model is never called again. The interrupt was delivered (queued above) but a paused attempt takes no further model call; the second one never reached it either.
+      assert.equal(answer.seen.length, 1, "no model call begins for a paused task");
+      assert.equal(requestText(answer, 0).includes("second thing"), false);
       // The provider's count of the first call was recorded against the admission that let it go (C07b confirmUsage, end to end).
       await until(async () => (await x.c.storage.listAggregates("ctx-admission", { limit: 10 })).some((a) => (a.body as unknown as { reported?: { inputTokens: number } }).reported?.inputTokens === 10), 10_000, "the provider's count was never recorded");
     } finally { answer.server.closeAllConnections(); answer.server.close(); await x.close(); }
@@ -226,22 +224,22 @@ describe("the composed controller runs the real worker process (cards H12b, H12f
     const x = await rig(real, answer);
     x.window.value = 32768;
     try {
-      const { taskId, attemptId } = await x.task(1, "Order seeds");
-      const gateway = { attemptId, call: async (): Promise<ToolResult> => { throw new Error("not used"); }, heartbeat: async () => ({ until: new Date(Date.now() + 600_000).toISOString() }), usage: async () => undefined, acknowledgeDecisions: async () => undefined } as unknown as ToolGateway;
-      const order = (n: number, id: string, resumeFrom?: object): WorkOrder => ({ attemptId: id, taskId, projectId: x.project, agentId: `agent:${AGENT}`, generation: 1, route: "localp/small", credential: `cred-${n}`, recipe: { revision: "r1", reach: [] }, content: "go on", requestId: `req-${n}`, expiresAt: new Date(Date.now() + 300_000).toISOString(), ...(resumeFrom === undefined ? {} : { resumeFrom }) } as never);
+      // The relay checks every call against the attempt that is current for its task (L05b fence), so each run is the real admitted attempt of its own task.
+      const gatewayOf = (attemptId: string): ToolGateway => ({ attemptId, call: async (): Promise<ToolResult> => { throw new Error("not used"); }, heartbeat: async () => ({ until: new Date(Date.now() + 600_000).toISOString() }), usage: async () => undefined, acknowledgeDecisions: async () => undefined } as unknown as ToolGateway);
+      const order = (n: number, id: string, taskId: string, resumeFrom?: object): WorkOrder => ({ attemptId: id, taskId, projectId: x.project, agentId: `agent:${AGENT}`, generation: 1, route: "localp/small", credential: `cred-${n}`, recipe: { revision: "r1", reach: [] }, content: "go on", requestId: `req-${n}`, expiresAt: new Date(Date.now() + 300_000).toISOString(), ...(resumeFrom === undefined ? {} : { resumeFrom }) } as never);
       const sizeOf = (r: { checkpoint?: unknown }): number => (r.checkpoint as { nn?: { contextTokens?: number } }).nn?.contextTokens ?? 0;
-      const run = async (n: number, id: string, from?: object) => { const handle = await x.worker().start(order(n, id, from)); const result = await handle.run(gateway); await handle.stop(); return result; };
+      const run = async (n: number, from?: object): Promise<{ id: string; status: string; error?: string; checkpoint?: object }> => { const t = await x.task(n, "Order seeds"); const handle = await x.worker().start(order(n, t.attemptId, t.taskId, from)); const result = await handle.run(gatewayOf(t.attemptId)); await handle.stop(); return { id: t.attemptId, ...result }; };
       // Two attempts each add a long answer to the conversation stored in the agent's home. Each first call fits (a quarter of the window is 8,192 tokens), so neither is compacted.
-      const one = await run(1, "att-one");
+      const one = await run(1);
       assert.equal(one.status, "completed", one.error);
-      const two = await run(2, "att-two", one.checkpoint);
+      const two = await run(2, one.checkpoint);
       assert.equal(two.status, "completed", two.error);
       const stored = sizeOf(two);
       assert.ok(stored > 6000 && stored < 19000, `the stored conversation is over most of the startup share but under the resume share (${stored})`);
       // The third resumes it: the first call (the stored conversation plus the fixed part) is over the startup share, so it is refused (a retry is announced, so no blocker yet), the real process compacts, and the call is admitted. It runs.
-      const three = await run(3, "att-three", two.checkpoint);
+      const three = await run(3, two.checkpoint);
       assert.equal(three.status, "completed", three.error);
-      const rounds = (await x.c.storage.listAggregates("ctx-admission", { limit: 20 })).map((a) => a.body as unknown as { attemptId: string; round: number; admit: boolean }).filter((b) => b.attemptId === "att-three").sort((a, b) => a.round - b.round);
+      const rounds = (await x.c.storage.listAggregates("ctx-admission", { limit: 20 })).map((a) => a.body as unknown as { attemptId: string; round: number; admit: boolean }).filter((b) => b.attemptId === three.id).sort((a, b) => a.round - b.round);
       assert.deepEqual(rounds.map((r) => [r.round, r.admit]), [[1, false], [2, true]], "refused for size, compacted, admitted");
       const open = (await BlockerService.withEpoch(x.c.storage, x.c.epoch).list({ limit: 50, openOnly: true })).items;
       assert.equal(open.filter((b) => b.type === "context_overflow").length, 0, "a call that passed after compaction opens no blocker");
@@ -251,7 +249,7 @@ describe("the composed controller runs the real worker process (cards H12b, H12f
       // A call that no compaction can bring under the limit is refused at start: the attempt ends failed, the blocker is open, and the model is not called.
       x.window.value = 1024;
       const calls = answer.seen.length;
-      const refused = await run(4, "att-four", three.checkpoint);
+      const refused = await run(4, three.checkpoint);
       assert.equal(refused.status, "failed");
       assert.match(refused.error ?? "", /first call was not sent/);
       assert.equal(answer.seen.length, calls, "nothing was sent to the model");
