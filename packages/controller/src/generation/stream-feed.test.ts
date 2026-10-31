@@ -291,6 +291,8 @@ for (const backend of backends) {
     await assert.rejects(c.relayFor(e, undefined, [], { attempt: { attemptId: c.attemptId, taskId: c.task, generation: 99 } }).relay(request as never), /refused the call: no generation begins/, "fenced");
     const paused = c.mk({ pauses: { guard: async () => ({ blockedBy: [{ kind: "project", id: "p" }], changes: [] }) } });
     await assert.rejects(c.relayFor(e, undefined, [], { gen: paused }).relay(request as never), /refused the call: .*paused/, "paused");
+    // The store answered: the refusal holds whatever the fail mode is (open only covers a store that cannot answer).
+    await assert.rejects(c.relayFor(e, { record: true, cut: true, failClosed: false }, [], { gen: paused }).relay(request as never), /refused the call: .*paused/, "paused, fail mode open");
     const waiting = c.mk({ decisions: { guard: async () => ({ blockedBy: ["the owner has not decided"], changes: [] }) } });
     await assert.rejects(c.relayFor(e, undefined, [], { gen: waiting }).relay(request as never), /refused the call: .*not decided/, "decision");
     const t = (await c.projects.getTask(c.task))!;
