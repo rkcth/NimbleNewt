@@ -10,7 +10,7 @@ import { shareableCite } from "../meetings/shareable.js";
 import { reassignWarningSink } from "../meetings/reassign-warning.js";
 import { MeetingRecordService, budgetRaiseApplier, grantApplier, taskReassignApplier, taskUpdateApplier } from "../meetings/record.js";
 import { EventService, EventSourceSettingsService, type EventSource } from "../events/index.js";
-import { BudgetService, holderNotice } from "../budgets/index.js";
+import { BudgetService, holderNotice, type NotifyAggregate } from "../budgets/index.js";
 import { NotificationService } from "../notifications/index.js";
 import { EscalationLadderService, StallService, type StallOptions } from "../health/index.js";
 import { DomainError } from "../domain/errors.js";
@@ -343,7 +343,8 @@ export async function startController(options: StartOptions): Promise<Controller
     // Decisions recorded here block the next action of affected tasks through the stored guard; interrupting a generation already running is the dispatcher's own instance of the service (card C08b).
     const decisions = DecisionService.withEpoch(storage, epoch, { events: EventService.withEpoch(storage, epoch), effects: EffectService.withEpoch(storage, epoch, assignments) });
     // A new request for more budget tells the owner when it is addressed to them (card R05c). Only the controller's own facts go in the notice, never the requester's words.
-    const budgets = BudgetService.withEpoch(storage, epoch, { agreedLimits: () => agreedLimits.effective(), notifyAggregate: async (n) => { await notifications.emitFromController({ commandId: `bgt-agg-${n.noticeId}`, kind: "maintenance", level: "needs-you", ref: { kind: "budget-aggregate", id: n.noticeId }, detail: `${n.text.slice(0, 400)} Change it with budget.aggregate.set.` }); }, notify: async (n) => { if (n.to === "owner") await notifications.emitFromController({ commandId: `bgt-req-${n.requestId}`, kind: "maintenance", level: "needs-you", ref: { kind: "budget-request", id: n.requestId }, detail: `${n.requestedBy} asked for more budget for task ${n.taskId} (${n.costMicros} millionths, ${n.computeMs} ms of compute). Decide it with budget.decide.` }); else if (n.to.startsWith("agent:")) { const { purpose, text } = holderNotice(n); await messages.noticeFromController({ commandId: `bgt-hold-${n.requestId}`, taskId: n.parentTaskId ?? n.taskId, to: n.to, purpose, text, admit: "budget.manage" }); } } });
+    const notifyAggregate: NotifyAggregate = async (n) => { await notifications.emitFromController({ commandId: `bgt-agg-${n.noticeId}`, kind: "maintenance", level: "needs-you", ref: { kind: "budget-aggregate", id: n.noticeId }, detail: `${n.text.slice(0, 400)} Change it with budget.aggregate.set.` }); };
+    const budgets = BudgetService.withEpoch(storage, epoch, { agreedLimits: () => agreedLimits.effective(), notifyAggregate, notify: async (n) => { if (n.to === "owner") await notifications.emitFromController({ commandId: `bgt-req-${n.requestId}`, kind: "maintenance", level: "needs-you", ref: { kind: "budget-request", id: n.requestId }, detail: `${n.requestedBy} asked for more budget for task ${n.taskId} (${n.costMicros} millionths, ${n.computeMs} ms of compute). Decide it with budget.decide.` }); else if (n.to.startsWith("agent:")) { const { purpose, text } = holderNotice(n); await messages.noticeFromController({ commandId: `bgt-hold-${n.requestId}`, taskId: n.parentTaskId ?? n.taskId, to: n.to, purpose, text, admit: "budget.manage" }); } } });
     // Event watches (card H13): an agent's watch on a stream, its handling attempts and the failed queue, which the status answers and the state API read.
     const watchService = WatchService.withEpoch(storage, epoch, { events: EventService.withEpoch(storage, epoch), inbox: InboxService.withEpoch(storage, epoch, assignments), assignments, projects });
     // A schedule that names no zone uses the owner's `meeting.timeZone` setting (card M01c).
@@ -491,7 +492,7 @@ export async function startController(options: StartOptions): Promise<Controller
     let dispatchProblem: string | undefined;
     if (options.dispatch !== undefined) {
       try {
-        dispatch = await composeDispatch({ storage, epoch, workspaceOps, stops, records, responsibilities: { checks: responsibilityChecks, incidents, notify: async (e) => {
+        dispatch = await composeDispatch({ notifyAggregate, storage, epoch, workspaceOps, stops, records, responsibilities: { checks: responsibilityChecks, incidents, notify: async (e) => {
           // The text must not change between ticks (no alert count): the command ids are fixed, so a retry after a failed markNotified must carry the same payload.
           const detail = `An incident on a responsibility (${e.signature}) is still open past its escalation time.`;
           if (e.escalatedTo === "owner") await notifications.emitFromController({ commandId: `inc-esc-${e.id}`, kind: "maintenance", level: "needs-you", ref: { kind: "responsibility-incident", id: e.id }, projectId: e.projectId, detail });

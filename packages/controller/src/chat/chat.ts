@@ -836,7 +836,8 @@ export class ChatService {
       args["participants"] = resolved;
     }
     steps.push({ op: intent.op, args, commandId: "" });
-    const reasonBase = proposalReason(intent.op, args, intent.draft === true, { profile, quoted, said: ownerSaysMove(intent.op, args, words, ["taskId", "prerequisiteId", "projectId", "agentId"].flatMap((k) => (typeof args[k] === "string" && labels[args[k] as string] !== undefined ? [labels[args[k] as string] as string] : [])).concat(intent.op === "resource.bind" && typeof args["label"] === "string" ? [args["label"]] : []).concat(extraTargets)) });
+    const raisesSpend = intent.op === "difficulty.set" ? await this.#raisesSpend(token, args) : false;
+    const reasonBase = proposalReason(intent.op, args, intent.draft === true, { profile, quoted, raisesSpend, said: ownerSaysMove(intent.op, args, words, ["taskId", "prerequisiteId", "projectId", "agentId"].flatMap((k) => (typeof args[k] === "string" && labels[args[k] as string] !== undefined ? [labels[args[k] as string] as string] : [])).concat(intent.op === "resource.bind" && typeof args["label"] === "string" ? [args["label"]] : []).concat(extraTargets)) });
     const reason = reasonBase ?? showFirst ?? (fromRecord ? "the location comes from an earlier binding, not from your words, so it is shown first" : undefined);
     return { ok: true, steps, pins, labels, ...(projectId === undefined ? {} : { projectId }), ...(reason === undefined ? {} : { reason }), args, op: intent.op };
   }
@@ -1004,6 +1005,17 @@ export class ChatService {
   }
 
   /** A read through the API: the item, or undefined when it is missing or not readable (the two read alike). */
+  /** Whether setting this difficulty moves the task to a profile whose spending limit is higher than the one it has now (an unrated task uses the `unrated` mapping). Clearing never does; anything that cannot be compared counts as yes. */
+  async #raisesSpend(token: string, args: Record<string, unknown>): Promise<boolean> {
+    try {
+      if (typeof args["difficulty"] !== "string") return false;
+      const profiles = await this.#get(token, "difficulty.profiles", {}) as { profiles?: Record<string, { spendLimitMicros?: number }>; mapping?: Record<string, string> } | undefined;
+      const contract = await this.#get(token, "contract.get", { taskId: args["taskId"] }) as { difficulty?: string } | undefined;
+      const spendOf = (level: string): number => profiles?.profiles?.[profiles.mapping?.[level] ?? ""]?.spendLimitMicros ?? 0;
+      return spendOf(args["difficulty"]) > spendOf(contract?.difficulty ?? "unrated");
+    } catch { return true; }
+  }
+
   async #get(token: string, op: string, args: Record<string, unknown>): Promise<Record<string, unknown> | undefined> {
     const response = await this.#deps.api.handle(token, { v: API_VERSION, op, args });
     if (response.ok) return response.result["item"] as Record<string, unknown>;

@@ -4,7 +4,7 @@ import { framedMcp } from "../dispatch/tools.js";
 import { ProjectResourceService } from "../projects/index.js";
 import type { AttemptRelay, ModelRelay, RelayMonitor } from "../dispatch/relay.js";
 import { AdmissionService } from "../admission/index.js";
-import { BudgetService, ChargeRetryService, holderNotice } from "../budgets/index.js";
+import { BudgetService, ChargeRetryService, holderNotice, type NotifyAggregate } from "../budgets/index.js";
 import { ArtifactService, FileBlobStore } from "../artifacts/index.js";
 import { RemoteWorkerHost, RemoteWorkerService, WorkerTransport, type RemoteDeps, type RemoteOptions, type RemoteWorkerHostOptions, type WorkerTransportOptions } from "../remote/index.js";
 import { DecisionService, type DecisionDeps } from "../decisions/index.js";
@@ -168,6 +168,8 @@ export interface DispatchHandle {
 }
 
 export interface ComposeInput {
+  /** Told once per window when the owner's aggregate spending cap refuses a reservation or stops paid calls (the same function the API's own budget service uses). */
+  readonly notifyAggregate?: NotifyAggregate;
   /** Whether an agent can be reached apart from its pause gates (the controller's `availability` option): `suspended` and `stopped` agents are withheld from meetings, the same as in the API's own instance. */
   readonly availability?: (principalId: string) => Promise<Availability>;
   /** Brings an agent the host reports stopped or suspended up for one meeting, after the owner authorized it (card M04f). Absent: the owner's authorization is refused ("no wake path"). */
@@ -231,7 +233,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   const blockers = BlockerService.withEpoch(storage, epoch, ro);
   const policy = PolicyService.withEpoch(storage, epoch, i.grants, { ...ro, roles: (id) => i.agents.rolesOfPrincipal(id) });
   const branchSettings = ProtectedBranchService.withEpoch(storage, epoch, ro);
-  const budgets = BudgetService.withEpoch(storage, epoch, ro);
+  const budgets = BudgetService.withEpoch(storage, epoch, { ...ro, ...(i.notifyAggregate === undefined ? {} : { notifyAggregate: i.notifyAggregate }) });
   const pauses = PauseService.withEpoch(storage, epoch, { waits: i.waits }, { ...ro, ...(i.availability === undefined ? {} : { otherAvailability: i.availability }) });
   const events = EventService.withEpoch(storage, epoch, { ...ro, notify: noticeThroughNotifications(notifications) });
   // A subscription made before idle expiry existed is counted idle from now, not from the day it was made (card H06c).
@@ -389,13 +391,20 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     // One relay per attempt, kept until the attempt\'s own expiry.
     const relays = new Map<string, { readonly relay: AttemptRelay; readonly until: number }>();
     const relayEnded = unlimited();
+    // A paid route is stopped, before the call is sent, once the owner's aggregate spending cap is reached; a local or free route is never asked.
+    const paidCallGate = async (order: WorkOrder): Promise<string | undefined> => {
+      const table = (await i.routing.get()) as unknown as { providers?: Record<string, { paid?: boolean }> } | undefined;
+      const provider = order.route.slice(0, Math.max(0, order.route.indexOf("/")));
+      if (table?.providers?.[provider]?.paid !== true) return undefined;
+      return budgets.capReached(principal, { taskId: order.taskId, agentId: order.agentId });
+    };
     const attemptRelay = (order: WorkOrder, relay: ModelRelay, options: { readonly model?: string; readonly cache?: Parameters<ModelRelay["forAttempt"]>[1] } = {}): AttemptRelay => {
       const clock = i.options.clock === undefined ? Date.now : (): number => Date.parse(i.options.clock!());
       for (const [id, entry] of relays) if (entry.until < clock()) relays.delete(id);
       relayEnded.forget(relays, clock());
       let found = relays.get(order.attemptId);
       if (found === undefined) {
-        found = { relay: relay.forAttempt({ route: order.route, ...(options.model === undefined ? {} : { model: options.model }), onFirstUsage: (usage) => { void confirmFirstCall(order, usage); }, ...(monitorOf === undefined ? {} : { monitor: monitorOf(order) }) }, options.cache), until: Number.isFinite(Date.parse(order.expiresAt ?? "")) ? Date.parse(order.expiresAt!) + 60_000 : Infinity };
+        found = { relay: relay.forAttempt({ route: order.route, ...(options.model === undefined ? {} : { model: options.model }), onFirstUsage: (usage) => { void confirmFirstCall(order, usage); }, gate: () => paidCallGate(order), ...(monitorOf === undefined ? {} : { monitor: monitorOf(order) }) }, options.cache), until: Number.isFinite(Date.parse(order.expiresAt ?? "")) ? Date.parse(order.expiresAt!) + 60_000 : Infinity };
         relays.set(order.attemptId, found);
       }
       return found.relay;

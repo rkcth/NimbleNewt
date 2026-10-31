@@ -11,7 +11,7 @@ import { onlyKnown, type TaskBody, type View } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import type { ProjectService } from "../domain/service.js";
 import type { AdmissionService } from "../admission/index.js";
-import type { BudgetService } from "../budgets/index.js";
+import { BudgetClosedError, type BudgetService } from "../budgets/index.js";
 import type { DecisionGuard } from "../decisions/index.js";
 import type { EnvironmentService } from "../environments/index.js";
 import type { GenerationService } from "../generation/index.js";
@@ -1140,6 +1140,14 @@ export class DispatcherService {
     let id: string;
     try { id = (await budgets.reserve(this.#deps.principal, { commandId: `dpa-res:${d.body.attemptId}${(d.body.reserveRound ?? 0) === 0 ? "" : `:${d.body.reserveRound}`}`, taskId: d.body.taskId, agentId: d.body.agentId, purpose: `attempt ${d.body.attemptId}`, ...want })).id; } catch (error) {
       if (isDomainError(error, "not_found")) return undefined;
+      if (error instanceof BudgetClosedError) {
+        // The owner closed the task's budget: nothing can be held for it, now or later, so the owner is told with a blocker rather than the attempt waiting in silence.
+        await this.#update(d.body.attemptId, (x) => { if (x.reservationId !== undefined || JSON.stringify(x.reserving) !== JSON.stringify(want)) return x; const { reserving: _r, ...rest } = x; void _r; return rest; });
+        const summary = `Attempt ${d.body.attemptId} was not started: ${errorText(error)}`.slice(0, 900);
+        const opened = await this.#deps.blockers.openBlocker({ commandId: `dpa-blk:dispatch_blocked:${d.body.taskId}:budget:${derivedId("dpa", summary).slice(4, 16)}`, actor: DISPATCHER_ACTOR, type: "dispatch_blocked", subject: { kind: "task", id: d.body.taskId }, summary, resolver: "owner" });
+        await this.#deps.notifications?.emitFromController({ commandId: `dpa-ntf:${opened.id}`, kind: "blocker", ref: { kind: "blocker", id: opened.id }, projectId: d.body.projectId }).catch(() => undefined);
+        return { kind: "blocked", check: "budget", blockerId: opened.id };
+      }
       if (isDomainError(error, "invalid_command")) {
         // Refused inside the budget's own command, so nothing was held: the amounts are decided again at the next tick (a sibling may have taken part of the allowance meanwhile).
         await this.#update(d.body.attemptId, (x) => { if (x.reservationId !== undefined || JSON.stringify(x.reserving) !== JSON.stringify(want)) return x; const { reserving: _r, ...rest } = x; void _r; return rest; });

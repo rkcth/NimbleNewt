@@ -186,6 +186,8 @@ export interface ProposalContext {
   readonly said: boolean;
   /** The message carried quoted or untrusted material. */
   readonly quoted: boolean;
+  /** Setting a difficulty would move the task to a profile that may spend more than its present one (or the profile could not be compared). */
+  readonly raisesSpend?: boolean;
 }
 
 /** Why a command that would apply is a proposal anyway, or undefined when it applies at once. */
@@ -200,6 +202,8 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
   // The request type is authority: an instruction or a decision left to the team is shown to the owner before it is recorded, whatever the profile, so a paraphrase cannot slip one in.
   if ((op === "agenda.capture" || op === "agenda.correct") && (args["intent"] === "owner-instruction" || args["intent"] === "delegated-decision")) return "it records an instruction or a decision for the team, so it is shown first";
   if (spec.mode === "propose") return op === "project.create" ? "a new project is drafted first" : op.startsWith("grant.") ? "a right is shown first" : op.startsWith("placement.") ? "where your local-only data may go is shown first" : op.startsWith("events.") ? "which event sources wake your agents is shown first" : op.startsWith("budget.") ? "money and spending limits are shown first" : op.startsWith("routing.") ? "which models work may reach is shown first" : op.startsWith("difficulty.") ? "how tasks are matched to models is shown first" : op.startsWith("project.branches.") ? "which branches are protected is shown first" : "a role's capabilities are shown first";
+  // Moving a task up to a profile that may spend more is a spending decision: shown first in every profile, as a budget raise is.
+  if (op === "difficulty.set" && context.raisesSpend === true) return "it moves the task to a profile that may spend more, so it is shown first";
   if (context.quoted && (!PLAIN_EDITS.has(op) || (op === "project.update" && args["state"] !== undefined))) return "your message carried quoted text, so this is shown first";
   if (!context.said) return "your own words do not say this move, so it is shown first";
   const strict = context.profile === "strict";

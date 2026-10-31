@@ -4,7 +4,7 @@ import { DomainError } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
-import { BudgetService, type AggregateNotice } from "./index.js";
+import { BUDGET_LIMITS, BudgetService, type AggregateNotice } from "./index.js";
 
 after(stopServer);
 
@@ -16,7 +16,7 @@ const refuses = async (code: string, run: () => Promise<unknown>, match?: RegExp
 };
 
 for (const backend of backends) {
-  interface Ctx { owner: Principal; host: Principal; svc: BudgetService; at(now: string): BudgetService; notices: AggregateNotice[]; a: string; b: string; t1: string; t2: string; tb: string; reserve(svc: BudgetService, task: string, cost: number, agent?: string): Promise<{ id: string }> }
+  interface Ctx { rewrite(kind: string, id: string, body: Record<string, unknown>): Promise<void>; owner: Principal; host: Principal; svc: BudgetService; at(now: string): BudgetService; notices: AggregateNotice[]; a: string; b: string; t1: string; t2: string; tb: string; reserve(svc: BudgetService, task: string, cost: number, agent?: string): Promise<{ id: string }> }
   const suite = (name: string, body: (c: Ctx) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
       const world = await backend.open();
@@ -33,7 +33,11 @@ for (const backend of backends) {
         const notices: AggregateNotice[] = [];
         const at = (now: string) => BudgetService.withEpoch(world.storage, projects.epoch, { clock: () => now, pause, notifyAggregate: async (x) => { notices.push(x); } });
         const reserve = (svc: BudgetService, task: string, cost: number, agent = "agent:ben") => svc.reserve(host, { commandId: cid("r"), taskId: task, costMicros: cost, agentId: agent, purpose: "a call" });
-        await body({ owner, host, svc: at("2026-10-22T21:00:00.000Z"), at, notices, a, b, t1, t2, tb, reserve });
+        const rewrite = async (kind: string, id: string, b: Record<string, unknown>): Promise<void> => {
+          const found = (await world.storage.getAggregate({ kind, id }))!;
+          await world.storage.applyOperation({ operationId: cid("rw"), epoch: projects.epoch, actor: "owner:rob", correlationId: "rw", at: "2026-10-22T21:00:00.000Z", changes: [{ type: "update", ref: { kind, id }, expectedRevision: found.revision, body: b as never }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] });
+        };
+        await body({ rewrite, owner, host, svc: at("2026-10-22T21:00:00.000Z"), at, notices, a, b, t1, t2, tb, reserve });
       } finally { await world.close(); }
     });
   const open = (c: Ctx, task: string, cost = 1000) => c.svc.open(c.owner, { commandId: cid("o"), taskId: task, currency: "USD", costMicros: cost, computeMs: 0 });
@@ -48,7 +52,7 @@ for (const backend of backends) {
     assert.equal(set.revision, 1);
     await refuses("invalid_command", () => c.reserve(c.svc, c.t1, 2000), /aggregate cap is reached/);
     await cap(c, { enabled: false });
-    assert.deepEqual(await c.svc.aggregate(c.owner), { revision: 2, enabled: false, scope: "installation", period: "none", amountMicros: 100000 });
+    assert.deepEqual(await c.svc.aggregate(c.owner), { revision: 2, enabled: false, scope: "installation", period: "none", amountMicros: 100000, currency: "USD" });
     await c.reserve(c.svc, c.t1, 1100);
     await cap(c, { enabled: true });
     await refuses("invalid_command", () => c.reserve(c.svc, c.t1, 1), /aggregate cap/);
@@ -136,5 +140,84 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.svc.raise(c.owner, { commandId: cid("r"), taskId: c.t1, costMicros: 5 }), /closed/);
     await refuses("invalid_command", () => c.svc.requestMore(c.owner, { commandId: cid("q"), taskId: c.t2, costMicros: 5, reason: "more" }).catch((e) => { throw e; }), undefined);
     await refuses("invalid_command", () => c.svc.delegate(c.owner, { commandId: cid("d"), parentTaskId: c.t1, childTaskId: c.tb, costMicros: 1 }));
+  });
+
+  suite("the cap reads running totals, not the ledger: with the old scan limit shrunk to 3 and many entries, an enabled cap still checks (it used to refuse everything once the scan was cut short)", async (c) => {
+    const limits = BUDGET_LIMITS as { scan: number };
+    const was = limits.scan;
+    limits.scan = 3;
+    try {
+      await open(c, c.t1, 1_000_000);
+      await cap(c, { enabled: true, scope: "installation", period: "none", amountMicros: 1000 });
+      for (let i = 0; i < 6; i++) { const r = await c.reserve(c.svc, c.t1, 10); await c.svc.settle(c.host, { commandId: cid("s"), reservationId: r.id, costMicros: 10 }); }
+      await c.reserve(c.svc, c.t1, 100);
+      await refuses("invalid_command", () => c.reserve(c.svc, c.t1, 900), /used 160 of 1000/);
+    } finally { limits.scan = was; }
+  });
+
+  suite("money charged without a reservation counts, and once the cap is reached the next paid call is stopped and the owner is told once", async (c) => {
+    await open(c, c.t1, 1_000_000);
+    await cap(c, { enabled: true, scope: "installation", period: "none", amountMicros: 100 });
+    assert.equal(await c.svc.capReached(c.host, { taskId: c.t1, agentId: "agent:ben" }), undefined);
+    await c.svc.charge(c.host, { commandId: cid("ch"), activity: "model-call", taskId: c.t1, agentId: "agent:ben", costMicros: 120 });
+    assert.equal(c.notices.length, 1, "told when the charge took it past the cap");
+    assert.match((await c.svc.capReached(c.host, { taskId: c.t1, agentId: "agent:ben" }))!, /used 120 of 100 millionths, so no further paid call/);
+    assert.match((await c.svc.capReached(c.host, { taskId: c.t1, agentId: "agent:ben" }))!, /no further paid call/);
+    assert.equal(c.notices.length, 1, "once for the same window");
+    await refuses("invalid_command", () => c.reserve(c.svc, c.t1, 1), /aggregate cap is reached/);
+    await cap(c, { enabled: false });
+    assert.equal(await c.svc.capReached(c.host, { taskId: c.t1 }), undefined, "off: nothing stops");
+  });
+
+  suite("two reservations at the same moment in different trees take turns: only one fits under the cap", async (c) => {
+    await open(c, c.t1); await open(c, c.tb);
+    await cap(c, { enabled: true, scope: "installation", period: "none", amountMicros: 100 });
+    const results = await Promise.allSettled([c.reserve(c.svc, c.t1, 60), c.reserve(c.svc, c.tb, 60)]);
+    assert.deepEqual(results.map((r) => r.status).sort(), ["fulfilled", "rejected"]);
+    const lost = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    assert.match(String(lost.reason), /aggregate cap is reached/);
+  });
+
+  suite("a settle racing a reservation is never missed: whichever commits first, the totals the cap reads equal what was spent plus what is held", async (c) => {
+    await open(c, c.t1); await open(c, c.tb);
+    await cap(c, { enabled: true, scope: "installation", period: "none", amountMicros: 100 });
+    const r1 = await c.reserve(c.svc, c.t1, 50);
+    const [settled, second] = await Promise.allSettled([c.svc.settle(c.host, { commandId: cid("s"), reservationId: r1.id, costMicros: 90 }), c.reserve(c.svc, c.tb, 50)]);
+    assert.equal(settled.status, "fulfilled");
+    // 90 spent, and 50 more held only if the reservation went first (it saw 50 held and fit); otherwise it saw 90 spent and was refused.
+    if (second.status === "fulfilled") assert.match((await c.svc.capReached(c.host, { taskId: c.t1 }))!, /used 140 of 100/);
+    else { assert.match(String(second.reason), /used 90 of 100/); assert.equal(await c.svc.capReached(c.host, { taskId: c.t1 }), undefined, "90 of 100 is under the cap"); }
+  });
+
+  suite("only money in the cap's currency counts: a tree in another currency is not summed with it", async (c) => {
+    await c.svc.open(c.owner, { commandId: cid("o"), taskId: c.t1, currency: "EUR", costMicros: 1000 });
+    await open(c, c.tb);
+    await cap(c, { enabled: true, scope: "installation", period: "none", amountMicros: 100 });
+    await c.reserve(c.svc, c.t1, 100);
+    await c.reserve(c.svc, c.tb, 100);
+    await refuses("invalid_command", () => c.reserve(c.svc, c.tb, 1), /used 100 of 100/);
+    await cap(c, { currency: "EUR" });
+    assert.equal((await c.svc.aggregate(c.owner)).currency, "EUR");
+    await refuses("invalid_command", () => c.reserve(c.svc, c.t1, 1), /used 100 of 100/);
+    await c.reserve(c.svc, c.tb, 5);
+    await refuses("invalid_command", () => cap(c, { currency: "euro" }));
+  });
+
+  suite("a closed budget takes no more charges; a caller with no rights is not told it is closed", async (c) => {
+    await open(c, c.t1);
+    await c.svc.close(c.owner, { commandId: cid("c"), taskId: c.t1 });
+    await refuses("invalid_command", () => c.svc.charge(c.host, { commandId: cid("ch"), activity: "model-call", taskId: c.t1, costMicros: 5 }), /is closed/);
+    await refuses("forbidden", () => c.svc.requestMore(c.host, { commandId: cid("q"), taskId: c.t1, costMicros: 5, reason: "more" }));
+  });
+
+  suite("a cap whose 'enabled' is not true or false is damaged: it refuses, never reads as none, and the owner is told", async (c) => {
+    await open(c, c.t1);
+    await cap(c, { enabled: true, scope: "installation", period: "none", amountMicros: 1000 });
+    const body = (await c.svc.aggregate(c.owner));
+    await c.rewrite("budget-aggregate", "main", { enabled: "yes", scope: "installation", period: "none", amountMicros: 1000, updatedBy: "owner:rob", updatedAt: "x" });
+    assert.equal(body.enabled, true);
+    await refuses("invalid_command", () => c.reserve(c.svc, c.t1, 1), /unreadable/);
+    assert.equal(c.notices.length, 1);
+    assert.match((await c.svc.capReached(c.host, { taskId: c.t1 }))!, /unreadable/);
   });
 }

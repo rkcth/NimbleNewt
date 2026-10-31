@@ -7,8 +7,13 @@ import { allows, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
-import { AGGREGATE_SCOPES, checkAggregateFields, isOn, windowStart, type AggregateBody } from "./aggregate.js";
+import { AGGREGATE_SCOPES, DEFAULT_AGGREGATE_CURRENCY, capReadable, capState, checkAggregateFields, windowStart, type AggregateBody, type AggregateScope } from "./aggregate.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
+
+/** A command refused because the budget it names was closed by the owner (a reader that must tell this from other refusals, such as the dispatcher, checks for this class). */
+export class BudgetClosedError extends DomainError {
+  constructor(rootTaskId: string) { super("invalid_command", `budget: the budget of task ${rootTaskId} is closed; open a new one on another task`, { field: "taskId" }); }
+}
 
 /** Provider money in millionths of the tree's currency, and local compute as occupied worker-slot milliseconds. The two are never converted into each other. */
 export interface Amounts { readonly costMicros: number; readonly computeMs: number }
@@ -71,6 +76,7 @@ export function holderNotice(n: RequestNotice): { purpose: string; text: string 
 export type NotifyRequest = (notice: RequestNotice) => Promise<void>;
 /** Told once per scope, window and setting revision when the owner's aggregate cap refuses a reservation. */
 export interface AggregateNotice { readonly noticeId: string; readonly taskId: string; readonly scope: string; readonly scopeKey: string; readonly period: string; readonly amountMicros: number; readonly usedMicros: number; readonly wantMicros: number; readonly text: string }
+interface Spent { readonly projectId?: string; readonly agentId?: string; readonly taskId?: string; readonly currency?: string; readonly costMicros: number }
 interface AggregateRefusal { readonly error: DomainError; readonly key: string; readonly notice: Omit<AggregateNotice, "noticeId" | "text"> }
 export type NotifyAggregate = (notice: AggregateNotice) => Promise<void>;
 
@@ -129,6 +135,8 @@ const ENTRY = "budget-entry";
 const REQUEST = "budget-request";
 const AGGREGATE = "budget-aggregate";
 const AGG_NOTICE = "budget-aggregate-notice";
+/** Running totals of money, kept in the same transaction as every settle, charge, reserve and release: one record per scope, scope key and window (day, month, all) for what was spent, and one per scope and key for what is held. */
+const AGG_TOTAL = "budget-aggregate-total";
 const AGG_REASON = "budget: the owner's aggregate cap";
 const PRINCIPAL = /^(?:owner|agent|host):[a-z0-9][a-z0-9-]{0,39}$/;
 const ACTIVITIES: readonly Activity[] = ["model-call", "background-job", "meeting", "supervision", "review"];
@@ -393,7 +401,8 @@ export class BudgetService {
         if (aggregate !== undefined) { refused = aggregate; throw aggregate.error; }
         addTo(node.reserved, want);
         tree.reservations[id] = { id, taskId, ...(agentId === undefined ? {} : { agentId }), amounts: want, purpose, activity, by: by.id, at: this.#runner.now(), state: "open" };
-        return { ref: treeRef, creates: false, changes: [{ type: "update", ref: treeRef, expectedRevision: found.revision, body: tree as unknown as JsonObject }, { type: "create", ref: { kind: "budget-reservation", id }, body: { treeId } }], detail: { taskId, reservationId: id, ...want }, contention: async () => new DomainError("stale_revision", "the budget changed meanwhile") };
+        const totals = await this.#bump(tree.projectId, agentId, tree.currency, this.#runner.now(), 0, want.costMicros);
+        return { ref: treeRef, creates: false, changes: [{ type: "update", ref: treeRef, expectedRevision: found.revision, body: tree as unknown as JsonObject }, { type: "create", ref: { kind: "budget-reservation", id }, body: { treeId } }, ...totals], detail: { taskId, reservationId: id, ...want }, contention: async () => new DomainError("stale_revision", "the budget changed meanwhile") };
       },
     }))); } catch (error) { if (refused !== undefined && error === refused.error) await this.#tellAggregate(by, refused); throw error; }
     return { id, replayed: result.replayed };
@@ -402,22 +411,22 @@ export class BudgetService {
   // ---- the owner's optional aggregate cap -------------------------------------------------------------------------------------
 
   /** The aggregate cap as set: `body` is absent until the owner sets one, and a cap that is off (`enabled: false`) keeps its figures for turning on again. Owner only. */
-  async aggregate(by: Principal): Promise<{ revision: number; enabled: boolean; scope?: string; period?: string; amountMicros?: number }> {
+  async aggregate(by: Principal): Promise<{ revision: number; enabled: boolean; scope?: string; period?: string; amountMicros?: number; currency?: string }> {
     this.#owner(by, "reads the aggregate cap");
     const found = await this.#runner.get(AGGREGATE, "main");
     const b = found?.body as unknown as AggregateBody | undefined;
-    return { revision: found?.revision ?? 0, enabled: b?.enabled === true, ...(b?.scope === undefined ? {} : { scope: b.scope }), ...(b?.period === undefined ? {} : { period: b.period }), ...(b?.amountMicros === undefined ? {} : { amountMicros: b.amountMicros }) };
+    return { revision: found?.revision ?? 0, enabled: b?.enabled === true, ...(b?.scope === undefined ? {} : { scope: b.scope }), ...(b?.period === undefined ? {} : { period: b.period }), ...(b?.amountMicros === undefined ? {} : { amountMicros: b.amountMicros }), ...(b?.currency === undefined ? {} : { currency: b.currency }) };
   }
 
   /**
    * The owner sets, changes, turns on or turns off the aggregate money cap; only the fields named change (merge), the others keep their value. Turning it on needs a scope, a period and an amount (named now or kept from before).
    * With no cap set, or with `enabled: false`, reservations are not affected at all. `expectedRevision` is optional.
    */
-  async setAggregate(owner: Principal, command: NoActor & { enabled?: boolean; scope?: string; period?: string; amountMicros?: number; expectedRevision?: number }): Promise<{ revision: number }> {
+  async setAggregate(owner: Principal, command: NoActor & { enabled?: boolean; scope?: string; period?: string; amountMicros?: number; currency?: string; expectedRevision?: number }): Promise<{ revision: number }> {
     this.#owner(owner, "sets the aggregate cap");
-    onlyKnown(command, ["commandId", "enabled", "scope", "period", "amountMicros", "expectedRevision"]);
+    onlyKnown(command, ["commandId", "enabled", "scope", "period", "amountMicros", "currency", "expectedRevision"]);
     const named = checkAggregateFields(command);
-    if (Object.keys(named).length === 0) invalid("enabled", "name what to change: enabled, scope, period or amountMicros");
+    if (Object.keys(named).length === 0) invalid("enabled", "name what to change: enabled, scope, period, amountMicros or currency");
     if (command.expectedRevision !== undefined && (!Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 0)) invalid("expectedRevision", "must be a whole number");
     const ref: AggregateRef = { kind: AGGREGATE, id: "main" };
     const result = await this.#retrying(() => this.#runner.command("budget.aggregate.set", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
@@ -426,7 +435,7 @@ export class BudgetService {
         const current = await this.#runner.get(AGGREGATE, "main");
         if (command.expectedRevision !== undefined && (current?.revision ?? 0) !== command.expectedRevision) throw new DomainError("stale_revision", `the aggregate cap is at revision ${current?.revision ?? 0}, not ${command.expectedRevision}`, { currentRevision: current?.revision ?? 0 });
         const before = current?.body as unknown as AggregateBody | undefined;
-        const next: AggregateBody = { enabled: named.enabled ?? before?.enabled ?? false, ...(named.scope ?? before?.scope ? { scope: (named.scope ?? before?.scope)! } : {}), ...(named.period ?? before?.period ? { period: (named.period ?? before?.period)! } : {}), ...((named.amountMicros ?? before?.amountMicros) !== undefined ? { amountMicros: (named.amountMicros ?? before?.amountMicros)! } : {}), updatedBy: owner.id, updatedAt: this.#runner.now() };
+        const next: AggregateBody = { enabled: named.enabled ?? before?.enabled ?? false, ...(named.scope ?? before?.scope ? { scope: (named.scope ?? before?.scope)! } : {}), ...(named.period ?? before?.period ? { period: (named.period ?? before?.period)! } : {}), ...((named.amountMicros ?? before?.amountMicros) !== undefined ? { amountMicros: (named.amountMicros ?? before?.amountMicros)! } : {}), ...(((named.currency ?? before?.currency) !== undefined || (named.enabled ?? before?.enabled) === true) ? { currency: named.currency ?? before?.currency ?? DEFAULT_AGGREGATE_CURRENCY } : {}), updatedBy: owner.id, updatedAt: this.#runner.now() };
         if (next.enabled && (next.scope === undefined || next.period === undefined || next.amountMicros === undefined)) invalid("enabled", "a cap needs a scope (installation, project or agent), a period (day, month or none) and an amount in millionths");
         const change = current === undefined ? { type: "create" as const, ref, body: next as unknown as JsonObject } : { type: "update" as const, ref, expectedRevision: current.revision, body: next as unknown as JsonObject };
         return { ref, creates: current === undefined, changes: [change], detail: { enabled: next.enabled } };
@@ -435,52 +444,104 @@ export class BudgetService {
     return { revision: result.revision };
   }
 
+  // ---- running totals ---------------------------------------------------------------------------------------------------------
+
+  /** The three scopes' keys for money spent in a project by an agent (`none` and `unattributed` when unnamed). */
+  #scopeKeys(projectId: string | undefined, agentId: string | undefined): Record<AggregateScope, string> {
+    return { installation: "installation", project: projectId ?? "none", agent: agentId ?? "unattributed" };
+  }
+  #totalId(scope: AggregateScope, key: string, window: string): string { return derivedId("bgt", `${scope}|${key}|${window}`); }
+  /** The windows a time falls in; a cap reads the one its period names. */
+  #windows(at: string): string[] { return [`day:${at.slice(0, 10)}`, `month:${at.slice(0, 7)}`, "all"]; }
+
   /**
-   * Whether this reservation would take the money used in its scope and period above the owner's cap. Used = ledger entries in the window plus money held by open and uncertain reservations of every open (not closed) budget
-   * tree. At most `BUDGET_LIMITS.scan` ledger entries and as many trees are read; when either is cut short the cap cannot be checked and the reservation is refused (fail closed), saying so. The check reads other trees without
-   * guarding them, so two reservations in different trees at the same moment can each pass: the cap is a ceiling for the next reservation, not a lock (see `BUDGET_ENFORCEMENT`).
+   * The changes that add `spent` (to the day, month and all-time totals of `at`) and `held` (to the held total) to the running totals of every scope, in the currency of the money. They are guarded by the revisions read now and
+   * committed in the same transaction as the settle, charge, reserve or release that moves the money, so a total never differs from the ledger and two commands that touch the same scope take turns (the loser reads again).
+   * Only money moves a total: zero changes none. An unknown currency is kept under "" and counts toward every cap.
+   */
+  async #bump(projectId: string | undefined, agentId: string | undefined, currency: string | undefined, at: string, spent: number, held: number): Promise<Change[]> {
+    const changes: Change[] = [];
+    if (spent === 0 && held === 0) return changes;
+    const keys = this.#scopeKeys(projectId, agentId);
+    const cur = currency ?? "";
+    for (const scope of AGGREGATE_SCOPES) {
+      const targets: [string, number][] = [...(spent === 0 ? [] : this.#windows(at).map((w): [string, number] => [w, spent])), ...(held === 0 ? [] : [["held", held] as [string, number]])];
+      for (const [window, delta] of targets) {
+        const id = this.#totalId(scope, keys[scope], window);
+        const found = await this.#runner.get(AGG_TOTAL, id);
+        const by = { ...((found?.body as unknown as { byCurrency: Record<string, number> } | undefined)?.byCurrency ?? {}) };
+        by[cur] = Math.max(0, (by[cur] ?? 0) + delta);
+        const body = { scope, scopeKey: keys[scope], window, byCurrency: by } as unknown as JsonObject;
+        const ref: AggregateRef = { kind: AGG_TOTAL, id };
+        changes.push(found === undefined ? { type: "create", ref, body } : { type: "update", ref, expectedRevision: found.revision, body });
+      }
+    }
+    return changes;
+  }
+
+  /** What the cap counts as used for this scope: money spent in the cap's window plus money held now, in the cap's currency (and money of unknown currency). Read from the running totals, never by scanning the ledger. */
+  async #usedFor(cap: AggregateBody & { scope: AggregateScope; period: "day" | "month" | "none"; amountMicros: number }, projectId: string | undefined, agentId: string | undefined, now: string): Promise<{ used: number; scopeKey: string; window: string }> {
+    const scopeKey = this.#scopeKeys(projectId, agentId)[cap.scope];
+    const window = cap.period === "day" ? `day:${now.slice(0, 10)}` : cap.period === "month" ? `month:${now.slice(0, 7)}` : "all";
+    const currency = cap.currency ?? DEFAULT_AGGREGATE_CURRENCY;
+    let used = 0;
+    for (const w of [window, "held"]) {
+      const by = (await this.#runner.get(AGG_TOTAL, this.#totalId(cap.scope, scopeKey, w)))?.body as unknown as { byCurrency?: Record<string, number> } | undefined;
+      used += (by?.byCurrency?.[currency] ?? 0) + (by?.byCurrency?.[""] ?? 0);
+    }
+    return { used, scopeKey, window };
+  }
+
+  /** The cap as it is now: off, damaged (a refusal for everything), or on with its readable figures. */
+  async #cap(): Promise<{ state: "off" } | { state: "damaged"; revision: number } | { state: "on"; revision: number; cap: AggregateBody & { scope: AggregateScope; period: "day" | "month" | "none"; amountMicros: number } }> {
+    const found = await this.#runner.get(AGGREGATE, "main");
+    const b = found?.body as unknown as AggregateBody | undefined;
+    const state = capState(b);
+    if (state === "off") return { state: "off" };
+    if (state === "damaged" || !capReadable(b!)) return { state: "damaged", revision: found!.revision };
+    return { state: "on", revision: found!.revision, cap: b as never };
+  }
+
+  /**
+   * Whether this reservation would take the money used in its scope and period above the owner's cap. Used = what the running totals say was spent in the window plus what is held now (by every open and uncertain
+   * reservation of every tree), in the cap's currency. The totals are read inside the reservation's own transaction and the reservation writes the held total it read, so two reservations at the same moment (in different
+   * trees too) take turns and the second sees the first. A cap that is switched on but cannot be read refuses, and so does a cap whose `enabled` is not true or false.
    * Returns the refusal (with the key that makes its notice once-only), or undefined when there is no cap, the cap is off, or the reservation fits.
    */
   async #aggregateRefusal(tree: TreeBody, want: Amounts, agentId: string | undefined, taskId: string): Promise<AggregateRefusal | undefined> {
-    const found = await this.#runner.get(AGGREGATE, "main");
-    const b = found?.body as unknown as AggregateBody | undefined;
-    if (!isOn(b) || want.costMicros === 0) return undefined;
-    const damaged = !(AGGREGATE_SCOPES as readonly string[]).includes(b.scope as string) || (b.period !== "day" && b.period !== "month" && b.period !== "none") || !Number.isSafeInteger(b.amountMicros);
-    if (damaged) return { error: new DomainError("invalid_command", `${AGG_REASON} is switched on but its setting is unreadable; the owner must set it again or turn it off`, { field: "costMicros" }), key: `damaged:${found!.revision}`, notice: { taskId, scope: "unknown", scopeKey: "unknown", period: "unknown", amountMicros: 0, usedMicros: 0, wantMicros: want.costMicros } };
-    const now = this.#runner.now();
-    const since = windowStart(b.period, now);
-    const mine = b.scope === "installation" ? "installation" : b.scope === "project" ? tree.projectId : (agentId ?? "unattributed");
-    const keyOf = (project: string | undefined, agent: string | undefined): string => (b.scope === "installation" ? "installation" : b.scope === "project" ? project ?? "none" : agent ?? "unattributed");
-    let used = 0, scanned = 0, truncated = false;
-    for (let after: string | undefined; !truncated;) {
-      const page = await this.#runner.list(ENTRY, { ...(after === undefined ? {} : { afterId: after }), limit: BUDGET_LIMITS.page });
-      for (const a of page) {
-        after = a.id;
-        if (++scanned > BUDGET_LIMITS.scan) { truncated = true; break; }
-        const e = a.body as unknown as UsageEntry;
-        if (keyOf(e.projectId, e.agentId) !== mine || (since !== undefined && !(e.at >= since))) continue;
-        used += e.costMicros;
-      }
-      if (page.length < BUDGET_LIMITS.page) break;
-    }
-    scanned = 0;
-    for (let after: string | undefined; !truncated;) {
-      const page = await this.#runner.list(TREE, { ...(after === undefined ? {} : { afterId: after }), limit: BUDGET_LIMITS.page });
-      for (const a of page) {
-        after = a.id;
-        if (++scanned > BUDGET_LIMITS.scan) { truncated = true; break; }
-        const t = a.body as unknown as TreeBody;
-        if (t.closed === true) continue;
-        for (const r of Object.values(t.reservations)) if (keyOf(t.projectId, r.agentId) === mine) used += r.amounts.costMicros;
-      }
-      if (page.length < BUDGET_LIMITS.page) break;
-    }
-    const base = { taskId, scope: b.scope, scopeKey: mine, period: b.period, amountMicros: b.amountMicros, usedMicros: used, wantMicros: want.costMicros };
-    const window = since ?? "all";
-    const key = `${found!.revision}:${b.scope}:${mine}:${window}`;
-    if (truncated) return { error: new DomainError("invalid_command", `${AGG_REASON} cannot be checked: more than ${BUDGET_LIMITS.scan} records would have to be read; the owner can turn it off or choose a shorter period`, { field: "costMicros" }), key: `scan:${key}`, notice: base };
+    const state = await this.#cap();
+    if (state.state === "off" || want.costMicros === 0) return undefined;
+    if (state.state === "damaged") return { error: new DomainError("invalid_command", `${AGG_REASON} is switched on but its setting is unreadable; the owner must set it again or turn it off`, { field: "costMicros" }), key: `damaged:${state.revision}`, notice: { taskId, scope: "unknown", scopeKey: "unknown", period: "unknown", amountMicros: 0, usedMicros: 0, wantMicros: want.costMicros } };
+    const b = state.cap;
+    if (tree.currency !== (b.currency ?? DEFAULT_AGGREGATE_CURRENCY)) return undefined;
+    const { used, scopeKey, window } = await this.#usedFor(b, tree.projectId, agentId, this.#runner.now());
+    const base = { taskId, scope: b.scope, scopeKey, period: b.period, amountMicros: b.amountMicros, usedMicros: used, wantMicros: want.costMicros };
     if (used + want.costMicros <= b.amountMicros) return undefined;
-    return { error: new DomainError("invalid_command", `${AGG_REASON} is reached: ${b.scope === "installation" ? "everything" : `${b.scope} ${mine}`} has used ${used} of ${b.amountMicros} millionths${b.period === "none" ? "" : ` this ${b.period}`}, and this call needs ${want.costMicros}; the owner can raise or turn off the cap (budget.aggregate.set)`, { field: "costMicros" }), key, notice: base };
+    return { error: new DomainError("invalid_command", `${AGG_REASON} is reached: ${b.scope === "installation" ? "everything" : `${b.scope} ${scopeKey}`} has used ${used} of ${b.amountMicros} millionths${b.period === "none" ? "" : ` this ${b.period}`}, and this call needs ${want.costMicros}; the owner can raise or turn off the cap (budget.aggregate.set)`, { field: "costMicros" }), key: `${state.revision}:${b.scope}:${scopeKey}:${window}`, notice: base };
+  }
+
+  /**
+   * Whether a paid call for this task and agent may go ahead: undefined while the cap is off or has room, otherwise the plain reason (the cap is reached, or is on and cannot be read). Real spending is only known after a call, so
+   * this is the gate in front of the next paid call (the model relay asks it): once the money used has reached the cap no further paid call is made, and the owner is told once per window. For the dispatcher.
+   */
+  async capReached(by: Principal, who: { taskId: string; agentId?: string }): Promise<string | undefined> {
+    this.#dispatcher(by);
+    const state = await this.#cap();
+    if (state.state === "off") return undefined;
+    const taskId = checkTaskId(who.taskId);
+    const refusal = await (async (): Promise<AggregateRefusal | undefined> => {
+      if (state.state === "damaged") return { error: new DomainError("invalid_command", `${AGG_REASON} is switched on but its setting is unreadable; the owner must set it again or turn it off`), key: `damaged:${state.revision}`, notice: { taskId, scope: "unknown", scopeKey: "unknown", period: "unknown", amountMicros: 0, usedMicros: 0, wantMicros: 0 } };
+      const linked = (await this.#runner.get(LINK, taskId))?.body as unknown as { treeId: string } | undefined;
+      const tree = linked === undefined ? undefined : (await this.#tree(linked.treeId)).body;
+      const projectId = tree?.projectId ?? await this.#projectOf(taskId);
+      if (tree !== undefined && tree.currency !== (state.cap.currency ?? DEFAULT_AGGREGATE_CURRENCY)) return undefined;
+      const { used, scopeKey, window } = await this.#usedFor(state.cap, projectId, who.agentId, this.#runner.now());
+      if (used < state.cap.amountMicros) return undefined;
+      return { error: new DomainError("invalid_command", `${AGG_REASON} is reached: ${state.cap.scope === "installation" ? "everything" : `${state.cap.scope} ${scopeKey}`} has used ${used} of ${state.cap.amountMicros} millionths${state.cap.period === "none" ? "" : ` this ${state.cap.period}`}, so no further paid call is made; the owner can raise or turn off the cap (budget.aggregate.set)`), key: `reached:${state.revision}:${state.cap.scope}:${scopeKey}:${window}`, notice: { taskId, scope: state.cap.scope, scopeKey, period: state.cap.period, amountMicros: state.cap.amountMicros, usedMicros: used, wantMicros: 0 } };
+    })();
+    if (refusal === undefined) return undefined;
+    await this.#tellAggregate(by, refusal);
+    return refusal.error.message;
   }
 
   /** Tells the owner once per key (scope, window and setting revision): the first call writes the notice record and sends; repeats find the record and say nothing. A failing send never fails the reservation's refusal. */
@@ -536,6 +597,7 @@ export class BudgetService {
     const cache = cacheUsage(command.cache);
     const treeId = await this.#reservationTree(id);
     const treeRef: AggregateRef = { kind: TREE, id: treeId };
+    let settled: Spent | undefined;
     await this.#retrying(() => this.#runner.command("budget.settle", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
       payload: { id, actual: actual as unknown as JsonObject, cache: (cache ?? null) as unknown as JsonObject },
       build: async () => {
@@ -549,9 +611,12 @@ export class BudgetService {
         delete tree.reservations[id];
         const entry: UsageEntry = { taskId: res.taskId, projectId: tree.projectId, ...(res.agentId === undefined ? {} : { agentId: res.agentId }), activity: res.activity ?? "model-call", category: "work", ...actual, currency: tree.currency, reservationId: id, reservedCostMicros: res.amounts.costMicros, reservedComputeMs: res.amounts.computeMs, ...(cache === undefined ? {} : { cache }), by: by.id, at: this.#runner.now() };
         const ref: AggregateRef = { kind: ENTRY, id };
-        return { ref: treeRef, creates: false, changes: [{ type: "update", ref: treeRef, expectedRevision: found.revision, body: tree as unknown as JsonObject }, { type: "create", ref, body: entry as unknown as JsonObject }], detail: { reservationId: id, taskId: res.taskId, ...actual } };
+        const totals = await this.#bump(tree.projectId, res.agentId, tree.currency, entry.at, actual.costMicros, -res.amounts.costMicros);
+        settled = { projectId: tree.projectId, ...(res.agentId === undefined ? {} : { agentId: res.agentId }), taskId: res.taskId, currency: tree.currency, costMicros: actual.costMicros };
+        return { ref: treeRef, creates: false, changes: [{ type: "update", ref: treeRef, expectedRevision: found.revision, body: tree as unknown as JsonObject }, { type: "create", ref, body: entry as unknown as JsonObject }, ...totals], detail: { reservationId: id, taskId: res.taskId, ...actual } };
       },
     })));
+    if (settled !== undefined) await this.#tellReached(by, settled);
   }
 
   /** Gives back a reservation that was never dispatched (open only; an uncertain one must be settled with what actually happened). */
@@ -571,7 +636,8 @@ export class BudgetService {
         if (res.state === "uncertain") throw new DomainError("invalid_transition", "an uncertain reservation is settled with what actually happened, not released");
         subFrom(tree.nodes[res.taskId]!.reserved, res.amounts);
         delete tree.reservations[id];
-        return { ref: treeRef, creates: false, changes: [{ type: "update", ref: treeRef, expectedRevision: found.revision, body: tree as unknown as JsonObject }], detail: { reservationId: id } };
+        const totals = await this.#bump(tree.projectId, res.agentId, tree.currency, this.#runner.now(), 0, -res.amounts.costMicros);
+        return { ref: treeRef, creates: false, changes: [{ type: "update", ref: treeRef, expectedRevision: found.revision, body: tree as unknown as JsonObject }, ...totals], detail: { reservationId: id } };
       },
     })));
   }
@@ -596,6 +662,7 @@ export class BudgetService {
     const id = derivedId("bgl", scopedCommandId(by.id, command.commandId));
     const entryRef: AggregateRef = { kind: ENTRY, id };
     let guarded = false;
+    let charged: Spent | undefined;
     const result = await this.#retrying(() => this.#runner.command("budget.charge", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
       payload: { activity: command.activity, taskId: taskId ?? null, rule: rule ?? null, projectId: projectId ?? null, agentId: agentId ?? null, used: used as unknown as JsonObject, cache: (cache ?? null) as unknown as JsonObject },
       build: async () => {
@@ -606,6 +673,8 @@ export class BudgetService {
         if (link !== undefined && taskId !== undefined) {
           const found = await this.#tree(link.treeId);
           const tree = clone(found.body);
+          // A closed budget takes no more spending: the call is refused, not recorded against it.
+          this.#mustBeOpen(tree);
           const node = tree.nodes[taskId]!;
           this.#step(tree, taskId, () => addTo(node.spent, used));
           currency = tree.currency;
@@ -613,10 +682,26 @@ export class BudgetService {
         }
         const entry: UsageEntry = { ...(taskId === undefined ? {} : { taskId }), ...(projectId === undefined ? {} : { projectId }), ...(agentId === undefined ? {} : { agentId }), activity: command.activity, category: taskId === undefined ? "shared-overhead" : "work", ...(rule === undefined ? {} : { rule }), ...used, ...(currency === undefined ? {} : { currency }), ...(cache === undefined ? {} : { cache }), by: by.id, at: this.#runner.now() };
         changes.push({ type: "create", ref: entryRef, body: entry as unknown as JsonObject });
+        const totals = await this.#bump(projectId, agentId, currency, entry.at, used.costMicros, 0);
+        changes.push(...totals);
+        if (totals.length > 0) { guarded = true; charged = { ...(projectId === undefined ? {} : { projectId }), ...(agentId === undefined ? {} : { agentId }), ...(taskId === undefined ? {} : { taskId }), ...(currency === undefined ? {} : { currency }), costMicros: used.costMicros }; }
         return { ref: entryRef, creates: true, changes, detail: { activity: command.activity, taskId: taskId ?? null, category: entry.category }, contention: async () => (!guarded ? new DomainError("command_conflict", "this command ID was used by something else") : new DomainError("stale_revision", "the budget changed meanwhile")) };
       },
     })));
+    if (charged !== undefined && !result.replayed) await this.#tellReached(by, charged);
     return { id, replayed: result.replayed };
+  }
+
+  /** Once money has been recorded, the owner is told (once per window) if the cap is now reached: the spending stands, and the next paid call is the one that is stopped. */
+  async #tellReached(by: Principal, spent: Spent): Promise<void> {
+    if (spent.costMicros <= 0) return;
+    try {
+      const state = await this.#cap();
+      if (state.state !== "on" || (spent.currency !== undefined && spent.currency !== (state.cap.currency ?? DEFAULT_AGGREGATE_CURRENCY))) return;
+      const { used, scopeKey, window } = await this.#usedFor(state.cap, spent.projectId, spent.agentId, this.#runner.now());
+      if (used < state.cap.amountMicros) return;
+      await this.#tellAggregate(by, { error: new DomainError("invalid_command", `${AGG_REASON} is reached: ${state.cap.scope === "installation" ? "everything" : `${state.cap.scope} ${scopeKey}`} has used ${used} of ${state.cap.amountMicros} millionths${state.cap.period === "none" ? "" : ` this ${state.cap.period}`}; no further paid call is made until the cap is raised or turned off (budget.aggregate.set)`), key: `reached:${state.revision}:${state.cap.scope}:${scopeKey}:${window}`, notice: { taskId: spent.taskId ?? "none", scope: state.cap.scope, scopeKey, period: state.cap.period, amountMicros: state.cap.amountMicros, usedMicros: used, wantMicros: 0 } });
+    } catch { /* the spending is recorded; the cap is checked again by the next reservation and call */ }
   }
 
   /** A task asks for more budget. It goes to the holder of the parent node, or to the owner (a root, or a parent with no holder). */
@@ -638,8 +723,9 @@ export class BudgetService {
         const found = await this.#tree(treeId);
         const tree = clone(found.body);
         const node = tree.nodes[taskId];
-        if (node !== undefined && tree.closed === true && inTaskScope(by, node.projectId)) this.#mustBeOpen(tree);
         if (node === undefined || !inTaskScope(by, node.projectId) || !(allows(by, "attempt.work", node.projectId, { resource: { kind: "task", id: taskId } }) || allows(by, "budget.manage", node.projectId, { resource: { kind: "task", id: taskId } }))) throw refused();
+        // Only a caller who may ask is told the budget is closed.
+        this.#mustBeOpen(tree);
         if (node.openRequests.length >= BUDGET_LIMITS.openRequestsPerTask) throw new DomainError("invalid_command", `that task already has ${BUDGET_LIMITS.openRequestsPerTask} open requests for more budget`, { field: "taskId" });
         const parent = node.parentId === undefined ? undefined : tree.nodes[node.parentId];
         to = parent?.holder ?? "owner";
@@ -889,7 +975,7 @@ export class BudgetService {
       n = parent;
     }
   }
-  #mustBeOpen(tree: TreeBody): void { if (tree.closed === true) throw new DomainError("invalid_command", `budget: the budget of task ${tree.rootTaskId} is closed; open a new one on another task`, { field: "taskId" }); }
+  #mustBeOpen(tree: TreeBody): void { if (tree.closed === true) throw new BudgetClosedError(tree.rootTaskId); }
   #depth(tree: TreeBody, taskId: string): number { let d = 1; for (let n = tree.nodes[taskId]; n?.parentId !== undefined; n = tree.nodes[n.parentId]) d++; return d; }
   /** New money for a task: its limit and every ancestor's limit and delegated rise together, so no available figure above it falls. */
   #grow(tree: TreeBody, taskId: string, add: Amounts): void {

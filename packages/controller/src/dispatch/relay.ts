@@ -79,6 +79,8 @@ export class ModelRelay {
     readonly monitor?: RelayMonitor;
     /** The least time between two progress reports of one reply (default 15 seconds). */
     readonly progressMs?: number;
+    /** Asked before every call is sent: a text is the reason the call is refused (the owner's spending cap is reached), undefined lets it go. A gate that throws refuses the call too (fail closed). */
+    readonly gate?: () => Promise<string | undefined>;
   }, cache?: Pick<PiCachePolicy, "payload" | "fetch">): AttemptRelay {
     const route = attempt.route;
     const maxBody = this.#options.maxBodyBytes ?? 8 * 1024 * 1024;
@@ -99,6 +101,11 @@ export class ModelRelay {
         if (!PATHS.has(rest) || parsed.search !== "") refuse("only the model API's own calls are allowed");
         const endpoint = this.#options.endpoint(route);
         if (endpoint === undefined) refuse(`route ${route.slice(0, 60)} has no endpoint`);
+        if (attempt.gate !== undefined && rest !== "messages/count_tokens") {
+          let why: string | undefined;
+          try { why = await attempt.gate(); } catch (error) { this.#options.onError?.(route, redactText(error instanceof Error ? error.message : String(error)).slice(0, 300)); refuse("the spending cap could not be checked"); }
+          if (why !== undefined) refuse(redactText(why).slice(0, 300));
+        }
         const target = `${endpoint!.url.replace(/\/+$/, "")}/${rest}`;
         if (request.body !== undefined && request.body.length > maxBody) refuse("the request is too large");
         const headers = new Headers();
