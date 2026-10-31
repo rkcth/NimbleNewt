@@ -381,7 +381,7 @@ export class DispatcherService {
     for (const loop of this.#deps.loops ?? []) {
       try { await loop.run(this.#deps.principal); loops.push({ name: loop.name, ok: true }); } catch (error) {
         if (isDomainError(error, "stale_epoch")) throw error;
-        loops.push({ name: loop.name, ok: false, error: error instanceof Error ? error.message.slice(0, 200) : "failed" });
+        loops.push({ name: loop.name, ok: false, error: error instanceof Error ? redactText(error.message).slice(0, 200) : "failed" });
       }
     }
     return { at, started, waiting, capacityWaits, skipped, blocked, lost, readmitted, reprioritized, approvals, loops, failures, scanned: scan.scanned, complete: scan.complete };

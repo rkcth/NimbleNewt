@@ -332,6 +332,9 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       await notifications.emitFromController({ commandId: `stall-esc-${key}`, kind: "maintenance", level: "needs-you", ref: { kind: "task", id: c.taskId }, projectId: c.projectId, detail });
     })),
   ];
+  // The notification sweep may wait on a slow outside channel (bounded by its own time budget), so it runs after every other loop of the tick and cannot delay them (card U11b review).
+  const lastLoop = loops.findIndex((l) => l.name === "notifications.run");
+  if (lastLoop >= 0) loops.push(...loops.splice(lastLoop, 1));
   // The local worker host gets its guards here, bound to the services built above (card H12k); the dispatcher then has it among its workers.
   const workers: WorkerHost[] = [...(i.options.workers ?? [])];
   const holder: { dispatcher?: DispatcherService } = {};

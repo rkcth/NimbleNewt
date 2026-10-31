@@ -8,6 +8,18 @@ import { buildWorld, workGrants } from "./testing/world.js";
 after(stopServer);
 
 for (const backend of backends) {
+  test(`${backend.name}: the error text of a failing loop is redacted in the tick report (card U11b review)`, async () => {
+    const store = await backend.open();
+    try {
+      const w = await buildWorld(store.storage);
+      const d = w.restart({ loops: [{ name: "leaky", run: async () => { throw new Error("channel down: token=abcd1234efgh5678ijkl"); } }] });
+      const report = await d.tick();
+      const text = report.loops.find((l) => l.name === "leaky")!.error ?? "";
+      assert.match(text, /channel down/);
+      assert.ok(!text.includes("abcd1234efgh5678ijkl"), text);
+    } finally { await store.close(); }
+  });
+
   test(`${backend.name}: a tick runs the loops of the services that said "the controller's loop must call this", as the dispatcher's service principal, and a loop that fails does not stop the others`, async () => {
     const store = await backend.open();
     try {

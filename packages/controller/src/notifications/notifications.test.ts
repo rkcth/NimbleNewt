@@ -10,7 +10,7 @@ import { DeskService, HistoryService, RetrievalService } from "../context/index.
 import { InquiryService } from "../inquiries/index.js";
 import { ReviewService } from "../review/index.js";
 import { PrincipalService, type Grant, type Principal } from "../security/index.js";
-import { NOTIFICATION_LIMITS, NotificationService, type ChannelAdapter, type NotificationKind } from "./index.js";
+import { DEFAULT_ESCALATIONS_PER_HOUR, NOTIFICATION_LIMITS, NotificationService, type ChannelAdapter, type NotificationKind } from "./index.js";
 
 after(stopServer);
 
@@ -31,6 +31,10 @@ for (const backend of backends) {
     sent: { text: string; links: unknown }[]; failing: { on: boolean }; responded: { commandId: string; id: string; answer: string }[];
     readsFailFor(id: string): NotificationService; review(): Promise<string>; resolveBlocker(id: string): Promise<void>; blocker(type?: "manual_hold" | "wait_overdue" | "unexplained_block"): Promise<string>; question(): Promise<string>;
     report(who: Principal, kind: NotificationKind, refKind: string, id: string, extra?: Record<string, unknown>): ReturnType<NotificationService["emit"]>;
+    /** Another service over the same storage with other wiring (channels, time zone, timeouts). */
+    other(o: { channels?: Record<string, ChannelAdapter>; timeZone?: () => Promise<string | undefined>; sendTimeoutMs?: number; runBudgetMs?: number }): NotificationService;
+    /** Replaces a stored record's body (damage, for the tests of one bad record among good ones). */
+    damage(kind: string, id: string, body: Record<string, unknown>): Promise<void>;
   }
   const suite = (name: string, body: (c: Ctx) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
@@ -64,6 +68,8 @@ for (const backend of backends) {
         await body({
           readsFailFor: (id) => NotificationService.withEpoch(new Proxy(world.storage, { get: (t, k) => { const v = Reflect.get(t, k, t); if (k !== "getAggregate") return typeof v === "function" ? v.bind(t) : v; return async (ref: { kind: string; id: string }) => { if (ref.id === id) throw new Error("storage hiccup"); return t.getAggregate(ref); }; } }), projects.epoch, options),
           svc, owner, ann, evil, ctl, wide, a, b, ta, sent, failing, responded,
+          other: (o) => NotificationService.withEpoch(world.storage, projects.epoch, { ...options, ...o }),
+          damage: async (kind, id, body) => { const ref = { kind, id }; const rec = (await world.storage.getAggregate(ref))!; await world.storage.applyOperation({ operationId: cid("dmg"), epoch: projects.epoch, actor: "owner:rob", correlationId: "dmg", at: new Date(now).toISOString(), changes: [{ type: "update", ref, expectedRevision: rec.revision, body }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never); },
           review: async () => (await reviews.request(ann, { commandId: cid("rq"), taskId: ta, operation: { name: "git-commit", args: { n: n++ }, target: { kind: "repository", id: "main" } }, context })).id,
           blocker: async (type = "manual_hold") => (await blockers.openBlocker({ commandId: cid("bl"), actor: "owner:rob", type, subject: { kind: "task", id: ta }, summary: "stuck", resolver: "owner:rob" })).id,
           resolveBlocker: async (id) => { const b = (await blockers.getBlocker(id))!; await blockers.resolveBlocker({ commandId: cid("rs"), actor: "owner:rob", blockerId: id, expectedRevision: b.revision, resolution: "fixed" }); },
@@ -221,6 +227,7 @@ for (const backend of backends) {
     const note = await c.report(c.ctl, "maintenance", "host", "host-3", { level: "notice" });
     const hours = (n: number) => set(new Date(Date.parse("2026-10-22T08:00:00.000Z") + n * 3_600_000).toISOString());
     const item = async (id: string) => (await c.svc.inbox(c.owner)).items.find((i) => i.id === id)!;
+    await c.svc.runDue(); // the sweep runs once when the items are new: waits are counted from the first run with escalation on
     hours(23);
     await c.svc.runDue();
     assert.equal((await item(waiting.itemId)).urgent, false, "23 hours: not yet");
@@ -235,7 +242,7 @@ for (const backend of backends) {
     assert.equal((await item(waiting.itemId)).escalatedAt, raised.escalatedAt, "told once: a later tick does not raise it again");
     // The owner sets the threshold; quiet hours hold the telling until they end; an answered item is left alone.
     set("2026-10-23T08:00:00.000Z");
-    await c.svc.configure(c.owner, { commandId: cid("cf"), expectedRevision: (await c.svc.settings(c.owner)).revision, escalateAfterHours: 2, quietHours: { start: "22:00", end: "10:00" } });
+    await c.svc.configure(c.owner, { commandId: cid("cf"), expectedRevision: (await c.svc.settings(c.owner)).revision, escalateAfterHours: 2, urgentInterruptsQuietHours: false, quietHours: { start: "22:00", end: "10:00" } });
     const second = await c.report(c.ann, "review-request", "review", await c.review());
     set("2026-10-23T11:00:00.000Z");
     await c.svc.runDue();
@@ -262,7 +269,10 @@ for (const backend of backends) {
     assert.equal((await item(fourth.itemId)).urgent, false, "escalation is off");
     await c.svc.configure(c.owner, { commandId: cid("cf-on"), expectedRevision: (await c.svc.settings(c.owner)).revision, escalateAfterHours: 5 });
     await c.svc.runDue();
-    assert.equal((await item(fourth.itemId)).urgent, true, "on again");
+    assert.equal((await item(fourth.itemId)).urgent, false, "switching it on again starts the clock afresh, so the old backlog is not raised at once");
+    set("2026-11-24T16:00:00.000Z");
+    await c.svc.runDue();
+    assert.equal((await item(fourth.itemId)).urgent, true, "on again: raised once it has waited the threshold since then");
   });
 
   suite("quiet hours hold the digest and an urgent review until they end; a safety stop is never held; a settings change counts from the next notification", async (c) => {
@@ -377,12 +387,162 @@ for (const backend of backends) {
     assert.match(digest, /maintenance: budget-request bgt-1/);
     assert.match(digest, /1 notice in your inbox, no action needed\.$/);
     assert.ok(!/host-info/.test(digest), "the pure notice is only counted");
-    // Unanswered for a day: the decision-bearing maintenance item is raised to Urgent and told; the notice never is.
+    // Unanswered for a day: a maintenance item has no owner-wait semantics, so it is NOT raised on its own (its producer closes it when the condition is gone) ...
     set("2026-10-23T10:00:00.000Z");
     await c.svc.runDue();
+    const quietly = (await c.svc.inbox(c.owner)).items;
+    assert.deepEqual([quietly.find((i) => i.id === budget.itemId)!.level, quietly.find((i) => i.id === unnamed.itemId)!.level], ["needs-you", "needs-you"], "not escalated unless the owner set the level");
+    // ... unless the owner says maintenance items matter: then they are raised to Urgent and told.
+    await c.svc.configure(c.owner, { commandId: cid("cf"), expectedRevision: (await c.svc.settings(c.owner)).revision, levelByKind: { maintenance: "needs-you" } });
+    await c.svc.runDue();
     const items = (await c.svc.inbox(c.owner)).items;
-    assert.deepEqual([items.find((i) => i.id === budget.itemId)!.level, items.find((i) => i.id === unnamed.itemId)!.level, items.find((i) => i.id === info.itemId)!.level], ["urgent", "urgent", "notice"]);
+    assert.deepEqual([items.find((i) => i.id === budget.itemId)!.level, items.find((i) => i.id === unnamed.itemId)!.level, items.find((i) => i.id === info.itemId)!.level], ["urgent", "urgent", "urgent"], "the owner's setting applies to every maintenance item");
     assert.equal(c.sent.filter((s) => s.text.startsWith("URGENT") && s.text.includes("budget-request")).length, 1);
+  });
+
+  suite("the first run on a backlog does not flood the owner: waits count from the first sweep with escalation on, and at most the hourly number of Urgent messages go out, the rest in ONE message (card U11b review)", async (c) => {
+    await c.svc.configure(c.owner, { commandId: cid("cf"), channel: "external", channelName: "pager" });
+    const ids: string[] = [];
+    for (let i = 0; i < 7; i++) { ids.push((await c.report(c.ann, "owner-question", "inquiry", await c.question())).itemId); ids.push((await c.report(c.ann, "review-request", "review", await c.review())).itemId); }
+    // Three days later the controller is upgraded and the sweep runs for the first time: every item is older than 24 hours, and none is raised.
+    set("2026-10-25T08:00:00.000Z");
+    await c.svc.runDue();
+    assert.equal((await c.svc.inbox(c.owner)).items.filter((i) => i.urgent).length, 0, "nothing is raised for waiting that happened before the sweep existed");
+    assert.deepEqual(c.sent.filter((m) => m.text.startsWith("URGENT")), []);
+    // A day later all 14 qualify at once: ten messages at most, the rest in one.
+    set("2026-10-26T09:00:00.000Z");
+    for (let k = 0; k < 4; k++) await c.svc.runDue(); // five sends a run
+    const told = c.sent.filter((m) => m.text.startsWith("URGENT"));
+    assert.equal(told.length, DEFAULT_ESCALATIONS_PER_HOUR, JSON.stringify(told.map((m) => m.text)));
+    assert.equal(told.filter((m) => /5 more items escalated/.test(m.text)).length, 1, "the rest are one message");
+    assert.equal((await c.svc.inbox(c.owner)).items.filter((i) => i.urgent).length, 14, "every item is Urgent in the inbox");
+    // The allowance is spent for the hour; a later item waits for the next hour, then goes.
+    const late = (await c.report(c.ann, "review-request", "review", await c.review())).itemId;
+    set("2026-10-27T10:00:00.000Z");
+    for (let k = 0; k < 2; k++) await c.svc.runDue();
+    assert.equal(c.sent.filter((m) => m.text.startsWith("URGENT")).length, DEFAULT_ESCALATIONS_PER_HOUR + 1, "a new hour has room again");
+    assert.equal((await c.svc.inbox(c.owner)).items.find((i) => i.id === late)!.urgent, true);
+    // The figure is the owner's.
+    await refuses("invalid_command", async () => c.svc.configure(c.owner, { commandId: cid("cf"), expectedRevision: (await c.svc.settings(c.owner)).revision, escalationsPerHour: 0 }));
+    await c.svc.configure(c.owner, { commandId: cid("cf"), expectedRevision: (await c.svc.settings(c.owner)).revision, escalationsPerHour: 2, sweepEverySeconds: 30, sendTimeoutSeconds: 5, urgentInterruptsQuietHours: false });
+    const st = await c.svc.settings(c.owner);
+    assert.deepEqual([st.escalationsPerHour, st.sweepEverySeconds, st.sendTimeoutSeconds, st.urgentInterruptsQuietHours], [2, 30, 5, false]);
+  });
+
+  suite("a hung channel adapter costs one timeout, never the run: sends are bounded in time and number and no adapter is called inside a storage transaction (card U11b review)", async (c) => {
+    await c.svc.configure(c.owner, { commandId: cid("cf"), channel: "external", channelName: "pager" });
+    for (let i = 0; i < 8; i++) await c.report(c.ctl, "safety-stop", "host", `host-${i}`);
+    let calls = 0; let aborted = 0;
+    const hanging = c.other({ channels: { pager: { send: (m) => { calls++; m.signal?.addEventListener("abort", () => { aborted++; }); return new Promise<void>(() => undefined); } } }, sendTimeoutMs: 40 });
+    const t0 = Date.now();
+    const ran = await hanging.runDue();
+    assert.ok(Date.now() - t0 < 5_000, `the run returned in ${Date.now() - t0} ms`);
+    assert.equal(calls, NOTIFICATION_LIMITS.deliveriesPerRun, "at most five sends are tried in a run");
+    assert.deepEqual([ran.retrying, ran.delivered, ran.failed], [NOTIFICATION_LIMITS.deliveriesPerRun, 0, 0]);
+    assert.equal(aborted, NOTIFICATION_LIMITS.deliveriesPerRun, "each hung send was told to stop");
+    // The run's own time budget: once it is used, no further send is started.
+    calls = 0;
+    minutes(2);
+    const tight = c.other({ channels: { pager: { send: () => { calls++; return new Promise<void>(() => undefined); } } }, sendTimeoutMs: 60, runBudgetMs: 100 });
+    await tight.runDue();
+    assert.ok(calls >= 1 && calls < NOTIFICATION_LIMITS.deliveriesPerRun, `the budget stopped the run after ${calls} sends`);
+    // A send that is in flight sees no transaction: reading and writing the store from inside the adapter works (it would deadlock or conflict inside one).
+    let inside: unknown;
+    minutes(10);
+    const probing = c.other({ channels: { pager: { send: async () => { inside = (await c.svc.inbox(c.owner)).items.length; } } } });
+    await probing.runDue();
+    assert.ok(typeof inside === "number", "the adapter ran with the store free");
+  });
+
+  suite("one damaged item does not hold back the escalations behind it; the first failure is raised after the others were tried (card U11b review)", async (c) => {
+    const b1 = await c.blocker("manual_hold"), b2 = await c.blocker("wait_overdue");
+    const first = await c.report(c.ann, "blocker", "blocker", b1);
+    minutes(1);
+    const second = await c.report(c.ann, "blocker", "blocker", b2);
+    await c.svc.runDue();
+    set("2026-10-23T10:00:00.000Z");
+    // The record the first item points at is damaged: describing it throws.
+    await c.damage("blocker", b1, { state: "open" });
+    await assert.rejects(() => c.svc.runDue(), (e: unknown) => e instanceof Error);
+    const items = (await c.svc.inbox(c.owner)).items;
+    assert.equal(items.find((i) => i.id === second.itemId)!.urgent, true, "the item behind the damaged one was raised");
+    assert.equal(items.find((i) => i.id === first.itemId)!.urgent, false);
+    // Closing what was settled elsewhere is likewise per item.
+    await c.svc.runDue().catch(() => undefined);
+  });
+
+  suite("the sweep is throttled and cheap between full sweeps: a damaged record is not read again before the next one is due (card U11b review)", async (c) => {
+    const b1 = await c.blocker("manual_hold");
+    await c.report(c.ann, "blocker", "blocker", b1);
+    await c.svc.runDue({ throttled: true });
+    await c.damage("blocker", b1, { state: "open" });
+    minutes(30 / 60);
+    await c.svc.runDue({ throttled: true }); // within the 60 seconds: no full sweep, so the damaged record is not touched and nothing throws
+    minutes(2);
+    await assert.rejects(() => c.svc.runDue({ throttled: true }), (e: unknown) => e instanceof Error, "the next full sweep reads it again");
+  });
+
+  suite("a delivery given up on tells the owner once; a channel nobody registered is refused when set (card U11b review)", async (c) => {
+    await c.svc.configure(c.owner, { commandId: cid("cf"), channel: "external", channelName: "pager" });
+    c.failing.on = true;
+    await c.report(c.ctl, "safety-stop", "host", "host-a");
+    await c.svc.runDue();
+    for (const wait of [1, 5, 30, 120]) { minutes(wait); await c.svc.runDue(); }
+    const notice = async () => (await c.svc.inbox(c.owner)).items.filter((i) => i.kind === "maintenance" && i.ref.kind === "notification-delivery");
+    assert.equal((await notice()).length, 1, "the owner is told in the inbox that a message could not be delivered");
+    assert.equal((await notice())[0]!.level, "needs-you");
+    // A second failure while that notice is open coalesces into it.
+    await c.report(c.ctl, "safety-stop", "host", "host-b");
+    await c.svc.runDue();
+    for (const wait of [1, 5, 30, 120]) { minutes(wait); await c.svc.runDue(); }
+    const after = await notice();
+    assert.deepEqual([after.length, after[0]!.count], [1, 2]);
+  });
+
+  suite("a maintenance item is closed by the service that reported it, never escalated on its own, and the owner can ask for it to matter (card U11b review)", async (c) => {
+    const rep = await c.report(c.ctl, "maintenance", "host", "host-7");
+    await c.svc.runDue();
+    set("2026-10-30T08:00:00.000Z");
+    await c.svc.runDue();
+    assert.equal((await c.svc.inbox(c.owner)).items.find((i) => i.id === rep.itemId)!.urgent, false, "waiting alone does not make a maintenance item Urgent");
+    assert.deepEqual(await c.svc.settleFromController({ commandId: cid("st"), kind: "maintenance", ref: { kind: "host", id: "host-7" } }), { closed: true });
+    assert.equal((await c.svc.inbox(c.owner)).items.some((i) => i.id === rep.itemId), false, "the condition is gone: the item leaves the inbox");
+    assert.deepEqual(await c.svc.settleFromController({ commandId: cid("st"), kind: "maintenance", ref: { kind: "host", id: "host-7" } }), { closed: false });
+    const again = await c.report(c.ctl, "maintenance", "host", "host-7");
+    assert.notEqual(again.itemId, rep.itemId, "a later occurrence is a new item");
+  });
+
+  suite("quiet hours are read in the owner's time zone (UTC when none is set) (card U11b review)", async (c) => {
+    await c.svc.configure(c.owner, { commandId: cid("cf"), quietHours: { start: "22:00", end: "07:00" } });
+    const tokyo = c.other({ timeZone: async () => "Asia/Tokyo" });
+    const nowhere = c.other({ timeZone: async () => "Not/AZone" });
+    set("2026-10-22T14:00:00.000Z"); // 14:00 UTC, 23:00 in Tokyo
+    assert.equal((await tokyo.emitFromController({ commandId: cid("n"), kind: "review-request", ref: { kind: "review", id: await c.review() }, urgent: true })).immediate, false, "23:00 in Tokyo is quiet");
+    assert.equal((await c.report(c.ctl, "review-request", "review", await c.review(), { urgent: true })).immediate, true, "with no time zone it is 14:00 UTC, not quiet");
+    assert.equal((await nowhere.emitFromController({ commandId: cid("n"), kind: "review-request", ref: { kind: "review", id: await c.review() }, urgent: true })).immediate, true, "an unknown zone falls back to UTC");
+  });
+
+  suite("a retry of an Urgent message goes out in quiet hours by default and waits for their end when the owner switched that off; other messages always wait (card U11b review)", async (c) => {
+    await c.svc.configure(c.owner, { commandId: cid("cf"), channel: "external", channelName: "pager", quietHours: { start: "22:00", end: "10:00" } });
+    set("2026-10-22T21:58:00.000Z");
+    c.failing.on = true;
+    await c.report(c.ctl, "safety-stop", "host", "host-q");
+    assert.equal((await c.svc.runDue()).retrying, 1);
+    c.failing.on = false;
+    set("2026-10-22T22:05:00.000Z");
+    assert.equal((await c.svc.runDue()).delivered, 1, "an Urgent retry is sent inside quiet hours by default");
+    await c.svc.configure(c.owner, { commandId: cid("cf"), expectedRevision: (await c.svc.settings(c.owner)).revision, urgentInterruptsQuietHours: false });
+    set("2026-10-22T23:00:00.000Z");
+    c.failing.on = true;
+    await c.report(c.ctl, "safety-stop", "host", "host-r");
+    assert.equal((await c.svc.runDue()).retrying, 0, "switched off: held until quiet hours end (nothing is tried)");
+    c.failing.on = false;
+    set("2026-10-23T10:00:00.000Z");
+    assert.equal((await c.svc.runDue()).delivered, 1, "sent when they end");
+  });
+
+  suite("digestsPerRun * digestItems covers openItems, so a digest pass can carry every open item", async () => {
+    assert.ok(NOTIFICATION_LIMITS.digestsPerRun * NOTIFICATION_LIMITS.digestItems >= NOTIFICATION_LIMITS.openItems);
   });
 
   suite("the owner sets the level per kind: moved to notice and back, agents cannot, a safety stop stays Urgent (card U11b)", async (c) => {
@@ -474,9 +634,7 @@ for (const backend of backends) {
     await c.report(c.ctl, "safety-stop", "host", "host-4");
     await c.svc.configure(c.owner, { commandId: cid("cf"), expectedRevision: (await c.svc.settings(c.owner)).revision, channel: "inbox" });
     assert.deepEqual(await c.svc.runDue(), { digestIds: [], delivered: 0, failed: 1, retrying: 0 });
-    await c.svc.configure(c.owner, { commandId: cid("cf"), expectedRevision: (await c.svc.settings(c.owner)).revision, channel: "external", channelName: "ghost" });
-    await c.report(c.ctl, "safety-stop", "host", "host-5");
-    assert.equal((await c.svc.runDue()).retrying, 1);
-    assert.match((await c.svc.report(c.owner)).pending[0]!.lastError!, /no such channel/);
+    // A channel nobody registered is refused when the owner sets it (otherwise every message to it would fail in silence).
+    await refuses("invalid_command", async () => c.svc.configure(c.owner, { commandId: cid("cf"), expectedRevision: (await c.svc.settings(c.owner)).revision, channel: "external", channelName: "ghost" }).catch((e) => { assert.match(String(e.message), /no channel adapter named ghost/); throw e; }));
   });
 }

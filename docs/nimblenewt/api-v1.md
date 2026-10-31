@@ -3243,12 +3243,16 @@ Owner only: sets how notifications reach the owner; only the fields given change
 Arguments:
 
 - `channel` (optional): inbox or external
-- `channelName` (optional): the name of the external channel (needed for external)
+- `channelName` (optional): the name of the external channel (needed for external; it must be a channel adapter registered in this installation, otherwise the change is refused)
 - `digestTimes` (optional): 1 to 8 UTC times such as 09:00
-- `quietHours` (optional): { start, end } UTC times, or null to remove them
+- `quietHours` (optional): { start, end } times in your time zone setting (UTC when none is set), or null to remove them
 - `levelByKind` (optional): { kind: notice | needs-you | urgent } for blocker, review-request, owner-question, maintenance, presence, safety-stop; null puts a kind back to its default (a safety stop stays urgent)
 - `noticeRetentionDays` (optional): whole days (1 to 365) a Notice stays in the inbox before it is closed (default 7)
 - `escalateAfterHours` (optional): whole hours (1 to 720) before an unanswered item is escalated; null turns escalation off (set a number again to turn it on)
+- `escalationsPerHour` (optional): whole number (1 to 1000) of Urgent messages the escalation sweep sends outside per hour (default 10); more in a burst are told in ONE "N more items escalated" message
+- `sweepEverySeconds` (optional): seconds (5 to 3600) between two full sweeps by the dispatcher (default 60)
+- `sendTimeoutSeconds` (optional): seconds (1 to 120) one channel send may take before it is retried later (default 10)
+- `urgentInterruptsQuietHours` (optional): true (default): an escalated Urgent item and its retries are also sent in quiet hours; false: they wait for the end of quiet hours
 - `expectedRevision` (optional): the settings revision you read (0 or absent when none were set yet)
 
 Result: `{ revision }`.
