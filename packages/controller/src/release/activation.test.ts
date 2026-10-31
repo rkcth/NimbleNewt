@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -9,7 +9,7 @@ import { CommandRunner, type Built } from "../domain/runner.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
-import { ReleaseActivationService, ReleaseService, SimulatedCrash, type ActivationOptions } from "./index.js";
+import { ReleaseActivationService, ReleaseService, SimulatedCrash, verifyReleaseDirectory, type ActivationOptions } from "./index.js";
 
 after(stopServer);
 const options = { clock: () => "2026-10-31T12:00:00.000Z", pause: async () => undefined };
@@ -19,6 +19,8 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, match
   await assert.rejects(run, (error: unknown) => { assert.ok(error instanceof DomainError, String(error)); assert.equal(error.code, code, error.message); if (match !== undefined) assert.match(error.message, match); return true; });
 };
 const sha = (s: string): string => createHash("sha256").update(s).digest("hex");
+/** Staged folders are read-only on POSIX: they are made writable again so that a test folder can be removed. */
+const unlockAll = (dir: string): void => { try { chmodSync(dir, 0o700); for (const e of readdirSync(dir, { withFileTypes: true })) if (e.isDirectory()) unlockAll(join(dir, e.name)); } catch { /* gone */ } };
 const linux = { os: "linux" as const, arch: "x64" as const };
 
 for (const backend of backends.slice(0, 2)) for (const switcher of ["symlink", "pointer"] as const) {
@@ -46,7 +48,7 @@ for (const backend of backends.slice(0, 2)) for (const switcher of ["symlink", "
           await runner.command("test.approve", { commandId: cid("ap"), actor: owner.id }, async () => ({ payload: { id }, build: async (): Promise<Built> => { const ref = { kind: "release-approval", id }; return { ref, creates: true, changes: [{ type: "create", ref, body: { candidateId: id, by: owner.id, at: "x" } }], detail: {} }; } }));
         };
         await body({ act: make(), make, owner, agent, candidate, approve, rel, root, runner, storage: world.storage });
-      } finally { await world.close(); rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+      } finally { await world.close(); unlockAll(join(root, "releases")); rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
     });
   };
   interface W { act: ReleaseActivationService; make: (o?: Partial<ActivationOptions>) => ReleaseActivationService; owner: Principal; agent: Principal; candidate: (f: Record<string, string>, o?: { lie?: string[]; matrix?: object[] }) => Promise<string>; approve: (id: string) => Promise<void>; rel: ReleaseService; root: string; runner: CommandRunner; storage: unknown }
@@ -158,6 +160,8 @@ for (const backend of backends.slice(0, 2)) for (const switcher of ["symlink", "
     const sa = await c.act.stage(c.owner, { commandId: cid("st"), candidateId: a }); const sb = await c.act.stage(c.owner, { commandId: cid("st"), candidateId: b });
     await c.act.activate(c.owner, { commandId: cid("ac"), candidateId: a, digest: sa.digest });
     const dir = join(c.root, "releases", b);
+    if (process.platform !== "win32" && process.getuid?.() !== 0) assert.throws(() => writeFileSync(join(dir, "extra.sh"), "run me"), /EACCES|EPERM/, "a staged folder is read-only (0555)");
+    unlockAll(dir);
     writeFileSync(join(dir, "extra.sh"), "run me");
     await refuses("invalid_transition", () => c.act.activate(c.owner, { commandId: cid("ac"), candidateId: b, digest: sb.digest }), /extra\.sh was added/);
     rmSync(join(dir, "extra.sh"));
@@ -260,14 +264,150 @@ for (const backend of backends.slice(0, 2)) for (const switcher of ["symlink", "
     assert.equal((await c.act.settings(c.owner)).requireApproval, true, "unchanged fields stay");
   });
 
-  suite("a staging folder left by a dead run is swept at start, and a half-finished release directory without a record is replaced, not trusted", async (c) => {
+  suite("sweep: only .tmp folders of this process (not in use) or older than the staleness window are removed; a fresh folder of another process and one being filled are kept", async (c) => {
     const a = await c.candidate({ "a.js": "A" });
-    mkdirSync(join(c.root, "releases", ".tmp-old"), { recursive: true });
-    mkdirSync(join(c.root, "releases", a), { recursive: true }); writeFileSync(join(c.root, "releases", a, "a.js"), "EVIL");
+    const r = join(c.root, "releases");
+    for (const n of [".tmp-old", `.tmp-mine-${process.pid}-x`, ".tmp-fresh-other"]) mkdirSync(join(r, n), { recursive: true });
+    const old = new Date(Date.now() - 2 * 3_600_000);
+    utimesSync(join(r, ".tmp-old"), old, old);
+    mkdirSync(join(r, a), { recursive: true }); writeFileSync(join(r, a, "a.js"), "EVIL");
     await c.act.recover();
-    assert.equal(existsSync(join(c.root, "releases", ".tmp-old")), false);
+    assert.equal(existsSync(join(r, ".tmp-old")), false, "older than the window");
+    assert.equal(existsSync(join(r, `.tmp-mine-${process.pid}-x`)), false, "left by this process");
+    assert.equal(existsSync(join(r, ".tmp-fresh-other")), true, "fresh and not ours: kept (another process may be filling it)");
     const s = await c.act.stage(c.owner, { commandId: cid("st"), candidateId: a });
-    assert.equal(readFileSync(join(c.root, "releases", a, "a.js"), "utf8"), "A");
+    assert.equal(readFileSync(join(r, a, "a.js"), "utf8"), "A");
     assert.equal(s.replayed, false);
+  });
+
+  suite("an unresolved switch is closed by the owner only, with the revision quoted: commit, abort and set-pointer verify, move the pointer, leave a history entry, and later activations work", async (c) => {
+    const a = await c.candidate({ "a.js": "A" }); const b = await c.candidate({ "b.js": "B" }); const d = await c.candidate({ "d.js": "D" });
+    await c.act.setSettings(c.owner, { commandId: cid("se"), requireApproval: false });
+    const [sa, sb] = [await c.act.stage(c.owner, { commandId: cid("st"), candidateId: a }), await c.act.stage(c.owner, { commandId: cid("st"), candidateId: b })];
+    const sd0 = await c.act.stage(c.owner, { commandId: cid("st"), candidateId: d });
+    await c.act.activate(c.owner, { commandId: cid("ac"), candidateId: a, digest: sa.digest });
+    const strand = async (): Promise<number> => {
+      const dying = c.make({ hook: (p) => { if (p === "afterBegin") throw new SimulatedCrash(p); } });
+      await assert.rejects(() => dying.activate(c.owner, { commandId: cid("ac"), candidateId: b, digest: sb.digest }), SimulatedCrash);
+      if (switcher === "symlink") { rmSync(join(c.root, "current")); symlinkSync(`releases/${d}`, join(c.root, "current")); } else writeFileSync(join(c.root, "current.json"), JSON.stringify({ release: d }));
+      assert.deepEqual(await c.make().recover(), { resolved: "unresolved" });
+      return (await c.act.status(c.owner)).revision;
+    };
+    let rev = await strand();
+    await refuses("forbidden", () => c.act.resolve(c.agent, { commandId: cid("rs"), action: "abort", expectedRevision: rev }));
+    await refuses("stale_revision", () => c.act.resolve(c.owner, { commandId: cid("rs"), action: "abort", expectedRevision: rev + 5 }));
+    await refuses("invalid_command", () => c.act.resolve(c.owner, { commandId: cid("rs"), action: "set-pointer", releaseId: d, expectedRevision: rev }), /one end/);
+    await refuses("invalid_command", () => c.act.resolve(c.owner, { commandId: cid("rs"), action: "nope", expectedRevision: rev } as never));
+    await refuses("invalid_transition", () => c.act.activate(c.owner, { commandId: cid("ac"), candidateId: d, digest: sd0.digest }), /in progress/);
+    await c.act.resolve(c.owner, { commandId: cid("rs"), action: "abort", expectedRevision: rev });
+    let st = await c.act.status(c.owner);
+    assert.deepEqual([st.current?.id, st.journal, pointer(c.root), st.diverged, st.history.at(-1)?.kind, st.history.at(-1)?.by], [a, undefined, a, false, "resolved", c.owner.id]);
+    await refuses("invalid_transition", () => c.act.resolve(c.owner, { commandId: cid("rs"), action: "commit", expectedRevision: st.revision }), /no open switch/);
+    rev = await strand();
+    await c.act.resolve(c.owner, { commandId: cid("rs"), action: "commit", expectedRevision: rev });
+    st = await c.act.status(c.owner);
+    assert.deepEqual([st.current?.id, st.previous?.id, st.journal, pointer(c.root), st.history.at(-1)?.kind], [b, a, undefined, b, "resolved"]);
+    // set-pointer to the old end of a stranded rollback closes it as not done.
+    const dsd = await c.act.status(c.owner);
+    assert.equal(dsd.diverged, false);
+    await c.act.rollback(c.owner, { commandId: cid("rb"), releaseId: a });
+    assert.equal((await c.act.status(c.owner)).current?.id, a);
+  });
+
+  suite("a first activation stranded with the pointer on a stray release: abort removes the pointer", async (c) => {
+    const a = await c.candidate({ "a.js": "A" }); const d = await c.candidate({ "d.js": "D" });
+    await c.act.setSettings(c.owner, { commandId: cid("se"), requireApproval: false });
+    const sa = await c.act.stage(c.owner, { commandId: cid("st"), candidateId: a });
+    const dying = c.make({ hook: (p) => { if (p === "afterBegin") throw new SimulatedCrash(p); } });
+    await assert.rejects(() => dying.activate(c.owner, { commandId: cid("ac"), candidateId: a, digest: sa.digest }), SimulatedCrash);
+    if (switcher === "symlink") symlinkSync(`releases/${d}`, join(c.root, "current")); else writeFileSync(join(c.root, "current.json"), JSON.stringify({ release: d }));
+    assert.deepEqual(await c.make().recover(), { resolved: "unresolved" });
+    const rev = (await c.act.status(c.owner)).revision;
+    await c.act.resolve(c.owner, { commandId: cid("rs"), action: "set-pointer", releaseId: a, expectedRevision: rev });
+    const st = await c.act.status(c.owner);
+    assert.deepEqual([st.current?.id, st.journal, pointer(c.root)], [a, undefined, a], "set-pointer to the new end closes it as done");
+  });
+
+  suite("a failed close of an interrupted switch is retried by the next recover (a plain error, not a crash, leaves the journal for it)", async (c) => {
+    const a = await c.candidate({ "a.js": "A" }); const b = await c.candidate({ "b.js": "B" });
+    await c.act.setSettings(c.owner, { commandId: cid("se"), requireApproval: false });
+    const [sa, sb] = [await c.act.stage(c.owner, { commandId: cid("st"), candidateId: a }), await c.act.stage(c.owner, { commandId: cid("st"), candidateId: b })];
+    await c.act.activate(c.owner, { commandId: cid("ac"), candidateId: a, digest: sa.digest });
+    const flaky = c.make({ hook: (p) => { if (p === "afterVerify") throw new Error("disk hiccup"); } });
+    await assert.rejects(() => flaky.activate(c.owner, { commandId: cid("ac"), candidateId: b, digest: sb.digest }), /disk hiccup/);
+    assert.ok((await c.act.status(c.owner)).journal !== undefined);
+    assert.deepEqual(await c.make().recover(), { resolved: "aborted" });
+    assert.deepEqual(await c.make().recover(), { resolved: "none" });
+    await c.act.activate(c.owner, { commandId: cid("ac"), candidateId: b, digest: sb.digest });
+    assert.equal(pointer(c.root), b);
+  });
+
+  suite("a staged release can be removed (record and files) unless it is current, previous or part of an open switch; keepStaged prunes the oldest on staging; owner only", async (c) => {
+    const ids: string[] = [];
+    for (const k of ["1", "2", "3", "4"]) ids.push(await c.candidate({ [`f${k}.js`]: k }));
+    await c.act.setSettings(c.owner, { commandId: cid("se"), requireApproval: false });
+    const dig: string[] = [];
+    for (const id of ids.slice(0, 3)) dig.push((await c.act.stage(c.owner, { commandId: cid("st"), candidateId: id })).digest);
+    await c.act.activate(c.owner, { commandId: cid("ac"), candidateId: ids[0]!, digest: dig[0]! });
+    await c.act.activate(c.owner, { commandId: cid("ac"), candidateId: ids[1]!, digest: dig[1]! });
+    await refuses("forbidden", () => c.act.remove(c.agent, { commandId: cid("rm"), candidateId: ids[2]! }));
+    await refuses("invalid_transition", () => c.act.remove(c.owner, { commandId: cid("rm"), candidateId: ids[1]! }), /current/);
+    await refuses("invalid_transition", () => c.act.remove(c.owner, { commandId: cid("rm"), candidateId: ids[0]! }), /rollback target/);
+    await refuses("not_found", () => c.act.remove(c.owner, { commandId: cid("rm"), candidateId: ids[3]! }));
+    assert.deepEqual(await c.act.remove(c.owner, { commandId: cid("rm"), candidateId: ids[2]! }), { candidateId: ids[2]!, removed: true });
+    assert.equal(existsSync(join(c.root, "releases", ids[2]!)), false);
+    assert.deepEqual((await c.act.status(c.owner)).staged.map((x) => x.candidateId).sort(), [ids[0]!, ids[1]!].sort());
+    // Retention: keep the newest 2, never the live ones.
+    await c.act.setSettings(c.owner, { commandId: cid("se"), keepStaged: 2 });
+    assert.equal((await c.act.settings(c.owner)).keepStaged, 2);
+    await c.act.stage(c.owner, { commandId: cid("st"), candidateId: ids[2]! });
+    const left = (await c.act.status(c.owner)).staged.map((x) => x.candidateId).sort();
+    assert.deepEqual(left, [ids[0]!, ids[1]!, ids[2]!].sort(), "the two live releases are never pruned, so three remain");
+    await c.act.stage(c.owner, { commandId: cid("st"), candidateId: ids[3]! });
+    const after = (await c.act.status(c.owner)).staged.map((x) => x.candidateId).sort();
+    assert.deepEqual(after, [ids[0]!, ids[1]!, ids[3]!].sort(), "the oldest not-live release (ids[2]) went");
+    await refuses("invalid_command", () => c.act.setSettings(c.owner, { commandId: cid("se"), keepStaged: 0 }));
+    await c.act.setSettings(c.owner, { commandId: cid("se"), keepStaged: null });
+    assert.equal((await c.act.settings(c.owner)).keepStaged, null);
+  });
+
+  suite("staging is refused when the launcher's pointer or the record names that release (a restored database); a missing candidate record is not_found at activation; the files are read-only folders on POSIX and verified at launch", async (c) => {
+    const a = await c.candidate({ "a.js": "A" });
+    // A restored database: the pointer names a release this database never staged.
+    if (switcher === "symlink") symlinkSync(`releases/${a}`, join(c.root, "current")); else writeFileSync(join(c.root, "current.json"), JSON.stringify({ release: a }));
+    await refuses("invalid_transition", () => c.act.stage(c.owner, { commandId: cid("st"), candidateId: a }), /already names/);
+    if (switcher === "symlink") rmSync(join(c.root, "current")); else rmSync(join(c.root, "current.json"));
+    const s = await c.act.stage(c.owner, { commandId: cid("st"), candidateId: a });
+    if (process.platform !== "win32") assert.equal(lstatSync(join(c.root, "releases", a)).mode & 0o222, 0, "release folders are read-only");
+    await c.act.setSettings(c.owner, { commandId: cid("se"), requireApproval: false });
+    // The candidate's record is gone: not_found, not a TypeError.
+    const rec = await c.runner.get("release-candidate", a);
+    assert.ok(rec);
+    await c.runner.command("test.drop", { commandId: cid("dr"), actor: c.owner.id }, async () => ({ payload: { a }, build: async (): Promise<Built> => ({ ref: { kind: "release-candidate", id: a }, creates: false, changes: [{ type: "delete", ref: { kind: "release-candidate", id: a }, expectedRevision: rec.revision }], detail: {} }) }));
+    await refuses("not_found", () => c.act.activate(c.owner, { commandId: cid("ac"), candidateId: a, digest: s.digest }), /candidate/);
+  });
+
+  suite("verify: the current release is checked against the manifest digest the record keeps (what the launcher checks at launch); a changed file is reported; incoming can live outside the release root", async (c) => {
+    const alt = mkdtempSync(join(tmpdir(), "nn-inc-"));
+    try {
+      const own = c.make({ incoming: alt });
+      const a = await c.candidate({ "a.js": "A" });
+      mkdirSync(join(alt, a), { recursive: true }); writeFileSync(join(alt, a, "a.js"), "A");
+      rmSync(join(c.root, "incoming"), { recursive: true, force: true });
+      await c.act.setSettings(c.owner, { commandId: cid("se"), requireApproval: false });
+      const s = await own.stage(c.owner, { commandId: cid("st"), candidateId: a });
+      assert.equal(existsSync(join(c.root, "incoming")), false, "the root's own incoming folder is not used when another is configured");
+      await own.activate(c.owner, { commandId: cid("ac"), candidateId: a, digest: s.digest });
+      const ok = await own.verify(c.owner);
+      assert.deepEqual([ok.releaseId, ok.digest, ok.ok], [a, s.digest, true]);
+      assert.deepEqual(await verifyReleaseDirectory(join(c.root, "releases", a), s.digest), []);
+      chmodSync(join(c.root, "releases", a, "a.js"), 0o644);
+      unlockAll(join(c.root, "releases", a));
+      writeFileSync(join(c.root, "releases", a, "a.js"), "EVIL");
+      const bad = await own.verify(c.owner);
+      assert.equal(bad.ok, false);
+      assert.match(bad.problems[0]!, /a\.js has a different (digest|size)/);
+      await refuses("forbidden", () => own.verify(c.agent));
+    } finally { rmSync(alt, { recursive: true, force: true }); }
   });
 }

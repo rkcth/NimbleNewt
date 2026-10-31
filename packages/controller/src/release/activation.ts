@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { constants as fsc, type Dirent } from "node:fs";
-import { chmod, lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, rm, symlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, rm, stat, symlink } from "node:fs/promises";
 import { join, sep } from "node:path";
 import { DomainError } from "../domain/errors.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
@@ -8,7 +8,7 @@ import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { canonicalJson } from "../storage/json.js";
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
-import { RELEASE_KINDS, type CandidateBody, type Cell } from "./release.js";
+import { RELEASE_KINDS, candidateIdOf, type ApprovalBody, type CandidateBody, type Cell } from "./release.js";
 
 /**
  * Release staging and activation (card K02).
@@ -17,6 +17,14 @@ import { RELEASE_KINDS, type CandidateBody, type Cell } from "./release.js";
  * the activation pointer (`current`, a relative symlink, or `current.json` where symlinks are not dependable). Staging copies each artifact the candidate's manifest names, refuses anything whose digest differs, and moves the finished
  * directory into place with one rename. Activation is a journal in the database (intent, then the switch, then the commit), so an interruption at any point resolves to the old or the new release on the next start, never to a mixture.
  * Nothing here ever writes into a release directory that exists, and the launcher and updater are not part of a release (a routine release cannot replace them).
+ *
+ * Trust model (stated plainly, not hidden):
+ * - The candidate's manifest is NOT signed. Its ID is a digest of its own content, so an ID cannot be re-pointed at other content, but anyone who can write the controller's database can submit another manifest. What stands between a
+ *   submitted manifest and a running release is the owner's word: staging shows the digest, activation needs that digest (bound to the staged directory), the candidate's approval (which is for that candidate ID, itself the digest of the manifest; activation re-derives the ID from the manifest and refuses a record that does not match), and a passing test on this platform.
+ * - The uid boundary: whoever can write to the release root's `releases/` folder as the controller's uid, or as root, can change a release after staging. Directories are made read-only (0555, files 0444) on POSIX, which stops accidents and other uids but not the owner of the files. The folder
+ *   the build writes into (`incoming`, configurable and best placed outside the release root, owned by the build's uid) is never trusted: every file is copied and re-hashed. Defence against the same uid is the digest check at activation and the launcher's own check at launch
+ *   (`verifyReleaseDirectory`, or the `release.verify` query), against the manifest digest the activation record keeps as the current release's `digest`.
+ * - An approval is not withdrawn; to stop a release being activated, remove the staged copy (`release.stage.remove`) or turn the approval requirement on and do not approve. A withdrawn state is not built.
  */
 export const ACTIVATION_LIMITS = { fileBytes: 4 * 1024 ** 3, files: 100, staged: 200, history: 20, listed: 50, entries: 2_000, chunk: 1024 * 1024 } as const;
 const CANDIDATE_ID = /^rcn-[0-9a-f]{24}$/;
@@ -36,14 +44,15 @@ const idOf = (v: unknown): string => { if (typeof v !== "string" || !CANDIDATE_I
 /** What the staged directory holds, fixed at staging: the file digests of the candidate's manifest, with sizes. Its digest is what the owner's word is bound to. */
 export interface StagedManifest { readonly candidateId: string; readonly sourceCommit: string; readonly files: Readonly<Record<string, { readonly sha256: string; readonly size: number }>> }
 export interface StagedBody { readonly candidateId: string; readonly digest: string; readonly bytes: number; readonly files: number; readonly stagedBy: string; readonly stagedAt: string }
+/** `digest` is the digest of the staged MANIFEST.json (the manifest digest) that the launcher verifies at launch. */
 export interface ReleaseRef { readonly id: string; readonly digest: string }
 export interface JournalBody { readonly kind: "activate" | "rollback"; readonly from?: ReleaseRef; readonly to: ReleaseRef; readonly by: string; readonly startedAt: string }
-export interface HistoryEntry { readonly at: string; readonly kind: "activated" | "rolled_back" | "aborted" | "recovered"; readonly by: string; readonly to?: string; readonly from?: string; readonly reason?: string }
+export interface HistoryEntry { readonly at: string; readonly kind: "activated" | "rolled_back" | "aborted" | "recovered" | "resolved"; readonly by: string; readonly to?: string; readonly from?: string; readonly reason?: string }
 export interface ActivationBody { readonly current?: ReleaseRef & { readonly at: string; readonly by: string }; readonly previous?: ReleaseRef; readonly journal?: JournalBody; readonly history: readonly HistoryEntry[]; readonly updatedAt: string }
-export interface ActivationSettingsBody { readonly requireApproval?: boolean; readonly maxStagedBytes?: number; readonly updatedBy: string; readonly updatedAt: string }
+export interface ActivationSettingsBody { readonly requireApproval?: boolean; readonly maxStagedBytes?: number; readonly keepStaged?: number; readonly updatedBy: string; readonly updatedAt: string }
 
 /** The place the launcher reads the active release from. */
-export interface Switcher { read(): Promise<string | undefined | "invalid">; write(id: string): Promise<void> }
+export interface Switcher { read(): Promise<string | undefined | "invalid">; write(id: string): Promise<void>; clear(): Promise<void> }
 
 async function syncDir(dir: string): Promise<void> {
   let fh;
@@ -66,6 +75,7 @@ export class SymlinkSwitcher implements Switcher {
     try { await rename(tmp, join(this.root, "current")); } catch (error) { await rm(tmp, { force: true }); throw error; }
     await syncDir(this.root);
   }
+  async clear(): Promise<void> { await rm(join(this.root, "current"), { force: true }); await syncDir(this.root); }
 }
 /** A pointer file replaced by rename: for systems where creating a symlink needs a privilege. */
 export class PointerSwitcher implements Switcher {
@@ -82,6 +92,63 @@ export class PointerSwitcher implements Switcher {
     try { await rename(tmp, join(this.root, "current.json")); } catch (error) { await rm(tmp, { force: true }); throw error; }
     await syncDir(this.root);
   }
+  async clear(): Promise<void> { await rm(join(this.root, "current.json"), { force: true }); await syncDir(this.root); }
+}
+
+const inflight = new Set<string>();
+const POSIX = process.platform !== "win32";
+/** Makes a staged release's folders read-only (POSIX; elsewhere modes do not mean this, and the file digests are the defence). */
+async function lockTree(dir: string): Promise<void> {
+  if (!POSIX) return;
+  for (const e of await readdir(dir, { withFileTypes: true })) if (e.isDirectory()) await lockTree(join(dir, e.name));
+  await chmod(dir, 0o555);
+}
+/** Makes the folders writable again so that the tree can be removed. */
+async function unlockTree(dir: string): Promise<void> {
+  if (!POSIX) return;
+  try { await chmod(dir, 0o700); } catch { return; }
+  let entries: Dirent[];
+  try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) if (e.isDirectory()) await unlockTree(join(dir, e.name));
+}
+async function removeTree(dir: string): Promise<void> { await unlockTree(dir); await rm(dir, { recursive: true, force: true }); }
+
+
+/** The problems found between a staged release directory and its recorded manifest digest; empty when it is exactly what was staged. Bounded by the number of files recorded. Exported so that the launcher can run the same check at launch. */
+export async function verifyReleaseDirectory(dir: string, digest: string): Promise<string[]> {
+  const problems: string[] = [];
+  let text: string;
+  try { text = await readFile(join(dir, MANIFEST_FILE), "utf8"); } catch { return [`${MANIFEST_FILE} is missing`]; }
+  if (sha256(text) !== digest) return [`${MANIFEST_FILE} is not the one that was staged`];
+  let manifest: StagedManifest;
+  try { manifest = JSON.parse(text) as StagedManifest; } catch { return [`${MANIFEST_FILE} is damaged`]; }
+  const expected = new Set(Object.keys(manifest.files));
+  // Anything in the directory that the manifest does not name is a problem (an added file could be run by the launcher).
+  const found = new Set<string>();
+  const walk = async (rel: string): Promise<void> => {
+    if (found.size > ACTIVATION_LIMITS.entries) { problems.push("too many entries"); return; }
+    let entries: Dirent[];
+    try { entries = await readdir(join(dir, rel), { withFileTypes: true }); } catch { problems.push(`${rel || "."} cannot be read`); return; }
+    for (const e of entries) {
+      const r = rel === "" ? e.name : `${rel}/${e.name}`;
+      if (e.isDirectory()) await walk(r); else found.add(r);
+    }
+  };
+  await walk("");
+  for (const f of found) if (f !== MANIFEST_FILE && !expected.has(f)) problems.push(`${f} was added`);
+  for (const [name, want] of Object.entries(manifest.files)) {
+    try {
+      const path = join(dir, ...name.split("/"));
+      const st = await lstat(path);
+      if (!st.isFile()) { problems.push(`${name} is not a plain file`); continue; }
+      if (st.size !== want.size) { problems.push(`${name} has a different size`); continue; }
+      const hash = createHash("sha256");
+      const fh = await open(path, fsc.O_RDONLY | (fsc.O_NOFOLLOW ?? 0));
+      try { const buf = Buffer.allocUnsafe(ACTIVATION_LIMITS.chunk); for (;;) { const { bytesRead } = await fh.read(buf, 0, buf.length, null); if (bytesRead === 0) break; hash.update(buf.subarray(0, bytesRead)); } } finally { await fh.close(); }
+      if (hash.digest("hex") !== want.sha256) problems.push(`${name} has a different digest`);
+    } catch { problems.push(`${name} is missing or unreadable`); }
+  }
+  return problems.slice(0, 10);
 }
 
 /** Thrown by a test hook to stand for the process dying at that point: nothing after it runs, the journal stays as it is. */
@@ -96,6 +163,10 @@ export interface ActivationOptions {
   /** Tests only: called at named points; throwing `SimulatedCrash` stops the operation there as a dying process would. */
   readonly hook?: (point: "afterBegin" | "afterVerify" | "afterSwitch") => void | Promise<void>;
   readonly runner?: RunnerOptions;
+  /** Where the build leaves artifacts (`<incoming>/<candidate>/<artifact>`). Default: `incoming` under the root; better a folder outside it, owned by the build's uid. Never trusted: files are copied and re-hashed. */
+  readonly incoming?: string;
+  /** A `.tmp-*` staging folder this process does not own is only removed when older than this (default one hour). */
+  readonly tmpStaleMs?: number;
 }
 export interface ActivationStatus {
   readonly revision: number;
@@ -107,7 +178,7 @@ export interface ActivationStatus {
   readonly diverged: boolean;
   readonly history: readonly HistoryEntry[];
   readonly staged: readonly { readonly candidateId: string; readonly digest: string; readonly stagedAt: string; readonly bytes: number }[];
-  readonly settings: { readonly requireApproval: boolean; readonly maxStagedBytes: number | null; readonly revision: number };
+  readonly settings: { readonly requireApproval: boolean; readonly maxStagedBytes: number | null; readonly keepStaged: number | null; readonly revision: number };
 }
 
 /** Settings and the staging/activation service in one place, because the settings are read inside the same checks. */
@@ -130,36 +201,40 @@ export class ReleaseActivationService {
     try { return await mine; } finally { if (this.#locks.get(key) === mine) this.#locks.delete(key); }
   }
   #dir(id: string): string { return join(this.#o.root, "releases", id); }
+  #incomingRoot(): string { return this.#o.incoming ?? join(this.#o.root, "incoming"); }
   #platform(): Pick<Cell, "os" | "arch"> { return this.#o.platform ?? { os: process.platform as Cell["os"], arch: process.arch as Cell["arch"] }; }
 
   // ---- settings ----------------------------------------------------------------------------------------------------------------------------------------------------------
 
-  async settings(owner: Principal): Promise<{ revision: number; requireApproval: boolean; maxStagedBytes: number | null; set: { requireApproval?: boolean; maxStagedBytes?: number } }> {
+  async settings(owner: Principal): Promise<{ revision: number; requireApproval: boolean; maxStagedBytes: number | null; keepStaged: number | null; set: { requireApproval?: boolean; maxStagedBytes?: number; keepStaged?: number } }> {
     strictOwner(owner, "read the release activation settings");
     const found = await this.#runner.get(SETTINGS.kind, SETTINGS.id);
     const b = found?.body as unknown as ActivationSettingsBody | undefined;
-    return { revision: found?.revision ?? 0, requireApproval: b?.requireApproval ?? true, maxStagedBytes: b?.maxStagedBytes ?? null, set: { ...(b?.requireApproval === undefined ? {} : { requireApproval: b.requireApproval }), ...(b?.maxStagedBytes === undefined ? {} : { maxStagedBytes: b.maxStagedBytes }) } };
+    return { revision: found?.revision ?? 0, requireApproval: b?.requireApproval ?? true, maxStagedBytes: b?.maxStagedBytes ?? null, keepStaged: b?.keepStaged ?? null, set: { ...(b?.requireApproval === undefined ? {} : { requireApproval: b.requireApproval }), ...(b?.maxStagedBytes === undefined ? {} : { maxStagedBytes: b.maxStagedBytes }), ...(b?.keepStaged === undefined ? {} : { keepStaged: b.keepStaged }) } };
   }
-  /** `requireApproval`: activation needs the candidate approved through `release.approve` (default on). `maxStagedBytes`: an optional cap on all staged releases together (off by default; null turns it off). */
-  async setSettings(owner: Principal, command: NoActor & { requireApproval?: unknown; maxStagedBytes?: unknown; expectedRevision?: number }): Promise<{ revision: number }> {
+  /** `requireApproval`: activation needs the candidate approved through `release.approve` (default on). `maxStagedBytes`: an optional cap on all staged releases together (off by default; null turns it off). `keepStaged`: keep only the newest N staged releases (never the current, the previous or one being switched to); off by default, null turns it off. */
+  async setSettings(owner: Principal, command: NoActor & { requireApproval?: unknown; maxStagedBytes?: unknown; keepStaged?: unknown; expectedRevision?: number }): Promise<{ revision: number }> {
     strictOwner(owner, "change the release activation settings");
-    known(command, ["commandId", "requireApproval", "maxStagedBytes", "expectedRevision"]);
-    if (command.requireApproval === undefined && command.maxStagedBytes === undefined) bad("requireApproval", "give requireApproval, maxStagedBytes or both");
+    known(command, ["commandId", "requireApproval", "maxStagedBytes", "keepStaged", "expectedRevision"]);
+    if (command.requireApproval === undefined && command.maxStagedBytes === undefined && command.keepStaged === undefined) bad("requireApproval", "give requireApproval, maxStagedBytes, keepStaged or several");
     if (command.requireApproval !== undefined && typeof command.requireApproval !== "boolean") bad("requireApproval", "must be true or false");
     const m = command.maxStagedBytes;
     if (m !== undefined && m !== null && !(typeof m === "number" && Number.isSafeInteger(m) && m >= 1)) bad("maxStagedBytes", "must be a whole number of bytes, or null for no cap");
+    const kp = command.keepStaged;
+    if (kp !== undefined && kp !== null && !(typeof kp === "number" && Number.isSafeInteger(kp) && kp >= 1 && kp <= ACTIVATION_LIMITS.staged)) bad("keepStaged", `must be a whole number from 1 to ${ACTIVATION_LIMITS.staged}, or null to keep them all`);
     wholeRev(command.expectedRevision);
     const r = await this.#runner.command("release.staging.settings.set", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
-      payload: { requireApproval: (command.requireApproval as boolean | undefined) ?? null, maxStagedBytes: m === undefined ? "keep" : (m as number | null), expectedRevision: command.expectedRevision ?? null },
+      payload: { requireApproval: (command.requireApproval as boolean | undefined) ?? null, maxStagedBytes: m === undefined ? "keep" : (m as number | null), keepStaged: kp === undefined ? "keep" : (kp as number | null), expectedRevision: command.expectedRevision ?? null },
       build: async () => {
         const current = await this.#runner.get(SETTINGS.kind, SETTINGS.id);
         if (command.expectedRevision !== undefined && (current?.revision ?? 0) !== command.expectedRevision) throw new DomainError("stale_revision", `the release settings are at revision ${current?.revision ?? 0}, not ${command.expectedRevision}`, { currentRevision: current?.revision ?? 0 });
         const before = current?.body as unknown as ActivationSettingsBody | undefined;
         const requireApproval = (command.requireApproval as boolean | undefined) ?? before?.requireApproval;
         const cap = m === undefined ? before?.maxStagedBytes : m === null ? undefined : (m as number);
-        const body: ActivationSettingsBody = { ...(requireApproval === undefined ? {} : { requireApproval }), ...(cap === undefined ? {} : { maxStagedBytes: cap }), updatedBy: owner.id, updatedAt: this.#runner.now() };
+        const keep = kp === undefined ? before?.keepStaged : kp === null ? undefined : (kp as number);
+        const body: ActivationSettingsBody = { ...(requireApproval === undefined ? {} : { requireApproval }), ...(cap === undefined ? {} : { maxStagedBytes: cap }), ...(keep === undefined ? {} : { keepStaged: keep }), updatedBy: owner.id, updatedAt: this.#runner.now() };
         const change = current === undefined ? { type: "create" as const, ref: SETTINGS, body: body as unknown as JsonObject } : { type: "update" as const, ref: SETTINGS, expectedRevision: current.revision, body: body as unknown as JsonObject };
-        return { ref: SETTINGS, creates: current === undefined, changes: [change], detail: { requireApproval: requireApproval ?? null, maxStagedBytes: cap ?? null } };
+        return { ref: SETTINGS, creates: current === undefined, changes: [change], detail: { requireApproval: requireApproval ?? null, maxStagedBytes: cap ?? null, keepStaged: keep ?? null } };
       },
     }));
     return { revision: r.revision };
@@ -182,6 +257,9 @@ export class ReleaseActivationService {
         if (check.length > 0) throw new DomainError("invalid_transition", `the staged release no longer matches its digests: ${check[0]}`);
         return { candidateId: id, digest: b.digest, bytes: b.bytes, files: b.files, replayed: true };
       }
+      // A release the launcher follows (or that the record names) is never staged again: that would replace the files it is running from (for example after the database was restored from an older copy).
+      const live = await this.#liveIds();
+      if (live.has(id) || (await this.#sw.read().catch(() => undefined)) === id) throw new DomainError("invalid_transition", "the launcher's pointer or the activation record already names this release; it cannot be staged again over the files it runs from");
       const all = await this.#runner.list(STAGED, { limit: ACTIVATION_LIMITS.staged + 1 });
       if (all.length > ACTIVATION_LIMITS.staged) throw new DomainError("invalid_transition", `${ACTIVATION_LIMITS.staged} releases are already staged; the oldest must be removed first`);
       const settings = await this.settings(owner);
@@ -191,12 +269,14 @@ export class ReleaseActivationService {
       this.#names(names);
       const releases = join(this.#o.root, "releases");
       await mkdir(releases, { recursive: true, mode: 0o700 });
-      await mkdir(join(this.#o.root, "incoming"), { recursive: true, mode: 0o700 });
-      const incoming = join(this.#o.root, "incoming", id);
+      await mkdir(this.#incomingRoot(), { recursive: true, mode: 0o700 });
+      const incoming = join(this.#incomingRoot(), id);
       let incomingReal: string;
       try { incomingReal = await realpath(incoming); } catch { throw new DomainError("not_found", `the artifacts are not in place: nothing at incoming/${id}`); }
-      if (incomingReal !== join(await realpath(join(this.#o.root, "incoming")), id)) throw new DomainError("invalid_command", "incoming/<candidate> is not a plain directory (a link is refused)");
-      const tmp = join(releases, `.tmp-${id}-${randomBytes(6).toString("hex")}`);
+      if (incomingReal !== join(await realpath(this.#incomingRoot()), id)) throw new DomainError("invalid_command", "incoming/<candidate> is not a plain directory (a link is refused)");
+      const tmpName = `.tmp-${id}-${process.pid}-${randomBytes(6).toString("hex")}`;
+      const tmp = join(releases, tmpName);
+      inflight.add(tmpName);
       await mkdir(tmp, { mode: 0o700 });
       const files: Record<string, { sha256: string; size: number }> = {};
       let bytes = 0;
@@ -214,8 +294,9 @@ export class ReleaseActivationService {
         try { await fh.writeFile(text); await fh.sync(); } finally { await fh.close(); }
         const digest = sha256(text);
         // A directory left by a run that died after the rename and before the record is not a staged release: it is replaced, never trusted.
-        await rm(this.#dir(id), { recursive: true, force: true });
+        await removeTree(this.#dir(id));
         await rename(tmp, this.#dir(id));
+        await lockTree(this.#dir(id));
         await syncDir(releases);
         const ref: AggregateRef = { kind: STAGED, id };
         const body: StagedBody = { candidateId: id, digest, bytes, files: names.length, stagedBy: owner.id, stagedAt: this.#runner.now() };
@@ -223,11 +304,12 @@ export class ReleaseActivationService {
           payload: { candidateId: id },
           build: async () => ({ ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }], detail: { candidateId: id, digest, bytes, files: names.length } }),
         }));
+        if (settings.keepStaged !== null) await this.#prune(settings.keepStaged, id).catch(() => undefined);
         return { candidateId: id, digest, bytes, files: names.length, replayed: false };
       } catch (error) {
-        await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
+        await removeTree(tmp).catch(() => undefined);
         throw error;
-      }
+      } finally { inflight.delete(tmpName); }
     });
   }
 
@@ -279,43 +361,7 @@ export class ReleaseActivationService {
     } finally { await input.close(); }
   }
 
-  /** The problems found between the staged directory and its recorded digests; empty when it is exactly what was staged. Bounded by the number of files recorded. */
-  async #verify(id: string, digest: string): Promise<string[]> {
-    const dir = this.#dir(id);
-    const problems: string[] = [];
-    let text: string;
-    try { text = await readFile(join(dir, MANIFEST_FILE), "utf8"); } catch { return [`${MANIFEST_FILE} is missing`]; }
-    if (sha256(text) !== digest) return [`${MANIFEST_FILE} is not the one that was staged`];
-    let manifest: StagedManifest;
-    try { manifest = JSON.parse(text) as StagedManifest; } catch { return [`${MANIFEST_FILE} is damaged`]; }
-    const expected = new Set(Object.keys(manifest.files));
-    // Anything in the directory that the manifest does not name is a problem (an added file could be run by the launcher).
-    const found = new Set<string>();
-    const walk = async (rel: string): Promise<void> => {
-      if (found.size > ACTIVATION_LIMITS.entries) { problems.push("too many entries"); return; }
-      let entries: Dirent[];
-      try { entries = await readdir(join(dir, rel), { withFileTypes: true }); } catch { problems.push(`${rel || "."} cannot be read`); return; }
-      for (const e of entries) {
-        const r = rel === "" ? e.name : `${rel}/${e.name}`;
-        if (e.isDirectory()) await walk(r); else found.add(r);
-      }
-    };
-    await walk("");
-    for (const f of found) if (f !== MANIFEST_FILE && !expected.has(f)) problems.push(`${f} was added`);
-    for (const [name, want] of Object.entries(manifest.files)) {
-      try {
-        const path = join(dir, ...name.split("/"));
-        const st = await lstat(path);
-        if (!st.isFile()) { problems.push(`${name} is not a plain file`); continue; }
-        if (st.size !== want.size) { problems.push(`${name} has a different size`); continue; }
-        const hash = createHash("sha256");
-        const fh = await open(path, fsc.O_RDONLY | (fsc.O_NOFOLLOW ?? 0));
-        try { const buf = Buffer.allocUnsafe(ACTIVATION_LIMITS.chunk); for (;;) { const { bytesRead } = await fh.read(buf, 0, buf.length, null); if (bytesRead === 0) break; hash.update(buf.subarray(0, bytesRead)); } } finally { await fh.close(); }
-        if (hash.digest("hex") !== want.sha256) problems.push(`${name} has a different digest`);
-      } catch { problems.push(`${name} is missing or unreadable`); }
-    }
-    return problems.slice(0, 10);
-  }
+  async #verify(id: string, digest: string): Promise<string[]> { return verifyReleaseDirectory(this.#dir(id), digest); }
 
   // ---- activation ---------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -331,10 +377,13 @@ export class ReleaseActivationService {
       if (staged === undefined) throw new DomainError("not_found", "that release is not staged");
       const sb = staged.body as unknown as StagedBody;
       if (sb.digest !== command.digest) throw new DomainError("invalid_command", "digest: is not the digest of the staged release; read it again before activating", { field: "digest" });
-      const candidate = (await this.#runner.get(RELEASE_KINDS.candidate, id))?.body as unknown as CandidateBody;
+      const candidate = (await this.#runner.get(RELEASE_KINDS.candidate, id))?.body as unknown as CandidateBody | undefined;
+      if (candidate === undefined) throw new DomainError("not_found", "no such release candidate (its record is gone); it cannot be activated");
+      // The approval and the staged files are both bound to this candidate; its ID is the digest of its manifest, so a record that no longer hashes to its ID is refused.
+      if (candidateIdOf(candidate.manifest) !== id) throw new DomainError("invalid_transition", "the candidate's record does not match its ID; it is not activated");
       const p = this.#platform();
       if (!candidate.manifest.matrix.some((c) => c.os === p.os && c.arch === p.arch)) throw new DomainError("invalid_transition", `the release was not tested for this installation's platform (${p.os}/${p.arch})`);
-      if ((await this.settings(owner)).requireApproval && (await this.#runner.get(RELEASE_KINDS.approval, id)) === undefined) throw new DomainError("invalid_transition", "the release is not approved (release.approve); the owner may switch that requirement off");
+      if ((await this.settings(owner)).requireApproval && ((await this.#runner.get(RELEASE_KINDS.approval, id))?.body as unknown as ApprovalBody | undefined)?.candidateId !== id) throw new DomainError("invalid_transition", "the release is not approved (release.approve); the owner may switch that requirement off");
       return this.#transition(owner, "activate", command.commandId, { id, digest: sb.digest }, command.expectedRevision);
     });
   }
@@ -390,7 +439,7 @@ export class ReleaseActivationService {
     const body = state!.body as unknown as ActivationBody;
     const journal = body.journal!;
     const problems = await this.#verify(journal.to.id, journal.to.digest);
-    if (problems.length > 0) { await this.#abort(by, state!.revision, body, `verification failed: ${problems[0]}`); throw new DomainError("invalid_transition", `the release was not switched to: ${problems[0]}`); }
+    if (problems.length > 0) { await this.#abort(by, state!.revision, body, `verification failed: ${problems[0]}`).catch(() => undefined); throw new DomainError("invalid_transition", `the release was not switched to: ${problems[0]}`); }
     await this.#o.hook?.("afterVerify");
     try { await this.#sw.write(journal.to.id); } catch (error) {
       await this.#abort(by, state!.revision, body, "the switch failed").catch(() => undefined);
@@ -401,27 +450,27 @@ export class ReleaseActivationService {
     return { revision: r, replayed };
   }
 
-  async #commit(by: string, rev: number, body: ActivationBody, recovered = false): Promise<number> {
+  async #commit(by: string, rev: number, body: ActivationBody, recovered = false, via?: { commandId: string; reason: string }): Promise<number> {
     const j = body.journal!;
-    const entry: HistoryEntry = { at: this.#runner.now(), kind: recovered ? "recovered" : j.kind === "activate" ? "activated" : "rolled_back", by: j.by, to: j.to.id, ...(j.from === undefined ? {} : { from: j.from.id }) };
+    const entry: HistoryEntry = { at: this.#runner.now(), kind: via !== undefined ? "resolved" : recovered ? "recovered" : j.kind === "activate" ? "activated" : "rolled_back", by: via !== undefined ? by : j.by, to: j.to.id, ...(j.from === undefined ? {} : { from: j.from.id }), ...(via === undefined ? {} : { reason: via.reason }) };
     const next: ActivationBody = {
       current: { ...j.to, at: this.#runner.now(), by: j.by },
       ...(j.kind === "activate" && j.from !== undefined ? { previous: j.from } : {}),
       history: [...body.history, entry].slice(-ACTIVATION_LIMITS.history),
       updatedAt: this.#runner.now(),
     };
-    const r = await this.#runner.command("release.switch.commit", { commandId: `release-switch-commit-${rev}`, actor: by }, async () => ({
+    const r = await this.#runner.command("release.switch.commit", { commandId: via?.commandId ?? `release-switch-commit-${rev}`, actor: by }, async () => ({
       payload: { to: j.to.id, rev },
       build: async () => ({ ref: STATE, creates: false, changes: [{ type: "update" as const, ref: STATE, expectedRevision: rev, body: next as unknown as JsonObject }], detail: { to: j.to.id, kind: j.kind } }),
     }));
     return r.revision;
   }
 
-  async #abort(by: string, rev: number, body: ActivationBody, reason: string): Promise<void> {
+  async #abort(by: string, rev: number, body: ActivationBody, reason: string, via?: { commandId: string }): Promise<void> {
     const j = body.journal!;
     const { journal: _j, ...rest } = body; void _j;
-    const next: ActivationBody = { ...rest, history: [...body.history, { at: this.#runner.now(), kind: "aborted" as const, by: j.by, to: j.to.id, reason }].slice(-ACTIVATION_LIMITS.history), updatedAt: this.#runner.now() };
-    await this.#runner.command("release.switch.abort", { commandId: `release-switch-abort-${rev}`, actor: by }, async () => ({
+    const next: ActivationBody = { ...rest, history: [...body.history, { at: this.#runner.now(), kind: via === undefined ? "aborted" as const : "resolved" as const, by: via === undefined ? j.by : by, to: j.to.id, reason }].slice(-ACTIVATION_LIMITS.history), updatedAt: this.#runner.now() };
+    await this.#runner.command("release.switch.abort", { commandId: via?.commandId ?? `release-switch-abort-${rev}`, actor: by }, async () => ({
       payload: { to: j.to.id, rev },
       build: async () => ({ ref: STATE, creates: false, changes: [{ type: "update" as const, ref: STATE, expectedRevision: rev, body: next as unknown as JsonObject }], detail: { to: j.to.id, reason } }),
     }));
@@ -445,8 +494,119 @@ export class ReleaseActivationService {
     });
   }
 
+  /** The releases that must stay: current, previous (the rollback target) and both ends of an open switch. */
+  async #liveIds(): Promise<Set<string>> {
+    const body = (await this.#runner.get(STATE.kind, STATE.id))?.body as unknown as ActivationBody | undefined;
+    return new Set([body?.current?.id, body?.previous?.id, body?.journal?.to.id, body?.journal?.from?.id].filter((v): v is string => v !== undefined));
+  }
+
+  /** Removes the oldest staged releases beyond `keep`, never a live one and never `spare`. */
+  async #prune(keep: number, spare: string): Promise<void> {
+    await this.#serial("switch", async () => {
+      const all = (await this.#runner.list(STAGED, { limit: ACTIVATION_LIMITS.staged + 1 })).map((a) => a.body as unknown as StagedBody).sort((a, b) => (a.stagedAt < b.stagedAt ? -1 : a.stagedAt > b.stagedAt ? 1 : a.candidateId < b.candidateId ? -1 : 1));
+      const live = await this.#liveIds();
+      let extra = all.length - keep;
+      for (const b of all) {
+        if (extra <= 0) break;
+        if (live.has(b.candidateId) || b.candidateId === spare) continue;
+        await this.#removeStaged(b.candidateId, `prune-${b.candidateId}-${randomBytes(4).toString("hex")}`, "system");
+        extra--;
+      }
+    });
+  }
+
+  async #removeStaged(id: string, commandId: string, actor: string): Promise<void> {
+    const ref: AggregateRef = { kind: STAGED, id };
+    await this.#runner.command("release.stage.remove", { commandId, actor }, async () => ({
+      payload: { candidateId: id },
+      build: async () => {
+        const found = await this.#runner.get(STAGED, id);
+        if (found === undefined) throw new DomainError("not_found", "that release is not staged");
+        return { ref, creates: false, changes: [{ type: "delete" as const, ref, expectedRevision: found.revision }], detail: { candidateId: id } };
+      },
+    }));
+    await removeTree(this.#dir(id));
+  }
+
+  /** Owner only. Removes a staged release (record and files) so the staging cap does not fill for good. Refused for the current release, the previous one (the rollback target) and either end of an open switch. */
+  async remove(owner: Principal, command: NoActor & { candidateId: string }): Promise<{ candidateId: string; removed: true }> {
+    strictOwner(owner, "remove a staged release");
+    known(command, ["commandId", "candidateId"]);
+    const id = idOf(command.candidateId);
+    return this.#serial("switch", async () => {
+      if ((await this.#runner.get(STAGED, id)) === undefined) throw new DomainError("not_found", "that release is not staged");
+      const live = await this.#liveIds();
+      if (live.has(id) || (await this.#sw.read().catch(() => undefined)) === id) throw new DomainError("invalid_transition", "that release is the current one, the one before it (the rollback target), part of an open switch, or what the launcher follows; it cannot be removed");
+      await this.#removeStaged(id, scopedCommandId(owner.id, command.commandId), owner.id);
+      return { candidateId: id, removed: true };
+    });
+  }
+
+  /** Owner only. Checks the current release's files (or the named staged release's) against the manifest digest the record keeps, as the launcher does at launch. */
+  async verify(owner: Principal, command: { releaseId?: string } = {}): Promise<{ releaseId: string | null; digest: string | null; ok: boolean; problems: string[] }> {
+    strictOwner(owner, "verify a release");
+    const body = (await this.#runner.get(STATE.kind, STATE.id))?.body as unknown as ActivationBody | undefined;
+    const id = command.releaseId === undefined ? body?.current?.id : idOf(command.releaseId);
+    if (id === undefined) return { releaseId: null, digest: null, ok: false, problems: ["no release is current"] };
+    const digest = body?.current?.id === id ? body.current.digest : ((await this.#runner.get(STAGED, id))?.body as unknown as StagedBody | undefined)?.digest;
+    if (digest === undefined) throw new DomainError("not_found", "that release is neither current nor staged");
+    const problems = await this.#verify(id, digest);
+    return { releaseId: id, digest, ok: problems.length === 0, problems };
+  }
+
+  /**
+   * Owner only: closes an open or interrupted switch that `recover` could not (the pointer names neither release). `commit` makes the new release current (verified first, pointer set to it); `abort` keeps the old one (pointer set back to it, or
+   * removed when there was none); `set-pointer` sets the pointer to `releaseId` (one end of the switch) and closes the switch the way that pointer says. Needs the record revision quoted; leaves a history entry and an audit record.
+   */
+  async resolve(owner: Principal, command: NoActor & { action: string; releaseId?: string; expectedRevision: number }): Promise<{ revision: number; action: string }> {
+    strictOwner(owner, "resolve a release switch");
+    known(command, ["commandId", "action", "releaseId", "expectedRevision"]);
+    if (command.action !== "commit" && command.action !== "abort" && command.action !== "set-pointer") bad("action", "must be commit, abort or set-pointer");
+    if (!Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 0) bad("expectedRevision", "is required: the activation record's revision from release.status");
+    if (command.action === "set-pointer") idOf(command.releaseId); else if (command.releaseId !== undefined) bad("releaseId", "is only for set-pointer");
+    return this.#serial("switch", async () => {
+      const state = await this.#runner.get(STATE.kind, STATE.id);
+      const body = state?.body as unknown as ActivationBody | undefined;
+      if (state === undefined || body?.journal === undefined) throw new DomainError("invalid_transition", "there is no open switch to resolve");
+      if (state.revision !== command.expectedRevision) throw new DomainError("stale_revision", `the activation record is at revision ${state.revision}, not ${command.expectedRevision}`, { currentRevision: state.revision });
+      const j = body.journal;
+      let outcome: "commit" | "abort" = command.action === "commit" ? "commit" : "abort";
+      if (command.action === "set-pointer") {
+        if (command.releaseId === j.to.id) outcome = "commit";
+        else if (command.releaseId === j.from?.id) outcome = "abort";
+        else throw new DomainError("invalid_command", "releaseId: must be one end of the open switch", { field: "releaseId" });
+      }
+      const via = { commandId: scopedCommandId(owner.id, command.commandId) };
+      if (outcome === "commit") {
+        const problems = await this.#verify(j.to.id, j.to.digest);
+        if (problems.length > 0) throw new DomainError("invalid_transition", `the new release cannot be made current: ${problems[0]}`);
+        await this.#sw.write(j.to.id);
+        const revision = await this.#commit(owner.id, state.revision, body, false, { ...via, reason: `owner resolved: ${command.action}` });
+        return { revision, action: command.action };
+      }
+      if (j.from !== undefined) {
+        const problems = await this.#verify(j.from.id, j.from.digest);
+        if (problems.length > 0) throw new DomainError("invalid_transition", `the old release cannot be kept: ${problems[0]}`);
+        await this.#sw.write(j.from.id);
+      } else await this.#sw.clear();
+      await this.#abort(owner.id, state.revision, body, `owner resolved: ${command.action}`, via);
+      return { revision: state.revision + 1, action: command.action };
+    });
+  }
+
+  /** Only leftovers are removed: a `.tmp-*` folder this process is filling now is never touched, and one owned by another process (or an older run) only once it has not been touched for the staleness window (default one hour). */
   async #sweep(): Promise<void> {
-    try { for (const e of await readdir(join(this.#o.root, "releases"))) if (e.startsWith(".tmp-")) await rm(join(this.#o.root, "releases", e), { recursive: true, force: true }); } catch { /* nothing staged yet */ }
+    const releases = join(this.#o.root, "releases");
+    const stale = this.#o.tmpStaleMs ?? 3_600_000;
+    let names: string[];
+    try { names = await readdir(releases); } catch { return; /* nothing staged yet */ }
+    for (const e of names) {
+      if (!e.startsWith(".tmp-") || inflight.has(e)) continue;
+      try {
+        const age = Date.now() - (await stat(join(releases, e))).mtimeMs;
+        if (e.includes(`-${process.pid}-`) || age >= stale) await removeTree(join(releases, e));
+      } catch { /* gone already, or not ours to judge now */ }
+    }
   }
 
   async status(owner: Principal): Promise<ActivationStatus> {
@@ -465,7 +625,7 @@ export class ReleaseActivationService {
       diverged: body?.journal === undefined && (pointer ?? null) !== (body?.current?.id ?? null),
       history: body?.history ?? [],
       staged: listed.map((a) => { const b = a.body as unknown as StagedBody; return { candidateId: b.candidateId, digest: b.digest, stagedAt: b.stagedAt, bytes: b.bytes }; }),
-      settings: { requireApproval: s.requireApproval, maxStagedBytes: s.maxStagedBytes, revision: s.revision },
+      settings: { requireApproval: s.requireApproval, maxStagedBytes: s.maxStagedBytes, keepStaged: s.keepStaged, revision: s.revision },
     };
   }
 }

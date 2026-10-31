@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -14,6 +14,7 @@ const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease:
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 type Reply = { ok: boolean; result?: any; error?: { code: string; message?: string } };
 
+const unlockAll = (dir: string): void => { try { chmodSync(dir, 0o700); for (const e of readdirSync(dir, { withFileTypes: true })) if (e.isDirectory()) unlockAll(join(dir, e.name)); } catch { /* gone */ } };
 test("release staging and activation end to end: the owner's word only, bound to digest and approval, switched on a real folder, interrupted switches resolve across restarts, chat proposes activation (card K02)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-k02-"));
   const root = join(d, "rel");
@@ -72,10 +73,12 @@ test("release staging and activation end to end: the owner's word only, bound to
 
     // Chat: stage applies at once, activate is only proposed and switches on the owner's word; the approval requirement is turned off by a proposal and on at once.
     const turn = async (id: string, text: string, intents: unknown[]) => { say[text] = intents; return (await c.chat!.submit(boot.token, { messageId: id, text })).outcomes; };
-    const needsApproval = `activate release ${two} with digest ${st2.digest}`;
+    const needsApproval = `activate release ${two}`;
     assert.ok((await owner("release.approve", { candidateId: two }, "ap2")).ok);
-    const shown = await turn("m1", needsApproval, [{ kind: "command", op: "release.activate", args: { candidateId: two, digest: st2.digest }, evidence: needsApproval, basis: "owner" }]);
+    const shown = await turn("m1", needsApproval, [{ kind: "command", op: "release.activate", args: { candidateId: two, digest: sha("an invented digest") }, evidence: needsApproval, basis: "owner" }]);
     assert.equal(shown[0]!.status, "proposed", JSON.stringify(shown));
+    assert.ok(JSON.stringify(shown[0]!.preview).includes(st2.digest), "the preview shows the digest of the staged record, filled in by the controller, not the interpreter's");
+    assert.ok(!JSON.stringify(shown[0]!.preview).includes(sha("an invented digest")));
     assert.equal(link(), `releases/${one}`, "a proposal switches nothing");
     const applied = await turn("m2", "yes, activate it", [{ kind: "apply_proposal", proposalId: shown[0]!.proposalId, evidence: "activate it", basis: "owner" }]);
     assert.equal(applied[0]!.status, "applied", JSON.stringify(applied));
@@ -89,6 +92,15 @@ test("release staging and activation end to end: the owner's word only, bound to
     const req = await turn("m4", reqText, [{ kind: "command", op: "release.approval.enable", args: {}, evidence: reqText, basis: "owner" }]);
     assert.equal(req[0]!.status, "applied", JSON.stringify(req));
     assert.equal((await owner("release.staging.settings.get", {})).result.item.requireApproval, true, "narrowing applied at once");
+
+    // Removing a staged release and closing a stranded switch are shown first, and the owner-only operations exist for them.
+    const rmText = `remove the staged release ${one}`;
+    const rmShown = await turn("m5", rmText, [{ kind: "command", op: "release.stage.remove", args: { candidateId: one }, evidence: rmText, basis: "owner" }]);
+    assert.equal(rmShown[0]!.status, "proposed", JSON.stringify(rmShown));
+    assert.equal((await call(builderToken, "release.stage.remove", { candidateId: one }, "b-rm")).error?.code, "forbidden");
+    assert.equal((await call(builderToken, "release.activation.resolve", { action: "abort", expectedRevision: 0 }, "b-rs")).error?.code, "forbidden");
+    assert.equal((await owner("release.activation.resolve", { action: "abort", expectedRevision: 0 }, "o-rs")).error?.code, "invalid_transition", "nothing to resolve");
+    assert.equal((await owner("release.verify", {})).result.ok, true);
 
     // A rollback interrupted right after the switch: the process dies; on the next start the record catches up to what the launcher already follows.
     let status = (await owner("release.status", {})).result.item;
@@ -114,10 +126,11 @@ test("release staging and activation end to end: the owner's word only, bound to
     assert.deepEqual([status.current.id, status.journal, link(), status.history.at(-1).kind], [one, undefined, `releases/${one}`, "aborted"]);
 
     // Tampering with a staged release after staging is caught at activation, with the old release still running.
+    unlockAll(join(root, "releases", two));
     chmodSync(join(root, "releases", two, "nn.js"), 0o644);
     writeFileSync(join(root, "releases", two, "nn.js"), "EVIL");
     const tampered = await owner("release.activate", { candidateId: two, digest: st2.digest }, "a10");
     assert.equal(tampered.error?.code, "invalid_transition");
     assert.equal(link(), `releases/${one}`);
-  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+  } finally { await c.close(); unlockAll(join(root, "releases")); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

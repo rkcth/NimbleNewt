@@ -1627,6 +1627,16 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `release.verify`
+
+Owner only: checks the current release's files (or a named staged release's) against the manifest digest the activation record keeps, the check the launcher makes at launch. Reports every problem found (up to 10).
+
+Arguments:
+
+- `releaseId` (optional): default: the current release
+
+Result: `{ releaseId, digest, ok, problems }`.
+
 #### `release.staging.settings.get`
 
 Owner only: whether activation needs the candidate approved (on by default), the optional cap on all staged releases together (off by default) and the revision to quote when changing them.
@@ -1635,7 +1645,7 @@ Arguments:
 
 - none
 
-Result: `{ item: { revision, requireApproval, maxStagedBytes, set } }`.
+Result: `{ item: { revision, requireApproval, maxStagedBytes, keepStaged, set } }`.
 
 #### `agenda.get`
 
@@ -4873,6 +4883,34 @@ Result: `{ revision, replayed }`.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `release.stage.remove`
+
+Owner only: removes a staged release (its record and files) so the staging cap does not fill for good. Refused for the current release, the previous one (the rollback target), either end of an open switch and whatever the launcher's pointer names.
+
+Arguments:
+
+- `candidateId`: the staged candidate
+- `commandId`: required
+
+Result: `{ candidateId, removed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `release.activation.resolve`
+
+Owner only: closes an open or interrupted switch that restart recovery could not (the launcher's pointer names neither release, so release.status shows a journal that never closes and every activation and rollback is refused). `commit` makes the new release current (verified first, pointer set to it); `abort` keeps the old one (pointer set back to it, or removed when there was none); `set-pointer` sets the pointer to `releaseId` (one end of the switch) and closes the switch the way that pointer says. Leaves a history entry and an audit record.
+
+Arguments:
+
+- `action`: commit, abort or set-pointer
+- `releaseId` (optional): for set-pointer: the release the pointer should name (the new or the old end of the switch)
+- `expectedRevision`: the `revision` of release.status (required)
+- `commandId`: required
+
+Result: `{ revision, action }`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `release.staging.settings.set`
 
 Owner only: sets whether activation needs an approved candidate (`requireApproval`) and/or the cap on staged releases in bytes (`maxStagedBytes`, null for no cap). Only the fields given change. Turning the approval requirement off widens what can be activated.
@@ -4881,6 +4919,7 @@ Arguments:
 
 - `requireApproval` (optional): true or false
 - `maxStagedBytes` (optional): whole bytes, or null for no cap
+- `keepStaged` (optional): keep only the newest N staged releases (1-200; never the current, the previous or one being switched to), or null to keep all (the default)
 - `expectedRevision` (optional): the revision you read (0 when none was set yet)
 - `commandId`: required
 

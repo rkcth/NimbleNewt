@@ -458,7 +458,7 @@ export class ChatService {
       // Every text in the command must be the owner's own words (or a record, or a fixed choice): a model cannot add content the owner never said.
       if (hasRefMarker(intent.args)) { push({ i, kind: "refused", code: "invalid_command", message: "$ref is reserved for steps the controller builds" }); continue; }
       // The reason recorded with a right is the owner's message, set by the chat. A gate is always shown to the owner first, so its kind and its (fixed) topic need not be words of the message: the wording still must be.
-      const unchecked = intent.op === "grant.create" ? ["basis"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
+      const unchecked = intent.op === "release.activate" ? ["digest"] : intent.op === "grant.create" ? ["basis"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
       const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined);
       if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: `${foreign} is not in your message, so it was not done. Say what it should be.` }); continue; }
       const landing = intent.op === "project.create" ? (intent.args["integration"] as { landing?: unknown } | undefined)?.landing : intent.args["landing"];
@@ -555,6 +555,18 @@ export class ChatService {
         if (open.length !== 1) return refuse("invalid_command", open.length === 0 ? "no release test of that candidate is running" : `${open.length} release tests of that candidate are running; give the attempt ID of the one to cancel`);
         args["attemptId"] = open[0]!.id;
       }
+    }
+    // Activation names the digest from the staged record, never from the interpreter or the owner's words (the owner sees it in the preview and the controller binds the word to it).
+    const fillNotes: string[] = [];
+    if (intent.op === "release.activate") {
+      delete args["digest"];
+      const wanted = args["candidateId"];
+      if (typeof wanted !== "string") return refuse("invalid_command", "say which staged release to activate");
+      const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "release.verify", args: { releaseId: wanted } });
+      if (!found.ok) return refuse(found.error.code, found.error.message);
+      const digest = String(found.result["digest"]);
+      args["digest"] = digest;
+      fillNotes.push(`Digest of the staged release, filled in from its record: ${digest}${found.result["ok"] === true ? "" : " (its files do not match this digest now; activation will refuse)"}`);
     }
     const labels: Record<string, string> = {};
     const pins: ChatPin[] = [];
@@ -891,7 +903,7 @@ export class ChatService {
     const raisesSpend = intent.op === "difficulty.set" ? await this.#raisesSpend(token, args) : false;
     const reasonBase = proposalReason(intent.op, args, intent.draft === true, { profile, quoted, raisesSpend, said: (intent.op !== "host.move-work" || (typeof args["hostId"] === "string" && ordersHostMove(words, args["hostId"]))) && ownerSaysMove(intent.op, args, words, ["taskId", "prerequisiteId", "projectId", "agentId"].flatMap((k) => (typeof args[k] === "string" && labels[args[k] as string] !== undefined ? [labels[args[k] as string] as string] : [])).concat(intent.op === "resource.bind" && typeof args["label"] === "string" ? [args["label"]] : []).concat(intent.op === "host.move-work" && typeof args["hostId"] === "string" ? [args["hostId"]] : []).concat(extraTargets)) });
     const reason = reasonBase ?? showFirst ?? (fromRecord ? "the location comes from an earlier binding, not from your words, so it is shown first" : undefined);
-    return { ok: true, steps, pins, labels, ...(projectId === undefined ? {} : { projectId }), ...(reason === undefined ? {} : { reason }), ...(notes.length === 0 ? {} : { notes }), args, op: intent.op };
+    return { ok: true, steps, pins, labels, ...(projectId === undefined ? {} : { projectId }), ...(reason === undefined ? {} : { reason }), ...(notes.length + fillNotes.length === 0 ? {} : { notes: [...fillNotes, ...notes] }), args, op: intent.op };
   }
 
   /**

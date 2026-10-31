@@ -90,6 +90,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // Requiring an approved candidate narrows and applies at once; dropping the requirement and any other setting change widens or is shown first (provisional, see the notes).
   "release.stage": { verb: "Stage a release", mode: "apply" },
   "release.activate": { verb: "Activate a staged release", mode: "propose" },
+  "release.stage.remove": { verb: "Remove a staged release", mode: "propose" },
+  "release.activation.resolve": { verb: "Resolve an interrupted release switch", mode: "propose" },
   "release.rollback": { verb: "Roll back to the previous release", mode: "propose" },
   "release.staging.settings.set": { verb: "Change the release staging settings", mode: "propose" },
   "release.approval.enable": { verb: "Require an approved release for activation", mode: "apply" },
