@@ -45,7 +45,7 @@ export interface IncidentPort {
 }
 export interface CatalogRetentionPort {
   retentionCandidates(by: Principal, keep: number, limit: number): Promise<{ items: { name: string; version: string; versionId: string; revision: number; ageDays: number }[]; partial: boolean }>;
-  revokedExecutables(by: Principal, olderThanDays: number, limit: number): Promise<{ items: { name: string; version: string; versionId: string; recordId: string; ageDays: number }[]; partial: boolean }>;
+  revokedExecutables(by: Principal, olderThanDays: number, limit: number): Promise<{ items: { name: string; version: string; versionId: string; recordId: string; ageDays: number; digest: string; revision: number }[]; partial: boolean }>;
   dropVersion(by: Principal, drop: { name: string; version: string; revision: number; keep: number }, holds?: (versionId: string) => Promise<readonly string[] | undefined>): Promise<{ dropped: boolean; held?: readonly string[] }>;
 }
 
@@ -250,9 +250,12 @@ export class RetentionService {
       versions = { items: free, partial: found.partial };
       if (found.partial) partial = true;
     }
-    let revoked: { items: { name: string; version: string; versionId: string; recordId: string; ageDays: number }[]; partial: boolean } | undefined;
-    if (values.revokedBytesDays !== null && this.#deps.catalog !== undefined) {
-      revoked = await this.#deps.catalog.revokedExecutables(by, values.revokedBytesDays, limit);
+    let revoked: { items: { name: string; version: string; versionId: string; recordId: string; ageDays: number; digest: string; revision: number }[]; partial: boolean } | undefined;
+    if (values.revokedBytesDays !== null && values.revokedBytesBlank && this.#deps.catalog !== undefined) {
+      const found = await this.#deps.catalog.revokedExecutables(by, values.revokedBytesDays, limit);
+      // A record something still cites (a resumable task's context or checkpoint, a dependency manifest) is not blanked.
+      const material = await RetainedMaterial.build(this.#runner.storage);
+      revoked = { items: found.items.filter((r) => material.why("desk-record", r.recordId) === undefined), partial: found.partial };
       if (revoked.partial) partial = true;
     }
     const counts = { daily: values.backupDaily, weekly: values.backupWeekly };
@@ -330,15 +333,18 @@ export class RetentionService {
   }
 
   /** Blanks the executable text of one revoked version's record (title and body gone, a marker left), guarded by the revision read now; the deletion ledger is written first so a restore of an older backup blanks it again. */
-  async #blankExecutable(by: Principal, r: { name: string; version: string; versionId: string; recordId: string }): Promise<boolean> {
+  async #blankExecutable(by: Principal, r: { name: string; version: string; versionId: string; recordId: string; digest: string; revision: number }): Promise<boolean> {
     const found = await this.#runner.get("desk-record", r.recordId);
     if (found === undefined) return false;
     const body = found.body as Record<string, unknown>;
     if (body["deleted"] !== undefined) return false;
+    // Only the content that was revoked: a record edited since the registration (new text or a new revision) is somebody's live work and stays.
+    if (typeof body["body"] !== "string" || createHash("sha256").update(body["body"]).digest("hex") !== r.digest || found.revision !== r.revision) return false;
+    // Something may cite it since the preview.
+    if ((await RetainedMaterial.build(this.#runner.storage)).why("desk-record", r.recordId) !== undefined) return false;
     const at = this.#runner.now();
     const deletionId = cmdId("rtb", r.versionId, r.recordId);
     try {
-      await this.#deps.ledger?.append({ deletionId, at, by: by.id, reason: `executable of revoked ${r.name} ${r.version}`.slice(0, 200), desk: [r.recordId], compactions: [], removed: [] });
       await this.#runner.command("retention.revoked-bytes", { commandId: cmdId("rtb", r.versionId, found.revision), actor: by.id }, async () => ({
         payload: { versionId: r.versionId, recordId: r.recordId, revision: found.revision },
         build: async (): Promise<Built> => {
@@ -349,6 +355,8 @@ export class RetentionService {
           return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: fresh.revision, body: stub as JsonObject }], detail: { rule: "revoked-bytes-days", name: r.name, version: r.version } };
         },
       }));
+      // The ledger outside the database is written once the guarded command has gone through, so a record that was left alone never has an entry that a restore of an older backup would apply to it.
+      await this.#deps.ledger?.append({ deletionId, at, by: by.id, reason: `executable of revoked ${r.name} ${r.version}`.slice(0, 200), desk: [r.recordId], compactions: [], removed: [] });
       return true;
     } catch (error) {
       if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "not_found")) return false;

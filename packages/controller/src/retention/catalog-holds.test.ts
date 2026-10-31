@@ -38,5 +38,6 @@ test("a tool version that a resumable task has parked or approved, an environmen
   assert.ok(held("toolbox.pinned-skill", "1.0.0"), "the revision an attempt is pinned to");
   assert.ok(held("toolbox.active-skill", "1.0.0"), "the active environment");
   assert.ok(held("toolbox.dep", "1.0.0"), "a dependency record of a live task");
+  assert.match(String(m.why("desk-record", "dsk-x")?.[0]), /dependency by task task-live/, "a desk record a live task's dependency manifest cites");
   for (const [name, v] of [["toolbox.old", "1.0.0"], ["toolbox.old-skill", "1.0.0"], ["toolbox.dep-done", "1.0.0"], ["read-file", "1"]] as const) assert.equal(held(name, v), undefined, `${name} ${v} is free`);
 });

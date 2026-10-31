@@ -68,6 +68,7 @@ const forbiddenWords = ["thinking", "reasoning", "chainOfThought", "thoughts", "
 export const clipText = (value: string, max: number): string => { const cut = value.slice(0, max); return value.length > max && /[\ud800-\udbff]$/.test(cut) ? cut.slice(0, -1) : cut; };
 const TIMELINE_PER_TASK = 10;
 const TIMELINE_TASKS = 25;
+const TIMELINE_SCOPE_CHECKS = 500;
 const TIMELINE_PAGES = 40;
 const statement = (value: unknown, field: string, max: number = ACTIVITY_LIMITS.statement): string => redactText(text(value, field, { min: 1, max, multiline: true }));
 const checkRef = (value: unknown, field: string): ManifestRef => {
@@ -206,6 +207,8 @@ export class ActivityService {
     const taskId = checkTaskId(command.taskId);
     const task = await this.#task(taskId);
     await this.#mayRead(by, task.projectId, taskId);
+    // An explanation is stored on the task: reading it is not enough, the caller needs the right to add to its activity (as for a correction).
+    if (!(by.kind === "owner" || by.kind === "host" || by.kind === "service" || allows(by, "history.append", task.projectId, { resource: { kind: "task", id: taskId } }) || allows(by, "attempt.work", task.projectId, { resource: { kind: "task", id: taskId } }))) throw new DomainError("forbidden", `${by.id} may not add an explanation to that task`);
     const { step, gone } = await this.#stepView(taskId, command.seq);
     const earlier = await this.#explanationsFor(taskId, command.seq);
     let body: ExplanationBody;
@@ -312,7 +315,18 @@ export class ActivityService {
     // A head from before `lastAt` existed sorts last.
     heads.sort((a, b) => ((b.head.lastAt ?? "") < (a.head.lastAt ?? "") ? -1 : (b.head.lastAt ?? "") > (a.head.lastAt ?? "") ? 1 : a.id < b.id ? -1 : 1));
     if (heads.length > TIMELINE_TASKS) truncated = true;
-    for (const { id, head } of heads.slice(0, TIMELINE_TASKS)) {
+    // The same reading scope as `steps`: a reviewer sees only the tasks it was asked to review, whatever its project-wide `history.read` says. The tasks are checked in recency order until enough are accepted (bounded).
+    const mine: { id: string; head: HeadBody }[] = [];
+    let checks = 0;
+    for (const h of heads) {
+      if (mine.length >= TIMELINE_TASKS) break;
+      if (!(by.kind === "owner" || by.kind === "service")) {
+        if (checks++ >= TIMELINE_SCOPE_CHECKS) { truncated = true; break; }
+        try { await this.#mayRead(by, projectId, h.id); } catch (error) { if (error instanceof DomainError && error.code === "not_found") continue; throw error; }
+      }
+      mine.push(h);
+    }
+    for (const { id, head } of mine) {
       if (sinceMs !== undefined && head.lastAt !== undefined && Date.parse(head.lastAt) < sinceMs) continue;
       for (let seq = Math.max(1, head.next - TIMELINE_PER_TASK); seq < head.next; seq++) {
         const { step, gone } = await this.#stepView(id, seq, head);

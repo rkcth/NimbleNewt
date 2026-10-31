@@ -496,10 +496,10 @@ export class CatalogService {
    * Revoked versions whose executable text retention may blank (card T02c): revoked at least `olderThanDays` ago, with an executable that is not also the text of a version that is not revoked. The version record,
    * its digest and the revocation stay. Bounded by `limit`; `partial` says more exist or a scan stopped (then nothing is blanked on a guess).
    */
-  async revokedExecutables(by: Principal, olderThanDays: number, limit: number): Promise<{ items: { name: string; version: string; versionId: string; recordId: string; ageDays: number }[]; partial: boolean }> {
+  async revokedExecutables(by: Principal, olderThanDays: number, limit: number): Promise<{ items: { name: string; version: string; versionId: string; recordId: string; ageDays: number; digest: string; revision: number }[]; partial: boolean }> {
     if (by.kind !== "owner" && by.kind !== "service" && by.kind !== "host") throw new DomainError("forbidden", `${by.id} may not read what retention would blank`);
     const now = Date.parse(this.#runner.now());
-    const found: { name: string; version: string; versionId: string; recordId: string; ageDays: number }[] = [];
+    const found: { name: string; version: string; versionId: string; recordId: string; ageDays: number; digest: string; revision: number }[] = [];
     const revokedOf = new Map<string, readonly string[]>();
     let partial = false; let scanned = 0;
     for (let after: string | undefined; ;) {
@@ -515,10 +515,13 @@ export class CatalogService {
           if (at === undefined || body?.executable === undefined) continue;
           const days = Math.floor((now - Date.parse(at)) / 86_400_000);
           if (!(days >= olderThanDays)) continue;
-          const record = (await this.#runner.get("desk-record", body.executable.recordId))?.body as unknown as { deleted?: unknown } | undefined;
-          if (record === undefined || record.deleted !== undefined) continue;
+          const live = await this.#runner.get("desk-record", body.executable.recordId);
+          const record = live?.body as unknown as { deleted?: unknown; body?: unknown } | undefined;
+          if (live === undefined || record === undefined || record.deleted !== undefined) continue;
+          // The record may be an agent's live desk record that was only the source of the registration and has been edited since: only a record still exactly as registered (same text, same revision) is the revoked content.
+          if (typeof record.body !== "string" || sha(record.body) !== body.executable.digest || live.revision !== body.executable.revision) continue;
           if (found.length >= limit) { partial = true; continue; }
-          found.push({ name: e.name, version: v, versionId: id, recordId: body.executable.recordId, ageDays: days });
+          found.push({ name: e.name, version: v, versionId: id, recordId: body.executable.recordId, ageDays: days, digest: body.executable.digest, revision: body.executable.revision });
         }
       }
       if (page.length < 200) break;

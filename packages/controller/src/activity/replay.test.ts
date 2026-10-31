@@ -43,7 +43,7 @@ for (const backend of backends) {
       const task = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "one" })).id;
       const foreign = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: elsewhere, title: "other" })).id;
       const worker = await make("ann", [{ action: "attempt.work", project }]);
-      const auditor = await make("aud", [{ action: "history.read", project }]);
+      const auditor = await make("aud", [{ action: "history.read", project }, { action: "history.append", project }]);
       const stranger = await make("zed", [{ action: "task.read", project }]);
       const deep = await make("dee", [{ action: "history.read", project }, { action: "history.sensitive.read", project }]);
       const svc = ActivityService.withEpoch(world.storage, projects.epoch, options);

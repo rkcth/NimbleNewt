@@ -69,6 +69,14 @@ for (const backend of backends) {
       assert.equal(((await replay.step(reviewer, assignedTask, 2, { withContent: true })).step.content as { readable?: boolean }).readable, false);
       assert.equal((await guarded.payload(deep, assignedTask, 2))!.text, "secret tool output");
       assert.equal((await guarded.payload(owner, otherTask, 2))!.text, "secret tool output");
+      // The project timeline has the same scope: a reviewer sees the steps of the assigned task only; a director, the owner and a plain reader of the project see all.
+      const tlTasks = async (who: Principal): Promise<string[]> => [...new Set((await guarded.timeline(who, project, { limit: 100 })).steps.map((x) => x.taskId))].sort();
+      assert.deepEqual(await tlTasks(reviewer), [assignedTask]);
+      assert.deepEqual(await tlTasks(director), [assignedTask, otherTask].sort());
+      assert.deepEqual(await tlTasks(owner), [assignedTask, otherTask].sort());
+      // Asking for an explanation after the fact writes to the task: reading it (even as its assigned reviewer) is not enough.
+      await refuses("forbidden", () => guarded.explainLater(reviewer, { commandId: cid("l"), taskId: assignedTask, seq: 1 }));
+      assert.ok((await guarded.explainLater(worker, { commandId: cid("l"), taskId: assignedTask, seq: 1 })).explanation !== undefined);
       // A director signs off for the project as a whole: the project-wide read stays. A reviewer with no assignment source at all reads nothing (fail closed, as for submissions).
       assert.equal((await replay.open(director, otherTask)).entries.length, 2);
       const noSource = ActivityService.withEpoch(world.storage, projects.epoch, { ...options, roles: async () => ["reviewer"] });

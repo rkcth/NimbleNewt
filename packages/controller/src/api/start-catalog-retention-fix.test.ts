@@ -125,7 +125,9 @@ test("revoked versions keep their record and digest; the executable text is blan
   try {
     const name = await publish(["1.0.0", "1.1.0"]);
     assert.equal((await call(boot, "retention.settings.get", {})).result.item.effective.revokedBytesDays, 90);
+    assert.equal((await call(boot, "retention.settings.get", {})).result.item.effective.revokedBytesBlank, false, "the blanking switch is off by default");
     await s.catalog.revoke(rob, { commandId: "rv", name, version: "1.0.0", reason: "bad" });
+    assert.ok((await call(boot, "retention.settings.set", { revokedBytesBlank: true }, "s-on0")).ok);
     const fresh = (await call(boot, "retention.run", { dryRun: true }, "p0")).result;
     assert.deepEqual(fresh.revokedBytes.candidates, [], "a revocation made now is not old enough");
     const ageDays = async (days: number): Promise<void> => {
@@ -136,10 +138,13 @@ test("revoked versions keep their record and digest; the executable text is blan
     await ageDays(100);
     const preview = (await call(boot, "retention.run", { dryRun: true }, "p1")).result;
     assert.deepEqual(preview.revokedBytes.candidates.map((x: any) => x.version), ["1.0.0"]);
+    // The switch is off by default: nothing is a candidate until the owner turns it on.
+    assert.ok((await call(boot, "retention.settings.set", { revokedBytesBlank: false }, "s-off0")).ok);
+    assert.equal((await call(boot, "retention.run", { dryRun: true }, "p1b")).result.revokedBytes, undefined, "nothing is a candidate while the switch is off");
     // Disabled: nothing.
-    assert.ok((await call(boot, "retention.settings.set", { revokedBytesDays: null }, "s-off")).ok);
+    assert.ok((await call(boot, "retention.settings.set", { revokedBytesDays: null, revokedBytesBlank: true }, "s-off")).ok);
     assert.equal((await call(boot, "retention.run", { dryRun: true }, "p2")).result.revokedBytes, undefined);
-    assert.ok((await call(boot, "retention.settings.set", { revokedBytesDays: "default" }, "s-on")).ok);
+    assert.ok((await call(boot, "retention.settings.set", { revokedBytesDays: "default", revokedBytesBlank: true }, "s-on")).ok);
     const p3 = (await call(boot, "retention.run", { dryRun: true }, "p3")).result;
     const ran = await call(boot, "retention.run", { dryRun: false, confirm: p3.digest }, "r1");
     assert.ok(ran.ok, JSON.stringify(ran));
@@ -160,6 +165,33 @@ test("revoked versions keep their record and digest; the executable text is blan
     for (const r of rows) await c.storage.applyOperation({ operationId: `age2-${r.id}-${nowMs++}`, epoch: c.epoch, actor: "test", correlationId: "age", at: new Date().toISOString(), changes: [{ type: "update", ref: { kind: "catalog-revocation", id: r.id }, expectedRevision: r.revision, body: { ...(r.body as object), at: new Date(Date.now() - 200 * 86_400_000).toISOString() } as never }], audit: [{ type: "test.age", detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] });
     const p4 = (await call(boot, "retention.run", { dryRun: true }, "p4")).result;
     assert.deepEqual(p4.revokedBytes.candidates, [], "the text the live 1.1.0 uses stays");
+  } finally { await c.close(); cleanup(d); }
+});
+
+test("a record that was the source of a registration and has changed since (a new revision) is not blanked when the version is revoked; a cited one is not either (card T02c re-review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-catfx-"));
+  const { c, s, boot, rob, ann, call, project, note } = await world(d);
+  try {
+    const code = await note("code to ship");
+    const readme = await note("readme");
+    await s.catalog.register(ann, { commandId: "reg-a", name: "edited", kind: "tool", version: "1.0.0", manifest, instructionsRecordId: readme, executableRecordId: code } as never);
+    // The agent keeps working in the same record.
+    const cur = await s.desks.read(ann, code);
+    await s.desks.revise(ann, { commandId: "rev-1", recordId: code, expectedRevision: cur.revision, status: "superseded" } as never);
+    const name = (await s.catalog.list(rob)).find((x) => x.name.endsWith("edited"))!.name;
+    await s.catalog.revoke(rob, { commandId: "rv", name, version: "1.0.0", reason: "bad" });
+    const row = (await c.storage.listAggregates("catalog-revocation", { limit: 10 }))[0]!;
+    await c.storage.applyOperation({ operationId: "age-x", epoch: c.epoch, actor: "test", correlationId: "age", at: new Date().toISOString(), changes: [{ type: "update", ref: { kind: "catalog-revocation", id: row.id }, expectedRevision: row.revision, body: { ...(row.body as object), at: "2020-01-01T00:00:00.000Z" } as never }], audit: [{ type: "test.age", detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] });
+    assert.ok((await call(boot, "retention.settings.set", { revokedBytesBlank: true }, "on")).ok);
+    const pre = (await call(boot, "retention.run", { dryRun: true }, "p1")).result;
+    assert.deepEqual(pre.revokedBytes.candidates, [], "an edited record is not the revoked content");
+    const ran = await call(boot, "retention.run", { dryRun: false, confirm: pre.digest }, "r1");
+    assert.ok(ran.ok, JSON.stringify(ran));
+    const after = (await c.storage.getAggregate({ kind: "desk-record", id: code }))!;
+    assert.equal((after.body as unknown as { body: string }).body, "code to ship", "the record keeps its text");
+    assert.ok(after.revision > cur.revision);
+    assert.equal((after.body as unknown as { deleted?: unknown }).deleted, undefined);
+    void project;
   } finally { await c.close(); cleanup(d); }
 });
 

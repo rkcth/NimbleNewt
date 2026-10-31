@@ -29,6 +29,8 @@ export interface RetentionValues {
   readonly catalogAutoDrop: boolean;
   /** A revoked version keeps its record (name, version, digest, manifest, why and when it was revoked) for good; its executable text is blanked this many days after the revocation, unless another live version uses the same text. `null`: keep it. */
   readonly revokedBytesDays: number | null;
+  /** The switch for that blanking (default off): `revokedBytesDays` applies only when this is true. Blanking edits a desk record, so it is something the owner turns on. */
+  readonly revokedBytesBlank: boolean;
   /** Optional storage quotas in bytes of records written (desk records, notes, summaries, artifacts): per project and per agent. `null`: no quota. */
   readonly quotaProjectBytes: number | null;
   readonly quotaAgentBytes: number | null;
@@ -39,7 +41,7 @@ export interface RetentionValues {
 }
 
 export const RETENTION_DEFAULTS: RetentionValues = {
-  derivedDays: null, autoRun: false, thinkingDays: 14, backupDaily: 7, backupWeekly: 4, incidentArchiveDays: null, incidentPurgeDays: null, catalogVersionsKept: null, catalogAutoDrop: false, revokedBytesDays: 90,
+  derivedDays: null, autoRun: false, thinkingDays: 14, backupDaily: 7, backupWeekly: 4, incidentArchiveDays: null, incidentPurgeDays: null, catalogVersionsKept: null, catalogAutoDrop: false, revokedBytesDays: 90, revokedBytesBlank: false,
   quotaProjectBytes: null, quotaAgentBytes: null, quotaWarnPercent: 80, reserveBytes: 16 * 1024 * 1024,
 };
 
@@ -56,6 +58,7 @@ export const RETENTION_FIELDS: Readonly<Record<keyof RetentionValues, Spec>> = {
   catalogVersionsKept: { kind: "count", min: 1, max: 500, nullable: true },
   catalogAutoDrop: { kind: "flag", min: 0, max: 1, nullable: false },
   revokedBytesDays: { kind: "days", min: 7, max: 3650, nullable: true },
+  revokedBytesBlank: { kind: "flag", min: 0, max: 1, nullable: false },
   quotaProjectBytes: { kind: "bytes", min: 1024, max: 2 ** 50, nullable: true },
   quotaAgentBytes: { kind: "bytes", min: 1024, max: 2 ** 50, nullable: true },
   quotaWarnPercent: { kind: "percent", min: 50, max: 99, nullable: false },

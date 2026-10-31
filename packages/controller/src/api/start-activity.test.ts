@@ -39,7 +39,8 @@ test("activity steps, explanations, corrections and unavailable ranges work thro
     const ex = { taskId: task, seq: 1, choice: "run the unit tests first", alternatives: [{ option: "run everything", whyNot: "too slow" }], evidence: [{ statement: "unit tests cover the change" }], uncertainty: "integration may differ" };
     assert.ok((await call(ann, "activity.explain", ex, "x1")).ok);
     assert.equal((await call(ann, "activity.explain", { ...ex, reasoning: "let me think" }, "x2")).error.code, "invalid_command");
-    const later = await call(aud, "activity.explain-later", { taskId: task, seq: 1 }, "l1");
+    assert.equal((await call(aud, "activity.explain-later", { taskId: task, seq: 1 }, "l0")).error.code, "forbidden", "a reader of the history cannot add an explanation");
+    const later = await call(ann, "activity.explain-later", { taskId: task, seq: 1 }, "l1");
     assert.deepEqual([later.result.explanation.mode, later.result.explanation.grounded], ["retrospective", true]);
     assert.equal((await call(aud, "activity.explanations", { taskId: task, seq: 1 })).result.items.length, 1);
 
@@ -90,7 +91,8 @@ test("replay through the state API: a task credential replays its own task only,
     // Its own task: allowed. A sibling task of the same project: forbidden, for every replay read and the raw reads.
     assert.ok((await call(cred, "activity.replay.open", { taskId: mine })).ok);
     assert.ok((await call(cred, "activity.replay.step", { taskId: mine, seq: 1 })).ok);
-    for (const [op, args] of [["activity.replay.open", {}], ["activity.replay.step", { seq: 1 }], ["activity.replay.led", { seq: 1 }], ["activity.replay.search", { query: "note" }], ["activity.replay.export", {}], ["activity.steps", {}], ["activity.payload", { seq: 1 }]] as [string, Record<string, unknown>][]) {
+    assert.ok((await call(cred, "activity.explanations", { taskId: mine })).ok);
+    for (const [op, args] of [["activity.replay.open", {}], ["activity.replay.step", { seq: 1 }], ["activity.replay.led", { seq: 1 }], ["activity.replay.search", { query: "note" }], ["activity.replay.export", {}], ["activity.steps", {}], ["activity.payload", { seq: 1 }], ["activity.explanations", {}], ["activity.corrections", { seq: 1 }], ["activity.explain-later", { seq: 1 }]] as [string, Record<string, unknown>][]) {
       assert.equal((await call(cred, op, { taskId: sibling, ...args })).error?.code, "forbidden", op);
     }
     assert.ok((await call(boot.token, "activity.replay.open", { taskId: sibling })).ok, "the owner replays any task");

@@ -115,7 +115,10 @@ export class RetainedMaterial {
     await scan("dependency-manifest", (a) => {
       const b = a.body as { taskId?: unknown; entries?: { kind?: unknown; key?: unknown }[] };
       if (!live(b.taskId)) return;
-      for (const e of Array.isArray(b.entries) ? b.entries : []) if (e?.kind === "tool-version" && typeof e.key === "string") out.#add("catalog-version", e.key, `recorded as a dependency by task ${b.taskId}, which can still resume`);
+      for (const e of Array.isArray(b.entries) ? b.entries : []) {
+        if (e?.kind === "tool-version" && typeof e.key === "string") out.#add("catalog-version", e.key, `recorded as a dependency by task ${b.taskId}, which can still resume`);
+        if ((e?.kind === "record" || e?.kind === "decision") && typeof e.key === "string") out.#add("desk-record", e.key, `recorded as a dependency by task ${b.taskId}, which can still resume`);
+      }
     });
     return out;
   }
