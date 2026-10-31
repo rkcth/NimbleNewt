@@ -117,7 +117,7 @@ export interface MaintenanceBody {
   readonly revoke?: { readonly by: string; readonly at: string; readonly reason: string };
   readonly revertEffect?: JsonObject; readonly revokedAt?: string;
 }
-interface SettingsBody { readonly requests?: boolean; readonly bosses?: boolean; readonly rules?: boolean; readonly bossKinds?: readonly MaintenanceKind[]; readonly leaseMinutes?: number; readonly requestsPerDay?: number; /** Further numbers the owner may set (0 = switched off where that makes sense, absent = the default): see `LIMIT_SETTINGS`. */ readonly limits?: Readonly<Record<string, number>>; readonly sites?: Readonly<Record<string, SiteRule>>; readonly catalogue?: readonly CatalogueEntry[]; readonly updatedBy: string; readonly updatedAt: string }
+interface SettingsBody { readonly requests?: boolean; readonly bosses?: boolean; readonly rules?: boolean; readonly bossKinds?: readonly MaintenanceKind[]; readonly leaseMinutes?: number; readonly requestsPerDay?: number; /** Further numbers the owner may set (0 = switched off where that makes sense, absent = the default): see `LIMIT_SETTINGS`. */ readonly limits?: Readonly<Record<string, number>>; /** The record was created by the service at start (revision 1 is not an owner's write): the revisions the owner sees count from there. */ readonly base?: true; readonly sites?: Readonly<Record<string, SiteRule>>; readonly catalogue?: readonly CatalogueEntry[]; readonly updatedBy: string; readonly updatedAt: string }
 export interface CatalogueEntry { readonly name: string; readonly version: string; readonly digest: string; readonly source: string; readonly installScripts?: boolean }
 export interface MaintenanceEffective { readonly requests: boolean; readonly bosses: boolean; readonly rules: boolean; readonly bossKinds: readonly MaintenanceKind[]; readonly leaseMs: number; /** Requests per agent per day; undefined = no cap (the default). */ readonly requestsPerDay: number | undefined; /** Requests of one agent waiting at once; undefined = no cap. Default 20. */ readonly pendingPerAgent: number | undefined; readonly attempts: number; /** An application that runs longer is marked uncertain and verified/reverted; undefined = no timeout. Default 60 minutes. */ readonly applyTimeoutMs: number | undefined; /** How long a controller shutdown waits for running applications; undefined = until they end. Default 30 seconds. */ readonly closeWaitMs: number | undefined; readonly maxApplies: number; readonly tickMs: number }
 
@@ -176,6 +176,9 @@ function limitsOf(body: SettingsBody | undefined): Pick<MaintenanceEffective, "r
   const perDay = body?.requestsPerDay;
   return { requestsPerDay: perDay === undefined || perDay === 0 ? undefined : perDay, pendingPerAgent: get("pendingPerAgent"), attempts: get("attempts")!, applyTimeoutMs: (get("applyTimeoutMinutes") ?? 0) * 60_000 || undefined, closeWaitMs: (get("closeWaitSeconds") ?? 0) * 1000 || undefined, maxApplies: get("maxApplies")!, tickMs: get("tickSeconds")! * 1000 };
 }
+
+/** The revision of the settings as the owner sees it: a record the service created at start does not count (an owner who has never written reads 0). */
+const seenRevision = (found: Aggregate | undefined): number => (found === undefined ? 0 : found.revision - ((found.body as unknown as SettingsBody).base === true ? 1 : 0));
 
 export class MaintenanceService {
   readonly #runner: CommandRunner;
@@ -265,7 +268,7 @@ export class MaintenanceService {
     const s = await this.#settings();
     if (!s.readable) throw new DomainError("integrity", "the maintenance settings record cannot be read");
     const { updatedBy: _a, updatedAt: _b, ...set } = s.body ?? ({} as SettingsBody);
-    return { revision: s.found?.revision ?? 0, set, effective: s.eff, profile: await this.#profile() };
+    return { revision: seenRevision(s.found), set, effective: s.eff, profile: await this.#profile() };
   }
 
   #view(id: string, b: MaintenanceBody): MaintenanceView { return { id, agentId: b.agentId, kind: b.kind, class: b.class, spec: b.spec, specDigest: b.specDigest, ...(b.rollbackPlan === undefined ? {} : { rollbackPlan: b.rollbackPlan }) }; }
@@ -610,7 +613,7 @@ export class MaintenanceService {
     const timer = beat > 0 ? setInterval(() => { if (timeoutMs === undefined || Date.now() - started < timeoutMs) void this.#renew(claimed.id, token).catch(() => undefined); }, beat) : undefined;
     timer?.unref();
     let limit: ReturnType<typeof setTimeout> | undefined;
-    const timedOut = timeoutMs === undefined ? undefined : new Promise<Out>((resolve) => { limit = setTimeout(() => resolve({ outcome: "uncertain", reason: `the applier did not answer within ${Math.round(timeoutMs / 60_000)} minutes; the state is unknown` }), timeoutMs); });
+    const timedOut = timeoutMs === undefined ? undefined : new Promise<Out>((resolve) => { limit = setTimeout(() => resolve({ outcome: "uncertain", reason: `the applier did not answer within ${Math.round(timeoutMs / 60_000)} minutes; the state is unknown` }), timeoutMs); limit.unref(); });
     try { const run = this.#applier.apply(this.#view(claimed.id, b)); out = await (timedOut === undefined ? run : Promise.race([run, timedOut])); run.catch(() => undefined); } catch (e) { out = { outcome: "uncertain", reason: `the applier threw; the state is unknown: ${redactText(String((e as Error).message ?? e)).slice(0, 150)}` }; } finally { if (timer !== undefined) clearInterval(timer); if (limit !== undefined) clearTimeout(limit); }
     for (let i = 0; i < 6; i++) {
       const found = await this.#runner.get(REQ, claimed.id);
@@ -730,13 +733,16 @@ export class MaintenanceService {
   /** The loop period the owner set (default 30 seconds). */
   async tickMs(): Promise<number> { return (await this.#settings()).eff.tickMs; }
 
-  /** Creates the settings record when there is none, so that every claim is checked against a settings revision from the start (a first settings write cannot slip in between a standing check and a claim). */
+  /**
+   * Creates the settings record when there is none, so that every claim is checked against a settings revision from the start (a first settings write cannot slip in between a standing check and a claim). The record is
+   * marked `base`, and the owner's revision numbers do not count it.
+   */
   async ensureSettings(): Promise<void> {
     if ((await this.#runner.get(SETTINGS.kind, SETTINGS.id)) !== undefined) return;
     try {
       await this.#runner.command("maintenance.settings.init", { commandId: "maintenance-settings-init", actor: "system" }, async () => ({
         payload: {},
-        build: async (): Promise<Built> => ({ ref: SETTINGS, creates: true, changes: [{ type: "create", ref: SETTINGS, body: { updatedBy: "system", updatedAt: this.#runner.now() } }], detail: {} }),
+        build: async (): Promise<Built> => ({ ref: SETTINGS, creates: true, changes: [{ type: "create", ref: SETTINGS, body: { base: true, updatedBy: "system", updatedAt: this.#runner.now() } }], detail: {} }),
       }));
     } catch (error) { if (!(error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict"))) throw error; }
   }
@@ -765,8 +771,8 @@ export class MaintenanceService {
       payload: { ...payload, expectedRevision: expectedRevision ?? null },
       build: async (): Promise<Built> => {
         const current = await this.#runner.get(SETTINGS.kind, SETTINGS.id);
-        if (expectedRevision !== undefined && (current?.revision ?? 0) !== expectedRevision) throw new DomainError("stale_revision", `the maintenance settings are at revision ${current?.revision ?? 0}, not ${expectedRevision}`, { currentRevision: current?.revision ?? 0 });
-        const next = { ...mutate(current?.body as unknown as SettingsBody | undefined), updatedBy: owner.id, updatedAt: this.#runner.now() } as unknown as JsonObject;
+        if (expectedRevision !== undefined && seenRevision(current) !== expectedRevision) throw new DomainError("stale_revision", `the maintenance settings are at revision ${seenRevision(current)}, not ${expectedRevision}`, { currentRevision: current?.revision ?? 0 });
+        const next = { ...mutate(current?.body as unknown as SettingsBody | undefined), ...((current?.body as unknown as SettingsBody | undefined)?.base === true ? { base: true } : {}), updatedBy: owner.id, updatedAt: this.#runner.now() } as unknown as JsonObject;
         const change: Change = current === undefined ? { type: "create", ref: SETTINGS, body: next } : { type: "update", ref: SETTINGS, expectedRevision: current.revision, body: next };
         return { ref: SETTINGS, creates: current === undefined, changes: [change], detail: { ...payload } , contention: async () => new DomainError("stale_revision", "the maintenance settings changed at the same moment; ask again") };
       },
@@ -774,7 +780,7 @@ export class MaintenanceService {
     // A narrowing counts for what is already waiting or approved: the write only marks the work and the dispatcher loop's tick (or a background tick started now, after the answer) looks at it again, bounded per tick.
     this.#dirty = true;
     this.background(this.tick());
-    return { revision: result.revision };
+    return { revision: result.revision - (((await this.#runner.get(SETTINGS.kind, SETTINGS.id))?.body as unknown as SettingsBody | undefined)?.base === true ? 1 : 0) };
   }
 
   /** Full form: `requests`, `bosses`, `rules` (true, false, or null for the profile's default), `sites` ({ site: "allow" | "deny" | null }), `catalogueAdd` and `catalogueRemove`. */

@@ -271,7 +271,7 @@ test("the settings are the owner's alone, race-safe and replay-safe, and the cha
   try {
     const ann = await w.agent("Ann");
     const get = async () => (await call(w.owner, "maintenance.settings.get", {})).result.item;
-    assert.deepEqual([(await get()).revision, (await get()).profile, (await get()).effective], [0, "strict", { requests: true, bosses: false, rules: true, bossKinds: [], leaseMs: 1_800_000, requestsPerDay: 200 }]);
+    assert.deepEqual([(await get()).revision, (await get()).profile, (await get()).effective], [0, "strict", { requests: true, bosses: false, rules: true, bossKinds: [], leaseMs: 1_800_000, pendingPerAgent: 20, attempts: 5, applyTimeoutMs: 3_600_000, closeWaitMs: 30_000, maxApplies: 4, tickMs: 30_000 }]);
     assert.equal((await call(ann.token, "maintenance.settings.get", {})).error?.code, "forbidden");
     for (const [op, args] of [["maintenance.settings.set", { rules: false }], ["maintenance.settings.enable", { what: "all" }], ["maintenance.settings.disable", { what: "all" }], ["maintenance.site.set", { site: "a.org", rule: "allow" }], ["maintenance.catalogue.add", { name: "x", version: "1", digest: D("a") }], ["maintenance.catalogue.remove", { name: "x", version: "1", digest: D("a") }], ["maintenance.apply", { maintenanceId: "mnt-x" }]] as const) {
       assert.equal((await call(ann.token, op, args as never, cid("o"))).error?.code, "forbidden", `${op}: owner only`);
@@ -288,7 +288,7 @@ test("the settings are the owner's alone, race-safe and replay-safe, and the cha
     assert.deepEqual([r1.ok, r2.ok].sort(), [false, true]);
     assert.equal([r1, r2].find((r) => !r.ok)!.error!.code, "stale_revision");
     assert.ok((await call(w.owner, "maintenance.settings.set", { requests: null, bosses: null, rules: null }, "s5")).ok);
-    assert.deepEqual((await get()).effective, { requests: true, bosses: false, rules: true, bossKinds: [], leaseMs: 1_800_000, requestsPerDay: 200 }, "null returns a field to the profile's default");
+    assert.deepEqual((await get()).effective, { requests: true, bosses: false, rules: true, bossKinds: [], leaseMs: 1_800_000, pendingPerAgent: 20, attempts: 5, applyTimeoutMs: 3_600_000, closeWaitMs: 30_000, maxApplies: 4, tickMs: 30_000 }, "null returns a field to the profile's default");
     // requests off: agents cannot ask, the owner still can for them
     assert.ok((await call(w.owner, "maintenance.settings.disable", { what: "requests" }, cid("c"))).ok);
     assert.equal((await call(ann.token, "maintenance.request", { kind: "skill", spec: { name: "s1", digest: D("1") }, reason: "x" }, "x1")).error?.code, "forbidden");

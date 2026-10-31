@@ -376,6 +376,8 @@ test("a puppet is not a boss: a decider created by a manager who also set the re
 
 test("an applier that never answers is given up on after the apply timeout: the request is marked uncertain and verified or reverted, and nothing waits for ever", async () => {
   await world(0, async (w) => {
+    const alive = setInterval(() => undefined, 20); // a hung applier holds no timer of its own: keep the test process alive meanwhile
+    try {
     const ann = await w.make("Ann");
     const m = w.service({ applyTimeoutMs: 60, heartbeatMs: 10 });
     const r = await request(w, ann.principal, "package", pkg("hung"));
@@ -384,11 +386,14 @@ test("an applier that never answers is given up on after the apply timeout: the 
     assert.notEqual(done.status, "applying");
     assert.ok(w.applier.calls.some((c) => c.op === "revert" && c.id === r.maintenanceId), "the unknown state was verified or reverted");
     assert.ok(["approved", "apply-uncertain", "failed"].includes((await w.body(r.maintenanceId)).status));
+    } finally { clearInterval(alive); }
   });
 });
 
 test("close() waits only the owner's bound for running applications and leaves a claim that is still running for the next start", async () => {
   await world(0, async (w) => {
+    const alive = setInterval(() => undefined, 20); // a hung applier holds no timer of its own: keep the test process alive meanwhile
+    try {
     const ann = await w.make("Ann");
     const m = w.service({ heartbeatMs: 0 });
     await m.change(w.owner, { commandId: cid("s"), closeWaitSeconds: 1 });
@@ -402,6 +407,7 @@ test("close() waits only the owner's bound for running applications and leaves a
     assert.equal(closed.left, 1);
     assert.ok(Date.now() - t0 < 5000);
     assert.equal((await w.body(r.maintenanceId)).status, "applying", "the claim is left for the restart to take up");
+    } finally { clearInterval(alive); }
   });
 });
 
@@ -433,7 +439,8 @@ test("every maintenance number is settable, with null for the default: no cap on
   await world(0, async (w) => {
     const ann = await w.make("Ann");
     await w.m.ensureSettings();
-    assert.ok(await w.storage.getAggregate({ kind: "maintenance-settings", id: "main" }), "a settings record exists before any write");
+    assert.ok(await w.storage.getAggregate({ kind: "maintenance-settings", id: "main" }), "a settings record exists before any owner write, so every claim has a revision to be checked against");
+    assert.equal((await w.m.settings(w.owner)).revision, 0, "the owner's revision numbers do not count it");
     const eff = (await w.m.settings(w.owner)).effective;
     assert.equal(eff.requestsPerDay, undefined, "no daily cap by default");
     assert.equal(eff.pendingPerAgent, 20);
