@@ -104,6 +104,8 @@ const APPROVAL = "release-approval";
 const CELLIDX = "release-cell";
 const HOSTIDX = "release-hostjobs";
 const ISSUERIDX = "release-issuer";
+/** The record kinds the activation part (K02) reads: it never writes them. */
+export const RELEASE_KINDS = { candidate: CANDIDATE, approval: APPROVAL } as const;
 const SETTINGS: AggregateRef = { kind: "release-settings", id: "main" };
 const ROLE = /^[a-z][a-z0-9-]{0,39}$/;
 

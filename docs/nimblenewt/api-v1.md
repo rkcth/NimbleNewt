@@ -1617,6 +1617,26 @@ Arguments:
 
 Result: `{ attempts }`.
 
+#### `release.status`
+
+Owner only: the current and previous release, an open or interrupted switch, what the launcher's pointer says now (and `diverged` when it is not the current release), the recent history, the staged releases (up to 50) and the staging settings.
+
+Arguments:
+
+- none
+
+Result: `{ item }`.
+
+#### `release.staging.settings.get`
+
+Owner only: whether activation needs the candidate approved (on by default), the optional cap on all staged releases together (off by default) and the revision to quote when changing them.
+
+Arguments:
+
+- none
+
+Result: `{ item: { revision, requireApproval, maxStagedBytes, set } }`.
+
 #### `agenda.get`
 
 One agenda item with its state, owner, deferral and outcome link.
@@ -4810,6 +4830,89 @@ Arguments:
 - `commandId`: required
 
 Result: `{ ok }`.
+
+#### `release.stage`
+
+Owner only: copies the artifacts of a candidate from its incoming folder under the release root into a new read-only versioned directory, refusing any file whose digest is not the one the candidate's manifest names. The owner names no path. Staging changes nothing that is running. The same candidate again is the same release.
+
+Arguments:
+
+- `candidateId`: the candidate
+- `commandId`: required
+
+Result: `{ candidateId, digest, bytes, files, replayed }`: quote `digest` to activate.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `release.activate`
+
+Owner only: makes a staged release the current one. The word is bound to the candidate, to the digest of what was staged (so a changed directory is refused) and to this installation's platform (the candidate must have been tested for it); the candidate must be approved unless the owner switched that requirement off. The files are verified again, then the switch is one atomic step recorded in a journal, so an interruption ends at the old release or the new, never between. A candidate built by an agent cannot stage or activate itself: only the owner can.
+
+Arguments:
+
+- `candidateId`: the staged candidate
+- `digest`: the digest `release.stage` returned
+- `expectedRevision` (optional): the `revision` of release.status
+- `commandId`: required
+
+Result: `{ revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `release.rollback`
+
+Owner only: goes back to the release that was current before the last activation, named by its ID (so a record that moved cannot send it elsewhere). Its files are verified first; the switch is journalled like an activation.
+
+Arguments:
+
+- `releaseId`: the previous release's ID, as release.status shows it
+- `expectedRevision` (optional): the `revision` of release.status
+- `commandId`: required
+
+Result: `{ revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `release.staging.settings.set`
+
+Owner only: sets whether activation needs an approved candidate (`requireApproval`) and/or the cap on staged releases in bytes (`maxStagedBytes`, null for no cap). Only the fields given change. Turning the approval requirement off widens what can be activated.
+
+Arguments:
+
+- `requireApproval` (optional): true or false
+- `maxStagedBytes` (optional): whole bytes, or null for no cap
+- `expectedRevision` (optional): the revision you read (0 when none was set yet)
+- `commandId`: required
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `release.approval.enable`
+
+Owner only: activation needs the candidate approved through release.approve (the default). This narrows.
+
+Arguments:
+
+- `expectedRevision` (optional): the revision of the staging settings
+- `commandId`: required
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `release.approval.disable`
+
+Owner only: activation no longer needs the candidate approved (its staged digest still must match). This widens.
+
+Arguments:
+
+- `expectedRevision` (optional): the revision of the staging settings
+- `commandId`: required
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
 
 #### `swarm.spawn`
 

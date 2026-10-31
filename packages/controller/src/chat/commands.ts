@@ -86,6 +86,14 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "backup.encryption.verify": { verb: "Check that a backup unlock method still works", mode: "apply" },
   // Approving a new backup key decides who can read every later backup: always a proposal, shown first in every profile.
   "backup.encryption.rekey": { verb: "Approve a new backup key", mode: "propose" },
+  // Release staging and activation (card K02). Staging copies verified files and changes nothing running, so it applies at once. Activating and rolling back change what runs: always shown first, the owner's word is the confirmation.
+  // Requiring an approved candidate narrows and applies at once; dropping the requirement and any other setting change widens or is shown first (provisional, see the notes).
+  "release.stage": { verb: "Stage a release", mode: "apply" },
+  "release.activate": { verb: "Activate a staged release", mode: "propose" },
+  "release.rollback": { verb: "Roll back to the previous release", mode: "propose" },
+  "release.staging.settings.set": { verb: "Change the release staging settings", mode: "propose" },
+  "release.approval.enable": { verb: "Require an approved release for activation", mode: "apply" },
+  "release.approval.disable": { verb: "Stop requiring an approved release for activation", mode: "propose" },
   "placement.change": { verb: "Change where local-only data may go", mode: "propose" },
   // How finished work lands (card P08b): where work reaches the codebase is authority, so it is shown first in every profile. The record and the rules are the same as through the API.
   "integration.set": { verb: "Change how finished work lands", mode: "propose" },

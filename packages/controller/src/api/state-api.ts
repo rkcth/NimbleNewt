@@ -7,7 +7,7 @@ import type { AgentService } from "../agents/index.js";
 import type { WatchService } from "../events/handling.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
-import type { ReleaseService } from "../release/index.js";
+import type { ReleaseActivationService, ReleaseService } from "../release/index.js";
 import type { AcceptanceService, SubmissionService } from "../submissions/index.js";
 import type { ServiceOperations } from "../service-ops/index.js";
 import type { TaskArtifactPublisher } from "../artifacts/index.js";
@@ -108,6 +108,7 @@ export interface StateApiDeps {
   readonly responsibilities?: ResponsibilityService;
   readonly responsibilityChecks?: Pick<ResponsibilityChecks, "pending">;
   readonly release?: Pick<ReleaseService, "submit" | "authorizeHost" | "issue" | "report" | "interrupt" | "gate" | "approve" | "attempts" | "start" | "cancel" | "settings" | "setSettings" | "changeIssuers">;
+  readonly activation?: Pick<ReleaseActivationService, "stage" | "activate" | "rollback" | "status" | "settings" | "setSettings">;
   readonly swarm?: Pick<SwarmService, "spawn" | "cancel" | "children">;
   readonly incidents?: Pick<IncidentService, "report" | "resolve" | "list" | "observed">;
   /** Submissions by role (card Q01b). */
@@ -266,6 +267,7 @@ export class StateApi {
         ...(this.#deps.taskArtifacts === undefined ? {} : { taskArtifacts: this.#deps.taskArtifacts }),
         ...(this.#deps.serviceOps === undefined ? {} : { serviceOps: this.#deps.serviceOps }),
         ...(this.#deps.release === undefined ? {} : { release: this.#deps.release }),
+        ...(this.#deps.activation === undefined ? {} : { activation: this.#deps.activation }),
         ...(this.#deps.swarm === undefined ? {} : { swarm: this.#deps.swarm }),
         ...(this.#deps.meetings === undefined ? {} : { meetings: this.#deps.meetings }),
         ...(this.#deps.workspaceOps === undefined ? {} : { workspaceOps: this.#deps.workspaceOps }),
