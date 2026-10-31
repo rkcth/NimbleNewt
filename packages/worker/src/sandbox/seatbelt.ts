@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import type { BackendHealth, GuestView, SandboxBackend, SpawnPlan } from "./backend.js";
 import { SandboxError } from "./errors.js";
+import { cachedLibraryReads } from "./libraries.js";
 import { normalizeRecipe, type NormalizedRecipe } from "./recipe.js";
 
 const run = promisify(execFile);
@@ -14,6 +15,8 @@ const SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
 export interface SeatbeltOptions {
   /** The program, as an absolute path. Default: `/usr/bin/sandbox-exec`. */
   readonly executable?: string;
+  /** Finds the files outside the system that the confined program loads (default on macOS: `otool`, cached; elsewhere none). Given the program and the paths already readable. */
+  readonly libraryReads?: (program: string, alreadyReadable: readonly string[]) => string[];
 }
 
 /**
@@ -22,7 +25,7 @@ export interface SeatbeltOptions {
  * protected names are read-only on top of its checkout. Looking at a file's existence and size (file-read-metadata) is allowed everywhere, because path lookup needs it: denied paths are
  * therefore visible but unreadable, one of the stated differences from Linux.
  */
-export function profileFor(recipe: NormalizedRecipe): string {
+export function profileFor(recipe: NormalizedRecipe, libraryReads: readonly string[] = []): string {
   const lines = [
     "(version 1)",
     "(deny default)",
@@ -43,17 +46,20 @@ export function profileFor(recipe: NormalizedRecipe): string {
     "(allow file-ioctl)",
   ];
   recipe.readOnly.forEach((_m, i) => lines.push(`(allow file-read* process-exec* (subpath (param "RO${i}")))`));
+  // The program's own libraries outside the system (Homebrew's node links libuv, openssl, icu from /opt/homebrew/opt/<formula>, symbolic links into the Cellar): each exact file and link, read only (card H12b remainder).
+  libraryReads.forEach((_p, i) => lines.push(`(allow file-read* (literal (param "LIB${i}")))`));
   recipe.protectedSubpaths.forEach((_n, i) => lines.push(`(deny file-write* (subpath (param "PROT${i}")))`));
   lines.push("(deny network*)");
   return lines.join("\n");
 }
 
 /** Everything the launcher parameterises: names to host paths. */
-function parameters(recipe: NormalizedRecipe, tmp: string): [string, string][] {
+function parameters(recipe: NormalizedRecipe, tmp: string, libraryReads: readonly string[]): [string, string][] {
   return [
     ["WORK", recipe.workdir], ["HOME", recipe.home], ["SCRATCH", recipe.scratch], ["TMP", tmp],
     ...recipe.readOnly.map((m, i) => [`RO${i}`, m.host] as [string, string]),
     ...recipe.protectedSubpaths.map((name, i) => [`PROT${i}`, join(recipe.workdir, name)] as [string, string]),
+    ...libraryReads.map((p, i) => [`LIB${i}`, p] as [string, string]),
   ];
 }
 
@@ -64,6 +70,7 @@ function parameters(recipe: NormalizedRecipe, tmp: string): [string, string][] {
  */
 export function seatbeltBackend(options: SeatbeltOptions = {}): SandboxBackend {
   const executable = options.executable ?? "/usr/bin/sandbox-exec";
+  const libraryReadsOf = options.libraryReads ?? (process.platform === "darwin" ? cachedLibraryReads() : () => []);
   const tmpOf = (recipe: NormalizedRecipe): string => join(recipe.scratch, ".tmp");
 
   const plan = (recipe: NormalizedRecipe, command: readonly string[]): SpawnPlan => {
@@ -73,9 +80,12 @@ export function seatbeltBackend(options: SeatbeltOptions = {}): SandboxBackend {
     try { existing = lstatSync(tmp); } catch { existing = undefined; }
     if (existing !== undefined && (existing.isSymbolicLink() || !existing.isDirectory())) throw new SandboxError("invalid_recipe", `${tmp} is not a plain directory; the agent's temporary directory must be`);
     if (existing === undefined) mkdirSync(tmp, { mode: 0o700 });
+    // A program outside the system places (the worker's node from Homebrew, say) is given read access to exactly its dependent libraries; a failure refuses the launch.
+    const program = command[0];
+    const libs = program !== undefined && program.startsWith("/") ? libraryReadsOf(program, [recipe.workdir, recipe.home, recipe.scratch, ...recipe.readOnly.map((m) => m.host)]) : [];
     const args: string[] = [];
-    for (const [name, value] of parameters(recipe, tmp)) args.push("-D", `${name}=${value}`);
-    args.push("-p", profileFor(recipe), ...command);
+    for (const [name, value] of parameters(recipe, tmp, libs)) args.push("-D", `${name}=${value}`);
+    args.push("-p", profileFor(recipe, libs), ...command);
     return { file: executable, args, env: { ...recipe.env, HOME: recipe.home, PATH: SYSTEM_PATH, TMPDIR: tmp }, cwd: recipe.workdir };
   };
 
