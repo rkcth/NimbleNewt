@@ -35,6 +35,8 @@ const names = (pattern: RegExp, max: number) => (v: unknown): string[] => {
 };
 const TOOL = /^[a-z][a-z0-9._-]{0,79}$/;
 const PROFILE = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
+const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._\/-]{0,199}$/;
+const PATH_PATTERN = /^[A-Za-z0-9._\/-]{1,200}$/;
 
 // Restriction kinds: how "no wider than" and "the tighter" work for a switch, a ceiling and an allowed-list.
 const flag = { within: (n: unknown, b: unknown): boolean => n === false || b === true, meet: (a: unknown, b: unknown): unknown => a === true && b === true };
@@ -64,6 +66,10 @@ export const DEFAULT_SETTINGS: readonly SettingDefinition[] = [
   { key: "workClass.pcCeiling", kind: "default", check: whole(0, 100), fallback: 100, effect: "next-request", description: "The most share of capacity planned for production work, in percent." },
   { key: "workClass.pcTarget", kind: "default", check: whole(0, 100), effect: "next-request", description: "The share aimed at; it must lie between the floor and the ceiling." },
   { key: "routing.fallbackProfile.*", kind: "default", check: (v) => (typeof v === "string" && PROFILE.test(v) ? v : refuse("must be a profile name")), effect: "after-current-operation", description: "The profile to fall back to when a profile has no eligible route." },
+  // The landing policy of a workspace host (card H12q): which branch a landing writes to, whether a landing needs the commit permit of the review gate, and which paths are kept for review. All three are set through the settings (chat: "set workspace.landing.branch to main"); a host reads them for the project.
+  { key: "workspace.landing.branch", kind: "default", check: (v) => (typeof v === "string" && BRANCH.test(v) && !v.split("/").some((x) => x === ".." || x === "." || x === "") ? v : refuse("must be a branch name of up to 200 letters, digits and . _ / -")), effect: "next-request", description: "The branch a landing writes to. Unset: nothing lands (a landing says so)." },
+  { key: "workspace.landing.requirePermit", kind: "restriction", check: bool, within: (n, b) => n === true || b === false, meet: (a, b) => a === true || b === true, fallback: true, effect: "next-request", description: "Whether every commit of a landed checkout must have been made through the review gate's commit permit (default true). A more specific layer cannot turn it off once a layer above requires it." },
+  { key: "workspace.landing.protectedPaths", kind: "default", check: (v) => { if (!Array.isArray(v) || v.length > 200) return refuse("must be a list of at most 200 path patterns"); return [...new Set(v.map((x) => (typeof x === "string" && PATH_PATTERN.test(x) && !x.split("/").some((y) => y === "..") && !x.startsWith("/") ? x : refuse(`${JSON.stringify(x)} is not an acceptable path pattern`))))]; }, effect: "next-request", description: "Paths a landing never writes by itself but keeps for review (a trailing / names a directory at the root; a name without / names a file anywhere). Unset: the built-in list (CI configuration, hooks, ownership and package manager files). An empty list protects nothing." },
   { key: "lifecycle.reloadPreservesPause", kind: "restriction", check: (v) => (v === true ? true : refuse("must stay true")), ...flag, fallback: true, effect: "next-request", description: "Always true: reloading configuration never lifts a pause. Present so it is visible, not so it can be turned off." },
 ];
 

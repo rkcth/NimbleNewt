@@ -82,6 +82,18 @@ for (const backend of backends) {
     assert.equal((await value(c, "workClass.pcFloor", { agentId: c.agentA }))!.effect, "next-request");
   });
 
+  suite("the landing policy is a set of real settings: branch, permit requirement (only tightened) and protected paths are checked and chat-settable (card H12q re-review)", async (c) => {
+    await put(c, c.owner, "installation", undefined, { "workspace.landing.branch": "main", "workspace.landing.protectedPaths": ["docs/", ".github/", "CODEOWNERS"] });
+    assert.equal((await value(c, "workspace.landing.branch"))!.value, "main");
+    assert.deepEqual((await value(c, "workspace.landing.protectedPaths"))!.value, ["docs/", ".github/", "CODEOWNERS"]);
+    assert.equal((await value(c, "workspace.landing.requirePermit"))!.value, true, "the permit is required unless someone turns it off");
+    await refuses("invalid_command", () => stageNow(c, c.owner, "installation", undefined, { set: { "workspace.landing.branch": "../x" } }), (e) => assert.match(e.message, /branch name/));
+    await refuses("invalid_command", () => stageNow(c, c.owner, "installation", undefined, { set: { "workspace.landing.protectedPaths": ["../etc"] } }), (e) => assert.match(e.message, /path pattern/));
+    // Once the installation requires it, a task cannot turn the requirement off.
+    await put(c, c.owner, "installation", undefined, { "workspace.landing.requirePermit": true });
+    await refuses("invalid_command", () => stageNow(c, c.owner, "task", c.task, { set: { "workspace.landing.requirePermit": false } }), (e) => assert.match(e.message, /wider than the layers above allow|can only narrow/));
+  });
+
   suite("a restriction can only be narrowed: a task cannot re-enable a disabled provider or raise a ceiling, now or after the layer above changes", async (c) => {
     await put(c, c.owner, "installation", undefined, { "provider.openrouter.enabled": false, "time.maxMinutes": 120 });
     await refuses("invalid_command", () => stageNow(c, c.owner, "task", c.task, { set: { "provider.openrouter.enabled": true } }), (e) => assert.match(e.message, /wider than the layers above allow/));
