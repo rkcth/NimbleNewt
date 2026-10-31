@@ -63,8 +63,9 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "host.move-work": { verb: "Move the work off a host", mode: "apply" },
   "workers.limits.change": { verb: "Change the limits for local agents", mode: "propose" },
   "workers.limits.besteffort": { verb: "Allow or forbid local agents to start when a limit cannot be fully enforced on this system (enable or disable best effort)", mode: "propose" },
-  // How long an attempt may run and how many attempts are admitted are resource decisions: shown first in every profile (provisional). Both limits are off unless the owner turns them on.
+  // How many attempts may run at once for one project, one agent or one supervisor is a resource decision: shown first in every profile; all caps are off unless the owner turns them on.
   "capacity.limits.change": { verb: "Change the capacity caps (per project, per agent, fan-in)", mode: "propose" },
+  // How long an attempt may run and how many attempts are admitted are resource decisions: shown first in every profile (provisional). Both limits are off unless the owner turns them on.
   "dispatch.limits.change": { verb: "Change the dispatcher's time and attempt limits", mode: "propose" },
   // Whether the controller may remove an ended attempt's scratch workspace is a data-keeping decision: shown first in every profile (owner decision 2026-10-30; default after-handoff).
   "cleanup.settings.change": { verb: "Change whether an ended attempt's scratch workspace is removed", mode: "propose" },

@@ -1858,7 +1858,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `capacity.limits.change`
 
-The owner changes the optional capacity caps (owner only), leaving the others as they are: `perProject` (attempts running at once for one project), `perAgent` (for one agent) and `fanIn` (running attempts that report to one supervisor or reviewer), each 1 to 1000. All are off by default. Work over a cap waits for capacity (it does not fail) and is served fairly; work already running is never stopped by a lower cap. `set` turns the named caps on with a figure (a null figure turns it off), `disable` turns them off keeping the figure, `enable` turns them on again with the kept figure, `unset` forgets the entry. A cap is named once. A change counts from the next admission decision and lets waiting work in at once. This is the form the chat uses.
+The owner changes the optional capacity caps (owner only), leaving the others as they are: `perProject` (attempts running at once for one project), `perAgent` (for one agent) and `fanIn` (running child attempts whose parent task is owned by one supervising agent; reviewers are not counted), each 1 to 1000. All are off by default. Work over a cap waits for capacity (it does not fail) and is served fairly; work already running is never stopped by a lower cap. `set` turns the named caps on with a figure (a null figure turns it off), `disable` turns them off keeping the figure, `enable` turns them on again with the kept figure, `unset` forgets the entry. A cap is named once. A change counts from the next admission decision and lets waiting work in at once. This is the form the chat uses.
 
 Arguments:
 

@@ -55,6 +55,8 @@ export interface DispatchBody {
   /** The H03 request that holds the attempt's place (absent while the attempt holds none, and before the first request), and how many requests were made for it. */
   readonly requestId?: string;
   readonly requests?: number;
+  /** What request number `n` asks for, kept BEFORE the request is made so that a replay after a crash asks for exactly the same thing (the request's command digest covers these) and a changed parent or priority cannot make the replay conflict. */
+  readonly ask?: { readonly n: number; readonly priority: number; readonly reportsTo?: string };
   readonly claimedAt: string;
   /** After this time the attempt is over whatever the worker says (the attempt's own expiry). Absent: the attempt has no time limit (the worker's lease still has to be kept). */
   readonly expiresAt?: string;

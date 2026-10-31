@@ -7,6 +7,7 @@ import { PrincipalService } from "../security/index.js";
 import type { ControllerStorage } from "../storage/types.js";
 import type { Principal } from "../security/principals.js";
 import { AdmissionService, CapacityLimitsService, type RequestAdmission } from "./index.js";
+import { DEFAULT_LIMITS, EMPTY_STATE, blockers, promote, type Entry } from "./policy.js";
 
 after(stopServer);
 
@@ -16,6 +17,24 @@ const cid = (label: string): string => `${label}-${n++}`;
 const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>): Promise<void> => {
   await assert.rejects(run, (error: unknown) => { assert.ok(error instanceof DomainError, String(error)); assert.equal(error.code, code, error.message); return true; });
 };
+
+
+test("blockers lists everything that holds a request, and a starved request bars every key it is blocked on (host h1 and a per-project cap of 1)", () => {
+  const e = (id: string, seq: number, extra: Partial<Entry>): Entry => ({ id, class: "productive", priority: 5, host: "host:h1", cpus: 1, memoryMb: 1024, depth: 0, seq, skipped: 0, at: "t", ...extra });
+  const state = {
+    ...EMPTY_STATE, limits: { ...DEFAULT_LIMITS, productive: 16, perHost: 1, patience: 2 },
+    capacity: { "host:h1": { cpus: 8, memoryMb: 16_384 }, "host:h2": { cpus: 8, memoryMb: 16_384 } },
+    caps: { perProject: 1 },
+    running: [e("r1", 1, { project: "project:b" }), e("r2", 2, { host: "host:h2", project: "project:a" })],
+    queue: [e("E", 3, { project: "project:a", skipped: 2 }), e("G", 4, { host: "host:h2", project: "project:c", priority: 9 }), e("H", 5, { host: "host:h1", project: "project:c" })],
+  };
+  assert.deepEqual(blockers(state, state.queue[0]!), ["host", "project"], "both the full host and the full project cap are reported");
+  // G and H share only the host with E (G: h2 is also full by perHost=1; H: h1). Nothing may pass the starved request on a key it waits for.
+  assert.deepEqual(promote(state).admitted.map((x) => x.id), [], "the starved request holds back what it is blocked on; the others are blocked by the full hosts anyway");
+  const roomy = { ...state, limits: { ...state.limits, perHost: 4 }, queue: [e("E", 3, { project: "project:a", skipped: 2, cpus: 2 }), state.queue[1]!, e("H", 5, { host: "host:h1", project: "project:d" })], running: [e("r1", 1, { project: "project:b", cpus: 7 }), e("r2", 2, { host: "host:h2", project: "project:a" })] };
+  assert.deepEqual(blockers(roomy, roomy.queue[0]!), ["host", "project"], "E needs 1 CPU more than the host has, and its project is full");
+  assert.deepEqual(promote(roomy).admitted.map((x) => x.id), ["G"], "work for another host and project carries on; the small request for E's own host does not slip past E");
+});
 
 for (const backend of backends) {
   const suite = (name: string, body: (c: {
@@ -91,6 +110,41 @@ for (const backend of backends) {
       if (current === low.id) { lowRanAfter = i; break; }
     }
     assert.ok(lowRanAfter >= 0 && lowRanAfter <= 5, `the low-priority request ran after ${lowRanAfter} releases (patience is 5)`);
+  });
+
+  suite("only the owner's caps are reported as capacity waits (a full host alone is not), and every blocker is considered", async ({ ask, admission, caps, owner }) => {
+    await admission.setLimits({ commandId: cid("l"), actor: "owner:rob", limits: { productive: 64, perHost: 1, control: 2, queue: 100, depth: 3, children: 4, patience: 5 } });
+    await caps.change(owner, { commandId: cid("c"), set: { perProject: 1 } });
+    await ask({ project: "project:a" });
+    const hostOnly = await ask({ project: "project:b" });
+    const both = await ask({ project: "project:a" });
+    const w1 = await admission.where(hostOnly.id), w2 = await admission.where(both.id);
+    assert.ok(w1.state === "waiting" && w2.state === "waiting");
+    assert.match(w1.reason ?? "", /host:h1 is full/);
+    assert.equal(w1.capReason, undefined, "a full host is not a capacity cap");
+    assert.match(w2.reason ?? "", /host:h1 is full/);
+    assert.match(w2.capReason ?? "", /project project:a already has 1 attempts running.*per-project cap/, "the cap is named even though the host is also full");
+  });
+
+  suite("annotate: requests from before the caps get their project and agent, and a waiting request's supervisor is read again", async ({ ask, admission, caps, owner, running }) => {
+    await caps.change(owner, { commandId: cid("c"), set: { perProject: 1, fanIn: 1 } });
+    const legacy = await ask({});
+    assert.equal((await ask({ project: "project:a" })).state, "running", "a request without a project is not counted (nothing to count it against)");
+    const note = (changes: { requestId: string; project?: string; agent?: string; reportsTo?: string | null }[]) => admission.annotate({ commandId: cid("an"), actor: "controller", changes });
+    assert.deepEqual(await note([{ requestId: legacy.id, project: "project:a", agent: "agent:x" }]), { changed: 1, missing: 0 });
+    const snap = await admission.snapshot();
+    assert.deepEqual(snap.running.find((e) => e.id === legacy.id) && [snap.running.find((e) => e.id === legacy.id)!.project, snap.running.find((e) => e.id === legacy.id)!.agent], ["project:a", "agent:x"]);
+    assert.equal((await ask({ project: "project:a" })).state, "waiting", "now it counts");
+    assert.deepEqual(await note([{ requestId: legacy.id, project: "project:z" }]), { changed: 0, missing: 0 }, "a project already set is never overwritten");
+    assert.deepEqual(await note([{ requestId: "req-aaaaaaaaaaaaaaaaaaaa", project: "project:z" }]), { changed: 0, missing: 1 });
+    // Fan-in: one runs for boss, the next waits; when the supervisor is gone (released) the waiting request stops counting and runs.
+    await caps.change(owner, { commandId: cid("c"), unset: ["perProject"] });
+    const one = await ask({ project: "project:f1", reportsTo: "agent:boss" });
+    const two = await ask({ project: "project:f2", reportsTo: "agent:boss" });
+    assert.deepEqual([one.state, two.state], ["running", "waiting"]);
+    assert.deepEqual(await note([{ requestId: two.id, reportsTo: null }]), { changed: 1, missing: 0 });
+    assert.equal((await admission.where(two.id)).state, "running", "no supervisor, nothing to count; admitted in the same step");
+    assert.equal((await running()).length, 5, "the project-cap waiter ran when that cap was removed");
   });
 
   suite("a lower cap stops nothing that runs; raising or removing a cap lets waiting work in at once", async ({ ask, admission, caps, owner }) => {

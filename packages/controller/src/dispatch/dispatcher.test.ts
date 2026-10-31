@@ -16,6 +16,9 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, check
 };
 const read = (callId: string, extra: Record<string, unknown> = {}) => ({ callId, tool: { name: "read-file", version: "1.0.0" }, args: { path: "README.md" }, ...extra });
 
+/** The admission service with some methods replaced (its private fields stay with the real one). */
+const wrap = <T extends object>(real: T, over: Partial<Record<keyof T, unknown>>): T => new Proxy(real, { get: (t, k) => (k in over ? (over as Record<PropertyKey, unknown>)[k] : typeof (t as never)[k] === "function" ? ((t as never)[k] as (...a: unknown[]) => unknown).bind(t) : (t as never)[k]) });
+
 for (const backend of backends) {
   interface Ctx extends DispatchWorld {
     /** One tick, then wait for the turns it started. */
@@ -155,6 +158,49 @@ for (const backend of backends) {
     assert.equal((await c.admission.snapshot()).running.length, 0, "no place is held by an attempt that never started");
     broken = false;
     assert.ok((await c.run()).started.includes(t.attemptId!), "the next tick starts it");
+  });
+
+  suite("a crash after the place was requested, then a changed supervisor: the replay asks for the same thing, starts, and no place leaks (card H10b)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const t = await c.task("Order seeds", ann);
+    const real = c.admission;
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => { open = resolve; });
+    c.worker.script = async () => { await gate; return { status: "completed", text: "x" }; };
+    let crash = true;
+    const crashing = wrap(real, { request: async (...a: Parameters<typeof real.request>) => { const r = await real.request(...a); if (crash) { crash = false; throw new Error("the process stopped"); } return r; } });
+    c.dispatcher = c.restart({ admission: crashing, reportsTo: async () => "agent:boss-one" });
+    await c.run();
+    assert.equal((await real.snapshot()).running.length, 1, "the request was committed before the crash");
+    c.dispatcher = c.restart({ reportsTo: async () => "agent:boss-two" });
+    const second = await c.dispatcher.tick();
+    assert.ok(second.started.includes(t.attemptId!), JSON.stringify({ f: second.failures, w: second.waiting }));
+    const snap = await real.snapshot();
+    open();
+    await c.dispatcher.idle();
+    assert.equal(snap.running.length, 1, "one place, not two");
+    assert.equal(snap.running[0]!.reportsTo, "agent:boss-one", "the replay used what the first request asked for");
+  });
+
+  suite("an orphaned request that cannot be repeated as it was (its command digest differs) is taken over, not left holding a place (card H10b)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const t = await c.task("Order seeds", ann);
+    const real = c.admission;
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => { open = resolve; });
+    c.worker.script = async () => { await gate; return { status: "completed", text: "x" }; };
+    let crash = true;
+    const crashing = wrap(real, { request: async (...a: Parameters<typeof real.request>) => { const r = await real.request(...a); if (crash) { crash = false; throw new Error("the process stopped"); } return r; } });
+    c.dispatcher = c.restart({ admission: crashing });
+    await c.run();
+    // The replay asks differently from the first request (as an older build, or another priority source, would).
+    const odd = wrap(real, { request: async (cmd: Parameters<typeof real.request>[0]) => real.request({ ...cmd, priority: (cmd.priority ?? 5) === 3 ? 4 : 3 }) });
+    c.dispatcher = c.restart({ admission: odd });
+    const second = await c.dispatcher.tick();
+    assert.ok(second.started.includes(t.attemptId!), JSON.stringify({ f: second.failures, w: second.waiting }));
+    assert.equal((await real.snapshot()).running.length, 1, "the committed entry was adopted, not leaked");
+    open();
+    await c.dispatcher.idle();
   });
 
   suite("a blocked task does not keep its allowance: a pin that fails gives the hold back with the place (also when the process stops half way), and the next tick holds it afresh, once, and the end charges what was used (card P01b)", async (c) => {

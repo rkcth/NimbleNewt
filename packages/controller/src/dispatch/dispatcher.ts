@@ -76,7 +76,7 @@ export interface DispatcherDeps {
   readonly assignments: Pick<AssignmentService, "getAssignment" | "getAttempt" | "finishAttempt" | "admitAttempt" | "guardFor" | "epoch">;
   readonly projects: Pick<ProjectService, "getTask">;
   readonly credentials: Pick<TaskCredentialService, "issueForAttempt" | "principalOf" | "endForAttempt">;
-  readonly admission: Pick<AdmissionService, "request" | "release" | "where" | "reprioritize" | "snapshot">;
+  readonly admission: Pick<AdmissionService, "request" | "release" | "where" | "reprioritize" | "annotate" | "snapshot">;
   /** Who receives the report of a task's attempt (card H10b): the agent of the task that spawned it. Used for the owner's optional fan-in cap; `undefined` means no supervisor. */
   readonly reportsTo?: (taskId: string) => Promise<string | undefined>;
   readonly hosts: Pick<HostService, "status">;
@@ -201,7 +201,7 @@ export interface TickReport {
   readonly started: readonly string[];
   /** Attempts whose request waits for a place. */
   readonly waiting: readonly string[];
-  /** Attempts that wait only because a capacity limit is full (not a failure), with why ("waiting for capacity: ..."); they are also in `waiting`. */
+  /** Attempts that wait because one of the owner's capacity caps (per project, per agent, fan-in) is full (not a failure), with why ("waiting for capacity: ..."); they are also in `waiting`. */
   readonly capacityWaits: readonly { readonly attemptId: string; readonly reason: string }[];
   readonly skipped: readonly { readonly taskId: string; readonly attemptId: string; readonly check: DispatchCheck; readonly reason: string }[];
   /** Attempts that cannot be started for a reason waiting does not fix: a blocker names who can change it. */
@@ -332,6 +332,7 @@ export class DispatcherService {
     }
     // 2. The priority the contract has now, for every request that still waits (no stored contract version is rewritten).
     const reprioritized = await this.#reprioritize();
+    await this.#annotate().catch((error: unknown) => { if (isDomainError(error, "stale_epoch")) throw error; this.#options.onError?.(error); });
     // 3. Waiting claims: get a request, or start when the place has come.
     for (const id of await this.#liveIds()) {
       const d = await this.#load(id);
@@ -340,7 +341,7 @@ export class DispatcherService {
       let outcome: AdvanceOutcome;
       try { outcome = await this.#advance(d); } catch (error) { failures.push({ taskId: d.body.taskId, attemptId: id, error: errorText(error) }); continue; }
       if (outcome.kind === "started") started.push(id);
-      else if (outcome.kind === "waiting") { waiting.push(id); if (outcome.reason !== undefined) capacityWaits.push({ attemptId: id, reason: outcome.reason }); }
+      else if (outcome.kind === "waiting") { waiting.push(id); if (outcome.capReason !== undefined) capacityWaits.push({ attemptId: id, reason: outcome.capReason }); }
       else if (outcome.kind === "skipped") skipped.push({ taskId: d.body.taskId, attemptId: id, check: outcome.check, reason: outcome.reason });
       else if (outcome.kind === "blocked") blocked.push({ taskId: d.body.taskId, attemptId: id, check: outcome.check, blockerId: outcome.blockerId });
     }
@@ -354,7 +355,7 @@ export class DispatcherService {
         const next = await this.#advance(d).catch((error: unknown): { kind: "failed"; error: string } => { if (isDomainError(error, "stale_epoch")) throw error; return { kind: "failed", error: errorText(error) }; });
         if (next.kind === "failed") { failures.push({ taskId: found.taskId, attemptId: found.attemptId, error: next.error }); continue; }
         if (next.kind === "started") started.push(found.attemptId);
-        else if (next.kind === "waiting") { waiting.push(found.attemptId); if (next.reason !== undefined) capacityWaits.push({ attemptId: found.attemptId, reason: next.reason }); }
+        else if (next.kind === "waiting") { waiting.push(found.attemptId); if (next.capReason !== undefined) capacityWaits.push({ attemptId: found.attemptId, reason: next.capReason }); }
         else if (next.kind === "skipped") skipped.push({ taskId: found.taskId, attemptId: found.attemptId, check: next.check, reason: next.reason });
         else if (next.kind === "blocked") blocked.push({ taskId: found.taskId, attemptId: found.attemptId, check: next.check, blockerId: next.blockerId });
       } else if (found.outcome.kind === "skipped") skipped.push({ taskId: found.taskId, attemptId: found.attemptId, check: found.outcome.check, reason: found.outcome.reason });
@@ -1138,7 +1139,7 @@ export class DispatcherService {
     const requestId = await this.#request(d, pre.host);
     const where = await this.#deps.admission.where(requestId);
     if (where.state !== "running" && where.state !== "waiting") await this.#giveBack(d);
-    if (where.state !== "running") return where.state === "waiting" ? { kind: "waiting", ...(where.reason === undefined ? {} : { reason: where.reason }) } : { kind: "skipped", check: "place", reason: where.state === "withdrawn" ? `the request for a place was withdrawn: ${where.reason}` : "the request for a place is gone" };
+    if (where.state !== "running") return where.state === "waiting" ? { kind: "waiting", ...(where.capReason === undefined ? {} : { capReason: where.capReason }) } : { kind: "skipped", check: "place", reason: where.state === "withdrawn" ? `the request for a place was withdrawn: ${where.reason}` : "the request for a place is gone" };
     // Card R05b: the allowance is held before the attempt starts, so two attempts of sibling tasks cannot count on the same money or compute. Nothing to reserve with: nothing is held.
     const held = await this.#reserve(d);
     if (held !== undefined) { await this.#giveBack(d); return held; }
@@ -1210,10 +1211,36 @@ export class DispatcherService {
       if (where.state === "running" || where.state === "waiting") return d.body.requestId;
     }
     const n = d.body.requests ?? 0;
-    const priority = await this.#deps.contracts.priorityOf(d.body.taskId);
-    // Who the work counts for under the owner's optional caps: its project, its agent and (for a child task) the agent of the task it reports to. A supervisor that cannot be read is simply not counted.
-    const reportsTo = this.#deps.reportsTo === undefined ? undefined : await this.#deps.reportsTo(d.body.taskId).catch((e: unknown) => { this.#options.onError?.(e); return undefined; });
-    const asked = await this.#deps.admission.request({ commandId: `dpa-req:${d.body.attemptId}:${n}`, actor: DISPATCHER_ACTOR, class: "productive", priority, host: host.hostId, project: d.body.projectId, agent: d.body.agentId, ...(reportsTo === undefined ? {} : { reportsTo }), cpus: host.resources.cpus, memoryMb: host.resources.memoryMb });
+    // What this request asks for is decided once and kept on the attempt BEFORE the request is made. A replay after a crash then asks for exactly the same thing (the request's command digest covers the
+    // priority and the supervisor), however the contract or the swarm link changed meanwhile, instead of conflicting at every tick while the committed entry holds a place.
+    let ask = d.body.ask?.n === n ? d.body.ask : undefined;
+    if (ask === undefined) {
+      const priority = await this.#deps.contracts.priorityOf(d.body.taskId);
+      // Who the work counts for under the owner's optional caps: its project, its agent and (for a child task) the agent of the task it reports to. A supervisor that cannot be read is simply not counted.
+      const reportsTo = await this.#supervisor(d.body.taskId);
+      ask = { n, priority, ...(reportsTo === undefined ? {} : { reportsTo }) };
+      const chosen = ask;
+      await this.#update(d.body.attemptId, (b) => (b.ask?.n === n ? b : { ...b, ask: chosen }));
+      ask = (await this.#load(d.body.attemptId))?.body.ask ?? ask;
+    }
+    const commandId = `dpa-req:${d.body.attemptId}:${n}`;
+    let asked: { id: string };
+    try {
+      asked = await this.#deps.admission.request({ commandId, actor: DISPATCHER_ACTOR, class: "productive", priority: ask.priority, host: host.hostId, project: d.body.projectId, agent: d.body.agentId, ...(ask.reportsTo === undefined ? {} : { reportsTo: ask.reportsTo }), cpus: host.resources.cpus, memoryMb: host.resources.memoryMb });
+    } catch (error) {
+      // An entry committed under this very command ID by a request that then could not be repeated as it was (a crash, then a different host or size): the entry is ours. Take it over when it is the same
+      // place, otherwise give it back and ask afresh under the next number, so a place is never leaked.
+      if (!isDomainError(error, "command_conflict")) throw error;
+      const orphan = derivedId("req", commandId);
+      const found = await this.#deps.admission.where(orphan);
+      if (found.state !== "running" && found.state !== "waiting") throw error;
+      if (found.entry.host === host.hostId) asked = { id: orphan };
+      else {
+        await this.#deps.admission.release({ commandId: `dpa-orphan:${d.body.attemptId}:${n}`, actor: DISPATCHER_ACTOR, requestId: orphan, reason: "an earlier request for this attempt was made for another host" }).catch((e: unknown) => { if (!isDomainError(e, "not_found")) throw e; });
+        await this.#update(d.body.attemptId, (b) => ({ ...b, requests: Math.max(b.requests ?? 0, n + 1) }));
+        throw error;
+      }
+    }
     await this.#update(d.body.attemptId, (b) => ({ ...b, requestId: asked.id, requests: Math.max(b.requests ?? 0, n + 1), hostId: host.hostId }));
     return asked.id;
   }
@@ -1553,6 +1580,45 @@ export class DispatcherService {
     return { readmitted: next.id };
   }
 
+  /** Who receives the report of a task's attempt (the agent of the task that spawned it), or undefined: none, or it cannot be read now (an unreadable supervisor is not counted). */
+  async #supervisor(taskId: string): Promise<string | undefined> {
+    if (this.#deps.reportsTo === undefined) return undefined;
+    return this.#deps.reportsTo(taskId).catch((e: unknown) => { this.#options.onError?.(e); return undefined; });
+  }
+
+  /**
+   * Keeps what the owner's caps count by current. Waiting requests have their supervisor read again (a fan-in frozen at request time would count a parent that has since been released, or miss one that
+   * was assigned later), and requests made before the caps existed, which carry no project or agent, get them from their attempt. A read that fails leaves the request as it was.
+   */
+  async #annotate(): Promise<number> {
+    const snapshot = await this.#deps.admission.snapshot();
+    const unmarked = new Set(snapshot.running.filter((e) => e.project === undefined || e.agent === undefined).map((e) => e.id));
+    if (snapshot.queue.length === 0 && unmarked.size === 0) return 0;
+    const waiting = new Map(snapshot.queue.map((e) => [e.id, e]));
+    const changes: { requestId: string; project?: string; agent?: string; reportsTo?: string | null }[] = [];
+    for (const id of await this.#liveIds()) {
+      const d = await this.#load(id);
+      const rid = d?.body.requestId;
+      if (d === undefined || rid === undefined) continue;
+      const queued = waiting.get(rid);
+      if (queued === undefined && !unmarked.has(rid)) continue;
+      const change: { requestId: string; project?: string; agent?: string; reportsTo?: string | null } = { requestId: rid };
+      if (queued === undefined || queued.project === undefined || queued.agent === undefined) { change.project = d.body.projectId; change.agent = d.body.agentId; }
+      if (queued !== undefined && this.#deps.reportsTo !== undefined) {
+        let now: string | undefined;
+        try { now = await this.#deps.reportsTo(d.body.taskId); } catch (e) { this.#options.onError?.(e); continue; }
+        if (now !== queued.reportsTo) change.reportsTo = now ?? null;
+      }
+      if (Object.keys(change).length > 1) changes.push(change);
+    }
+    let changed = 0;
+    for (let i = 0; i < changes.length; i += 100) {
+      const batch = changes.slice(i, i + 100);
+      changed += (await this.#deps.admission.annotate({ commandId: `dpa-ann:${snapshot.revision}:${i}`, actor: DISPATCHER_ACTOR, changes: batch })).changed;
+    }
+    return changed;
+  }
+
   async #reprioritize(): Promise<number> {
     // Only requests whose stored priority differs from the contract's now are sent, and the command names the queue it was worked out from, so a priority that goes back to an earlier value is applied again.
     const snapshot = await this.#deps.admission.snapshot();
@@ -1621,7 +1687,7 @@ export class DispatcherService {
 
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : "failed").slice(0, 300);
 type ClaimOutcome = { kind: "failed"; error: string } | { kind: "claimed" } | { kind: "skipped"; check: DispatchCheck; reason: string } | { kind: "blocked"; check: DispatchCheck; blockerId: string };
-type AdvanceOutcome = { kind: "started" } | { kind: "waiting"; reason?: string } | { kind: "skipped"; check: DispatchCheck; reason: string } | { kind: "blocked"; check: DispatchCheck; blockerId: string };
+type AdvanceOutcome = { kind: "started" } | { kind: "waiting"; capReason?: string } | { kind: "skipped"; check: DispatchCheck; reason: string } | { kind: "blocked"; check: DispatchCheck; blockerId: string };
 
 /** A limit of 0 states no limit; a limit that is set is used up when what was spent (and what may have been) reaches it. */
 const exhausted = (limit: number, used: number): boolean => limit > 0 && used >= limit;

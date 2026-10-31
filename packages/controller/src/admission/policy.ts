@@ -29,7 +29,7 @@ export const LIMIT_BOUNDS: Readonly<Record<keyof Limits, readonly [number, numbe
 
 /**
  * Optional capacity caps beyond the admission limits (card H10b). Each is OFF (absent) unless the owner turned it on: productive attempts running at once for one project, for one agent, and
- * the fan-in: how many running attempts report to one supervisor or reviewer at once. A request over a cap waits (it is not refused); nothing is stopped by a lower cap.
+ * the fan-in: how many running attempts report to one supervising agent at once (the agent of the task that spawned them; reviewers are not counted). A request over a cap waits (it is not refused); nothing is stopped by a lower cap.
  */
 export interface Caps {
   readonly perProject?: number;
@@ -61,7 +61,7 @@ export interface Entry {
   readonly project?: string;
   /** The agent that does the work (counted against `perAgent`). */
   readonly agent?: string;
-  /** The supervisor or reviewer that receives its report (counted against `fanIn`). */
+  /** The supervising agent that receives its report: the agent of the task that spawned it (counted against `fanIn`; reviewers are not counted). */
   readonly reportsTo?: string;
   readonly seq: number;
   /** How many times a later or lower-priority request was served ahead of this one. */
@@ -91,28 +91,32 @@ const own = <T>(map: Readonly<Record<string, T>>, key: string): T | undefined =>
 export type Blocker = "lane" | "host" | "never" | "project" | "agent" | "fanin" | null;
 
 /**
- * What stands between a request and a place right now. `lane`: its lane is full. `host`: its host has no room (count, CPUs or memory) at the moment. `never`: its host has no declared
- * capacity. Inquiries and reviews are not counted against a host's CPUs and memory (they are small, and must stay possible on a host that productive work has filled), so for them only the lane matters.
+ * Everything that stands between a request and a place right now, in a fixed order. `lane`: its lane is full. `host`: its host has no room (count, CPUs or memory) at the moment. `never`: its host has no
+ * declared capacity. `project`, `agent`, `fanin`: one of the owner's optional caps is full. Inquiries and reviews are not counted against a host's CPUs and memory (they are small, and must stay possible
+ * on a host that productive work has filled), so for them only the lane matters. A request can be held by several things at once (a full host and a full project cap); all of them are listed.
  */
-export function blocker(state: AdmissionState, entry: Entry): Blocker {
+export function blockers(state: AdmissionState, entry: Entry): Exclude<Blocker, null>[] {
+  const out: Exclude<Blocker, null>[] = [];
   const lane = laneOf(entry.class);
   const inLane = state.running.filter((r) => laneOf(r.class) === lane);
-  if (inLane.length >= (lane === "productive" ? state.limits.productive : state.limits.control)) return "lane";
-  if (lane === "control") return null;
+  if (inLane.length >= (lane === "productive" ? state.limits.productive : state.limits.control)) out.push("lane");
+  if (lane === "control") return out;
   const capacity = entry.host === undefined ? undefined : own(state.capacity, entry.host);
-  if (capacity === undefined) return "never";
+  if (capacity === undefined) { out.push("never"); return out; }
   const onHost = state.running.filter((r) => r.host === entry.host && laneOf(r.class) === "productive");
-  if (onHost.length >= state.limits.perHost) return "host";
   const cpus = onHost.reduce((sum, r) => sum + r.cpus, 0) + entry.cpus;
   const memory = onHost.reduce((sum, r) => sum + r.memoryMb, 0) + entry.memoryMb;
-  if (!(cpus <= capacity.cpus && memory <= capacity.memoryMb)) return "host";
+  if (onHost.length >= state.limits.perHost || !(cpus <= capacity.cpus && memory <= capacity.memoryMb)) out.push("host");
   const caps = state.caps;
   const productive = state.running.filter((r) => laneOf(r.class) === "productive");
-  if (caps?.perProject !== undefined && entry.project !== undefined && productive.filter((r) => r.project === entry.project).length >= caps.perProject) return "project";
-  if (caps?.perAgent !== undefined && entry.agent !== undefined && productive.filter((r) => r.agent === entry.agent).length >= caps.perAgent) return "agent";
-  if (caps?.fanIn !== undefined && entry.reportsTo !== undefined && productive.filter((r) => r.reportsTo === entry.reportsTo).length >= caps.fanIn) return "fanin";
-  return null;
+  if (caps?.perProject !== undefined && entry.project !== undefined && productive.filter((r) => r.project === entry.project).length >= caps.perProject) out.push("project");
+  if (caps?.perAgent !== undefined && entry.agent !== undefined && productive.filter((r) => r.agent === entry.agent).length >= caps.perAgent) out.push("agent");
+  if (caps?.fanIn !== undefined && entry.reportsTo !== undefined && productive.filter((r) => r.reportsTo === entry.reportsTo).length >= caps.fanIn) out.push("fanin");
+  return out;
 }
+
+/** The first thing that holds a request back (see `blockers`), or null when nothing does. */
+export const blocker = (state: AdmissionState, entry: Entry): Blocker => blockers(state, entry)[0] ?? null;
 
 /** What a blocked request competes for: requests with the same key hold each other back. */
 const keyOf = (b: Blocker, e: Entry): string | undefined => (b === "lane" ? "lane" : b === "host" ? `host:${e.host}` : b === "project" ? `project:${e.project}` : b === "agent" ? `agent:${e.agent}` : b === "fanin" ? `fanin:${e.reportsTo}` : undefined);
@@ -121,14 +125,23 @@ const keysOf = (e: Entry): string[] => [e.host === undefined ? "" : `host:${e.ho
 /** Why a waiting request waits, in words for the owner ("waiting for capacity", never a failure). Null when nothing but order holds it back. */
 export function waitReason(state: AdmissionState, entry: Entry): string | null {
   const b = blocker(state, entry);
-  const caps = state.caps;
   switch (b) {
     case "lane": return `waiting for capacity: ${laneOf(entry.class) === "productive" ? state.limits.productive : state.limits.control} ${laneOf(entry.class)} attempts are already running`;
     case "host": return `waiting for capacity: ${entry.host} is full`;
+    case "never": return `${entry.host} has no declared capacity`;
+    case "project": case "agent": case "fanin": return capWaitReason(state, entry);
+    default: return null;
+  }
+}
+
+/** Why a waiting request waits on one of the owner's capacity caps (per project, per agent, fan-in), whatever else also holds it. Null when no cap holds it. */
+export function capWaitReason(state: AdmissionState, entry: Entry): string | null {
+  const caps = state.caps;
+  const b = blockers(state, entry).find((x) => x === "project" || x === "agent" || x === "fanin");
+  switch (b) {
     case "project": return `waiting for capacity: project ${entry.project} already has ${caps?.perProject} attempts running (the owner's per-project cap)`;
     case "agent": return `waiting for capacity: agent ${entry.agent} already has ${caps?.perAgent} attempts running (the owner's per-agent cap)`;
     case "fanin": return `waiting for capacity: ${entry.reportsTo} already receives reports from ${caps?.fanIn} running attempts (the owner's fan-in cap)`;
-    case "never": return `${entry.host} has no declared capacity`;
     default: return null;
   }
 }
@@ -160,18 +173,18 @@ export function promote(state: AdmissionState): { state: AdmissionState; admitte
       let chosen: Entry | undefined;
       for (const entry of candidates) {
         if (barred.has("lane") || keysOf(entry).some((k) => barred.has(k))) continue;
-        const b = blocker(current, entry);
-        if (b === null) { chosen = entry; break; }
-        // A starved request holds back only what it is waiting for (the lane, its host, its project, its agent or its supervisor).
-        if (entry.skipped >= current.limits.patience) { const k = keyOf(b, entry); if (k !== undefined) barred.add(k); }
+        const bs = blockers(current, entry);
+        if (bs.length === 0) { chosen = entry; break; }
+        // A starved request holds back everything it is waiting for (the lane, its host, its project, its agent and its supervisor, each that is full), so a request that
+        // shares any one of them cannot slip past it; work that shares none of them carries on.
+        if (entry.skipped >= current.limits.patience) for (const b of bs) { const k = keyOf(b, entry); if (k !== undefined) barred.add(k); }
       }
       if (chosen === undefined) break;
       const picked = chosen;
       const jumped = new Set(candidates.filter((e) => {
         if (e.id === picked.id || e.seq >= picked.seq) return false;
-        const b = blocker(current, e);
-        const k = keyOf(b, e);
-        return b === null || b === "lane" || (k !== undefined && keysOf(picked).includes(k));
+        const bs = blockers(current, e);
+        return bs.length === 0 || bs.includes("lane") || bs.some((b) => { const k = keyOf(b, e); return k !== undefined && keysOf(picked).includes(k); });
       }).map((e) => e.id));
       current = {
         ...current,

@@ -43,7 +43,7 @@ export function capsOf(body: unknown, revision?: number): Caps {
 }
 
 /**
- * Optional capacity caps (card H10b): attempts running at once per project, per agent, and the fan-in (running attempts that report to one supervisor or reviewer). All OFF by default. The owner turns each
+ * Optional capacity caps (card H10b): attempts running at once per project, per agent, and the fan-in (running child attempts whose parent task is owned by one supervising agent; reviewers are not counted). All OFF by default. The owner turns each
  * on with a figure, off (the figure is kept), on again, or forgets it. Owner only, race-safe (`expectedRevision`), replay-safe. Admission reads the record at every decision, so a change counts from the next one;
  * `onChanged` lets the controller re-run admission at once so a raised or removed cap lets waiting work in. Work already running is never stopped by a lower cap.
  */

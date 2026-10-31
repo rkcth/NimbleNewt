@@ -6,7 +6,7 @@ import { CAPS_REF, capsOf } from "./caps.js";
 import type { PrincipalBody } from "../security/principals.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import {
-  EMPTY_STATE, WITHDRAWN_KEPT, checkLimits, descendants, laneOf, order, promote, waitReason, type AdmissionState, type Capacity, type Entry, type Limits, type RequestClass,
+  EMPTY_STATE, WITHDRAWN_KEPT, checkLimits, descendants, laneOf, order, promote, waitReason, capWaitReason, type AdmissionState, type Capacity, type Entry, type Limits, type RequestClass,
 } from "./policy.js";
 
 const STATE: AggregateRef = { kind: "admission-state", id: "admission" };
@@ -25,13 +25,13 @@ export interface RequestAdmission extends CommandMeta {
   readonly memoryMb: number;
   /** The running request that is starting this one. */
   readonly parent?: string;
-  /** Who and what the work belongs to, for the owner's optional caps (project, agent, and the supervisor or reviewer that receives its report). */
+  /** Who and what the work belongs to, for the owner's optional caps (project, agent, and the supervising agent that receives its report; reviewers are not counted). */
   readonly project?: string;
   readonly agent?: string;
   readonly reportsTo?: string;
 }
 
-export type Where = { readonly state: "running"; readonly entry: Entry } | { readonly state: "waiting"; readonly entry: Entry; readonly position?: number; /** Why it waits ("waiting for capacity: ..."); absent when only order holds it back. */ readonly reason?: string } | { readonly state: "withdrawn"; readonly reason: string } | { readonly state: "absent" };
+export type Where = { readonly state: "running"; readonly entry: Entry } | { readonly state: "waiting"; readonly entry: Entry; readonly position?: number; /** Why it waits ("waiting for capacity: ..."); absent when only order holds it back. */ readonly reason?: string; /** Set only when one of the owner's capacity caps (per project, per agent, fan-in) is full, whatever else also holds it. */ readonly capReason?: string } | { readonly state: "withdrawn"; readonly reason: string } | { readonly state: "absent" };
 
 /**
  * Priority admission and reserved control capacity (card H03). One small durable record holds what is running and what waits, so every decision is made on the whole picture in a single
@@ -235,6 +235,54 @@ export class AdmissionService {
     return report;
   }
 
+  /**
+   * Keeps what the owner's caps count by up to date (card H10b follow-up). For requests that are running or waiting: `project` and `agent` are filled in when the record has none (a request made before the
+   * caps existed), and `reportsTo` is set, or cleared with null, for a request that is still waiting (the supervisor is read again at each decision; a request that already runs keeps what it ran under).
+   * Nothing else about a request changes, and requests that are gone are counted as missing. Waiting requests that now fit are admitted in the same step.
+   */
+  async annotate(command: CommandMeta & { changes: readonly { requestId: string; project?: string; agent?: string; reportsTo?: string | null }[] }): Promise<{ changed: number; missing: number }> {
+    let report = { changed: 0, missing: 0 };
+    await this.#retrying(() => this.#runner.command("admission.annotate", command, async () => {
+      onlyKnown(command, ["commandId", "actor", "changes"]);
+      if (!Array.isArray(command.changes) || command.changes.length < 1 || command.changes.length > 100) invalid("changes", "must list 1 to 100 requests");
+      const seen = new Set<string>();
+      const changes = command.changes.map((c, i) => {
+        if (c === null || typeof c !== "object") return invalid(`changes[${i}]`, "must be an object with requestId");
+        onlyKnown(c, ["requestId", "project", "agent", "reportsTo"]);
+        const requestId = typeof c.requestId === "string" && REQUEST_ID.test(c.requestId) ? c.requestId : invalid(`changes[${i}].requestId`, "is not a request ID");
+        if (seen.has(requestId)) invalid(`changes[${i}].requestId`, "is listed twice");
+        seen.add(requestId);
+        const one = (v: unknown, field: string): string | undefined => (v === undefined ? undefined : typeof v === "string" && LABEL.test(v) ? v : invalid(`changes[${i}].${field}`, "is not a valid ID"));
+        const reportsTo = c.reportsTo === null ? null : one(c.reportsTo, "reportsTo");
+        return { requestId, ...(one(c.project, "project") === undefined ? {} : { project: one(c.project, "project")! }), ...(one(c.agent, "agent") === undefined ? {} : { agent: one(c.agent, "agent")! }), ...(reportsTo === undefined ? {} : { reportsTo }) };
+      });
+      return {
+        payload: { changes: changes as unknown as JsonObject[] },
+        build: async () => {
+          const loaded = await this.#load();
+          const state = await this.#prepare(loaded.state);
+          const by = new Map(changes.map((c) => [c.requestId, c]));
+          let changed = 0;
+          const apply = (e: Entry, waiting: boolean): Entry => {
+            const c = by.get(e.id);
+            if (c === undefined) return e;
+            let next: { -readonly [K in keyof Entry]: Entry[K] } = { ...e };
+            if (c.project !== undefined && e.project === undefined) next.project = c.project;
+            if (c.agent !== undefined && e.agent === undefined) next.agent = c.agent;
+            if (c.reportsTo !== undefined && (waiting || e.reportsTo === undefined)) { if (c.reportsTo === null) { const { reportsTo: _r, ...rest } = next; void _r; next = rest as typeof next; } else next.reportsTo = c.reportsTo; }
+            if (JSON.stringify(next) !== JSON.stringify(e)) changed++;
+            return next;
+          };
+          const next: AdmissionState = { ...state, running: state.running.map((e) => apply(e, false)), queue: state.queue.map((e) => apply(e, true)) };
+          const missing = changes.filter((c) => ![...state.running, ...state.queue].some((e) => e.id === c.requestId)).length;
+          report = { changed, missing };
+          return this.#built(loaded.revision, (await this.#promote(next)), { changed, missing });
+        },
+      };
+    }));
+    return report;
+  }
+
   /** Where a request is: running, waiting (with its position in its lane's order), or neither. */
   async where(requestId: string): Promise<Where> {
     const { state } = await this.#load();
@@ -246,9 +294,9 @@ export class AdmissionService {
       return gone === undefined ? { state: "absent" } : { state: "withdrawn", reason: gone.reason };
     }
     const ahead = order(state, laneOf(waiting.class));
-    let reason: string | null = null;
-    try { reason = waitReason({ ...state, caps: await this.#caps() }, waiting); } catch (error) { if (!(error instanceof DomainError && error.code === "integrity")) throw error; reason = "waiting for capacity: the owner's capacity limits setting is damaged, nothing new starts until it is repaired"; }
-    return { state: "waiting", entry: waiting, position: ahead.findIndex((e) => e.id === requestId) + 1, ...(reason === null ? {} : { reason }) };
+    let reason: string | null = null, capReason: string | null = null;
+    try { const withCaps = { ...state, caps: await this.#caps() }; reason = waitReason(withCaps, waiting); capReason = capWaitReason(withCaps, waiting); } catch (error) { if (!(error instanceof DomainError && error.code === "integrity")) throw error; reason = capReason = "waiting for capacity: the owner's capacity limits setting is damaged, nothing new starts until it is repaired"; }
+    return { state: "waiting", entry: waiting, position: ahead.findIndex((e) => e.id === requestId) + 1, ...(reason === null ? {} : { reason }), ...(capReason === null ? {} : { capReason }) };
   }
 
   async snapshot(): Promise<AdmissionState & { revision: number }> {
