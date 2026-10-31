@@ -80,6 +80,21 @@ test("meeting.decisions.log: the owner reads one line per carried-out change, an
     assert.equal((await logOp(owner, { outcome: "applied", projectId: project })).result.item.entries.length, 2);
     assert.equal((await logOp(owner, { outcome: "declined" })).result.item.entries.length, 0);
 
+    // The chat reading of the log (card M02g): the owner gets one plain line per change, citing its log line; anyone else reads nothing.
+    const asked = await call(owner, "status.ask", { request: { kind: "decision_log", projectId: project } });
+    assert.ok(asked.ok, JSON.stringify(asked));
+    const lines = asked.result.item.lines as { text: string; cites: { kind: string; id: string }[] }[];
+    assert.equal(lines.length, 2);
+    for (const l of lines) { assert.match(l.text, /budget\.raise on a task: applied; you allowed it\./); assert.ok(l.cites.some((x) => x.kind === "meeting-decision-log" && entries.some((e) => e.id === x.id))); }
+    assert.equal(((await call(owner, "status.ask", { request: { kind: "decision_log", outcome: "declined" } })).result.item.lines as unknown[]).length, 1, "an empty reading says so in one line");
+    const denied = await call(ann, "status.ask", { request: { kind: "decision_log" } });
+    assert.equal(denied.ok, false, "an agent reads nothing");
+    // The per-decision limit settings are the owner's and are validated (card M02g).
+    for (const bad of [{ "meeting.decision.maxPolicyWidening": 51 }, { "meeting.decision.maxPolicyWidening": -1 }, { "meeting.decision.limitPolicyWidening": "no" }]) assert.notEqual(await c.services.configuration.stage(rob, { commandId: `cfgb-${Object.keys(bad)[0]}-${JSON.stringify(Object.values(bad)[0])}`, layer: "installation", set: bad }).then(() => "staged", (e: Error) => e.message), "staged");
+    assert.deepEqual(await c.services.configuration.installationValues(["meeting.decision.limitPolicyWidening", "meeting.decision.maxPolicyWidening"]), { "meeting.decision.limitPolicyWidening": true, "meeting.decision.maxPolicyWidening": 3 }, "limited to three by default");
+    const stagedLimit = await c.services.configuration.stage(rob, { commandId: "cfg-l1", layer: "installation", set: { "meeting.decision.maxPolicyWidening": 7, "meeting.decision.limitPolicyWidening": false } });
+    await c.services.configuration.apply(rob, { commandId: "cfg-l2", layer: "installation", expectedRevision: stagedLimit.revision });
+    assert.deepEqual(await c.services.configuration.installationValues(["meeting.decision.limitPolicyWidening", "meeting.decision.maxPolicyWidening"]), { "meeting.decision.limitPolicyWidening": false, "meeting.decision.maxPolicyWidening": 7 });
     // A replay writes nothing more, and neither does a restart followed by a repeat of the apply.
     assert.ok((await call(owner, "meeting.record.apply", { decisionId }, "ap1")).ok);
     assert.equal((await logOp(owner)).result.item.entries.length, 2);

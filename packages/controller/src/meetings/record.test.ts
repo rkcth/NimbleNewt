@@ -34,7 +34,7 @@ for (const backend of backends) {
     pA: string; pB: string; pC: string; pD: string; pE: string; project: string;
     meetings: MeetingService; records: MeetingRecordService; decisions: DecisionService; grants: GrantService; principals: PrincipalService; projects: ProjectService;
     other: Map<string, Availability>; shared: Set<string>; calls: { applied: string[]; failOnce: boolean; failLog: boolean; narrate: "ok" | "throw" };
-    reopen(extra?: Partial<{ appliers: Record<string, ChangeApplier>; shareable: (c: SourceCite) => Promise<boolean>; widening: (cls: "access-change" | "spend", projectId: string) => Promise<"allow" | "ask"> }>): MeetingRecordService;
+    reopen(extra?: Partial<{ appliers: Record<string, ChangeApplier>; shareable: (c: SourceCite) => Promise<boolean>; widening: (cls: "access-change" | "spend", projectId: string) => Promise<"allow" | "ask">; policyWideningLimit: (projectId: string) => Promise<number | undefined> }>): MeetingRecordService;
     task(title?: string): Promise<{ id: string; revision: number }>;
     grantUpdate(agent: string): Promise<{ id: string; revision: number }>;
     meet(o?: { roster?: string[]; chair?: string; paused?: string[]; item?: "delegated-decision" | "owner-instruction" }): Promise<{ occ: string; rec: string; item?: string }>;
@@ -90,8 +90,8 @@ for (const backend of backends) {
           const p = await principals.get(id);
           return p === undefined ? undefined : grants.effective({ id, kind: p.kind, name: p.name, grants: p.grants }, clock());
         };
-        const make = (extra: Partial<{ appliers: Record<string, ChangeApplier>; shareable: (c: SourceCite) => Promise<boolean>; widening: (cls: "access-change" | "spend", projectId: string) => Promise<"allow" | "ask"> }> = {}) => MeetingRecordService.withEpoch(flaky, epoch, { meetings, decisions }, {
-          ...options, authority, appliers: extra.appliers ?? { "task.update": counting }, shareable: extra.shareable ?? (async (c) => shared.has(`${c.kind}:${c.id}`)), ...(extra.widening === undefined ? {} : { widening: extra.widening }),
+        const make = (extra: Partial<{ appliers: Record<string, ChangeApplier>; shareable: (c: SourceCite) => Promise<boolean>; widening: (cls: "access-change" | "spend", projectId: string) => Promise<"allow" | "ask">; policyWideningLimit: (projectId: string) => Promise<number | undefined> }> = {}) => MeetingRecordService.withEpoch(flaky, epoch, { meetings, decisions }, {
+          ...options, authority, appliers: extra.appliers ?? { "task.update": counting }, shareable: extra.shareable ?? (async (c) => shared.has(`${c.kind}:${c.id}`)), ...(extra.widening === undefined ? {} : { widening: extra.widening }), ...(extra.policyWideningLimit === undefined ? {} : { policyWideningLimit: extra.policyWideningLimit }),
           narrate: async ({ summary }) => { if (calls.narrate === "throw") throw new Error("the model is down"); return `A meeting with ${summary.decisions.length} decision(s).`; },
         });
         const records = make();
@@ -929,6 +929,52 @@ for (const backend of backends) {
     assert.deepEqual(await svc.apply(c.host, { decisionId: d.id }), { applied: 1, notApplied: 0, pending: 0 });
     assert.deepEqual(seen, ["policy:spend", "policy:spend"], "the same basis on the replay");
     assert.equal((await c.projects.getTask(task.id))!.title, "Write the guide, v2");
+  });
+
+  suite("a decision may carry out only so many widening changes on the policy's leave; the rest wait for the owner, whose agreement lifts the limit (card M02g)", async (c) => {
+    const widens = { ...taskUpdateApplier(c.projects), widens: "spend" as const };
+    await c.grantUpdate(c.pA);
+    const decide = async (limit: number | undefined, count: number, owner?: "agree") => {
+      const svc = c.reopen({ appliers: { "task.update": taskUpdateApplier(c.projects), "task.retitle-widening": widens }, widening: async () => "allow", policyWideningLimit: async () => limit });
+      const ctx = { ...c, records: svc } as Ctx;
+      const tasks = await Promise.all(Array.from({ length: count }, (_, i) => c.task(`Limit ${i}`)));
+      const meeting = await c.meet({ chair: c.pD, item: "delegated-decision" });
+      const item = (await c.meetings.occurrence(c.owner, (await recordOf(c, meeting.rec)).occurrenceId))!.agenda.find((a) => a.intent === "delegated-decision")!.id;
+      const m = await adopt(ctx, meeting.rec, c.asB, { agendaItemId: item, changes: tasks.map((t, i) => ({ ...change(c, t, c.pA, `Limit ${i}, retitled`), kind: "task.retitle-widening" })) });
+      const d = await decisionOf(ctx, m);
+      if (owner === "agree") await svc.ownerRespond(c.owner, { commandId: cid("or"), decisionId: d.id, response: "agree" });
+      else await svc.apply(c.host, { decisionId: d.id });
+      return (await decisionOf(ctx, m)).changes;
+    };
+    const none = await decide(undefined, 3);
+    assert.deepEqual(none.map((x) => x.state), ["applied", "applied", "applied"], "no limit set: nothing is held back");
+    const two = await decide(2, 3);
+    assert.deepEqual(two.map((x) => [x.state, x.code]), [["applied", undefined], ["applied", undefined], ["not-applied", "unauthorized"]]);
+    assert.match(two[2]!.reason!, /already has 2 widening changes .* limit is 2/);
+    const zero = await decide(0, 1);
+    assert.deepEqual(zero.map((x) => [x.state, x.code]), [["not-applied", "unauthorized"]], "limit 0: nothing without the owner");
+    const agreed = await decide(1, 3, "agree");
+    assert.deepEqual(agreed.map((x) => x.state), ["applied", "applied", "applied"], "the owner's agreement lifts the limit");
+  });
+
+  suite("a refusal is not saved over a change the owner's agreement has already started (card M02g)", async (c) => {
+    await c.grantUpdate(c.pA);
+    const task = await c.task();
+    const { rec, item } = await c.meet({ chair: c.pD, item: "delegated-decision" });
+    const m = await adopt(c, rec, c.asB, { agendaItemId: item, changes: [change(c, task, c.pA)] });
+    const d = await decisionOf(c, m);
+    const seen: string[] = [];
+    let crash = true;
+    const base = taskUpdateApplier(c.projects);
+    const widening: ChangeApplier = { ...base, widens: "spend", async apply(ch) { seen.push(ch.agreedBy); if (crash) { crash = false; throw new DomainError("unavailable", "storage went away"); } return base.apply(ch); } };
+    let svc: MeetingRecordService | undefined;
+    // While the first pass reads the policy, the owner agrees: that apply starts the change and stops half way (the applier is down once). The first pass wanted to refuse (the policy says ask) but must not overwrite the started change.
+    let agreeing = true;
+    svc = c.reopen({ appliers: { "task.update": widening }, widening: async () => { if (agreeing) { agreeing = false; await svc!.ownerRespond(c.owner, { commandId: cid("or"), decisionId: d.id, response: "agree" }).catch(() => undefined); } return "ask"; } });
+    assert.deepEqual(await svc.apply(c.host, { decisionId: d.id }), { applied: 1, notApplied: 0, pending: 0 });
+    const done = (await decisionOf(c, m)).changes[0]!;
+    assert.deepEqual([done.state, done.agreedBy], ["applied", "owner:agreed"]);
+    assert.deepEqual(seen, ["owner:agreed", "owner:agreed"], "applied once more after the half-done apply, under the owner's agreement");
   });
 
   suite("an apply that committed and crashed before `applied` was saved is replayed under the recorded actor, so the service's recovery finishes it (card M02e3)", async (c) => {

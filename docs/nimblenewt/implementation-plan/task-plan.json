@@ -6120,11 +6120,28 @@
       "id": "M02g",
       "parent": "N12",
       "existing_issue": "AII-262",
-      "title": "Finish meeting records: steward agent, narrator, chat commands, per-decision limits",
+      "title": "Meeting decisions: per-decision limit on widening changes, guarded refusals, chat reading of the decision log",
       "depends_on": [
         "M02f"
       ],
-      "deliverable": "Split from M02f (2026-10-30): the steward agent for decisions no coded rule covers (decidedBy steward), the narrator, chat commands for meetings and a chat reading of the log, learning auto-apply rules from the log once production data exists, and the open items from the applier work (no per-decision limit on grants or raises, the aggregate cap, unguarded refuse saves)",
+      "deliverable": "Split from M02f (2026-10-30); narrowed 2026-10-31 (the steward agent, narrator, meeting chat commands, learned auto-apply rules and the aggregate cap moved to M02h): a limit on how many widening changes (grants, budget raises) one decision carries out on the approval policy's leave alone (owner settings, default three, switch-off explicit), refusals that cannot overwrite a change the owner's agreement has started, and a chat reading of the decision log (status.ask decision_log)",
+      "acceptance_and_verification": "The limit holds and the owner's agreement lifts it; the owner can read the log in chat",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "M02h",
+      "parent": "N12",
+      "existing_issue": "AII-262",
+      "title": "Finish meeting records: steward agent, narrator, meeting chat commands, learned rules, aggregate cap",
+      "depends_on": [
+        "M02g"
+      ],
+      "deliverable": "Split from M02g (2026-10-31): the steward agent for decisions no coded rule covers (decidedBy steward), the narrator, chat commands for meetings (moving and voting, not only reading the log), learning auto-apply rules from the log once production data exists, and a cap across decisions on policy-agreed grants and raises (the per-decision limit is M02g)",
       "acceptance_and_verification": "Unforeseen decisions go to a capable agent under the same widening policy; the commands are reachable through chat",
       "status": "planned",
       "research_evidence": null,
@@ -8695,6 +8712,7 @@
         "L05c",
         "U14",
         "M02g",
+        "M02h",
         "M03g",
         "M03h",
         "M04g",

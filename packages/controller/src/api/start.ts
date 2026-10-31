@@ -500,7 +500,9 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const replay = ReplayService.withEpoch(storage, epoch, activity, { limits: replayLimits });
     // The stop service is built after the status service (it uses the pause service), so the readiness view reaches it through this.
     let stopsLive: StopService | undefined;
-    const status = StatusService.withEpoch(storage, epoch, { assignments, waits, blockers: BlockerService.withEpoch(storage, epoch), contracts, pauses, revocations: { list: (by, query) => catalogService.revocations(by, query) }, stall, watch: watchService, reviews, ownerQuestions: messages, agenda: meetings, meetings, shutdown: { readiness: async (by) => { if (stopsLive === undefined) throw new DomainError("unavailable", "stop is not ready"); return stopsLive.readiness(by, { kind: "installation", id: "installation" }); } }, handoffs: { forTask: (by, taskId) => handoffs.forTask(by, taskId) }, activity, replay, ...(checked === undefined ? {} : { verifyArtifact: async (id: string) => ({ ok: (await checked.verify(id)).ok }) }) });
+    // The meeting record service is built after the status service (it needs the grants and budgets); the chat reading of the decision log reaches it when it is there (card M02g).
+    let recordsLive: MeetingRecordService | undefined;
+    const status = StatusService.withEpoch(storage, epoch, { assignments, waits, blockers: BlockerService.withEpoch(storage, epoch), contracts, pauses, revocations: { list: (by, query) => catalogService.revocations(by, query) }, stall, watch: watchService, reviews, ownerQuestions: messages, agenda: meetings, meetings, decisionLog: async (by, query) => { if (recordsLive === undefined) throw new DomainError("unavailable", "meeting records are not running"); return recordsLive.decisionLog(by, query); }, shutdown: { readiness: async (by) => { if (stopsLive === undefined) throw new DomainError("unavailable", "stop is not ready"); return stopsLive.readiness(by, { kind: "installation", id: "installation" }); } }, handoffs: { forTask: (by, taskId) => handoffs.forTask(by, taskId) }, activity, replay, ...(checked === undefined ? {} : { verifyArtifact: async (id: string) => ({ ok: (await checked.verify(id)).ok }) }) });
     const branchSettings = ProtectedBranchService.withEpoch(storage, epoch);
     // Typed commands (card T09b): the `nimblenewt.` names are the state-API operations, `toolbox.` and `a_<id>.` names come from the catalog.
     // ONE catalogue for the whole controller: its revocation listeners live on the instance, so the revoke path and the tool bridge must share it.
@@ -666,6 +668,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         // The engine keeps a change of rights a decision for the owner whatever the profile says, so a vote widens rights without the owner only where the owner set that cell by hand (a specific setting overrides the profile).
         return wideningDecision(cell, cls);
       },
+      // At most this many widening changes per decision on the policy's leave alone (card M02g); the owner turns the limit off with meeting.decision.limitPolicyWidening.
+      policyWideningLimit: async () => { const v = await configuration.installationValues(["meeting.decision.limitPolicyWidening", "meeting.decision.maxPolicyWidening"]); return v["meeting.decision.limitPolicyWidening"] === false ? undefined : typeof v["meeting.decision.maxPolicyWidening"] === "number" ? v["meeting.decision.maxPolicyWidening"] : 3; },
       // A change that was carried out, or refused, is a step in the task it names (card C09f); the step is written by the controller itself (a service identity with no grants, which the activity service accepts as a service).
       onChange: async (e) => {
         if (e.target.kind !== "task") return;
@@ -675,6 +679,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       },
       authority: async (principalId) => { const p = await principals.get(principalId); return p === undefined || p.state !== "active" ? undefined : grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); },
     });
+    recordsLive = records;
     // The attendance service lives with the dispatcher (it needs the budget and the pause service it was composed with), which starts after the API: calls reach it when it is there.
     const attendance = new Proxy({}, { get: (_t, method: string) => (...args: unknown[]) => { const live = dispatch?.attendance as unknown as Record<string, (...x: unknown[]) => unknown> | undefined; if (live === undefined) throw new DomainError("unavailable", "meeting attendance is not running: the dispatcher is not"); return live[method]!(...args); } }) as NonNullable<ConstructorParameters<typeof StateApi>[0]["attendance"]>;
     const standups = new Proxy({}, { get: (_t, method: string) => (...args: unknown[]) => { const live = dispatch?.standups as unknown as Record<string, (...x: unknown[]) => unknown> | undefined; if (live === undefined) throw new DomainError("unavailable", "stand-ups are not running: the dispatcher is not"); return live[method]!(...args); } }) as NonNullable<ConstructorParameters<typeof StateApi>[0]["standups"]>;

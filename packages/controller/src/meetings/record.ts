@@ -198,6 +198,8 @@ export interface RecordOptions extends RunnerOptions {
   readonly onChange?: (event: { decisionId: string; index: number; projectId: string; target: { kind: string; id: string }; state: "applied" | "not-applied"; summary: string; reason?: string }) => Promise<void>;
   /** Whether the approval policy lets a class of widening change be carried out without asking the owner (spend follows the profile: strict asks, derived and autonomous let it through in development; rights are the owner's unless the owner set that cell by hand). Missing: always ask the owner. */
   readonly widening?: (cls: "access-change" | "spend", projectId: string) => Promise<"allow" | "ask">;
+  /** The most widening changes (grants, budget raises) one decision may have carried out without the owner's agreement (the policy letting them through); more wait for the owner. Missing, or resolving to undefined: no limit. The owner agreeing to the decision lifts it (card M02g). */
+  readonly policyWideningLimit?: (projectId: string) => Promise<number | undefined>;
   /** How much of the decision log one read scans: entries per storage read and the most reads per call (default 100 and 20). */
   readonly logScan?: { readonly pageSize: number; readonly reads: number };
   /** Minutes a vote stays open (default 10), unless the vote names its own. */
@@ -982,13 +984,21 @@ export class MeetingRecordService {
       };
       // The policy's cell for the change's widening class, read once when the change is started or refused and kept on the change (the decision log reads it from there).
       let cell: "allow" | "ask" | undefined;
-      const refuse = async (code: ChangeRecord["code"], reason: string): Promise<void> => { await save({ ...change, state: "not-applied", ...(code === undefined ? {} : { code }), ...((cell ?? change.setting) === undefined ? {} : { setting: cell ?? change.setting }), reason }); };
+      // Until the change has been started, a refusal is saved only while the change is still adopted and the owner's answer is the one this pass worked from; if the owner answered meanwhile the pass reads the decision again (card M02g).
+      let started = change.state === "applying";
+      const refuse = async (code: ChangeRecord["code"], reason: string): Promise<void> => { await save({ ...change, state: "not-applied", ...(code === undefined ? {} : { code }), ...((cell ?? change.setting) === undefined ? {} : { setting: cell ?? change.setting }), reason }, started ? undefined : "refusal"); };
       if (change.state === "adopted") {
         const applier = this.#options.appliers?.[change.kind];
         if (applier === undefined) { await refuse("failed", `no applier is registered for ${change.kind}`); continue; }
         if (applier.widens !== undefined) cell = this.#options.widening === undefined ? "ask" : await this.#options.widening(applier.widens, d.projectId).catch(() => "ask" as const);
         // The policy may have tightened since the vote: a widening change goes ahead without the owner's agreement only while the policy still lets its class through.
         if (applier.widens !== undefined && d.ownerResponse !== "agreed" && cell !== "allow") { await refuse("unauthorized", `the approval policy asks the owner before ${applier.widens} changes are carried out, and the owner has not agreed`); continue; }
+        // A limit on how much widening one decision may do without the owner: the policy's leave covers that many changes, the rest wait for the owner (who may agree to the whole decision).
+        if (applier.widens !== undefined && d.ownerResponse !== "agreed") {
+          const limit = this.#options.policyWideningLimit === undefined ? undefined : await this.#options.policyWideningLimit(d.projectId).catch(() => 0);
+          const used = d.changes.filter((c) => c.id !== change.id && c.agreedBy !== undefined && c.agreedBy.startsWith("policy:") && c.agreedBy !== "policy:none").length;
+          if (limit !== undefined && used >= limit) { await refuse("unauthorized", `this decision already has ${used} widening change${used === 1 ? "" : "s"} carried out on the policy's leave (the limit is ${limit}); the owner has to agree to the rest`); continue; }
+        }
         if (change.target.kind === "task" && this.#deps.decisions !== undefined) {
           const blocked = (await this.#deps.decisions.guard(change.target.id, "start")).blockedBy;
           if (blocked.length > 0) { await refuse("gate", `an owner gate or a superseded decision blocks work on the task (${blocked.join(", ")})`); continue; }
@@ -1003,6 +1013,7 @@ export class MeetingRecordService {
         // The owner may have declined since this was read: then the change is not started, and the decline's own record stands.
         // The actor of the effect is fixed the same way: the command digest includes it, and a replay may run under another principal (the owner agreed, the service recovers).
         if (!(await save({ ...change, state: "applying", agreedBy, actedAs: by.id, ...(cell === undefined ? {} : { setting: cell }) }, agreedBy))) continue;
+        started = true;
       }
       const applier = this.#options.appliers?.[change.kind];
       if (applier === undefined) { await refuse("failed", `no applier is registered for ${change.kind}`); continue; }
