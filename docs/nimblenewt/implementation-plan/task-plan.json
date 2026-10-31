@@ -1995,8 +1995,25 @@
         "C07e",
         "H12"
       ],
-      "deliverable": "Split from C07e (2026-10-28): the dispatcher calls the route change when a fallback or cutover moves a running task, using the measured system prompt and tool schemas of that route, and a controller with only remote hosts scales MCP limits to the window",
-      "acceptance_and_verification": "A fallback to a smaller window rebuilds the view with the route's real fixed part; the cut text can be read back; repeating the change gives the recorded decision; remote-only MCP limits follow the window",
+      "deliverable": "Split from C07e (2026-10-28), narrowed 2026-10-31: the dispatcher asks for the route change before an attempt starts when the task last ran on another route (a fallback, a cutover or a re-admitted attempt), using the system prompt and tool schemas measured at the first admitted call on the new route; a controller with only remote hosts scales MCP limits to the window of the route in the routing table; the cut text is read back through the state API",
+      "acceptance_and_verification": "A task whose next attempt is on another route has the context checked for that route's window and measured fixed part before the attempt starts, and an attempt that does not fit does not start, with the reason shown; the cut text can be read back; repeating the change gives the recorded decision; remote-only MCP limits follow the routing table's window",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "C07g",
+      "parent": "N07",
+      "existing_issue": "AII-257",
+      "title": "Put the rebuilt context into the worker's prompt and rebuild during a live attempt",
+      "depends_on": [
+        "C07f"
+      ],
+      "deliverable": "Split from C07f (2026-10-31): the route-change decision is built from the owner's decision record only and is a check and an archive; the worker's own startup prompt (desk, history, retrieval pieces) is not yet built from the rebuilt view, a route never measured counts its fixed part as 0 until its first call is admitted, and a route changed in the middle of a live attempt is only seen when the next attempt starts",
+      "acceptance_and_verification": "The rebuilt view (its kept pieces and cut references) is what the worker puts in the first prompt on the new route; a route with no measured fixed part is measured before it is trusted; a live attempt whose route moves is rebuilt or restarted on the new route without losing the cut text",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -8517,6 +8534,7 @@
         "P02b",
         "A08c",
         "C07f",
+        "C07g",
         "L02b",
         "H08b",
         "U06b",

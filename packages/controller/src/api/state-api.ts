@@ -203,7 +203,7 @@ export interface StateApiDeps {
   readonly commands?: CommandService;
 
   /** When present, the rest of a tool result cut to the window can be read in pages through the API (card C07d). */
-  readonly spill?: { readonly readSpill: (by: Principal, spillId: string, index: number, size?: number) => Promise<{ text: string; next?: number } | undefined> };
+  readonly spill?: { readonly readSpill: (by: Principal, spillId: string, index: number, size?: number) => Promise<{ text: string; next?: number } | undefined>; /** The full text of an item cut when a task moved to a smaller route (card C07f). */ readonly readRouteArchive?: (by: Principal, taskId: string, digest: string) => Promise<{ itemId: string; text: string; digest: string } | undefined> };
   /** When present, the owner can set the idle time of event subscriptions and cancel one through the API (card H06c). */
   readonly events?: Pick<EventService, "configureIdle" | "cancel">;
   /** When present, the owner can read and set notification settings through the API (card U11b). */

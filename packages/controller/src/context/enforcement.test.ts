@@ -3,7 +3,7 @@ import { after, test } from "node:test";
 import { BlockerService, DomainError, EffectService, ProjectService, type DomainErrorCode } from "../domain/index.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Grant, type Principal } from "../security/index.js";
-import { ContextEnforcementService, DeskService, HistoryService, RetrievalService, contextBudget, type CompactionOutcome, type HandoffFacts, type SourceRef, type StartupItem, type Summariser } from "./index.js";
+import { ContextEnforcementService, contextRouteKey, DeskService, HistoryService, RetrievalService, contextBudget, type CompactionOutcome, type HandoffFacts, type SourceRef, type StartupItem, type Summariser } from "./index.js";
 
 after(stopServer);
 
@@ -164,6 +164,38 @@ for (const backend of backends) {
     assert.deepEqual(blocked.startup.pieces, [], "nothing to send");
     assert.equal((await blockers.getBlocker(blocked.blockerId!))!.type, "context_overflow");
     assert.equal((await enf.changeRoute(owner, { taskId: t2, attemptId: "att-1", window: 8_192, fixedTokens: 2_000, items })).replayed, true);
+  });
+
+  suite("a task moved to another route is rebuilt with that route's measured fixed part (card C07f), and the cut text can be read back", async ({ enf, owner, blockers, t, t2 }) => {
+    const at = (i: number): string => new Date(Date.UTC(2026, 9, 1, 0, i)).toISOString();
+    const items: StartupItem[] = [{ id: "g", kind: "goal", text: "Goal: ship v1.", at: at(0) }, { id: "h", kind: "human", text: "Merge the branch.", at: at(1) }];
+    for (let i = 0; i < 20; i++) items.push({ id: `r${i}`, kind: "report", text: "x".repeat(1500), at: at(i + 2) });
+    // Nothing measured yet for the route: the figure is 0, said so, and the first call on the route is still admitted against its own measure.
+    const before = await enf.routeMoved(owner, { taskId: t, attemptId: "att-1", route: "local/small", window: 65_536, items });
+    assert.deepEqual([before.measured, before.rebuilt], [false, true]);
+    // A first call on the route measures its system prompt and tool schemas (for every task, kept per route).
+    await enf.admit(owner, { taskId: t2, attemptId: "att-1", window: 65_536, route: contextRouteKey("local/small"), call: { systemPromptChars: 12_000, toolSchemaChars: 9_000, startupTokens: 500, replyReserveTokens: 1_000 } });
+    assert.deepEqual(await enf.fixedPartOf("local/small", 65_536), { systemPromptChars: 12_000, toolSchemaChars: 9_000, tokens: 7_000 });
+    assert.equal(await enf.fixedPartOf("other/route", 65_536), undefined);
+    const after = await enf.routeMoved(owner, { taskId: t, attemptId: "att-2", route: "local/small", window: 65_536, items });
+    assert.equal(after.measured, true);
+    assert.ok(after.rebuilt && after.startup.tokens + 7_000 <= contextBudget(65_536).startupTokens, "the view is built around the real fixed part");
+    assert.ok(after.startup.tokens < before.startup.tokens, "a larger fixed part leaves less room, so more is cut");
+    // The cut text can be read back by digest.
+    const cut = after.startup.cuts[0]!;
+    assert.equal((await enf.routeArchive(owner, { taskId: t, digest: cut.digest }))?.text.length, cut.originalChars);
+    // Repeating gives the recorded decision; a fixed part that changed is a new decision.
+    assert.equal((await enf.routeMoved(owner, { taskId: t, attemptId: "att-2", route: "local/small", window: 65_536, items })).replayed, true);
+    await enf.admit(owner, { taskId: t2, attemptId: "att-2", window: 65_536, route: contextRouteKey("local/small"), call: { systemPromptChars: 24_000, toolSchemaChars: 9_000, startupTokens: 500, replyReserveTokens: 1_000 } });
+    const grown = await enf.routeMoved(owner, { taskId: t, attemptId: "att-2", route: "local/small", window: 65_536, items });
+    assert.equal(grown.replayed, false);
+    assert.ok(grown.startup.tokens < after.startup.tokens);
+    // Essentials that do not fit beside the measured part block the move with a visible reason.
+    await enf.admit(owner, { taskId: t2, attemptId: "att-3", window: 8_192, route: contextRouteKey("tiny/one"), call: { systemPromptChars: 15_000, toolSchemaChars: 9_000, startupTokens: 500, replyReserveTokens: 1_000 } });
+    const blocked = await enf.routeMoved(owner, { taskId: t, attemptId: "att-3", route: "tiny/one", window: 8_192, items });
+    assert.equal(blocked.rebuilt, false);
+    assert.match(blocked.reason!, /essential constraints do not fit the 8192-token route/);
+    assert.equal((await blockers.getBlocker(blocked.blockerId!))!.type, "context_overflow");
   });
 
   suite("one compressor per context: a second is refused at registration, the same one again is a no-op, and only the registered one compacts", async ({ enf, owner, note, ann, t, t2 }) => {

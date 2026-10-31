@@ -243,6 +243,18 @@ for (const backend of backends) {
     assert.equal(spillCalls.at(-1)!.by, "agent:ann");
     assert.equal((await fails(ownerToken, read({ spillId: "spl-aaaaaaaaaaaaaaaaaaaa", extra: 1 }))).code, "invalid_command");
   }, (deps) => ({ ...deps, spill: { readSpill: async (by, id, index, size) => { spillCalls.push({ by: by.id, id, index, size }); return id === "spl-aaaaaaaaaaaaaaaaaaaa" && by.kind === "owner" ? { text: `page ${index}`, ...(index < 2 ? { next: index + 1 } : {}) } : undefined; } } }));
+
+  const archiveCalls: { by: string; taskId: string; digest: string }[] = [];
+  suite("the full text of an item cut when a task moved to a smaller route is read through the API by the caller's own principal (card C07f)", async ({ ownerToken, agent, ok, fails }) => {
+    archiveCalls.length = 0;
+    const read = (args: Record<string, unknown>) => ({ v: 1, op: "context.route-archive.read", args });
+    assert.deepEqual((await ok(ownerToken, read({ taskId: "task-aaaaaaaaaaaaaaaaaaaa", digest: "sha256:abc" }))).result, { item: { itemId: "r1", text: "the whole report", digest: "sha256:abc" } });
+    assert.equal((await fails(ownerToken, read({ taskId: "task-aaaaaaaaaaaaaaaaaaaa", digest: "sha256:other" }))).code, "not_found");
+    const ann = await agent("ann", []);
+    assert.equal((await fails(ann, read({ taskId: "task-aaaaaaaaaaaaaaaaaaaa", digest: "sha256:abc" }))).code, "not_found", "the service decides who may read");
+    assert.equal(archiveCalls.at(-1)!.by, "agent:ann");
+    assert.equal((await fails(ownerToken, read({ taskId: "task-aaaaaaaaaaaaaaaaaaaa", digest: "sha256:abc", extra: 1 }))).code, "invalid_command");
+  }, (deps) => ({ ...deps, spill: { readSpill: async () => undefined, readRouteArchive: async (by, taskId, digest) => { archiveCalls.push({ by: by.id, taskId, digest }); return by.kind === "owner" && digest === "sha256:abc" ? { itemId: "r1", text: "the whole report", digest } : undefined; } } }));
 }
 
 test("the documentation is generated from the operation table and is up to date", () => {

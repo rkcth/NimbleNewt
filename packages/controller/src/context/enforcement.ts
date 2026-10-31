@@ -8,7 +8,7 @@ import type { Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import { sha256 } from "../storage/json.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
-import { classifyFailure, contextBudget, handoffFromFacts, limitToolOutput, page, type BudgetOverrides, type ContextBudget, type HandoffFacts, type StartupItem, type StartupResult, type ToolOutput } from "./budget.js";
+import { classifyFailure, contextBudget, tokensOf, handoffFromFacts, limitToolOutput, page, type BudgetOverrides, type ContextBudget, type HandoffFacts, type StartupItem, type StartupResult, type ToolOutput } from "./budget.js";
 import { admitFirstCall, boundedSummarise, calibratedCharsPerToken, reviewRouteChange, SUMMARY_DEFAULTS, type FirstCallDecision, type FirstCall, type SummariseAttempt, type SummariseLimits, type Summariser } from "./dispatch.js";
 import type { RetrievalService, SourceRef } from "./retrieval.js";
 
@@ -51,6 +51,10 @@ export interface CompactionBody {
 }
 export interface OverflowBody { readonly taskId: string; readonly count: number; readonly total: number; readonly events: readonly string[]; readonly last?: string; readonly blockerId?: string }
 export interface HandoffBody { readonly taskId: string; readonly projectId: string; readonly attemptId: string; readonly source: "attempt" | "controller"; readonly text: string; readonly endedBecause: string; readonly writtenBy: string }
+/** What a route's fixed part (the system prompt and tool schemas) measured at the last first call admitted on it (card C07f). */
+interface RouteFixedBody { readonly route: string; readonly systemPromptChars: number; readonly toolSchemaChars: number; readonly attemptId: string }
+/** The route as the context records name it: the same cleaning every caller applies, so a route measured at admission is the one a route change finds. */
+export const contextRouteKey = (route: string): string => route.replace(/[^A-Za-z0-9._:-]/g, ":").slice(0, 80);
 interface CalibrationBody { readonly taskId: string; readonly route: string; readonly ratio: number; readonly charsPerToken: number; readonly reportedTokens: number; readonly attemptId: string }
 interface ChainBody { readonly taskId: string; readonly head?: string; readonly count: number }
 interface SpillBody { /** An outside server's text: read only by those who may use MCP in the project, and framed as data when paged out. */ readonly untrusted?: boolean; readonly taskId: string; readonly projectId: string; readonly tool: string; readonly callId: string; readonly remainder: string; readonly remainderChars: number; readonly lostChars: number }
@@ -163,7 +167,16 @@ export class ContextEnforcementService {
     const body: AdmissionBody = { type: "first-call", taskId, projectId, attemptId, round: r, window: w, route, admit: decision.admit, startupTokens: decision.startupTokens, estimatedTokens: decision.estimatedTokens, rawEstimatedTokens: raw.estimatedTokens, workingTokens: decision.workingTokens, basis: decision.basis, reasons: decision.reasons, ...(ratio > 1 ? { calibrationRatio: ratio } : {}), decidedBy: principal.id };
     const run = await this.#runner.command("context.admit", { commandId: `ctx-adm-${id.slice(4)}`, actor: principal.id }, async () => ({
       payload: { taskId, attemptId, round: r, window: w, route, call: call as unknown as JsonObject },
-      build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { admit: decision.admit } }),
+      build: async () => {
+        // The measured fixed part of the route is kept beside the decision (a route's prompt and tools are the same for every task), so that a later move of a task to this route uses the real figure.
+        const fixedRef: AggregateRef = { kind: "ctx-route-fixed", id: derivedId("ctx", `route\0${route}\0fixed`) };
+        const old = await this.#runner.get(fixedRef.kind, fixedRef.id);
+        const was = old?.body as unknown as RouteFixedBody | undefined;
+        const fixed: RouteFixedBody = { route, systemPromptChars: call.systemPromptChars, toolSchemaChars: call.toolSchemaChars, attemptId };
+        const same = was !== undefined && was.systemPromptChars === fixed.systemPromptChars && was.toolSchemaChars === fixed.toolSchemaChars;
+        const fixedChange: Change[] = same ? [] : [old === undefined ? { type: "create", ref: fixedRef, body: fixed as unknown as JsonObject } : { type: "update", ref: fixedRef, expectedRevision: old.revision, body: fixed as unknown as JsonObject }];
+        return { ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }, ...fixedChange], detail: { admit: decision.admit } };
+      },
     }));
     const recorded = view<AdmissionBody>((await this.#runner.get(ref.kind, id))!);
     // `retry`: the caller will make the call smaller (compact the stored conversation) and ask again as the next round; that round, if refused, is the one that opens the blocker.
@@ -206,12 +219,34 @@ export class ContextEnforcementService {
     return { charsPerToken: body.reported!.charsPerToken, overStartupLimit: body.reported!.overStartupLimit, ratio: body.reported!.ratio, replayed: r.replayed };
   }
 
+  /** The fixed part of a route as last measured at an admitted first call (card C07f), in characters and, at this window, in tokens; `undefined` when no first call on the route has been measured. */
+  async fixedPartOf(route: string, window: number): Promise<{ readonly systemPromptChars: number; readonly toolSchemaChars: number; readonly tokens: number } | undefined> {
+    const found = await this.#runner.get("ctx-route-fixed", derivedId("ctx", `route\0${key("route", contextRouteKey(route))}\0fixed`));
+    if (found === undefined) return undefined;
+    const b = found.body as unknown as RouteFixedBody;
+    return { systemPromptChars: b.systemPromptChars, toolSchemaChars: b.toolSchemaChars, tokens: tokensOf(b.systemPromptChars + b.toolSchemaChars, this.budget(window)) };
+  }
+
+  /**
+   * A running task moves to another route (a fallback, a cutover, a re-admitted attempt): the startup context is built again for the new route's window and its measured fixed part (card C07f). A route never measured
+   * has no figure yet: its fixed part counts as 0 here (said in the reason of the record's basis `unmeasured`), and the first call on it is measured and checked by `admit` anyway. Repeating it with the same items answers with the recorded decision.
+   */
+  async routeMoved(principal: Principal, command: { taskId: string; attemptId: string; route: string; window: number; items: readonly StartupItem[] }): Promise<Awaited<ReturnType<ContextEnforcementService["changeRoute"]>> & { measured: boolean }> {
+    onlyKnown(command, ["taskId", "attemptId", "route", "window", "items"]);
+    const route = contextRouteKey(command.route);
+    const fixed = await this.fixedPartOf(route, command.window);
+    // A different set of items is a different decision (the view is rebuilt from what the owner's record says now); the same set repeats the recorded one.
+    const launch = sha256(JSON.stringify([command.items, fixed?.tokens ?? null])).slice(0, 16);
+    const r = await this.changeRoute(principal, { taskId: command.taskId, attemptId: command.attemptId, launch, window: command.window, route, fixedTokens: fixed?.tokens ?? 0, items: command.items, ...(fixed === undefined ? { fixedBasis: "unmeasured" as const } : {}) });
+    return { ...r, measured: fixed !== undefined };
+  }
+
   /**
    * Falling back to a route with a smaller window: the startup context is built again for that window and that route's fixed part; if what must stay whole does not fit, a blocker is opened and nothing
    * is to be sent. The cut text is returned for archiving. Repeating it answers with the recorded decision (the view is rebuilt from the same items).
    */
-  async changeRoute(principal: Principal, command: { taskId: string; attemptId: string; round?: number; launch?: string; window: number; route?: string; fixedTokens: number; items: readonly StartupItem[] }): Promise<{ rebuilt: boolean; startup: StartupResult; reason?: string; blockerId?: string; id: string; replayed: boolean }> {
-    onlyKnown(command, ["taskId", "attemptId", "round", "launch", "window", "route", "fixedTokens", "items"]);
+  async changeRoute(principal: Principal, command: { taskId: string; attemptId: string; round?: number; launch?: string; window: number; route?: string; fixedTokens: number; fixedBasis?: "unmeasured"; items: readonly StartupItem[] }): Promise<{ rebuilt: boolean; startup: StartupResult; reason?: string; blockerId?: string; id: string; replayed: boolean }> {
+    onlyKnown(command, ["taskId", "attemptId", "round", "launch", "window", "route", "fixedTokens", "fixedBasis", "items"]);
     const taskId = checkTaskId(command.taskId); const attemptId = key("attemptId", command.attemptId); const r = round(command.round); const w = window(command.window);
     const route = command.route === undefined ? `window-${w}` : key("route", command.route);
     const projectId = (await this.#dispatch(principal, taskId))!;
@@ -221,7 +256,7 @@ export class ContextEnforcementService {
     const id = derivedId("adm", `${taskId}\0${attemptId}\0route\0${r}${launchPart(command.launch)}`);
     const ref: AggregateRef = { kind: "ctx-admission", id };
     const reasons = review.kind === "blocked" ? [review.reason] : [];
-    const body: AdmissionBody = { type: "route-change", taskId, projectId, attemptId, round: r, window: w, route, admit: review.kind === "rebuilt", startupTokens: review.startup.tokens + command.fixedTokens, estimatedTokens: review.startup.tokens + command.fixedTokens, rawEstimatedTokens: review.startup.tokens + command.fixedTokens, workingTokens: 0, basis: "estimated", reasons, decidedBy: principal.id };
+    const body: AdmissionBody = { type: "route-change", taskId, projectId, attemptId, round: r, window: w, route, admit: review.kind === "rebuilt", startupTokens: review.startup.tokens + command.fixedTokens, estimatedTokens: review.startup.tokens + command.fixedTokens, rawEstimatedTokens: review.startup.tokens + command.fixedTokens, workingTokens: 0, basis: command.fixedBasis === "unmeasured" ? "unmeasured" : "estimated", reasons, decidedBy: principal.id };
     // The text that was cut is kept (once per task and content) before the decision is written, in batches, so it is archived even if the caller never stores what is returned; a very long item is kept up to a limit and says so.
     const fresh: { aref: AggregateRef; body: JsonObject }[] = [];
     for (const a of review.startup.archive) {
@@ -238,7 +273,7 @@ export class ContextEnforcementService {
       }));
     }
     const run = await this.#runner.command("context.route", { commandId: `ctx-rte-${id.slice(4)}`, actor: principal.id }, async () => ({
-      payload: { taskId, attemptId, round: r, window: w, route, fixedTokens: command.fixedTokens, items: sha256(JSON.stringify(command.items)) },
+      payload: { taskId, attemptId, round: r, window: w, route, fixedTokens: command.fixedTokens, basis: command.fixedBasis ?? null, items: sha256(JSON.stringify(command.items)) },
       build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { rebuilt: review.kind === "rebuilt" } }),
     }));
     const blockerId = review.kind === "blocked" ? await this.#block(principal, taskId, `Attempt ${attemptId} cannot move to the ${w}-token route: ${review.reason}.`) : undefined;

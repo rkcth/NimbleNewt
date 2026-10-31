@@ -1193,6 +1193,46 @@ for (const backend of backends) {
     assert.deepEqual(calls.map((a) => (a.body as unknown as { outcome?: string }).outcome).sort(), ["ok", "ok"], "the outcome is recorded with the MCP service too");
   });
 
+  suite("a controller with no local window scales an MCP answer to the window of the route in the routing table (card C07f)", async (c) => {
+    const { McpService } = await import("../mcp/index.js");
+    const { ContextEnforcementService, DeskService, HistoryService, RetrievalService } = await import("../context/index.js");
+    const { createHash } = await import("node:crypto");
+    const H = (t: string): string => createHash("sha256").update(t).digest("hex");
+    const item = (name: string) => ({ name, descriptionDigest: H(`${name} does a thing`), schemaDigest: H("{}") });
+    const mcp = McpService.withEpoch(c.storage, c.epoch, c.options);
+    await c.principals.enroll(c.owner, { commandId: "mh", kind: "host", name: "mcp-host", grants: [] });
+    const mhost = await c.principals.authenticate((await c.principals.issueCredential(c.owner, "host:mcp-host")).token);
+    const server = (await mcp.register(c.owner, { commandId: "rg", name: "files", mode: "local", transport: "stdio", protocolRevision: "2025-06-18", sdk: { name: "@modelcontextprotocol/sdk", version: "1.12.0" }, launch: { command: "/opt/mcp/files-server", args: [], env: {}, secretRefs: [] }, audience: [c.project], allowed: { tools: ["read-file"] } } as never)).id;
+    await mcp.recordCatalog(mhost, { commandId: "sn", serverId: server, protocolRevision: "2025-06-18", tools: [item("read-file")] });
+    await mcp.acceptCatalog(c.owner, { commandId: "ac", serverId: server, revision: 1, expectedRevision: 2 });
+    const histories = HistoryService.withEpoch(c.storage, c.epoch, c.options);
+    const desks = DeskService.withEpoch(c.storage, c.epoch, c.options);
+    const retrieval = RetrievalService.withEpoch(c.storage, c.epoch, desks, histories, c.options);
+    const { BlockerService } = await import("../domain/index.js");
+    const blockers = BlockerService.withEpoch(c.storage, c.epoch, c.options);
+    const context = ContextEnforcementService.withEpoch(c.storage, c.epoch, { blockers, retrieval }, c.options);
+    const ann = await c.agent("ann", [...workGrants(c.project, ["read-file"]), { action: "mcp.use", project: c.project }, { action: "desk.read", project: c.project }]);
+    await c.task("t", ann);
+    const out: ToolResult[] = [];
+    const big = "abcdefghij".repeat(6_000);
+    c.worker.script = async ({ gateway, order }) => {
+      const table = (await c.routing.get())!;
+      assert.ok(table.routes[order.route] !== undefined, "the route is in the routing table");
+      out.push(await gateway.call({ callId: "m1", tool: { name: "read-file", version: "0.4.2", kind: "mcp", server }, args: { path: "/work/a" } }, local(big)));
+      return { status: "completed", text: "x" };
+    };
+    // No local window at all (no toolWindow): the figure is the routing table's.
+    c.dispatcher = c.restart({ mcp, context });
+    await c.run();
+    const shown = (out[0] as { text: string }).text;
+    const table = (await c.routing.get())!;
+    const route = c.worker.starts[0]!.route;
+    const limit = context.budget(table.routes[route]!.contextTokens).toolOutputChars;
+    assert.match(shown, /spill spl-/, "cut to the window's share and kept to be read in pages");
+    assert.doesNotMatch(shown, /Output cut: it was longer than the limit for an MCP result/, "not the fixed bound");
+    assert.ok(shown.length <= limit + 2000 && shown.length < big.length, `cut to the window's share (${shown.length}; limit ${limit})`);
+  });
+
   suite("an MCP answer longer than the route's tool limit is cut to the window's share and the rest is kept to be read in pages; a small answer is not touched; a limiter that fails falls back to the fixed bound (card C07d)", async (c) => {
     const { McpService } = await import("../mcp/index.js");
     const { ContextEnforcementService, DeskService, HistoryService, RetrievalService } = await import("../context/index.js");

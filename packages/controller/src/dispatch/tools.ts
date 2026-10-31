@@ -248,6 +248,15 @@ export class ToolPath {
     return { kind: "park", decision: info, ownerOnly: decision.mode === "owner" };
   }
 
+  /** The route's window: the local host's figure when it has one, else the routing table's context size for the route, so a controller with only remote hosts also scales MCP limits to the window (card C07f). */
+  async #windowOf(route: string): Promise<number | undefined> {
+    try {
+      const own = this.#deps.toolWindow?.(route);
+      if (own !== undefined) return own;
+      return (await this.#deps.routing?.get())?.routes[route]?.contextTokens;
+    } catch { return undefined; }
+  }
+
   async #routeProblem(d: DispatchBody): Promise<string | undefined> {
     if (this.#deps.routing === undefined) return undefined;
     const table = await this.#deps.routing.get();
@@ -527,8 +536,8 @@ export class ToolPath {
    * can be read in pages; otherwise it is cut at the fixed bound. A failing limiter falls back to the fixed bound, so a result is never lost to it.
    */
   async #mcpText(d: DispatchBody, opId: string, server: string, raw: string, restricted: boolean): Promise<string> {
-    const { context, toolWindow } = this.#deps;
-    const window = restricted || context?.limitTool === undefined || toolWindow === undefined ? undefined : toolWindow(d.route);
+    const { context } = this.#deps;
+    const window = restricted || context?.limitTool === undefined ? undefined : await this.#windowOf(d.route);
     if (window === undefined || context?.limitTool === undefined) return framedMcp(server, raw);
     try {
       const limited = await context.limitTool(this.#deps.principal, { taskId: d.taskId, callId: opId, tool: server, window, output: { text: redactText(raw) }, untrusted: true });

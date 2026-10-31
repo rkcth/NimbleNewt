@@ -142,6 +142,11 @@ export interface DispatcherDeps {
   readonly context?: Pick<ContextEnforcementService, "ensureHandoff" | "reportOverflow" | "resetOverflow"> & Partial<Pick<ContextEnforcementService, "limitTool">>;
   /** The context window of a route, in tokens, or `undefined` when the route does not say (card C07d): an MCP result is cut to that window's share of tool output and the rest is kept to be read in pages. */
   readonly toolWindow?: (route: string) => number | undefined;
+  /**
+   * A task that ran on one route is about to run on another (a fallback, a cutover, a re-admitted attempt) (card C07f): the startup context is built again for the new route. `ok: false` keeps the attempt from starting, with the reason shown.
+   * It is asked at every pass while the attempt waits, so it must answer the same for the same facts. An error leaves the attempt waiting (it is asked again).
+   */
+  readonly routeChange?: (change: { readonly taskId: string; readonly projectId: string; readonly attemptId: string; readonly route: string; readonly previousRoute: string }) => Promise<{ readonly ok: true } | { readonly ok: false; readonly reason: string }>;
   readonly handoffFacts?: (info: { taskId: string; attemptId: string; endedBecause: string }) => Promise<Omit<HandoffFacts, "endedBecause">>;
   /** Called when a checkpoint is taken for an attempt (the composer connects C04's `ContinuationService.capture` here). */
   readonly checkpoints?: (info: { attemptId: string; taskId: string; agentId: string; reason: string; checkpoint: JsonObject }) => Promise<void>;
@@ -712,12 +717,13 @@ export class DispatcherService {
     return ((await this.#runner.get(PLACED_KIND, checkTaskId(taskId)))?.body as unknown as { hostId?: string } | undefined)?.hostId;
   }
 
-  async #placedChange(taskId: string, hostId: string): Promise<Change[]> {
+  async #placedChange(taskId: string, hostId: string, route: string): Promise<Change[]> {
     const ref: AggregateRef = { kind: PLACED_KIND, id: taskId };
     const found = await this.#runner.get(PLACED_KIND, taskId);
-    const body = { hostId } as unknown as JsonObject;
+    const body = { hostId, route } as unknown as JsonObject;
     if (found === undefined) return [{ type: "create", ref, body }];
-    if ((found.body as unknown as { hostId?: string }).hostId === hostId) return [];
+    const was = found.body as unknown as { hostId?: string; route?: string };
+    if (was.hostId === hostId && was.route === route) return [];
     return [{ type: "update", ref, expectedRevision: found.revision, body }];
   }
 
@@ -1088,6 +1094,15 @@ export class DispatcherService {
     // 5b. A checked resume (card L04c): an attempt that carries earlier work back is checked first, with the model it is about to run on.
     const resumed = await this.#resumeCheck(attemptId, taskId, chosen.route);
     if (resumed !== undefined) return skip("resume", resumed);
+    // 5c. A task that last ran on another route has its context built again for this one (card C07f); essential constraints that do not fit keep the attempt from starting.
+    if (this.#deps.routeChange !== undefined) {
+      const previous = ((await this.#runner.get(PLACED_KIND, taskId))?.body as unknown as { route?: string } | undefined)?.route;
+      if (previous !== undefined && previous !== chosen.route) {
+        let moved: Awaited<ReturnType<NonNullable<DispatcherDeps["routeChange"]>>>;
+        try { moved = await this.#deps.routeChange({ taskId, projectId: task.projectId, attemptId, route: chosen.route, previousRoute: previous }); } catch (error) { this.#options.onError?.(error); return skip("route", `the context for route ${chosen.route} could not be rebuilt yet: ${String((error as Error)?.message ?? error).slice(0, 300)}`); }
+        if (!moved.ok) return block("route", "dispatch_blocked", moved.reason.slice(0, 800));
+      }
+    }
     // 6. Budget, from accounting.
     if (this.#deps.budgets !== undefined) {
       const report = await this.#deps.budgets.accounting(this.#deps.principal, taskId);
@@ -1428,7 +1443,7 @@ export class DispatcherService {
         if (x.state !== "waiting" || x.requestId !== requestId) throw new DomainError("invalid_command", `attempt ${b.attemptId} is ${x.state} and was started by another caller`, { field: "attemptId" });
         const { resumeNote: _n, resumeFrom: _f, pinnedHost: _p, ...rest } = x; void _n; void _f; void _p;
         return { ...rest, state: "running", hostId: host.hostId, startedAt: x.startedAt ?? now, lease: { holder: this.#holder, until } };
-      }, async () => this.#placedChange(b.taskId, host.hostId));
+      }, async () => this.#placedChange(b.taskId, host.hostId, b.route));
     } catch (error) {
       if (isDomainError(error, "invalid_command")) return { kind: "skipped", check: "place", reason: "another caller started the attempt" };
       throw error;

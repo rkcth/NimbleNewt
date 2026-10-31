@@ -44,6 +44,17 @@ Arguments:
 
 Result: `{ item: { text, next? } }`; `next` is the index of the following page when there is one.
 
+#### `context.route-archive.read`
+
+The full text of an item that was cut or left out of a task's startup context when the task moved to a route with a smaller window (the move names the item's digest). Needs the right to work on the task; anyone else gets not found.
+
+Arguments:
+
+- `taskId`: the task
+- `digest`: the digest the cut item names
+
+Result: `{ item: { itemId, text, digest } }`.
+
 #### `grant.list`
 
 The rights the owner has granted, with their IDs and revisions (owner only).
