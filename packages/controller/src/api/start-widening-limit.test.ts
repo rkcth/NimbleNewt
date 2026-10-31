@@ -50,8 +50,9 @@ async function scenario(settings: Record<string, unknown>) {
     assert.ok(applied.ok, JSON.stringify(applied));
     const raised = async () => { let n = 0; for (const t of tasks) if ((await call(boot.token, "budget.report", { taskId: t.id })).result.item.limit.costMicros === 1_500_000) n++; return n; };
     const agree = async () => { const r = await call(boot.token, "meeting.record.owner-respond", { decisionId, response: "agree" }, "or1"); assert.ok(r.ok, JSON.stringify(r)); return r.result as { applied?: number }; };
+    const needs = async () => ((await call(boot.token, "status.ask", { request: { kind: "needs_you" } })).result.item.lines as { text: string }[]).filter((l) => /meeting decision waits for you/.test(l.text)).length;
     const logged = async () => ((await call(boot.token, "meeting.decisions.log", {})).result.item.entries as { outcome: string; decidedBy: string }[]).map((e) => `${e.outcome}:${e.decidedBy}`).sort();
-    return { applied: applied.result as { applied: number; pending: number; waitingFor?: string }, raised, agree, logged, done: async () => { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } };
+    return { applied: applied.result as { applied: number; pending: number; waitingFor?: string }, raised, agree, logged, needs, done: async () => { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } };
   } catch (e) { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); throw e; }
 }
 
@@ -61,7 +62,9 @@ test("a decision of five budget raises on the policy's leave is limited to three
   await run({}, async (s) => {
     assert.deepEqual([s.applied.applied, s.applied.pending, s.applied.waitingFor], [3, 2, "owner"]);
     assert.equal(await s.raised(), 3);
+    assert.equal(await s.needs(), 1, "the owner is shown the held decision");
     assert.equal((await s.agree()).applied, 5);
+    assert.equal(await s.needs(), 0, "and it leaves the list once answered");
     assert.equal(await s.raised(), 5);
     assert.deepEqual(await s.logged(), ["applied:owner", "applied:owner", "applied:policy", "applied:policy", "applied:policy"]);
   });

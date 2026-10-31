@@ -960,11 +960,12 @@ export class MeetingRecordService {
         applied: d.changes.filter((c) => c.state === "applied").length, notApplied: d.changes.filter((c) => c.state === "not-applied").length, pending: d.changes.filter((c) => c.state === "adopted" || c.state === "applying").length,
         ...(d.ownerResponse === "pending" ? { waitingFor: "owner" as const } : {}),
       });
-      if (d.outcome !== "adopted" || d.scope !== "in-scope" || d.ownerResponse === "pending") return tally();
-      const change = d.changes.find((c) => c.state === "adopted" || c.state === "applying");
+      if (d.outcome !== "adopted" || d.scope !== "in-scope" || (d.ownerResponse === "pending" && d.held !== true)) return tally();
+      // A decision held part way waits only for its widening changes: a change already started and the ones that widen nothing (the vote carried them) go on.
+      const change = d.changes.find((c) => c.state === "applying" || (c.state === "adopted" && (d.ownerResponse !== "pending" || this.#options.appliers?.[c.kind]?.widens === undefined)));
       if (change === undefined) { await this.#announceChanges(decisionId); return tally(); }
       let limitNow: number | undefined;
-      const countPolicy = (body: DecisionRecordBody, exceptId: string): number => body.changes.filter((c) => c.id !== exceptId && c.agreedBy !== undefined && c.agreedBy.startsWith("policy:") && c.agreedBy !== "policy:none").length;
+      const countPolicy = (body: DecisionRecordBody, exceptId: string): number => body.changes.filter((c) => c.id !== exceptId && (c.state === "applied" || c.state === "applying") && c.agreedBy !== undefined && c.agreedBy.startsWith("policy:") && c.agreedBy !== "policy:none").length;
       // `agreement` is set for the save that starts a change: it holds only while the change is still adopted and the owner's response is still the one the agreement was worked out from.
       const save = async (next: ChangeRecord, agreement?: string): Promise<boolean> => {
         let lost = false;
@@ -990,7 +991,9 @@ export class MeetingRecordService {
       let cell: "allow" | "ask" | undefined;
       // Until the change has been started, a refusal is saved only while the change is still adopted and the owner's answer is the one this pass worked from; if the owner answered meanwhile the pass reads the decision again (card M02g).
       let started = change.state === "applying";
-      const refuse = async (code: ChangeRecord["code"], reason: string): Promise<void> => { await save({ ...change, state: "not-applied", ...(code === undefined ? {} : { code }), ...((cell ?? change.setting) === undefined ? {} : { setting: cell ?? change.setting }), reason }, started ? undefined : "refusal"); };
+      // Who allowed the start and who acted, kept on a refusal after the start (the stale copy of the change lacks them), so the log shows the policy's or the owner's start.
+      let carried: { agreedBy?: string; actedAs?: string } = {};
+      const refuse = async (code: ChangeRecord["code"], reason: string): Promise<void> => { await save({ ...change, ...carried, state: "not-applied", ...(code === undefined ? {} : { code }), ...((cell ?? change.setting) === undefined ? {} : { setting: cell ?? change.setting }), reason }, started ? undefined : "refusal"); };
       // The decision goes back to waiting for the owner, only while the owner's answer is still the one this pass worked from; needs_you then shows it, an agree carries out what is left and a decline refuses it.
       const holdForOwner = async (): Promise<void> => {
         let moved = false;
@@ -1000,7 +1003,7 @@ export class MeetingRecordService {
             const cur = await this.#runner.get("meeting-decision", decisionId);
             const body = known<DecisionRecordBody>(cur)!;
             if (body.ownerResponse !== d.ownerResponse || body.ownerResponse === "pending") { moved = true; throw new DomainError("invalid_command", "the owner answered meanwhile"); }
-            return { ref: { kind: "meeting-decision", id: decisionId }, creates: false, changes: [{ type: "update", ref: { kind: "meeting-decision", id: decisionId }, expectedRevision: cur!.revision, body: json({ ...body, ownerResponse: "pending" }) }], detail: { projectId: body.projectId, limit: "reached" } };
+            return { ref: { kind: "meeting-decision", id: decisionId }, creates: false, changes: [{ type: "update", ref: { kind: "meeting-decision", id: decisionId }, expectedRevision: cur!.revision, body: json({ ...body, ownerResponse: "pending", held: true }) }], detail: { projectId: body.projectId, limit: "reached" } };
           },
         }))); } catch (error) { if (!moved) throw error; }
       };
@@ -1009,7 +1012,8 @@ export class MeetingRecordService {
         if (applier === undefined) { await refuse("failed", `no applier is registered for ${change.kind}`); continue; }
         if (applier.widens !== undefined) cell = this.#options.widening === undefined ? "ask" : await this.#options.widening(applier.widens, d.projectId).catch(() => "ask" as const);
         // The policy may have tightened since the vote: a widening change goes ahead without the owner's agreement only while the policy still lets its class through.
-        if (applier.widens !== undefined && d.ownerResponse !== "agreed" && cell !== "allow") { await refuse("unauthorized", `the approval policy asks the owner before ${applier.widens} changes are carried out, and the owner has not agreed`); continue; }
+        // The owner was never asked about it, so the decision goes back to waiting for the owner (their agree carries it out, their decline refuses it) instead of ending in a refusal.
+        if (applier.widens !== undefined && d.ownerResponse !== "agreed" && cell !== "allow") { await holdForOwner(); continue; }
         // A limit on how much widening one decision may do without the owner: the policy's leave covers that many changes. At the limit the decision waits for the owner (as when the policy asks), the rest stay adopted, and the owner's agreement carries them out.
         if (applier.widens !== undefined && d.ownerResponse !== "agreed") {
           limitNow = this.#options.policyWideningLimit === undefined ? undefined : await this.#options.policyWideningLimit(d.projectId).catch(() => 0);
@@ -1030,6 +1034,7 @@ export class MeetingRecordService {
         // The actor of the effect is fixed the same way: the command digest includes it, and a replay may run under another principal (the owner agreed, the service recovers).
         if (!(await save({ ...change, state: "applying", agreedBy, actedAs: by.id, ...(cell === undefined ? {} : { setting: cell }) }, agreedBy))) continue;
         started = true;
+        carried = { agreedBy, actedAs: by.id };
       }
       const applier = this.#options.appliers?.[change.kind];
       if (applier === undefined) { await refuse("failed", `no applier is registered for ${change.kind}`); continue; }
@@ -1074,7 +1079,7 @@ export class MeetingRecordService {
           const body: DecisionLogBody = {
             decisionId, changeId: c.id, projectId: d.projectId, kind: c.kind, targetKind: c.target.kind, outcome, ...(code === undefined ? {} : { code }), decidedBy,
             ...(agreedBy === undefined ? {} : { agreedBy }), ...(c.actedAs === undefined ? {} : { actedAs: c.actedAs }), ...(widens === undefined ? {} : { widens }), ...(widens === undefined || c.setting === undefined ? {} : { setting: c.setting }),
-            ownerResponse: d.ownerResponse, patchHash: createHash("sha256").update(canonicalJson(c.patch)).digest("hex"), counters: logCounters(c), changedAt: c.at ?? d.concludedAt, loggedAt: this.#runner.now(),
+            ownerResponse: c.agreedBy?.startsWith("policy:") === true && d.ownerResponse !== "agreed" ? "not-asked" : d.ownerResponse, patchHash: createHash("sha256").update(canonicalJson(c.patch)).digest("hex"), counters: logCounters(c), changedAt: c.at ?? d.concludedAt, loggedAt: this.#runner.now(),
           };
           await this.#retrying(() => this.#runner.command("meeting.decision.log", { commandId: `mdl:${decisionId}:${c.id}:${outcome}`.slice(0, 120), actor: "service:meeting-records" }, async () => ({
             payload: { decisionId, changeId: c.id, outcome },
@@ -1149,6 +1154,30 @@ export class MeetingRecordService {
       }
       if (page.length < pageSize) return { entries: out };
     }
+  }
+
+  /**
+   * The adopted decisions that wait for the owner's answer (agree, decline or an alternative), for the owner's "needs you" list (card M02g): decisions in scope whose response is pending and that still have a change left to carry out.
+   * Owner only. Reads at most 10 pages of 100 decisions; `truncated` says the end was not reached.
+   */
+  async ownerPending(by: Principal, limit = 50): Promise<{ items: { id: string; revision: number; projectId: string; since: string; left: number; applied: number }[]; truncated: boolean }> {
+    if (by.kind !== "owner" || by.taskScope !== undefined) return { items: [], truncated: false };
+    const items: { id: string; revision: number; projectId: string; since: string; left: number; applied: number }[] = [];
+    let after: string | undefined;
+    for (let pages = 0; pages < 10; pages++) {
+      const page = await this.#runner.list("meeting-decision", { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
+      for (const a of page) {
+        after = a.id;
+        const d = a.body as unknown as DecisionRecordBody;
+        if (d.outcome !== "adopted" || d.scope !== "in-scope" || d.ownerResponse !== "pending") continue;
+        const left = d.changes.filter((c) => c.state === "adopted" || c.state === "applying").length;
+        if (left === 0) continue;
+        if (items.length >= limit) return { items, truncated: true };
+        items.push({ id: a.id, revision: a.revision, projectId: d.projectId, since: d.concludedAt, left, applied: d.changes.filter((c) => c.state === "applied").length });
+      }
+      if (page.length < 100) return { items, truncated: false };
+    }
+    return { items, truncated: true };
   }
 
   /** Tells the observer of every change that has reached a final state; each is told again on a repeat of the apply, which the observer's stable command IDs make harmless. */

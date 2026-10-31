@@ -240,6 +240,8 @@ export interface StatusDeps {
   readonly handoffs?: { forTask(by: Principal, taskId: string): Promise<View<TaskHandoffBody> | undefined> };
   /** The planned meetings of a project (card M04f). Absent: the view is not offered. */
   readonly meetings?: { planned(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { id: string; revision: number; title: string; kind: string; startsAt: string; endsAt: string; mode: string; state: string; participants: readonly { id: string; status?: string; availability?: string }[] }[]; next?: string } | undefined> };
+  /** Adopted meeting decisions that wait for the owner (card M02g). Owner only. Absent: they are not listed in the needs-you list. */
+  readonly meetingDecisions?: (viewer: Principal, limit: number) => Promise<{ items: readonly { id: string; revision: number; projectId: string; since: string; left: number; applied: number }[]; truncated: boolean }>;
   /** The log of what happened to each change a meeting decided (card M02g). Owner only: for anyone else the view reads as missing. Absent: the view is not offered. */
   readonly decisionLog?: (viewer: Principal, query: { kind?: string; outcome?: string; projectId?: string; after?: string; limit?: number }) => Promise<{ entries: readonly { id: string; revision: number; decisionId: string; projectId: string; kind: string; targetKind: string; outcome: string; code?: string; decidedBy: string; agreedBy?: string; widens?: string; setting?: string; changedAt: string }[]; next?: string; scanLimited?: true }>;
   /** The open agenda of a project (card M03f). Absent: the view is not offered. */
@@ -489,14 +491,14 @@ export class StatusService {
     return { observedAt: this.#runner.now(), lines };
   }
 
-  /** What happened to the changes meetings decided, as plain lines (card M02g): the owner's reading of the decision log. The log is stored in ID order (not time order), so one reading takes a window of up to 100 stored entries (the log reader scans at most 2000), shows the newest of them first, and gives `after` to go on with the next window; a window can therefore hold entries newer than ones shown later. Anyone but the owner gets nothing. */
+  /** What happened to the changes meetings decided, as plain lines (card M02g): the owner's reading of the decision log. The log is stored in ID order (not time order), so a reading is one page of `limit` stored entries (the log reader scans at most 2000 to fill it), shown newest first within the page, and `after` continues with the next page; a later page can hold newer entries than an earlier one. Anyone but the owner gets nothing. */
   async decisionLogLines(by: Principal, request: { projectId?: string; changeKind?: string; outcome?: string; after?: string; limit?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     if (this.#deps.decisionLog === undefined) return undefined;
     if (by.kind !== "owner" || by.taskScope !== undefined) return undefined;
     const limit = request.limit === undefined ? 10 : Number.isSafeInteger(request.limit) && request.limit >= 1 && request.limit <= 50 ? request.limit : invalid("limit", "must be 1 to 50");
     const projectId = request.projectId === undefined ? undefined : checkProjectId(request.projectId);
     if (request.changeKind !== undefined && (typeof request.changeKind !== "string" || request.changeKind.length === 0 || request.changeKind.length > 80)) invalid("changeKind", "must be a kind of change, such as budget.raise");
-    const page = await this.#deps.decisionLog(by, { limit: 100, ...(projectId === undefined ? {} : { projectId }), ...(request.changeKind === undefined ? {} : { kind: request.changeKind }), ...(request.outcome === undefined ? {} : { outcome: request.outcome }), ...(request.after === undefined ? {} : { after: request.after }) });
+    const page = await this.#deps.decisionLog(by, { limit, ...(projectId === undefined ? {} : { projectId }), ...(request.changeKind === undefined ? {} : { kind: request.changeKind }), ...(request.outcome === undefined ? {} : { outcome: request.outcome }), ...(request.after === undefined ? {} : { after: request.after }) });
     const newestFirst = [...page.entries].sort((a, b) => (a.changedAt < b.changedAt ? 1 : a.changedAt > b.changedAt ? -1 : a.id < b.id ? -1 : 1));
     const lines: Line[] = newestFirst.slice(0, limit).map((e) => {
       const b = e;
@@ -505,8 +507,7 @@ export class StatusService {
     });
     const more = page.next !== undefined || page.scanLimited === true;
     if (lines.length === 0) lines.push(line(more ? `Nothing matched in the part of the log searched so far; ask again with after "${page.next ?? ""}" to search further.` : "No meeting decision matches."));
-    else if (newestFirst.length > limit) lines.push(line(`There are more entries in this part of the log than shown; ask for a larger limit${more ? ` or go on with after "${page.next ?? ""}"` : ""}.`));
-    else if (more) lines.push(line(`The log has more entries; go on with after "${page.next ?? ""}".`));
+    else if (more) lines.push(line(`The log has more entries; go on with after "${page.next ?? ""}". The log is read in its stored order (by entry ID, which is not time order); each page is shown newest first.`));
     return { observedAt: this.#runner.now(), lines };
   }
 
@@ -634,6 +635,13 @@ export class StatusService {
       if (pending.length > 50) truncated.push("approvals");
       for (const r of pending.slice(0, 50)) {
         all.push({ text: `An approval of "${shown(r.name)}" is waiting for you (allow or deny it)`, cites: [cite("review", r.id), cite("task", r.taskId)], taskId: r.taskId, since: r.requestedAt, id: r.id });
+      }
+    }
+    if (this.#deps.meetingDecisions !== undefined) {
+      const waiting = await this.#deps.meetingDecisions(by, 51);
+      if (waiting.truncated || waiting.items.length > 50) truncated.push("meeting decisions");
+      for (const m of waiting.items.slice(0, 50)) {
+        all.push({ text: `A meeting decision waits for you: ${m.left} change${m.left === 1 ? "" : "s"} left to carry out${m.applied > 0 ? ` (${m.applied} already done)` : ""} (agree, decline or choose another)`, cites: [cite("meeting-decision", m.id, m.revision), cite("project", m.projectId)], since: m.since, id: m.id });
       }
     }
     // The owner's blockers are looked for through all the open ones (the others are the agents' to resolve), up to 50 found.

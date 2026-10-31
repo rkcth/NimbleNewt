@@ -20,9 +20,10 @@ const restsOnPrivate = (sources: readonly SourceCite[] | undefined, shared: Shar
 function statusOf(d: DecisionRecordBody): SummaryDecision["status"] {
   if (d.outcome !== "adopted") return d.outcome;
   if (d.scope === "recommendation") return "recommendation";
-  if (d.ownerResponse === "pending") return "waiting-for-owner";
-  if (d.changes.length === 0) return "adopted";
   const applied = d.changes.filter((c) => c.state === "applied").length;
+  // A decision held part way has applied what the policy let through: it reads as part-applied, not as untouched.
+  if (d.ownerResponse === "pending" && applied === 0) return "waiting-for-owner";
+  if (d.changes.length === 0) return "adopted";
   const refused = d.changes.filter((c) => c.state === "not-applied").length;
   if (applied === d.changes.length) return "applied";
   if (applied > 0) return "part-applied";

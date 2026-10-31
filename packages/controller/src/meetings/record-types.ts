@@ -184,6 +184,8 @@ export interface DecisionRecordBody {
   readonly scopeReason?: string;
   readonly changes: readonly ChangeRecord[];
   readonly ownerResponse: OwnerResponse;
+  /** Set when the decision was put back to waiting for the owner part way through (the widening limit, or the policy asking at apply time): changes that widen nothing still go ahead, only widening ones wait. Absent: a pending decision holds all its changes. */
+  readonly held?: true;
   readonly ownerDecisionId?: string;
   readonly ownerRespondedAt?: string;
   readonly agendaItemId?: string;

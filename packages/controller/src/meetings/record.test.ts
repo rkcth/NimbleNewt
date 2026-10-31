@@ -807,7 +807,7 @@ for (const backend of backends) {
     const d2 = await decisionOf({ ...c, records: letting } as Ctx, m2);
     assert.equal(d2.ownerResponse, "not-asked");
     assert.deepEqual(await letting.apply(c.host, { decisionId: d2.id }), { applied: 1, notApplied: 0, pending: 0 });
-    // The policy tightened after the vote: with the owner not having agreed, the change is refused at apply, not carried out.
+    // The policy tightened after the vote: with the owner not having agreed, the change is not carried out; the decision goes back to waiting for the owner (never refused for good), whose agree carries it out.
     const third = await c.task("Third budgeted task");
     const three = await c.meet({ chair: c.pD, item: "delegated-decision" });
     const agenda3 = (await c.meetings.occurrence(c.owner, (await recordOf(c, three.rec)).occurrenceId))!.agenda.find((a) => a.intent === "delegated-decision")!.id;
@@ -817,8 +817,10 @@ for (const backend of backends) {
     answer = "ask";
     const d3 = await decisionOf({ ...c, records: moving } as Ctx, m3);
     const result = await moving.apply(c.host, { decisionId: d3.id });
-    assert.deepEqual([result.applied, result.notApplied], [0, 1]);
+    assert.deepEqual(result, { applied: 0, notApplied: 0, pending: 1, waitingFor: "owner" });
     assert.equal((await c.projects.getTask(third.id))!.title, "Third budgeted task");
+    assert.equal((await moving.ownerRespond(c.owner, { commandId: cid("or"), decisionId: d3.id, response: "agree" })).applied, 1);
+    assert.equal((await c.projects.getTask(third.id))!.title, "Should not happen");
   });
 
   suite("decisions apply with the expected revision: an adopted change is carried out once, a target that moved is shown as not applied, and a grant revoked since the meeting is not honoured", async (c) => {
@@ -934,17 +936,18 @@ for (const backend of backends) {
   suite("a decision may carry out only so many widening changes on the policy's leave; at the limit it waits for the owner, whose agreement carries out the rest and whose decline refuses them (card M02g)", async (c) => {
     const widens = { ...taskUpdateApplier(c.projects), widens: "spend" as const };
     await c.grantUpdate(c.pA);
-    type Mixed = "widen" | "plain";
+    type Mixed = "widen" | "plain" | "boom";
+    const boomer: ChangeApplier = { ...widens, async apply() { throw new DomainError("invalid_command", "cannot be carried out"); } };
     const decide = async (limit: (() => Promise<number | undefined>) | undefined, kinds: Mixed[]) => {
-      const svc = c.reopen({ appliers: { "task.update": taskUpdateApplier(c.projects), "task.retitle-widening": widens }, widening: async () => "allow", ...(limit === undefined ? {} : { policyWideningLimit: limit }) });
+      const svc = c.reopen({ appliers: { "task.update": taskUpdateApplier(c.projects), "task.retitle-widening": widens, "task.boom-widening": boomer }, widening: async () => "allow", ...(limit === undefined ? {} : { policyWideningLimit: limit }) });
       const ctx = { ...c, records: svc } as Ctx;
       const tasks = await Promise.all(kinds.map((_, i) => c.task(`Limit ${i}`)));
       const meeting = await c.meet({ chair: c.pD, item: "delegated-decision" });
       const item = (await c.meetings.occurrence(c.owner, (await recordOf(c, meeting.rec)).occurrenceId))!.agenda.find((a) => a.intent === "delegated-decision")!.id;
-      const m = await adopt(ctx, meeting.rec, c.asB, { agendaItemId: item, changes: tasks.map((t, i) => ({ ...change(c, t, c.pA, `Limit ${i}, retitled`), ...(kinds[i] === "widen" ? { kind: "task.retitle-widening" } : {}) })) });
+      const m = await adopt(ctx, meeting.rec, c.asB, { agendaItemId: item, changes: tasks.map((t, i) => ({ ...change(c, t, c.pA, `Limit ${i}, retitled`), ...(kinds[i] === "widen" ? { kind: "task.retitle-widening" } : kinds[i] === "boom" ? { kind: "task.boom-widening" } : {}) })) });
       const d = await decisionOf(ctx, m);
       const result = await svc.apply(c.host, { decisionId: d.id });
-      return { svc, ctx, m, d, result, now: async () => decisionOf(ctx, m) };
+      return { svc, ctx, m, d, result, rec: meeting.rec, now: async () => decisionOf(ctx, m) };
     };
     const five: Mixed[] = ["widen", "widen", "widen", "widen", "widen"];
     // No limit: nothing is held back.
@@ -968,6 +971,21 @@ for (const backend of backends) {
     await declined.svc.ownerRespond(c.owner, { commandId: cid("or"), decisionId: declined.d.id, response: "decline" });
     assert.deepEqual((await declined.now()).changes.map((x) => [x.state, x.code]), [["applied", undefined], ["applied", undefined], ["applied", undefined], ["not-applied", "owner"], ["not-applied", "owner"]]);
     assert.deepEqual((await declined.svc.decisionLog(c.owner)).entries.filter((e) => e.decisionId === declined.d.id).map((e) => e.outcome).sort(), ["applied", "applied", "applied", "declined", "declined"]);
+    // The held decision reads as part-applied in the summary, and the lines written while it waits do not claim the owner is pending on what the policy applied.
+    const held2 = await decide(async () => 3, five);
+    await held2.svc.summarize(c.host, { commandId: cid("sm"), recordId: held2.rec });
+    const sum = (await held2.svc.summary(c.owner, held2.rec))!.content.decisions;
+    assert.deepEqual(sum.map((x) => x.status), ["part-applied"]);
+    assert.deepEqual([...new Set((await held2.svc.decisionLog(c.owner)).entries.filter((e) => e.decisionId === held2.d.id).map((e) => e.ownerResponse))], ["not-asked"]);
+    // Only widening changes wait: with a limit of 1, [widen, widen, plain] applies the first and the plain one; the second waits, and a decline refuses only it.
+    const mixedHeld = await decide(async () => 1, ["widen", "widen", "plain"]);
+    assert.deepEqual(mixedHeld.result, { applied: 2, notApplied: 0, pending: 1, waitingFor: "owner" });
+    await mixedHeld.svc.ownerRespond(c.owner, { commandId: cid("or"), decisionId: mixedHeld.d.id, response: "decline" });
+    assert.deepEqual((await mixedHeld.now()).changes.map((x) => [x.state, x.code]), [["applied", undefined], ["not-applied", "owner"], ["applied", undefined]]);
+    // A widening change that was started and then failed does not use up the limit.
+    const failed = await decide(async () => 1, ["boom", "widen"]);
+    assert.deepEqual(failed.result, { applied: 1, notApplied: 1, pending: 0 });
+    assert.deepEqual((await failed.svc.decisionLog(c.owner)).entries.filter((e) => e.decisionId === failed.d.id).map((e) => [e.outcome, e.code, e.decidedBy]).sort().map((x) => x.join(":")), ["applied::policy", "not-applied:failed:policy"], "the failed start is the policy's");
     // Limit 0: nothing goes ahead without the owner.
     const zero = await decide(async () => 0, ["widen"]);
     assert.deepEqual(zero.result, { applied: 0, notApplied: 0, pending: 1, waitingFor: "owner" });
@@ -1220,10 +1238,12 @@ for (const backend of backends) {
     answer = "allow";
     const two = await decide("Log two", "SECRET words two");
     assert.deepEqual(await svc.apply(c.host, { decisionId: two.d.id }), { applied: 1, notApplied: 0, pending: 0 });
-    // 3. The policy tightens after the vote: refused.
+    // 3. The policy tightens after the vote: the decision waits for the owner (nothing logged yet), who declines.
     const three = await decide("Log three", "SECRET words three");
     answer = "ask";
-    assert.equal((await svc.apply(c.host, { decisionId: three.d.id })).notApplied, 1);
+    assert.deepEqual(await svc.apply(c.host, { decisionId: three.d.id }), { applied: 0, notApplied: 0, pending: 1, waitingFor: "owner" });
+    assert.equal((await log()).entries.length, 2, "a held change is not logged");
+    await svc.ownerRespond(c.owner, { commandId: cid("or"), decisionId: three.d.id, response: "decline" });
     // 4. The owner declines before anything runs.
     const four = await decide("Log four", "SECRET words four");
     await svc.ownerRespond(c.owner, { commandId: cid("or"), decisionId: four.d.id, response: "decline" });
@@ -1232,7 +1252,7 @@ for (const backend of backends) {
     const by = (id: string) => all.find((e) => e.decisionId === id)!;
     assert.deepEqual([by(one.d.id).outcome, by(one.d.id).decidedBy, by(one.d.id).agreedBy, by(one.d.id).setting, by(one.d.id).widens], ["applied", "owner", "owner:agreed", "ask", "spend"]);
     assert.deepEqual([by(two.d.id).outcome, by(two.d.id).decidedBy, by(two.d.id).agreedBy, by(two.d.id).setting], ["applied", "policy", "policy:spend", "allow"]);
-    assert.deepEqual([by(three.d.id).outcome, by(three.d.id).decidedBy, by(three.d.id).code, by(three.d.id).setting], ["refused", "none", "unauthorized", "ask"]);
+    assert.deepEqual([by(three.d.id).outcome, by(three.d.id).decidedBy, by(three.d.id).code, by(three.d.id).setting], ["declined", "owner", "owner", undefined]);
     assert.deepEqual([by(four.d.id).outcome, by(four.d.id).decidedBy, by(four.d.id).code], ["declined", "owner", "owner"]);
     for (const e of all) {
       assert.match(e.patchHash, /^[0-9a-f]{64}$/);
@@ -1249,7 +1269,7 @@ for (const backend of backends) {
     assert.equal((await restarted.decisionLog(c.owner)).entries.length, 4, "each change is logged once");
     // Filters and pages.
     assert.deepEqual((await log({ outcome: "applied" })).entries.map((e) => e.decisionId).sort(), [one.d.id, two.d.id].sort());
-    assert.equal((await log({ outcome: "declined" })).entries.length, 1);
+    assert.equal((await log({ outcome: "declined" })).entries.length, 2);
     assert.equal((await log({ kind: "budget.raise" })).entries.length, 0);
     assert.equal((await log({ projectId: "proj-none" })).entries.length, 0);
     const seen: string[] = [];
@@ -1335,15 +1355,17 @@ for (const backend of backends) {
       const agenda = (await c.meetings.occurrence(c.owner, (await recordOf(c, meeting.rec)).occurrenceId))!.agenda.find((a) => a.intent === "delegated-decision")!.id;
       return decisionOf(ctx, await adopt(ctx, meeting.rec, c.asB, { agendaItemId: agenda, changes: [{ ...change(c, task, c.pA, title), kind: "task.retitle-widening" }] }));
     };
-    // Refused while the policy asks; then the policy loosens: the line still says "ask", the cell of that moment.
+    // Held for the owner while the policy asks; then the policy loosens and the owner declines: the held change had no cell recorded.
     answer = "allow";
     const one = await decide("Cell one");
     answer = "ask";
     await svc.apply(c.host, { decisionId: one.id });
     answer = "allow";
     await svc.sweep(c.host, { projectId: c.project });
+    assert.equal((await svc.decisionLog(c.owner)).entries.length, 0, "nothing logged while it waits");
+    await svc.ownerRespond(c.owner, { commandId: cid("or"), decisionId: one.id, response: "decline" });
     const entries = (await svc.decisionLog(c.owner)).entries;
-    assert.deepEqual(entries.map((e) => [e.outcome, e.setting, e.decidedBy]), [["refused", "ask", "none"]]);
+    assert.deepEqual(entries.map((e) => [e.outcome, e.setting, e.decidedBy]), [["declined", undefined, "owner"]]);
     // The owner agreed, then the agent's right was revoked: refused, but the owner is the one who allowed it.
     answer = "ask";
     const two = await decide("Cell two");
