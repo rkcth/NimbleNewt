@@ -308,7 +308,7 @@ export async function startController(options: StartOptions): Promise<Controller
     };
     // How long an undecided concern waits at each level of the supervisor ladder: the owner's setting, else the installation's `stall.escalateAfterMs`, else 24 hours (owner decision 2026-10-30, supervisor ladder).
     const escalationLadder = EscalationLadderService.withEpoch(storage, epoch);
-    const stall = StallService.withEpoch(storage, epoch, assignments, waits, { ...(options.stall ?? {}), ladderHours: () => escalationLadder.hours(), declaredSpeed, isPaused: (taskId) => pauses.isPaused(taskId) });
+    const stall = StallService.withEpoch(storage, epoch, assignments, waits, { ...(options.stall ?? {}), ladderHours: () => escalationLadder.hours(), ladderDamaged: async (n) => { await notifications.emitFromController({ commandId: n.id, kind: "maintenance", level: "needs-you", ref: { kind: "principal", id: "dispatcher" }, detail: n.detail }); }, declaredSpeed, isPaused: (taskId) => pauses.isPaused(taskId) });
     // Durable job records (card T07): a permitted background job's result goes to the pause service; no MCP connection check is bound until an MCP client exists, so no MCP operation is admitted.
     // The time a job or a review took is charged to its task by the dispatcher's budget service once that is built; a charge that fails is reported, and the job or review stands (card R05f).
     const charged = async (usage: { commandId: string; activity: "review" | "background-job"; taskId: string; agentId?: string; computeMs: number }): Promise<void> => { try { await dispatch?.chargeUse(usage); } catch (error) { options.onInternalError?.(error); } };

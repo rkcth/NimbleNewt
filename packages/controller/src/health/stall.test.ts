@@ -436,6 +436,10 @@ for (const backend of backends) {
     return { top: named.Top!, chief: named.Chief!, mid: named.Mid!, boss, ann, t, concernId };
   };
   const HOUR = 60 * MIN;
+  const patch = async (c: Ctx, kind: string, id: string, change: (body: Record<string, unknown>) => Record<string, unknown>): Promise<void> => {
+    const rec = await c.storage.getAggregate({ kind, id });
+    await c.storage.applyOperation({ operationId: cid("patch"), epoch: c.projects.epoch, actor: "owner:rob", correlationId: cid("patch"), at: at(), changes: [{ type: "update", ref: { kind, id }, expectedRevision: rec!.revision, body: change(rec!.body as Record<string, unknown>) }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
+  };
 
   suite("the ladder: a concern goes to the supervisor, then up the chain level by level at the owner's hours, skipping one who cannot see the task with the reason, then to the owner; restarts do not repeat a step (owner decision 2026-10-30, supervisor ladder)", async (c) => {
     const { top, chief, mid, boss, ann, concernId } = await ladderWorld(c);
@@ -499,21 +503,126 @@ for (const backend of backends) {
     assert.ok(one!.escalatedTo!.startsWith("agent:"));
     assert.notEqual(one!.escalatedTo, `agent:${chief.id}`);
     assert.equal(one!.escalationTrail![0]!.skipped, undefined);
-    const broken = c.service({ ladderHours: async () => { throw new DomainError("unavailable", "setting unreadable"); } });
+    const told: { id: string; detail: string }[] = [];
+    let damaged = true;
+    const broken = c.service({ ladderHours: async () => { if (damaged) throw new DomainError("unavailable", "setting unreadable"); return []; }, ladderDamaged: async (n) => { told.push(n); } });
     now += 100 * HOUR;
-    await refuses("unavailable", async () => broken.escalateUndecided(c.owner));
+    // The untold notice of the climb already made is still returned; nothing climbs further; the owner is told once about the damage.
+    const owed = await broken.escalateUndecided(c.owner);
+    assert.deepEqual(owed.map((x) => [x.id, x.escalationLevel]), [[concernId, 1]]);
+    assert.equal((await broken.escalateUndecided(c.owner)).length, 1);
     assert.equal((await c.stall.get(c.owner, concernId))!.escalationLevel, 1, "no climb at an unset time");
+    assert.equal(told.length, 1, "one notice for the whole episode");
+    assert.match(told[0]!.detail, /setting unreadable/);
+    // Mended, it climbs again; damaged anew, a new episode has its own notice.
+    damaged = false;
+    assert.equal((await broken.escalateUndecided(c.owner))[0]!.escalationLevel, 2);
+    damaged = true;
+    now += 1;
+    await broken.escalateUndecided(c.owner);
+    assert.equal(told.length, 2);
+    assert.notEqual(told[0]!.id, told[1]!.id);
     void boss;
+  });
+
+  suite("the ladder: a concern escalated by the first version of the escalation is held by the owner, not climbed to a supervisor and told again", async (c) => {
+    const { chief, concernId } = await ladderWorld(c, ["Mid", "Chief", "Top"]);
+    await patch(c, "stall-concern", concernId, (b) => ({ ...b, escalatedAt: at() }));
+    const read = (await c.stall.get(c.owner, concernId))!;
+    assert.equal(read.escalatedTo, "owner");
+    now += 100 * HOUR;
+    const owed = await c.stall.escalateUndecided(c.owner);
+    assert.deepEqual(owed.map((x) => [x.id, x.escalatedTo, x.escalationLevel]), [[concernId, "owner", undefined]]);
+    assert.equal((await c.stall.get(c.owner, concernId))!.escalationLevel, undefined, "no climb");
+    void chief;
+  });
+
+  suite("the ladder: concerns parked with the owner do not crowd the others out of a limited pass", async (c) => {
+    const a = await ladderWorld(c, ["Mid", "Chief"]);
+    const b = await ladderWorld(c, ["Mid", "Chief"]);
+    const [first, second] = [a.concernId, b.concernId].sort();
+    await patch(c, "stall-concern", first!, (x) => ({ ...x, escalatedAt: at(), escalatedTo: "owner", escalationLevel: 3, notifiedAt: at() }));
+    now += 30 * HOUR;
+    const owed = await c.stall.escalateUndecided(c.owner, 1);
+    assert.deepEqual(owed.map((x) => x.id), [second], "the one that can climb is reached");
+  });
+
+  suite("the ladder: when the route changes the ladder starts again for the new route (a supervisor retires mid-climb)", async (c) => {
+    const { chief, boss, ann, concernId } = await ladderWorld(c, ["Boss", "Chief"]);
+    const climb = c.service({ escalateAfterMs: 2 * HOUR });
+    now += 3 * HOUR;
+    const [first] = await climb.escalateUndecided(c.owner);
+    assert.equal(first!.escalatedTo, `agent:${chief.id}`);
+    // Ann is moved under a new supervisor (S1 of the old route is out of the picture): the concern is routed anew and Chief no longer holds it.
+    const s2 = await c.hbAgent("S2");
+    const rec = (await c.agents.get(c.owner, ann.id))!;
+    await c.agents.update(c.owner, { commandId: cid("u"), agentId: ann.id, expectedRevision: rec.revision, supervisorId: s2.id });
+    await climb.scan(c.owner);
+    const moved = (await climb.get(c.owner, concernId))!;
+    assert.deepEqual([moved.route.to.id, moved.escalatedTo, moved.escalationLevel, moved.escalatedAt, moved.escalationTrail], [s2.id, undefined, undefined, undefined, undefined]);
+    assert.equal(await climb.get(chief.principal, concernId), undefined);
+    assert.ok(await climb.get(s2.principal, concernId));
+    assert.deepEqual(await climb.escalateUndecided(c.owner), [], "the new supervisor gets its own time");
+    // The new supervisor retires leaving the owner as the route: the concern is the owner's, never climbed.
+    await patch(c, "agent", s2.id, (b) => ({ ...b, state: "retired" }));
+    await climb.scan(c.owner);
+    now += 100 * HOUR;
+    const owner = (await climb.get(c.owner, concernId))!;
+    assert.equal(owner.route.via, "owner");
+    assert.deepEqual(await climb.escalateUndecided(c.owner), []);
+    void boss;
+  });
+
+  suite("the ladder: a concern parked with the owner (its holder could not be told) stays there; why supervisors were skipped is shown only to the owner and the holder", async (c) => {
+    const { chief, boss, ann, mid, concernId } = await ladderWorld(c, ["Boss", "Mid", "Chief"]);
+    await patch(c, "agent", mid.id, (b) => ({ ...b, state: "retired" }));
+    const climb = c.service({ escalateAfterMs: 2 * HOUR });
+    now += 3 * HOUR;
+    const [first] = await climb.escalateUndecided(c.owner);
+    assert.equal(first!.escalatedTo, `agent:${chief.id}`);
+    assert.deepEqual(first!.escalationTrail![0]!.skipped, [{ id: mid.id, reason: "is retired" }]);
+    const asHolder = (await climb.get(chief.principal, concernId))!;
+    assert.equal(asHolder.escalationTrail![0]!.skipped?.length, 1);
+    const asBoss = (await climb.get(boss.principal, concernId))!;
+    assert.equal(asBoss.escalationTrail![0]!.skipped, undefined, "the routed supervisor is not shown the reasons");
+    assert.equal(asBoss.escalationTrail![0]!.to, `agent:${chief.id}`);
+    assert.equal((await climb.list(boss.principal)).items[0]!.escalationTrail![0]!.skipped, undefined);
+    assert.equal((await climb.list(c.owner)).items[0]!.escalationTrail![0]!.skipped?.length, 1);
+    // The holder cannot be told: the concern is parked with the owner and stays there (it does not climb back to a supervisor).
+    await climb.holdWithOwner(c.owner, concernId);
+    const parked = (await climb.get(c.owner, concernId))!;
+    assert.deepEqual([parked.escalatedTo, parked.escalationLevel, parked.escalatedAt], ["owner", 1, first!.escalatedAt]);
+    assert.equal(await climb.get(chief.principal, concernId), undefined, "the agent who could not see the task no longer holds it");
+    now += 100 * HOUR;
+    assert.equal((await climb.escalateUndecided(c.owner)).length, 1, "the notice is still owed until it is told");
+    assert.equal((await climb.get(c.owner, concernId))!.escalationLevel, 1);
+    void ann;
+  });
+
+  suite("the ladder: the task's own owner met on the way up is passed over for that reason and the walk goes on (not stopped as a loop)", async (c) => {
+    const { top, chief, ann, concernId } = await ladderWorld(c, ["Boss", "Mid", "Chief", "Top"]);
+    // Top, by a forced record, reports to Ann (the task's owner).
+    await patch(c, "agent", top.id, (b) => ({ ...b, supervisorId: ann.id }));
+    const climb = c.service({ escalateAfterMs: 2 * HOUR });
+    for (let i = 0; i < 4; i++) { now += 3 * HOUR; await climb.escalateUndecided(c.owner); }
+    const c4 = (await climb.get(c.owner, concernId))!;
+    const last = c4.escalationTrail!.at(-1)!;
+    assert.equal(c4.escalatedTo, "owner");
+    assert.deepEqual(last.skipped![0], { id: ann.id, reason: "is the task's own owner" });
+    void chief;
   });
 
   suite("the ladder: a supervisor holding the concern decides it; retired and looping chains end at the owner with the reasons recorded", async (c) => {
     const { mid, chief, boss, concernId } = await ladderWorld(c, ["Mid", "Chief"]);
     // The routed supervisor, Boss, is passed over to Mid; then Mid retires (not active), Chief is next but a cycle is forced: Chief reports to Boss.
     const climb = c.service({ escalateAfterMs: 2 * HOUR });
+    // Mid retires (the agent service refuses while Boss reports to it, so the record is changed directly): it is passed over, with the reason, to Chief.
+    await patch(c, "agent", mid.id, (b) => ({ ...b, state: "retired" }));
     now += 3 * HOUR;
     const [first] = await climb.escalateUndecided(c.owner);
-    assert.equal(first!.escalatedTo, `agent:${mid.id}`);
-    const decided = await climb.decide(mid.principal, { commandId: cid("d"), concernId, expectedRevision: first!.revision, decision: "dismiss", reason: "known slow build" });
+    assert.equal(first!.escalatedTo, `agent:${chief.id}`);
+    assert.deepEqual(first!.escalationTrail![0]!.skipped, [{ id: mid.id, reason: "is retired" }]);
+    const decided = await climb.decide(chief.principal, { commandId: cid("d"), concernId, expectedRevision: first!.revision, decision: "dismiss", reason: "known slow build" });
     assert.equal(decided.replayed, false);
     // Force a loop (the agent service refuses to make one): Mid -> Chief -> Top -> ... becomes Chief -> Boss.
     const { chief: chief2, boss: boss2, concernId: id2 } = await ladderWorld(c, []);
@@ -526,7 +635,7 @@ for (const backend of backends) {
     assert.ok(skipped.some((x) => x.reason === "cannot see the task"));
     assert.ok(skipped.some((x) => /loops back/.test(x.reason)), JSON.stringify(skipped));
     assert.ok(skipped.length <= 10);
-    void chief; void boss;
+    void boss;
   });
 
   suite("suspected stalls and confirmed failures are shown apart; decisions are revisioned, repeatable and survive a restart", async (c) => {

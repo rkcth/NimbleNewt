@@ -199,7 +199,7 @@ export interface ComposeInput {
   /** Unfinished hand-offs and checked resumes are carried on the same way (cards L03c, L04c). */
   readonly sweeps?: readonly { readonly name: string; readonly sweep: (by: Principal) => Promise<unknown> }[];
   /** The stall detection and the reconciler the controller built; the dispatcher's tick runs them (card L01b). */
-  readonly recovery?: { readonly stall: Pick<StallService, "scan"> & Partial<Pick<StallService, "reportFromRelay">>; readonly reconciler: { runPass(): Promise<unknown> } };
+  readonly recovery?: { readonly stall: Pick<StallService, "scan"> & Partial<Pick<StallService, "reportFromRelay" | "holdWithOwner">>; readonly reconciler: { runPass(): Promise<unknown> } };
   readonly onError?: (error: unknown) => void;
   /** The `meeting.leadMinutes` setting (card M01d), already defaulted by the caller: how long before a meeting its occurrence is made and its agents are invited and kept free. */
   readonly leadMinutes?: () => Promise<number | undefined>;
@@ -286,6 +286,8 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         try { await messages.noticeFromController({ commandId: `stall-esc-${key}`, taskId: c.taskId, to: c.escalatedTo, purpose: "A stuck agent's concern was passed up to you", text: `${detail} Concern ${c.id}, level ${c.escalationLevel ?? 1}. Look at it and confirm or dismiss it; if you do not decide in time it goes to your supervisor, and finally to the owner.` }); return; } catch (error) {
           // A supervisor who can no longer be told (it lost sight of the task since) must not hold the concern: the owner is told, and the reason is in the text.
           if (!(error instanceof DomainError && error.code === "forbidden")) throw error;
+          // The concern is parked with the owner first, so it is not left with an agent who cannot see the task (and does not climb back down); a repeat of this notice is the same one.
+          await i.recovery!.stall.holdWithOwner?.(await i.principals.authenticate(issued.token), c.id);
           await notifications.emitFromController({ commandId: `stall-esc-${key}`, kind: "maintenance", level: "needs-you", ref: { kind: "task", id: c.taskId }, projectId: c.projectId, detail: `${detail}`.slice(0, 120) + ` (${c.escalatedTo} could not be told)` });
           return;
         }
