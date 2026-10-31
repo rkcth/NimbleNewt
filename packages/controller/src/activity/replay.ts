@@ -29,6 +29,7 @@ export const REPLAY_LABELS = {
   contemporaneous: "Written at the time by the one who chose.",
   retrospective: "Asked for afterwards and built only from the records; not what was in anyone's mind.",
   superseded: "Replaced by a later step; kept for the record and no longer authoritative.",
+  supersederUnread: "Later steps of this task were not read (the range is given), so a step after this window may have replaced this one.",
   notRecorded: "not recorded",
   unexplained: "The records do not show what led to this step.",
   /** Outcome and branch are written by whoever recorded the step; only a controller service's are facts. */
@@ -64,6 +65,8 @@ export interface ReplayStep {
   /** The context supplied at the step, as recorded then. */
   readonly versionsThen: { readonly state: "recorded"; readonly refs: readonly ManifestRef[]; readonly summaryId?: string } | { readonly state: "not-recorded"; readonly reason: string };
   readonly authority: "current" | "superseded";
+  /** Set on a step shown as current when later steps were not read, so a superseder may lie outside the window. */
+  readonly authorityNote?: string;
   readonly supersedes?: number; readonly supersededBy?: readonly number[];
   readonly content: ReplayContent;
   readonly corrections: number;
@@ -123,6 +126,9 @@ interface Scanned { readonly steps: Map<number, ActivityStepBody & { corrections
 interface Model { readonly lanes: Map<string, number[]>; readonly supersededBy: Map<number, number[]>; readonly verified: ReadonlyMap<string, boolean> }
 /** "agent" for `agent:coder`, "service" for `service:reviews`, "owner" for the owner. */
 const actorKind = (actor: string): string => actor.split(":")[0] ?? actor;
+/** Whether `by` may replace `target`: the one who wrote it, the owner or a service; on the same line. A target outside the window is taken as replaceable by an authorised writer only. */
+const replaceable = (target: { actor: string; branch?: string } | undefined, by: { actor: string; branch?: string }): boolean =>
+  target !== undefined && (actorKind(by.actor) === "owner" || actorKind(by.actor) === "service" || target.actor === by.actor) && (target.branch ?? "main") === (by.branch ?? "main");
 
 export class ReplayService {
   readonly #runner: CommandRunner;
@@ -327,7 +333,8 @@ export class ReplayService {
     for (const [seq, s] of [...scanned.steps].sort((a, b) => a[0] - b[0])) {
       const lane = s.branch ?? "main";
       lanes.set(lane, [...(lanes.get(lane) ?? []), seq]);
-      if (s.supersedes !== undefined) supersededBy.set(s.supersedes, [...(supersededBy.get(s.supersedes) ?? []), seq]);
+      // The same authority as when a step is recorded (only its writer, the owner or a service may replace a step, and only on its own line): an older record, or one written some other way, that claims otherwise does not retire the step.
+      if (s.supersedes !== undefined && replaceable(scanned.steps.get(s.supersedes), s)) supersededBy.set(s.supersedes, [...(supersededBy.get(s.supersedes) ?? []), seq]);
     }
     // A line is "verified" only when a registry of the task's context branches knows it; without one, no line is.
     const verified = new Map<string, boolean>();
@@ -352,6 +359,7 @@ export class ReplayService {
       outcome: s.outcome ?? "not-recorded", ...(s.outcome !== undefined && kind !== "service" ? { outcomeNote: `reported by ${kind}` } : {}),
       versionsThen: s.manifest.missing ? { state: "not-recorded", reason: s.manifest.reason } : { state: "recorded", refs: s.manifest.refs, ...(s.manifest.summaryId === undefined ? {} : { summaryId: s.manifest.summaryId }) },
       authority: by === undefined ? "current" : "superseded",
+      ...(by === undefined && scanned.last < scanned.lastSeq ? { authorityNote: REPLAY_LABELS.supersederUnread } : {}),
       ...(s.supersedes === undefined ? {} : { supersedes: s.supersedes }), ...(by === undefined ? {} : { supersededBy: by }),
       content: s.payload.state === "none" ? { state: "none" } : s.payload.state === "missing" ? { state: "missing", reason: s.payload.reason } : { state: "stored", sensitive: s.payload.sensitive, ...(readable ? { chars: s.payload.chars, redactions: s.payload.redactions } : {}) },
       corrections: s.corrections,

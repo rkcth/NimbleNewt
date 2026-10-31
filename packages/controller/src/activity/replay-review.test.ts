@@ -98,6 +98,12 @@ for (const backend of backends) {
       const afterForgery = await replay.open(owner, assignedTask);
       assert.equal(afterForgery.entries.find((e) => e.seq === 1 && "authority" in e && e.authority === "superseded"), undefined, "the owner's instruction is still current");
 
+      // 3b. An old record that claims to supersede another's step (written before the check existed, or some other way) does not retire it when replayed.
+      const forged = { steps: async (...a: Parameters<ActivityService["steps"]>) => { const r = await open.steps(...a); return { ...r, steps: r.steps.map((x) => ("seq" in x && x.seq === 3 && !("unavailable" in x) ? { ...x, supersedes: 1 } : x)) }; }, payload: open.payload.bind(open), explanations: open.explanations.bind(open), explanationsPage: open.explanationsPage.bind(open), contentReadable: open.contentReadable.bind(open) };
+      const viaForged = await ReplayService.withEpoch(world.storage, projects.epoch, forged as never).open(owner, assignedTask);
+      assert.equal(viaForged.entries.find((e) => e.seq === 1 && "authority" in e && e.authority === "superseded"), undefined, "a forged supersede of the owner's instruction is not honoured");
+      assert.equal(viaForged.entries.find((e) => e.seq === 3 && "authority" in e && e.authority === "superseded") !== undefined, true, "a genuine one (the owner replacing ann's redo) still is");
+
       // 4. Outcome and branch are the recorder's claims unless a controller service set them.
       await rec(open, worker, assignedTask, { kind: "branch", summary: "side work", branch: "invented", outcome: "confirmed" });                                         // 6
       await rec(open, service, assignedTask, { kind: "tool-call", summary: "service saw it", outcome: "confirmed", branch: "svc-line" });                               // 7

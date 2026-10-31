@@ -25,6 +25,11 @@ test("activity steps, explanations, corrections and unavailable ranges work thro
     const aud = await tok("aud", [{ action: "history.read", project }]);
     const zed = await tok("zed", [{ action: "task.read", project }]);
 
+    // A host reads the steps only of a task it holds an attempt of: here it holds none, so it reads nothing (card U09 re-review).
+    await c.services.principals.enroll(rob, { commandId: "e-host", kind: "host", name: "h1", grants: [] });
+    const hostToken = (await c.services.principals.issueCredential(rob, "host:h1")).token;
+    assert.equal((await call(hostToken, "activity.steps", { taskId: task })).error?.code, "not_found");
+
     const one = await call(ann, "activity.record", { taskId: task, kind: "tool-call", summary: "ran the tests", manifest: { refs: [{ kind: "record", id: "dsk-1" }] }, payload: { text: "ok, key sk-live-ABCDEFGHIJKLMNOPQRSTUVWX1234" } }, "a1");
     assert.deepEqual([one.ok, one.result.seq], [true, 1], JSON.stringify(one));
     assert.equal((await call(zed, "activity.record", { taskId: task, kind: "lifecycle", summary: "x" }, "a2")).error.code, "forbidden");

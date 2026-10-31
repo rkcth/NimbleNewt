@@ -447,7 +447,17 @@ export async function startController(options: StartOptions): Promise<Controller
     const blobStore = options.artifacts === undefined ? undefined : await FileBlobStore.open({ directory: options.artifacts.directory });
     const checked = blobStore === undefined ? undefined : ArtifactService.withEpoch(storage, epoch, blobStore);
     // Replay reads: a reviewer reads only a task it was asked to review and sensitive content needs `history.sensitive.read` (card U09). The review-assignment source is the one the submissions use (Q01c): until it is composed (as it is not for submissions) no reviewer reads a task's activity.
-    const activity = ActivityService.withEpoch(storage, epoch, { roles: (_id, scope, by) => agents.rolesOfPrincipalIn(by, scope.projectId, new Date().toISOString()) });
+    // A host reads the activity of a task only while it holds a live attempt of it (the attempts come from the dispatcher when it is composed; without one no host reads any task's steps).
+    const activity = ActivityService.withEpoch(storage, epoch, {
+      roles: (_id, scope, by) => agents.rolesOfPrincipalIn(by, scope.projectId, new Date().toISOString()),
+      hostOwnsAttempt: async (hostId, taskId) => {
+        for (const attemptId of (await dispatch?.attemptControl.live(taskId)) ?? []) {
+          const found = await storage.getAggregate({ kind: "dispatch", id: attemptId });
+          if ((found?.body as { hostId?: unknown } | undefined)?.hostId === hostId) return true;
+        }
+        return false;
+      },
+    });
     // Replay reads the activity records only (card U09); the thinking look, the retention marker and the context-branch registry are not composed yet (U09b), so the owner is told thinking is unavailable (not wired) and no side line is verified.
     const replayLimits = ReplayLimitsService.withEpoch(storage, epoch);
     const replay = ReplayService.withEpoch(storage, epoch, activity, { limits: replayLimits });
