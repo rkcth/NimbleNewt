@@ -2687,12 +2687,41 @@
       "id": "L03h",
       "parent": "N05",
       "existing_issue": "AII-255",
-      "title": "Finish hand-off: a locks source, offering to reassign responsibilities",
+      "title": "Hand-off locks source from open workspace operations and held resource claims",
       "depends_on": [
         "L03g"
       ],
-      "deliverable": "Split from L03g (2026-10-30): the hand-off locks source has a service behind it, and responsibilities can be offered for reassignment with the hand-off",
-      "acceptance_and_verification": "A hand-off package lists the real locks and the owner can reassign responsibilities with it",
+      "deliverable": "Split from L03g (2026-10-30): the hand-off locks source has a service behind it (open workspace operations and held resource claims), limited to what the recipient may see, with gaps told as gaps. Offering to reassign responsibilities and the other lock sources moved to L03i (2026-10-30).",
+      "acceptance_and_verification": "A hand-off package lists the real locks the recipient may see and tells a gap as a gap",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "e94598e",
+          "fa8c271"
+        ],
+        "ci_runs": [
+          "41163513254"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Hand-off locks come from open workspace operations and held resource claims, limited to what the recipient may see, with gaps told as gaps. Offering to reassign responsibilities and the integrator and workspace lock sources are L03i.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "L03i",
+      "parent": "N05",
+      "existing_issue": "AII-255",
+      "title": "Finish hand-off: offering to reassign responsibilities, integrator and workspace lock sources",
+      "depends_on": [
+        "L03h"
+      ],
+      "deliverable": "Split from L03h (2026-10-30): offering to reassign the sender's responsibilities with the hand-off (an owner question surfaced with the package; nothing is transferred by a hand-off today), the integrator lease (P10) and workspace holds (H12m) as lock sources once they exist",
+      "acceptance_and_verification": "The owner can reassign responsibilities with the hand-off package and the package lists every kind of lock",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -5280,7 +5309,7 @@
       "id": "U11b",
       "parent": "N09",
       "existing_issue": "AII-259",
-      "title": "Implement notification levels, the Needs you view and escalation to Urgent",
+      "title": "Notification levels, the Needs you view and escalation to Urgent by age",
       "depends_on": [
         "U11",
         "A07b",
@@ -5292,7 +5321,46 @@
         "H09",
         "A08"
       ],
-      "deliverable": "Three levels for everything that reaches the owner (owner decision 2026-10-22): Notice (informational, no action), Needs you (waiting on a decision, work elsewhere continues) and Urgent (needs the owner now); one 'Needs you' view with the count shown in every chat reply; extends U11's controller-raised interrupting kinds",
+      "deliverable": "Three levels for everything that reaches the owner (owner decision 2026-10-22): Notice (informational, no action), Needs you (waiting on a decision, work elsewhere continues) and Urgent (needs the owner now), set by the controller from what an item is (owner level per kind chat-settable); one Needs you view (approval requests, agent questions, owner-only approvals, owner blockers, owner-decision reviews, grant_needed blockers) sorted by what it holds up; Notices never pushed, counted, retained and capped apart from the open-item limit; escalation to Urgent after an owner-set time; notification settings by state API and chat; the stand-up agenda opens with the Needs-you and Urgent items and ends with one notice line. Split 2026-10-30: the remaining Urgent triggers and the rest moved to U11c.",
+      "acceptance_and_verification": "Only the controller raises Urgent; a Notice goes to the inbox and the activity record only and is counted, never pushed; every item awaiting an owner decision from the sources named appears in one view sorted by critical path, then the number of tasks it blocks, then age; an item waiting past the owner-set time is raised to Urgent with its reason; levels and the escalation time are changed by chat, owner-only and recorded",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "d83695d",
+          "9bb38d4",
+          "ef56ca4",
+          "16d59d2",
+          "0115950",
+          "d1c71c1",
+          "e9db33b",
+          "ca544f2",
+          "c5e8a6b",
+          "ce6d0d4",
+          "a2d6e8c",
+          "7a34e1a"
+        ],
+        "ci_runs": [
+          "41163513254"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Notice, Needs you and Urgent levels set by the controller, the Needs-you view sorted by what it holds up, Notices never pushed and kept apart from the item limit, escalation to Urgent by age, settings by API and chat, and a stand-up that opens with the Needs-you items. The remaining Urgent triggers, critical-path marking and answering in place are U11c.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "U11c",
+      "parent": "N09",
+      "existing_issue": "AII-259",
+      "title": "Finish notification levels: Urgent triggers, critical path, answering in place, digest rule",
+      "depends_on": [
+        "U11b"
+      ],
+      "deliverable": "Split from U11b (2026-10-30). Original text of the card: Three levels for everything that reaches the owner (owner decision 2026-10-22): Notice (informational, no action), Needs you (waiting on a decision, work elsewhere continues) and Urgent (needs the owner now); one 'Needs you' view with the count shown in every chat reply; extends U11's controller-raised interrupting kinds Remaining: owner-marked critical tasks and goal-based critical path; the Urgent triggers for K01 backups, H01/H09 host down, controller down (watchdog), A08 integrity and sandbox/credential/protected-path events, and repeated denials; escalation when the agent has nothing else to do and de-escalation by the dispatcher; the plain 09:00 digest only when no stand-up is scheduled; answering in place from the Needs-you view; deferred meeting items from M03",
       "acceptance_and_verification": "Only the controller raises Urgent (agents still cannot interrupt, as in U11); a notice goes to the inbox and the activity record only and is counted in the daily report, never pushed; every item awaiting an owner decision (approval requests, agent questions, escalated reviews, deferred meeting items from M03) appears in one view sorted by critical path first, then the number of tasks it blocks, then age, each answerable in place; Urgent triggers are exactly: a safety stop; a blocked critical path (a task that an open goal or another open task depends on through the task dependency records, or one the owner marked critical, computed by this card); failing backups (K01: no good backup within the limit, which is 48 hours until K01c lets the owner set it); a host down (H01 heartbeat loss, H09 reconciliation failure) or the controller down (a watchdog or host sends straight to the configured external channel, and the controller raises it again when it returns); a sandbox escape attempt, a credential used from the wrong task or host, a protected path (.git or the loader configuration) touched, a failed integrity check (A08), or repeated denials from one agent over an owner-set threshold; and any Needs-you item that has stopped work (a critical-path task is blocked, or the dispatcher's view of available work (H12) shows an agent or project with nothing else to do while it waits) or has waited past an owner-set time (default 24 hours); routine single policy denials are not Urgent; an item that only holds back an agent with other work stays Needs you; escalation to Urgent is recorded with its reason and the dispatcher returns it to Needs you on the next dispatch if the work has resumed; Urgent interrupts at once on every configured channel and also in quiet hours; the daily stand-up report (M03) opens with the Needs-you items and then a summary of notices and is the digest, with a plain 09:00 UTC digest only when no stand-up is scheduled; levels and the escalation time are changed by chatting with the supervisor, owner-only and recorded; the Needs you view also lists every review that is in owner-decision mode (created by the commit gate, a direct request, a deadline or a reviewer escalation as well as by the dispatcher), so no owner-mode review waits unseen (H12h follow-up); a task that needs a grant nobody has given (a grant_needed blocker raised by the dispatcher, H12) is listed as a Needs-you item",
       "status": "planned",
       "research_evidence": null,
@@ -5874,12 +5942,41 @@
       "id": "M02f",
       "parent": "N12",
       "existing_issue": "AII-262",
-      "title": "Finish meeting records: decision log, steward agent, narrator, chat commands",
+      "title": "Meeting decision log: each decision and its outcome recorded and readable",
       "depends_on": [
         "M02e"
       ],
-      "deliverable": "Split from M02e (2026-10-30): the log of each meeting decision and its outcome so safe patterns can be found later, the steward agent for decisions no coded rule covers, the narrator, and the chat commands for meetings. Open items from the applier work are in implementation-notes.md (no per-decision limit on grants or raises, the aggregate cap, unguarded refuse saves).",
-      "acceptance_and_verification": "Unforeseen decisions go to a capable agent under the same widening policy; each decision and outcome is recorded; the commands are reachable through chat.",
+      "deliverable": "Split from M02e (2026-10-30): the log of each meeting decision and its outcome so safe patterns can be found later, read through meeting.decisions.log (the sweep fills lines lost to a crash). The steward agent, narrator and chat commands moved to M02g (2026-10-30).",
+      "acceptance_and_verification": "Each decision and outcome is recorded once, with the cell as it was at decision time, and can be read by those allowed",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "7367fed",
+          "7959d81"
+        ],
+        "ci_runs": [
+          "41163513254"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Each meeting decision and its outcome is logged once with the cell as it was at decision time, readable through meeting.decisions.log; a sweep fills lines lost to a crash. The steward agent, narrator and chat commands are M02g.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "M02g",
+      "parent": "N12",
+      "existing_issue": "AII-262",
+      "title": "Finish meeting records: steward agent, narrator, chat commands, per-decision limits",
+      "depends_on": [
+        "M02f"
+      ],
+      "deliverable": "Split from M02f (2026-10-30): the steward agent for decisions no coded rule covers (decidedBy steward), the narrator, chat commands for meetings and a chat reading of the log, learning auto-apply rules from the log once production data exists, and the open items from the applier work (no per-decision limit on grants or raises, the aggregate cap, unguarded refuse saves)",
+      "acceptance_and_verification": "Unforeseen decisions go to a capable agent under the same widening policy; the commands are reachable through chat",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -6038,12 +6135,43 @@
       "id": "M03f",
       "parent": "N12",
       "existing_issue": "AII-262",
-      "title": "Finish stand-ups: agenda outcomes to chat turns and inquiries, other sinks, chat",
+      "title": "Stand-ups: agenda outcomes to chat turns and inquiries, the open agenda and the owner's items in chat",
       "depends_on": [
         "M03e"
       ],
-      "deliverable": "Split from M03e (2026-10-29): agenda outcomes to chat turns and inquiries, the notice/allocation/usage/owner-item sinks, chat commands",
-      "acceptance_and_verification": "A stand-up runs end to end in the running controller",
+      "deliverable": "Split from M03e (2026-10-29): agenda outcomes go back to the chat turn or inquiry they came from, the open agenda of a project can be asked for in chat, the owner's Needs-you items are composed into the stand-up preparation, proven through the running controller. The remaining sinks and chat commands moved to M03g (2026-10-30).",
+      "acceptance_and_verification": "An agenda outcome reaches the chat turn or inquiry it came from once, across a replay and a restart; the owner's list is in the prepared stand-up and only for the owner",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "05c6ba3",
+          "6a3af8f",
+          "cd92dc4",
+          "34e08da"
+        ],
+        "ci_runs": [
+          "41163513254"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Stand-up agenda outcomes go back to the chat turn or inquiry they came from once, the open agenda is asked for in chat, and the owner's items are composed into the preparation, proven through the running controller. Other sinks and stand-up chat commands are M03g.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "M03g",
+      "parent": "N12",
+      "existing_issue": "AII-262",
+      "title": "Finish stand-ups: allocation and usage sinks, follow-ups in the chat listing, stand-up chat commands, new owner questions",
+      "depends_on": [
+        "M03f"
+      ],
+      "deliverable": "Split from M03f (2026-10-30): the allocation sink (needs the configuration service in the dispatch composition) and the usage sink (nothing measures worker-slot time per project yet), showing follow-ups in the chat's own listing of turns, chat commands for stand-ups, and an agenda outcome that asks the owner a new question (an inquiry or chat turn created by the stand-up itself)",
+      "acceptance_and_verification": "A stand-up runs end to end in the running controller with every sink and the owner can run and read it through chat",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -6206,12 +6334,45 @@
       "id": "M04f",
       "parent": "N12",
       "existing_issue": "AII-262",
-      "title": "Finish meeting attendance: chat wording for the stopped-agent exception, wake of agents the host reports stopped",
+      "title": "Stopped-agent meeting exception in chat, and the host wake path",
       "depends_on": [
         "M04e"
       ],
-      "deliverable": "Split from M04e (2026-10-29): chat wording that explains the owner's exception for a stopped agent, a wake path for agents the host's own availability hook reports stopped; the dispatcher passes safeLongRunning so long work is refused during a meeting",
-      "acceptance_and_verification": "The owner can ask in chat for a stopped agent to attend and is told what it means",
+      "deliverable": "Split from M04e (2026-10-29): chat wording that explains the owner's exception for a stopped agent (and planned meetings and rosters in chat), a wake path (meetingWakeSink, StartOptions.meetingWake) for agents the host's own availability hook reports stopped, and a safeLongRunning predicate the dispatcher passes to the meeting check. Composing a real predicate and a host that supplies the wake moved to M04g (2026-10-30).",
+      "acceptance_and_verification": "The owner can ask in chat for a stopped agent to attend and is told what it means; the wake reaches the host once per wake with a bounded wait, and a failing host is told without its own text",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "1bd970f",
+          "0139674",
+          "33ff0ce",
+          "7b55417",
+          "e94975e",
+          "43fe62e"
+        ],
+        "ci_runs": [
+          "41163513254"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "The owner asks in chat for a stopped agent to attend and is told what it means; planned meetings and rosters are readable in chat; a wake path reaches a host hook once per wake with a bounded wait; the dispatcher passes a provisional safeLongRunning predicate. A real predicate and a host that supplies the wake are M04g.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "M04g",
+      "parent": "N12",
+      "existing_issue": "AII-262",
+      "title": "Compose a real safeLongRunning and a host that wakes stopped agents",
+      "depends_on": [
+        "M04f"
+      ],
+      "deliverable": "Split from M04f (2026-10-30): a definition of a long-running operation that is safe to carry on during a meeting (needs T07 job knowledge) composed into the dispatcher, and a real host (L02/L03) that supplies the wake hook and reports the woken agent available, so the owner's wake works outside tests",
+      "acceptance_and_verification": "A long job that cannot yield is refused during a meeting and a safe one carries on; the owner's wake of a stopped agent works against a real host",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -6345,12 +6506,43 @@
       "id": "T02b",
       "parent": "N13",
       "existing_issue": "AII-263",
-      "title": "Finish catalog promotion: in-flight policy on revocation, retention",
+      "title": "Catalog revocation: in-flight policy (finish or cancel) and revoking by chat",
       "depends_on": [
         "T02"
       ],
-      "deliverable": "Split from T02 (2026-10-30): what happens to a run in flight when its artifact is revoked (finish, cancel or pause), and retention of old versions",
-      "acceptance_and_verification": "A revoked artifact's running work follows the chosen policy; old versions are kept or dropped by the retention rule",
+      "deliverable": "Split from T02 (2026-10-30): what happens to a catalogue tool call already running when its version is revoked (finish or cancel, chosen by the owner, fail-closed when the policy cannot be read), and revoking a tool version by chat. Retention, the pause policy and other-process runs moved to T02c (2026-10-30).",
+      "acceptance_and_verification": "A revoked version's running calls follow the chosen policy and a new run of it is refused",
+      "status": "implemented",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "817e699",
+          "a2137bf",
+          "dad6c52",
+          "5121b0e"
+        ],
+        "ci_runs": [
+          "41163513254"
+        ],
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "A running catalogue tool call follows the owner-chosen finish or cancel policy when its version is revoked (cancel when the policy cannot be read), and the owner revokes a version by chat. Retention, a pause policy and runs on other processes are T02c.",
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge"
+      }
+    },
+    {
+      "id": "T02c",
+      "parent": "N13",
+      "existing_issue": "AII-263",
+      "title": "Finish catalog promotion: retention of old versions, pause policy, runs on other processes",
+      "depends_on": [
+        "T02b"
+      ],
+      "deliverable": "Split from T02b (2026-10-30): retention of old and stale referenced versions (K06), pause as a third in-flight policy, cancellation of runs on other hosts and processes (remote workers cannot run catalogue tools yet), a production launcher passed to the tool bridge, a chat view of past revocations",
+      "acceptance_and_verification": "Old versions are kept or dropped by the retention rule and a revocation reaches calls on every host",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -8226,7 +8418,13 @@
         "L03h",
         "V02c",
         "H12q",
-        "U14"
+        "U14",
+        "M02g",
+        "M03g",
+        "M04g",
+        "L03i",
+        "T02c",
+        "U11c"
       ],
       "deliverable": "Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete",
       "acceptance_and_verification": "D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards",
