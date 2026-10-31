@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { BridgeReplyMessage, ChannelContext, ChannelModel, JsonValue } from "@nimblenewt/contracts";
 import { attemptSandbox, type AttemptSandboxPlan } from "../sandbox/attempt.js";
@@ -44,6 +44,33 @@ export interface HostFirstCall { readonly systemPromptChars: number; readonly to
 export function storedTokensOf(from: JsonObj | undefined): number | undefined {
   const tokens = (from?.["nn"] as JsonObj | undefined)?.["contextTokens"];
   return typeof tokens === "number" && Number.isSafeInteger(tokens) && tokens >= 0 ? tokens : undefined;
+}
+
+/**
+ * What to ask of the process about work an earlier process left unfinished: to recover (release Pi's hold, abandoning nothing) only when the controller's review says nothing is waiting; otherwise undefined, so the hold stays and `onHeld` says so.
+ * No answer, or an answer that throws, is "not reviewed".
+ */
+export async function recoveryFor(options: Pick<LocalHostOptions<unknown>, "heldForReview" | "onHeld">, order: HostOrder, restarted: boolean): Promise<{ readonly reason: string } | undefined> {
+  let held = true;
+  try { held = options.heldForReview === undefined ? true : (await options.heldForReview(order)) !== false; } catch { held = true; }
+  if (held) { try { options.onHeld?.(order, "interrupted work of this attempt is held until it has been reviewed"); } catch { /* the hold itself is the safe side */ } return undefined; }
+  return { reason: restarted ? "the controller restarted the sandbox of this attempt" : "the controller resumed this attempt from a checkpoint" };
+}
+
+/** A rough size, in tokens, of the conversation stored under `dir` (three bytes to a token, the budget's own estimate); undefined when nothing is stored there. Bounded: it looks at most at 20,000 files. */
+export function estimateStoredTokens(dir: string): number | undefined {
+  let bytes = 0; let files = 0; let found = false;
+  const walk = (at: string): void => {
+    let names: string[];
+    try { names = readdirSync(at); } catch { return; }
+    for (const name of names) {
+      if (files >= 20_000) return;
+      const path = join(at, name);
+      try { const st = statSync(path); if (st.isDirectory()) walk(path); else if (st.isFile()) { files++; bytes += st.size; found = true; } } catch { /* a file that went away is not counted */ }
+    }
+  };
+  walk(dir);
+  return found ? Math.ceil(bytes / 3) : undefined;
 }
 
 export interface HostRuntime {
@@ -141,6 +168,8 @@ export function ownerPolicyOptions(services: OwnerPolicyServices): Pick<LocalHos
 export interface ReachGrant { readonly readOnly?: readonly ReadOnlyMount[]; readonly env?: Readonly<Record<string, string>> }
 const REACH_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/;
 const MAX_REACH = 32;
+/** Environment a named reach may not set: anything that changes how a program starts or loads code (interpreter and loader options, git configuration, shell start-up files, search paths). The workspace's own environment is never overridden by a reach. */
+export const REACH_ENV_DENIED = /^(NODE_|NPM_|npm_|BASH_|ENV$|BASH|SHELL$|IFS$|CDPATH$|PS[0-9]$|PROMPT_COMMAND$|GIT_|PYTHON|RUBY|PERL|GEM_|BUNDLE_|LD_|DYLD_|JAVA_|_JAVA_|JDK_|CLASSPATH$|GOFLAGS$|GOPATH$|GOROOT$|CARGO_|RUSTC|RUSTFLAGS$|PATH$|HOME$|USER$|LOGNAME$|TMPDIR$|TEMP$|TMP$|XDG_|LANG$|LC_|PWD$|OLDPWD$|SSH_|HTTP_PROXY$|HTTPS_PROXY$|ALL_PROXY$|NO_PROXY$|http_proxy$|https_proxy$|all_proxy$|no_proxy$)/i;
 
 export interface LocalHostOptions<Call> {
   readonly launcher: Pick<SandboxLauncher, "launch">;
@@ -184,6 +213,13 @@ export interface LocalHostOptions<Call> {
    * view): every path is the host's own, so the program, its entry file and the store are given by their host paths. The mounts are still checked and still the only things the profile lets the process read.
    */
   readonly guestPaths?: "private" | "host";
+  /**
+   * Whether the controller's review says work an earlier process of this attempt left unfinished still awaits review (the ledger holds an unsettled call). Pi holds such work until it is reviewed; the host asks the process to recover (abandon nothing, release the hold) only
+   * when this answers false. Absent, or throwing: not reviewed, so the hold stays in force and the turn is refused by it (fails closed).
+   */
+  readonly heldForReview?: (order: HostOrder) => Promise<boolean> | boolean;
+  /** Told when the host left the hold on interrupted work in force because it is not reviewed (so the owner can be told); a throw is ignored. */
+  readonly onHeld?: (order: HostOrder, why: string) => void;
   /** The address the process uses for model calls (default `http://relay.invalid`). */
   readonly relayBase?: string;
   readonly clock?: () => number;
@@ -219,6 +255,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
       if (granted === undefined) throw new Error(`this host cannot provide the reach "${name}" of the recipe; the sandbox is not started with part of a recipe`);
       readOnly.push(...(granted.readOnly ?? []));
       for (const [key, value] of Object.entries(granted.env ?? {})) {
+        if (REACH_ENV_DENIED.test(key) || !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(key)) throw new Error(`the reach "${name}" sets ${key}, which a reach may not set (it changes how programs start or where they look)`);
         if (Object.hasOwn(env, key) && env[key] !== value) throw new Error(`the reaches of the recipe set ${key} to different values`);
         env[key] = value;
       }
@@ -230,7 +267,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
     async open(summary: HostOrder["recipe"], order: HostOrder): Promise<HostSandboxSession> {
       const workspace = await options.workspace(order);
       const reach = await reachOf(summary, order);
-      const planned = attemptSandbox({ ...workspace, ...(reach.env === undefined ? {} : { env: { ...workspace.env, ...reach.env } }) }, { protectedPaths: options.protectedPaths });
+      const planned = attemptSandbox({ ...workspace, ...(reach.env === undefined ? {} : { env: { ...reach.env, ...workspace.env } }) }, { protectedPaths: options.protectedPaths });
       const recipe = { ...planned.recipe, readOnly: [...(planned.recipe.readOnly ?? []), { host: options.app.node.root, guest: "/opt/node" }, ...options.app.mounts, ...reach.readOnly] };
       // Checked against the host now, so a bad workspace refuses the attempt before any process starts; the launcher checks again at the launch.
       const normalized = normalizeRecipe(recipe, planned.protectedPaths);
@@ -261,6 +298,8 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
       if ((from?.["pi"] !== undefined || nn?.["midTurn"] === true) && !existsSync(join(entry.workspace.home, "pi"))) throw new Error("the attempt resumes from a checkpoint but this host no longer holds the conversation");
       // Work an earlier process of this attempt left unfinished (this host restarted the sandbox, or the attempt resumes from a checkpoint) was reviewed by the controller before it asked: the conversation goes on from it.
       const goesOn = entry.process !== undefined || from !== undefined;
+      // Pi holds unfinished work until it is reviewed. The host asks the process to release that hold only when the controller's review says nothing is waiting; otherwise the hold stays and is reported.
+      const recovery = goesOn ? await recoveryFor(options, order, entry.process !== undefined) : undefined;
       await entry.process?.close().catch(() => undefined);
       const remaining = Math.min(MAX_RUN_MS, order.expiresAt === undefined ? Number.MAX_SAFE_INTEGER : Math.max(1000, Date.parse(order.expiresAt) - clock()));
       // Everything the owner's policy needs is read inside the guard: a setting that cannot be read refuses the launch AND is recorded as refused, with the reason (never an unrecorded throw).
@@ -304,7 +343,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
       try {
         await process.start({
           attemptId: order.attemptId, agentId: order.agentId, namespaceId: options.namespaceId(order), credential: order.credential,
-          storeDir: hostPaths ? join(entry.workspace.home, "pi") : `${GUEST.home}/pi`, model, ...(goesOn ? { recover: { reason: entry.process !== undefined ? "the controller restarted the sandbox of this attempt" : "the controller resumed this attempt from a checkpoint" } } : {}), relayBase: options.relayBase ?? RELAY_BASE,
+          storeDir: hostPaths ? join(entry.workspace.home, "pi") : `${GUEST.home}/pi`, model, ...(recovery === undefined ? {} : { recover: recovery }), relayBase: options.relayBase ?? RELAY_BASE,
           ...(options.context?.(order) === undefined ? {} : { context: options.context(order)! }),
           ...(cache === undefined || (cache.key === undefined && cache.retention === undefined) ? {} : { cache: { ...(cache.key === undefined ? {} : { key: cache.key }), ...(cache.retention === undefined ? {} : { retention: cache.retention }) } }),
         }, PROCESS_LIMITS.readyMs);
@@ -313,6 +352,8 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
         throw error;
       }
       let contextTokens: number | undefined = typeof nn?.["contextTokens"] === "number" ? (nn["contextTokens"] as number) : undefined;
+      // A checkpoint that did not say how big the conversation is (taken in the middle of a turn) is not an empty one: the stored conversation's own size is the estimate (it counts what the model no longer sees too, so it errs towards refusing and compacting).
+      if (contextTokens === undefined) { const stored = estimateStoredTokens(join(entry.workspace.home, "pi")); if (stored !== undefined) contextTokens = stored; }
       const wrapCheckpoint = (taken: { readonly checkpoint: JsonObj; readonly contextTokens?: number }): JsonObj => {
         if (taken.contextTokens !== undefined) contextTokens = taken.contextTokens;
         return { pi: taken.checkpoint, nn: { turnSeq, ...(lastRequest === undefined ? {} : { lastRequest }), ...(contextTokens === undefined ? {} : { contextTokens }) } };

@@ -91,6 +91,24 @@ for (const backend of backends) {
     assert.equal((await enf.admit(owner, { taskId: t, attemptId: "att-1", round: 3, window: WINDOW, call: { ...call, startupTokens: 3_000 } })).admit, true);
   });
 
+  suite("an attempt resumed after a restart is judged afresh: a new start of the worker does not replay the answer given when the conversation was small (review fix, cards H12b, H12f)", async ({ enf, owner, blockers, t }) => {
+    const call = { systemPromptChars: 9_000, toolSchemaChars: 15_000, startupTokens: 2_000, replyReserveTokens: 8_000 };
+    const small = await enf.admit(owner, { taskId: t, attemptId: "att-1", round: 1, launch: "start-a", window: WINDOW, call });
+    assert.equal(small.admit, true);
+    // The same start asking again is a repeat: it gets the recorded answer.
+    assert.equal((await enf.admit(owner, { taskId: t, attemptId: "att-1", round: 1, launch: "start-a", window: WINDOW, call })).replayed, true);
+    // The conversation has grown past the limit; the attempt (same ID) is started again. Without the start in the key the old 'admit' would come back and the whole conversation would be sent.
+    const grown = await enf.admit(owner, { taskId: t, attemptId: "att-1", round: 1, launch: "start-b", window: WINDOW, call: { ...call, startupTokens: 120_000 } });
+    assert.equal(grown.admit, false, JSON.stringify(grown));
+    assert.equal(grown.replayed, false);
+    assert.notEqual(grown.id, small.id);
+    assert.equal((await blockers.list({ limit: 20, openOnly: true })).items.filter((b) => b.type === "context_overflow").length, 1, "and the refusal opened the blocker");
+    // While the blocker is open nothing is admitted for a further start either (the open-blocker check is not skipped because an older record exists).
+    const later = await enf.admit(owner, { taskId: t, attemptId: "att-1", round: 1, launch: "start-c", window: WINDOW, call });
+    assert.equal(later.admit, false);
+    await refuses("invalid_command", () => enf.admit(owner, { taskId: t, attemptId: "att-1", launch: "bad launch!", window: WINDOW, call }));
+  });
+
   suite("a refusal the caller will retry after making the call smaller opens no blocker; the refusal of the retry does (card H12f)", async ({ enf, owner, blockers, t }) => {
     const call = { systemPromptChars: 9_000, toolSchemaChars: 100_000, startupTokens: 2_000, replyReserveTokens: 8_000 };
     const first = await enf.admit(owner, { taskId: t, attemptId: "att-1", round: 1, window: WINDOW, call, retry: true });

@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
 import type { HostFacts } from "../catalog/index.js";
 import type { FirstCall } from "../context/dispatch.js";
@@ -75,7 +76,7 @@ export type MessageBoundaryName = "interrupt" | "safe-boundary";
 export interface RuntimeGuards {
   readonly context?: {
     /** `retry`: the runtime will make the call smaller and ask again as the next round, so a refusal now opens no blocker (the refusal of that round does). */
-    admit(order: WorkOrder, call: FirstCall, round: number, retry?: boolean): Promise<{ readonly admit: boolean; readonly reasons: readonly string[] }>;
+    admit(order: WorkOrder, call: FirstCall, round: number, retry?: boolean, launch?: string): Promise<{ readonly admit: boolean; readonly reasons: readonly string[] }>;
     /** The first call went out and the provider reported its input size (card C07b): recorded against the admission, which calibrates the estimate for the route. */
     confirm?(order: WorkOrder, usage: { readonly reportedInputTokens: number; readonly promptChars: number }): Promise<void>;
     resume(order: WorkOrder, storedTokens: number): Promise<{ readonly resume: boolean; readonly reason: string }>;
@@ -171,6 +172,8 @@ export class LocalWorker implements WorkerHost {
 
     // The first call is admitted or refused before anything is sent (C07b). A refused one is made smaller once, if the runtime can, and asked again.
     let round = 0;
+    // Each start of the worker is judged afresh: an attempt resumed after a restart, a host loss or a move has the same attempt ID but a conversation that has grown since, so an earlier round's answer is never replayed for it.
+    const launch = randomBytes(6).toString("hex");
     const admitFirst = async (rt: AttemptRuntime, text: string): Promise<string | undefined> => {
       if (guards?.context === undefined || rt.firstCall === undefined) return undefined;
       let refusal: string | undefined;
@@ -179,7 +182,7 @@ export class LocalWorker implements WorkerHost {
           const first = rt.firstCall(text);
           if (first === undefined) return undefined;
           const compactable = pass === 1 && rt.compact !== undefined;
-          const decision = await guards.context.admit(order, first, ++round, compactable);
+          const decision = await guards.context.admit(order, first, ++round, compactable, launch);
           if (decision.admit) return undefined;
           refusal = decision.reasons.join("; ") || "the first call is over the context budget";
           if (!compactable) break;
@@ -272,15 +275,22 @@ export class LocalWorker implements WorkerHost {
           if (stopped) throw new DomainError("fenced", "the attempt was stopped");
           await runtime!.close();
           await sandbox.close();
-          sandbox = await options.sandbox.open(recipe, order);
-          if (stopped) { await sandbox.close().catch(() => undefined); throw new DomainError("fenced", "the attempt was stopped"); }
-          // The conversation continues from a checkpoint just taken from the same attempt; the new process has told nothing yet.
-          reported = undefined;
-          runtime = await options.runtimes.open({ ...order, recipe }, call, resumeFrom);
-          if (stopped) { await runtime.close().catch(() => undefined); await sandbox.close().catch(() => undefined); throw new DomainError("fenced", "the attempt was stopped"); }
-          // The new process takes the whole stored conversation into its next call: it is admitted again (and compacted once if it must be), and a refusal leaves the attempt frozen (the dispatcher keeps it so).
-          const again = await admitFirst(runtime, "");
-          if (again !== undefined) throw new DomainError("unavailable", `the restarted sandbox's first call was not sent: ${again}`);
+          // Whatever the restart opened is closed again when it fails (a refused re-admission, a process that did not start): a frozen attempt does not keep a second sandbox running.
+          try {
+            sandbox = await options.sandbox.open(recipe, order);
+            if (stopped) { await sandbox.close().catch(() => undefined); throw new DomainError("fenced", "the attempt was stopped"); }
+            // The conversation continues from a checkpoint just taken from the same attempt; the new process has told nothing yet.
+            reported = undefined;
+            runtime = await options.runtimes.open({ ...order, recipe }, call, resumeFrom);
+            if (stopped) { await runtime.close().catch(() => undefined); await sandbox.close().catch(() => undefined); throw new DomainError("fenced", "the attempt was stopped"); }
+            // The new process takes the whole stored conversation into its next call: it is admitted again (and compacted once if it must be), and a refusal leaves the attempt frozen (the dispatcher keeps it so).
+            const again = await admitFirst(runtime, "");
+            if (again !== undefined) throw new DomainError("unavailable", `the restarted sandbox's first call was not sent: ${again}`);
+          } catch (error) {
+            await runtime?.close().catch(() => undefined);
+            await sandbox.close().catch(() => undefined);
+            throw error;
+          }
         })();
         restarting = done;
         try { await done; restartFailed = false; } catch (error) { restartFailed = true; throw error; } finally { if (restarting === done) restarting = undefined; }

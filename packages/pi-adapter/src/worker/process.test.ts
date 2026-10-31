@@ -136,6 +136,8 @@ test("after a compaction the size the process reports is what the model still se
   assert.equal(answer.t, "compact.ok", JSON.stringify(answer));
   const after = answer.t === "compact.ok" ? answer.contextTokens ?? Number.MAX_SAFE_INTEGER : Number.MAX_SAFE_INTEGER;
   assert.ok(after < before - 1500, `the compacted conversation is smaller (${before} then ${after})`);
+  // The summary that replaced the older part is sent to the model, so its text counts (about 6,000 characters of extract, so well over 1,000 tokens); a size of only the kept messages would undercount.
+  assert.ok(after >= 1000, `the compaction summary counts toward the size (${after})`);
   h.send({ t: "checkpoint", id: 42 });
   assert.equal((await h.next("checkpoint.ok", h.seen.findIndex((m) => m.t === "compact.ok"))).contextTokens, after, "a checkpoint after the compaction reports the same size");
   h.send({ t: "close" });

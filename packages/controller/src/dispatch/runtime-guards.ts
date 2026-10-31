@@ -47,24 +47,25 @@ export function controllerGuards(binding: GuardBinding): RuntimeGuards {
   const counts = new Map<string, number>();
   const next = (key: string): number => { const n = (counts.get(key) ?? 0) + 1; counts.set(key, n); return n; };
   // The round of each attempt's latest first-call admission, so that the provider's count is recorded against the call that was sent.
-  const rounds = new Map<string, number>();
+  const rounds = new Map<string, { round: number; launch?: string }>();
   return {
     context: {
-      async admit(order, call, round, retry) {
+      async admit(order, call, round, retry, launch) {
         const window = binding.window(order);
         if (window === undefined) return { admit: true, reasons: [] };
-        const decision = await context.admit(binding.system, { taskId: order.taskId, attemptId: order.attemptId, round, window, route: order.route.replace(/[^A-Za-z0-9._:-]/g, ":").slice(0, 80), call, ...(retry === true ? { retry: true } : {}) });
-        if (decision.admit) rounds.set(order.attemptId, round);
+        const decision = await context.admit(binding.system, { taskId: order.taskId, attemptId: order.attemptId, round, ...(launch === undefined ? {} : { launch }), window, route: order.route.replace(/[^A-Za-z0-9._:-]/g, ":").slice(0, 80), call, ...(retry === true ? { retry: true } : {}) });
+        if (decision.admit) rounds.set(order.attemptId, { round, ...(launch === undefined ? {} : { launch }) });
         return { admit: decision.admit, reasons: decision.reasons };
       },
       async confirm(order, usage) {
-        const round = rounds.get(order.attemptId);
+        const sent = rounds.get(order.attemptId);
+        const round = sent?.round;
         const window = binding.window(order);
         if (round === undefined || window === undefined) return;
         rounds.delete(order.attemptId);
         // A count no sensible prompt could have (more than four windows, or fewer than half a character a token) is not a measurement.
         if (usage.reportedInputTokens > window * 4 || usage.promptChars / usage.reportedInputTokens < 0.5) return;
-        await context.confirmUsage(binding.system, { taskId: order.taskId, attemptId: order.attemptId, round, reportedInputTokens: usage.reportedInputTokens, promptChars: usage.promptChars });
+        await context.confirmUsage(binding.system, { taskId: order.taskId, attemptId: order.attemptId, round, ...(sent?.launch === undefined ? {} : { launch: sent.launch }), reportedInputTokens: usage.reportedInputTokens, promptChars: usage.promptChars });
       },
       async resume(order, storedTokens) {
         const window = binding.window(order);

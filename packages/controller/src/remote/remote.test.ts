@@ -340,17 +340,18 @@ for (const backend of backends) {
     assert.deepEqual(await attempt.pollControl(), []);
     assert.equal(await c.remote.control(c.dispatcherPrincipal, attemptId, { kind: "tell", text: "the recipe was widened" }), 1);
     await c.remote.control(c.owner, attemptId, { kind: "checkpoint" });
-    await c.remote.control(c.owner, attemptId, { kind: "restart", recipe: { revision: "r-2", reach: ["read-file"] }, checkpoint: { turn: 4 } });
+    await c.remote.control(c.owner, attemptId, { kind: "restart", recipe: { revision: "r-2", reach: ["read-file"], limits: { memoryMb: 512, processes: 32 } }, checkpoint: { turn: 4 } });
     await c.remote.control(c.owner, attemptId, { kind: "stop", emergency: true });
     const all = await attempt.pollControl();
     assert.deepEqual(all.map((m) => [m.seq, m.kind]), [[1, "tell"], [2, "checkpoint"], [3, "restart"], [4, "stop"]]);
+    assert.deepEqual((all[2] as { recipe?: unknown }).recipe, { revision: "r-2", reach: ["read-file"], limits: { memoryMb: 512, processes: 32 } }, "a restart over the wire keeps the recipe's limits, not just its revision and reach (review fix, card H12b)");
     assert.deepEqual((await attempt.pollControl(3)).map((m) => m.seq), [4]);
     assert.deepEqual(all[3], { kind: "stop", emergency: true, seq: 4 });
     for (let i = 0; i < REMOTE_LIMITS.control + 5; i++) await c.remote.control(c.owner, attemptId, { kind: "tell", text: `n${i}` });
     const kept = await attempt.pollControl();
     assert.equal(kept.length, REMOTE_LIMITS.control);
     assert.equal(kept.at(-1)!.seq, 4 + REMOTE_LIMITS.control + 5);
-    for (const bad of [{ kind: "tell" }, { kind: "tell", text: "" }, { kind: "reboot" }, { kind: "stop", extra: 1 }, { kind: "restart", recipe: {}, checkpoint: {} }, { kind: "restart", recipe: { revision: "r", reach: [] }, checkpoint: [] }, null, "stop"]) {
+    for (const bad of [{ kind: "tell" }, { kind: "tell", text: "" }, { kind: "reboot" }, { kind: "stop", extra: 1 }, { kind: "restart", recipe: {}, checkpoint: {} }, { kind: "restart", recipe: { revision: "r", reach: [] }, checkpoint: [] }, { kind: "restart", recipe: { revision: "r", reach: [], limits: { memoryMb: 0 } }, checkpoint: {} }, { kind: "restart", recipe: { revision: "r", reach: [], limits: { bogus: 1 } }, checkpoint: {} }, null, "stop"]) {
       await refuses("invalid_command", () => c.remote.control(c.owner, attemptId, bad as never));
     }
     await wireRefuses("invalid_command", () => attempt.pollControl(-1), 400).catch(() => undefined);

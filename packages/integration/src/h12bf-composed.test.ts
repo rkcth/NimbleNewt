@@ -16,6 +16,8 @@ import { descendantsOf, processesMentioning } from "./h12b-confinement-support.j
 const required = process.env["NIMBLENEWT_REQUIRE_SANDBOX"] === "1";
 const nodeRoot = dirname(dirname(realpathSync(process.execPath)));
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+/** Where the CI says the sandbox exists (NIMBLENEWT_REQUIRE_SANDBOX=1) a check that cannot run is a failure, never a silent skip. */
+const skipOrFail = (t: { skip(why: string): void }, why: string): void => { if (required) assert.fail(`NIMBLENEWT_REQUIRE_SANDBOX=1 but the check cannot run: ${why}`); t.skip(why); };
 const AGENT = "agt-abcdefghijklmnopqrst";
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const until = async (ok: () => boolean | Promise<boolean>, ms = 30_000, why = "timed out waiting"): Promise<void> => { const end = Date.now() + ms; while (!(await ok())) { if (Date.now() > end) assert.fail(why); await sleep(50); } };
@@ -108,6 +110,7 @@ async function rig(real: SandboxLauncher, answer: Model): Promise<Rig> {
     dispatch: {
       manual: true,
       local: {
+        acceptUnenforcedLimits: true,
         window: () => window.value,
         build: (services) => {
           const relay = new ModelRelay({ fetch: loopbackFetch, endpoint: (route) => (route === "localp/small" ? { url: answer.url, headers: () => ({ authorization: "Bearer sk-provider-secret" }) } : undefined) });
@@ -121,6 +124,8 @@ async function rig(real: SandboxLauncher, answer: Model): Promise<Rig> {
             context: (order) => services.context(order as never),
             reach: (name) => (name === "inputs-a" ? { readOnly: [{ host: inputs, guest: "/inputs/a" }] } : undefined),
             requireEnforced: false, guestPaths: style,
+            // The ledger's own view: work an earlier process left unsettled stays held until reviewed; nothing unsettled lets the restarted process carry on.
+            heldForReview: (order) => c.dispatch!.dispatcher.heldForReview(order.attemptId),
           });
           local = new LocalWorker({
             hostId: "host:w1", resources: { cpus: 1, memoryMb: 1024 }, version: "h12bf-test", guards: services.guards,
@@ -164,7 +169,7 @@ const mountPoints = (pid: string): string[] => read(pid, "mountinfo").split("\n"
 describe("the composed controller runs the real worker process (cards H12b, H12f)", () => {
   test("a pause that arrives mid-turn shows as pausing while the model call is open and as paused once it has settled; an interrupt reaches the running attempt and never a paused one; the provider's count of the first call is recorded", async (t) => {
     const real = await launcher();
-    if (real === undefined) return t.skip("the sandbox of this OS (bubblewrap, Seatbelt) or a node install it can mount is unusable");
+    if (real === undefined) return skipOrFail(t, "the sandbox of this OS (bubblewrap, Seatbelt) or a node install it can mount is unusable");
     const first = gate();
     const answer = await model([{ hold: first.promise, call: { name: "nimblenewt__desk-read", args: { recordId: "dsk-aaaaaaaaaaaaaaaaaaaa" } } }, { text: "all done" }]);
     const x = await rig(real, answer);
@@ -215,7 +220,7 @@ describe("the composed controller runs the real worker process (cards H12b, H12f
 
   test("a stored conversation over the startup share is compacted once by the real process and then admitted; one that cannot fit is refused at start with the blocker, and nothing was sent to the model", async (t) => {
     const real = await launcher();
-    if (real === undefined) return t.skip("the sandbox of this OS (bubblewrap, Seatbelt) or a node install it can mount is unusable");
+    if (real === undefined) return skipOrFail(t, "the sandbox of this OS (bubblewrap, Seatbelt) or a node install it can mount is unusable");
     const big = (n: number): string => `Seed order part ${n}. `.concat("The seed order is long and detailed. ".repeat(330));
     const answer = await model([{ text: big(1) }, { text: big(2) }, { text: "continued" }]);
     const x = await rig(real, answer);
@@ -258,7 +263,7 @@ describe("the composed controller runs the real worker process (cards H12b, H12f
   test("a recipe change on a running attempt is applied by the real launcher: widening adds a mount and limits, narrowing removes them, the turn and its conversation go on in the new process, the agent is told on a widening, and the turn keeps one number", async (t) => {
     if (linuxOnly !== undefined) return t.skip(linuxOnly);
     const real = await launcher();
-    if (real === undefined) return t.skip("the sandbox of this OS (bubblewrap, Seatbelt) or a node install it can mount is unusable");
+    if (real === undefined) return skipOrFail(t, "the sandbox of this OS (bubblewrap, Seatbelt) or a node install it can mount is unusable");
     const g1 = gate(), g2 = gate(), g3 = gate();
     const answer = await model([{ hold: g1.promise, text: "never sent" }, { hold: g2.promise, call: { name: "nimblenewt__desk-read", args: { recordId: "dsk-aaaaaaaaaaaaaaaaaaaa" } } }, { hold: g3.promise, text: "never sent" }, { text: "all done after two restarts" }]);
     const x = await rig(real, answer);
@@ -294,17 +299,17 @@ describe("the composed controller runs the real worker process (cards H12b, H12f
       assert.match(requestText(answer, 2), /Order seeds/);
 
       // Narrowing, in the middle of the next call: the mount and the limits go with the process that had them.
-      const narrow = await dispatcher.changeRecipe(x.owner, attemptId, { kind: "narrow", recipe: { revision: "r-narrow", reach: [] } });
+      const narrow = await dispatcher.changeRecipe(x.owner, attemptId, { kind: "narrow", recipe: { revision: "r-narrow", reach: [], limits: { memoryMb: 512, processes: 32 } } });
       assert.equal(narrow.restarted, true);
       await until(() => answer.seen.length >= 4, 30_000, "the turn did not go on after the narrowing");
       await until(() => !mounts().includes("/inputs/a") && insideNow().length > 0, 20_000, "the narrowed recipe still has the mount");
       assert.ok(insideNow().every((p) => !widePids.includes(p)));
-      assert.deepEqual(records.at(-1)?.limits ?? [], [], "no limits asked for, none recorded");
+      assert.deepEqual((records.at(-1)?.limits ?? []).map((l) => [l.limit, l.value]).sort(), [["memoryMb", 512], ["processes", 32]], "the narrowed limits are the ones the new process was started with");
       assert.match(requestText(answer, 3), /You can now read \/inputs\/a\./, "what the agent was told is still in its conversation");
       assert.match(requestText(answer, 3), /Order seeds/);
       const revisions = records.slice(-3).map((r) => r.recipeRevision);
       assert.notEqual(revisions[0], revisions[1], "the widened launch recorded another recipe revision");
-      assert.equal(revisions[0], revisions[2], "the narrowed recipe is the first one again, so it has the first one's revision");
+      assert.notEqual(revisions[1], revisions[2], "so did the narrowed one");
 
       await dispatcher.idle();
       const record = (await dispatcher.get(x.c.dispatch!.principal, attemptId))!;
@@ -319,7 +324,7 @@ describe("the composed controller runs the real worker process (cards H12b, H12f
   test("from inside the sandbox nothing but the relay's address can be reached: the model endpoint, loopback and an outside address all fail", async (t) => {
     if (linuxOnly !== undefined) return t.skip(linuxOnly);
     const real = await launcher();
-    if (real === undefined) return t.skip("the sandbox of this OS (bubblewrap, Seatbelt) or a node install it can mount is unusable");
+    if (real === undefined) return skipOrFail(t, "the sandbox of this OS (bubblewrap, Seatbelt) or a node install it can mount is unusable");
     const answer = await model([{ text: "x" }]);
     const directory = realpathSync(mkdtempSync(join(tmpdir(), "nn h12bn ")));
     try {

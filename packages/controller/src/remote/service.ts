@@ -1324,10 +1324,12 @@ function checkControl(value: unknown): ControlMessage {
     case "stop": onlyKnown(m, ["kind", "emergency"]); return { kind: "stop", emergency: m["emergency"] === true };
     case "restart": {
       onlyKnown(m, ["kind", "recipe", "checkpoint"]);
-      const recipe = m["recipe"] as { revision?: unknown; reach?: unknown } | undefined;
+      const recipe = m["recipe"] as { revision?: unknown; reach?: unknown; limits?: unknown } | undefined;
       if (recipe === undefined || recipe === null || typeof recipe.revision !== "string" || !Array.isArray(recipe.reach)) invalid("recipe", "must name its revision and reach");
       if (m["checkpoint"] === null || typeof m["checkpoint"] !== "object" || Array.isArray(m["checkpoint"])) invalid("checkpoint", "must be a checkpoint object");
-      return { kind: "restart", recipe: { revision: text(recipe!.revision, "recipe.revision", { min: 1, max: 120 }), reach: (recipe!.reach as unknown[]).slice(0, 100).map((x, i) => text(x, `recipe.reach[${i}]`, { min: 1, max: 120 })) }, checkpoint: m["checkpoint"] as JsonObject };
+      const limits = recipe!.limits;
+      if (limits !== undefined && (limits === null || typeof limits !== "object" || Array.isArray(limits) || Object.entries(limits).some(([k, v]) => !["cpus", "memoryMb", "diskMb", "processes"].includes(k) || !Number.isSafeInteger(v) || (v as number) < 1))) invalid("recipe.limits", "must be whole numbers for cpus, memoryMb, diskMb and processes");
+      return { kind: "restart", recipe: { revision: text(recipe!.revision, "recipe.revision", { min: 1, max: 120 }), reach: (recipe!.reach as unknown[]).slice(0, 100).map((x, i) => text(x, `recipe.reach[${i}]`, { min: 1, max: 120 })), ...(limits === undefined ? {} : { limits: { ...(limits as object) } }) }, checkpoint: m["checkpoint"] as JsonObject };
     }
     default: return invalid("kind", "must be tell, restart, checkpoint or stop");
   }

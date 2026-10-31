@@ -908,6 +908,54 @@ for (const backend of backends) {
     await c.dispatcher.idle();
   });
 
+  suite("the label of a recipe change is not trusted: a narrowing that adds reach or raises or drops a limit is refused, a real widening is for the owner (or an explicit right), and the recipe the record holds is the one a moved attempt starts with (review fixes, card H12b)", async (c) => {
+    const { w2, d, host } = await secondWorker(c);
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const { attemptId } = await c.task("t", ann);
+    const hold = deferred<void>();
+    const started = deferred<void>();
+    c.worker.script = async ({ gateway }) => { await gateway.call(read("c1"), local()); started.resolve(); await hold.promise; return { status: "completed", text: "x" }; };
+    assert.deepEqual((await d.tick()).started, [attemptId]);
+    await started.promise;
+    const handle = c.worker.handles[0]!;
+    // Labelled "narrow" but adding reach: refused before anything is frozen or restarted.
+    await refuses("invalid_command", () => d.changeRecipe(c.owner, attemptId!, { kind: "narrow", recipe: { revision: "sneaky", reach: ["net"] } }));
+    assert.equal(handle.restarts.length, 0);
+    assert.equal((await d.get(c.owner, attemptId!))!.frozen, undefined);
+    // A widening by someone who is not the owner and has no explicit right is refused; the owner may.
+    await refuses("forbidden", () => d.changeRecipe(host, attemptId!, { kind: "widen", recipe: { revision: "w", reach: ["net"] }, tell: "x" }));
+    assert.equal(handle.restarts.length, 0);
+    await d.changeRecipe(c.owner, attemptId!, { kind: "widen", recipe: { revision: "r-wide", reach: ["net", "files"], limits: { memoryMb: 800, processes: 40 } }, tell: "wider" });
+    // Raising a limit, or dropping one, is a widening too, whatever it is called.
+    await refuses("invalid_command", () => d.changeRecipe(c.owner, attemptId!, { kind: "narrow", recipe: { revision: "n1", reach: ["net"], limits: { memoryMb: 900, processes: 40 } } }));
+    await refuses("invalid_command", () => d.changeRecipe(c.owner, attemptId!, { kind: "narrow", recipe: { revision: "n2", reach: ["net"], limits: { memoryMb: 800 } } }));
+    assert.equal(handle.restarts.length, 1);
+    // A real narrowing goes through, and the record holds what is in force.
+    await d.changeRecipe(c.owner, attemptId!, { kind: "narrow", recipe: { revision: "r-narrow", reach: ["net"], limits: { memoryMb: 512, processes: 40 } } });
+    const held = (await d.get(c.owner, attemptId!))!;
+    assert.deepEqual(held.recipe, { revision: "r-narrow", reach: ["net"], limits: { memoryMb: 512, processes: 40 } });
+    // The attempt moves to another host: it starts there with the narrowed recipe, not the defaults.
+    await d.relocate(c.owner, attemptId!, { hostId: "host:w2", checkpoint: { turn: 3 }, note: "moved" });
+    hold.resolve();
+    await d.tick(); await d.idle();
+    assert.equal(w2.starts.length, 1);
+    assert.deepEqual(w2.starts[0]!.recipe, { revision: "r-narrow", reach: ["net"], limits: { memoryMb: 512, processes: 40 } });
+  });
+
+  suite("a widening by a principal the embedder's policy allows goes through (the policy is a setting, strict by default)", async (c) => {
+    const d = c.restart({}, { mayWiden: (by: { id: string }, _a: string, what: string) => by.id.startsWith("host:") && /adds reach/.test(what) } as never);
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const { attemptId } = await c.task("t", ann);
+    const hold = deferred<void>(); const started = deferred<void>();
+    c.worker.script = async ({ gateway }) => { await gateway.call(read("c1"), local()); started.resolve(); await hold.promise; return { status: "completed", text: "x" }; };
+    await d.tick(); await started.promise;
+    await c.principals.enroll(c.owner, { commandId: "e-wh", kind: "host", name: "wh", grants: [] });
+    const wh = await c.principals.authenticate((await c.principals.issueCredential(c.owner, "host:wh")).token);
+    assert.equal((await d.changeRecipe(wh, attemptId!, { kind: "widen", recipe: { revision: "w", reach: ["net"] }, tell: "x" })).restarted, true);
+    await refuses("forbidden", () => d.changeRecipe(wh, attemptId!, { kind: "widen", recipe: { revision: "w2", reach: ["net"], limits: { memoryMb: 1 } }, tell: "x" }).then(() => d.changeRecipe(wh, attemptId!, { kind: "widen", recipe: { revision: "w3", reach: ["net"], limits: { memoryMb: 2 } }, tell: "x" })));
+    hold.resolve(); await d.idle();
+  });
+
   /** An attempt whose worker waits, started by a tick; `release` lets its turn complete. */
   const scripts = new WeakMap<object, Map<string, { started: () => void; gate: Promise<void> }>>();
   async function running(c: Ctx, name: string) {

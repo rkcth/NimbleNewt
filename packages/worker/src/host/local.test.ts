@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { localWorkerParts, type HostOrder } from "./local.js";
+import { estimateStoredTokens, localWorkerParts, recoveryFor, type HostOrder } from "./local.js";
 
 // Card H12b: the recipe the dispatcher states (named reaches and limits) becomes a real recipe when the sandbox is opened. Nothing is launched here; the launcher's own checks run on the recipe at open.
 const root = realpathSync(mkdtempSync(join(tmpdir(), "nn host local ")));
@@ -76,6 +76,42 @@ test("the launch command and the store follow the launcher's path style: private
   assert.deepEqual(launched.at(-1)!.limits, { memoryMb: 512 });
   // A launcher that shows host paths cannot run an app that does not say where its entry file is.
   assert.throws(() => localWorkerParts<unknown>({ launcher: capture as never, app, protectedPaths: [], workspace: () => work, model: () => { throw new Error("unused"); }, namespaceId: () => "abcdef0123456789", bridge: async () => ({ ok: false, code: "x", message: "y" }), relay: async () => { throw new Error("unused"); }, guestPaths: "host" }), /host entry file/);
+});
+
+test("a reach may not set the environment that changes how programs start (NODE_OPTIONS, GIT_*, BASH_ENV, PYTHON*, ...), and the workspace's own environment is never overridden by a reach (review fixes, card H12b)", async () => {
+  const launched: { env: Record<string, string> }[] = [];
+  const capture = { launch: async (request: { recipe: { env?: Record<string, string> } }) => { launched.push({ env: request.recipe.env ?? {} }); throw new Error("captured"); } };
+  const make = (reach: (name: string) => { env: Record<string, string> } | undefined) => localWorkerParts<unknown>({ launcher: capture as never, app, protectedPaths: [], workspace: () => ({ ...work, env: { MODE: "workspace", KEEP: "1" } }), model: () => ({ alias: "m0", provider: "p", api: "openai-completions", modelId: "m", contextWindow: 8192, maxTokens: 256, reasoning: false, input: ["text"] }), namespaceId: () => "abcdef0123456789", bridge: async () => ({ ok: false, code: "x", message: "y" }), relay: async () => { throw new Error("unused"); }, reach });
+  for (const bad of ["NODE_OPTIONS", "GIT_SSH_COMMAND", "GIT_CONFIG_COUNT", "BASH_ENV", "ENV", "PYTHONSTARTUP", "PYTHONPATH", "RUBYOPT", "PERL5OPT", "LD_PRELOAD", "PATH", "HOME", "NPM_CONFIG_REGISTRY", "BAD KEY"]) {
+    await assert.rejects(make(() => ({ env: { [bad]: "x" } })).sandbox.open(order(["e"]).recipe, order(["e"])), /may not set/, bad);
+  }
+  // A harmless name is passed; where the workspace sets the same name, the workspace's value stays.
+  const p = make(() => ({ env: { REGION: "eu", MODE: "reach" } }));
+  const session = await p.sandbox.open(order(["e"]).recipe, order(["e"]));
+  await assert.rejects(p.runtimes.open(order(["e"]), {}, undefined), /captured/);
+  await session.close();
+  assert.equal(launched.at(-1)!.env["REGION"], "eu");
+  assert.equal(launched.at(-1)!.env["MODE"], "workspace", "the workspace wins");
+  assert.equal(launched.at(-1)!.env["KEEP"], "1");
+});
+
+test("a restart or resume asks the process to release Pi's hold only when the controller's review says nothing is held; otherwise the hold stays and is reported (review fixes, card H12b)", async () => {
+  const told: string[] = [];
+  const o = order([]);
+  assert.equal(await recoveryFor({ heldForReview: () => true, onHeld: (_o, why) => told.push(why) }, o, true), undefined);
+  assert.equal(told.length, 1, "the held work is reported");
+  assert.equal(await recoveryFor({}, o, true), undefined, "no review given: the hold stays");
+  assert.equal(await recoveryFor({ heldForReview: () => { throw new Error("ledger unreadable"); } }, o, false), undefined, "a review that fails is not a review");
+  assert.deepEqual(await recoveryFor({ heldForReview: async () => false }, o, true), { reason: "the controller restarted the sandbox of this attempt" });
+  assert.deepEqual(await recoveryFor({ heldForReview: () => false }, o, false), { reason: "the controller resumed this attempt from a checkpoint" });
+});
+
+test("a checkpoint that does not say how big the conversation is is estimated from the stored conversation, not taken as empty (review fixes, card H12f)", async () => {
+  const store = dir("store/pi");
+  assert.equal(estimateStoredTokens(store), undefined, "nothing stored");
+  assert.equal(estimateStoredTokens(join(root, "no-such-dir")), undefined);
+  writeFileSync(join(store, "a.jsonl"), "x".repeat(3000)); mkdirSync(join(store, "sub")); writeFileSync(join(store, "sub", "b.jsonl"), "y".repeat(6000));
+  assert.equal(estimateStoredTokens(store), 3000);
 });
 
 test.after(() => { rmSync(root, { recursive: true, force: true }); void dirname; });

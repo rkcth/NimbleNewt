@@ -95,6 +95,8 @@ export interface DispatchBody {
   readonly calls: number;
   /** The conversation checkpoint reference taken when the attempt ended or was reconfigured. */
   readonly recipeRevision?: string;
+  /** The recipe the attempt runs with now (reach and limits, as the dispatcher last stated them): every start, resume, move and restart builds its recipe from this, never from the defaults. */
+  readonly recipe?: { readonly revision: string; readonly reach: readonly string[]; readonly limits?: { readonly cpus?: number; readonly memoryMb?: number; readonly diskMb?: number; readonly processes?: number } };
   /** Set when a turn's usage figures could not be charged to accounting: why (redacted). */
   readonly usageError?: string;
   /** Set when the attempt was finished: whether its worker was confirmed stopped (its handle stopped, or the host holding it confirmed the release). Absent: not confirmed. */

@@ -22,6 +22,8 @@ const round = (value: unknown): number => (value === undefined ? 1 : Number.isSa
 const window = (value: unknown): number => (Number.isSafeInteger(value) ? (value as number) : invalid("window", "must be a whole number of tokens"));
 const cleanReason = (value: unknown, field: string): string => redactText(text(value, field, { min: 1, max: 2000, multiline: true })).slice(0, ENFORCEMENT_LIMITS.reason);
 const sameSource = (a: SourceRef, b: SourceRef): boolean => JSON.stringify(a) === JSON.stringify(b);
+/** Part of an admission's identity that tells one start of the worker apart from another (the same attempt resumed after a restart, a host loss or a move is judged afresh, not given the answer of an earlier, smaller conversation). */
+const launchPart = (launch: unknown): string => (launch === undefined ? "" : `\0launch\0${key("launch", launch)}`);
 const handoffId = (taskId: string, attemptId: string, source: string): string => derivedId("hof", `${taskId}\0${attemptId}\0${source}`);
 const label = (s: SourceRef): string => (s.kind === "desk-record" || s.kind === "owner-decision" ? s.id : `${s.scopeId}#${s.seq}`);
 
@@ -137,8 +139,8 @@ export class ContextEnforcementService {
    * Decides whether the first call of an attempt may be sent. Repeating it (same task, attempt and round) answers with the recorded decision; a refusal has opened a blocker (unless the caller said it will `retry` after making the call smaller). While a `context_overflow`
    * blocker is open on the task nothing is admitted. If an earlier confirmed call on the same route (`route`, default one per window) was larger than estimated, the estimate is scaled by that ratio.
    */
-  async admit(principal: Principal, command: { taskId: string; attemptId: string; round?: number; window: number; route?: string; call: FirstCall; retry?: boolean }): Promise<FirstCallDecision & { id: string; blockerId?: string; replayed: boolean }> {
-    onlyKnown(command, ["taskId", "attemptId", "round", "window", "route", "call", "retry"]);
+  async admit(principal: Principal, command: { taskId: string; attemptId: string; round?: number; launch?: string; window: number; route?: string; call: FirstCall; retry?: boolean }): Promise<FirstCallDecision & { id: string; blockerId?: string; replayed: boolean }> {
+    onlyKnown(command, ["taskId", "attemptId", "round", "launch", "window", "route", "call", "retry"]);
     if (command.retry !== undefined && typeof command.retry !== "boolean") return invalid("retry", "must be true or false");
     const taskId = checkTaskId(command.taskId); const attemptId = key("attemptId", command.attemptId); const r = round(command.round); const w = window(command.window);
     const route = command.route === undefined ? `window-${w}` : key("route", command.route);
@@ -146,7 +148,7 @@ export class ContextEnforcementService {
     const budget = this.budget(w);
     onlyKnown(command.call, ["systemPromptChars", "toolSchemaChars", "startupTokens", "replyReserveTokens", "likelyToolOutputTokens", "reportedInputTokens"]);
     const call = command.call;
-    const id = derivedId("adm", `${taskId}\0${attemptId}\0first\0${r}`);
+    const id = derivedId("adm", `${taskId}\0${attemptId}\0first\0${r}${launchPart(command.launch)}`);
     const ref: AggregateRef = { kind: "ctx-admission", id };
     let raw: FirstCallDecision;
     try { raw = admitFirstCall(call, budget); } catch (error) { if (error instanceof RangeError) return invalid("call", error.message); throw error; }
@@ -173,11 +175,11 @@ export class ContextEnforcementService {
    * After the call went out: records the size the provider reported and what characters per token it implies, whether the call was in fact over the startup limit, and (per task and route) how far the
    * estimate was off, which later `admit` calls on that route apply.
    */
-  async confirmUsage(principal: Principal, command: { taskId: string; attemptId: string; round?: number; reportedInputTokens: number; promptChars: number }): Promise<{ charsPerToken: number; overStartupLimit: boolean; ratio: number; replayed: boolean }> {
-    onlyKnown(command, ["taskId", "attemptId", "round", "reportedInputTokens", "promptChars"]);
+  async confirmUsage(principal: Principal, command: { taskId: string; attemptId: string; round?: number; launch?: string; reportedInputTokens: number; promptChars: number }): Promise<{ charsPerToken: number; overStartupLimit: boolean; ratio: number; replayed: boolean }> {
+    onlyKnown(command, ["taskId", "attemptId", "round", "launch", "reportedInputTokens", "promptChars"]);
     const taskId = checkTaskId(command.taskId); const attemptId = key("attemptId", command.attemptId);
     await this.#dispatch(principal, taskId);
-    const id = derivedId("adm", `${taskId}\0${attemptId}\0first\0${round(command.round)}`);
+    const id = derivedId("adm", `${taskId}\0${attemptId}\0first\0${round(command.round)}${launchPart(command.launch)}`);
     let cpt: number;
     try { cpt = calibratedCharsPerToken(command.promptChars, command.reportedInputTokens); } catch (error) { if (error instanceof RangeError) return invalid("reportedInputTokens", error.message); throw error; }
     const r = await this.#runner.command("context.confirm", { commandId: `ctx-cnf-${id.slice(4)}`, actor: principal.id }, async () => ({
@@ -208,15 +210,15 @@ export class ContextEnforcementService {
    * Falling back to a route with a smaller window: the startup context is built again for that window and that route's fixed part; if what must stay whole does not fit, a blocker is opened and nothing
    * is to be sent. The cut text is returned for archiving. Repeating it answers with the recorded decision (the view is rebuilt from the same items).
    */
-  async changeRoute(principal: Principal, command: { taskId: string; attemptId: string; round?: number; window: number; route?: string; fixedTokens: number; items: readonly StartupItem[] }): Promise<{ rebuilt: boolean; startup: StartupResult; reason?: string; blockerId?: string; id: string; replayed: boolean }> {
-    onlyKnown(command, ["taskId", "attemptId", "round", "window", "route", "fixedTokens", "items"]);
+  async changeRoute(principal: Principal, command: { taskId: string; attemptId: string; round?: number; launch?: string; window: number; route?: string; fixedTokens: number; items: readonly StartupItem[] }): Promise<{ rebuilt: boolean; startup: StartupResult; reason?: string; blockerId?: string; id: string; replayed: boolean }> {
+    onlyKnown(command, ["taskId", "attemptId", "round", "launch", "window", "route", "fixedTokens", "items"]);
     const taskId = checkTaskId(command.taskId); const attemptId = key("attemptId", command.attemptId); const r = round(command.round); const w = window(command.window);
     const route = command.route === undefined ? `window-${w}` : key("route", command.route);
     const projectId = (await this.#dispatch(principal, taskId))!;
     if (!Array.isArray(command.items) || command.items.length > 1000) invalid("items", "must be a list of at most 1000 items");
     let review: ReturnType<typeof reviewRouteChange>;
     try { review = reviewRouteChange(command.items, this.budget(w), command.fixedTokens); } catch (error) { if (error instanceof RangeError) return invalid("fixedTokens", error.message); throw error; }
-    const id = derivedId("adm", `${taskId}\0${attemptId}\0route\0${r}`);
+    const id = derivedId("adm", `${taskId}\0${attemptId}\0route\0${r}${launchPart(command.launch)}`);
     const ref: AggregateRef = { kind: "ctx-admission", id };
     const reasons = review.kind === "blocked" ? [review.reason] : [];
     const body: AdmissionBody = { type: "route-change", taskId, projectId, attemptId, round: r, window: w, route, admit: review.kind === "rebuilt", startupTokens: review.startup.tokens + command.fixedTokens, estimatedTokens: review.startup.tokens + command.fixedTokens, rawEstimatedTokens: review.startup.tokens + command.fixedTokens, workingTokens: 0, basis: "estimated", reasons, decidedBy: principal.id };

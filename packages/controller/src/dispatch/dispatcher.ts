@@ -157,6 +157,8 @@ export interface AttemptDispatcherOptions extends RunnerOptions {
    * (millionths of the tree's currency; default none, so only compute is reserved). Without `budgets.reserve` nothing is reserved. An attempt that cannot reserve waits and is tried again; it is not started.
    */
   readonly reserveCostMicros?: number;
+  /** Whether a principal other than the owner may widen the sandbox of an attempt (an explicit widening right, or a policy the owner set). Absent: only the owner (the strict default). */
+  readonly mayWiden?: (by: Principal, attemptId: string, what: string) => Promise<boolean> | boolean;
   /** A worker that does not beat within this time is taken as lost. Default one minute. */
   readonly leaseMs?: number;
   /** How long an attempt may run (shortened by the contract's `maxMinutes`). Default: no limit. The owner's dispatcher-limits setting (`limits`) wins over this start-up figure. */
@@ -216,6 +218,20 @@ export interface TickReport {
   readonly scanned: number;
   /** True when the scan of assignments reached its end in this tick (so it saw every assignment since it began). */
   readonly complete: boolean;
+}
+
+const LIMIT_KEYS = ["cpus", "memoryMb", "diskMb", "processes"] as const;
+/** Why `next` is wider than `current` (a reach it adds, a limit it raises or drops), or undefined when it is the same or narrower. A limit the current recipe does not state is the host's default, which is not known here: stating one is not a widening. */
+export function recipeWidens(current: Pick<RecipeSummary, "reach" | "limits">, next: Pick<RecipeSummary, "reach" | "limits">): string | undefined {
+  const added = next.reach.filter((n) => !current.reach.includes(n));
+  if (added.length > 0) return `adds reach ${added.join(", ")}`;
+  for (const k of LIMIT_KEYS) {
+    const was = current.limits?.[k]; const now = next.limits?.[k];
+    if (was === undefined) continue;
+    if (now === undefined) return `drops the ${k} limit`;
+    if (now > was) return `raises ${k} from ${was} to ${now}`;
+  }
+  return undefined;
 }
 
 export type RecipeChange =
@@ -553,13 +569,23 @@ export class DispatcherService {
       const limits = change.recipe.limits as unknown;
       if (limits === null || typeof limits !== "object" || Array.isArray(limits) || Object.entries(limits).some(([k, v]) => !["cpus", "memoryMb", "diskMb", "processes"].includes(k) || !Number.isSafeInteger(v) || (v as number) < 1)) invalid("recipe", "limits must be whole numbers for cpus, memoryMb, diskMb and processes");
     }
+    // The label is not trusted: the new recipe is compared with the one the attempt holds. A "narrow" that adds reach or raises or drops a limit is refused; a real widening needs the owner (or the embedder's explicit widening right).
+    const current = d.body.recipe ?? { revision: d.body.recipeRevision ?? "", reach: [] as readonly string[] };
+    const widens = recipeWidens(current, change.recipe);
+    if (change.kind === "narrow" && widens !== undefined) invalid("recipe", `a narrowing may not widen the sandbox (${widens}); ask for a widening`);
+    if (widens !== undefined && by.kind !== "owner" && (this.#options.mayWiden === undefined || (await this.#options.mayWiden(by, attemptId, widens)) !== true)) throw new DomainError("forbidden", `${by.id} may not widen the sandbox of an attempt (${widens}); the owner decides that`);
     await this.freeze(by, attemptId, change.kind === "narrow" ? "narrowing the sandbox" : "widening the sandbox");
     await this.settle(by, attemptId, { cancel: true });
     const checkpoint = await this.#checkpoint(attemptId, `recipe ${change.kind}`);
     await live.handle.restart(change.recipe, checkpoint ?? {});
     if (change.kind === "widen") await live.handle.tell?.(change.tell);
-    await this.#update(d.body.attemptId, (b) => ({ ...withoutFreeze(b, false), recipeRevision: change.recipe.revision }));
+    await this.#update(d.body.attemptId, (b) => ({ ...withoutFreeze(b, false), recipeRevision: change.recipe.revision, recipe: { revision: change.recipe.revision, reach: [...change.recipe.reach], ...(change.recipe.limits === undefined ? {} : { limits: { ...change.recipe.limits } }) } }));
     return { restarted: true, recipeRevision: change.recipe.revision };
+  }
+
+  /** Whether the ledger holds a call of the attempt that is not settled (in progress, or uncertain): work an earlier process left that the controller has not reviewed. The host leaves Pi's hold on such work in force (card H12b review). */
+  async heldForReview(attemptId: string): Promise<boolean> {
+    return (await this.#path.list(attemptId)).some((o) => o.state === "uncertain" || o.state === "in-progress");
   }
 
   /**
@@ -1303,7 +1329,8 @@ export class DispatcherService {
     const credentialId = credential.token.slice(0, credential.token.lastIndexOf("."));
     const environment = await this.#pin(b);
     await this.#update(b.attemptId, (x) => ({ ...x, credentialId, revisions: { ...x.revisions, ...(environment === undefined ? {} : { environment }) } }));
-    const recipe: RecipeSummary = { revision: `r-${b.attemptId.slice(4, 16)}`, reach: [] };
+    // The recipe the attempt holds now: a resumed, moved or restarted attempt keeps the narrowed (or widened) recipe its record names, never the defaults.
+    const recipe: RecipeSummary = b.recipe !== undefined ? { revision: b.recipe.revision, reach: [...b.recipe.reach], ...(b.recipe.limits === undefined ? {} : { limits: { ...b.recipe.limits } }) } : { revision: `r-${b.attemptId.slice(4, 16)}`, reach: [] };
     const order: WorkOrder = {
       attemptId: b.attemptId, taskId: b.taskId, projectId: b.projectId, agentId: b.agentId, generation: b.generation, ...(b.harness === undefined ? {} : { harness: b.harness }), route: b.route, credential: credential.token, recipe,
       content: await this.#contentOf(b.taskId) + await this.#policyNote(b), requestId: `cmd:adm:${b.attemptId}`, ...(b.expiresAt === undefined ? {} : { expiresAt: b.expiresAt }),
@@ -1316,7 +1343,7 @@ export class DispatcherService {
       // The report says why too (a host that cannot meet a requirement is a visible refusal, not a silent skip).
       return { kind: "skipped", check: "host", reason: `the worker did not start: ${why}` };
     }
-    await this.#update(b.attemptId, (x) => ({ ...x, workerVersion: handle.workerVersion, recipeRevision: recipe.revision }));
+    await this.#update(b.attemptId, (x) => ({ ...x, workerVersion: handle.workerVersion, recipeRevision: recipe.revision, recipe }));
     await this.#stepOf(b.attemptId, "model", "model-selected", `Attempt ${b.attemptId} runs on route ${b.route}.`, [{ kind: "dispatch", id: b.attemptId }]);
     if (b.harness !== undefined) await this.#stepOf(b.attemptId, "harness", "harness-selected", `Attempt ${b.attemptId} runs in the ${b.harness} harness.`, [{ kind: "dispatch", id: b.attemptId }]);
     // A stop may have landed while the worker was starting (the record says running before the host answers): the attempt is over, so the worker that came up is let go instead of left live and unowned. No await between this check and `#live.set`.

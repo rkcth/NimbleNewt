@@ -292,6 +292,23 @@ test("card H12f: a restarted sandbox's conversation is admitted again; one that 
   assert.equal(sizes, 2);
 });
 
+test("review fix (card H12b): a restart that fails after opening the new sandbox (re-admission refused, process not started) closes the new runtime and sandbox; the frozen attempt does not keep them running", async () => {
+  for (const failure of ["refused", "open"] as const) {
+    const open = new Set<string>();
+    let sandboxes = 0; let runtimes = 0; let asked = 0;
+    const local = new LocalWorker({
+      hostId: "host:local", resources: { cpus: 1, memoryMb: 1 }, version: "v", capabilities: () => ({}) as never,
+      ...(failure === "refused" ? { guards: { context: { admit: async () => ({ admit: ++asked === 1, reasons: ["conversation too big"] }), resume: ADMIT_ALL.resume } } as never } : {}),
+      sandbox: { open: async (recipe) => { const n = ++sandboxes; open.add(`sandbox ${n}`); return { revision: recipe.revision, close: async () => { open.delete(`sandbox ${n}`); } }; } },
+      runtimes: { open: async () => { const n = ++runtimes; if (failure === "open" && n === 2) throw new Error("the process did not start"); open.add(`runtime ${n}`); return { firstCall: () => CALL, run: async () => ({ status: "completed" as const }), checkpoint: async () => ({}), close: async () => { open.delete(`runtime ${n}`); } }; } },
+    });
+    const handle = await local.start(order());
+    assert.deepEqual([...open].sort(), ["runtime 1", "sandbox 1"]);
+    await assert.rejects(handle.restart({ revision: "r2", reach: [] } as never, {}));
+    assert.deepEqual([...open], [], `nothing is left running after a ${failure} restart`);
+  }
+});
+
 test("card H12b: restarts run one at a time, and a stop that comes while the sandbox is being started again ends what the restart opened", async () => {
   const log: string[] = [];
   let release!: () => void;
