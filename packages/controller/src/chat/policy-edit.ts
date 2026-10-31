@@ -704,7 +704,8 @@ export class PolicyEditService {
     const layerName = change.layer === "installation" ? "the whole installation" : `${change.layer} ${change.scopeId as string}`;
     const summary = [change.remove === true ? `Remove ${change.key} from ${layerName}.` : `Set ${change.key} to ${JSON.stringify(change.value)} for ${layerName}.`];
     const layer = await this.#deps.configuration.layer(owner, change.layer, change.scopeId);
-    const explanation = [`${def.description}`, `It takes effect ${EFFECT_WORDS[def.effect] ?? def.effect}.`, def.kind === "restriction" ? "A narrower layer can only narrow it further, and a value wider than the layers above allow is refused." : "A narrower layer may override it.", "It is applied as a whole after the combination of settings is checked; if the check fails nothing changes."];
+    if (def.installationOnly === true && change.layer !== "installation") throw new Refusal("invalid_command", `${change.key} can only be set for the whole installation (by the owner), not for a ${change.layer}.`);
+    const explanation = [`${def.description}`, `It takes effect ${EFFECT_WORDS[def.effect] ?? def.effect}.`, def.installationOnly === true ? "It can only be set for the whole installation; no narrower layer can override it." : def.kind === "restriction" ? (def.installationMayWiden === true ? "Only the owner, for the whole installation, can set it past its default; a narrower layer can only narrow it further, and a value wider than the layers above allow is refused." : "A narrower layer can only narrow it further, and a value wider than the layers above allow is refused.") : "A narrower layer may override it.", "It is applied as a whole after the combination of settings is checked; if the check fails nothing changes."];
     if (change.layer === "installation") {
       const eff = await this.#deps.configuration.effective(owner);
       const now = eff?.values[change.key];

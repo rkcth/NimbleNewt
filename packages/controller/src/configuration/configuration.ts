@@ -106,8 +106,8 @@ export class ConfigurationService {
   }
 
   /** The settings this service knows. */
-  settings(): readonly { key: string; kind: "default" | "restriction"; effect: Effect; description: string }[] {
-    return this.#definitions.map((d) => ({ key: d.key, kind: d.kind, effect: d.effect, description: d.description }));
+  settings(): readonly { key: string; kind: "default" | "restriction"; effect: Effect; description: string; installationOnly?: boolean; installationMayWiden?: boolean }[] {
+    return this.#definitions.map((d) => ({ key: d.key, kind: d.kind, effect: d.effect, description: d.description, ...(d.installationOnly === true ? { installationOnly: true } : {}), ...(d.installationMayWiden === true ? { installationMayWiden: true } : {}) }));
   }
 
   /**
@@ -311,6 +311,24 @@ export class ConfigurationService {
     return built === undefined ? undefined : (await this.#combined(built.chain)).values[key]?.value;
   }
 
+  /**
+   * Several settings as they apply to a task, from ONE combination of the layers (so they cannot come from different revisions), for the controller's own reading; no rights check. The team and agent layers apply only when an agent
+   * owns the task (otherwise only the installation and the task layers do). `undefined` when the task is missing or the ID is malformed.
+   */
+  async taskValues(keys: readonly string[], taskId: string): Promise<Readonly<Record<string, unknown>> | undefined> {
+    if (!TASK_ID.test(taskId)) return undefined;
+    const built = await this.#chainOf({ taskId });
+    if (built === undefined) return undefined;
+    const values = (await this.#combined(built.chain)).values;
+    return Object.fromEntries(keys.map((k) => [k, values[k]?.value]));
+  }
+
+  /** Several installation-level values from one combination (see `taskValues`). */
+  async installationValues(keys: readonly string[]): Promise<Readonly<Record<string, unknown>>> {
+    const values = (await this.#combined([await this.#link("installation", "installation")])).values;
+    return Object.fromEntries(keys.map((k) => [k, values[k]?.value]));
+  }
+
   /** One setting's installation-level value, for the controller's own reading (no rights check: it is not an answer to a caller). `undefined` when the setting is not known or unset. */
   async installationValue(key: string): Promise<unknown> {
     return (await this.#combined([await this.#link("installation", "installation")])).values[key]?.value;
@@ -428,6 +446,7 @@ export class ConfigurationService {
 
   /** A value for a layer must not be locked by a layer above and, for a restriction, must be no wider than what they allow. */
   #checkAbove(chain: readonly Link[], key: string, def: SettingDefinition, value: unknown, layer: LayerKind): void {
+    if (def.installationOnly === true && layer !== "installation") invalid("set", `${key} can only be set for the whole installation (by the owner), not in a ${layer} layer`);
     for (const above of chain) {
       if (above.applied[key]?.locked === true) invalid("set", `${key} is locked by the ${above.layer} layer; ${layer} cannot change it`);
     }
@@ -438,7 +457,8 @@ export class ConfigurationService {
       if (e === undefined) continue;
       bound = bound === undefined ? e.value : def.meet!(bound, e.value);
     }
-    const limit = bound ?? def.fallback;
+    // A setting the owner may widen past its fallback is checked against nothing at the installation layer (the owner chooses explicitly); lower layers are checked against the layers above, then the fallback.
+    const limit = bound ?? (def.installationMayWiden === true && layer === "installation" ? undefined : def.fallback);
     if (limit !== undefined && !def.within!(value, limit)) invalid("set", `${key} = ${JSON.stringify(value)} is wider than the layers above allow (${JSON.stringify(limit)}); a ${layer} layer can only narrow it`);
   }
 
@@ -457,9 +477,11 @@ export class ConfigurationService {
       const ignored: { layer: LayerKind; id: string; reason: string }[] = [];
       for (const link of chain) {
         const e = link.applied[key];
+        // A setting only the installation may give: a value stored in another layer (written before the setting was installation-only) is not used.
+        if (e !== undefined && def.installationOnly === true && link.layer !== "installation") { ignored.push({ layer: link.layer, id: link.id, reason: "this setting can only be set for the whole installation" }); continue; }
         if (lockedBy !== undefined) { if (e !== undefined) ignored.push({ layer: link.layer, id: link.id, reason: `locked by the ${lockedBy.layer} layer` }); continue; }
         if (e !== undefined) {
-          if (def.kind === "default" || value === undefined) { value = e.value; source = { layer: link.layer, id: link.id }; }
+          if (def.kind === "default" || value === undefined || (def.installationMayWiden === true && link.layer === "installation")) { value = e.value; source = { layer: link.layer, id: link.id }; }
           else {
             const met = def.meet!(value, e.value);
             if (!same(met, value) || source.layer === "default") { value = met; source = { layer: link.layer, id: link.id }; }

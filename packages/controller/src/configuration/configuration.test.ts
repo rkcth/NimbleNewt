@@ -7,7 +7,8 @@ import { ProjectService } from "../domain/service.js";
 import { backends, stopServer, type Backend } from "../domain/testing/backends.js";
 import { RoutingService } from "../routing/index.js";
 import { GrantService, PrincipalService, type Grant, type Principal } from "../security/index.js";
-import { ConfigurationService, type LayerKind } from "./index.js";
+import { landingPolicyFrom } from "../api/landing-policy.js";
+import { ConfigurationService, type LayerKind, type SettingDefinition } from "./index.js";
 
 after(stopServer);
 
@@ -20,6 +21,7 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, check
 
 interface Ctx {
   config: ConfigurationService; routing: RoutingService; owner: Principal; grants: GrantService; assignments: AssignmentService; projects: ProjectService;
+  later: (settings: readonly SettingDefinition[]) => ConfigurationService;
   team: string; agentA: string; agentB: string; task: string; project: string;
   writer: Principal; broad: Principal; routingWriter: Principal; nobody: Principal; agentPrincipal: Principal; otherAgentPrincipal: Principal;
 }
@@ -43,6 +45,7 @@ async function open(backend: Backend, body: (c: Ctx) => Promise<void>): Promise<
     const plain = async (nm: string, g: Grant[]) => { await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: nm, grants: g }); return principals.authenticate((await principals.issueCredential(owner, `agent:${nm}`)).token); };
     const as = async (id: string) => principals.authenticate((await principals.issueCredential(owner, `agent:${id}`)).token);
     await body({
+      later: (settings) => ConfigurationService.withEpoch(world.storage, projects.epoch, { ...options, routing, settings }),
       config, routing, owner, grants, assignments, projects, team, agentA, agentB, task, project,
       writer: await plain("writer", [{ action: "config.write", project: "*" }]), routingWriter: await plain("rw", [{ action: "routing.write", project: "*" }]),
       broad: await plain("broad", [{ action: "*", project: "*" }]), nobody: await plain("nobody", []), agentPrincipal: await as(agentA), otherAgentPrincipal: await as(agentB),
@@ -85,13 +88,82 @@ for (const backend of backends) {
   suite("the landing policy is a set of real settings: branch, permit requirement (only tightened) and protected paths are checked and chat-settable (card H12q re-review)", async (c) => {
     await put(c, c.owner, "installation", undefined, { "workspace.landing.branch": "main", "workspace.landing.protectedPaths": ["docs/", ".github/", "CODEOWNERS"] });
     assert.equal((await value(c, "workspace.landing.branch"))!.value, "main");
-    assert.deepEqual((await value(c, "workspace.landing.protectedPaths"))!.value, ["docs/", ".github/", "CODEOWNERS"]);
+    assert.deepEqual((await value(c, "workspace.landing.protectedPaths"))!.value, [".github/", "CODEOWNERS", "docs/"]);
     assert.equal((await value(c, "workspace.landing.requirePermit"))!.value, true, "the permit is required unless someone turns it off");
     await refuses("invalid_command", () => stageNow(c, c.owner, "installation", undefined, { set: { "workspace.landing.branch": "../x" } }), (e) => assert.match(e.message, /branch name/));
     await refuses("invalid_command", () => stageNow(c, c.owner, "installation", undefined, { set: { "workspace.landing.protectedPaths": ["../etc"] } }), (e) => assert.match(e.message, /path pattern/));
     // Once the installation requires it, a task cannot turn the requirement off.
     await put(c, c.owner, "installation", undefined, { "workspace.landing.requirePermit": true });
     await refuses("invalid_command", () => stageNow(c, c.owner, "task", c.task, { set: { "workspace.landing.requirePermit": false } }), (e) => assert.match(e.message, /wider than the layers above allow|can only narrow/));
+  });
+
+  suite("landing: only the owner can turn the permit requirement off; lower layers can only keep it on; the policy reads the real service per task (card H12s review)", async (c) => {
+    const policy = landingPolicyFrom(c.config);
+    const call = { taskId: c.task, projectId: c.project };
+    assert.equal((await policy(call)).requirePermit, true);
+    assert.equal((await value(c, "workspace.landing.requirePermit"))!.value, true, "the default view shows true");
+    // Nobody but the owner writes the installation layer, and with nothing set a task cannot turn it off either.
+    await refuses("forbidden", () => stageNow(c, c.writer, "installation", undefined, { set: { "workspace.landing.requirePermit": false } }));
+    await refuses("invalid_command", () => stageNow(c, c.owner, "task", c.task, { set: { "workspace.landing.requirePermit": false } }), (e) => assert.match(e.message, /wider than the layers above allow/));
+    await refuses("invalid_command", () => stageNow(c, c.writer, "task", c.task, { set: { "workspace.landing.requirePermit": false } }));
+    await put(c, c.owner, "installation", undefined, { "workspace.landing.requirePermit": false });
+    assert.equal((await policy(call)).requirePermit, false, "the owner's explicit false is what the host reads");
+    assert.equal((await value(c, "workspace.landing.requirePermit", { taskId: c.task }))!.value, false);
+    // A task can tighten it again, and then the task value wins.
+    await put(c, c.writer, "task", c.task, { "workspace.landing.requirePermit": true });
+    assert.equal((await policy(call)).requirePermit, true, "task layer over installation");
+    // The owner turns it on again.
+    await put(c, c.owner, "installation", undefined, { "workspace.landing.requirePermit": true });
+    await refuses("invalid_command", () => stageNow(c, c.owner, "agent", c.agentA, { set: { "workspace.landing.requirePermit": false } }), (e) => assert.match(e.message, /wider than the layers above allow/));
+  });
+
+  suite("landing: the owner's protected paths add to the built-in list, every layer adds, the built-in list is switched off only by the owner, and the branch is the owner's alone (card H12s review)", async (c) => {
+    const policy = landingPolicyFrom(c.config);
+    const call = { taskId: c.task, projectId: c.project };
+    assert.deepEqual(await policy(call), { requirePermit: true, protectDefaults: true, protectedPaths: [] });
+    await put(c, c.owner, "installation", undefined, { "workspace.landing.protectedPaths": ["docs/"], "workspace.landing.branch": "main" });
+    await put(c, c.writer, "task", c.task, { "workspace.landing.protectedPaths": ["secrets/"] });
+    assert.deepEqual((await policy(call)).protectedPaths, ["docs/", "secrets/"], "layers add; nothing is replaced");
+    assert.equal((await policy(call)).protectDefaults, true);
+    // Not widening: a task cannot take a path away, nor change the branch, nor switch the defaults off.
+    await put(c, c.writer, "task", c.task, { "workspace.landing.protectedPaths": [] });
+    assert.deepEqual((await policy(call)).protectedPaths, ["docs/"], "an empty task list adds nothing and removes nothing");
+    await refuses("invalid_command", () => stageNow(c, c.writer, "task", c.task, { set: { "workspace.landing.branch": "evil" } }), (e) => assert.match(e.message, /whole installation/));
+    await refuses("invalid_command", () => stageNow(c, c.owner, "agent", c.agentA, { set: { "workspace.landing.branch": "evil" } }), (e) => assert.match(e.message, /whole installation/));
+    await refuses("invalid_command", () => stageNow(c, c.writer, "task", c.task, { set: { "workspace.landing.protectDefaults": false } }), (e) => assert.match(e.message, /whole installation/));
+    await refuses("forbidden", () => stageNow(c, c.writer, "installation", undefined, { set: { "workspace.landing.protectDefaults": false } }));
+    assert.equal((await policy(call)).branch, "main");
+    await put(c, c.owner, "installation", undefined, { "workspace.landing.protectDefaults": false });
+    assert.equal((await policy(call)).protectDefaults, false, "the owner switched the built-in list off");
+    assert.deepEqual((await policy(call)).protectedPaths, ["docs/"]);
+    // Patterns with a . part never match anything: refused.
+    for (const bad of ["./CODEOWNERS", ".github/./", "a/./b", "/etc"]) await refuses("invalid_command", () => stageNow(c, c.owner, "installation", undefined, { set: { "workspace.landing.protectedPaths": [bad] } }), (e) => assert.match(e.message, /path pattern/));
+    // The task-layer value on a task that exists is read for that task (not the unknown-task fallback).
+    await put(c, c.owner, "task", c.task, { "workspace.landing.protectedPaths": ["only-here/"] });
+    assert.deepEqual((await policy(call)).protectedPaths, ["docs/", "only-here/"]);
+    assert.deepEqual((await policy({ taskId: "task-aaaaaaaaaaaaaaaaaaaa", projectId: c.project })).protectedPaths, ["docs/"], "an unknown task reads the installation value");
+  });
+
+  suite("landing: a value stored in a task layer before the setting became installation-only is ignored when reading, and listed as ignored (card H12s second review)", async (c) => {
+    // The same key as it was defined before: a plain default, so a task layer could hold it; then the key is made installation-only.
+    const legacy = c.later([{ key: "test.legacy.branch", kind: "default", check: (v) => v, effect: "next-request", description: "d" }]);
+    const staged = await legacy.stage(c.owner, { commandId: cid("st"), layer: "task", scopeId: c.task, set: { "test.legacy.branch": "evil" } } as never);
+    assert.equal((await legacy.apply(c.owner, { commandId: cid("ap"), layer: "task", scopeId: c.task, expectedRevision: staged.revision } as never)).applied, true);
+    assert.equal(await legacy.taskValue("test.legacy.branch", c.task), "evil", "before the change the task layer wins");
+    const now = c.later([{ key: "test.legacy.branch", kind: "default", installationOnly: true, check: (v) => v, effect: "next-request", description: "d" }]);
+    assert.equal(await now.taskValue("test.legacy.branch", c.task), undefined, "the stale task value no longer wins");
+    const staged2 = await now.stage(c.owner, { commandId: cid("st"), layer: "installation", set: { "test.legacy.branch": "main" } } as never);
+    await now.apply(c.owner, { commandId: cid("ap"), layer: "installation", expectedRevision: staged2.revision } as never);
+    assert.equal(await now.taskValue("test.legacy.branch", c.task), "main");
+    const eff = (await now.effective(c.owner, { taskId: c.task }))!.values["test.legacy.branch"]!;
+    assert.deepEqual(eff.ignored.map((i) => [i.layer, i.id]), [["task", c.task]]);
+    assert.match(eff.ignored[0]!.reason, /whole installation/);
+    // One combination answers all keys.
+    assert.deepEqual(await now.taskValues(["test.legacy.branch", "no.such"], c.task), { "test.legacy.branch": "main", "no.such": undefined });
+    assert.equal(await now.taskValues(["test.legacy.branch"], "task-aaaaaaaaaaaaaaaaaaaa"), undefined);
+    // The setting list exposes the flags for the chat text.
+    const flags = Object.fromEntries(c.config.settings().filter((s) => s.key.startsWith("workspace.landing.")).map((s) => [s.key, [s.installationOnly === true, s.installationMayWiden === true]]));
+    assert.deepEqual(flags, { "workspace.landing.branch": [true, false], "workspace.landing.requirePermit": [false, true], "workspace.landing.protectedPaths": [false, false], "workspace.landing.protectDefaults": [true, false] });
   });
 
   suite("a restriction can only be narrowed: a task cannot re-enable a disabled provider or raise a ceiling, now or after the layer above changes", async (c) => {

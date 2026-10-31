@@ -2,7 +2,7 @@ import { fold } from "./names.js";
 
 /**
  * Paths whose change takes effect outside the code review of an ordinary file (card H12q review): Git's attribute and submodule files, hook directories, and the CI configuration that runs with the repository's
- * credentials. A landing never writes them by itself: they are kept for the owner's review. The list is a setting of the project (`workspace.landing.protectedPaths`, set through chat); this is its default.
+ * credentials. A landing never writes them by itself: they are kept for the owner's review. The owner's `workspace.landing.protectedPaths` (set through chat) are added to this list, and `workspace.landing.protectDefaults` turns it off.
  *
  * A pattern ending in `/` names a directory at the root of the repository (everything under it); any other pattern with a `/` names that path at the root; a pattern without a `/` names a file in any directory. Names are
  * compared the way a case-insensitive filesystem would see them (`fold`).

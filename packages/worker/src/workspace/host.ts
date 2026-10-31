@@ -60,8 +60,10 @@ export interface LandingPolicy {
   readonly branch?: string;
   /** Whether every commit of the checkout since its base must carry the commit permit's marks (A06/H12o). Default true. */
   readonly requirePermit?: boolean;
-  /** Paths that are kept for review instead of landing (see `DEFAULT_PROTECTED_PATHS`). */
+  /** Paths kept for review instead of landing, in addition to `DEFAULT_PROTECTED_PATHS` (unless `protectDefaults` is false). */
   readonly protectedPaths?: readonly string[];
+  /** Whether the built-in list `DEFAULT_PROTECTED_PATHS` applies (default true). */
+  readonly protectDefaults?: boolean;
 }
 
 export interface WorkspaceHostOptions {
@@ -76,7 +78,7 @@ export interface WorkspaceHostOptions {
    * answers false or throws, the request is refused and left unstarted. A host that has attempts must give it.
    */
   /**
-   * The landing policy of a project, from this host's settings (chat-settable: `workspace.landing.branch`, `workspace.landing.requirePermit`, `workspace.landing.protectedPaths`). Without it, or without a `branch`, a landing is
+   * The landing policy of a task (today one policy for the installation, task layers can only tighten; a project layer is card H12t), from this host's settings (chat-settable: `workspace.landing.branch`, `workspace.landing.requirePermit`, `workspace.landing.protectedPaths`). Without it, or without a `branch`, a landing is
    * refused: the landing branch is named, never guessed from what the shared tree happens to be on. `requirePermit` defaults to true.
    */
   readonly landing?: (call: { readonly taskId: string; readonly projectId: string }) => Promise<LandingPolicy | undefined> | LandingPolicy | undefined;
@@ -221,7 +223,7 @@ export class WorkspaceHost {
       const bare = await git.unpermitted({ gitDir: where.gitDir, taskId: call.taskId });
       if (bare.length > 0) return no(`${bare.length} commit(s) of the checkout (first ${bare[0]!.slice(0, 12)}) do not carry the commit permit of the review gate for this task; nothing was landed (work reaches the shared workspace through review)`);
     }
-    const patterns = policy.protectedPaths ?? DEFAULT_PROTECTED_PATHS;
+    const patterns = [...(policy.protectDefaults === false ? [] : DEFAULT_PROTECTED_PATHS), ...(policy.protectedPaths ?? [])];
     const bridge = new WorkspaceBridge({ shared: where.shared, state: where.bridgeState, ...(this.#options.clock === undefined ? {} : { clock: this.#options.clock }) });
     const author = call.assignee ?? `workspace:${call.requestId}`;
     let result;

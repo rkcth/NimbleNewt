@@ -873,6 +873,21 @@ for (const backend of backends) {
   };
   const DAY = 86_400_000;
 
+  suite("chat explains who may set the landing settings: installation-only keys say so and are refused at a task layer; requirePermit says only the owner can set it past its default (card H12s second review)", async (c) => {
+    const prep = (layer: string, key: string, value: unknown) => c.edits.prepare(c.w.owner, { change: { type: "setting", layer, ...(layer === "installation" ? {} : { scopeId: "task-abcdefghijklmnopqrst" }), key, value } as never, conditions: [], evidence: key, wording: `Set ${key} to ${String(value)}.`, quoted: false, forwarded: false });
+    const inst = await prep("installation", "workspace.landing.branch", "main");
+    assert.ok(inst.ok, JSON.stringify(inst));
+    assert.match(JSON.stringify(inst.draft), /only be set for the whole installation/);
+    assert.doesNotMatch(JSON.stringify(inst.draft), /may override it/);
+    const task = await prep("task", "workspace.landing.branch", "main");
+    assert.match(JSON.stringify(task), /"refus[a-z]*"|refuse/i, "a refused draft");
+    assert.match(JSON.stringify(task), /can only be set for the whole installation/);
+    assert.doesNotMatch(JSON.stringify(task), /It takes effect/, "nothing was prepared to apply");
+    const permit = await prep("installation", "workspace.landing.requirePermit", false);
+    assert.ok(permit.ok, JSON.stringify(permit));
+    assert.match(JSON.stringify(permit.draft), /Only the owner, for the whole installation, can set it past its default/);
+  });
+
   suite("a grant may have no end when the owner says so; it is shown as permanent, never expires, and a replay makes one grant", async (c, script) => {
     const ann = "agent:ann";
     // the model cannot add 'no end' that the owner never said

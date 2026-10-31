@@ -398,7 +398,7 @@ test("a landing needs a clean shared tree on the named landing branch: another b
 
 test("a checkout with an untracked file, or with a file an ignore rule hides, is not landed (card H12q review)", { skip }, async () => {
   // The ignore file is itself a protected path by default; this test is about the dirty check, so the project's list is empty here.
-  const w = await world({ landing: () => ({ branch: "main", requirePermit: false, protectedPaths: [] }) });
+  const w = await world({ landing: () => ({ branch: "main", requirePermit: false, protectDefaults: false, protectedPaths: [] }) });
   try {
     await writeFile(join(w.where.checkout, ".gitignore"), "*.log\n");
     await writeFile(join(w.where.checkout, "src", "a.ts"), "export const a = 2;\n");
@@ -486,8 +486,8 @@ test("a landing is all or nothing: a protected path (CI configuration) is kept f
     assert.equal(existsSync(join(w.shared, ".github")), false);
     assert.equal((await new WorkspaceBridge({ shared: w.shared, state: w.where.bridgeState }).pending()).length, 1);
   } finally { await w.done(); }
-  // The list is a setting: with it emptied the same change lands; with another path named, that path is held.
-  const open = await world({ landing: () => ({ branch: "main", requirePermit: false, protectedPaths: ["src/a.ts"] }) });
+  // The owner's list adds to the built-in one, which only the owner's switch turns off: with the built-in list off the same change lands.
+  const open = await world({ landing: () => ({ branch: "main", requirePermit: false, protectDefaults: false, protectedPaths: ["src/a.ts"] }) });
   try {
     await mkdir(join(open.where.checkout, ".github", "workflows"), { recursive: true });
     await writeFile(join(open.where.checkout, ".github", "workflows", "ci.yml"), "on: push\n");
@@ -531,4 +531,21 @@ test("task and project names are checked as folder names on every system: no ':'
     for (const bad of ["tsk:one", "tsk-one.", "CON", "a b", "tsk~1"]) assert.match(reasonOf(await w.host.run(call("refresh", { taskId: bad }))), /malformed/, bad);
     assert.match(reasonOf(await w.host.run(call("refresh", { projectId: "prj:one" }))), /malformed/);
   } finally { await w.done(); }
+});
+
+test("the owner's protected paths add to the built-in list instead of replacing it (card H12s review)", { skip }, async () => {
+  const w = await world({ landing: () => ({ branch: "main", requirePermit: false, protectedPaths: ["docs/"] }) });
+  try {
+    await mkdir(join(w.where.checkout, ".github", "workflows"), { recursive: true });
+    await writeFile(join(w.where.checkout, ".github", "workflows", "ci.yml"), "on: push\n");
+    commitCheckout(w, "agent work");
+    const out = detailOf(await w.host.run(call("landing")));
+    assert.equal(out["landed"], false, "the built-in .github/ still holds although the owner named only docs/");
+  } finally { await w.done(); }
+  const extra = await world({ landing: () => ({ branch: "main", requirePermit: false, protectedPaths: ["src/a.ts"] }) });
+  try {
+    await writeFile(join(extra.where.checkout, "src", "a.ts"), "export const a = 2;\n");
+    commitCheckout(extra, "agent work");
+    assert.equal(detailOf(await extra.host.run(call("landing")))["landed"], false, "the owner's own path holds too");
+  } finally { await extra.done(); }
 });
