@@ -287,10 +287,12 @@ export class RetentionService {
     if (notify === undefined) return;
     const week = Math.floor(Date.parse(this.#runner.now()) / (7 * DAY));
     const { quotas } = await this.#quotaLevels(values).catch(() => ({ quotas: [] as { scope: string; id: string; used: number; quota: number; percent: number; level: "warn" | "full" }[] }));
+    // The text is the same for a given ID (the figures are in the status), so a retried notice is the one already sent; a clash is not an error of the sweep.
+    const tell = async (n: Parameters<NonNullable<RetentionDeps["notify"]>>[0]): Promise<void> => { try { await notify(n); } catch (error) { if (!(error instanceof DomainError && error.code === "command_conflict")) throw error; } };
     for (const q of quotas) {
-      await notify({ commandId: cmdId("rtw", "quota", q.scope, q.id, q.level, week), text: `Storage quota: ${q.scope} ${q.id} is at ${q.percent}% (${q.used} of ${q.quota} bytes)${q.level === "full" ? "; new records from it are refused until you raise the quota or delete something" : ""}.`, ref: { kind: q.scope === "project" ? "project" : "agent", id: q.id } });
+      await tell({ commandId: cmdId("rtw", "quota", q.scope, q.id, q.level, week), text: `Storage quota: ${q.scope} ${q.id} has reached ${q.level === "full" ? "its quota; new records from it are refused until you raise the quota or delete something" : `${values.quotaWarnPercent}% of its quota`}. See retention.status.`, ref: q.scope === "project" ? { kind: "project", id: q.id } : { kind: "quota", id: `a-${createHash("sha256").update(q.id).digest("hex").slice(0, 20)}` } });
     }
-    if (this.#deps.reserve?.released === true) await notify({ commandId: cmdId("rtw", "reserve", week), text: "The data disk is nearly full and the reserve for shutdown and recovery records is in use. Only those records are written until room is made.", ref: { kind: "installation", id: "main" } });
+    if (this.#deps.reserve?.released === true) await tell({ commandId: cmdId("rtw", "reserve", week), text: "The data disk is nearly full and the reserve for shutdown and recovery records is in use. Only those records are written until room is made.", ref: { kind: "installation", id: "main" } });
   }
 
   // ---- user-requested deletion ----------------------------------------------------------------------------------------------

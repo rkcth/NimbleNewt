@@ -85,8 +85,8 @@ export function isDiskFull(error: unknown): boolean {
   return false;
 }
 
-/** The commands whose records must reach the disk when it is nearly full: checkpoints, stops, recovery and resume records, pauses, and the retention commands that free room. */
-const CRITICAL_PREFIXES = ["continuation.", "stop.", "recovery", "resume.", "stall.recover", "pause.", "retention.", "quiesce", "shutdown", "checkpoint"] as const;
+/** The commands whose records must reach the disk when it is nearly full: checkpoints, stops, recovery and resume records, pauses, the notice that tells the owner (the disk-full warning itself), and the retention commands that free room. */
+const CRITICAL_PREFIXES = ["continuation.", "stop.", "recovery", "resume.", "stall.recover", "pause.", "retention.", "quiesce", "shutdown", "checkpoint", "notification.emit"] as const;
 export const isCriticalOperation = (input: Pick<OperationInput, "audit">): boolean => {
   const first = input.audit[0]?.type;
   return first !== undefined && CRITICAL_PREFIXES.some((p) => first.startsWith(p));

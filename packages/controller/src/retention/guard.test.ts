@@ -24,8 +24,8 @@ test("a full disk is recognised from the driver's error however it is wrapped", 
 });
 
 test("checkpoints, stops, recovery records and retention commands are critical; ordinary writes are not", () => {
-  for (const t of ["continuation.capture", "continuation.resume", "stop.request", "stop.advance", "recovery-point.record", "stall.recover.begin", "resume.start", "pause.observe", "retention.delete", "retention.settings.set"]) assert.equal(isCriticalOperation(op(t)), true, t);
-  for (const t of ["desk.write", "task.create", "note.write", "agent.message"]) assert.equal(isCriticalOperation(op(t)), false, t);
+  for (const t of ["continuation.capture", "continuation.resume", "stop.request", "stop.advance", "recovery-point.record", "stall.recover.begin", "resume.start", "pause.observe", "retention.delete", "retention.settings.set", "notification.emit"]) assert.equal(isCriticalOperation(op(t)), true, t);
+  for (const t of ["desk.write", "task.create", "note.write", "agent.message", "notification.configure"]) assert.equal(isCriticalOperation(op(t)), false, t);
   assert.equal(isCriticalOperation({ audit: [] }), false);
 });
 
