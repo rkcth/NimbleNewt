@@ -79,7 +79,7 @@ import { WorkerLimitsSettingsService } from "./worker-limits-settings.js";
 import { CapacityLimitsService } from "../admission/caps.js";
 import { DispatchLimitsSettingsService } from "./dispatch-limits-settings.js";
 import { CleanupSettingsService, ScratchCleanupService, ownerNotices, supervisorNotice, scratchRecordId, type ScratchMode, type ScratchPorts } from "../work-end/index.js";
-import { WorkspaceOpService } from "../workspace-ops/index.js";
+import { WorkspaceOpService, type WorkspacePort } from "../workspace-ops/index.js";
 import { ArtifactService, DeliverableService, FileBlobStore } from "../artifacts/index.js";
 import { composeDispatch, type DispatchHandle, type DispatchStartOptions } from "./dispatch-compose.js";
 import { ConversationTransport, type TransportOptions } from "../transport/index.js";
@@ -404,7 +404,14 @@ export async function startController(options: StartOptions): Promise<Controller
     const invitationInbox = InvitationInbox.withEpoch(storage, epoch);
     const meetingLead = async (): Promise<number> => { const v = await configuration.installationValue("meeting.leadMinutes"); return typeof v === "number" ? v : MEETING_LIMITS.leadDefault; };
     const meetings = MeetingService.withEpoch(storage, epoch, { inquiries }, { availability: pauses.availability, leadMinutes: meetingLead, ownerTimeZone: async () => { const v = await configuration.installationValue("meeting.timeZone"); return typeof v === "string" ? v : undefined; } });
-    const workspaceOps = WorkspaceOpService.withEpoch(storage, epoch, { quiesce: { around: (scope, operation, run, after) => dispatch === undefined ? run({ attempts: [] }) : dispatch.quiesce.around(scope, operation, run, after) }, portOf: async (taskId) => dispatch?.workspacePortOf(taskId), attempts: { live: async (taskId) => (await dispatch?.attemptControl.live(taskId)) ?? [], frozenReason: async (id) => dispatch?.attemptControl.frozenReason(id), release: async (id) => { await dispatch?.attemptControl.release(id); } } });
+    // The host's workspace port is reached only through this closure, which the dispatch composer fills in (card H12m): there is no other way to it from outside the workspace service.
+    let workspacePort: ((taskId: string) => Promise<WorkspacePort | undefined>) | undefined;
+    const workspaceOps = WorkspaceOpService.withEpoch(storage, epoch, {
+      quiesce: { around: (scope, operation, run, after, tag, status) => dispatch === undefined ? run({ attempts: [] }) : dispatch.quiesce.around(scope, operation, run, after, tag, status) },
+      portOf: async (taskId) => workspacePort?.(taskId),
+      assignee: async (taskId) => { const a = await assignments.getAssignment(taskId); return a?.state === "assigned" ? a.owner?.id : undefined; },
+      attempts: { live: async (taskId) => (await dispatch?.attemptControl.live(taskId)) ?? [], frozenReason: async (id) => dispatch?.attemptControl.frozenReason(id), release: async (id) => { await dispatch?.attemptControl.release(id); }, tell: async (id, text) => (await dispatch?.attemptControl.tell(id, text)) ?? false, stop: async (id, reason) => { await dispatch?.attemptControl.stop(id, reason); } },
+    });
     const blobStore = options.artifacts === undefined ? undefined : await FileBlobStore.open({ directory: options.artifacts.directory });
     const checked = blobStore === undefined ? undefined : ArtifactService.withEpoch(storage, epoch, blobStore);
     const activity = ActivityService.withEpoch(storage, epoch);
@@ -634,7 +641,7 @@ export async function startController(options: StartOptions): Promise<Controller
     let dispatchProblem: string | undefined;
     if (options.dispatch !== undefined) {
       try {
-        dispatch = await composeDispatch({ release: releaseService, quietHosts: { settings: quietHostSettings, ...(options.dispatch?.quietHosts === undefined ? {} : { options: options.dispatch.quietHosts }) }, notifyAggregate, storage, epoch, workspaceOps, stops, records, responsibilities: { checks: responsibilityChecks, incidents, coverage: { service: coverage, notify: async (g) => { const more = (n: number): string => `; and ${n} more`; let list = ""; let shown = 0; for (const x of g.items) { const next = `${list}${shown === 0 ? "" : "; "}${x.title.slice(0, 30)}`; if (next.length > 110) break; list = next; shown++; } await notifications.emitFromController({ commandId: g.alertId, kind: "maintenance", level: "needs-you", ref: { kind: "responsibility", id: g.items[0]!.responsibilityId }, projectId: g.projectId, detail: `${g.count} responsibilit${g.count === 1 ? "y is" : "ies are"} without coverage: ${list}${g.count > shown ? more(g.count - shown) : ""}. See responsibility.coverage.`.slice(0, 200) }); } }, notify: async (e) => {
+        dispatch = await composeDispatch({ release: releaseService, quietHosts: { settings: quietHostSettings, ...(options.dispatch?.quietHosts === undefined ? {} : { options: options.dispatch.quietHosts }) }, notifyAggregate, storage, epoch, workspaceOps, bindWorkspacePort: (f) => { workspacePort = f; }, stops, records, responsibilities: { checks: responsibilityChecks, incidents, coverage: { service: coverage, notify: async (g) => { const more = (n: number): string => `; and ${n} more`; let list = ""; let shown = 0; for (const x of g.items) { const next = `${list}${shown === 0 ? "" : "; "}${x.title.slice(0, 30)}`; if (next.length > 110) break; list = next; shown++; } await notifications.emitFromController({ commandId: g.alertId, kind: "maintenance", level: "needs-you", ref: { kind: "responsibility", id: g.items[0]!.responsibilityId }, projectId: g.projectId, detail: `${g.count} responsibilit${g.count === 1 ? "y is" : "ies are"} without coverage: ${list}${g.count > shown ? more(g.count - shown) : ""}. See responsibility.coverage.`.slice(0, 200) }); } }, notify: async (e) => {
           // The text must not change between ticks (no alert count): the command ids are fixed, so a retry after a failed markNotified must carry the same payload.
           const detail = `An incident on a responsibility (${e.signature}) is still open past its escalation time.`;
           if (e.escalatedTo === "owner") await notifications.emitFromController({ commandId: `inc-esc-${e.id}`, kind: "maintenance", level: "needs-you", ref: { kind: "responsibility-incident", id: e.id }, projectId: e.projectId, detail });

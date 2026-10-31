@@ -5,6 +5,7 @@ import type { FirstCall } from "../context/dispatch.js";
 import type { Capabilities, HostService } from "../hosts/index.js";
 import type { Principal } from "../security/principals.js";
 import type { JsonObject } from "../storage/types.js";
+import type { WorkspacePort } from "../workspace-ops/workspace-ops.js";
 import type { RecipeSummary, ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, TurnUsage, WorkerHandle, WorkerHost, WorkOrder, WorkerTurnResult } from "./ports.js";
 
 /** An isolation session for one attempt (card A03's launcher, behind a port): the host opens one with the recipe the dispatcher stated and closes it when the attempt ends or the recipe changes. */
@@ -60,6 +61,8 @@ export interface LocalWorkerOptions {
   readonly schedule?: (beat: () => Promise<void>) => () => void;
   /** What the runtime asks the controller's services while it runs (card H12f). Absent: none of it happens. */
   readonly guards?: RuntimeGuards;
+  /** This host's side of integration, checkout refresh and quarantine for the checkouts it holds (card H12m): the worker package's `WorkspaceHost.run` fits it. Absent: those requests are refused for this host. */
+  readonly workspace?: WorkspacePort;
   /** Told when a guard fails (the attempt goes on; a guard never silently stops working). */
   readonly onGuardError?: (attemptId: string, what: string, error: unknown) => void;
 }
@@ -104,10 +107,12 @@ export class LocalWorker implements WorkerHost {
   readonly resources: { readonly cpus: number; readonly memoryMb: number };
   readonly ownerPolicy: boolean;
   readonly #options: LocalWorkerOptions;
+  readonly workspace?: WorkspacePort;
   #sequence = 0;
   #beat = 0;
 
   constructor(options: LocalWorkerOptions) {
+    if (options.workspace !== undefined) this.workspace = options.workspace;
     this.hostId = options.hostId;
     this.resources = options.resources;
     this.ownerPolicy = options.ownerPolicy === true;

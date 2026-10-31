@@ -39,6 +39,8 @@ export interface WorkspaceCall {
   readonly projectId: string;
   readonly reason: string;
   readonly quietAttempts: readonly string[];
+  /** The agent the task is assigned to (the request is recorded against it, and what is carried into the shared workspace is attributed to it). Absent when nobody is assigned. */
+  readonly assignee?: string;
 }
 export type WorkspaceOutcome = { readonly ok: true; readonly summary: string; readonly detail?: JsonObject } | { readonly ok: false; readonly reason: string };
 /** The host side of the operations. A host that cannot do one answers `ok: false` with why (a typed refusal, not a fault). */
@@ -55,8 +57,13 @@ export interface WorkspaceRecordBody {
   readonly finishedAt?: string;
   readonly summary?: string;
   readonly detail?: JsonObject;
+  /** The agent the task was assigned to when the request was made (the request is recorded against it); absent when nobody was. */
+  readonly assignee?: string;
   /** The attempts that were quiet while the host worked. */
   readonly quietAttempts?: readonly string[];
+  /** The attempts that were told their checkout changed (refresh, integration), and those that were stopped because their checkout was quarantined. */
+  readonly told?: readonly string[];
+  readonly stopped?: readonly string[];
   /** The attempts this operation froze and has not released yet (kept so a crash cannot leave them frozen). */
   readonly held?: readonly string[];
   /** The blocker opened when an attempt could not be made quiet. */
@@ -68,8 +75,10 @@ export interface WorkspaceDeps {
   readonly quiesce: Pick<QuiesceCoordinator, "around">;
   /** The host's side for the task's checkout (the host that runs its live attempt, else the one its checkout is pinned to); `undefined` when no host that can do this holds it. */
   readonly portOf: (taskId: string) => Promise<WorkspacePort | undefined>;
-  /** The live attempts of a task, what an attempt's freeze says (`undefined`: not frozen), and lifting it. For recovery only. */
-  readonly attempts?: { live(taskId: string): Promise<string[]>; frozenReason(attemptId: string): Promise<string | undefined>; release(attemptId: string): Promise<void> };
+  /** The live attempts of a task, what an attempt's freeze says (`undefined`: not frozen), and lifting it. For recovery. `tell` puts a text before a running agent (returns whether it reached a worker) and `stop` ends an attempt (card H12m). */
+  readonly attempts?: { live(taskId: string): Promise<string[]>; frozenReason(attemptId: string): Promise<string | undefined>; release(attemptId: string): Promise<void>; tell?(attemptId: string, text: string): Promise<boolean>; stop?(attemptId: string, reason: string): Promise<void> };
+  /** The agent the task is assigned to, if anyone is. */
+  readonly assignee?: (taskId: string) => Promise<string | undefined>;
 }
 
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
@@ -129,12 +138,19 @@ export class WorkspaceOpService {
       // What an earlier controller left open on this task is resolved first, so its freeze cannot be taken for ours.
       await this.#resolveOpen(taskId);
       const intended = (await this.#deps.attempts?.live(taskId)) ?? [];
-      const make: WorkspaceRecordBody = { operation, taskId, projectId, requestedBy: by.id, reason, state: "started", at: this.#runner.now(), ...(intended.length === 0 ? {} : { held: intended }) };
+      let assignee: string | undefined;
+      try { assignee = await this.#deps.assignee?.(taskId); } catch { assignee = undefined; }
+      const make: WorkspaceRecordBody = { operation, taskId, projectId, requestedBy: by.id, reason, state: "started", at: this.#runner.now(), ...(assignee === undefined ? {} : { assignee }), ...(intended.length === 0 ? {} : { held: intended }) };
       await this.#write(by.id, scoped, "workspace.request", id, { creates: true, payload: { operation, taskId, reason }, body: () => make, also: () => this.#openChange(taskId, id) });
       const started = (await this.#get(id))!;
       const outcome = await this.#run(id, started.body);
       return await this.#settle(by.id, scoped, id, outcome);
     } finally { this.#busy.delete(taskId); }
+  }
+
+  /** Whether an operation is running or left open on the task's checkout: the dispatcher does not start an attempt of such a task until it ends (card H12m). */
+  async isBusy(taskId: string): Promise<boolean> {
+    return this.#busy.has(taskId) || (await this.openFor(taskId)) !== undefined;
   }
 
   /**
@@ -230,25 +246,48 @@ export class WorkspaceOpService {
   }
 
   async #run(id: string, body: WorkspaceRecordBody): Promise<WorkspaceRecordBody> {
-    const done = (state: WorkspaceState, more: Partial<WorkspaceRecordBody>): WorkspaceRecordBody => { const { held: _held, ...rest } = body; void _held; return clean({ ...rest, state, finishedAt: this.#runner.now(), ...more }); };
+    const status = { unreleased: [] as string[] };
+    const done = (state: WorkspaceState, more: Partial<WorkspaceRecordBody>): WorkspaceRecordBody => {
+      const { held: _held, ...rest } = body; void _held;
+      // A freeze that could not be lifted stays in the record (and the open index), so recovery lifts it later and it is never left unseen.
+      return clean({ ...rest, state, finishedAt: this.#runner.now(), ...(status.unreleased.length === 0 ? {} : { held: [...new Set(status.unreleased)] }), ...more });
+    };
     let port: WorkspacePort | undefined;
     try { port = await this.#deps.portOf(body.taskId); } catch (error) { return done("failed", { summary: `no host could be found: ${safe(error, WORKSPACE_LIMITS.summary)}` }); }
     if (port === undefined) return done("refused", { summary: "no host that can do this holds the checkout of that task, so nothing was done" });
     let quietAttempts: readonly string[] = [];
+    const stopped: string[] = [];
+    const told: string[] = [];
+    let changed = false;
     try {
       const outcome = await this.#deps.quiesce.around({ taskId: body.taskId }, body.operation, async (quiet) => {
         quietAttempts = quiet.attempts.map((a) => a.attemptId);
-        return port!.run({ requestId: id, operation: body.operation, taskId: body.taskId, projectId: body.projectId, reason: body.reason, quietAttempts });
-      }, undefined, id);
+        const answer = await port!.run({ requestId: id, operation: body.operation, taskId: body.taskId, projectId: body.projectId, reason: body.reason, quietAttempts, ...(body.assignee === undefined ? {} : { assignee: body.assignee }) });
+        if (answer !== null && typeof answer === "object" && answer.ok === true) {
+          changed = (answer.detail as { changed?: unknown } | undefined)?.changed !== false;
+          // A quarantined checkout is gone from under the agent: while it is still quiet its attempt is stopped (it would only fail on a missing folder), and the task is left as it is.
+          if (body.operation === "quarantine" && this.#deps.attempts?.stop !== undefined) {
+            for (const attemptId of quietAttempts) {
+              try { await this.#deps.attempts.stop(attemptId, `its checkout was quarantined (${id}); the work is kept for the owner`); stopped.push(attemptId); } catch { /* it ended meanwhile, or stays frozen and fails on the missing checkout; the record says which were stopped */ }
+            }
+          }
+        }
+        return answer;
+      }, async (attemptId) => {
+        if (!changed || body.operation === "quarantine" || this.#deps.attempts?.tell === undefined) return;
+        const what = body.operation === "refresh" ? "was refreshed to the shared workspace's current head: files in it may differ from what you read earlier, so read them again before you rely on them" : "was integrated into the shared workspace";
+        if (await this.#deps.attempts.tell(attemptId, `[workspace] Your checkout ${what} (request ${id}).`)) told.push(attemptId);
+      }, id, status);
+      const more: Partial<WorkspaceRecordBody> = { quietAttempts, ...(told.length === 0 ? {} : { told }), ...(stopped.length === 0 ? {} : { stopped }) };
       if (outcome !== null && typeof outcome === "object" && outcome.ok === true) {
         const detail = boundedDetail(outcome.detail);
-        return done("done", { summary: safe(outcome.summary, WORKSPACE_LIMITS.summary), ...(detail === undefined ? {} : { detail }), quietAttempts });
+        return done("done", { summary: safe(outcome.summary, WORKSPACE_LIMITS.summary), ...(detail === undefined ? {} : { detail }), ...more });
       }
       return done("refused", { summary: `the host did not do it: ${safe((outcome as { reason?: unknown } | undefined)?.reason ?? "no reason given", WORKSPACE_LIMITS.summary)}`, quietAttempts });
     } catch (error) {
       if (error instanceof QuiesceRefused) return done("refused", { summary: safe(error.message, WORKSPACE_LIMITS.summary), ...(error.blockerId === undefined ? {} : { blocker: error.blockerId }) });
       // The host was asked and failed, or the answer was lost: it may have changed the checkout, so this is not a clean failure.
-      return done("failed", { summary: safe(error, WORKSPACE_LIMITS.summary), ...(quietAttempts.length === 0 ? {} : { quietAttempts }) });
+      return done("failed", { summary: safe(error, WORKSPACE_LIMITS.summary), ...(quietAttempts.length === 0 ? {} : { quietAttempts }), ...(stopped.length === 0 ? {} : { stopped }) });
     }
   }
 
@@ -257,7 +296,7 @@ export class WorkspaceOpService {
     for (let attempt = 0; attempt < 5; attempt++) {
       const current = (await this.#get(id))!;
       try {
-        await this.#write(actor, `${scoped}:finish:${outcome.state}`, "workspace.finish", id, { creates: false, payload: { state: outcome.state }, body: () => outcome, expectedRevision: current.revision, also: () => this.#openChange(outcome.taskId, null, id) });
+        await this.#write(actor, `${scoped}:finish:${outcome.state}`, "workspace.finish", id, { creates: false, payload: { state: outcome.state }, body: () => outcome, expectedRevision: current.revision, also: () => (outcome.held !== undefined && outcome.held.length > 0 ? Promise.resolve([]) : this.#openChange(outcome.taskId, null, id)) });
         return { ...outcome, id, replayed: false };
       } catch (error) {
         if (!(error instanceof DomainError && error.code === "stale_revision")) throw error;

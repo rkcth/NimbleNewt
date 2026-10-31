@@ -254,6 +254,9 @@ export class GitBridge {
     } finally { await rm(dir, { recursive: true, force: true }); }
   }
 
+  /** The commit the checkout is based on (what a refresh moves and what the agent's work is measured from). */
+  async baseOf(gitDir: string): Promise<string> { return this.#base(gitDir); }
+
   async #base(gitDir: string): Promise<string> {
     return (await this.#run(["rev-parse", "--verify", "refs/nn/base"], { gitDir })).stdout.trim();
   }

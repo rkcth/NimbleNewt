@@ -7,7 +7,7 @@ import { mergeChanges } from "../domain/changes.js";
 import type { EffectService } from "../domain/effects.js";
 import { DomainError, isDomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
-import { onlyKnown, type TaskBody, type View } from "../domain/model.js";
+import { onlyKnown, taskId as checkTaskId, type TaskBody, type View } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import type { ProjectService } from "../domain/service.js";
 import type { AdmissionService } from "../admission/index.js";
@@ -42,6 +42,8 @@ import { chooseHost, type HostVerdict } from "../hosts/candidates.js";
 /** The record of live dispatches: the attempts that have a claim and have not finished. Ticks read it instead of scanning every dispatch ever made. */
 const LIVE: AggregateRef = { kind: "dispatch-live", id: "live" };
 const LIVE_MAX = 600;
+/** The host that last took an attempt of a task (card H12m): where the task's checkout is when it has no live attempt. One record per task. */
+const PLACED_KIND = "task-placement";
 /** Where the scan of assignments stopped (card H12c): the next tick, of this process or of one after a restart, goes on from there instead of from the beginning. */
 const CURSOR: AggregateRef = { kind: "dispatch-cursor", id: "scan" };
 const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 3)}...` : s);
@@ -96,6 +98,11 @@ export interface DispatcherDeps {
   readonly routing?: Pick<RoutingService, "get">;
   readonly pauses: PauseGuard;
   readonly decisions?: DecisionGuard;
+  /**
+   * Whether an operation on the task's checkout (integration, refresh, quarantine) is running or left open (card H12m): an attempt of such a task is not started until it ends, and waits instead. A failure to
+   * ask counts as busy (the safe side). Absent: nothing is ever held back.
+   */
+  readonly workspaceBusy?: (taskId: string) => Promise<boolean>;
   /** Pins the checkout a task is dispatched against and refuses work whose repository moved or was unbound (card P01). */
   readonly checkouts?: { dispatchCheckout(command: { commandId: string; taskId: string; actor: string; pin: boolean }): Promise<{ kind: "none" } | { kind: "ok" } | { kind: "unbound" | "changed"; reason: string }> };
   /**
@@ -663,6 +670,35 @@ export class DispatcherService {
   // ---- reads --------------------------------------------------------------------------------------------------------------------
 
   /** The attempts of a task or an agent that are live now (running, or waiting or parked with their place), for whoever must make them quiet before touching their work (card H12d). Only staff may ask. */
+  /**
+   * Tells a running agent something (card H12m: its checkout changed). Staff and holders of `assignment.manage` only. Returns whether the text reached a live worker: an attempt with no running worker here, or one whose
+   * worker cannot be told, is not an error.
+   */
+  async tell(by: Principal, attemptId: string, text: string): Promise<boolean> {
+    const d = await this.#controlled(by, attemptId);
+    if (typeof text !== "string" || text.length < 1 || text.length > 2000) invalid("text", "must be 1 to 2000 characters");
+    const live = this.#live.get(d.body.attemptId);
+    if (live === undefined || live.handle.tell === undefined) return false;
+    await live.handle.tell(text);
+    return true;
+  }
+
+  /** The host that last took an attempt of the task, if any did (staff only): where its checkout is when no attempt of it is live. */
+  async placedHostOf(by: Principal, taskId: string): Promise<string | undefined> {
+    const staff = (by.kind === "owner" || by.kind === "host" || by.kind === "service") && by.taskScope === undefined;
+    if (!staff) throw new DomainError("forbidden", `${by.id} may not read where a task was placed`);
+    return ((await this.#runner.get(PLACED_KIND, checkTaskId(taskId)))?.body as unknown as { hostId?: string } | undefined)?.hostId;
+  }
+
+  async #placedChange(taskId: string, hostId: string): Promise<Change[]> {
+    const ref: AggregateRef = { kind: PLACED_KIND, id: taskId };
+    const found = await this.#runner.get(PLACED_KIND, taskId);
+    const body = { hostId } as unknown as JsonObject;
+    if (found === undefined) return [{ type: "create", ref, body }];
+    if ((found.body as unknown as { hostId?: string }).hostId === hostId) return [];
+    return [{ type: "update", ref, expectedRevision: found.revision, body }];
+  }
+
   async liveAttemptsOf(by: Principal, scope: { readonly taskId?: string; readonly agentId?: string }): Promise<string[]> {
     const staff = (by.kind === "owner" || by.kind === "host" || by.kind === "service") && by.taskScope === undefined;
     if (!staff) throw new DomainError("forbidden", `${by.id} may not list live attempts`);
@@ -1166,6 +1202,15 @@ export class DispatcherService {
       return pre;
     }
     if (pre.kind !== "ok") return { kind: "waiting" };
+    // An operation on the task's checkout (integration, refresh, quarantine) is running: the attempt waits for it, holding no place, and the next tick looks again (card H12m).
+    if (this.#deps.workspaceBusy !== undefined) {
+      let busy = true;
+      try { busy = await this.#deps.workspaceBusy(b.taskId); } catch { busy = true; }
+      if (busy) {
+        if (b.requestId !== undefined || b.reservationId !== undefined || b.releasingId !== undefined) await this.#giveBack(d);
+        return { kind: "waiting" };
+      }
+    }
     // The place. The request ID derives from the dispatch and the number of requests so far, so a repeat after a crash finds the same request.
     const requestId = await this.#request(d, pre.host);
     const where = await this.#deps.admission.where(requestId);
@@ -1319,7 +1364,7 @@ export class DispatcherService {
         if (x.state !== "waiting" || x.requestId !== requestId) throw new DomainError("invalid_command", `attempt ${b.attemptId} is ${x.state} and was started by another caller`, { field: "attemptId" });
         const { resumeNote: _n, resumeFrom: _f, pinnedHost: _p, ...rest } = x; void _n; void _f; void _p;
         return { ...rest, state: "running", hostId: host.hostId, startedAt: x.startedAt ?? now, lease: { holder: this.#holder, until } };
-      });
+      }, async () => this.#placedChange(b.taskId, host.hostId));
     } catch (error) {
       if (isDomainError(error, "invalid_command")) return { kind: "skipped", check: "place", reason: "another caller started the attempt" };
       throw error;

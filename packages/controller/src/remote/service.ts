@@ -14,7 +14,8 @@ import { DISPATCHER_PRINCIPAL } from "../security/task-credentials.js";
 import type { NoActor, Principal, PrincipalBody } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
-import { WORKER_PROTOCOL, WAITING_FOR_OWNER, REMOTE_LIMITS, ProtocolMismatch, checkRange, negotiateProtocol, type ArtifactListing, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange } from "./protocol.js";
+import { WORKSPACE_OPERATIONS, type WorkspaceCall } from "../workspace-ops/workspace-ops.js";
+import { WORKER_PROTOCOL, WAITING_FOR_OWNER, REMOTE_LIMITS, ProtocolMismatch, checkRange, negotiateProtocol, type ArtifactListing, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type WorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
 
 export const SESSION_KIND = "remote-session";
 export const PLACEMENT_KIND = "remote-placement";
@@ -151,6 +152,45 @@ export function capabilityReasons(host: string, status: HostStatus | undefined, 
   return out;
 }
 
+interface WorkspaceAskState { readonly hostId: string; readonly wire: WorkspaceAsk; readonly at: number; abandoned: boolean; answer?: WorkspaceAnswer; readonly waiters: Set<() => void> }
+
+/** The request as it is sent to a host: every field checked and bounded, nothing else carried. */
+function checkAsk(call: WorkspaceCall): WorkspaceAsk {
+  if (call === null || typeof call !== "object") invalid("call", "must be an object");
+  const id = call.requestId;
+  if (typeof id !== "string" || !/^wsr-[a-z2-7]{20}$/.test(id)) invalid("requestId", "is not a workspace request ID");
+  if (!(WORKSPACE_OPERATIONS as readonly string[]).includes(call.operation)) invalid("operation", "is not a workspace operation");
+  const name = /^[A-Za-z0-9._:-]{1,120}$/;
+  if (typeof call.taskId !== "string" || !name.test(call.taskId) || typeof call.projectId !== "string" || !name.test(call.projectId)) invalid("taskId", "or projectId is malformed");
+  if (typeof call.reason !== "string" || call.reason.length < 1 || call.reason.length > 500) invalid("reason", "must be 1 to 500 characters");
+  if (!Array.isArray(call.quietAttempts) || call.quietAttempts.length > 50 || call.quietAttempts.some((a) => typeof a !== "string" || !ATTEMPT.test(a))) invalid("quietAttempts", "must be a short list of attempt IDs");
+  if (call.assignee !== undefined && (typeof call.assignee !== "string" || !name.test(call.assignee))) invalid("assignee", "is malformed");
+  return { requestId: id, operation: call.operation, taskId: call.taskId, projectId: call.projectId, reason: call.reason, quietAttempts: [...call.quietAttempts], ...(call.assignee === undefined ? {} : { assignee: call.assignee }) };
+}
+
+/** A host's answer, checked: the typed outcome and nothing more, with the text and the detail bounded. */
+function checkAnswer(value: unknown): WorkspaceAnswer {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) invalid("outcome", "must be an object");
+  const o = value as Record<string, unknown>;
+  for (const key of Object.keys(o)) if (!["ok", "summary", "detail", "reason"].includes(key)) invalid("outcome", `${key} is not a field of an answer`);
+  if (o["ok"] === true) {
+    if (o["reason"] !== undefined) invalid("outcome", "an answer that succeeded has no reason");
+    if (typeof o["summary"] !== "string" || o["summary"].length > 1000) invalid("summary", "must be text of at most 1000 characters");
+    let detail: JsonObject | undefined;
+    if (o["detail"] !== undefined) {
+      if (o["detail"] === null || typeof o["detail"] !== "object" || Array.isArray(o["detail"])) invalid("detail", "must be an object");
+      const encoded = JSON.stringify(o["detail"]);
+      if (Buffer.byteLength(encoded, "utf8") > REMOTE_LIMITS.workspaceDetailBytes) invalid("detail", `must be at most ${REMOTE_LIMITS.workspaceDetailBytes} bytes`);
+      detail = JSON.parse(encoded) as JsonObject;
+    }
+    return { ok: true, summary: o["summary"] as string, ...(detail === undefined ? {} : { detail }) };
+  }
+  if (o["ok"] !== false) invalid("ok", "must be true or false");
+  if (o["summary"] !== undefined || o["detail"] !== undefined) invalid("outcome", "a refusal has only a reason");
+  if (typeof o["reason"] !== "string" || o["reason"].length < 1 || o["reason"].length > 1000) invalid("reason", "must be text of 1 to 1000 characters");
+  return { ok: false, reason: o["reason"] as string };
+}
+
 /** The promise's result, or an `unavailable` refusal when it takes longer than `ms` (its late result is ignored). */
 function within<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -240,6 +280,8 @@ export class RemoteWorkerService {
   /** Connected hosts by platform (`os/arch`), so a placement looks only at hosts that can run it (card H07). */
   readonly #byPlatform = new Map<string, Set<string>>();
   readonly #platformOf = new Map<string, string>();
+  /** Workspace requests carried to hosts and their answers (card H12m). In memory: a request is recorded durably by the workspace service, and one lost with a restart reads there as uncertain. */
+  readonly #asks = new Map<string, WorkspaceAskState>();
 
   private constructor(runner: CommandRunner, deps: RemoteDeps, protocol: VersionRange, fileBytes: number, settleMs: number) {
     this.#settleMs = settleMs;
@@ -329,7 +371,77 @@ export class RemoteWorkerService {
   #endPoll(hostId: string): void { this.#made.set(hostId, (this.#made.get(hostId) ?? 0) + 1); this.#polls.get(hostId)?.end(); }
 
   /** Ends every open poll (the controller is stopping). */
-  close(): void { this.#closed = true; for (const poll of [...this.#polls.values()]) poll.end(); }
+  close(): void { this.#closed = true; for (const poll of [...this.#polls.values()]) poll.end(); for (const ask of this.#asks.values()) for (const wake of [...ask.waiters]) wake(); }
+
+  // ---- workspace operations on a remote host (card H12m) -------------------------------------------------------------------------
+
+  /**
+   * Carries a workspace request (integration, refresh, quarantine) to the host that holds the checkout and waits for its answer, which has the same typed shape a local host gives. Only the owner and the dispatcher may ask (the
+   * workspace service does, after its own rights check, its record and the quiesce). Nothing is sent to a host that is not connected, revoked or not heard from lately: that is a refusal saying nothing was sent. A host that does not
+   * answer within `waitMs` leaves the request as it is: this throws `unavailable` (the operation may or may not have been carried out) and the ask is withdrawn, so the host does not start it later; an answer that comes after is
+   * accepted and dropped. The same request ID asked again joins the first ask and gets the same answer.
+   */
+  async askWorkspace(by: Principal, hostId: string, call: WorkspaceCall, options: { readonly waitMs: number }): Promise<WorkspaceAnswer> {
+    this.#staff(by);
+    const host = hostIdOf(hostId);
+    const wire = checkAsk(call);
+    if (!Number.isSafeInteger(options.waitMs) || options.waitMs < 1 || options.waitMs > 3_600_000) invalid("waitMs", "must be a whole number of milliseconds from 1 to 3600000");
+    const earlier = this.#asks.get(wire.requestId);
+    let ask: WorkspaceAskState;
+    if (earlier !== undefined) {
+      if (earlier.hostId !== host) invalid("requestId", "was asked of another host");
+      ask = earlier;
+    } else {
+      const reasons = capabilityReasons(host, await this.#deps.hosts.status(this.#deps.principal, host), { data: "cloud-allowed" });
+      if (reasons.length > 0 || (await this.#connected(host)) === undefined) return { ok: false, reason: `${reasons.length > 0 ? reasons.join("; ") : `${host} is not connected`}; nothing was sent` };
+      const waiting = [...this.#asks.values()].filter((a) => a.hostId === host && a.answer === undefined && !a.abandoned).length;
+      if (waiting >= REMOTE_LIMITS.workspaceAsks) return { ok: false, reason: `${host} already has ${waiting} workspace requests waiting; nothing was sent` };
+      // The map stays bounded: answered and withdrawn requests older than an hour are dropped first.
+      if (this.#asks.size >= 256) for (const [id, a] of this.#asks) if ((a.answer !== undefined || a.abandoned) && Date.now() - a.at > 3_600_000) this.#asks.delete(id);
+      if (this.#asks.size >= 256) return { ok: false, reason: "too many workspace requests are open; nothing was sent" };
+      ask = { hostId: host, wire, at: Date.now(), abandoned: false, waiters: new Set() };
+      this.#asks.set(wire.requestId, ask);
+      // The host's offers poll ends now, so it reads its requests without waiting out the hold.
+      this.#endPoll(host);
+    }
+    if (ask.answer === undefined) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(done, options.waitMs);
+        timer.unref?.();
+        function done(): void { clearTimeout(timer); ask.waiters.delete(done); resolve(); }
+        ask.waiters.add(done);
+        if (this.#closed) done();
+      });
+    }
+    if (ask.answer !== undefined) return ask.answer;
+    ask.abandoned = true;
+    throw new DomainError("unavailable", `${host} did not answer the workspace request within ${options.waitMs} ms; it may or may not have been carried out there`);
+  }
+
+  /** The workspace requests waiting for this host, oldest first. The same request is listed until the host answers it (or it is withdrawn). */
+  async workspaceRequests(host: Principal, sessionId: unknown): Promise<WorkspaceAsk[]> {
+    await this.#session(host, sessionId);
+    return [...this.#asks.values()].filter((a) => a.hostId === host.id && a.answer === undefined && !a.abandoned).sort((x, y) => x.at - y.at).map((a) => a.wire);
+  }
+
+  /**
+   * The host's answer to one request. Only the host the request was made to may answer it (any other reads it as missing); the first answer stands, the same answer again is accepted as a repeat, a different one is refused;
+   * an answer to a request that was withdrawn is accepted and dropped. The shape is checked and bounded here.
+   */
+  async answerWorkspace(host: Principal, sessionId: unknown, requestId: unknown, outcome: unknown): Promise<{ readonly accepted: true; readonly repeat: boolean; readonly late: boolean }> {
+    await this.#session(host, sessionId);
+    const ask = typeof requestId === "string" && /^wsr-[a-z2-7]{20}$/.test(requestId) ? this.#asks.get(requestId) : undefined;
+    if (ask === undefined || ask.hostId !== host.id) throw new DomainError("not_found", "no such workspace request");
+    const answer = checkAnswer(outcome);
+    if (ask.answer !== undefined) {
+      if (canonicalJson(ask.answer as unknown as JsonObject) !== canonicalJson(answer as unknown as JsonObject)) throw new DomainError("command_conflict", "that workspace request was already answered differently");
+      return { accepted: true, repeat: true, late: false };
+    }
+    ask.answer = answer;
+    const late = ask.abandoned;
+    for (const wake of [...ask.waiters]) wake();
+    return { accepted: true, repeat: false, late };
+  }
 
   /** How many polls are held open and how they ended, for the owner and for tests (card H07). */
   pollStats(by: Principal): { readonly open: number; readonly polls: number; readonly held: number; readonly woken: number; readonly superseded: number; readonly timedOut: number } {

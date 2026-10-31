@@ -2,6 +2,7 @@ import { DomainError } from "../domain/errors.js";
 import type { JsonObject } from "../storage/types.js";
 import type { Principal } from "../security/index.js";
 import type { HostProbe, RecipeSummary, ToolGateway, WorkOrder, WorkerHandle, WorkerHost, WorkerTurnResult } from "../dispatch/ports.js";
+import type { WorkspacePort } from "../workspace-ops/workspace-ops.js";
 import type { RemoteWorkerService, Requirements } from "./service.js";
 
 export interface RemoteWorkerHostOptions {
@@ -15,6 +16,8 @@ export interface RemoteWorkerHostOptions {
   readonly checkpointWaitMs?: number;
   /** Wait between looks for the checkpoint, in milliseconds. Default 100. */
   readonly pollMs?: number;
+  /** How long a workspace request (integration, refresh, quarantine) waits for the host's answer, in ms. Default 300 000 (five minutes); a host that is slower leaves the request recorded as failed, with the operation possibly done there. */
+  readonly workspaceWaitMs?: number;
 }
 
 /**
@@ -24,7 +27,12 @@ export interface RemoteWorkerHostOptions {
  */
 export class RemoteWorkerHost implements WorkerHost {
   readonly resources: { readonly cpus: number; readonly memoryMb: number };
-  constructor(readonly hostId: string, private readonly remote: RemoteWorkerService, private readonly by: Principal, private readonly options: RemoteWorkerHostOptions) { this.resources = options.resources; }
+  /** The same request the local host answers, carried over the authenticated transport to the host (card H12m): the answer has the same typed outcomes. */
+  readonly workspace: WorkspacePort;
+  constructor(readonly hostId: string, private readonly remote: RemoteWorkerService, private readonly by: Principal, private readonly options: RemoteWorkerHostOptions) {
+    this.resources = options.resources;
+    this.workspace = { run: (call) => this.remote.askWorkspace(this.by, this.hostId, call, { waitMs: this.options.workspaceWaitMs ?? 300_000 }) };
+  }
 
   /** Why this host would refuse the attempt (card H07e), judged by the same rules as the placement. The order is not built yet, so the requirements are asked of a preview of it that carries no credential. */
   async refuses(probe: HostProbe): Promise<{ readonly reasons: readonly string[]; readonly lasting: boolean }> {

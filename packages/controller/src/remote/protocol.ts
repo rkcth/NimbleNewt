@@ -65,6 +65,9 @@ export const REMOTE_LIMITS = {
   /** The longest an offers poll may be held open by the controller, in milliseconds (card H07). */
   pollMs: 25_000,
   text: 2000,
+  /** Workspace requests (card H12m) waiting for one host at once, and the largest detail an answer may carry, in bytes of JSON. */
+  workspaceAsks: 4,
+  workspaceDetailBytes: 4000,
 } as const;
 
 // ---- wire shapes -----------------------------------------------------------------------------------------------------------------
@@ -95,3 +98,16 @@ export interface Offer { readonly placement: number; readonly order: import("../
 
 /** The result a worker reports for a turn, as it is kept on the placement (the checkpoint goes to its own artifact). */
 export type StoredResult = Omit<WorkerTurnResult, "checkpoint">;
+
+/** A request for the host that holds a task's checkout (card H12m): integration, refresh or quarantine, carried over the authenticated channel. The same fields as the controller's `WorkspaceCall`. */
+export interface WorkspaceAsk {
+  readonly requestId: string;
+  readonly operation: "integration" | "refresh" | "release" | "quarantine";
+  readonly taskId: string;
+  readonly projectId: string;
+  readonly reason: string;
+  readonly quietAttempts: readonly string[];
+  readonly assignee?: string;
+}
+/** What the host answers: the same typed outcomes a local host gives (done, or a refusal with its reason). */
+export type WorkspaceAnswer = { readonly ok: true; readonly summary: string; readonly detail?: JsonObject } | { readonly ok: false; readonly reason: string };

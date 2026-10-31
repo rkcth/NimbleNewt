@@ -46,55 +46,64 @@ export class QuiesceCoordinator {
    * Runs `run` with the scope's attempts quiet. `after` runs once the attempts are released and the operation did not throw, for each attempt (to tell the agent its checkout changed); a failure in it is the caller's to see
    * but never leaves an attempt frozen. `tag` is written into the freeze's reason, so whoever must lift it later can tell it from any other.
    */
-  async around<T>(scope: { readonly taskId?: string; readonly agentId?: string }, operation: QuiesceOperation, run: (quiet: Quiet) => Promise<T>, after?: (attemptId: string) => Promise<void>, tag?: string): Promise<T> {
+  async around<T>(scope: { readonly taskId?: string; readonly agentId?: string }, operation: QuiesceOperation, run: (quiet: Quiet) => Promise<T>, after?: (attemptId: string) => Promise<void>, tag?: string, status?: { unreleased: string[] }): Promise<T> {
     const { dispatcher, principal } = this.#deps;
-    const ids = await dispatcher.liveAttemptsOf(principal, scope);
     const reason = `${operation}: the agent's work is being changed${tag === undefined ? "" : ` (${tag})`}`;
     const quiet: { attemptId: string; checkpoint?: JsonObject }[] = [];
     // A freeze somebody else set (the owner, a recipe change that failed, a stop) is theirs: it is not lifted here.
     const theirs = new Set<string>();
+    const subject = scope.taskId !== undefined ? { kind: "task", id: scope.taskId } : { kind: "agent", id: scope.agentId! };
+    // Lifts what this call froze. A freeze that cannot be lifted is a blocker the owner sees, and its attempt is named in `status.unreleased` so the caller keeps a record of it (a freeze marker is never left unseen).
     const releaseAll = async (): Promise<string | undefined> => {
       let failed: string | undefined;
       for (const entry of quiet) { if (theirs.has(entry.attemptId)) continue; try { await dispatcher.release(principal, entry.attemptId); } catch (error) {
         // An attempt that ended meanwhile has nothing to release.
-        if (!(error instanceof DomainError && error.code === "not_found")) failed = `${entry.attemptId}: ${reasonOf(error)}`;
+        if (!(error instanceof DomainError && error.code === "not_found")) { failed = `${entry.attemptId}: ${reasonOf(error)}`; status?.unreleased.push(entry.attemptId); }
       } }
       return failed;
     };
-    for (const attemptId of ids) {
+    const unreleasedBlocker = async (failed: string, why: string): Promise<void> => {
+      await this.#deps.blockers.openBlocker({ commandId: `quiesce-rel:${this.#nonce}:${operation}:${++this.#sequence}`, actor: principal.id, type: "runtime_hold", subject, summary: `${operation} ${why}, but an attempt could not be released: ${failed}`.slice(0, 400), resolver: "owner" }).catch(() => undefined);
+    };
+    const makeQuiet = async (attemptId: string): Promise<void> => {
       try {
         if ((await dispatcher.get(principal, attemptId))?.frozen !== undefined) theirs.add(attemptId);
         const { checkpoint } = await dispatcher.quiesce(principal, attemptId, reason.slice(0, 300), { strictMs: this.#deps.settleMs ?? 10_000 });
         quiet.push({ attemptId, ...(checkpoint === undefined ? {} : { checkpoint }) });
       } catch (error) {
         // It ended between the listing and now: there is nothing left to make quiet.
-        if (error instanceof DomainError && error.code === "not_found") continue;
+        if (error instanceof DomainError && error.code === "not_found") return;
         // It may be frozen already even though it did not settle: it is released with the others, never left refusing calls.
         quiet.push({ attemptId });
         const why = reasonOf(error);
-        const subject = scope.taskId !== undefined ? { kind: "task", id: scope.taskId } : { kind: "agent", id: scope.agentId! };
         let blockerId: string | undefined;
         try {
           const opened = await this.#deps.blockers.openBlocker({ commandId: `quiesce-blk:${this.#nonce}:${attemptId}:${operation}:${++this.#sequence}`, actor: principal.id, type: "runtime_hold", subject, summary: `${operation} did not run: attempt ${attemptId} could not be made quiet (${why})`, resolver: "owner" });
           blockerId = opened.id;
         } catch { /* the refusal below still says it */ }
-        await releaseAll();
+        const failed = await releaseAll();
+        if (failed !== undefined) await unreleasedBlocker(failed, "did not run");
         throw new QuiesceRefused(operation, attemptId, blockerId, why);
       }
+    };
+    // An attempt that starts while the others are being made quiet is found by listing again (a few rounds), so none begins to run on a checkout that is about to change.
+    const seen = new Set<string>();
+    for (let round = 0; round < 4; round++) {
+      const fresh = (await dispatcher.liveAttemptsOf(principal, scope)).filter((id) => !seen.has(id));
+      if (fresh.length === 0) break;
+      for (const attemptId of fresh) { seen.add(attemptId); await makeQuiet(attemptId); }
     }
     let result: T;
     try {
       result = await run({ attempts: quiet });
     } catch (error) {
-      await releaseAll();
+      const failed = await releaseAll();
+      if (failed !== undefined) await unreleasedBlocker(failed, "failed");
       throw error;
     }
     // The operation has happened: a release that fails is not the operation failing (a retry would do it twice). It is a blocker, and the others still continue.
     const failed = await releaseAll();
-    if (failed !== undefined) {
-      const subject = scope.taskId !== undefined ? { kind: "task", id: scope.taskId } : { kind: "agent", id: scope.agentId! };
-      await this.#deps.blockers.openBlocker({ commandId: `quiesce-rel:${this.#nonce}:${operation}:${++this.#sequence}`, actor: principal.id, type: "runtime_hold", subject, summary: `${operation} ran, but an attempt could not be released: ${failed}`, resolver: "owner" }).catch(() => undefined);
-    }
+    if (failed !== undefined) await unreleasedBlocker(failed, "ran");
     if (after !== undefined) for (const entry of quiet) await after(entry.attemptId).catch(() => undefined);
     return result;
   }

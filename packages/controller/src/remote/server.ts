@@ -69,6 +69,7 @@ interface Reply { readonly status: number; readonly body?: unknown; readonly raw
  *
  * Routes (all JSON unless noted; `Idempotency-Key` on those that change state, so a retry applies once; every request after `connect` names the session and the negotiated protocol version):
  * `POST /worker/connect`, `POST /worker/session/heartbeat`, `POST /worker/session/reconcile`, `GET /worker/session/offers`, `POST /worker/attempts/{id}/{accept|begin|report|usage|heartbeat|acknowledge|complete}`,
+ * `GET /worker/session/workspace` and `POST /worker/session/workspace/{request}` (the workspace requests for this host and its answer to one, card H12m),
  * `PUT /worker/attempts/{id}/checkpoint`, `GET /worker/attempts/{id}/control`, `GET /worker/attempts/{id}/artifacts`, `GET /worker/attempts/{id}/artifacts/{artifact}/file` (bytes), `POST /worker/attempts/{id}/artifacts`.
  */
 export class WorkerTransport {
@@ -250,6 +251,18 @@ export class WorkerTransport {
       return { status: 200, body: { offers: await svc.offers(host, await this.#session(req, host), waitMs) } };
     }
     if (a === "release" && b === "jobs") return this.#releaseRoute(req, host, parts, url, method);
+    if (a === "session" && b === "workspace" && parts.length === 3) {
+      allowed("GET");
+      for (const key of url.searchParams.keys()) throw new HttpError(400, "invalid_command", `${key}: is not a parameter of this route`);
+      return { status: 200, body: { requests: await svc.workspaceRequests(host, await this.#session(req, host)) } };
+    }
+    if (a === "session" && b === "workspace" && c !== undefined && parts.length === 4) {
+      allowed("POST");
+      const session = await this.#session(req, host);
+      const body = this.#only(await this.#body(req), ["outcome"]);
+      this.#key(req);
+      return { status: 200, body: await svc.answerWorkspace(host, session, c, body["outcome"]) };
+    }
     if (a !== "attempts" || b === undefined || c === undefined) throw new HttpError(404, "not_found", "no such route");
     const session = await this.#session(req, host);
     const attempt = b;

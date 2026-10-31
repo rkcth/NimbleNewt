@@ -173,10 +173,8 @@ export interface DispatchHandle {
   readonly watches: WatchService;
   readonly unsettledCharges: (by: Principal) => ReturnType<ChargeRetryService["unsettled"]>;
   readonly chargeUse: (usage: { commandId: string; activity: "review" | "background-job"; taskId: string; agentId?: string; computeMs: number }) => Promise<void>;
-  /** The host side of workspace operations for a task's checkout (card H12l): the host of its live attempt, else the only host that has one; `undefined` when none can be named. */
-  readonly workspacePortOf: (taskId: string) => Promise<WorkspacePort | undefined>;
-  /** What an attempt's freeze says and lifting it, for the workspace service's recovery (card H12l). */
-  readonly attemptControl: { live(taskId: string): Promise<string[]>; frozenReason(attemptId: string): Promise<string | undefined>; release(attemptId: string): Promise<void> };
+  /** What an attempt's freeze says and lifting it, for the workspace service's recovery (card H12l), telling a running agent something and stopping an attempt (card H12m). */
+  readonly attemptControl: { live(taskId: string): Promise<string[]>; frozenReason(attemptId: string): Promise<string | undefined>; release(attemptId: string): Promise<void>; tell(attemptId: string, text: string): Promise<boolean>; stop(attemptId: string, reason: string): Promise<void> };
   /** The MCP service and the only way the host reaches a remote server (cards T03, H12g); present when `mcp` was given. */
   readonly mcp?: { readonly service: McpService; readonly connector: RemoteMcpConnector };
 }
@@ -195,7 +193,13 @@ export interface ComposeInput {
   readonly contracts: ContractService; readonly catalog: HarnessCatalog; readonly routing: RoutingService; readonly inquiries: InquiryService; readonly agents: AgentService; readonly histories: HistoryService; readonly reviews: ReviewService;
   readonly retrieval: RetrievalService;
   /** The workspace operations service; the tick resolves the ones a stopped controller left unfinished (card H12l). */
-  readonly workspaceOps?: Pick<WorkspaceOpService, "recover">;
+  readonly workspaceOps?: Pick<WorkspaceOpService, "recover" | "isBusy">;
+  /**
+   * Hands the workspace service the way to a task's host port (card H12m). The port is not on the handle this function returns: it can be reached only through the function given here, which the workspace service holds
+   * (an operation is then recorded, run behind the quiesce and answered as a typed outcome). The host is the one that runs the task's live attempt (or the one it is pinned to); with no live attempt, the host of the task's
+   * last placement; a live attempt that is waiting with no host pinned names none and nothing is guessed. Only a task never placed anywhere falls back to the one host that has a workspace port, if there is exactly one.
+   */
+  readonly bindWorkspacePort?: (portOf: (taskId: string) => Promise<WorkspacePort | undefined>) => void;
   /** Suspensions and stops the controller was carrying out are carried on each tick, and at start-up by the first one (card L02b). */
   readonly stops?: Pick<StopService, "sweep">;
   /** Meeting records are swept for votes past their time and records nobody finished (card M02c). */
@@ -483,13 +487,30 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       }
     }
     const dispatcher = DispatcherService.withEpoch(storage, epoch, {
-      principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, reportsTo: reportsToOf, hosts, workers,  contracts: i.contracts, harnesses: i.catalog, policy, protectedBranch: (projectId, branch) => branchSettings.isProtected(projectId, branch), effects, blockers, route,
+      principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, reportsTo: reportsToOf, hosts, workers, ...(i.workspaceOps === undefined ? {} : { workspaceBusy: (taskId: string) => i.workspaceOps!.isBusy(taskId) }), contracts: i.contracts, harnesses: i.catalog, policy, protectedBranch: (projectId, branch) => branchSettings.isProtected(projectId, branch), effects, blockers, route,
       activity: async (step) => { await ActivityService.withEpoch(storage, epoch, ro).record(principal, { commandId: step.commandId, taskId: step.taskId, kind: step.kind, summary: step.summary, manifest: { refs: step.refs } } as never); }, routing: i.routing, pauses, decisions, ...(i.resumes === undefined ? {} : { resumes: i.resumes }), prerequisites: async (taskId: string) => { const deps = await i.contracts.prerequisitesOf(taskId); if (deps === undefined) throw new DomainError("unavailable", "the task's dependencies could not be read"); const open: string[] = []; const dead: string[] = []; for (const e of deps.dependsOn) { if (e.state === undefined) dead.push(`${e.taskId} (missing)`); else if (e.state === "cancelled") dead.push(`${e.taskId} (cancelled)`); else if (e.state !== "done") open.push(`${e.taskId} (${e.state})`); } return { open, dead }; }, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
       ...(i.options.local === undefined ? {} : { toolWindow: (route: string) => { try { return i.options.local!.window({ route } as WorkOrder); } catch { return undefined; } } }),
       ...(remote === undefined ? {} : { storeOwner: (agentId: string, attemptId: string) => remote!.storeOwner(principal, agentId, attemptId) }),
     }, { ...ro, holder: "dispatcher", ...(i.onError === undefined ? {} : { onError: i.onError }), ...(i.options.dispatcher ?? {}), ...(i.dispatchLimits === undefined ? {} : { limits: i.dispatchLimits }), ...(i.taskMinutes === undefined ? {} : { configuredMinutes: i.taskMinutes }) });
     holder.dispatcher = dispatcher;
     live.dispatcher = dispatcher;
+    i.bindWorkspacePort?.(async (taskId) => {
+      const portOf = (hostId: string): WorkspacePort | undefined => workers.find((w) => w.hostId === hostId)?.workspace;
+      const attempts = await dispatcher.liveAttemptsOf(principal, { taskId });
+      if (attempts.length > 0) {
+        for (const attemptId of attempts) {
+          const d = await dispatcher.get(principal, attemptId);
+          const host = d?.state === "running" ? d.hostId : d?.pinnedHost;
+          if (host !== undefined) return portOf(host);
+        }
+        // A live attempt that waits with no host pinned: its checkout is not known to be anywhere, and another host is not tried.
+        return undefined;
+      }
+      const placed = await dispatcher.placedHostOf(principal, taskId);
+      if (placed !== undefined) return portOf(placed);
+      const capable = workers.filter((w) => w.workspace !== undefined);
+      return capable.length === 1 ? capable[0]!.workspace : undefined;
+    });
     if (remote !== undefined) {
       transport = await WorkerTransport.listen({ ...(i.options.remote?.transport ?? {}), remote, principals: i.principals, ...(i.release === undefined ? {} : { release: i.release }) });
     }
@@ -506,17 +527,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     return {
       dispatcher, driver, closeWorkers: async () => { remote?.close(); await transport?.close().catch(() => undefined); await i.options.local?.close?.(); },
       ...(transport === undefined ? {} : { workerUrl: transport.url }), ...(remote === undefined ? {} : { remote }), ...(quiet.service === undefined ? {} : { quietHosts: quiet.service }),
-      attemptControl: { live: (taskId) => dispatcher.liveAttemptsOf(principal, { taskId }), frozenReason: async (id) => (await dispatcher.get(principal, id))?.frozen?.reason, release: (id) => dispatcher.release(principal, id) },
-      workspacePortOf: async (taskId) => {
-        const capable = workers.filter((w) => w.workspace !== undefined);
-        for (const attemptId of await dispatcher.liveAttemptsOf(principal, { taskId })) {
-          const d = await dispatcher.get(principal, attemptId);
-          const host = d?.state === "running" ? d.hostId : d?.pinnedHost;
-          if (host !== undefined) return workers.find((w) => w.hostId === host)?.workspace;
-        }
-        // No live attempt names a host: the checkout is on the only host that can do this, if there is exactly one.
-        return capable.length === 1 ? capable[0]!.workspace : undefined;
-      },
+      attemptControl: { live: (taskId) => dispatcher.liveAttemptsOf(principal, { taskId }), frozenReason: async (id) => (await dispatcher.get(principal, id))?.frozen?.reason, release: (id) => dispatcher.release(principal, id), tell: (id, text) => dispatcher.tell(principal, id, text), stop: (id, reason) => dispatcher.stop(principal, id, { reason }) },
       attendance, standups, watches,
       unsettledCharges: (by) => chargeRetry.unsettled(by),
       chargeUse: (u) => chargeRetry.submit(principal, { commandId: u.commandId, activity: u.activity, taskId: u.taskId, computeMs: u.computeMs, ...(u.agentId === undefined ? {} : { agentId: u.agentId }) }).then(() => undefined),
