@@ -38,12 +38,14 @@ export class ScriptedHandle implements WorkerHandle {
   readonly restarts: { recipe: string; from: JsonObject }[] = [];
   checkpoints = 0;
   stopped = 0;
+  /** When set, `stop` fails with it (a sandbox that would not die). */
+  stopError: Error | undefined;
   constructor(readonly order: WorkOrder, private readonly script: WorkerScript, version: string) { this.workerVersion = version; }
   run(gateway: ToolGateway): Promise<WorkerTurnResult> { return this.script({ order: this.order, gateway, worker: this }); }
   async checkpoint(): Promise<JsonObject> { this.checkpoints++; return { n: this.checkpoints, attempt: this.order.attemptId }; }
   async restart(recipe: { revision: string }, from: JsonObject): Promise<void> { this.restarts.push({ recipe: recipe.revision, from }); }
   async tell(text: string): Promise<void> { this.told.push(text); }
-  async stop(): Promise<void> { this.stopped++; }
+  async stop(): Promise<void> { this.stopped++; if (this.stopError !== undefined) throw this.stopError; }
 }
 
 /** A worker host that runs a script instead of a model: the same contract a real local or remote worker implements. */

@@ -31,11 +31,12 @@ const names = (v: unknown, field: string): Name[] => {
 export class CleanupSettingsService {
   readonly #runner: CommandRunner;
   readonly #startup: ScratchMode;
-  private constructor(runner: CommandRunner, startup: ScratchMode) { this.#runner = runner; this.#startup = startup; }
+  readonly #warn: ((damage: { readonly revision: number; readonly detail: string }) => Promise<void>) | undefined;
+  private constructor(runner: CommandRunner, startup: ScratchMode, warn: ((damage: { readonly revision: number; readonly detail: string }) => Promise<void>) | undefined) { this.#runner = runner; this.#startup = startup; this.#warn = warn; }
 
-  static withEpoch(storage: ControllerStorage, epoch: number, startup: ScratchMode = SCRATCH_DEFAULT, options: RunnerOptions = {}): CleanupSettingsService {
+  static withEpoch(storage: ControllerStorage, epoch: number, startup: ScratchMode = SCRATCH_DEFAULT, options: RunnerOptions & { warn?: (damage: { readonly revision: number; readonly detail: string }) => Promise<void> } = {}): CleanupSettingsService {
     if (!mode(startup)) throw new RangeError("scratch must be after-handoff or keep");
-    return new CleanupSettingsService(new CommandRunner(storage, epoch, options), startup);
+    return new CleanupSettingsService(new CommandRunner(storage, epoch, options), startup, options.warn);
   }
 
   async get(by: Principal): Promise<{ readonly revision: number; readonly scratch: ScratchMode | null; readonly default: ScratchMode; readonly effective: { readonly scratch: ScratchMode }; readonly damaged?: true }> {
@@ -84,10 +85,16 @@ export class CleanupSettingsService {
     return v === undefined ? { damaged: false } : mode(v) ? { value: v, damaged: false } : { damaged: true };
   }
 
-  /** The mode for a cleanup now: the owner's entry, else the start-up default. A damaged record gives `keep`. */
+  /**
+   * The mode for a cleanup now: the owner's entry, else the start-up default. A damaged record gives `keep`, and `warn` tells the owner once per damage episode (the warning's identity is the damaged record's revision, so reading again
+   * does not repeat it; the owner's next change repairs it). A warning that cannot be sent changes nothing; the next read tries again.
+   */
   async effective(): Promise<{ readonly scratch: ScratchMode }> {
     const found = await this.#runner.get(REF.kind, REF.id);
     const read = this.#read(found?.body);
+    if (read.damaged && found !== undefined && this.#warn !== undefined) {
+      try { await this.#warn({ revision: found.revision, detail: "the stored cleanup setting is damaged, so scratch is kept (nothing is removed) until you set it again (cleanup.settings.change)" }); } catch { /* the next read tries again */ }
+    }
     return { scratch: read.damaged ? "keep" : read.value ?? this.#startup };
   }
 }

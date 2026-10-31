@@ -171,6 +171,8 @@ export interface AttemptDispatcherOptions extends RunnerOptions {
   readonly pinnedStaleTicks?: number;
   /** How long the end hook (the agent's ending) may take before the attempt ends with the dispatcher's own outcome and the hook's delay is reported through `onError`. Default 30 seconds. */
   readonly endHookMs?: number;
+  /** How long the ended hook may run before it is cut off (default: `endHookMs`). */
+  readonly endedHookMs?: number;
   /** Assignments looked at per tick. Default 100. */
   readonly scanPage?: number;
   /** How long the dispatcher expects an attempt to run when the contract says nothing, for the meeting check (M04). Default 30 minutes. */
@@ -243,7 +245,9 @@ export class DispatcherService {
   readonly #usageSeq = new Map<string, number>();
   readonly #ending = new Set<Promise<unknown>>();
   #endHook: EndHook | undefined;
-  #endedHook: ((attemptId: string, how: { readonly outcome: "succeeded" | "failed" | "abandoned" }) => Promise<void>) | undefined;
+  #endedHook: ((attemptId: string, how: { readonly outcome: "succeeded" | "failed" | "abandoned"; readonly workerStopped: boolean }) => Promise<void>) | undefined;
+  /** Ended hooks still running. Apart from `#ending` on purpose: `idle()` and the blocker for a failure never wait for a hook. */
+  readonly #endedRunning = new Set<Promise<unknown>>();
   readonly #endingBy = new Map<string, Promise<{ readmitted?: string }>>();
   /** Consecutive ticks an attempt pinned to a host has waited for it (in memory: a restart starts the count again). */
   readonly #pinnedWaits = new Map<string, number>();
@@ -1345,8 +1349,25 @@ export class DispatcherService {
    */
   /** Binds the agent's ending: asked before an attempt ends for any reason (the turn completing, a stop, a lost worker), so an ending the agent asked for is completed or dropped with its true reason. */
   onEnd(hook: EndHook | undefined): void { this.#endHook = hook; }
-  /** Called once an attempt is finished and its worker let go (never before): a failure is reported and changes nothing. The scratch cleanup uses it. */
-  onEnded(hook: ((attemptId: string, how: { readonly outcome: "succeeded" | "failed" | "abandoned" }) => Promise<void>) | undefined): void { this.#endedHook = hook; }
+  /**
+   * Called once an attempt is finished (never before), with whether its worker is CONFIRMED stopped (`workerStopped`: its handle stopped, or the host that held it confirmed the release; a stop that failed or a host that cannot release is not a confirmation).
+   * It runs apart from the end: after the failure's blocker is open, not awaited by the end or by `idle()`, and cut off after `endedHookMs` (default: `endHookMs`, else 30 s). A failure or a timeout is reported and changes nothing. The scratch cleanup uses it.
+   */
+  onEnded(hook: ((attemptId: string, how: { readonly outcome: "succeeded" | "failed" | "abandoned"; readonly workerStopped: boolean }) => Promise<void>) | undefined): void { this.#endedHook = hook; }
+  /** Waits for the ended hooks now running (tests and shutdown; each is bounded by its own timeout). */
+  async endedIdle(): Promise<void> { while (this.#endedRunning.size > 0) await Promise.allSettled([...this.#endedRunning]); }
+
+  #runEnded(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", workerStopped: boolean): void {
+    const hook = this.#endedHook;
+    if (hook === undefined) return;
+    const limit = this.#options.endedHookMs ?? this.#options.endHookMs ?? 30_000;
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<"timeout">((resolve) => { timer = setTimeout(() => resolve("timeout"), limit); });
+    const call = (async () => hook(attemptId, { outcome, workerStopped }))();
+    call.catch((error: unknown) => { this.#options.onError?.(error); });
+    const run: Promise<unknown> = Promise.race([call, timeout]).then((r) => { if (r === "timeout") this.#options.onError?.(new Error(`the ended hook of attempt ${attemptId} did not answer within ${limit} ms; it is left to the sweep`)); }, () => undefined).finally(() => { if (timer !== undefined) clearTimeout(timer); this.#endedRunning.delete(run); });
+    this.#endedRunning.add(run);
+  }
 
   async #end(attemptId: string, outcome: "succeeded" | "failed" | "abandoned", summary: string, options: { readmit: boolean; lost?: boolean; stopped?: { readonly by: "owner" | "emergency"; readonly reason: string }; skipHook?: boolean; partial?: boolean }): Promise<{ readmitted?: string }> {
     // `idle()` waits for every end in progress, not only for the turns: an attempt leaves the live list part-way through its end, and the blocker for a failure is opened after that.
@@ -1399,9 +1420,11 @@ export class DispatcherService {
     const d = await this.#load(attemptId);
     if (d === undefined || d.body.state === "finished") return {};
     const live = this.#live.get(attemptId);
-    if (live !== undefined) await live.handle.stop().catch(() => undefined);
+    // Whether the worker is CONFIRMED gone: its handle stopped without error, or the host that held it confirmed the release. A failed stop, or a host that cannot release, is not a confirmation (the scratch stays).
+    let workerStopped: boolean;
+    if (live !== undefined) workerStopped = await live.handle.stop().then(() => true, () => false);
     // No handle in this process (the controller restarted since the worker was placed): the host that holds the attempt is told to let go, or a remote placement would stay live for ever and keep the agent's store busy.
-    else await this.#deps.workers.find((w) => w.hostId === d.body.hostId)?.release?.(attemptId, summary.slice(0, 280)).catch(() => undefined);
+    else { const host = this.#deps.workers.find((w) => w.hostId === d.body.hostId); workerStopped = host?.release === undefined ? false : await host.release(attemptId, summary.slice(0, 280)).then(() => true, () => false); }
     await this.#path.settle(attemptId, true).catch(() => undefined);
     await this.#path.cancelParked(attemptId).catch(() => undefined);
     const b = (await this.#load(attemptId))!.body;
@@ -1419,17 +1442,17 @@ export class DispatcherService {
     await this.#deps.credentials.endForAttempt(this.#deps.principal, { commandId: `dpa-end-cred:${attemptId}`, attemptId, reason: summary.slice(0, 280) }).catch((error: unknown) => { if (!isDomainError(error, "not_found")) throw error; });
     // Before the attempt is marked finished, so a crash in between leaves the end to be done again (every command here is derived from the task and the attempt). A superseded attempt does not count against the task or take the hand-off head.
     if (active) await this.#contextAtEnd(b, outcome, summary, options.partial === true);
-    await this.#update(attemptId, (x) => ({ ...x, state: "finished", inFlight: [], parked: [], outcome: { status: outcome, summary: summary.slice(0, 500), at: this.#runner.now() } }), () => this.#liveChange(attemptId, false));
+    await this.#update(attemptId, (x) => ({ ...x, state: "finished", workerStopped, inFlight: [], parked: [], outcome: { status: outcome, summary: summary.slice(0, 500), at: this.#runner.now() } }), () => this.#liveChange(attemptId, false));
     // A worker registered while this end was running (its start answered after the end began) is let go too.
     const late = this.#live.get(attemptId);
-    if (late !== undefined && late.handle !== live?.handle) await late.handle.stop().catch(() => undefined);
+    if (late !== undefined && late.handle !== live?.handle && !(await late.handle.stop().then(() => true, () => false))) { workerStopped = false; await this.#update(attemptId, (x) => ({ ...x, workerStopped: false })).catch(() => undefined); }
     this.#live.delete(attemptId);
     this.#usageSeq.delete(attemptId);
-    if (this.#endedHook !== undefined) await this.#endedHook(attemptId, { outcome }).catch((error: unknown) => { this.#options.onError?.(error); });
     if (outcome === "failed") {
       const opened = await this.#deps.blockers.openBlocker({ commandId: `dpa-blk:failed:${attemptId}`, actor: DISPATCHER_ACTOR, type: "dispatch_blocked", subject: { kind: "task", id: b.taskId }, summary: `Attempt ${attemptId} failed (${summary.slice(0, 300)}); the task is as it was and no further attempt starts by itself.`, resolver: "owner" });
       await this.#deps.notifications?.emitFromController({ commandId: `dpa-ntf:${opened.id}`, kind: "blocker", ref: { kind: "blocker", id: opened.id }, projectId: b.projectId }).catch(() => undefined);
     }
+    this.#runEnded(attemptId, outcome, workerStopped);
     return figures !== undefined ? this.#readmit(b, figures) : {};
   }
 

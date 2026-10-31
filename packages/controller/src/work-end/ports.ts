@@ -18,7 +18,7 @@ export function dispatcherEndingPorts(dispatch: () => { readonly dispatcher: Dis
       const h = need();
       const d = await h.dispatcher.get(h.principal, attemptId);
       if (d === undefined) return undefined;
-      return { attemptId: d.attemptId, taskId: d.taskId, projectId: d.projectId, agentId: d.agentId, live: d.state !== "finished", ...(d.stopped === undefined ? {} : { stopped: { by: d.stopped.by, reason: d.stopped.reason } }) };
+      return { attemptId: d.attemptId, taskId: d.taskId, projectId: d.projectId, agentId: d.agentId, live: d.state !== "finished", ...(d.workerStopped === true ? { workerStopped: true } : {}), ...(d.stopped === undefined ? {} : { stopped: { by: d.stopped.by, reason: d.stopped.reason } }) };
     },
     freeze: async (attemptId, reason) => { const h = need(); await h.dispatcher.freeze(h.principal, attemptId, reason, { ending: true }); },
     settle: async (attemptId) => {
@@ -65,4 +65,16 @@ export function stagedSubmit(deps: {
     const made = await deps.submissions.record(by, { commandId: key, taskId: attempt.taskId, kind: "code", role: "author", base: staged.base, tree: staged.tree, patchId: staged.patchId });
     return { submissionId: made.id };
   };
+}
+
+/**
+ * Whether a recorded continuation was taken BY THIS ATTEMPT: by the attempt's agent, at or after the moment the attempt started. A continuation of an earlier attempt of the same task says nothing about this attempt's own work, which a
+ * later attempt would lose with its scratch (card H12n, owner decision 2026-10-30; provisional: the start of the attempt is the cut, since the dispatcher keeps no time of the last write).
+ */
+export function checkpointByAttempt(continuation: { readonly capturedAt: string; readonly agent: string } | undefined, attempt: { readonly agentId: string; readonly startedAt?: string; readonly claimedAt: string }): boolean {
+  if (continuation === undefined) return false;
+  const bare = (id: string): string => (id.startsWith("agent:") ? id.slice("agent:".length) : id);
+  if (bare(continuation.agent) !== bare(attempt.agentId)) return false;
+  const since = Date.parse(attempt.startedAt ?? attempt.claimedAt), at = Date.parse(continuation.capturedAt);
+  return Number.isFinite(since) && Number.isFinite(at) && at >= since;
 }

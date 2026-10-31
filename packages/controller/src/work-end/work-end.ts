@@ -64,6 +64,8 @@ export interface EndingAttempt {
   readonly live: boolean;
   /** Set when the attempt was stopped, by whom (`owner`, or `emergency`) and why. */
   readonly stopped?: { readonly by: "owner" | "emergency" | "other"; readonly reason: string };
+  /** True when the worker was confirmed stopped (its handle stopped, or the host that held it confirmed the release) when the attempt was finished. Anything else, or absent: not confirmed, so its scratch is not removed. */
+  readonly workerStopped?: boolean;
 }
 
 export interface SettleReport {
@@ -93,7 +95,7 @@ export interface WorkEndDeps {
   readonly tell?: (attempt: EndingAttempt, message: string, key: string) => Promise<void>;
   /**
    * The scratch cleanup (owner decision 2026-10-30): after the attempt is finished and what matters was handed onward, the controller-created scratch workspace may be removed (step `cleanup.scratch`). Absent: scratch is never touched.
-   * `checkpointRecorded` says whether a complete checkpoint/continuation of the task is recorded (a failed or stopped attempt continues from it); absent means no (the scratch stays unless a submission carries the work).
+   * `checkpointRecorded` says whether a complete checkpoint/continuation was recorded BY THIS ATTEMPT (taken while it ran: one from an earlier attempt of the task says nothing about this attempt's own work), which a failed or stopped attempt's successor continues from; absent means no (the scratch stays unless a submission carries the work).
    */
   readonly scratch?: { readonly cleanup: Pick<ScratchCleanupService, "run">; readonly checkpointRecorded?: (attempt: ScratchAttempt) => Promise<boolean> };
 }
@@ -128,7 +130,7 @@ export interface WorkEndRecord {
   readonly steps?: WorkEndSteps;
 }
 export interface WorkEndSteps {
-  readonly settled?: { /** Set when a write call had to be killed (the submit is not made). */ readonly summary?: string; readonly blocker?: string };
+  readonly settled?: { /** Set when a write call had to be killed (the submit is not made). */ readonly summary?: string; readonly blocker?: string; /** How many write calls had to be killed (set whether or not a submit was asked for). */ readonly killedWrites?: number };
   readonly submitted?: { readonly submissionId?: string; readonly typed?: WorkEndRecord["typed"]; readonly summary?: string; readonly blocker?: string };
   readonly told?: true;
   readonly finished?: true;
@@ -298,10 +300,10 @@ export class WorkEndService {
       // The attempt finished meanwhile (its turn ended, a stop): nothing is in flight any more, so the settle is as good as done.
       const settled = await this.#deps.attempts.settle(attemptId).catch((error: unknown) => { if (error instanceof DomainError && error.code === "not_found") return { killed: [] } as SettleReport; throw error; });
       const wrote = settled.killed.filter((k) => k.write);
-      let value: NonNullable<WorkEndSteps["settled"]> = {};
+      let value: NonNullable<WorkEndSteps["settled"]> = wrote.length > 0 ? { killedWrites: wrote.length } : {};
       if (body.submit && wrote.length > 0) {
         const summary = `release_failed: ${wrote.length} write call(s) had to be killed (${wrote.map((k) => `${k.callId}: ${k.reason}`).join("; ").slice(0, 300)}); the work was not submitted`;
-        value = clean({ summary, blocker: await this.#blocker(body, `${attemptId}:release_failed:settle`, summary) });
+        value = clean({ summary, killedWrites: wrote.length, blocker: await this.#blocker(body, `${attemptId}:release_failed:settle`, summary) });
       }
       body = (await step("settled", value)).body;
     }
@@ -343,10 +345,13 @@ export class WorkEndService {
       if (ended === false) { await this.#guard(attemptId); throw busy(); }
       body = (await step("finished", true)).body;
     }
-    // cleanup.scratch: only after the attempt is finished, and then only when what matters was handed onward (see `#missing`).
+    // cleanup.scratch: only after the attempt is finished, and then only when what matters was handed onward (see `#missing`). A drop that landed meanwhile is respected before the order goes out.
     if (this.#deps.scratch !== undefined && body.steps?.["cleanup.scratch"] === undefined) {
+      await this.#guard(attemptId);
       const scratchAttempt: ScratchAttempt = { attemptId, taskId: body.taskId, projectId: body.projectId, agentId: body.agentId };
-      const ran = await this.#deps.scratch.cleanup.run(scratchAttempt, await this.#missing(body, scratchAttempt));
+      const now = await this.#deps.attempts.get(attemptId);
+      const dropped = async (): Promise<string | undefined> => ((await this.#get(idOf(attemptId)))?.body.state === "dropped" ? "the ending was dropped before the order went out" : undefined);
+      const ran = await this.#deps.scratch.cleanup.run(scratchAttempt, await this.#missing(body, scratchAttempt, now), dropped);
       body = (await step("cleanup.scratch", { state: ran.state === "removed" ? "removed" : "kept", ...(ran.why === undefined ? {} : { why: ran.why }) })).body;
     }
     const written = await this.#mutate(attemptId, "workend.finish", (b) => {
@@ -359,20 +364,24 @@ export class WorkEndService {
     return { ...written.body, replayed: false };
   }
 
-  /** What is not yet handed onward (empty: all of it is): the settle, the product (a submission, or else a recorded checkpoint) and the message must be done. */
-  async #missing(b: WorkEndRecord, attempt: ScratchAttempt): Promise<string[]> {
-    const s = b.steps, out: string[] = [];
-    if (s?.finished !== true) out.push("the attempt is not finished");
-    if (s?.settled?.summary !== undefined) out.push("a write call had to be killed");
-    if (b.submit && s?.submitted?.submissionId === undefined) out.push("no submission was opened");
+  /**
+   * What is not yet handed onward (empty: all of it is): the worker must be confirmed stopped, no write call may have been killed, the product (a submission, or else a checkpoint recorded by this attempt) and the message must be done.
+   * `finished` is false for an attempt that ended another way, where the attempt's own ending steps are not the measure.
+   */
+  async #missing(b: WorkEndRecord | undefined, attempt: ScratchAttempt, now: EndingAttempt | undefined): Promise<string[]> {
+    const s = b?.steps, out: string[] = [];
+    if (now?.workerStopped !== true) out.push("the worker was not confirmed stopped");
+    if (s?.settled?.summary !== undefined || (s?.settled?.killedWrites ?? 0) > 0) out.push("a write call had to be killed");
+    if (b?.submit === true && s?.submitted?.submissionId === undefined) out.push("no submission was opened");
     if (s?.submitted?.submissionId === undefined && !(await this.#deps.scratch?.checkpointRecorded?.(attempt).catch(() => false))) out.push("no checkpoint is recorded");
-    if (b.message !== undefined && s?.told !== true) out.push("the message was not passed on");
+    if (b?.message !== undefined && s?.told !== true) out.push("the message was not passed on");
     return out;
   }
 
   /**
-   * An attempt ended some other way than through its own completed ending (a failure, a stop, a turn that ended, an ending dropped): the scratch is removed only when a checkpoint is recorded, so the next attempt can continue from it.
-   * Never throws into the caller (a failed report is retried by the next call for this attempt).
+   * An attempt ended some other way than through its own completed ending (a failure, a stop, a turn that ended, an ending dropped): the scratch is removed only under the same conditions as after a completed ending (see `#missing`): a checkpoint of
+   * this attempt is recorded so the next attempt can continue from it, no write call was killed, any message was passed on, and the worker is confirmed stopped.
+   * Never throws into the caller (a failed report is retried by the sweep).
    */
   async cleanupAfterEnd(attemptId: string): Promise<void> {
     const sc = this.#deps.scratch;
@@ -385,9 +394,8 @@ export class WorkEndService {
       // An ending of this attempt still open is the completed path's to clean up (after it finished); a done one has done so.
       if (rec !== undefined && OPEN_STATES.includes(rec.body.state)) return;
       if (rec?.body.state === "done" && rec.body.steps?.["cleanup.scratch"] !== undefined) return;
-      const checkpoint = await sc.checkpointRecorded?.(a).catch(() => false);
-      await sc.cleanup.run(a, checkpoint === true ? [] : ["no checkpoint is recorded"]);
-    } catch { /* kept; the next call for this attempt tries again */ }
+      await sc.cleanup.run(a, await this.#missing(rec?.body, a, attempt));
+    } catch { /* kept; the sweep tries again for what is left open */ }
   }
 
   /** Before a side effect: the intent is re-read; a dropped one aborts the run, another instance's claim is `busy`. */

@@ -93,6 +93,8 @@ export interface DispatchBody {
   readonly recipeRevision?: string;
   /** Set when a turn's usage figures could not be charged to accounting: why (redacted). */
   readonly usageError?: string;
+  /** Set when the attempt was finished: whether its worker was confirmed stopped (its handle stopped, or the host holding it confirmed the release). Absent: not confirmed. */
+  readonly workerStopped?: boolean;
   readonly outcome?: { readonly status: "succeeded" | "failed" | "abandoned"; readonly summary: string; readonly at: string };
 }
 

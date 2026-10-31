@@ -66,7 +66,7 @@ import { JobService } from "../jobs/index.js";
 import { ContinuationService, ResumeCheckService, ResumeSettingsService, controllerResumePorts } from "../continuation/index.js";
 import { DependencyService } from "../dependencies/index.js";
 import { ActivityService } from "../activity/index.js";
-import { WorkEndService, dispatcherEndingPorts, stagedSubmit, type EndingAttempt, type Landed, type StagedWork } from "../work-end/index.js";
+import { WorkEndService, checkpointByAttempt, dispatcherEndingPorts, stagedSubmit, type EndingAttempt, type Landed, type StagedWork } from "../work-end/index.js";
 import { HandoffService, PauseService, StopService, agentsUnder, controllerHandoffSources, dispatchStopPorts, type LocalWork } from "../lifecycle/index.js";
 import { SubmissionService, attemptOfAssignments } from "../submissions/index.js";
 import { ReviewService } from "../review/index.js";
@@ -75,7 +75,7 @@ import { checkLocalWorkerLimits } from "./worker-limits.js";
 import { AgreedLimitsSettingsService } from "./agreed-limits-settings.js";
 import { WorkerLimitsSettingsService } from "./worker-limits-settings.js";
 import { DispatchLimitsSettingsService } from "./dispatch-limits-settings.js";
-import { CleanupSettingsService, ScratchCleanupService, scratchRecordId, type ScratchMode, type ScratchPorts } from "../work-end/index.js";
+import { CleanupSettingsService, ScratchCleanupService, ownerNotices, supervisorNotice, scratchRecordId, type ScratchMode, type ScratchPorts } from "../work-end/index.js";
 import { WorkspaceOpService } from "../workspace-ops/index.js";
 import { ArtifactService, DeliverableService, FileBlobStore } from "../artifacts/index.js";
 import { composeDispatch, type DispatchHandle, type DispatchStartOptions } from "./dispatch-compose.js";
@@ -187,7 +187,7 @@ export interface Controller {
   readonly prerequisites: readonly PrerequisiteReport[];
   readonly services: {
     readonly backups?: BackupService;
-    readonly workEnd: WorkEndService;
+    readonly workEnd: WorkEndService; readonly scratchCleanup: ScratchCleanupService;
     /** The one catalogue (revoke path and tool bridge share it). */
     readonly catalog: CatalogService;
     readonly principals: PrincipalService; readonly taskCredentials: TaskCredentialService; readonly grants: GrantService; readonly projects: ProjectService; readonly assignments: AssignmentService;
@@ -392,25 +392,29 @@ export async function startController(options: StartOptions): Promise<Controller
     const notes = WorkingNoteService.withEpoch(storage, epoch);
     // The agent's ending (card H12n). The submission is bound to the submission service through the optional `stage` (and the landing check to `landing`) of the start options: without them a submit is refused as unavailable and nothing is submitted.
     const submissions = SubmissionService.withEpoch(storage, epoch, (_id, scope, by) => agents.rolesOfPrincipalIn(by, scope.projectId, new Date().toISOString()), { reviewersAvailableIn: (projectId, workerId) => agents.reviewersAvailableIn(projectId, workerId, new Date().toISOString()), attemptOf: (() => { const of = attemptOfAssignments(assignments); /* the dispatcher names an attempt's owner by its bare agent id, the principals by `agent:<id>`: the same identity either way */ return async (taskId: string) => { const a = await of(taskId); return a === undefined ? undefined : { ...a, ownerId: a.ownerId.startsWith("agent:") ? a.ownerId : `agent:${a.ownerId}` }; }; })() });
-    const cleanupSettings = CleanupSettingsService.withEpoch(storage, epoch, options.cleanupDefault);
+    const cleanupSettings = CleanupSettingsService.withEpoch(storage, epoch, options.cleanupDefault, { warn: async (d) => { await notifications.emitFromController({ commandId: `cleanup-settings-damaged:${d.revision}`, kind: "maintenance", level: "needs-you", ref: { kind: "cleanup-settings", id: "main" }, detail: d.detail }); } });
     // The leftovers of a finished attempt (installed or still running, never removed by the controller) go to the agent's boss as a needs-you message; with no boss, or one who cannot be told about the task, to the owner.
     const scratchCleanup = ScratchCleanupService.withEpoch(storage, epoch, {
       mode: async () => (await cleanupSettings.effective()).scratch,
       ...(options.scratchHost === undefined ? {} : { order: options.scratchHost.remove }),
-      report: async (a, leftovers, key) => {
-        const lines = leftovers.map((l) => `${l.kind}: ${l.what}`).join("; ").slice(0, 1500);
-        const text = `Attempt ${a.attemptId} ended and left things behind that the controller did not remove: ${lines}. Decide for each: clean it up, keep it, or adopt it.`;
+      report: async (a, leftovers, _key) => {
+        // To the supervisor AGENT: the host's words framed as quoted untrusted data (see `supervisorNotice`). With no boss, or one who cannot be told about the task, to the owner in notices that fit the notification's detail limit.
         const own = a.agentId.startsWith("agent:") ? a.agentId.slice("agent:".length) : a.agentId;
         const boss = ((await storage.getAggregate({ kind: "agent", id: own }))?.body as unknown as { supervisorId?: string } | undefined)?.supervisorId;
         if (boss !== undefined) {
-          try { await messages.noticeFromController({ commandId: `scl-left:${a.attemptId}`, taskId: a.taskId, to: `agent:${boss}`, purpose: "needs-you: leftovers of a finished attempt", text }); return; } catch (error) {
+          const note = supervisorNotice(a, leftovers);
+          try { await messages.noticeFromController({ commandId: `scl-left:${a.attemptId}`, taskId: a.taskId, to: `agent:${boss}`, purpose: note.purpose, text: note.text }); return; } catch (error) {
             if (!(error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found"))) throw error;
           }
         }
-        await notifications.emitFromController({ commandId: `scl-left:${a.attemptId}`, kind: "maintenance", level: "needs-you", ref: { kind: "scratch-cleanup", id: scratchRecordId(a.attemptId) }, projectId: a.projectId, detail: text.slice(0, 1800) });
+        for (const [i, detail] of ownerNotices(a, leftovers).entries()) await notifications.emitFromController({ commandId: `scl-left:${a.attemptId}:${i + 1}`, kind: "maintenance", level: "needs-you", ref: { kind: "scratch-cleanup", id: `${scratchRecordId(a.attemptId)}-${i + 1}` }, projectId: a.projectId, detail });
       },
     });
-    const workEnd = WorkEndService.withEpoch(storage, epoch, { attempts: dispatcherEndingPorts(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal })), landing: options.landing === undefined ? async () => undefined : (taskId) => options.landing!(taskId), ...(options.stage === undefined ? {} : { submit: stagedSubmit({ stage: options.stage, submissions, principalOf: async (agentId) => { const p = await principals.get(agentId.startsWith("agent:") ? agentId : `agent:${agentId}`); return p === undefined || p.state !== "active" ? undefined : ((await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString())) as Principal); } }) }), blockers: BlockerService.withEpoch(storage, epoch), paused: (taskId) => pauses.isPaused(taskId), scratch: { cleanup: scratchCleanup, checkpointRecorded: async (a) => dispatch !== undefined && (await continuations.latest(dispatch.principal, a.taskId).catch(() => undefined)) !== undefined } });
+    const workEnd = WorkEndService.withEpoch(storage, epoch, { attempts: dispatcherEndingPorts(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal })), landing: options.landing === undefined ? async () => undefined : (taskId) => options.landing!(taskId), ...(options.stage === undefined ? {} : { submit: stagedSubmit({ stage: options.stage, submissions, principalOf: async (agentId) => { const p = await principals.get(agentId.startsWith("agent:") ? agentId : `agent:${agentId}`); return p === undefined || p.state !== "active" ? undefined : ((await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString())) as Principal); } }) }), blockers: BlockerService.withEpoch(storage, epoch), paused: (taskId) => pauses.isPaused(taskId), scratch: { cleanup: scratchCleanup, checkpointRecorded: async (a) => {
+      if (dispatch === undefined) return false;
+      const attempt = await dispatch.dispatcher.get(dispatch.principal, a.attemptId).catch(() => undefined);
+      return attempt !== undefined && checkpointByAttempt(await continuations.latest(dispatch.principal, a.taskId).catch(() => undefined), attempt);
+    } } });
     const stops = stopsLive = StopService.withEpoch(storage, epoch, pauses, dispatchStopPorts(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal }), () => (options.dispatch === undefined ? "none" : "pending"), (scope) => agentsUnder(storage, scope), (_by, taskId) => jobs.unfinishedOf(taskId), options.localWork, { dropEnding: (id, why, reason) => workEnd.drop(id, why, reason) }), { onSettled: async (by, e) => { if (e.scope.kind !== "task") return; await activity.record(by, { commandId: `${e.intentId}-act`, taskId: e.scope.id, kind: "lifecycle", summary: `${e.mode === "suspend" ? "Suspension" : "Stop"} ${e.outcome.state}${e.outcome.graceful ? "" : " (not graceful)"}${e.outcome.unresolved.length > 0 ? `; unresolved: ${e.outcome.unresolved.slice(0, 5).join(", ")}` : ""}.`, manifest: { refs: [{ kind: "stop-intent", id: e.intentId }] } } as never); } });
 
     // Provider drain and cutover (card R04b): the owner's controls gate every route choice made through the fallback service, which the cutover cancels running calls on.
@@ -549,7 +553,7 @@ export async function startController(options: StartOptions): Promise<Controller
             if (taskId === undefined) throw new DomainError("unavailable", `${e.escalatedTo} holds no task in the project to file the escalation notice against`);
             await messages.noticeFromController({ commandId: `inc-esc-${e.id}`, taskId, to: e.escalatedTo, purpose: "An incident was escalated to you", text: `${detail} Responsibility ${e.responsibilityId}; incident ${e.id}.` });
           }
-        } }, eventSources: eventSourceList, eventSourcesOff: () => eventSourceSettings.disabled(), workerLimits: () => workerLimits.effective(), dispatchLimits: () => dispatchLimits.effective(), taskMinutes: async (taskId) => { const v = await configuration.taskValue("time.maxMinutes", taskId); return typeof v === "number" ? v : undefined; }, ...(options.routeProbes === undefined ? {} : { probes: { cutover, probes: { enabled: () => options.routeProbes?.enabled === true, run: options.routeProbes.run, intervalMs: options.routeProbes.intervalMs ?? 60_000 } } }), ...(backups === undefined ? {} : { backups }), resumes, sweeps: [{ name: "handoffs.sweep", sweep: (by) => handoffs.sweep(by) }, { name: "resumes.sweep", sweep: (by) => resumes.sweep(by) }, { name: "workend.complete", sweep: () => workEnd.recover() }], leadMinutes: meetingLead, options: withPlacement(options.dispatch), ...(options.availability === undefined ? {} : { availability: options.availability }), ...(options.meetingWake === undefined ? {} : { meetingWake: meetingWakeSink(options.meetingWake, options.meetingWake.timeoutMs === undefined ? {} : { timeoutMs: options.meetingWake.timeoutMs }) }), recovery: { stall, reconciler }, principals, grants, taskCredentials, projects, assignments, waits, contracts, catalog, routing, inquiries, agents, histories, reviews, retrieval, ...(options.onInternalError === undefined ? {} : { onError: options.onInternalError }) });
+        } }, eventSources: eventSourceList, eventSourcesOff: () => eventSourceSettings.disabled(), workerLimits: () => workerLimits.effective(), dispatchLimits: () => dispatchLimits.effective(), taskMinutes: async (taskId) => { const v = await configuration.taskValue("time.maxMinutes", taskId); return typeof v === "number" ? v : undefined; }, ...(options.routeProbes === undefined ? {} : { probes: { cutover, probes: { enabled: () => options.routeProbes?.enabled === true, run: options.routeProbes.run, intervalMs: options.routeProbes.intervalMs ?? 60_000 } } }), ...(backups === undefined ? {} : { backups }), resumes, sweeps: [{ name: "handoffs.sweep", sweep: (by) => handoffs.sweep(by) }, { name: "resumes.sweep", sweep: (by) => resumes.sweep(by) }, { name: "workend.complete", sweep: () => workEnd.recover() }, { name: "scratch.recover", sweep: async () => { await scratchCleanup.recover(); } }], leadMinutes: meetingLead, options: withPlacement(options.dispatch), ...(options.availability === undefined ? {} : { availability: options.availability }), ...(options.meetingWake === undefined ? {} : { meetingWake: meetingWakeSink(options.meetingWake, options.meetingWake.timeoutMs === undefined ? {} : { timeoutMs: options.meetingWake.timeoutMs }) }), recovery: { stall, reconciler }, principals, grants, taskCredentials, projects, assignments, waits, contracts, catalog, routing, inquiries, agents, histories, reviews, retrieval, ...(options.onInternalError === undefined ? {} : { onError: options.onInternalError }) });
       } catch (error) {
         // A dispatcher the owner disabled, or a store that failed here, must not keep the rest of the controller from starting; the operator is told, and the reason stays on the controller.
         dispatchProblem = error instanceof Error ? error.message.slice(0, 300) : "the dispatcher could not be built";
@@ -571,7 +575,7 @@ export async function startController(options: StartOptions): Promise<Controller
     }
     const transport = options.conversationTransport === undefined ? undefined : await ConversationTransport.listen({ ...options.conversationTransport, conversations, principals });
     return {
-      api, storage, epoch, check, filesystems, prerequisites, services: { ...(backups === undefined ? {} : { backups }), catalog: catalogService, workEnd, records, activity, continuations, resumes, handoffs, cutover, fallback, principals, taskCredentials, grants, projects, assignments, waits, stall, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing, pauses, branches, jobs },
+      api, storage, epoch, check, filesystems, prerequisites, services: { ...(backups === undefined ? {} : { backups }), catalog: catalogService, workEnd, scratchCleanup, records, activity, continuations, resumes, handoffs, cutover, fallback, principals, taskCredentials, grants, projects, assignments, waits, stall, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing, pauses, branches, jobs },
       ...(chat === undefined ? {} : { chat }), ...(coordinator === undefined ? {} : { coordinator }),
       ...(dispatch === undefined ? {} : { dispatch }), ...(tools === undefined ? {} : { tools }), ...(dispatchProblem === undefined ? {} : { dispatchProblem }),
       ...(transport === undefined ? {} : { conversationUrl: transport.url }),
