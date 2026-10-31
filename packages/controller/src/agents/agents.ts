@@ -434,6 +434,31 @@ export class AgentService {
     }
   }
 
+  /**
+   * The agents of one project that could decide a deliverable by `workerPrincipalId` (card Q01fx): exactly the set the acceptance service lets decide, so "no one else can review" means the same thing in both places.
+   * An active agent holding the reviewer role with a live grant in the project (or every project), or the director role with a live grant naming THIS project (a project-wide `*` grant does not make a director).
+   * Never the worker. Empty: review is disabled and the owner decides.
+   */
+  async decidersAvailableIn(projectId: string, workerPrincipalId: string, now: string): Promise<string[]> {
+    const out: string[] = [];
+    let after: string | undefined;
+    for (;;) {
+      const records = await this.#runner.list("agent", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const r of records) {
+        after = r.id;
+        const b = r.body as unknown as AgentBody;
+        const reviewer = b.roles.includes("reviewer"), director = b.roles.includes("director");
+        if (b.state !== "active" || b.principalId === workerPrincipalId || (!reviewer && !director)) continue;
+        const principal = (await this.#runner.get("principal", b.principalId))?.body as unknown as PrincipalBody | undefined;
+        if (principal === undefined || principal.state !== "active") continue;
+        const effective = await effectiveOf(this.#runner, { id: b.principalId, kind: "agent", name: principal.name, grants: principal.grants, asOf: now } as Principal, now);
+        const live = effective.grants.filter((g) => (g.expiresAt === undefined || g.expiresAt > now) && !g.action.startsWith("tool."));
+        if ((reviewer && live.some((g) => g.project === projectId || g.project === "*")) || (director && live.some((g) => g.project === projectId))) out.push(b.principalId);
+      }
+      if (records.length < 200) return out;
+    }
+  }
+
   /** One agent. The owner, a manager or reader, and the agent itself may ask; anyone else gets the answer a missing agent would get. */
   async get(by: Principal, id: string): Promise<View<AgentBody> | undefined> {
     const found = await this.#runner.get("agent", agentId(id));

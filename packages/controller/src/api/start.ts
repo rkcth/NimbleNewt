@@ -425,7 +425,8 @@ export async function startController(options: StartOptions): Promise<Controller
     const acceptance = AcceptanceService.withEpoch(storage, epoch, {
       rolesOf: (_id, scope, by) => agents.rolesOfPrincipalIn(by, scope.projectId, new Date().toISOString()),
       contractVersion: async (taskId) => ((await contracts.runner.get("task-contract", taskId))?.body as unknown as { version?: number } | undefined)?.version ?? 0,
-      reviewersAvailableIn: (projectId, workerId) => agents.reviewersAvailableIn(projectId, workerId, new Date().toISOString()),
+      reviewersAvailableIn: (projectId, workerId) => agents.decidersAvailableIn(projectId, workerId, new Date().toISOString()),
+      notify: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "notice", ref: { kind: "deliverable", id: n.deliverableId }, detail: n.text }); },
       ...(checked === undefined ? {} : { verifyArtifact: async (artifactId: string) => { const r = await checked.verify(artifactId); return { ok: r.ok, problems: r.problems.length }; } }),
     });
     const cleanupSettings = CleanupSettingsService.withEpoch(storage, epoch, options.cleanupDefault, { warn: async (d) => { await notifications.emitFromController({ commandId: `cleanup-settings-damaged:${d.revision}`, kind: "maintenance", level: "needs-you", ref: { kind: "cleanup-settings", id: "main" }, detail: d.detail }); } });

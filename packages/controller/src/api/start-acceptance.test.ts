@@ -26,6 +26,8 @@ async function world(name: string) {
     const made = await s.agents.create(rob, { commandId: `mk-${n}`, friendlyName: n, roles });
     const id = `agent:${made.id}`;
     if (read) await s.grants.grant(rob, { commandId: `g-${n}`, grantee: id, action: "task.read", project: inProject, source: "direct", basis: "test" } as never);
+    // A reviewer decides only with a specific review right in the project (or when asked to review one deliverable).
+    if (read && roles.includes("reviewer")) await s.grants.grant(rob, { commandId: `gr-${n}`, grantee: id, action: "review.decide", project: inProject, source: "direct", basis: "test" } as never);
     return { id, token: (await s.principals.issueCredential(rob, id)).token };
   };
   const artifacts = ArtifactService.withEpoch(c.storage, c.epoch, await FileBlobStore.open({ directory: join(d, "blobs") }));
@@ -180,6 +182,13 @@ test("who may decide: external audience is the owner's alone, a single-agent pro
     assert.equal((await call(ann.token, "deliverable.accept", { id, version: 1 }, "o5")).error.code, "forbidden");
     assert.equal((await call(boot.token, "deliverable.accept", { id, version: 1 }, "o6")).ok, true, "the owner accepts");
 
+    // A recorded-disabled version stays the owner's, also after a second agent joins and could review newer work.
+    const dis = (await call(ann.token, "deliverable.draft", { taskId: task, type: "operational-outcome", title: "Disabled", outcome: out }, "x1")).result.id as string;
+    await call(ann.token, "deliverable.submit", { id: dis, expectedRevision: 1, contractVersion: 0 }, "x2");
+    const dir0 = await w.hire("Dir0", ["director"], project);
+    assert.equal((await call(dir0.token, "deliverable.review.start", { id: dis, version: 1 }, "x3")).error.code, "forbidden", "recorded review-disabled: only the owner");
+    assert.equal((await call(boot.token, "deliverable.review.start", { id: dis, version: 1 }, "x4")).ok, true);
+    assert.equal((await call(dir0.token, "deliverable.accept", { id: dis, version: 1 }, "x5")).error.code, "forbidden");
     // A second agent joins; an external-audience deliverable is still the owner's to accept.
     const dir = await w.hire("Dir", ["director"], project);
     const ext = (await call(ann.token, "deliverable.draft", { taskId: task, type: "operational-outcome", title: "Publish", audience: ["external"], outcome: out }, "e1")).result.id as string;

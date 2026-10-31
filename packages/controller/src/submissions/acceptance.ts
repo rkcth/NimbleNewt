@@ -80,8 +80,12 @@ export interface AcceptancePorts {
   readonly contractVersion: (taskId: string) => Promise<number>;
   /** Checks an artifact against its bytes. Absent: a deliverable that names artifacts cannot be submitted or decided (fail closed). A thrown `not_found` or `integrity` error counts as damaged. */
   readonly verifyArtifact?: (artifactId: string) => Promise<{ readonly ok: boolean; readonly problems: number }>;
-  /** Other agents of the project able to review work by the worker; none means review is disabled (a project with one agent). */
+  /** The other agents of the project that the acceptance service itself would let decide (director with a grant naming the project, or reviewer); none means review is disabled and only the owner decides. */
   readonly reviewersAvailableIn?: (projectId: string, workerId: string) => Promise<readonly string[]>;
+  /** The deliverable IDs and submission IDs this principal was asked to review in the task. A reviewer decides only what is named here (or holds `review.decide` in the project). Absent: nobody is assigned. */
+  readonly reviewAssignments?: (principalId: string, taskId: string) => Promise<readonly string[]>;
+  /** Tells the owner (and says who else is affected) that a version under review or accepted was replaced. Best effort: a failure never undoes the replacement. */
+  readonly notify?: (notice: { readonly commandId: string; readonly deliverableId: string; readonly text: string }) => Promise<void>;
 }
 
 const ID = /^dlv-[a-z2-7]{20}$/;
@@ -198,21 +202,37 @@ export class AcceptanceService {
     return new Set([d.responsibleAgent, d.createdBy, v.createdBy, ...(v.submittedBy === undefined ? [] : [v.submittedBy]), ...v.content.submissions.map((s) => s.submittedBy)]);
   }
 
-  /** Who may take a review step on a version: the owner, or an agent holding the director or reviewer role that did none of the work and may read the deliverable. */
-  async #decider(by: Principal, d: DeliverableBody, v: VersionBody, step: "start" | "decide"): Promise<void> {
+  /** Whether the grant is live now. */
+  #live(g: Principal["grants"][number]): boolean { return (g.expiresAt === undefined || g.expiresAt > this.#runner.now()) && !g.action.startsWith("tool."); }
+
+  /** The agents other than the ones that did the work that the acceptance service would let decide, as of now. */
+  async #deciders(d: DeliverableBody, v: VersionBody, extra?: string): Promise<readonly string[]> {
+    if (this.#ports.reviewersAvailableIn === undefined) return ["unknown"];
+    const conflicted = this.#conflicted(d, v);
+    if (extra !== undefined) conflicted.add(extra);
+    return (await this.#ports.reviewersAvailableIn(d.projectId, d.responsibleAgent)).filter((r) => !conflicted.has(r));
+  }
+
+  /**
+   * Who may take a review step on a version: the owner, or an agent that did none of the work, may read the deliverable and holds a real review right here: a director with a grant naming this project
+   * (not only a project-wide one), or a reviewer that was asked to review this deliverable (or its submission) or holds `review.decide` in this project. Where no other agent could review (recorded at
+   * submission, and looked at again now), review is disabled and the owner alone decides: an agent never decides a version recorded as review-disabled.
+   */
+  async #decider(by: Principal, id: string, d: DeliverableBody, v: VersionBody, step: "start" | "decide"): Promise<void> {
     if (by.kind === "owner") return;
     if (by.kind !== "agent") throw new DomainError("forbidden", `${by.id} may not review a deliverable`);
     if (d.audience.includes("external")) throw new DomainError("forbidden", "a deliverable for an external audience is accepted or rejected by the owner only");
     if (this.#conflicted(d, v).has(by.id)) throw new DomainError("forbidden", "a deliverable cannot be reviewed or accepted by an agent that did its work (no self-review)");
+    if (v.review?.required === false || (await this.#deciders(d, v)).length === 0) throw new DomainError("forbidden", "review is disabled for this deliverable (no other agent can review it): the owner decides");
     const roles = await this.#ports.rolesOf(by.id, { projectId: d.projectId, taskId: d.taskId }, by);
-    const director = roles.includes("director");
-    if (!director && !roles.includes("reviewer")) throw new DomainError("forbidden", "only the owner, a director or a reviewer may review a deliverable");
+    const director = roles.includes("director") && by.grants.some((g) => g.project === d.projectId && this.#live(g));
+    let reviewer = false;
+    if (!director && roles.includes("reviewer")) {
+      const named = this.#ports.reviewAssignments === undefined ? [] : await this.#ports.reviewAssignments(by.id, d.taskId);
+      reviewer = named.includes(id) || v.content.submissions.some((x) => named.includes(x.id)) || by.grants.some((g) => g.action === "review.decide" && g.project === d.projectId && this.#live(g));
+    }
+    if (!director && !reviewer) throw new DomainError("forbidden", "only the owner, a director of this project or a reviewer asked to review this deliverable may review it");
     if (step === "decide" && !director && v.reviewer !== by.id) throw new DomainError("forbidden", "a reviewer decides only on a review it started");
-  }
-
-  async #reviewDisabled(d: DeliverableBody): Promise<boolean> {
-    if (this.#ports.reviewersAvailableIn === undefined) return false;
-    return (await this.#ports.reviewersAvailableIn(d.projectId, d.responsibleAgent)).filter((r) => r !== d.responsibleAgent).length === 0;
   }
 
   // ---- content ---------------------------------------------------------------------------------------------------------------
@@ -236,7 +256,7 @@ export class AcceptanceService {
       if (body!.artifactDigest !== undefined && !artifacts.some((a) => body!.artifactDigest === `sha256:${a.manifestDigest}` || body!.artifactDigest === a.manifestDigest)) bad("submissionIds", `${id}: its artifact digest is not one of this version's artifacts`);
       submissions.push({ id, kind: body!.kind, submittedBy: body!.submittedBy, ...(body!.tree === undefined ? {} : { tree: body!.tree }), ...(body!.artifactDigest === undefined ? {} : { artifactDigest: body!.artifactDigest }) });
     }
-    return { artifacts, submissions, ...(s.outcome === undefined ? {} : { outcome: s.outcome }), ...(s.note === undefined ? {} : { note: redactText(s.note) }) };
+    return { artifacts, submissions, ...(s.outcome === undefined ? {} : { outcome: { reference: redactText(s.outcome.reference), systemVersion: redactText(s.outcome.systemVersion), observedAt: s.outcome.observedAt } }), ...(s.note === undefined ? {} : { note: redactText(s.note) }) };
   }
 
   /** What a version must hold before it can be submitted. */
@@ -246,18 +266,22 @@ export class AcceptanceService {
     if ((type === "document" || type === "report" || type === "design") && c.artifacts.length === 0) bad("artifacts", `a ${type} deliverable names at least one artifact`);
   }
 
-  async #verify(c: Content): Promise<{ ok: boolean; problems: number }> {
-    if (c.artifacts.length === 0) return { ok: true, problems: 0 };
+  /** Checks the artifacts against their records and bytes; `checks` pin the artifact records read, so a decision commits only if none changed meanwhile. */
+  async #verify(c: Content): Promise<{ ok: boolean; problems: number; checks: Change[] }> {
+    if (c.artifacts.length === 0) return { ok: true, problems: 0, checks: [] };
     if (this.#ports.verifyArtifact === undefined) throw new DomainError("unavailable", "artifacts cannot be checked on this controller, so a deliverable that names them cannot be submitted or decided");
     let problems = 0;
+    const checks: Change[] = [];
     for (const a of c.artifacts) {
-      const current = (await this.#runner.get("artifact", a.artifactId))?.body as unknown as ArtifactBody | undefined;
-      if (current === undefined || current.manifestDigest !== a.manifestDigest) { problems++; continue; }
+      const found = await this.#runner.get("artifact", a.artifactId);
+      const current = found?.body as unknown as ArtifactBody | undefined;
+      if (found === undefined || current === undefined || current.manifestDigest !== a.manifestDigest) { problems++; continue; }
+      checks.push({ type: "check", ref: { kind: "artifact", id: a.artifactId }, expectedRevision: found.revision });
       try { const r = await this.#ports.verifyArtifact(a.artifactId); if (!r.ok) problems += Math.max(1, r.problems); } catch (error) {
         if (error instanceof DomainError && (error.code === "not_found" || error.code === "integrity")) problems++; else throw error;
       }
     }
-    return { ok: problems === 0, problems };
+    return { ok: problems === 0, problems, checks };
   }
 
   // ---- writing ---------------------------------------------------------------------------------------------------------------
@@ -309,7 +333,10 @@ export class AcceptanceService {
           if (!WRITERS.some((r) => roles.includes(r))) throw new DomainError("forbidden", `${by.id} holds none of the roles ${WRITERS.join(", ")} that make deliverables`);
         }
         if (task.state === "cancelled") throw new DomainError("invalid_command", "the task is cancelled");
-        const content = await this.#content(taskId, task.projectId, shape, command.responsibleAgent ?? by.id);
+        const responsible = command.responsibleAgent ?? by.id;
+        const who = (await this.#runner.get("principal", responsible))?.body as unknown as { kind?: string; state?: string } | undefined;
+        if (who === undefined || who.kind !== "agent" || who.state !== "active") bad("responsibleAgent", `${responsible} is not an active agent`);
+        const content = await this.#content(taskId, task.projectId, shape, responsible);
         const index = await this.#runner.get("deliverable-index", taskId);
         const ids = ((index?.body as unknown as { ids: string[] } | undefined)?.ids) ?? [];
         if (ids.length >= MAX_PER_TASK) throw new DomainError("invalid_command", `a task has at most ${MAX_PER_TASK} deliverables`);
@@ -348,6 +375,7 @@ export class AcceptanceService {
     if (typeof command.id !== "string" || !ID.test(command.id)) bad("id", "is not a deliverable ID");
     if (!Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 1) bad("expectedRevision", "must be the revision you read");
     const shape = shapeOf(command);
+    let notice: string | undefined;
     const result = await this.#runner.command(type, { commandId: scopedCommandId(by.id, commandId), actor: by.id }, async () => ({
       payload: { id: command.id, expectedRevision: command.expectedRevision, shape: sameShape(shape) },
       build: async () => {
@@ -372,8 +400,10 @@ export class AcceptanceService {
         const changes: Change[] = [];
         // A rejected version keeps its verdict; any other earlier version is superseded.
         const supersede = v.state !== "rejected" && v.state !== "superseded";
-        if (supersede) events.push({ version: v.version, kind: "superseded", reason: `replaced by version ${next}` });
+        const wasLive = v.state === "under-review" || v.state === "accepted";
+        if (supersede) events.push({ version: v.version, kind: "superseded", reason: wasLive ? `replaced by version ${next} by ${by.id} while ${v.state}${v.state === "accepted" ? ` (accepted by ${v.decidedBy ?? "unknown"})` : v.reviewer === undefined ? "" : ` (under review by ${v.reviewer})`}` : `replaced by version ${next}` });
         events.push({ version: next, kind: "draft" });
+        if (supersede && wasLive) notice = events[0]!.reason;
         const ev = this.#events(command.id, d, events, by.id);
         const nd: DeliverableBody = { ...ev.body, currentVersion: next, state: "draft" };
         changes.push({ type: "update", ref, expectedRevision: agg.revision, body: nd as unknown as JsonObject });
@@ -383,6 +413,10 @@ export class AcceptanceService {
         return { ref, creates: false, changes, detail: { deliverable: command.id, version: next } };
       },
     }));
+    // The decider and the owner are told that a review or an acceptance was undone by a new version (the event is already on the record).
+    if (notice !== undefined && !result.replayed && this.#ports.notify !== undefined) {
+      await this.#ports.notify({ commandId: `dlv-superseded:${command.id}:${result.revision}`, deliverableId: command.id, text: `${command.id}: ${notice}` }).catch(() => undefined);
+    }
     return { id: result.id, revision: result.revision, replayed: result.replayed };
   }
 
@@ -412,7 +446,7 @@ export class AcceptanceService {
         this.#complete(d.type, content);
         const checked = await this.#verify(content);
         if (!checked.ok) throw new DomainError("integrity", `${checked.problems} problem(s) with the artifacts of version ${v.version}: they are missing or changed`);
-        const review = (await this.#reviewDisabled(d)) ? { required: false, reason: REVIEW_DISABLED_SINGLE_AGENT } : { required: true };
+        const review = (await this.#deciders(d, { ...v, content }, by.id)).length === 0 ? { required: false, reason: REVIEW_DISABLED_SINGLE_AGENT } : { required: true };
         return this.#move(command.id, agg, d, vAgg, v, "submitted", by.id, { content, contractVersion: current, submittedBy: by.id, submittedAt: this.#runner.now(), review: review as NonNullable<VersionBody["review"]> });
     },
     }));
@@ -469,12 +503,20 @@ export class AcceptanceService {
         const v = vAgg.body as unknown as VersionBody;
         const from = to === "under-review" ? "submitted" : "under-review";
         if (v.state !== from) throw new DomainError("invalid_transition", `version ${v.version} is ${v.state}, not ${from}`);
-        await this.#decider(by, d, v, to === "under-review" ? "start" : "decide");
+        await this.#decider(by, command.id, d, v, to === "under-review" ? "start" : "decide");
+        let artifactChecks: Change[] = [];
         if (to !== "rejected") {
           const checked = await this.#verify(v.content);
+          artifactChecks = checked.checks;
           if (!checked.ok) throw new Damaged(`${checked.problems} problem(s) with the artifacts of version ${v.version}: they are missing or changed, so the review cannot go on`, checked.problems);
         }
-        return this.#move(command.id, agg, d, vAgg, v, to, by.id, to === "under-review" ? { reviewer: by.id } : { decidedBy: by.id, decidedAt: this.#runner.now(), ...(reason === undefined ? {} : { reason: redactText(reason) }) }, to === "under-review" ? undefined : reason === undefined ? undefined : redactText(reason));
+        const moved = this.#move(command.id, agg, d, vAgg, v, to, by.id, to === "under-review" ? { reviewer: by.id } : { decidedBy: by.id, decidedAt: this.#runner.now(), ...(reason === undefined ? {} : { reason: redactText(reason) }) }, to === "under-review" ? undefined : reason === undefined ? undefined : redactText(reason));
+        if (to === "accepted") {
+          // The artifact records and the contract read for this decision must be unchanged when it commits.
+          const contract = await this.#runner.get("task-contract", d.taskId);
+          moved.changes.push(...artifactChecks, ...(contract === undefined ? [] : [{ type: "check" as const, ref: { kind: "task-contract", id: d.taskId }, expectedRevision: contract.revision }]));
+        }
+        return moved;
       },
     }));
     try {
