@@ -112,6 +112,18 @@ Result: `{ item }`: `revision` and `limits`, which has any of `raiseMaxCostMicro
 
 Completion: finished when accepted (`completed: true`).
 
+#### `resume.settings.get`
+
+How many blocked rounds a stalled resume check retries before the owner is told (owner only): the owner's figure, the default and the effective one.
+
+Arguments:
+
+- none
+
+Result: `{ item }`: `revision`, `maxRounds` (the owner's, or null), `default`, `effective`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `workers.limits.get`
 
 What one local agent may use (owner only): the figures the owner set, the ones from the controller's start-up configuration, and the effective limits (the owner's win per figure).
@@ -1453,6 +1465,19 @@ Arguments:
 
 - `set` (optional): for example `{ "grantMaxDays": 90 }`
 - `unset` (optional): ceiling names to remove
+- `expectedRevision` (optional): the revision of the setting you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `resume.settings.set`
+
+The owner sets how many blocked rounds a stalled resume check retries before the owner is told (owner only): `maxRounds` is a whole number from 1 to 10, or null to clear it so the default (3) applies. It counts for checks started afterwards; a check already running keeps the figure it started with. This is the form the chat uses.
+
+Arguments:
+
+- `maxRounds`: 1 to 10, or null to clear
 - `expectedRevision` (optional): the revision of the setting you read
 
 Result: `{ revision }`.
