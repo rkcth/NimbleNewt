@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { FileBlobStore } from "../artifacts/index.js";
 import { MemoryStorage } from "../storage/index.js";
-import { BackupEncryption, ProofRefused, UnlockFailed, PasscodeRefused, createBackup, createKeyring, restoreBackup, unlockWithPasscode, unlockWithRecovery, verifyBackup, type Keyring } from "./index.js";
-import { CHUNK_BYTES, beginSeal, openSink, readPlain, type BackupCipher } from "./crypto.js";
+import { BackupEncryption, ProofRefused, UnlockFailed, parseKeyring, PasscodeRefused, createBackup, createKeyring, restoreBackup, unlockWithPasscode, unlockWithRecovery, verifyBackup, type Keyring } from "./index.js";
+import { CHUNK_BYTES, SealedFileBad, beginSeal, openSink, readPlain, type BackupCipher } from "./crypto.js";
 import { runBackupCli } from "./cli.js";
 
 const AT = "2026-10-29T10:00:00.000Z";
@@ -36,7 +36,10 @@ test("a wrong passcode or the wrong recovery file never opens the key, with one 
   await assert.rejects(createKeyring({ passcode: "aaaaaaaaaaaaaaaa", scrypt: FAST }), PasscodeRefused);
   await assert.rejects(createKeyring({ passcode: PASS, scrypt: { N: 2 ** 10, r: 8, p: 1 } }));
   // A keyring asking for tiny or enormous work is refused before any derivation (no downgrade, no memory bomb).
-  for (const N of [2 ** 10, 2 ** 24]) await assert.rejects(unlockWithPasscode({ ...keyring, wrappers: keyring.wrappers.map((w) => w.kind === "passcode" ? { ...w, kdf: { ...w.kdf, N } } : w) } as Keyring, PASS));
+  // It is refused as a bad key record (not as a failed unlock): the check happens before any derivation, so nothing was spent.
+  for (const N of [2 ** 10, 2 ** 15, 2 ** 19, 2 ** 20, 2 ** 24]) await assert.rejects(unlockWithPasscode({ ...keyring, wrappers: keyring.wrappers.map((w) => w.kind === "passcode" ? { ...w, kdf: { ...w.kdf, N } } : w) } as Keyring, PASS), (e: unknown) => e instanceof SealedFileBad && /key derivation settings/.test(e.message), `N=${N}`);
+  // The ceiling is 2^18: a keyring at the ceiling is read, one above is not.
+  parseKeyring({ ...keyring, wrappers: keyring.wrappers.map((w) => w.kind === "passcode" ? { ...w, kdf: { ...w.kdf, N: 2 ** 18 } } : w) });
 });
 
 test("an encrypted backup holds nothing readable, restores with the passcode or the recovery file alone, and is not verified without one (card K01b)", async () => {
@@ -63,7 +66,7 @@ test("an encrypted backup holds nothing readable, restores with the passcode or 
     const r1 = await restoreBackup(path, t1, { unlock: byPass, blobs: b1 });
     assert.equal(r1.blobsRestored, 1);
     assert.equal((await t1.getAggregate({ kind: "task", id: "task-a" }))?.body["title"], SECRET_TITLE);
-    assert.ok(await b1.has?.(put.digest) ?? true);
+    assert.equal(readFileSync(b1.pathOf(put.digest), "utf8"), "blob-plan-text-5521", "the blob came back with the same bytes");
     // The recovery file alone does the same on a new machine from the backup alone.
     const t2 = new MemoryStorage(); const b2 = await FileBlobStore.open({ directory: fresh[1]! });
     await restoreBackup(path, t2, { unlock: unlockWithRecovery(manifest.encryption!.keyring, recoveryFile), blobs: b2 });

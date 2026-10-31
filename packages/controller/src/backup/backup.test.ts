@@ -99,7 +99,7 @@ test("an interrupted backup leaves no folder that looks complete, and the next o
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-const info = (iso: string, kind: BackupKind = "scheduled"): BackupInfo => ({ path: `/b/${iso}-${kind}`, manifest: { createdAt: iso, kind } as never });
+const info = (iso: string, kind: BackupKind = "scheduled"): BackupInfo => ({ path: `/b/${iso}-${kind}`, manifest: { createdAt: iso, kind } as never, at: iso, trusted: true });
 
 test("retention keeps the newest of the last 7 days and 4 weeks, the newest of all, and every pre-upgrade snapshot", () => {
   const days = Array.from({ length: 40 }, (_, i) => info(new Date(Date.UTC(2026, 9, 29) - i * 86_400_000 + 3 * 3_600_000).toISOString()));

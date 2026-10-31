@@ -683,13 +683,13 @@ Result: `{ item: { items, next? } }`.
 
 #### `backup.encryption.status`
 
-Owner only: whether backups are encrypted (off unless the host set it up), the key ID, how many unlock methods the key has by kind, and the last proof. It never holds a passcode, a recovery key or any key material. Encryption is switched on and off on the host, because it needs the passcode and recovery file, which never travel through chat.
+Owner only: whether backups are encrypted (off unless the host set it up), the key ID and its fingerprint (the SHA-256 of the backup public key, which the installation pins), what is pinned and what the owner approved for the next start, how many unlock methods the key has by kind, the last proof, and warnings (a recovery file left on the host). It never holds a passcode, a recovery key or any key material. Encryption is switched on and off on the host, because it needs the passcode and recovery file, which never travel through chat.
 
 Arguments:
 
 - none
 
-Result: `{ item: { enabled, scope, keyId, createdAt, unlockMethods: { passcode, recovery }, lastProof? } }`, or `{ item: { enabled: false } }`.
+Result: `{ item: { enabled, scope, keyId, createdAt, fingerprint, warnings, pinned?, approvedNext?, unlockMethods: { passcode, recovery }, lastProof? } }`, or `{ item: { enabled: false } }`.
 
 #### `backup.list`
 
@@ -2830,6 +2830,19 @@ Arguments:
 - `commandId`: required
 
 Result: `{ item: { name, createdAt, kind, schemaVersion, epoch, rows } }`.
+
+#### `backup.encryption.rekey`
+
+Owner only: approves a new backup key by its fingerprint (as `backup encryption-setup` printed it, 64 hexadecimal characters), or withdraws the approval with null. The installation pins the backup key it first used and refuses to start with a different one; this is the owner's word that the change is meant. Do it while the controller runs with the old keyring, then replace the keyring file and restart. It never changes the pin itself, and old backups stay readable only with the old key's passcode or recovery file.
+
+Arguments:
+
+- `fingerprint`: the new key's fingerprint, or null
+- `expectedRevision` (optional): the pinRevision you read
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
 
 #### `backup.encryption.verify`
 

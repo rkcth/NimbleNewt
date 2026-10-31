@@ -1,8 +1,8 @@
-import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { createHash, timingSafeEqual } from "node:crypto";
+import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { SNAPSHOT_TABLES } from "../storage/index.js";
-import { UnlockFailed, hasherFor, parseKeyring, readPlain, type BackupCipher, type BackupKey } from "./crypto.js";
+import { SNAPSHOT_TABLES, canonicalJson } from "../storage/index.js";
+import { MAX_JSON_BYTES, UnlockFailed, hasherFor, parseKeyring, readPlain, type BackupCipher, type BackupKey } from "./crypto.js";
 import { ARTIFACT_FOLDER, BACKUP_FORMAT, MANIFEST_FILE, tableFile, type BackupManifest, type BlobIndexLine } from "./format.js";
 
 export interface BackupCheck { readonly ok: boolean; readonly manifest?: BackupManifest; readonly problems: readonly string[] }
@@ -10,7 +10,11 @@ export interface BackupCheck { readonly ok: boolean; readonly manifest?: BackupM
 /** Reads and checks a backup's manifest (not the files): the format, the product, the complete mark and a file for every table. */
 export async function readManifest(path: string): Promise<{ manifest?: BackupManifest; problems: string[] }> {
   let raw: string;
-  try { raw = await readFile(join(path, MANIFEST_FILE), "utf8"); } catch { return { problems: ["there is no manifest: the backup was never finished"] }; }
+  try {
+    // A manifest is a few kilobytes plus a keyring; one far larger is not read (the folder can be changed by anyone who can write to it).
+    if ((await stat(join(path, MANIFEST_FILE))).size > MAX_JSON_BYTES * 4) return { problems: ["the manifest is too large to be a backup's"] };
+    raw = await readFile(join(path, MANIFEST_FILE), "utf8");
+  } catch { return { problems: ["there is no manifest: the backup was never finished"] }; }
   let manifest: BackupManifest;
   try { manifest = JSON.parse(raw) as BackupManifest; } catch { return { problems: ["the manifest is not readable"] }; }
   const problems: string[] = [];
@@ -44,6 +48,13 @@ export async function verifyBackup(path: string, options: { unlock?: BackupKey; 
   let cipher: BackupCipher | undefined;
   try { cipher = cipherOf(manifest, options.unlock); } catch (error) { return { ok: false, manifest, problems: [error instanceof Error ? error.message : "the backup cannot be unlocked"] }; }
   const sealed = cipher !== undefined;
+  // The manifest's own MAC comes first: everything below (names, counts, digests, notes) is read from a manifest that anyone with the folder could have changed.
+  if (cipher !== undefined) {
+    const { mac, ...rest } = manifest;
+    const expected = Buffer.from(cipher.manifestMac(canonicalJson(rest as never)), "hex");
+    const given = typeof mac === "string" && /^[0-9a-f]{64}$/.test(mac) ? Buffer.from(mac, "hex") : undefined;
+    if (given === undefined || given.length !== expected.length || !timingSafeEqual(given, expected)) return { ok: false, manifest, problems: ["the manifest was changed or is not the one this backup was made with"] };
+  }
   for (const entry of manifest.files) {
     if (entry.file !== tableFile(entry.table, sealed)) { problems.push(`${entry.table}: the file name ${JSON.stringify(entry.file)} is not the table's`); continue; }
     const hash = hasherFor(cipher);

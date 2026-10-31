@@ -87,13 +87,13 @@ export class BackupService {
     // After a failed run, wait before trying again: a full disk would otherwise be hit with a new copy every tick.
     if (this.#lastError !== undefined && this.#now().getTime() - Date.parse(this.#lastError.at) < (this.#options.retryAfterMs ?? 3_600_000)) return false;
     let newest;
-    try { newest = (await listBackups(this.#options.root)).find((b) => b.manifest.kind !== "pre-upgrade"); } catch (error) {
+    try { newest = (await listBackups(this.#options.root)).find((b) => b.manifest.kind !== "pre-upgrade" && b.trusted); } catch (error) {
       // A backups folder that cannot be read is a failed run: it shows in the status and is not retried every tick.
       this.#lastError = { at: this.#now().toISOString(), message: error instanceof Error ? error.message.slice(0, 300) : "the backups folder could not be read" };
       return false;
     }
     const every = this.#options.everyMs ?? 24 * 3_600_000;
-    if (newest !== undefined && this.#now().getTime() - Date.parse(newest.manifest.createdAt) < every) return false;
+    if (newest !== undefined && this.#now().getTime() - Date.parse(newest.at) < every) return false;
     try { await this.backUpNow("scheduled"); } catch { return false; } // the failure is kept in `status`
     return true;
   }

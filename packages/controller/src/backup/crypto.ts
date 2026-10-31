@@ -17,7 +17,11 @@ const HEADER = MAGIC.length + 16;
 export interface ScryptParams { readonly N: number; readonly r: number; readonly p: number }
 export const DEFAULT_SCRYPT: ScryptParams = { N: 2 ** 17, r: 8, p: 1 }; // 128 MiB
 const FLOOR_N = 2 ** 16; // 64 MiB at r=8
-const CEIL_N = 2 ** 20;
+const CEIL_N = 2 ** 18; // 256 MiB at r=8
+/** Most passcode wrappers a keyring may carry (each one costs a derivation to try), the longest wrapper ID, and the most JSON a keyring or manifest may be (it is read from disk that anyone with the folder can change). */
+export const MAX_PASSCODE_WRAPPERS = 2;
+const MAX_WRAPPER_ID = 32;
+export const MAX_JSON_BYTES = 1024 * 1024;
 export const MIN_PASSCODE_CHARS = 12;
 const MAX_PASSCODE_BYTES = 1024;
 
@@ -90,12 +94,21 @@ export async function createKeyring(options: { passcode: string; now?: () => Dat
   return { keyring, recoveryFile: { format: "nimblenewt-recovery", version: 1, keyId, recoveryKey: b64(recoveryKey) } };
 }
 
+/** A short name for the backup key, for the owner to compare and to pin: the SHA-256 of the public key (public information, safe to show). */
+export function keyringFingerprint(keyring: Keyring): string {
+  return createHash("sha256").update(unb64(keyring.publicKey, "public key")).digest("hex");
+}
+
 /** Reads a keyring from untrusted JSON (a manifest or the keyring file): the shape, sizes and settings are checked before anything is derived. */
 export function parseKeyring(value: unknown): Keyring {
   const k = value as Keyring;
+  let size = Number.POSITIVE_INFINITY;
+  try { size = Buffer.byteLength(JSON.stringify(value), "utf8"); } catch { /* not JSON */ }
+  if (size > MAX_JSON_BYTES) throw new SealedFileBad("the key record is too large");
   if (k === null || typeof k !== "object" || k.version !== KEYRING_VERSION || typeof k.keyId !== "string" || k.keyId.length > 64 || typeof k.publicKey !== "string" || !Array.isArray(k.wrappers) || k.wrappers.length < 1 || k.wrappers.length > 16) throw new SealedFileBad("the key record is not valid");
+  if (k.wrappers.filter((w) => w?.kind === "passcode").length > MAX_PASSCODE_WRAPPERS) throw new SealedFileBad("the key record has more passcode wrappers than this version accepts");
   for (const w of k.wrappers) {
-    if (w === null || typeof w !== "object" || typeof w.id !== "string" || (w.kind !== "passcode" && w.kind !== "recovery")) throw new SealedFileBad("a key wrapper is not valid");
+    if (w === null || typeof w !== "object" || typeof w.id !== "string" || w.id.length > MAX_WRAPPER_ID || (w.kind !== "passcode" && w.kind !== "recovery")) throw new SealedFileBad("a key wrapper is not valid");
     if (w.kind === "passcode") { if (w.kdf?.name !== "scrypt") throw new SealedFileBad("a key wrapper is not valid"); checkParams(w.kdf); unb64(w.salt, "salt", 16); }
     unb64(w.nonce, "nonce", 12); unb64(w.wrapped, "wrapped key");
   }
@@ -147,6 +160,8 @@ export class BackupCipher {
   constructor(root: Buffer) { this.#root = root; }
   fileKey(salt: Buffer, label: string): Buffer { return hkdf(this.#root, salt, `nn-backup-file:${label}`); }
   hasher() { return createHmac("sha256", hkdf(this.#root, Buffer.alloc(0), "nn-backup-mac")); }
+  /** The MAC over a backup's manifest (everything in it but the MAC itself, as canonical JSON), under a key of its own: it makes the name, time, kind, epoch, notes, skipped list and file list tamper-evident to whoever can unlock the backup. */
+  manifestMac(canonical: string): string { return createHmac("sha256", hkdf(this.#root, Buffer.alloc(0), "nn-backup-manifest-mac")).update(canonical).digest("hex"); }
 }
 
 /** Starts an encrypted backup from the public keyring only (no secret is needed, so a scheduled backup runs unattended). */

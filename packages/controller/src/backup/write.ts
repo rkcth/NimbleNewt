@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, open, rename, rm } from "node:fs/promises";
+import { mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { SNAPSHOT_TABLES, TABLE_SPECS, type ControllerStorage, type SnapshotRow, type SnapshotTable } from "../storage/index.js";
+import { SNAPSHOT_TABLES, TABLE_SPECS, canonicalJson, type ControllerStorage, type SnapshotRow, type SnapshotTable } from "../storage/index.js";
 import type { FileBlobStore } from "../artifacts/index.js";
 import { beginSeal, hasherFor, openSink, type BackupCipher, type BackupSeal, type Keyring } from "./crypto.js";
-import { ARTIFACT_FOLDER, ARTIFACT_INDEX, BACKUP_FORMAT, BACKUP_NOTES, MANIFEST_FILE, PARTIAL_SUFFIX, SEALED_SUFFIX, tableFile, type BackupArtifacts, type BackupFileEntry, type BackupKind, type BackupManifest } from "./format.js";
+import { ARTIFACT_FOLDER, ARTIFACT_INDEX, BACKUP_FORMAT, ENCRYPTION_MARKER, BACKUP_NOTES, MANIFEST_FILE, PARTIAL_SUFFIX, SEALED_SUFFIX, tableFile, type BackupArtifacts, type BackupFileEntry, type BackupKind, type BackupManifest } from "./format.js";
 
 export interface BackupOptions {
   /** The folder the backups live in; each backup is a folder of its own inside it. */
@@ -49,6 +49,8 @@ async function write(storage: Pick<ControllerStorage, "snapshot">, options: Back
     await mkdir(options.root, { recursive: true, mode: 0o700 });
     await rm(staging, { recursive: true, force: true });
     await mkdir(staging, { mode: 0o700 });
+    // The folder remembers that encrypted backups are kept in it, so a plain one that turns up later is not taken for one of them without being asked (the command line checks this).
+    if (options.encryption !== undefined) await writeFile(join(options.root, ENCRYPTION_MARKER), `${JSON.stringify({ keyId: options.encryption.keyId, at: at.toISOString() })}\n`, { flag: "wx", mode: 0o600 }).catch(() => undefined);
     const files: BackupFileEntry[] = [];
     let epoch = 0;
     for (const table of SNAPSHOT_TABLES) {
@@ -76,7 +78,9 @@ async function write(storage: Pick<ControllerStorage, "snapshot">, options: Back
       files.push({ table, file, rows, bytes, sha256: hash.digest("hex") });
     }
     const artifacts = options.blobs === undefined ? undefined : await copyBlobs(options.blobs, staging, cipher);
-    const manifest: BackupManifest = { format: BACKUP_FORMAT, product: "nimblenewt", name, createdAt: at.toISOString(), kind: options.kind, version: options.version, schemaVersion: snapshot.schemaVersion, epoch, files, ...(artifacts === undefined ? {} : { artifacts }), ...(sealing === undefined ? {} : { encryption: sealing.seal }), notes: BACKUP_NOTES, complete: true };
+    const unsigned: BackupManifest = { format: BACKUP_FORMAT, product: "nimblenewt", name, createdAt: at.toISOString(), kind: options.kind, version: options.version, schemaVersion: snapshot.schemaVersion, epoch, files, ...(artifacts === undefined ? {} : { artifacts }), ...(sealing === undefined ? {} : { encryption: sealing.seal }), notes: BACKUP_NOTES, complete: true };
+    // An encrypted backup's manifest ends with a keyed MAC over all of it, so the name, time, kind, epoch, notes, skipped list and file list cannot be changed by whoever only has the folder.
+    const manifest: BackupManifest = cipher === undefined ? unsigned : { ...unsigned, mac: cipher.manifestMac(canonicalJson(unsigned as never)) };
     const manifestHandle = await open(join(staging, MANIFEST_FILE), "wx", 0o600);
     try { await manifestHandle.write(`${JSON.stringify(manifest, null, 2)}\n`); await manifestHandle.sync(); } finally { await manifestHandle.close(); }
     await rename(staging, final);
