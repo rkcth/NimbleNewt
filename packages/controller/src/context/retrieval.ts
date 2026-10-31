@@ -40,6 +40,8 @@ export interface SummaryBody {
   /** The originals it was written from, each with a digest of the text at the time. */
   readonly sources: readonly { readonly source: SourceRef; readonly digest: string }[];
   readonly createdBy: string;
+  /** The task whose compaction wrote it (set by the controller, never by a caller): a resumable task's summaries are retained (card K06). */
+  readonly taskId?: string;
 }
 
 export type SourceState = "current" | "changed" | "unavailable";
@@ -244,7 +246,7 @@ export class RetrievalService {
   // ---- summaries ---------------------------------------------------------------------------------------------------------------
 
   /** Records a summary of originals the writer can read, in one project, with a digest of each. */
-  async summarize(principal: Principal, command: NoActor & { projectId: string; title: string; text: string; sources: readonly SourceRef[] }): Promise<{ id: string; replayed: boolean }> {
+  async summarize(principal: Principal, command: NoActor & { projectId: string; title: string; text: string; sources: readonly SourceRef[] }, internal: { readonly taskId?: string } = {}): Promise<{ id: string; replayed: boolean }> {
     onlyKnown(command, ["commandId", "projectId", "title", "text", "sources"]);
     const projectId = checkProjectId(command.projectId);
     const title = text(command.title, "title", { min: 1, max: 200 });
@@ -266,7 +268,7 @@ export class RetrievalService {
           kept.push({ source, digest: original.digest });
         }
         const ref: AggregateRef = { kind: "summary-record", id };
-        const value: SummaryBody = { projectId, title, text: body, sources: kept, createdBy: principal.id };
+        const value: SummaryBody = { projectId, title, text: body, sources: kept, createdBy: principal.id, ...(internal.taskId === undefined ? {} : { taskId: internal.taskId }) };
         return { ref, creates: true, changes: [{ type: "create", ref, body: value as unknown as JsonObject }], detail: { projectId, sources: kept.length } };
       },
     }));

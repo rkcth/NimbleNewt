@@ -129,6 +129,8 @@ export class SqliteStorage implements ControllerStorage {
     this.#db.exec("PRAGMA synchronous = FULL");
     this.#db.exec("PRAGMA foreign_keys = ON");
     this.#db.exec("PRAGMA trusted_schema = OFF");
+    // Deleted content is overwritten with zeros in the database file (card K06: a deleted record's text must not stay in free pages). The WAL and backups are handled by checkpoints and the backup rule.
+    this.#db.exec("PRAGMA secure_delete = ON");
     this.#db.exec("PRAGMA journal_size_limit = 67108864"); // the WAL file shrinks back to 64 MiB after a spike; auto-checkpoint stays at SQLite's default of 1000 pages
     const settings = this.settings();
     if (settings.synchronous !== "FULL" || !settings.foreignKeys) throw new StorageError("unavailable", `the durability settings did not take effect: ${JSON.stringify(settings)}`);

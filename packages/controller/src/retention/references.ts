@@ -49,7 +49,17 @@ export class RetainedMaterial {
       else if (r.kind === "history-entry" && typeof r.scopeId === "string") out.#add("history-scope", r.scopeId, reason);
       else if (r.kind === "owner-decision" && typeof r.id === "string") out.#add("decision", r.id, reason);
     };
-    await scan("desk-record", (a) => { const b = a.body as { taskId?: unknown }; if (live(b.taskId)) out.#add("desk-record", a.id, `written for task ${b.taskId}, which can still resume`); });
+    const liveDesk = new Map<string, string>();
+    await scan("desk-record", (a) => { const b = a.body as { taskId?: unknown }; if (live(b.taskId)) { liveDesk.set(a.id, b.taskId); out.#add("desk-record", a.id, `written for task ${b.taskId}, which can still resume`); } });
+    // A summary has no task of its own on older records: it belongs to a resumable task when it names one, or when it was built from that task's desk records (its sources).
+    await scan("summary-record", (a) => {
+      const b = a.body as { taskId?: unknown; sources?: { source?: { kind?: string; id?: string } }[] };
+      if (live(b.taskId)) { out.#add("summary-record", a.id, `summary written by task ${b.taskId}, which can still resume`); return; }
+      for (const x of Array.isArray(b.sources) ? b.sources : []) {
+        const t = x?.source?.kind === "desk-record" && typeof x.source.id === "string" ? liveDesk.get(x.source.id) : undefined;
+        if (t !== undefined) { out.#add("summary-record", a.id, `built from records of task ${t}, which can still resume`); return; }
+      }
+    });
     await scan("artifact", (a) => { const b = a.body as { taskId?: unknown }; if (live(b.taskId)) out.#add("artifact", a.id, `produced by task ${b.taskId}, which can still resume`); });
     await scan("history-scope", (a) => { const b = a.body as { taskId?: unknown }; if (live(b.taskId)) out.#add("history-scope", a.id, `history of task ${b.taskId}, which can still resume or be replayed`); });
     await scan("ctx-compaction", (a) => {

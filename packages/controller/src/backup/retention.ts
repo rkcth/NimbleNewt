@@ -24,7 +24,9 @@ export async function listBackups(root: string): Promise<BackupInfo[]> {
     const named = parseBackupName(name);
     // A folder whose name is not a backup's has no time retention can rely on: it is listed, never deleted, and counts for nothing.
     const trusted = named !== undefined && read.manifest.name === name && read.manifest.kind === named.kind && secondOf(read.manifest.createdAt) === named.at;
-    out.push({ path, manifest: read.manifest, at: named?.at ?? "0000-00-00T00:00:00.000Z", trusted });
+    // Without a name time that can be relied on, the folder's own modification time stands in, so such a folder ages out like any other instead of staying for ever (a deleted record's text could sit in it).
+    const mtime = named === undefined ? await stat(path).then((s) => s.mtime.toISOString(), () => undefined) : undefined;
+    out.push({ path, manifest: read.manifest, at: named?.at ?? mtime ?? "0000-00-00T00:00:00.000Z", trusted });
   }
   return out.sort((a, b) => b.at.localeCompare(a.at));
 }
@@ -40,7 +42,7 @@ export function chooseKept(backups: readonly BackupInfo[], retention: { daily: n
   const newestFirst = backups.filter((b) => b.trusted).sort((a, b) => b.at.localeCompare(a.at));
   const kept = new Set<string>();
   // A backup whose manifest does not agree with its name is never deleted here and never takes the place of a trusted one in a rule.
-  for (const b of backups) if (!b.trusted) kept.add(b.path);
+  // An untrusted backup is kept while it is no older than the oldest backup the rules keep (so it expires with the others); with no trusted backup at all, everything is kept.
   const first = newestFirst[0];
   if (first !== undefined) kept.add(first.path);
   for (const b of newestFirst) if (b.manifest.kind === "pre-upgrade") kept.add(b.path);
@@ -56,6 +58,8 @@ export function chooseKept(backups: readonly BackupInfo[], retention: { daily: n
   };
   keepBy(day, retention.daily);
   keepBy(week, retention.weekly);
+  const oldestKept = newestFirst.filter((b) => kept.has(b.path)).map((b) => b.at).sort()[0];
+  for (const b of backups) if (!b.trusted && (oldestKept === undefined || b.at >= oldestKept)) kept.add(b.path);
   return kept;
 }
 

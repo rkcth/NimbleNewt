@@ -5,6 +5,7 @@ import { createInterface } from "node:readline";
 import { SNAPSHOT_TABLES, canonicalJson, type ControllerStorage, type SnapshotRow } from "../storage/index.js";
 import { cipherOf, blobFile, readAll, verifyBackup } from "./verify.js";
 import { readPlain, type BackupKey } from "./crypto.js";
+import { ledgerFilter, type LedgerEntry } from "../retention/ledger.js";
 import { ARTIFACT_FOLDER, type BackupManifest, type BlobIndexLine } from "./format.js";
 
 export class RestoreRefused extends Error {
@@ -20,6 +21,8 @@ export interface RestoreResult {
   readonly deliveriesToResend: number;
   /** Artifact blobs put back into the artifact store. */
   readonly blobsRestored: number;
+  /** Records the deletion ledger blanked or removed again, so a backup older than a deletion does not bring the text back (card K06). */
+  readonly deletionsReapplied: number;
 }
 
 const RESTORED_EVIDENCE = canonicalJson({ restoredFromBackup: true, note: "this effect was intended when the backup was taken; whether it happened afterwards is not known, so it must be reconciled with the outside world and is never run again" });
@@ -28,7 +31,7 @@ const RESTORED_EVIDENCE = canonicalJson({ restoredFromBackup: true, note: "this 
  * Restores a backup into an empty store (one no controller has owned). The backup is verified first, against its manifest and the store's schema version; nothing is written when it fails. An interrupted restore leaves
  * a partly filled store, which the caller discards (a restore always starts from a new, empty database), because the state row that makes a store look used is written last.
  */
-export async function restoreBackup(path: string, storage: ControllerStorage, options: { pageSize?: number; /** Where the backup's artifact blobs go; required when the backup has any. */ blobs?: FileBlobStore; /** The unlocked key, for an encrypted backup. */ unlock?: BackupKey; /** Refuse a backup that is not encrypted. */ requireEncrypted?: boolean } = {}): Promise<RestoreResult> {
+export async function restoreBackup(path: string, storage: ControllerStorage, options: { pageSize?: number; /** Where the backup's artifact blobs go; required when the backup has any. */ blobs?: FileBlobStore; /** The unlocked key, for an encrypted backup. */ unlock?: BackupKey; /** The deletions recorded outside the database (`DeletionLedger.read`): applied to the rows as they are restored. */ deletions?: readonly LedgerEntry[]; /** Refuse a backup that is not encrypted. */ requireEncrypted?: boolean } = {}): Promise<RestoreResult> {
   const check = await verifyBackup(path, { ...(options.unlock === undefined ? {} : { unlock: options.unlock }), ...(options.requireEncrypted === undefined ? {} : { requireEncrypted: options.requireEncrypted }) });
   if (!check.ok || check.manifest === undefined) throw new RestoreRefused(`the backup cannot be restored: ${check.problems.join("; ")}`);
   const manifest = check.manifest;
@@ -55,6 +58,7 @@ export async function restoreBackup(path: string, storage: ControllerStorage, op
   let total = 0;
   let marked = 0;
   let resend = 0;
+  const ledger = ledgerFilter(options.deletions ?? []);
   for (const table of SNAPSHOT_TABLES) {
     const entry = manifest.files.find((f) => f.table === table)!;
     let batch: SnapshotRow[] = [];
@@ -64,10 +68,11 @@ export async function restoreBackup(path: string, storage: ControllerStorage, op
       let row = JSON.parse(line) as SnapshotRow;
       if (table === "effects" && row["status"] === "intended") { row = { ...row, status: "uncertain", evidence: RESTORED_EVIDENCE }; marked += 1; }
       if (table === "deliveries" && row["state"] !== "delivered") resend += 1;
+      if (table === "aggregates") { const kept = ledger.apply(row); if (kept === undefined) continue; row = kept; }
       batch.push(row);
       if (batch.length >= pageSize) await flush();
     }
     await flush();
   }
-  return { manifest, rows: total, effectsMarkedUncertain: marked, deliveriesToResend: resend, blobsRestored: blobs };
+  return { manifest, rows: total, effectsMarkedUncertain: marked, deliveriesToResend: resend, blobsRestored: blobs, deletionsReapplied: ledger.touched() };
 }

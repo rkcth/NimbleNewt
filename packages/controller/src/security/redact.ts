@@ -7,7 +7,7 @@ import { CREDENTIAL_PATTERNS } from "./credential-patterns.js";
 export const REDACTED = "[redacted]";
 
 /** A field is sensitive by its last word (`apiKey`, `client_secret`, `accessToken`, `password`); a plural such as `inputTokens` is a count, not a secret. */
-const SENSITIVE_LAST_WORD = new Set(["secret", "secrets", "token", "password", "passwords", "passwd", "credential", "credentials", "apikey", "authorization", "cookie", "cookies", "key"]);
+const SENSITIVE_LAST_WORD = new Set(["secret", "secrets", "token", "password", "passwords", "passwd", "credential", "credentials", "apikey", "authorization", "cookie", "cookies", "passcode", "pin", "key"]);
 const SENSITIVE_PAIRS = /(?:api|private|access|secret|auth|signing)[-_ ]?key$/i;
 function sensitiveName(name: string): boolean {
   if (SENSITIVE_PAIRS.test(name)) return true;

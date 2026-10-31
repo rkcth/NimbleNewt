@@ -25,7 +25,7 @@ test("a full disk is recognised from the driver's error however it is wrapped", 
 
 test("checkpoints, stops, recovery records and retention commands are critical; ordinary writes are not", () => {
   for (const t of ["continuation.capture", "continuation.resume", "stop.request", "stop.advance", "recovery-point.record", "stall.recover.begin", "resume.start", "pause.observe", "retention.delete", "retention.settings.set", "notification.emit"]) assert.equal(isCriticalOperation(op(t)), true, t);
-  for (const t of ["desk.write", "task.create", "note.write", "agent.message", "notification.configure"]) assert.equal(isCriticalOperation(op(t)), false, t);
+  for (const t of ["desk.write", "task.create", "note.write", "agent.message", "notification.configure", "retention.archive", "retention.restore"]) assert.equal(isCriticalOperation(op(t)), false, t);
   assert.equal(isCriticalOperation({ audit: [] }), false);
 });
 
@@ -54,12 +54,12 @@ test("the reserve is a real file; it is given back once, made again only when as
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
-async function guarded(values: Partial<RetentionValues>, dir: string) {
+async function guarded(values: Partial<RetentionValues>, dir: string, ttlMs = 0) {
   const raw = new MemoryStorage();
   const { epoch } = await raw.acquireEpoch({ holder: "t", at: "2026-10-30T10:00:00.000Z" });
   const reserve = new ReserveFile(join(dir, ".r"));
   await reserve.apply(100_000);
-  const meter = new QuotaMeter(raw, { ttlMs: 0 });
+  const meter = new QuotaMeter(raw, { ttlMs });
   const g = guardStorage(raw, { reserve, meter, values: async () => ({ ...RETENTION_DEFAULTS, ...values }) });
   // The disk is full until room is made; the reserve file's room is all that is left, enough for one record.
   let diskFull = true; let attempts = 0; let room = 0; let sawReserve = true;
@@ -136,6 +136,20 @@ test("quotas: off by default, per project and per agent when set, counted from t
     await q.g.applyOperation(op("history.open", [create("history-scope", "hst-1", { projectId: "proj-d", count: 0 })]));
     await assert.rejects(() => q.g.applyOperation(op("history.append", [scope(1), create("history-entry", "hst-1.1", { scope: "hst-1", seq: 1, role: "user", author: "agent:z", text: "y".repeat(4500) })])), /project proj-d is over its storage quota/);
     assert.deepEqual([...addedBy(op("x", [create("history-scope", "hst-1", { projectId: "proj-d" }), create("history-entry", "hst-1.1", { scope: "hst-1", text: "hi" })])).project.keys()], ["proj-d"]);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test("quotas: an update counts only the bytes it adds, so rewriting a record does not inflate the usage; a delete frees what it held (card K06 review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-qd-"));
+  try {
+    const rec = (id: string, size: number) => ({ projectId: "proj-a", owner: "agent:a", title: "t", body: "x".repeat(size) });
+    const q = await guarded({ quotaProjectBytes: 4000 }, d, 3_600_000); q.setFull(false); await q.reserve.apply(0);
+    await q.g.applyOperation(op("desk.write", [create("desk-record", "d1", rec("d1", 1000))]));
+    for (let r = 1; r <= 6; r++) await q.g.applyOperation(op("desk.write", [{ type: "update", ref: { kind: "desk-record", id: "d1" }, expectedRevision: r, body: rec("d1", 1000) as never }]));
+    // Counted at the full size each time, six rewrites would have taken 7000 bytes of a 4000 quota.
+    await q.g.applyOperation(op("desk.write", [create("desk-record", "d2", rec("d2", 1500))]));
+    await q.g.applyOperation({ ...op("desk.delete", [{ type: "delete", ref: { kind: "desk-record", id: "d2" }, expectedRevision: 1 }]), audit: [{ type: "desk.delete", subject: { kind: "desk-record", id: "d2" }, detail: {} }] });
+    await q.g.applyOperation(op("desk.write", [create("desk-record", "d3", rec("d3", 2500))]));
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 

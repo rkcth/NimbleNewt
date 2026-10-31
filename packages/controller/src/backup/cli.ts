@@ -3,7 +3,8 @@ import { PostgresStorage } from "../storage/postgres/index.js";
 import { SqliteStorage } from "../storage/sqlite/index.js";
 import type { ControllerStorage } from "../storage/types.js";
 import { mkdir, rm, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { DeletionLedger, LEDGER_FILE } from "../retention/ledger.js";
 import { UnlockFailed, createKeyring, keyringFingerprint, parseKeyring, unlockWithPasscode, unlockWithRecovery, type BackupKey } from "./crypto.js";
 import { readSecretFile, SecretFileRefused } from "./secret-file.js";
 import { ENCRYPTION_MARKER } from "./format.js";
@@ -75,7 +76,7 @@ export async function runBackupCli(argv: readonly string[], print: (line: string
       for (const p of check.problems) print(`problem: ${p}`);
       return 1;
     }
-    const opts = options(rest, ["sqlite", "postgres", "schema", "artifacts", "passcode-file", "recovery-file", "require-encrypted", "allow-plain"]);
+    const opts = options(rest, ["sqlite", "postgres", "schema", "artifacts", "passcode-file", "recovery-file", "require-encrypted", "allow-plain", "deletions"]);
     if (typeof opts === "string") { print(opts); print(USAGE); return 2; }
     if ((opts.get("sqlite") === undefined) === (opts.get("postgres") === undefined)) { print("give exactly one of --sqlite and --postgres"); return 2; }
     if (opts.get("schema") !== undefined && opts.get("postgres") === undefined) { print("--schema goes with --postgres"); return 2; }
@@ -87,8 +88,11 @@ export async function runBackupCli(argv: readonly string[], print: (line: string
     else storage = await PostgresStorage.open({ connectionString: opts.get("postgres")!, ...(opts.get("schema") === undefined ? {} : { schema: opts.get("schema")! }) });
     try {
       const blobs = opts.get("artifacts") === undefined ? undefined : await FileBlobStore.open({ directory: opts.get("artifacts")! });
-      const done = await restoreBackup(folder, storage, { ...(blobs === undefined ? {} : { blobs }), ...unlocked });
+      // Deletions the owner asked for after this backup was made are re-applied, so restoring an old backup does not bring a deleted record's text back.
+      const ledgerPath = opts.get("deletions") ?? join(dirname(resolve(folder)), LEDGER_FILE);
+      const done = await restoreBackup(folder, storage, { ...(blobs === undefined ? {} : { blobs }), ...unlocked, deletions: await new DeletionLedger(ledgerPath).read() });
       print(`restored ${done.rows} rows${done.blobsRestored > 0 ? ` and ${done.blobsRestored} artifact files` : ""} from ${done.manifest.name}`);
+      if (done.deletionsReapplied > 0) print(`${done.deletionsReapplied} records deleted at your request after this backup was made were blanked or removed again`);
       if (done.effectsMarkedUncertain > 0) print(`${done.effectsMarkedUncertain} actions on the outside were only intended when the backup was taken; they are marked uncertain and are never run again, so check what really happened`);
       if (done.deliveriesToResend > 0) print(`${done.deliveriesToResend} messages had not been delivered when the backup was taken; they will be sent again`);
       return 0;

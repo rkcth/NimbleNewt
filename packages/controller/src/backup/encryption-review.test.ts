@@ -119,8 +119,9 @@ test("retention does not trust a manifest time that disagrees with the backup's 
     assert.equal(all.filter((b) => b.trusted).length, 7);
     assert.deepEqual(all.map((b) => b.at).slice(0, 2), [new Date(Date.parse(AT)).toISOString().replace(/\.\d+Z$/, ".000Z"), new Date(Date.parse(AT) - 86_400_000).toISOString().replace(/\.\d+Z$/, ".000Z")], "ordered by the folder name's time, not the manifest's");
     const pruned = await pruneBackups(root, { now: () => new Date(AT) });
-    assert.ok(existsSync(forged) && existsSync(old), "an untrusted backup is not deleted");
-    assert.equal(pruned.deleted.length, 0, "7 trusted days are kept, the untrusted ones are not counted and not removed");
+    assert.ok(existsSync(forged), "an untrusted backup inside the retention window is kept");
+    assert.ok(!existsSync(old), "an untrusted backup older than the oldest backup the rules keep expires with the others (card K06: it may hold deleted text)");
+    assert.deepEqual(pruned.deleted, [old], "the 7 trusted days are kept, the untrusted ones are not counted");
     // A backup folder renamed to another time is untrusted for the same reason.
     const renamed = join(root, "backup-20300101T000000Z-scheduled");
     execFileSync("mv", [made[3]!, renamed]);

@@ -4362,7 +4362,7 @@ Arguments:
 - `reason`: why (recorded)
 - `dryRun` (optional): true to preview
 
-Result: `{ status: deleted | retained | preview, derived, backups, retained?, deletionId? }`.
+Result: `{ status: deleted | partial | retained | preview, derived, backups, retained?, deletionId?, remaining? }`. `partial` (more than one request handles): ask again with the same commandId to continue. Backups made before the deletion hold the text until they expire; a restore re-applies the deletion ledger.
 
 Completion: finished when accepted (`completed: true`).
 
@@ -4387,7 +4387,7 @@ Arguments:
 
 - `taskId`: the task
 
-Result: `{ taskId, restored, conflicts }`.
+Result: `{ taskId, restored, conflicts, conflictDetails }` (a reason for each conflict).
 
 Completion: finished when accepted (`completed: true`).
 

@@ -85,8 +85,8 @@ export function isDiskFull(error: unknown): boolean {
   return false;
 }
 
-/** The commands whose records must reach the disk when it is nearly full: checkpoints, stops, recovery and resume records, pauses, the notice that tells the owner (the disk-full warning itself), and the retention commands that free room. */
-const CRITICAL_PREFIXES = ["continuation.", "stop.", "recovery", "resume.", "stall.recover", "pause.", "retention.", "quiesce", "shutdown", "checkpoint", "notification.emit"] as const;
+/** The commands whose records must reach the disk when it is nearly full: checkpoints, stops, recovery and resume records, pauses, the notice that tells the owner (the disk-full warning itself), and the retention commands that free room (delete, run, expire, and changing the settings that raise a quota). Archive and restore ADD bytes (a copy of the text next to the stub), so they are ordinary writes and are refused when the disk is full or protected. */
+const CRITICAL_PREFIXES = ["continuation.", "stop.", "recovery", "resume.", "stall.recover", "pause.", "retention.delete", "retention.run", "retention.expire", "retention.settings", "quiesce", "shutdown", "checkpoint", "notification.emit"] as const;
 export const isCriticalOperation = (input: Pick<OperationInput, "audit">): boolean => {
   const first = input.audit[0]?.type;
   return first !== undefined && CRITICAL_PREFIXES.some((p) => first.startsWith(p));
@@ -120,12 +120,19 @@ export class QuotaMeter {
   readonly #ttlMs: number;
   readonly #now: () => number;
   #usage: { byProject: Map<string, number>; byAgent: Map<string, number>; partial: boolean; at: number } | undefined;
+  /** The pass in progress: a second caller waits for it instead of starting another scan of the whole store. */
+  #inflight: Promise<Usage> | undefined;
   constructor(storage: ControllerStorage, options: { ttlMs?: number; now?: () => number } = {}) { this.#storage = storage; this.#ttlMs = options.ttlMs ?? 60_000; this.#now = options.now ?? Date.now; }
 
   invalidate(): void { this.#usage = undefined; }
 
   async usage(): Promise<Usage> {
     if (this.#usage !== undefined && this.#now() - this.#usage.at < this.#ttlMs) return this.#usage;
+    this.#inflight ??= this.#scan().finally(() => { this.#inflight = undefined; });
+    return this.#inflight;
+  }
+
+  async #scan(): Promise<Usage> {
     const byProject = new Map<string, number>(); const byAgent = new Map<string, number>();
     let partial = false;
     const scopes = new Map<string, string>();
@@ -157,11 +164,11 @@ export class QuotaMeter {
     return this.#usage;
   }
 
-  /** Adds what was admitted to the kept figures (an update is counted at its full new size: the next pass corrects it). */
+  /** Adds the net change an operation made to the kept figures (an update counts only the bytes it adds or frees; a pass every `ttlMs` corrects the rest). */
   note(project: ReadonlyMap<string, number>, agent: ReadonlyMap<string, number>): void {
     if (this.#usage === undefined) return;
-    for (const [k, v] of project) this.#usage.byProject.set(k, (this.#usage.byProject.get(k) ?? 0) + v);
-    for (const [k, v] of agent) this.#usage.byAgent.set(k, (this.#usage.byAgent.get(k) ?? 0) + v);
+    for (const [k, v] of project) this.#usage.byProject.set(k, Math.max(0, (this.#usage.byProject.get(k) ?? 0) + v));
+    for (const [k, v] of agent) this.#usage.byAgent.set(k, Math.max(0, (this.#usage.byAgent.get(k) ?? 0) + v));
   }
 }
 
@@ -183,6 +190,23 @@ export function addedBy(input: Pick<OperationInput, "changes">): { project: Map<
   return { project, agent };
 }
 
+/** The net bytes an operation adds (negative: frees) to each project and writer: an update counts the difference to the record it replaces, a delete frees what the record held. */
+export async function netAdded(storage: Pick<ControllerStorage, "getAggregate">, input: Pick<OperationInput, "changes">): Promise<{ project: Map<string, number>; agent: Map<string, number> }> {
+  const out = addedBy(input);
+  const bump = (m: Map<string, number>, k: string | undefined, n: number): void => { if (k !== undefined) m.set(k, (m.get(k) ?? 0) + n); };
+  for (const c of input.changes) {
+    if (c.type !== "update" && c.type !== "delete") continue;
+    const meter = METERED[c.ref.kind];
+    if (meter === undefined) continue;
+    const old = await storage.getAggregate(c.ref);
+    if (old === undefined) continue;
+    const b = old.body as Record<string, unknown>; const n = meter.bytes(b);
+    const scopes = new Map<string, string>();
+    bump(out.project, meter.project(b, scopes), -n); bump(out.agent, meter.agent(b), -n);
+  }
+  return out;
+}
+
 export interface GuardOptions {
   readonly reserve?: ReserveFile;
   readonly meter: QuotaMeter;
@@ -199,10 +223,9 @@ export interface GuardOptions {
  */
 export function guardStorage(storage: ControllerStorage, options: GuardOptions): ControllerStorage {
   const now = options.now ?? (() => new Date().toISOString());
-  const refusal = async (input: OperationInput): Promise<DomainError | undefined> => {
+  const refusal = async (added: { project: Map<string, number>; agent: Map<string, number> }): Promise<DomainError | undefined> => {
     if (options.reserve?.released === true) return new DomainError("unavailable", "the disk is nearly full and the reserve for shutdown and recovery records is in use; only those records are written until room is made (free some space, or delete something: retention.delete)");
-    const added = addedBy(input);
-    if (added.project.size === 0 && added.agent.size === 0) return undefined;
+    if (![...added.project.values(), ...added.agent.values()].some((n) => n > 0)) return undefined;
     let values: RetentionValues | undefined;
     try { values = await options.values(); } catch { values = undefined; }
     if (values === undefined || (values.quotaProjectBytes === null && values.quotaAgentBytes === null)) return undefined;
@@ -213,14 +236,16 @@ export function guardStorage(storage: ControllerStorage, options: GuardOptions):
   };
   const apply = async (input: OperationInput): Promise<OperationResult> => {
     const critical = isCriticalOperation(input);
-    if (!critical) {
-      const refused = await refusal(input);
+    // Measured before the write: an update's net change is the difference to the record it replaces.
+    const added = critical ? undefined : await netAdded(storage, input).catch(() => addedBy(input));
+    if (added !== undefined) {
+      const refused = await refusal(added);
       // A repeat of an operation that already committed is answered with its stored result, which writes nothing, so a rule about new writes does not apply to it.
       if (refused !== undefined && (await storage.getOperation(input.operationId)) === undefined) throw refused;
     }
     try {
       const result = await storage.applyOperation(input);
-      if (!critical) { const added = addedBy(input); options.meter.note(added.project, added.agent); }
+      if (added !== undefined) options.meter.note(added.project, added.agent);
       return result;
     } catch (error) {
       if (!isDiskFull(error)) throw error;

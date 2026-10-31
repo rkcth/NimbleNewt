@@ -8,13 +8,21 @@ import { redact, redactText } from "../security/redact.js";
 import { canonicalJson, sha256 } from "../storage/json.js";
 import type { Aggregate, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import { diskSpace, QuotaMeter, type ReserveFile } from "./guard.js";
+import { stubDeskBody, type DeletionLedger } from "./ledger.js";
 import { RetainedMaterial } from "./references.js";
 import type { RetentionSettingsService, RetentionValues } from "./settings.js";
 
 const DAY = 86_400_000;
 const RUN_LIMIT = { default: 200, max: 1000 } as const;
 const SCAN_LIMIT = 50_000;
+/** The most operations one deletion request performs; past it the answer is `partial` with `remaining`, and the same command continues. */
 const DELETE_MEMBERS = 400;
+/** Holds are looked at again before each batch of this many removals. */
+const BATCH = 25;
+/** The runner reads the holds again before each batch of this many removals. */
+const REMOVE_BATCH = 25;
+interface Plan { desk: string[]; summaries: string[]; compactions: string[]; archives: string[]; others: { kind: string; id: string }[] }
+interface Found { desk: Aggregate[]; summaries: Aggregate[]; compactions: Aggregate[]; archives: Aggregate[]; others: { kind: string; id: string }[]; complete: boolean }
 const RECORD_ID = /^dsk-[a-z2-7]{20}$/;
 const TASK_ID = /^task-[a-z2-7]{20}$/;
 const PROJECT_ID = /^proj-[a-z2-7]{20}$/;
@@ -48,6 +56,10 @@ export interface RetentionDeps {
   /** The least time between two automatic runs of the runner (default one hour: a run reads the whole store). */
   readonly autoEveryMs?: number;
   readonly now?: () => number;
+  /** Where user-requested deletions are recorded outside the database, so a restore of an older backup re-applies them. */
+  readonly ledger?: DeletionLedger;
+  /** A test seam: called before each batch of removals. */
+  readonly beforeBatch?: (batch: number) => Promise<void>;
 }
 
 const isOwner = (by: Principal): boolean => by.kind === "owner";
@@ -90,7 +102,7 @@ export interface DeletionReport {
   readonly status: "deleted" | "retained" | "preview" | "partial";
   readonly recordId: string;
   readonly retained?: { kind: string; id: string; reasons: string[] }[];
-  readonly derived: { copies: string[]; summaries: string[]; compactions: string[]; archives: string[]; indexes: string; cachedReplies: string };
+  readonly derived: { copies: string[]; summaries: string[]; compactions: string[]; archives: string[]; others: string[]; indexes: string; cachedReplies: string };
   readonly backups: { handling: string; holding: number; staysUpToDays: number | null; note: string };
   readonly deletionId?: string;
   /** More members than one request handles: ask again (the same command) to finish. */
@@ -154,8 +166,9 @@ export class RetentionService {
 
   async #recent(kind: string, n: number): Promise<Aggregate[]> {
     const all: Aggregate[] = [];
-    await scan(this.#runner, kind, (a) => all.push(a), 5_000);
-    return all.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)).slice(0, n);
+    await scan(this.#runner, kind, (a) => all.push(a), SCAN_LIMIT);
+    // Newest first by the time of the record (not by the order of the IDs, which is a hash); ties by ID.
+    return all.sort((a, b) => (a.createdAt === b.createdAt ? (a.id < b.id ? 1 : -1) : a.createdAt < b.createdAt ? 1 : -1)).slice(0, n);
   }
 
   /** Whether the record is held by a resumable task or a replay, and why. */
@@ -228,9 +241,16 @@ export class RetentionService {
     if (!auto && options.confirm !== digest) throw new DomainError("invalid_command", "confirm: what retention would remove has changed since the preview (or confirm was not given); preview again and pass its digest", { field: "confirm" });
 
     const removedIds: string[] = [];
-    for (const c of candidates) {
-      const done = await this.#removeOne(by, c, values.derivedDays!);
-      if (done) removedIds.push(`${c.kind}/${c.id}`);
+    // A hold can appear while the run is going (a task resumes, a checkpoint cites a summary): the holds are read again before every batch, and a candidate held now is kept and shown as retained.
+    for (let i = 0; i < candidates.length; i += REMOVE_BATCH) {
+      await this.#deps.beforeBatch?.(i / REMOVE_BATCH);
+      const material = await RetainedMaterial.build(this.#runner.storage);
+      for (const c of candidates.slice(i, i + REMOVE_BATCH)) {
+        const why = material.why(c.kind, c.id);
+        if (why !== undefined) { if (retained.length < 200) retained.push({ kind: c.kind, id: c.id, reasons: why }); continue; }
+        const done = await this.#removeOne(by, c, values.derivedDays!);
+        if (done) removedIds.push(`${c.kind}/${c.id}`);
+      }
     }
     let deleted: string[] | undefined;
     if (backupsPort !== undefined) deleted = await backupsPort.prune(counts);
@@ -269,7 +289,11 @@ export class RetentionService {
           const fresh = await this.#runner.get(c.kind, c.id);
           if (fresh === undefined || fresh.revision !== c.revision) throw new DomainError("stale_revision", "changed since the preview");
           const ref = { kind: c.kind, id: c.id };
-          return { ref, creates: false, changes: [{ type: "delete", ref, expectedRevision: fresh.revision }], detail: { rule: "derived-days", days, ageDays: c.ageDays, ...(c.projectId === undefined ? {} : { projectId: c.projectId }) } };
+          // The archive of an archived stub goes with it: its original text must not outlive the stub.
+          const arc = await this.#runner.get("retention-archive", archiveIdOf(c.id));
+          const changes: Change[] = [{ type: "delete", ref, expectedRevision: fresh.revision }];
+          if (arc !== undefined) changes.push({ type: "delete", ref: { kind: "retention-archive", id: arc.id }, expectedRevision: arc.revision });
+          return { ref, creates: false, changes, ...(arc === undefined ? {} : { audit: [{ type: "retention.expire.archive", subject: { kind: "retention-archive", id: arc.id }, detail: { with: c.id } }] }), detail: { rule: "derived-days", days, ageDays: c.ageDays, ...(c.projectId === undefined ? {} : { projectId: c.projectId }) } };
         },
       }));
       return !r.replayed;
@@ -298,9 +322,14 @@ export class RetentionService {
   // ---- user-requested deletion ----------------------------------------------------------------------------------------------
 
   /**
-   * The owner deletes a desk record and what was made from it: the copies other agents made of it, the summaries that cite it (removed), the compactions that cite it (their summary text blanked and marked), and any archive of it. The text goes;
-   * a digest, who, why and when stay. A record a resumable task or a replay needs is NOT deleted: the request is recorded as retained, with the reasons, and nothing changes. The record says how backups are handled: existing backups
-   * are not altered; they hold the text until they expire under the backup rule, and the answer says for how long. Indexes and cached replies: none exist (said in the record).
+   * The owner deletes a desk record and what was made from it: the copies other agents made of it, the summaries that cite it (removed), the compactions that cite it and every later compaction built on them (their summary text blanked
+   * and marked, and their summary records removed), meeting summaries and stand-up briefs that quote it, and any archive of it. The text goes; a digest, who, why and when stay. A record a resumable task or a replay needs is NOT
+   * deleted: the request is recorded as retained, with the reasons, and nothing changes. Existing backups are not altered: they hold the text until they expire, the answer says for how long, and a restore re-applies the deletion
+   * ledger kept next to the backups. Indexes and cached replies: none exist (said in the record).
+   *
+   * The work is resumable: the first thing written is a deletion record "in progress" holding the plan and an attempt number; the step command IDs derive from the command ID and that attempt, so asking again with the same
+   * command ID continues where a crash or a bounded request stopped, and the final record (status deleted) is an upsert by the deletion ID. A request is bounded (`DELETE_MEMBERS` operations): when more remain the answer is
+   * `partial` with `remaining`, and asking again continues. Holds are looked at again before every batch of removals.
    */
   async delete(owner: Principal, command: { commandId: string; recordId: string; reason: string; dryRun?: boolean }): Promise<DeletionReport> {
     if (!isOwner(owner)) throw new DomainError("forbidden", `${owner.id} may not delete records`);
@@ -308,67 +337,53 @@ export class RetentionService {
     if (typeof command.reason !== "string" || command.reason.trim() === "" || command.reason.length > 300) invalid("reason", "must be 1 to 300 characters");
     if (redactText(command.reason) !== command.reason) invalid("reason", "looks like a credential or key");
     const base = scopedCommandId(owner.id, command.commandId);
+    const deletionId = derivedId("rtd", base);
     const root = await this.#runner.get("desk-record", command.recordId);
     if (root === undefined) throw new DomainError("not_found", "no such desk record");
     const values = await this.#deps.settings.effective();
-
-    // Everything that stands on the record.
-    const members = new Map<string, Aggregate>();
-    const summaries: Aggregate[] = []; const compactions: Aggregate[] = []; const archives: Aggregate[] = [];
-    const copyOf = new Set<string>([command.recordId]);
-    let complete = true;
-    const copies: Aggregate[] = [];
-    // Copies of copies share the same root: gather until no new one appears (bounded by the scan).
-    for (let round = 0; round < 4; round++) {
-      let added = false;
-      complete = (await scan(this.#runner, "desk-record", (a) => {
-        if (copyOf.has(a.id)) return;
-        const b = a.body as { copiedFrom?: string; origin?: { recordId?: string } };
-        if ((b.copiedFrom !== undefined && copyOf.has(b.copiedFrom)) || b.origin?.recordId === command.recordId) { copyOf.add(a.id); copies.push(a); added = true; }
-      })) && complete;
-      if (!added) break;
-    }
-    complete = (await scan(this.#runner, "summary-record", (a) => { const b = a.body as { sources?: { source?: { kind?: string; id?: string } }[] }; if ((b.sources ?? []).some((s) => s.source?.kind === "desk-record" && s.source.id !== undefined && copyOf.has(s.source.id))) summaries.push(a); })) && complete;
-    complete = (await scan(this.#runner, "ctx-compaction", (a) => { const b = a.body as { sources?: { kind?: string; id?: string }[]; pinned?: { kind?: string; id?: string }[] }; if ([...(b.sources ?? []), ...(b.pinned ?? [])].some((s) => s.kind === "desk-record" && s.id !== undefined && copyOf.has(s.id))) compactions.push(a); })) && complete;
-    for (const id of [...copyOf, ...summaries.map((x) => x.id)]) { const arc = await this.#runner.get("retention-archive", archiveIdOf(id)); if (arc !== undefined) archives.push(arc); }
-    members.set(command.recordId, root);
-    for (const c of copies) members.set(c.id, c);
-
-    const material = await RetainedMaterial.build(this.#runner.storage);
-    const held: { kind: string; id: string; reasons: string[] }[] = [];
-    for (const [id] of members) { const why = material.why("desk-record", id); if (why !== undefined) held.push({ kind: "desk-record", id, reasons: why }); }
-    for (const s of summaries) { const why = material.why("summary-record", s.id); if (why !== undefined) held.push({ kind: "summary-record", id: s.id, reasons: why }); }
-    for (const c of compactions) { const why = material.why("ctx-compaction", c.id); if (why !== undefined) held.push({ kind: "ctx-compaction", id: c.id, reasons: why }); }
-    if (!complete) held.push({ kind: "desk-record", id: command.recordId, reasons: ["too many records to find everything made from it safely; nothing was deleted"] });
-
     const backups = await this.#backupHandling(root.createdAt, values);
-    const derived = { copies: copies.map((c) => c.id), summaries: summaries.map((s) => s.id), compactions: compactions.map((c) => c.id), archives: archives.map((a) => a.id), ...NOT_STORED };
-    const deletionId = derivedId("rtd", base);
-    const recordBody = (status: string, extra: JsonObject = {}): JsonObject => ({ recordId: command.recordId, projectId: (root.body as { projectId?: string }).projectId ?? "", requestedBy: owner.id, reason: command.reason, at: this.#runner.now(), status, derived: derived as unknown as JsonObject, backups: backups as unknown as JsonObject, ...extra });
+    const prior = await this.#runner.get("retention-deletion", deletionId);
+    const priorBody = prior?.body as { status?: string; attempt?: number; plan?: Plan; derived?: DeletionReport["derived"] } | undefined;
+    if (priorBody?.status === "deleted" && priorBody.derived !== undefined && command.dryRun !== true) return { status: "deleted", recordId: command.recordId, derived: priorBody.derived, backups, deletionId };
 
+    const found = await this.#gather(root, command.recordId, priorBody?.status === "in-progress" ? priorBody.plan : undefined);
+    const members = found.desk;
+    const derived = { copies: found.desk.filter((a) => a.id !== command.recordId).map((c) => c.id), summaries: found.summaries.map((x) => x.id), compactions: found.compactions.map((c) => c.id), archives: found.archives.map((a) => a.id), others: found.others.map((o) => `${o.kind}/${o.id}`), ...NOT_STORED };
+    const heldNow = async (): Promise<{ kind: string; id: string; reasons: string[] }[]> => {
+      const material = await RetainedMaterial.build(this.#runner.storage);
+      const held: { kind: string; id: string; reasons: string[] }[] = [];
+      for (const a of members) { const why = material.why("desk-record", a.id); if (why !== undefined) held.push({ kind: "desk-record", id: a.id, reasons: why }); }
+      for (const x of found.summaries) { const why = material.why("summary-record", x.id); if (why !== undefined) held.push({ kind: "summary-record", id: x.id, reasons: why }); }
+      for (const c of found.compactions) { const why = material.why("ctx-compaction", c.id); if (why !== undefined) held.push({ kind: "ctx-compaction", id: c.id, reasons: why }); }
+      if (!found.complete) held.push({ kind: "desk-record", id: command.recordId, reasons: ["too many records to find everything made from it safely; nothing was deleted"] });
+      return held;
+    };
+    const held = await heldNow();
+    const recordBody = (status: string, extra: JsonObject = {}): JsonObject => ({ recordId: command.recordId, projectId: (root.body as { projectId?: string }).projectId ?? "", requestedBy: owner.id, reason: command.reason, at: this.#runner.now(), status, derived: derived as unknown as JsonObject, backups: backups as unknown as JsonObject, ...extra });
     if (command.dryRun === true) return { status: held.length > 0 ? "retained" : "preview", recordId: command.recordId, ...(held.length > 0 ? { retained: held } : {}), derived, backups };
 
-    if (held.length > 0) {
-      await this.#runner.command("retention.delete", { commandId: base, actor: owner.id }, async () => ({
-        payload: { recordId: command.recordId, reason: command.reason, outcome: "retained" },
-        build: async (): Promise<Built> => { const ref = { kind: "retention-deletion", id: deletionId }; return { ref, creates: true, changes: [{ type: "create", ref, body: recordBody("retained", { retained: held as unknown as JsonObject[] }) }], detail: { recordId: command.recordId, retained: held.length } }; },
-      }));
-      return { status: "retained", recordId: command.recordId, retained: held, derived, backups, deletionId };
-    }
+    const attempt = priorBody?.status === "in-progress" ? (priorBody.attempt ?? 1) : (priorBody?.attempt ?? 0) + 1;
+    const retain = async (list: typeof held): Promise<DeletionReport> => {
+      await this.#upsertDeletion(owner.id, `${base}.retained.${attempt}`, deletionId, recordBody("retained", { attempt, retained: list as unknown as JsonObject[] }));
+      return { status: "retained", recordId: command.recordId, retained: list, derived, backups, deletionId };
+    };
+    if (held.length > 0) return retain(held);
 
-    // The work, one operation per record, each safe to repeat. The deletion record comes last, so its existence means everything before it was done.
-    const total = members.size + summaries.length + compactions.length + archives.length;
-    if (total > DELETE_MEMBERS) throw new DomainError("invalid_command", `recordId: ${total} records stand on that record, more than one request handles (${DELETE_MEMBERS})`, { field: "recordId" });
+    // The plan and the attempt are on the record before any content changes: a crash leaves a trace that a second call continues from.
+    const plan: Plan = { desk: members.map((a) => a.id), summaries: found.summaries.map((x) => x.id), compactions: found.compactions.map((c) => c.id), archives: found.archives.map((a) => a.id), others: found.others.map((o) => ({ kind: o.kind, id: o.id })) };
+    if (priorBody?.status !== "in-progress") await this.#upsertDeletion(owner.id, `${base}.begin.${attempt}`, deletionId, recordBody("in-progress", { attempt, plan: plan as unknown as JsonObject }));
+    // The ledger outside the database is written before the first removal, so a restore of an older backup applies this deletion too.
+    await this.#deps.ledger?.append({ deletionId, at: this.#runner.now(), by: owner.id, reason: command.reason, desk: plan.desk, compactions: plan.compactions, removed: [...plan.summaries.map((id) => ({ kind: "summary-record", id })), ...plan.archives.map((id) => ({ kind: "retention-archive", id })), ...plan.others] });
+
     const at = this.#runner.now();
     const stub = (a: Aggregate): JsonObject => {
       const b = a.body as Record<string, unknown>;
-      const original = archives.find((x) => x.id === archiveIdOf(a.id))?.body as { original?: { title?: unknown; body?: unknown } } | undefined;
+      const original = found.archives.find((x) => x.id === archiveIdOf(a.id))?.body as { original?: { title?: unknown; body?: unknown } } | undefined;
       const text = original?.original ?? b;
-      const rest = Object.fromEntries(Object.entries(b).filter(([k]) => k !== "archived"));
-      return { ...rest, title: "", body: "", visibility: "private", deleted: { at, by: owner.id, reason: command.reason, contentDigest: digestOf({ title: text["title"] ?? "", body: text["body"] ?? "" }) } } as JsonObject;
+      return stubDeskBody(b, { at, by: owner.id, reason: command.reason, contentDigest: digestOf({ title: text["title"] ?? "", body: text["body"] ?? "" }) }) as JsonObject;
     };
     const step = async (name: string, kind: string, id: string, build: (fresh: Aggregate) => Change[]): Promise<void> => {
-      await this.#runner.command(`retention.delete.${name}`, { commandId: cmdId("rtd", base, kind, id), actor: owner.id }, async () => ({
+      await this.#runner.command(`retention.delete.${name}`, { commandId: cmdId("rtd", base, attempt, kind, id), actor: owner.id }, async () => ({
         payload: { kind, id, deletion: deletionId },
         build: async (): Promise<Built> => {
           const fresh = await this.#runner.get(kind, id);
@@ -378,19 +393,103 @@ export class RetentionService {
         },
       })).catch((error: unknown) => { if (error instanceof DomainError && error.code === "not_found") return; throw error; });
     };
-    for (const [id, a] of members) {
+    const work: { name: string; kind: string; id: string; build: (f: Aggregate) => Change[] }[] = [];
+    for (const a of members) {
       if ((a.body as { deleted?: unknown }).deleted !== undefined) continue;
       // Someone else's deletion of the same record may have got here first: its digest of the original is kept, not overwritten with one of the blank.
-      await step("record", "desk-record", id, (f) => [(f.body as { deleted?: unknown }).deleted !== undefined ? { type: "check", ref: { kind: "desk-record", id }, expectedRevision: f.revision } : { type: "update", ref: { kind: "desk-record", id }, expectedRevision: f.revision, body: stub(f) }]);
+      work.push({ name: "record", kind: "desk-record", id: a.id, build: (f) => [(f.body as { deleted?: unknown }).deleted !== undefined ? { type: "check", ref: { kind: "desk-record", id: a.id }, expectedRevision: f.revision } : { type: "update", ref: { kind: "desk-record", id: a.id }, expectedRevision: f.revision, body: stub(f) }] });
     }
-    for (const arc of archives) await step("archive", "retention-archive", arc.id, (f) => [{ type: "delete", ref: { kind: "retention-archive", id: arc.id }, expectedRevision: f.revision }]);
-    for (const s of summaries) await step("summary", "summary-record", s.id, (f) => [{ type: "delete", ref: { kind: "summary-record", id: s.id }, expectedRevision: f.revision }]);
-    for (const c of compactions) await step("compaction", "ctx-compaction", c.id, (f) => [{ type: "update", ref: { kind: "ctx-compaction", id: c.id }, expectedRevision: f.revision, body: { ...(f.body as Record<string, unknown>), summary: "", digest: "", sourceDeleted: true } as JsonObject }]);
-    await this.#runner.command("retention.delete", { commandId: base, actor: owner.id }, async () => ({
-      payload: { recordId: command.recordId, reason: command.reason, outcome: "deleted" },
-      build: async (): Promise<Built> => { const ref = { kind: "retention-deletion", id: deletionId }; return { ref, creates: true, changes: [{ type: "create", ref, body: recordBody("deleted") }], detail: { recordId: command.recordId, copies: copies.length, summaries: summaries.length, compactions: compactions.length } }; },
-    }));
+    for (const arc of found.archives) work.push({ name: "archive", kind: "retention-archive", id: arc.id, build: (f) => [{ type: "delete", ref: { kind: "retention-archive", id: arc.id }, expectedRevision: f.revision }] });
+    for (const x of found.summaries) work.push({ name: "summary", kind: "summary-record", id: x.id, build: (f) => [{ type: "delete", ref: { kind: "summary-record", id: x.id }, expectedRevision: f.revision }] });
+    for (const o of found.others) work.push({ name: "derived", kind: o.kind, id: o.id, build: (f) => [{ type: "delete", ref: { kind: o.kind, id: o.id }, expectedRevision: f.revision }] });
+    for (const c of found.compactions) {
+      if ((c.body as { sourceDeleted?: unknown }).sourceDeleted === true && (c.body as { summary?: unknown }).summary === "") continue;
+      work.push({ name: "compaction", kind: "ctx-compaction", id: c.id, build: (f) => [{ type: "update", ref: { kind: "ctx-compaction", id: c.id }, expectedRevision: f.revision, body: { ...(f.body as Record<string, unknown>), summary: "", digest: "", sourceDeleted: true } as JsonObject }] });
+    }
+    const todo = work.length;
+    const handled = Math.min(todo, DELETE_MEMBERS);
+    for (let i = 0; i < handled; i += BATCH) {
+      const batch = work.slice(i, Math.min(i + BATCH, handled));
+      // A hold that appeared since the last batch (a task resumed, a checkpoint cited the record) stops the removals here; what was removed stays removed and is on the record.
+      await this.#deps.beforeBatch?.(i / BATCH);
+      if (i > 0) {
+        const material = await RetainedMaterial.build(this.#runner.storage);
+        const nowHeld = batch.flatMap((w) => { const why = material.why(w.kind, w.id); return why === undefined ? [] : [{ kind: w.kind, id: w.id, reasons: why }]; });
+        if (nowHeld.length > 0) return retain(nowHeld);
+      }
+      for (const w of batch) await step(w.name, w.kind, w.id, w.build);
+    }
+    if (todo > handled) return { status: "partial", recordId: command.recordId, derived, backups, deletionId, remaining: todo - handled };
+    await this.#upsertDeletion(owner.id, `${base}.done.${attempt}`, deletionId, recordBody("deleted", { attempt, plan: null as unknown as JsonObject }));
     return { status: "deleted", recordId: command.recordId, derived, backups, deletionId };
+  }
+
+  /** Writes the deletion record, creating it or replacing the earlier state of the same deletion: the one record per deletion ID, whatever its earlier attempts said. */
+  async #upsertDeletion(actor: string, commandId: string, deletionId: string, body: JsonObject): Promise<void> {
+    await this.#runner.command("retention.delete", { commandId, actor }, async () => ({
+      payload: { deletion: deletionId, status: String(body["status"]), attempt: Number(body["attempt"] ?? 0) },
+      build: async (): Promise<Built> => {
+        const ref = { kind: "retention-deletion", id: deletionId };
+        const cur = await this.#runner.get(ref.kind, ref.id);
+        return { ref, creates: cur === undefined, changes: [cur === undefined ? { type: "create", ref, body } : { type: "update", ref, expectedRevision: cur.revision, body }], detail: { recordId: String(body["recordId"]), status: String(body["status"]) } };
+      },
+    }));
+  }
+
+  /**
+   * Everything that stands on the record, followed to the end: copies (and copies of copies), newer versions that quote it, summaries that cite any of them, compactions that cite them and every compaction built on those (by `parent`
+   * or `lineage`, transitively and bounded), the summary records those compactions published, meeting summaries and stand-up briefs that quote the text, and the archives of all of it. A `plan` of an earlier try is added, so a
+   * resumed deletion still knows what it set out to remove after parts of it are gone.
+   */
+  async #gather(root: Aggregate, recordId: string, plan: Plan | undefined): Promise<Found> {
+    const copyOf = new Set<string>([recordId]);
+    const desk = new Map<string, Aggregate>([[recordId, root]]);
+    let complete = true;
+    const rb = root.body as { title?: unknown; body?: unknown; supersedes?: unknown };
+    const needle = ((): string | undefined => { const clean = (v: unknown): string => (typeof v === "string" ? v : "").replace(/\s+/g, " ").trim(); const text = clean(rb.body).length >= 24 ? clean(rb.body) : `${clean(rb.title)} ${clean(rb.body)}`.trim(); return text.length < 24 ? undefined : text.slice(0, 120); })();
+    const quotes = (b: unknown): boolean => needle !== undefined && JSON.stringify(b).replace(/\\n|\s+/g, " ").includes(JSON.stringify(needle).slice(1, -1).replace(/\s+/g, " "));
+    // Copies of copies share the same root: gather until no new one appears (bounded by the scan). A record that supersedes this one (or that it supersedes) is included only where it quotes the text.
+    for (let round = 0; round < 4; round++) {
+      let added = false;
+      complete = (await scan(this.#runner, "desk-record", (a) => {
+        if (copyOf.has(a.id)) return;
+        const b = a.body as { copiedFrom?: string; supersedes?: string; origin?: { recordId?: string } };
+        const copied = (b.copiedFrom !== undefined && copyOf.has(b.copiedFrom)) || b.origin?.recordId === recordId;
+        const chain = ((b.supersedes !== undefined && copyOf.has(b.supersedes)) || (typeof rb.supersedes === "string" && a.id === rb.supersedes)) && quotes(a.body);
+        if (copied || chain) { copyOf.add(a.id); desk.set(a.id, a); added = true; }
+      })) && complete;
+      if (!added) break;
+    }
+    for (const id of plan?.desk ?? []) if (!desk.has(id)) { const a = await this.#runner.get("desk-record", id); if (a !== undefined) { desk.set(id, a); copyOf.add(id); } }
+    const summaries = new Map<string, Aggregate>(); const compactions = new Map<string, Aggregate>(); const others = new Map<string, { kind: string; id: string }>();
+    complete = (await scan(this.#runner, "summary-record", (a) => { const b = a.body as { sources?: { source?: { kind?: string; id?: string } }[] }; if ((b.sources ?? []).some((x) => x.source?.kind === "desk-record" && x.source.id !== undefined && copyOf.has(x.source.id))) summaries.set(a.id, a); })) && complete;
+    // Compactions that cite the record, then every later compaction built on one of them (`parent`, or `lineage`): their summary text was written from the text. Bounded rounds.
+    const all: Aggregate[] = [];
+    complete = (await scan(this.#runner, "ctx-compaction", (a) => { all.push(a); })) && complete;
+    for (const a of all) { const b = a.body as { sources?: { kind?: string; id?: string }[]; pinned?: { kind?: string; id?: string }[] }; if ([...(b.sources ?? []), ...(b.pinned ?? [])].some((x) => x.kind === "desk-record" && x.id !== undefined && copyOf.has(x.id))) compactions.set(a.id, a); }
+    for (const id of plan?.compactions ?? []) { const a = all.find((x) => x.id === id); if (a !== undefined) compactions.set(id, a); }
+    for (let round = 0; round < 64; round++) {
+      let added = false;
+      for (const a of all) {
+        if (compactions.has(a.id)) continue;
+        const b = a.body as { parent?: string; lineage?: string[] };
+        if ((b.parent !== undefined && compactions.has(b.parent)) || (b.lineage ?? []).some((id) => compactions.has(id))) { compactions.set(a.id, a); added = true; }
+      }
+      if (!added) break;
+      if (round === 63) complete = false;
+    }
+    // The summary records those compactions published (they carry the same text), and what cites a removed summary.
+    for (const c of compactions.values()) { const sid = (c.body as { summaryId?: string }).summaryId; if (typeof sid === "string") { const sum = await this.#runner.get("summary-record", sid); if (sum !== undefined) summaries.set(sid, sum); } }
+    for (const id of plan?.summaries ?? []) { const sum = await this.#runner.get("summary-record", id); if (sum !== undefined) summaries.set(id, sum); }
+    // Meeting summaries and stand-up briefs that quote the text are derived from it as well.
+    for (const kind of ["meeting-summary", "standup-brief"]) {
+      complete = (await scan(this.#runner, kind, (a) => { if (quotes(a.body)) others.set(`${kind}/${a.id}`, { kind, id: a.id }); })) && complete;
+    }
+    for (const o of plan?.others ?? []) if ((await this.#runner.get(o.kind, o.id)) !== undefined) others.set(`${o.kind}/${o.id}`, o);
+    const archives: Aggregate[] = [];
+    for (const id of [...copyOf, ...summaries.keys(), ...[...others.values()].map((o) => o.id)]) { const arc = await this.#runner.get("retention-archive", archiveIdOf(id)); if (arc !== undefined) archives.push(arc); }
+    for (const id of plan?.archives ?? []) if (!archives.some((x) => x.id === id)) { const arc = await this.#runner.get("retention-archive", id); if (arc !== undefined) archives.push(arc); }
+    return { desk: [...desk.values()], summaries: [...summaries.values()], compactions: [...compactions.values()], archives, others: [...others.values()], complete };
   }
 
   /** How the backups are handled for a deletion: left alone, and for how long they hold the text. */
@@ -464,19 +563,22 @@ export class RetentionService {
   }
 
   /** Puts a task's archived records back exactly as they were. A record changed since it was archived (or deleted at the owner's request) is left alone and listed. */
-  async restore(owner: Principal, command: { commandId: string; taskId: string }): Promise<{ taskId: string; restored: string[]; conflicts: string[] }> {
+  async restore(owner: Principal, command: { commandId: string; taskId: string }): Promise<{ taskId: string; restored: string[]; conflicts: string[]; conflictDetails: { recordId: string; reason: string }[] }> {
     if (!isOwner(owner)) throw new DomainError("forbidden", `${owner.id} may not restore archived work`);
     if (typeof command.taskId !== "string" || !TASK_ID.test(command.taskId)) invalid("taskId", "is not a task ID");
     const base = scopedCommandId(owner.id, command.commandId);
     const found: Aggregate[] = [];
     if (!(await scan(this.#runner, "retention-archive", (a) => { if ((a.body as { taskId?: string }).taskId === command.taskId) found.push(a); }))) throw new DomainError("unavailable", "too many archives to restore a task safely");
-    const restored: string[] = []; const conflicts: string[] = [];
+    const restored: string[] = []; const conflicts: string[] = []; const conflictDetails: { recordId: string; reason: string }[] = [];
+    const conflict = (recordId: string, reason: string): void => { conflicts.push(recordId); conflictDetails.push({ recordId, reason }); };
     for (const arc of found.sort((a, b) => (a.id < b.id ? -1 : 1))) {
       const body = arc.body as unknown as { recordId: string; recordKind?: "desk-record" | "summary-record"; original: JsonObject; stubRevision: number };
       const kind = body.recordKind ?? "desk-record";
       const cur = await this.#runner.get(kind, body.recordId);
       const marker = (cur?.body as { archived?: { archiveId?: string } } | undefined)?.archived;
-      if (cur === undefined || cur.revision !== body.stubRevision || marker?.archiveId !== arc.id) { conflicts.push(body.recordId); continue; }
+      if (cur === undefined) { conflict(body.recordId, "the record is gone"); continue; }
+      if ((cur.body as { deleted?: unknown }).deleted !== undefined) { conflict(body.recordId, "deleted at the owner's request: the text is not restored"); continue; }
+      if (cur.revision !== body.stubRevision || marker?.archiveId !== arc.id) { conflict(body.recordId, "changed since it was archived"); continue; }
       const r = await this.#runner.command("retention.restore", { commandId: cmdId("rta", "restore", base, arc.id), actor: owner.id }, async () => ({
         payload: { archiveId: arc.id, taskId: command.taskId },
         build: async (): Promise<Built> => {
@@ -487,9 +589,9 @@ export class RetentionService {
           return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: fresh.revision, body: body.original }, { type: "delete", ref: { kind: "retention-archive", id: arc.id }, expectedRevision: freshArc.revision }], detail: { recordId: body.recordId, taskId: command.taskId }, audit: [{ type: "retention.restore.archive", subject: { kind: "retention-archive", id: arc.id }, detail: { recordId: body.recordId, taskId: command.taskId } }] };
         },
       })).catch((error: unknown) => { if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "not_found")) return undefined; throw error; });
-      if (r !== undefined) restored.push(body.recordId); else conflicts.push(body.recordId);
+      if (r !== undefined) restored.push(body.recordId); else conflict(body.recordId, "changed while it was being restored");
     }
-    return { taskId: command.taskId, restored, conflicts };
+    return { taskId: command.taskId, restored, conflicts, conflictDetails };
   }
 
   // ---- export ---------------------------------------------------------------------------------------------------------------
@@ -511,6 +613,9 @@ export class RetentionService {
       return [Number(m[1]), m[2] === "" ? undefined : m[2]];
     })();
     const items: { kind: string; id: string; revision: number; body: JsonObject }[] = [];
+    // An artifact may name its task and not its project: the project is then the task's.
+    const projectTasks = new Set<string>();
+    await scan(this.#runner, "task", (t) => { if ((t.body as { projectId?: unknown }).projectId === options.projectId) projectTasks.add(t.id); });
     let redactions = 0; let bytes = 0; let examined = 0;
     const MAX_BYTES = 512 * 1024; const MAX_EXAMINE = 5_000;
     for (; k < kinds.length; k++, afterId = undefined) {
@@ -521,7 +626,7 @@ export class RetentionService {
           const prior = afterId;
           afterId = a.id; examined++;
           const b = a.body as Record<string, unknown>;
-          const mine = kind === "project" ? a.id === options.projectId : b["projectId"] === options.projectId;
+          const mine = kind === "project" ? a.id === options.projectId : b["projectId"] === options.projectId || (b["projectId"] === undefined && typeof b["taskId"] === "string" && projectTasks.has(b["taskId"]));
           if (mine) {
             const clean = redact(a.body);
             if (canonicalJson(clean as never) !== canonicalJson(a.body as never)) redactions++;

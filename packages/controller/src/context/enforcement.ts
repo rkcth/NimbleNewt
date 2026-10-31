@@ -421,7 +421,7 @@ export class ContextEnforcementService {
   }
 
   async #publish(principal: Principal, a: { id: string; ref: AggregateRef; body: CompactionBody }): Promise<string> {
-    const made = await this.#retrieval.summarize(principal, { commandId: `ctx-sum-${a.id.slice(4)}`, projectId: a.body.projectId, title: `Context summary ${a.body.key} (generation ${a.body.generation})`, text: a.body.summary ?? "", sources: [...a.body.sources, ...a.body.pinned.filter((p) => !a.body.sources.some((s) => sameSource(s, p)))] });
+    const made = await this.#retrieval.summarize(principal, { commandId: `ctx-sum-${a.id.slice(4)}`, projectId: a.body.projectId, title: `Context summary ${a.body.key} (generation ${a.body.generation})`, text: a.body.summary ?? "", sources: [...a.body.sources, ...a.body.pinned.filter((p) => !a.body.sources.some((s) => sameSource(s, p)))] }, { taskId: a.body.taskId });
     await this.#firstWriterWins(a.ref, () => this.#runner.command("context.compaction.publish", { commandId: `ctx-cpb-${a.id.slice(4)}`, actor: principal.id }, async () => ({
       payload: { id: a.id, summaryId: made.id },
       build: async () => {
