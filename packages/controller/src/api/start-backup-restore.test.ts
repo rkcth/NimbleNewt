@@ -62,7 +62,7 @@ test("the owner restores a backup from inside the running controller: preview, a
   } finally { await c.close().catch(() => undefined); rmSync(d, { recursive: true, force: true }); }
 });
 
-test("the chat proposes a restore with the plan worked out by the controller, its token comes from the record and not the interpreter; the backup list says Pi state is not included; a second start on the directory is refused (card K01h)", async () => {
+test("the chat proposes a restore with the plan worked out by the controller, its token comes from the record and not the interpreter; the backup list says Pi state is not included; a second start on the directory is refused while a restore is waiting to be swapped in (card K01h)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-bkc-"));
   const say: Record<string, unknown[]> = {};
   const open = () => startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer() },
@@ -71,7 +71,9 @@ test("the chat proposes a restore with the plan worked out by the controller, it
   try {
     const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
     const call = async (op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    writeFileSync(join(d, "pending-restore.json"), "{}");
     await assert.rejects(open(), /another controller holds this data directory/);
+    rmSync(join(d, "pending-restore.json"));
     const made = await call("backup.now", {}, "b1");
     const name = made.result.item.name as string;
     const listed = await call("backup.list", {});

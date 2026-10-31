@@ -6,7 +6,7 @@ import { QuietHostSettingsService } from "../remote/quiet-host-settings.js";
 import { ReconnectSettingsService } from "../remote/reconnect-settings.js";
 import { InvitationInbox, MEETING_LIMITS, MEETING_SETTINGS, MeetingService, meetingWakeSink, checkMeetingWakeTimeout, type HostWakeRequest } from "../meetings/index.js";
 import { DeletionLedger, LEDGER_FILE, QuotaMeter, RETENTION_DEFAULTS, ReserveFile, RetentionService, RetentionSettingsService, guardStorage, type RetentionValues } from "../retention/index.js";
-import { acquireDataLocks, type DataLock } from "../backup/index.js";
+import { JOURNAL_FILE, PENDING_FILE, acquireDataLocks, type DataLock } from "../backup/index.js";
 import { BackupEncryption, BackupKeyPinService, BackupService, MaintenanceBarrier, StagedRestore, applyPendingRestore, createBackup, readKeyringFile, type PendingRestore, type PiStateSource } from "../backup/index.js";
 import { readFile } from "node:fs/promises";
 import { defaultEventSources } from "./default-sources.js";
@@ -23,6 +23,7 @@ import { ProjectService } from "../domain/service.js";
 import { AssignmentService } from "../domain/assignments.js";
 import { WaitService } from "../domain/waits.js";
 import { DeskService, HistoryService, RetrievalService, WorkingNoteService, ContextRouteSettingsService } from "../context/index.js";
+import { existsSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
   UnsupportedEnvironmentError, checkEnvironment, checkFilesystems, checkPrerequisites, decideStartup, detectDistribution, detectEnvironment, hostLine, overrideRequested, overriddenCheck, prerequisiteProblems, realProbes, recordHost, recordOverride,
@@ -276,7 +277,13 @@ export async function startController(options: StartOptions): Promise<Controller
   const dir = options.dataDirectory ?? (options.storage.kind === "sqlite" ? dirname(resolve(options.storage.path)) : undefined);
   // One controller owns a data directory at a time (card K01h): a second start, or a restore swap under a running one, is refused with the holder named. The lock is taken once the environment checks have passed (a refused start creates nothing).
   const box: { lock?: DataLock } = {};
-  const take = options.storage.kind !== "sqlite" || dir === undefined ? undefined : async (): Promise<DataLock> => { box.lock = await acquireDataLocks([dir, dirname(resolve((options.storage as { path: string }).path))]); return box.lock; };
+  const take = options.storage.kind !== "sqlite" || dir === undefined ? undefined : async (): Promise<DataLock | undefined> => {
+    try { box.lock = await acquireDataLocks([dir, dirname(resolve((options.storage as { path: string }).path))]); return box.lock; } catch (error) {
+      // A second controller on the same store takes the epoch and the first stops (card F04i); the lock only refuses a start that is about to swap a restore in under a live holder.
+      if ((error as { code?: string }).code !== "unavailable" || existsSync(join(dir, PENDING_FILE)) || existsSync(join(dir, JOURNAL_FILE))) throw error;
+      return undefined;
+    }
+  };
   try {
     const controller = await startControllerWith(options, take);
     const close = controller.close;
@@ -284,7 +291,7 @@ export async function startController(options: StartOptions): Promise<Controller
   } catch (error) { await box.lock?.release(); throw error; }
 }
 
-async function startControllerWith(options: StartOptions, takeLock: (() => Promise<DataLock>) | undefined): Promise<Controller> {
+async function startControllerWith(options: StartOptions, takeLock: (() => Promise<DataLock | undefined>) | undefined): Promise<Controller> {
   if (options.meetingWake !== undefined) checkMeetingWakeTimeout(options.meetingWake.timeoutMs);
   if (options.tools !== undefined && options.dispatch === undefined) throw new Error("options.tools needs options.dispatch: the tool bridge runs over the dispatcher, so without it the tools would be ignored");
   const print = options.print ?? ((line: string) => { process.stderr.write(`${line}\n`); });
