@@ -38,16 +38,16 @@ test("the model relay stops a paid call once the owner's aggregate spending cap 
       return attempt.relay({ url: `${attempt.relayBase}/${attempt.alias}/chat/completions`, method: "POST", headers: [["content-type", "application/json"]], body: Buffer.from("{}"), signal: new AbortController().signal } as never);
     };
     // No cap: a paid call goes out.
-    assert.equal((await send("att-1", "cloud/big")).status, 200);
+    assert.equal((await send("att-aaaaaaaaaaaaaaaaaaaa", "cloud/big")).status, 200);
     await budgets.setAggregate(rob, { commandId: "cap", enabled: true, scope: "installation", period: "none", amountMicros: 1000 });
     await budgets.charge(rob, { commandId: "ch", activity: "model-call", taskId: task, agentId: "agent:ann", costMicros: 1500 });
     const before = calls.length;
-    await assert.rejects(() => send("att-2", "cloud/big"), /the model relay refused the call: .*aggregate cap is reached/);
+    await assert.rejects(() => send("att-bbbbbbbbbbbbbbbbbbbb", "cloud/big"), /the model relay refused the call: .*aggregate cap is reached/);
     assert.equal(calls.length, before, "the paid call was never sent");
     // A free (local) route is not money: it goes through.
-    assert.equal((await send("att-3", "llama/local")).status, 200);
+    assert.equal((await send("att-cccccccccccccccccccc", "llama/local")).status, 200);
     // Turned off: paid calls go out again.
     await budgets.setAggregate(rob, { commandId: "cap2", enabled: false });
-    assert.equal((await send("att-4", "cloud/big")).status, 200);
+    assert.equal((await send("att-dddddddddddddddddddd", "cloud/big")).status, 200);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
