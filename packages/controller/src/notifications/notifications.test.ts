@@ -252,6 +252,17 @@ for (const backend of backends) {
     const rev = (await c.svc.settings(c.owner)).revision;
     await refuses("invalid_command", () => c.svc.configure(c.owner, { commandId: cid("cf"), expectedRevision: rev, escalateAfterHours: 0 }));
     await refuses("forbidden", () => c.svc.configure(c.ann, { commandId: cid("cf"), escalateAfterHours: 1 }));
+    // null turns escalation off: nothing is raised however long it waits; only the owner; a number turns it on again.
+    await refuses("forbidden", () => c.svc.configure(c.ann, { commandId: cid("cf-off"), escalateAfterHours: null }));
+    await c.svc.configure(c.owner, { commandId: cid("cf-off"), expectedRevision: rev, escalateAfterHours: null, quietHours: null });
+    assert.equal((await c.svc.settings(c.owner)).escalateAfterHours, null);
+    const fourth = await c.report(c.ann, "owner-question", "inquiry", await c.question());
+    set("2026-11-24T10:00:00.000Z");
+    await c.svc.runDue();
+    assert.equal((await item(fourth.itemId)).urgent, false, "escalation is off");
+    await c.svc.configure(c.owner, { commandId: cid("cf-on"), expectedRevision: (await c.svc.settings(c.owner)).revision, escalateAfterHours: 5 });
+    await c.svc.runDue();
+    assert.equal((await item(fourth.itemId)).urgent, true, "on again");
   });
 
   suite("quiet hours hold the digest and an urgent review until they end; a safety stop is never held; a settings change counts from the next notification", async (c) => {

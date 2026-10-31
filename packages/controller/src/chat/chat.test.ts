@@ -92,6 +92,10 @@ for (const backend of backends) {
       const ann = await w.agent("ann", [{ action: "*", project: "*" }]);
       await assert.rejects(w.chat().submit(ann.token, { messageId: "m-n", text: a }), (e: unknown) => e instanceof DomainError && e.code === "forbidden");
       assert.equal(calls.length, 2, "an agent changed nothing");
+      const off = "never escalate";
+      script[off] = [cmd("notifications.configure", { escalateAfterHours: null }, off)];
+      assert.equal(only((await say(w, chat, off)).outcomes).status, "applied");
+      assert.equal(state["escalateAfterHours"], null, "null (escalation off) reaches the service");
     } finally { await w.close(); }
   });
 

@@ -18,7 +18,7 @@ export type PolicyEditChange =
   | ({ readonly type: "environment"; readonly environment: Environment } & PolicyWhere)
   | { readonly type: "lock" | "unlock"; readonly cells: readonly string[] }
   | ({ readonly type: "reserve" | "unreserve"; readonly tool: string } & PolicyWhere)
-  | ({ readonly type: "grant"; readonly grantee: string; readonly approve: Approve; readonly environments?: readonly Environment[]; readonly lengthDays?: number; readonly until?: string; readonly spendLimit?: number; readonly audiences?: readonly string[] } & PolicyWhere)
+  | ({ readonly type: "grant"; readonly grantee: string; readonly approve: Approve; readonly environments?: readonly Environment[]; /** null: the grant has no end. */ readonly lengthDays?: number | null; readonly until?: string; /** null: the owner says there is no spending limit. */ readonly spendLimit?: number | null; readonly audiences?: readonly string[] } & PolicyWhere)
   | ({ readonly type: "revoke"; readonly grantee: string; readonly approve: Approve } & PolicyWhere)
   | { readonly type: "setting"; readonly layer: LayerName; readonly scopeId?: string; readonly key: string; readonly value?: unknown; readonly remove?: true };
 
@@ -79,9 +79,9 @@ export function checkPolicyChange(raw: unknown, field: string): PolicyEditChange
       return {
         type: "grant", grantee: name(raw["grantee"], `${field}.grantee`), approve: approve(raw["approve"], `${field}.approve`),
         ...(environments === undefined ? {} : { environments: [...new Set((environments as unknown[]).map((x, i) => oneOf(x, ENVIRONMENTS, `${field}.environments[${i}]`)))] }),
-        ...(raw["lengthDays"] === undefined ? {} : { lengthDays: typeof raw["lengthDays"] === "number" && Number.isSafeInteger(raw["lengthDays"]) && raw["lengthDays"] >= 1 ? raw["lengthDays"] : invalid(`${field}.lengthDays`, "must be a whole number of days, 1 or more") }),
+        ...(raw["lengthDays"] === undefined ? {} : { lengthDays: raw["lengthDays"] === null ? null : typeof raw["lengthDays"] === "number" && Number.isSafeInteger(raw["lengthDays"]) && raw["lengthDays"] >= 1 ? raw["lengthDays"] : invalid(`${field}.lengthDays`, "must be a whole number of days, 1 or more") }),
         ...(raw["until"] === undefined ? {} : { until: typeof raw["until"] === "string" && /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?Z)?$/.test(raw["until"]) && !Number.isNaN(Date.parse(raw["until"])) ? raw["until"] : invalid(`${field}.until`, "must be a date such as 2026-10-30 or a UTC time such as 2026-10-30T17:00:00Z") }),
-        ...(raw["spendLimit"] === undefined ? {} : { spendLimit: typeof raw["spendLimit"] === "number" && Number.isFinite(raw["spendLimit"]) && raw["spendLimit"] >= 0 ? raw["spendLimit"] : invalid(`${field}.spendLimit`, "must be a number, 0 or more") }),
+        ...(raw["spendLimit"] === undefined ? {} : { spendLimit: raw["spendLimit"] === null ? null : typeof raw["spendLimit"] === "number" && Number.isFinite(raw["spendLimit"]) && raw["spendLimit"] >= 0 ? raw["spendLimit"] : invalid(`${field}.spendLimit`, "must be a number, 0 or more") }),
         ...(audiences === undefined ? {} : { audiences: [...new Set((audiences as unknown[]).map((x, i) => name(x, `${field}.audiences[${i}]`)))] }),
         ...where(raw, field),
       };

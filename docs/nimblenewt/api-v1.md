@@ -1821,14 +1821,14 @@ Result: `{ revision, replayed }`.
 
 #### `model-budget.set`
 
-Owner only: limits what a task may use of model calls in all: money (`maxCostMicros`), tokens (`maxTokens`) and failed attempts (`maxFailedAttempts`, counted across calls, routes and rebuilt contexts). A limit left out keeps its earlier value. When one is reached the next call waits visibly until the owner raises it.
+Owner only: limits what a task may use of model calls in all: money (`maxCostMicros`), tokens (`maxTokens`) and failed attempts (`maxFailedAttempts`, counted across calls, routes and rebuilt contexts). A limit left out keeps its earlier value; a limit given as null is removed (no limit; 'remove the limit' in chat). When one is reached the next call waits visibly until the owner raises it.
 
 Arguments:
 
 - `taskId`: the task
-- `maxCostMicros` (optional): whole number
-- `maxTokens` (optional): whole number
-- `maxFailedAttempts` (optional): whole number
+- `maxCostMicros` (optional): whole number, or null to remove the limit
+- `maxTokens` (optional): whole number, or null to remove the limit
+- `maxFailedAttempts` (optional): whole number, or null to remove the limit
 - `commandId`: required
 
 Result: `{ ok }`.
@@ -2857,7 +2857,7 @@ Arguments:
 - `quietHours` (optional): { start, end } UTC times, or null to remove them
 - `levelByKind` (optional): { kind: notice | needs-you | urgent } for blocker, review-request, owner-question, maintenance, presence, safety-stop; null puts a kind back to its default (a safety stop stays urgent)
 - `noticeRetentionDays` (optional): whole days (1 to 365) a Notice stays in the inbox before it is closed (default 7)
-- `escalateAfterHours` (optional): whole hours (1 to 720) before an unanswered item is escalated
+- `escalateAfterHours` (optional): whole hours (1 to 720) before an unanswered item is escalated; null turns escalation off (set a number again to turn it on)
 - `expectedRevision` (optional): the settings revision you read (0 or absent when none were set yet)
 
 Result: `{ revision }`.

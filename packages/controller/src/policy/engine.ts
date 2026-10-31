@@ -48,6 +48,8 @@ export interface GrantView {
   readonly action: string;
   readonly environments?: readonly string[];
   readonly spendLimit?: number;
+  /** The grant states explicitly that spending has no limit. */
+  readonly spendUnlimited?: true;
   readonly window?: { readonly start: string; readonly end: string; readonly days?: readonly number[] };
   readonly audiences?: readonly string[];
   /** The protected branches the grant waives, by exact name (card A07f). */
@@ -122,7 +124,7 @@ export function termsMet(grant: GrantView, request: PolicyRequest): { ok: true }
   if (request.cls === "spend" || request.estimatedSpend !== undefined) {
     const amount = request.estimatedSpend ?? 0;
     if (grant.spendLimit !== undefined && amount > grant.spendLimit) return { ok: false, why: `the spend ${amount} is above the grant's limit ${grant.spendLimit}` };
-    if (request.cls === "spend" && grant.spendLimit === undefined) return { ok: false, why: "a spend grant has to state its limit" };
+    if (request.cls === "spend" && grant.spendLimit === undefined && grant.spendUnlimited !== true) return { ok: false, why: "a spend grant has to state its limit" };
   }
   if ((request.cls === "external-send" || request.cls === "publish") && request.audience !== undefined && !(grant.audiences ?? []).includes(request.audience)) return { ok: false, why: `the grant does not name the audience ${request.audience}` };
   if ((request.cls === "external-send" || request.cls === "publish") && request.audience === undefined) return { ok: false, why: "the request does not say who it goes to, so no grant for named audiences covers it" };

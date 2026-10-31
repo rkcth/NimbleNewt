@@ -29,7 +29,7 @@ export interface NotificationSettings {
   /** No digest and no urgent-review message in this span (UTC `HH:MM`, may cross midnight). A blocked critical path and a safety stop still interrupt. */
   readonly quietHours?: { readonly start: string; readonly end: string };
   /** Hours an item that waits on the owner may stay unanswered before the controller raises it to Urgent (card U11b); default 24. */
-  readonly escalateAfterHours?: number;
+  readonly escalateAfterHours?: number | null;
   /** Days a Notice stays in the inbox before the controller closes it (card U11b); default 7. */
   readonly noticeRetentionDays?: number;
   /** The owner's own level per kind; it overrides the default level of the kind (a safety stop cannot be set below Urgent). */
@@ -168,7 +168,7 @@ export class NotificationService {
   }
 
   /** The owner sets how notifications reach them (owner only; counts from the next notification). */
-  async configure(owner: Principal, command: NoActor & { expectedRevision?: number; channel?: "inbox" | "external"; channelName?: string; digestTimes?: readonly string[]; quietHours?: { start: string; end: string } | null; escalateAfterHours?: number; noticeRetentionDays?: number; levelByKind?: Readonly<Record<string, NotificationLevel | null>> }): Promise<{ revision: number }> {
+  async configure(owner: Principal, command: NoActor & { expectedRevision?: number; channel?: "inbox" | "external"; channelName?: string; digestTimes?: readonly string[]; quietHours?: { start: string; end: string } | null; escalateAfterHours?: number | null; noticeRetentionDays?: number; levelByKind?: Readonly<Record<string, NotificationLevel | null>> }): Promise<{ revision: number }> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner sets how notifications reach them`);
     onlyKnown(command, ["commandId", "expectedRevision", "channel", "channelName", "digestTimes", "quietHours", "escalateAfterHours", "noticeRetentionDays", "levelByKind"]);
     const current = await this.#runner.get("notification-settings", "installation");
@@ -193,7 +193,8 @@ export class NotificationService {
         next = { ...next, quietHours: { start: q.start, end: q.end } };
       }
     }
-    if (command.escalateAfterHours !== undefined) {
+    if (command.escalateAfterHours === null) next = { ...next, escalateAfterHours: null };
+    else if (command.escalateAfterHours !== undefined) {
       if (!Number.isSafeInteger(command.escalateAfterHours) || command.escalateAfterHours < 1 || command.escalateAfterHours > 24 * 30) invalid("escalateAfterHours", "must be a whole number of hours from 1 to 720");
       next = { ...next, escalateAfterHours: command.escalateAfterHours };
     }
@@ -493,6 +494,7 @@ export class NotificationService {
    * Nothing but this tick raises it: a producer cannot, and a repeat of the tick or a restart does not tell it again.
    */
   async #escalateStale(settings: NotificationSettings, now: string): Promise<void> {
+    if (settings.escalateAfterHours === null) return;
     const limit = Date.parse(now) - (settings.escalateAfterHours ?? DEFAULT_ESCALATE_AFTER_HOURS) * 3_600_000;
     for (const item of await this.#load<ItemBody>("notification-item", this.#openIds((await this.#index()).body))) {
       if (item.state === "answered" || item.state === "settled" || item.escalatedAt !== undefined || levelOf(item, settings.levelByKind) !== "needs-you" || Date.parse(item.firstAt) > limit) continue;

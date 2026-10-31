@@ -38,6 +38,7 @@ export const POLICY_EDIT_LIMITS = { open: 50, forwarded: 50, lease: 15 * 60_000,
 export const GRANT_LENGTH_OPTIONS: readonly number[] = [1, 7, 30, 90];
 /** The length of a standing grant when nothing says otherwise (the fallback of A07b; the derived default of A07d will be added on top of it). */
 export const DEFAULT_GRANT_DAYS = 30;
+/** The old fixed ceiling; no longer enforced (the owner setting grants.maxDays replaces it, unset = no maximum). */
 export const MAX_GRANT_DAYS = 365;
 const DAY_MS = 86_400_000;
 
@@ -45,7 +46,7 @@ const DAY_MS = 86_400_000;
 export type EditOp =
   | { readonly kind: "policy"; readonly scope: string; readonly expectedRevision?: number; readonly profile?: string; readonly allCommandGate?: boolean; readonly environment?: string; readonly overrides?: Readonly<Record<string, string | null>>; readonly lock?: readonly string[]; readonly unlock?: readonly string[] }
   | { readonly kind: "reserve"; readonly projectId: string; readonly expectedRevision?: number; readonly policy: ReviewPolicyBody }
-  | { readonly kind: "grant"; readonly grantee: string; readonly action: string; readonly projectId: string; readonly environments: readonly string[]; readonly spendLimit?: number; readonly audiences?: readonly string[]; readonly lengthDays?: number; readonly until?: string; readonly options: readonly number[]; readonly lengthWhy: string }
+  | { readonly kind: "grant"; readonly grantee: string; readonly action: string; readonly projectId: string; readonly environments: readonly string[]; readonly spendLimit?: number; readonly spendUnlimited?: true; readonly audiences?: readonly string[]; readonly lengthDays?: number; readonly permanent?: true; readonly until?: string; readonly options: readonly number[]; readonly lengthWhy: string }
   | { readonly kind: "revoke"; readonly grants: readonly { readonly id: string; readonly revision: number }[] }
   | { readonly kind: "setting"; readonly layer: string; readonly scopeId?: string; readonly expectedRevision?: number; readonly key: string; readonly value?: unknown; readonly remove?: true };
 
@@ -79,7 +80,7 @@ export interface PolicyEditBody {
   readonly refusal?: { readonly code: string; readonly message: string };
   readonly createdAt: string;
   /** Fixed when the edit starts to apply, so a retry after a crash does the same thing. */
-  readonly decided?: { readonly at: string; readonly expiresAt?: string; readonly lengthDays?: number };
+  readonly decided?: { readonly at: string; readonly expiresAt?: string; readonly lengthDays?: number; readonly permanent?: true };
   readonly appliedAt?: string;
   /** The revisions the edit produced. */
   readonly applied?: readonly AppliedRef[];
@@ -182,29 +183,42 @@ const EDIT_ID = /^pedit-[0-9a-f]{32}$/;
 const PROJECT_ID = /^proj-[a-z2-7]{20}$/;
 const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 const line = (s: string): string => (s.length > POLICY_EDIT_LIMITS.line ? `${s.slice(0, POLICY_EDIT_LIMITS.line - 3)}...` : s);
+const NO_LIMIT_WORDS = /\b(no\s+(spend(ing)?\s+|money\s+)?(limit|cap|ceiling|maximum)|unlimited|without\s+(a\s+|any\s+)?(spend(ing)?\s+)?(limit|cap)|no\s+upper\s+limit)\b/i;
+const NO_END_WORDS = /\b(permanent(ly)?|no\s+(end|expir\w*|time\s+limit)|never\s+expires?|(does\s*n[o']?t|doesn't|do\s+not)\s+expire|without\s+(an\s+)?(end|expir\w*)|indefinite(ly)?|forever|open[- ]ended)\b/i;
 const freedom = (profile: string): number => (profile === "strict" ? 0 : profile === "derived" ? 1 : 2);
 const refuseDraft = (change: PolicyEditChange, evidence: string, code: string, message: string, conditions: readonly string[] = [], wording = ""): PolicyEditPrepared => ({
   ok: true, draft: { change: asJson(change), evidence, summary: [], explanation: [], unapplied: unappliedOf(conditions, wording), direction: "unknown", direct: false, status: "refused", reason: message, refusal: { code, message } },
 });
 const unappliedOf = (conditions: readonly string[], wording: string): { text: string; why: string }[] => conditions.map((c) => (evidenceInText(c, wording) ? { text: c, why: "this system cannot enforce that condition" } : { text: "a condition that is not in your message", why: "this system cannot enforce it and its wording was not yours" }));
 
-/** The length of a standing grant, from what the owner said, else the fallback. The explanation is in plain words and is kept with the edit and the grant (card A07d adds the pattern of earlier approvals as an input). */
-export function chooseGrantLength(input: { lengthDays?: number; until?: string; now: string }): { ok: true; days: number; why: string; until?: string } | { ok: false; message: string } {
+/** The grant length rules the owner has set (both optional): no maximum and a 30-day default when unset. */
+export interface GrantLengthRules { readonly maxDays?: number; readonly defaultDays?: number }
+const noMore = (max: number, what: string): string => `the owner setting grants.maxDays allows a standing grant at most ${max} day${max === 1 ? "" : "s"}; ${what}`;
+
+/** The length of a standing grant, from what the owner said, else the default. `lengthDays: null` is a grant with no end, which is allowed only while no maximum is set. The explanation is in plain words and is kept with the edit and the grant (card A07d adds the pattern of earlier approvals as an input). */
+export function chooseGrantLength(input: { lengthDays?: number | null; until?: string; now: string; rules?: GrantLengthRules }): { ok: true; days?: number; permanent?: true; why: string; until?: string } | { ok: false; message: string } {
   const now = Date.parse(input.now);
+  const max = input.rules?.maxDays;
   if (input.until !== undefined) {
     const until = input.until.length === 10 ? `${input.until}T23:59:59.000Z` : new Date(input.until).toISOString();
     const days = Math.ceil((Date.parse(until) - now) / DAY_MS);
     if (!(Date.parse(until) > now)) return { ok: false, message: `${input.until} is not in the future` };
-    if (days > MAX_GRANT_DAYS) return { ok: false, message: `a standing grant lasts at most ${MAX_GRANT_DAYS} days; ${input.until} is further away` };
+    if (max !== undefined && days > max) return { ok: false, message: noMore(max, `${input.until} is further away`) };
     return { ok: true, days, until, why: `you asked for it to last until ${input.until}` };
   }
+  if (input.lengthDays === null) {
+    if (max !== undefined) return { ok: false, message: noMore(max, "a grant with no end is not possible until that setting is removed") };
+    return { ok: true, permanent: true, why: "you asked for it to have no end" };
+  }
   if (input.lengthDays !== undefined) {
-    if (input.lengthDays > MAX_GRANT_DAYS) return { ok: false, message: `a standing grant lasts at most ${MAX_GRANT_DAYS} days, not ${input.lengthDays}` };
+    if (max !== undefined && input.lengthDays > max) return { ok: false, message: noMore(max, `not ${input.lengthDays}`) };
     return { ok: true, days: input.lengthDays, why: `you asked for ${input.lengthDays} day${input.lengthDays === 1 ? "" : "s"}` };
   }
-  return { ok: true, days: DEFAULT_GRANT_DAYS, why: `you did not say how long and there is no pattern of earlier approvals to go on, so the default of ${DEFAULT_GRANT_DAYS} days is used` };
+  const base = input.rules?.defaultDays ?? DEFAULT_GRANT_DAYS;
+  const days = max === undefined ? base : Math.min(base, max);
+  return { ok: true, days, why: `you did not say how long and there is no pattern of earlier approvals to go on, so the ${input.rules?.defaultDays === undefined ? "default" : "default you set"} of ${days} days is used` };
 }
-const lengthOptions = (stated?: number): number[] => [...new Set([...GRANT_LENGTH_OPTIONS, ...(stated === undefined ? [] : [stated])])].sort((a, b) => a - b);
+const lengthOptions = (stated?: number, max?: number): number[] => [...new Set([...GRANT_LENGTH_OPTIONS.filter((d) => max === undefined || d <= max), ...(stated === undefined ? [] : [stated])])].sort((a, b) => a - b);
 
 /** Whether a sentence of the owner's own words that holds the evidence orders this move: it has a verb of that move, no negation, no musing, and is not a question. */
 export function ownerOrders(evidence: string, wording: string, move: string, targets: readonly RegExp[] = []): boolean {
@@ -258,7 +272,9 @@ export class PolicyEditService {
     if (change.type === "grant") {
       const bad = (change.environments ?? []).find((e) => !(ENV_WORDS[e] as RegExp).test(wording));
       if (bad !== undefined) return { ok: false, kind: "refuse", code: "unsupported_value", message: `${bad} is not in your message, so it was not done. Say which environments.` };
-      if (change.spendLimit !== undefined && !new RegExp(`(^|[^0-9.])${String(change.spendLimit).replace(".", "\\.")}([^0-9]|$)`).test(wording)) return { ok: false, kind: "refuse", code: "unsupported_value", message: `${change.spendLimit} is not in your message, so it was not done. Say the limit.` };
+      if (change.spendLimit === null && !NO_LIMIT_WORDS.test(wording)) return { ok: false, kind: "refuse", code: "unsupported_value", message: "you did not say there is no spending limit, so it was not done. Say the limit, or say there is none." };
+      if (change.lengthDays === null && !NO_END_WORDS.test(wording)) return { ok: false, kind: "refuse", code: "unsupported_value", message: "you did not say the grant has no end, so it was not done. Say how long, or say it has no end." };
+      if (typeof change.spendLimit === "number" && !new RegExp(`(^|[^0-9.])${String(change.spendLimit).replace(".", "\\.")}([^0-9]|$)`).test(wording)) return { ok: false, kind: "refuse", code: "unsupported_value", message: `${change.spendLimit} is not in your message, so it was not done. Say the limit.` };
     }
     let built: Built | { ask: PolicyEditPrepared & { ok: false } };
     try { built = await this.#build(owner, change, input); } catch (error) {
@@ -358,9 +374,10 @@ export class PolicyEditService {
     }
     // Phase 1: fix the time and the length. A second request, or a retry, finds them already stored.
     const at = this.#runner.now();
-    const chosen = op?.kind === "grant" ? this.#length(op, at, request.lengthDays) : undefined;
+    // A retry of an edit already applying keeps what was fixed and stored the first time (a maximum set since must not strand it half done).
+    const chosen = op?.kind === "grant" && found.status !== "applying" ? this.#length(op, at, request.lengthDays, await this.#lengthRules(owner)) : undefined;
     if (chosen !== undefined && "message" in chosen) throw new DomainError("invalid_command", chosen.message, { field: "lengthDays" });
-    const begun = await this.#move(owner.id, id, `${id}-begin`, ["proposed", "applying"], (b) => (b.status === "applying" ? b : { ...b, status: "applying", decided: { at, ...(chosen === undefined || "message" in chosen ? {} : { expiresAt: chosen.expiresAt, lengthDays: chosen.days }) } }));
+    const begun = await this.#move(owner.id, id, `${id}-begin`, ["proposed", "applying"], (b) => (b.status === "applying" ? b : { ...b, status: "applying", decided: { at, ...(chosen === undefined || "message" in chosen ? {} : chosen.permanent === true ? { permanent: true as const } : { expiresAt: chosen.expiresAt as string, lengthDays: chosen.days as number }) } }));
     if (begun.body.status !== "applying") {
       if (begun.body.status === "applied") return { editId: id, status: "applied", replayed: true, applied: begun.body.applied ?? [] };
       invalid("editId", `that edit is ${begun.body.status}`);
@@ -599,20 +616,24 @@ export class PolicyEditService {
     const reserved = (await this.#deps.reviews.getPolicy(owner, project.id))?.policy.mandatoryHuman ?? [];
     if (tool !== undefined && reserved.includes(tool)) throw new Refusal("mandatory_gate", `${tool} is reserved for you in "${project.name}"; no grant can waive that, so none was made.`);
     if ((cls === "external-send" || cls === "publish") && (change.audiences ?? []).length === 0) throw new Refusal("needs_audience", `Sending out and publishing are granted per account and audience. Say who ${grantee.name} may ${cls === "publish" ? "publish for" : "send to"}.`);
-    if (cls === "spend" && change.spendLimit === undefined) throw new Refusal("needs_limit", "A spending grant has to state its limit. Say how much.");
-    const chosen = chooseGrantLength({ ...(change.lengthDays === undefined ? {} : { lengthDays: change.lengthDays }), ...(change.until === undefined ? {} : { until: change.until }), now: this.#runner.now() });
+    if (cls === "spend" && change.spendLimit === undefined) throw new Refusal("needs_limit", "A spending grant has to state its limit. Say how much, or say there is no limit.");
+    const rules = await this.#lengthRules(owner);
+    const chosen = chooseGrantLength({ ...(change.lengthDays === undefined ? {} : { lengthDays: change.lengthDays }), ...(change.until === undefined ? {} : { until: change.until }), now: this.#runner.now(), rules });
     if (!chosen.ok) throw new Refusal("invalid_length", chosen.message);
+    const now = this.#runner.now();
+    const ends = chosen.permanent === true ? "permanent: it has no end time" : `if applied now it ends ${chosen.until ?? new Date(Date.parse(now) + (chosen.days as number) * DAY_MS).toISOString()}`;
     const environments = change.environments ?? ["development", "testing"];
-    const options = lengthOptions(change.lengthDays ?? (change.until === undefined ? undefined : chosen.days));
+    const options = lengthOptions(typeof change.lengthDays === "number" ? change.lengthDays : change.until === undefined ? undefined : chosen.days, rules.maxDays);
     const explanation = [
       `It covers ${environments.join(" and ")} only${change.environments === undefined ? " (you did not name an environment, so only the free ones)" : ""}.`,
-      `Length: ${chosen.days} day${chosen.days === 1 ? "" : "s"} (${chosen.why}). You can pick another when you apply it: ${options.map((d) => `${d} day${d === 1 ? "" : "s"}`).join(", ")}.`,
-      "It expires by itself and you can revoke it at any time. A standing grant never covers what stays your decision: changing access, a customer-live deployment, a protected branch, spending beyond the estimate, an irreversible action, or an audience nobody named.",
-      ...(change.audiences === undefined ? [] : [`Audiences: ${change.audiences.join(", ")}.`]), ...(change.spendLimit === undefined ? [] : [`Spend limit: ${change.spendLimit}.`]),
+      `Length: ${chosen.permanent === true ? "no end" : `${chosen.days} day${chosen.days === 1 ? "" : "s"}`} (${chosen.why}); ${ends}. You can pick another when you apply it: ${options.map((d) => `${d} day${d === 1 ? "" : "s"}`).join(", ")}.`,
+      chosen.permanent === true ? "It does not expire by itself; you can revoke it at any time." : "It expires by itself and you can revoke it at any time.",
+      " A standing grant never covers what stays your decision: changing access, a customer-live deployment, a protected branch, spending beyond the estimate, an irreversible action, or an audience nobody named.",
+      ...(change.audiences === undefined ? [] : [`Audiences: ${change.audiences.join(", ")}.`]), ...(change.spendLimit === undefined ? [] : [change.spendLimit === null ? "Spend limit: none, as you said (it can spend any amount)." : `Spend limit: ${change.spendLimit}.`]),
     ];
     return {
       summary, explanation, direction: "loosen",
-      op: { kind: "grant", grantee: grantee.principalId, action: `approve.${tool !== undefined ? `tool.${tool}` : `class.${change.approve.class as string}`}`, projectId: project.id, environments, ...(change.spendLimit === undefined ? {} : { spendLimit: change.spendLimit }), ...(change.audiences === undefined ? {} : { audiences: change.audiences }), ...(change.lengthDays === undefined ? {} : { lengthDays: change.lengthDays }), ...(chosen.until === undefined ? {} : { until: chosen.until }), options, lengthWhy: chosen.why },
+      op: { kind: "grant", grantee: grantee.principalId, action: `approve.${tool !== undefined ? `tool.${tool}` : `class.${change.approve.class as string}`}`, projectId: project.id, environments, ...(typeof change.spendLimit !== "number" ? {} : { spendLimit: change.spendLimit }), ...(change.spendLimit === null ? { spendUnlimited: true as const } : {}), ...(change.audiences === undefined ? {} : { audiences: change.audiences }), ...(typeof change.lengthDays === "number" ? { lengthDays: change.lengthDays } : {}), ...(chosen.permanent === true ? { permanent: true as const } : {}), ...(chosen.until === undefined ? {} : { until: chosen.until }), options, lengthWhy: chosen.why },
     };
   }
 
@@ -700,13 +721,29 @@ export class PolicyEditService {
 
   // ---- doing ----------------------------------------------------------------------------------------------------------------------
 
-  #length(op: Extract<EditOp, { kind: "grant" }>, at: string, override: number | undefined): { days: number; expiresAt: string } | { message: string } {
+  async #lengthRules(owner: Principal): Promise<GrantLengthRules> {
+    const eff = await this.#deps.configuration.effective(owner);
+    const num = (key: string): number | undefined => { const v = eff?.values[key]?.value; return typeof v === "number" && Number.isSafeInteger(v) && v >= 1 ? v : undefined; };
+    const maxDays = num("grants.maxDays"); const defaultDays = num("grants.defaultDays");
+    return { ...(maxDays === undefined ? {} : { maxDays }), ...(defaultDays === undefined ? {} : { defaultDays }) };
+  }
+
+  /** The length fixed when the owner applies: the maximum is looked at again then, so a maximum set after the proposal still binds. */
+  #length(op: Extract<EditOp, { kind: "grant" }>, at: string, override: number | undefined, rules: GrantLengthRules): { days?: number; expiresAt?: string; permanent?: true } | { message: string } {
+    const max = rules.maxDays;
+    if (override === undefined && op.permanent === true) {
+      if (max !== undefined) return { message: noMore(max, "this grant has no end, so it can no longer be made as proposed; ask again") };
+      return { permanent: true };
+    }
     if (override === undefined && op.until !== undefined) {
       const until = op.until.length === 10 ? `${op.until}T23:59:59.000Z` : new Date(op.until).toISOString();
       if (!(Date.parse(until) > Date.parse(at))) return { message: `${op.until} has passed, so this grant can no longer be made as asked; ask again` };
-      return { days: Math.ceil((Date.parse(until) - Date.parse(at)) / DAY_MS), expiresAt: until };
+      const days = Math.ceil((Date.parse(until) - Date.parse(at)) / DAY_MS);
+      if (max !== undefined && days > max) return { message: noMore(max, `${op.until} is further away`) };
+      return { days, expiresAt: until };
     }
-    const days = override ?? op.lengthDays ?? DEFAULT_GRANT_DAYS;
+    const days = override ?? op.lengthDays ?? rules.defaultDays ?? DEFAULT_GRANT_DAYS;
+    if (max !== undefined && days > max) return { message: noMore(max, `not ${days}`) };
     return { days, expiresAt: new Date(Date.parse(at) + days * DAY_MS).toISOString() };
   }
 
@@ -724,9 +761,9 @@ export class PolicyEditService {
       }
       case "grant": {
         const g = await d.grants.grant(owner, {
-          commandId: `${id}-gr`, grantee: op.grantee, action: op.action, project: op.projectId, source: "standing", expiresAt: body.decided?.expiresAt as string,
-          basis: `chat, edit ${id}: "${body.wording}" Length: ${body.decided?.lengthDays ?? "?"} days (${op.lengthWhy}).`.slice(0, 900),
-          terms: { environments: [...op.environments], ...(op.spendLimit === undefined ? {} : { spendLimit: op.spendLimit }), ...(op.audiences === undefined ? {} : { audiences: [...op.audiences] }) },
+          commandId: `${id}-gr`, grantee: op.grantee, action: op.action, project: op.projectId, source: "standing", ...(body.decided?.expiresAt === undefined ? {} : { expiresAt: body.decided.expiresAt }),
+          basis: `chat, edit ${id}: "${body.wording}" Length: ${body.decided?.permanent === true ? "no end" : `${body.decided?.lengthDays ?? "?"} days`} (${op.lengthWhy}).`.slice(0, 900),
+          terms: { environments: [...op.environments], ...(op.spendLimit === undefined ? {} : { spendLimit: op.spendLimit }), ...(op.spendUnlimited === true ? { spendUnlimited: true } : {}), ...(op.audiences === undefined ? {} : { audiences: [...op.audiences] }) },
         });
         return { applied: [{ kind: "grant-record", id: g.id, revision: g.revision }], takesEffect: "from the grantee's next snapshot" };
       }

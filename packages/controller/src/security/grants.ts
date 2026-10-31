@@ -27,6 +27,8 @@ export interface ResourceRef {
 export interface GrantTerms {
   readonly environments?: readonly string[];
   readonly spendLimit?: number;
+  /** The owner said in so many words that there is no spending limit (only true; excludes spendLimit). */
+  readonly spendUnlimited?: true;
   /** Hours of the day, UTC, in which the grant applies, and optionally the days of the week (0 is Sunday). */
   readonly window?: { readonly start: string; readonly end: string; readonly days?: readonly number[] };
   readonly audiences?: readonly string[];
@@ -69,7 +71,7 @@ export function checkTerms(value: unknown): GrantTerms | undefined {
   if (value === undefined) return undefined;
   if (value === null || typeof value !== "object" || Array.isArray(value)) return invalid("terms", "must be an object");
   const e = value as Record<string, unknown>;
-  for (const key of Object.keys(e)) if (!["environments", "spendLimit", "window", "audiences", "branches", "delegation", "conditions"].includes(key)) invalid(`terms.${key}`, "is not a grant term");
+  for (const key of Object.keys(e)) if (!["environments", "spendLimit", "spendUnlimited", "window", "audiences", "branches", "delegation", "conditions"].includes(key)) invalid(`terms.${key}`, "is not a grant term");
   const list = (v: unknown, field: string, one: (x: unknown, f: string) => string, max: number): string[] => {
     if (!Array.isArray(v) || v.length > max) return invalid(field, `must be a list of at most ${max} entries`);
     return [...new Set(v.map((x, i) => one(x, `${field}[${i}]`)))].sort();
@@ -79,6 +81,11 @@ export function checkTerms(value: unknown): GrantTerms | undefined {
   if (e["spendLimit"] !== undefined) {
     const v = e["spendLimit"];
     out.spendLimit = typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1e9 ? v : invalid("terms.spendLimit", "must be a number from 0 to 1000000000");
+  }
+  if (e["spendUnlimited"] !== undefined) {
+    if (e["spendUnlimited"] !== true) invalid("terms.spendUnlimited", "must be true when given");
+    if (e["spendLimit"] !== undefined) invalid("terms.spendUnlimited", "cannot go with a spendLimit");
+    out.spendUnlimited = true;
   }
   if (e["window"] !== undefined) {
     const w = e["window"] as Record<string, unknown>;

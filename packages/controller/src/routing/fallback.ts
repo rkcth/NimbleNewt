@@ -116,13 +116,19 @@ export class FallbackService {
   }
 
   /** The owner caps what a task may spend across all calls and fallbacks. */
-  async setBudget(owner: Principal, command: NoActor & { taskId: string; maxCostMicros?: number; maxTokens?: number; maxFailedAttempts?: number }): Promise<void> {
+  async setBudget(owner: Principal, command: NoActor & { taskId: string; maxCostMicros?: number | null; maxTokens?: number | null; maxFailedAttempts?: number | null }): Promise<void> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner sets a spending budget`);
     onlyKnown(command, ["commandId", "taskId", "maxCostMicros", "maxTokens", "maxFailedAttempts"]);
     const taskId = checkTaskId(command.taskId);
-    // A field left out keeps what the owner set before (raising one limit does not clear the others).
+    // A field left out keeps what the owner set before (raising one limit does not clear the others); a field given as null removes that limit (no limit is the default).
     const previous = (await this.#runner.get("model-budget", taskId))?.body as unknown as BudgetBody | undefined;
-    const body: BudgetBody = { ...(previous?.maxCostMicros === undefined ? {} : { maxCostMicros: previous.maxCostMicros }), ...(previous?.maxTokens === undefined ? {} : { maxTokens: previous.maxTokens }), ...(previous?.maxFailedAttempts === undefined ? {} : { maxFailedAttempts: previous.maxFailedAttempts }), ...(command.maxFailedAttempts === undefined ? {} : { maxFailedAttempts: count(command.maxFailedAttempts, "maxFailedAttempts") }), ...(command.maxCostMicros === undefined ? {} : { maxCostMicros: count(command.maxCostMicros, "maxCostMicros") }), ...(command.maxTokens === undefined ? {} : { maxTokens: count(command.maxTokens, "maxTokens") }), setBy: owner.id };
+    const field = (name: "maxCostMicros" | "maxTokens" | "maxFailedAttempts"): { [k: string]: number } => {
+      const given = command[name];
+      if (given === null) return {};
+      if (given !== undefined) return { [name]: count(given, name) };
+      return previous?.[name] === undefined ? {} : { [name]: previous[name] as number };
+    };
+    const body: BudgetBody = { ...field("maxFailedAttempts"), ...field("maxCostMicros"), ...field("maxTokens"), setBy: owner.id };
     const ref: AggregateRef = { kind: "model-budget", id: taskId };
     await this.#runner.command("model.budget", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
       payload: { taskId, budget: body as unknown as JsonObject },

@@ -98,6 +98,15 @@ for (const backend of backends) {
     await c.fb.setBudget(c.owner, { commandId: cid("bud"), taskId: c.task, maxFailedAttempts: 11 });
     assert.deepEqual(Object.entries((await c.fb.budget(c.task))!).filter(([k]) => k !== "setBy").sort(), [["maxCostMicros", 5000], ["maxFailedAttempts", 11]]);
     route(await c.fb.begin(c.host, { commandId: cid("b"), taskId: c.task, request }));
+    // null removes that one limit only (no limit is allowed); the others stay; only the owner; a replay changes nothing more.
+    await refuses("forbidden", () => c.fb.setBudget(c.host, { commandId: cid("bud"), taskId: c.task, maxFailedAttempts: null }));
+    await c.fb.setBudget(c.owner, { commandId: cid("bud-null"), taskId: c.task, maxFailedAttempts: null });
+    await c.fb.setBudget(c.owner, { commandId: cid("bud-null"), taskId: c.task, maxFailedAttempts: null });
+    assert.deepEqual(Object.entries((await c.fb.budget(c.task))!).filter(([k]) => k !== "setBy"), [["maxCostMicros", 5000]]);
+    await refuses("invalid_command", () => c.fb.setBudget(c.owner, { commandId: cid("bud-bad"), taskId: c.task, maxTokens: "none" as never }));
+    await c.fb.setBudget(c.owner, { commandId: cid("bud-null2"), taskId: c.task, maxCostMicros: null });
+    assert.deepEqual(Object.keys((await c.fb.budget(c.task))!), ["setBy"]);
+    for (let i = 0; i < 4; i++) route(await c.fb.begin(c.host, { commandId: cid("b"), taskId: c.task, request }));
   });
 
   suite("exhausted routes become a visible wait, and resume tries again when cooldowns or the table have changed", async (c) => {

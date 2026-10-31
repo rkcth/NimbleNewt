@@ -98,6 +98,7 @@ test("a grant allows only inside its terms: environment, time window and spend l
   assert.equal(ask("strict", "pay", "development", { estimatedSpend: 8 }, [spend]).via, "grant");
   assert.equal(ask("strict", "pay", "development", { estimatedSpend: 12 }, [spend]).mode, "owner");
   assert.equal(ask("strict", "pay", "development", { estimatedSpend: 8 }, [{ id: "grt-x", action: "approve.tool.pay" }]).mode, "owner", "a spend grant has to state its limit");
+  assert.equal(ask("strict", "pay", "development", { estimatedSpend: 1e9 }, [{ id: "grt-u", action: "approve.tool.pay", spendUnlimited: true }]).via, "grant", "an explicit no-limit spend grant has no ceiling");
   assert.equal(ask("strict", "git-commit", "development", {}, [{ id: "grt-p", action: "approve.tool.*" }]).via, "grant", "a prefix grant covers the tool");
   assert.equal(ask("strict", "git-commit", "development", {}, [{ id: "grt-o", action: "approve.tool.deploy" }]).mode, "owner");
 });

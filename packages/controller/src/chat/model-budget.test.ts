@@ -33,4 +33,29 @@ for (const backend of backends) {
       void build;
     } finally { await w.close(); }
   });
+
+  test(`${backend.name}: 'remove the limit' on a task's model use passes null for that field after the owner agrees; nothing is removed before`, async () => {
+    const script: Record<string, unknown> = {};
+    const set: Record<string, unknown>[] = [];
+    const stub = { setBudget: async (_p: unknown, c: Record<string, unknown>) => { set.push(c); }, budget: async () => undefined, spend: async () => ({ costMicros: 0, tokens: 0, calls: 0, failures: 0 }) };
+    const w = await openWorld(backend, script, undefined, { modelBudget: stub as never });
+    try {
+      const a = await w.project("A");
+      await w.task(a, "Build the login");
+      const chat = w.chat();
+      await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+      w.profile.value = "autonomous";
+      const say = async (text: string): Promise<Outcome> => { const o = (await chat.submit(w.ownerToken, { messageId: cid("m"), text })).outcomes; assert.equal(o.length, 1); return o[0]!; };
+      script["Remove the token limit on Build the login."] = [cmd("model-budget.set", { taskTitle: "Build the login", maxTokens: null }, "Remove the token limit on Build the login")];
+      const proposed = await say("Remove the token limit on Build the login.");
+      assert.equal(proposed.status, "proposed");
+      assert.match(JSON.stringify(proposed), /maxTokens=null/);
+      assert.equal(set.length, 0);
+      script["Yes, remove it."] = [{ kind: "apply_proposal", proposalId: proposed.proposalId ?? proposed.editId, evidence: "remove it", basis: "owner" }];
+      const done = await say("Yes, remove it.");
+      assert.equal(done.status, "applied", JSON.stringify(done));
+      assert.equal(set.length, 1);
+      assert.equal(set[0]!["maxTokens"], null);
+    } finally { await w.close(); }
+  });
 }

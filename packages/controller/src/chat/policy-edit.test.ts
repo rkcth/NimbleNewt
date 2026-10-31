@@ -78,8 +78,20 @@ test("a grant's length: stated wins, an until date is exact, nothing stated give
   const c = chooseGrantLength({ now: NOW, until: "2026-10-30" });
   assert.ok(c.ok && c.days === 9 && c.until === "2026-10-30T23:59:59.000Z");
   assert.equal(chooseGrantLength({ now: NOW, until: "2026-10-21" }).ok, false);
-  assert.equal(chooseGrantLength({ now: NOW, until: "2028-01-01" }).ok, false);
-  assert.equal(chooseGrantLength({ now: NOW, lengthDays: 400 }).ok, false);
+  // no maximum unless the owner sets one (grants.maxDays); a grant may have no end only then
+  const far = chooseGrantLength({ now: NOW, lengthDays: 4000 });
+  assert.ok(far.ok && far.days === 4000);
+  assert.ok(chooseGrantLength({ now: NOW, until: "2028-01-01" }).ok);
+  const forever = chooseGrantLength({ now: NOW, lengthDays: null });
+  assert.ok(forever.ok && forever.permanent === true && forever.days === undefined);
+  assert.match((chooseGrantLength({ now: NOW, lengthDays: null, rules: { maxDays: 90 } }) as { message: string }).message, /grants\.maxDays allows a standing grant at most 90 days/);
+  assert.equal(chooseGrantLength({ now: NOW, lengthDays: 91, rules: { maxDays: 90 } }).ok, false);
+  assert.equal(chooseGrantLength({ now: NOW, until: "2028-01-01", rules: { maxDays: 90 } }).ok, false);
+  // the default is the owner's when set, and never above the maximum
+  const d = chooseGrantLength({ now: NOW, rules: { defaultDays: 14 } });
+  assert.ok(d.ok && d.days === 14 && /default you set of 14 days/.test(d.why));
+  const dm = chooseGrantLength({ now: NOW, rules: { defaultDays: 14, maxDays: 7 } });
+  assert.ok(dm.ok && dm.days === 7);
 });
 
 for (const backend of backends) {
@@ -381,7 +393,6 @@ for (const backend of backends) {
     await refusal(`Let ${ann} send mail to anyone.`, { type: "grant", grantee: ann, approve: { class: "external-send" } }, "needs_audience", /per account and audience/);
     await refusal(`Let ${ann} spend money freely.`, { type: "grant", grantee: ann, approve: { class: "spend" } }, "needs_limit", /state its limit/);
     await refusal(`Let ${ann} use mystery-tool freely.`, { type: "grant", grantee: ann, approve: { tool: "mystery-tool" } }, "unsupported", /not a classified action/);
-    await refusal(`Let ${ann} commit for two years.`, { type: "grant", grantee: ann, approve: { class: "commit" }, lengthDays: 730 }, "invalid_length", /at most 365 days/);
     await refusal(`Let nobody-here commit to things.`, { type: "grant", grantee: "nobody-here", approve: { class: "commit" } }, "not_found", /no active agent/);
     // sends and spending are granted per audience and with a limit
     script[`Let ${ann} send mail to team@example.org.`] = [pe({ type: "grant", grantee: ann, approve: { class: "external-send" }, audiences: ["team@example.org"] }, "send mail to team")];
@@ -851,5 +862,90 @@ for (const backend of backends) {
     assert.equal(only((await c.say("Let agent:ann spend for a week.")).outcomes).code, "unsupported_value");
     script["Let agent:ann spend up to 500 in staging for a week."] = [pe({ type: "grant", grantee: "agent:ann", approve: { class: "spend" }, spendLimit: 500, environments: ["staging"], lengthDays: 7 }, "spend up to 500")];
     assert.equal(only((await c.say("Let agent:ann spend up to 500 in staging for a week.")).outcomes).status, "proposed");
+  });
+
+  /** Sets an installation setting through the same edit service the chat uses (propose, then apply). */
+  const setSetting = async (c: Ctx, key: string, value: number | undefined): Promise<void> => {
+    const prepared = await c.edits.prepare(c.w.owner, { change: { type: "setting", layer: "installation", key, ...(value === undefined ? { remove: true as const } : { value }) }, conditions: [], evidence: key, wording: `Set ${key} to ${value}.`, quoted: false, forwarded: false });
+    assert.ok(prepared.ok, JSON.stringify(prepared));
+    const made = await c.edits.create(c.w.owner, { commandId: cid("ss"), turnId: "t", wording: `Set ${key} to ${value}.`, draft: prepared.draft });
+    assert.equal((await c.edits.apply(c.w.owner, { commandId: cid("sa"), editId: made.id })).status, "applied");
+  };
+  const DAY = 86_400_000;
+
+  suite("a grant may have no end when the owner says so; it is shown as permanent, never expires, and a replay makes one grant", async (c, script) => {
+    const ann = "agent:ann";
+    // the model cannot add 'no end' that the owner never said
+    script[`Let ${ann} commit in development.`] = [pe({ type: "grant", grantee: ann, approve: { class: "commit" }, lengthDays: null }, "commit in development")];
+    assert.equal(only((await c.say(`Let ${ann} commit in development.`)).outcomes).code, "unsupported_value");
+    script[`Let ${ann} commit in development permanently.`] = [pe({ type: "grant", grantee: ann, approve: { class: "commit" }, lengthDays: null }, "commit in development permanently")];
+    const r = await c.say(`Let ${ann} commit in development permanently.`);
+    const o = only(r.outcomes);
+    assert.equal(o.status, "proposed", JSON.stringify(o));
+    assert.match(r.reply[0]!, /Length: no end .*permanent: it has no end time/);
+    assert.match(r.reply[0]!, /does not expire by itself/);
+    assert.deepEqual(await c.grants.held(ann, NOW), [], "shown first, no grant yet");
+    const first = await c.edits.apply(c.w.owner, { commandId: cid("a"), editId: o.editId! });
+    assert.equal(first.status, "applied");
+    const again = await c.edits.apply(c.w.owner, { commandId: cid("a2"), editId: o.editId! });
+    assert.equal(again.replayed, true);
+    const later = new Date(Date.parse(NOW) + 5000 * DAY).toISOString();
+    const held = await c.grants.held(ann, later);
+    assert.equal(held.length, 1, "one grant, still held 5000 days on");
+    assert.equal(held[0]!.body.expiresAt, undefined);
+    assert.match(held[0]!.body.basis, /Length: no end/);
+    // only the owner
+    await refuses("forbidden", () => c.edits.apply(c.ann.principal, { commandId: cid("x"), editId: o.editId! }));
+  });
+
+  suite("the longest grant is an optional owner setting: unset means no maximum, a maximum refuses a grant with no end and is looked at again on apply, removing it lifts it", async (c, script) => {
+    const ann = "agent:ann";
+    script[`Let ${ann} commit in development for 400 days.`] = [pe({ type: "grant", grantee: ann, approve: { class: "commit" }, lengthDays: 400 }, "commit in development for 400 days")];
+    assert.equal(only((await c.say(`Let ${ann} commit in development for 400 days.`)).outcomes).status, "proposed", "no maximum by default");
+    await setSetting(c, "grants.maxDays", 30);
+    script[`Let ${ann} commit in development forever.`] = [pe({ type: "grant", grantee: ann, approve: { class: "commit" }, lengthDays: null }, "commit in development forever")];
+    const refused = await c.say(`Let ${ann} commit in development forever.`);
+    assert.equal(only(refused.outcomes).code, "invalid_length");
+    assert.match(refused.reply[0]!, /grants\.maxDays allows a standing grant at most 30 days/);
+    script[`Let ${ann} commit in development for 60 days.`] = [pe({ type: "grant", grantee: ann, approve: { class: "commit" }, lengthDays: 60 }, "commit in development for 60 days")];
+    assert.equal(only((await c.say(`Let ${ann} commit in development for 60 days.`)).outcomes).code, "invalid_length");
+    // a proposal made before the maximum was lowered cannot be applied beyond it
+    await setSetting(c, "grants.maxDays", undefined);
+    script[`Let ${ann} commit in development with no end.`] = [pe({ type: "grant", grantee: ann, approve: { class: "commit" }, lengthDays: null }, "commit in development with no end")];
+    const p = only((await c.say(`Let ${ann} commit in development with no end.`)).outcomes);
+    assert.equal(p.status, "proposed");
+    await setSetting(c, "grants.maxDays", 7);
+    await refuses("invalid_command", () => c.edits.apply(c.w.owner, { commandId: cid("a"), editId: p.editId! }));
+    assert.deepEqual(await c.grants.held(ann, NOW), []);
+    // the offered lengths stay within the maximum
+    script[`Let ${ann} commit in development for 3 days.`] = [pe({ type: "grant", grantee: ann, approve: { class: "commit" }, lengthDays: 3 }, "commit in development for 3 days")];
+    assert.match((await c.say(`Let ${ann} commit in development for 3 days.`)).reply[0]!, /pick another when you apply it: 1 day, 3 days, 7 days\./);
+  });
+
+  suite("the default grant length is an optional owner setting; unset keeps 30 days", async (c, script) => {
+    const ann = "agent:ann";
+    await setSetting(c, "grants.defaultDays", 14);
+    script[`Let ${ann} commit in development.`] = [pe({ type: "grant", grantee: ann, approve: { class: "commit" } }, "commit in development")];
+    const r = await c.say(`Let ${ann} commit in development.`);
+    assert.match(r.reply[0]!, /Length: 14 days \(you did not say how long.*default you set of 14 days/);
+    await c.edits.apply(c.w.owner, { commandId: cid("a"), editId: only(r.outcomes).editId! });
+    assert.equal((await c.grants.held(ann, NOW))[0]!.body.expiresAt, new Date(Date.parse(NOW) + 14 * DAY).toISOString());
+  });
+
+  suite("a spending grant may state 'no limit' explicitly: only in the owner's words, still a proposal, and it spends without a ceiling", async (c, script) => {
+    const ann = "agent:ann";
+    script[`Let ${ann} spend in staging for a week.`] = [pe({ type: "grant", grantee: ann, approve: { class: "spend" }, spendLimit: null, environments: ["staging"], lengthDays: 7 }, "spend in staging for a week")];
+    assert.equal(only((await c.say(`Let ${ann} spend in staging for a week.`)).outcomes).code, "unsupported_value");
+    script[`Let ${ann} spend in staging for a week with no limit.`] = [pe({ type: "grant", grantee: ann, approve: { class: "spend" }, spendLimit: null, environments: ["staging"], lengthDays: 7 }, "spend in staging for a week with no limit")];
+    const r = await c.say(`Let ${ann} spend in staging for a week with no limit.`);
+    const o = only(r.outcomes);
+    assert.equal(o.status, "proposed", JSON.stringify(o));
+    assert.match(r.reply[0]!, /Spend limit: none, as you said/);
+    assert.equal((await c.edits.apply(c.w.owner, { commandId: cid("a"), editId: o.editId! })).status, "applied");
+    const g = (await c.grants.held(ann, NOW))[0]!.body;
+    assert.deepEqual([g.terms?.spendUnlimited, g.terms?.spendLimit], [true, undefined]);
+    // without saying anything about the limit it is still refused
+    script[`Let ${ann} spend money.`] = [pe({ type: "grant", grantee: ann, approve: { class: "spend" } }, "spend money")];
+    assert.equal(only((await c.say(`Let ${ann} spend money.`)).outcomes).code, "needs_limit");
   });
 }

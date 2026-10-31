@@ -421,7 +421,7 @@ function grantView(id: string, body: GrantRecordBody): GrantView {
   const t = body.terms;
   return {
     id, action: body.action, source: body.rootSource ?? body.source,
-    ...(t?.environments === undefined ? {} : { environments: t.environments }), ...(t?.spendLimit === undefined ? {} : { spendLimit: t.spendLimit }),
+    ...(t?.environments === undefined ? {} : { environments: t.environments }), ...(t?.spendLimit === undefined ? {} : { spendLimit: t.spendLimit }), ...(t?.spendUnlimited === true ? { spendUnlimited: true as const } : {}),
     ...(t?.window === undefined ? {} : { window: t.window }), ...(t?.audiences === undefined ? {} : { audiences: t.audiences }), ...(t?.branches === undefined ? {} : { branches: t.branches }),
   };
 }
