@@ -32,15 +32,15 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N02 / AII-252 | F01, F02, F03, F04a, F04b, F04c, F04d, F04, F04f, F04g, F04h, F04i, F04j, F04k, F04e, F09 |
 | N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06, C06b |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
-| N05 / AII-255 | L05, L05b, L01, L01b, L02, L02b, L02c, L02d, L03, L03b, L03c, L03d, L03e, L03f, L03g, L03h, L04, L04b, L04c, L06, L06b, H08, H08b |
+| N05 / AII-255 | L05, L05b, L01, L01b, L02, L02b, L02c, L02d, L03, L03b, L03c, L03d, L03e, L03f, L03g, L03h, L03i, L04, L04b, L04c, L06, L06b, H08, H08b |
 | N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A07e, A08, A08b, A08c, A09, A10, A10b, A07f, A07g |
 | N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C07e, C07f, C08, C09, C09b, C09c, C09d, C09e, C09f, C09g, C09h, C08b, C08c, C08d |
 | N08 / AII-258 | R01, R02, R03, R04, R04b, R04c, R05, R05b, R05c, R05d, R05f, R05g, R05e |
-| N09 / AII-259 | U03, U03d, U03e, U05b, U04, U05, U06, U06b, U03b, U03c, U07, U09, U08, U10, U11, U11b, U14 |
+| N09 / AII-259 | U03, U03d, U03e, U05b, U04, U05, U06, U06b, U03b, U03c, U07, U09, U08, U10, U11, U11b, U11c, U14 |
 | N10 / AII-260 | H01, H02, H03, H04, H05, H05b, H06, H06b, H06c, H07, H07b, H07c, H07d, H07e, H02e, H09, H09b, H10, H11, H12, H12a, H12b, H12c, H12d, H12q, H12l, H12m, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H13, H13b, H13c, H13d, H13e, H13f, H02b, H02c, H02d, H11b, H12n, H12p, H12o |
 | N11 / AII-261 | V01, V01b, V01c, V02, V02b, V02c |
-| N12 / AII-262 | M01b, M01c, M01d, M00, M01, M02, M02b, M02c, M02d, M02e, M02f, M03, M03b, M03c, M03d, M03e, M03f, M04, M04b, M04c, M04d, M04e, M04f, M05, M05b, M06 |
-| N13 / AII-263 | U04b, U04c, U04d, T01, T02, T02b, T03, T06, T06b, T07, T07b, T08, T09, T09b, T09c, T09d |
+| N12 / AII-262 | M01b, M01c, M01d, M00, M01, M02, M02b, M02c, M02d, M02e, M02f, M02g, M03, M03b, M03c, M03d, M03e, M03f, M03g, M04, M04b, M04c, M04d, M04e, M04f, M04g, M05, M05b, M06 |
+| N13 / AII-263 | U04b, U04c, U04d, T01, T02, T02b, T02c, T03, T06, T06b, T07, T07b, T08, T09, T09b, T09c, T09d |
 | N14 / AII-264 | P01b, P01c, P01, P02, P02b, P03, P04, P05, P06, P07, P08, P08b, P08c, P09, P10, P10b, P10c |
 | N15 / AII-265 | Q01, Q02, Q03, Q04, Q01b |
 | N16 / AII-266 | B01 |
@@ -982,12 +982,22 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** A recipient can carry on from the package alone.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
-### L03h — Finish hand-off: a locks source, offering to reassign responsibilities
+### L03h — Hand-off locks source from open workspace operations and held resource claims
 
 - **Parent:** N05 / AII-255.
+- **Status:** implemented; commits `e94598e`, `fa8c271`; CI runs 41163513254; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Hand-off locks come from open workspace operations and held resource claims, limited to what the recipient may see, with gaps told as gaps. Offering to reassign responsibilities and the integrator and workspace lock sources are L03i.
 - **Blockers:** L03g.
-- **Deliverable:** Split from L03g (2026-10-30): the hand-off locks source has a service behind it, and responsibilities can be offered for reassignment with the hand-off.
-- **Acceptance and verification:** A hand-off package lists the real locks and the owner can reassign responsibilities with it.
+- **Deliverable:** Split from L03g (2026-10-30): the hand-off locks source has a service behind it (open workspace operations and held resource claims), limited to what the recipient may see, with gaps told as gaps. Offering to reassign responsibilities and the other lock sources moved to L03i (2026-10-30)..
+- **Acceptance and verification:** A hand-off package lists the real locks the recipient may see and tells a gap as a gap.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### L03i — Finish hand-off: offering to reassign responsibilities, integrator and workspace lock sources
+
+- **Parent:** N05 / AII-255.
+- **Blockers:** L03h.
+- **Deliverable:** Split from L03h (2026-10-30): offering to reassign the sender's responsibilities with the hand-off (an owner question surfaced with the package; nothing is transferred by a hand-off today), the integrator lease (P10) and workspace holds (H12m) as lock sources once they exist.
+- **Acceptance and verification:** The owner can reassign responsibilities with the hand-off package and the package lists every kind of lock.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### L04 — Implement checked resume and evidence invalidation
@@ -1880,11 +1890,21 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** Each listed event produces one notification linking to its record; delivery failure is visible and retried within a bound; duplicates coalesce; channel and quiet-hour changes apply from the next notification; notifications carry no secrets or restricted payloads; nothing is sent to an external service unless configured; owner asks are collected into a digest at times the owner sets, answerable in one pass from the notification, with quiet hours; an immediate interruption only for a blocked critical path, a safety stop or the other Urgent triggers defined in U11b; reviews escalated to the owner (H05) arrive in the digest unless the policy marks them urgent.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
-### U11b — Implement notification levels, the Needs you view and escalation to Urgent
+### U11b — Notification levels, the Needs you view and escalation to Urgent by age
 
 - **Parent:** N09 / AII-259.
+- **Status:** implemented; commits `d83695d`, `9bb38d4`, `ef56ca4`, `16d59d2`, `0115950`, `d1c71c1`, `e9db33b`, `ca544f2`, `c5e8a6b`, `ce6d0d4`, `a2d6e8c`, `7a34e1a`; CI runs 41163513254; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Notice, Needs you and Urgent levels set by the controller, the Needs-you view sorted by what it holds up, Notices never pushed and kept apart from the item limit, escalation to Urgent by age, settings by API and chat, and a stand-up that opens with the Needs-you items. The remaining Urgent triggers, critical-path marking and answering in place are U11c.
 - **Blockers:** U11, A07b, H05, M03, H12, K01, H01, H09, A08.
-- **Deliverable:** Three levels for everything that reaches the owner (owner decision 2026-10-22): Notice (informational, no action), Needs you (waiting on a decision, work elsewhere continues) and Urgent (needs the owner now); one 'Needs you' view with the count shown in every chat reply; extends U11's controller-raised interrupting kinds.
+- **Deliverable:** Three levels for everything that reaches the owner (owner decision 2026-10-22): Notice (informational, no action), Needs you (waiting on a decision, work elsewhere continues) and Urgent (needs the owner now), set by the controller from what an item is (owner level per kind chat-settable); one Needs you view (approval requests, agent questions, owner-only approvals, owner blockers, owner-decision reviews, grant_needed blockers) sorted by what it holds up; Notices never pushed, counted, retained and capped apart from the open-item limit; escalation to Urgent after an owner-set time; notification settings by state API and chat; the stand-up agenda opens with the Needs-you and Urgent items and ends with one notice line. Split 2026-10-30: the remaining Urgent triggers and the rest moved to U11c..
+- **Acceptance and verification:** Only the controller raises Urgent; a Notice goes to the inbox and the activity record only and is counted, never pushed; every item awaiting an owner decision from the sources named appears in one view sorted by critical path, then the number of tasks it blocks, then age; an item waiting past the owner-set time is raised to Urgent with its reason; levels and the escalation time are changed by chat, owner-only and recorded.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### U11c — Finish notification levels: Urgent triggers, critical path, answering in place, digest rule
+
+- **Parent:** N09 / AII-259.
+- **Blockers:** U11b.
+- **Deliverable:** Split from U11b (2026-10-30). Original text of the card: Three levels for everything that reaches the owner (owner decision 2026-10-22): Notice (informational, no action), Needs you (waiting on a decision, work elsewhere continues) and Urgent (needs the owner now); one 'Needs you' view with the count shown in every chat reply; extends U11's controller-raised interrupting kinds Remaining: owner-marked critical tasks and goal-based critical path; the Urgent triggers for K01 backups, H01/H09 host down, controller down (watchdog), A08 integrity and sandbox/credential/protected-path events, and repeated denials; escalation when the agent has nothing else to do and de-escalation by the dispatcher; the plain 09:00 digest only when no stand-up is scheduled; answering in place from the Needs-you view; deferred meeting items from M03.
 - **Acceptance and verification:** Only the controller raises Urgent (agents still cannot interrupt, as in U11); a notice goes to the inbox and the activity record only and is counted in the daily report, never pushed; every item awaiting an owner decision (approval requests, agent questions, escalated reviews, deferred meeting items from M03) appears in one view sorted by critical path first, then the number of tasks it blocks, then age, each answerable in place; Urgent triggers are exactly: a safety stop; a blocked critical path (a task that an open goal or another open task depends on through the task dependency records, or one the owner marked critical, computed by this card); failing backups (K01: no good backup within the limit, which is 48 hours until K01c lets the owner set it); a host down (H01 heartbeat loss, H09 reconciliation failure) or the controller down (a watchdog or host sends straight to the configured external channel, and the controller raises it again when it returns); a sandbox escape attempt, a credential used from the wrong task or host, a protected path (.git or the loader configuration) touched, a failed integrity check (A08), or repeated denials from one agent over an owner-set threshold; and any Needs-you item that has stopped work (a critical-path task is blocked, or the dispatcher's view of available work (H12) shows an agent or project with nothing else to do while it waits) or has waited past an owner-set time (default 24 hours); routine single policy denials are not Urgent; an item that only holds back an agent with other work stays Needs you; escalation to Urgent is recorded with its reason and the dispatcher returns it to Needs you on the next dispatch if the work has resumed; Urgent interrupts at once on every configured channel and also in quiet hours; the daily stand-up report (M03) opens with the Needs-you items and then a summary of notices and is the digest, with a plain 09:00 UTC digest only when no stand-up is scheduled; levels and the escalation time are changed by chatting with the supervisor, owner-only and recorded; the Needs you view also lists every review that is in owner-decision mode (created by the commit gate, a direct request, a deadline or a reviewer escalation as well as by the dispatcher), so no owner-mode review waits unseen (H12h follow-up); a task that needs a grant nobody has given (a grant_needed blocker raised by the dispatcher, H12) is listed as a Needs-you item.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
@@ -2080,12 +2100,22 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** A decision that widens rights or spend is carried out only with the owner's agreement or the policy's leave.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
-### M02f — Finish meeting records: decision log, steward agent, narrator, chat commands
+### M02f — Meeting decision log: each decision and its outcome recorded and readable
 
 - **Parent:** N12 / AII-262.
+- **Status:** implemented; commits `7367fed`, `7959d81`; CI runs 41163513254; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Each meeting decision and its outcome is logged once with the cell as it was at decision time, readable through meeting.decisions.log; a sweep fills lines lost to a crash. The steward agent, narrator and chat commands are M02g.
 - **Blockers:** M02e.
-- **Deliverable:** Split from M02e (2026-10-30): the log of each meeting decision and its outcome so safe patterns can be found later, the steward agent for decisions no coded rule covers, the narrator, and the chat commands for meetings. Open items from the applier work are in implementation-notes.md (no per-decision limit on grants or raises, the aggregate cap, unguarded refuse saves)..
-- **Acceptance and verification:** Unforeseen decisions go to a capable agent under the same widening policy; each decision and outcome is recorded; the commands are reachable through chat..
+- **Deliverable:** Split from M02e (2026-10-30): the log of each meeting decision and its outcome so safe patterns can be found later, read through meeting.decisions.log (the sweep fills lines lost to a crash). The steward agent, narrator and chat commands moved to M02g (2026-10-30)..
+- **Acceptance and verification:** Each decision and outcome is recorded once, with the cell as it was at decision time, and can be read by those allowed.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### M02g — Finish meeting records: steward agent, narrator, chat commands, per-decision limits
+
+- **Parent:** N12 / AII-262.
+- **Blockers:** M02f.
+- **Deliverable:** Split from M02f (2026-10-30): the steward agent for decisions no coded rule covers (decidedBy steward), the narrator, chat commands for meetings and a chat reading of the log, learning auto-apply rules from the log once production data exists, and the open items from the applier work (no per-decision limit on grants or raises, the aggregate cap, unguarded refuse saves).
+- **Acceptance and verification:** Unforeseen decisions go to a capable agent under the same widening policy; the commands are reachable through chat.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### M03 — Implement stand-up preparation, briefs and agenda items
@@ -2138,12 +2168,22 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** A stand-up runs end to end in the running controller.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
-### M03f — Finish stand-ups: agenda outcomes to chat turns and inquiries, other sinks, chat
+### M03f — Stand-ups: agenda outcomes to chat turns and inquiries, the open agenda and the owner's items in chat
 
 - **Parent:** N12 / AII-262.
+- **Status:** implemented; commits `05c6ba3`, `6a3af8f`, `cd92dc4`, `34e08da`; CI runs 41163513254; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** Stand-up agenda outcomes go back to the chat turn or inquiry they came from once, the open agenda is asked for in chat, and the owner's items are composed into the preparation, proven through the running controller. Other sinks and stand-up chat commands are M03g.
 - **Blockers:** M03e.
-- **Deliverable:** Split from M03e (2026-10-29): agenda outcomes to chat turns and inquiries, the notice/allocation/usage/owner-item sinks, chat commands.
-- **Acceptance and verification:** A stand-up runs end to end in the running controller.
+- **Deliverable:** Split from M03e (2026-10-29): agenda outcomes go back to the chat turn or inquiry they came from, the open agenda of a project can be asked for in chat, the owner's Needs-you items are composed into the stand-up preparation, proven through the running controller. The remaining sinks and chat commands moved to M03g (2026-10-30)..
+- **Acceptance and verification:** An agenda outcome reaches the chat turn or inquiry it came from once, across a replay and a restart; the owner's list is in the prepared stand-up and only for the owner.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### M03g — Finish stand-ups: allocation and usage sinks, follow-ups in the chat listing, stand-up chat commands, new owner questions
+
+- **Parent:** N12 / AII-262.
+- **Blockers:** M03f.
+- **Deliverable:** Split from M03f (2026-10-30): the allocation sink (needs the configuration service in the dispatch composition) and the usage sink (nothing measures worker-slot time per project yet), showing follow-ups in the chat's own listing of turns, chat commands for stand-ups, and an agenda outcome that asks the owner a new question (an inquiry or chat turn created by the stand-up itself).
+- **Acceptance and verification:** A stand-up runs end to end in the running controller with every sink and the owner can run and read it through chat.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### M04 — Implement meeting attendance and return to work
@@ -2196,12 +2236,22 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** A long-running job started during a meeting is refused; a Stopped agent the owner excepted attends and goes back to Stopped.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
-### M04f — Finish meeting attendance: chat wording for the stopped-agent exception, wake of agents the host reports stopped
+### M04f — Stopped-agent meeting exception in chat, and the host wake path
 
 - **Parent:** N12 / AII-262.
+- **Status:** implemented; commits `1bd970f`, `0139674`, `33ff0ce`, `7b55417`, `e94975e`, `43fe62e`; CI runs 41163513254; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** The owner asks in chat for a stopped agent to attend and is told what it means; planned meetings and rosters are readable in chat; a wake path reaches a host hook once per wake with a bounded wait; the dispatcher passes a provisional safeLongRunning predicate. A real predicate and a host that supplies the wake are M04g.
 - **Blockers:** M04e.
-- **Deliverable:** Split from M04e (2026-10-29): chat wording that explains the owner's exception for a stopped agent, a wake path for agents the host's own availability hook reports stopped; the dispatcher passes safeLongRunning so long work is refused during a meeting.
-- **Acceptance and verification:** The owner can ask in chat for a stopped agent to attend and is told what it means.
+- **Deliverable:** Split from M04e (2026-10-29): chat wording that explains the owner's exception for a stopped agent (and planned meetings and rosters in chat), a wake path (meetingWakeSink, StartOptions.meetingWake) for agents the host's own availability hook reports stopped, and a safeLongRunning predicate the dispatcher passes to the meeting check. Composing a real predicate and a host that supplies the wake moved to M04g (2026-10-30)..
+- **Acceptance and verification:** The owner can ask in chat for a stopped agent to attend and is told what it means; the wake reaches the host once per wake with a bounded wait, and a failing host is told without its own text.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### M04g — Compose a real safeLongRunning and a host that wakes stopped agents
+
+- **Parent:** N12 / AII-262.
+- **Blockers:** M04f.
+- **Deliverable:** Split from M04f (2026-10-30): a definition of a long-running operation that is safe to carry on during a meeting (needs T07 job knowledge) composed into the dispatcher, and a real host (L02/L03) that supplies the wake hook and reports the woken agent available, so the owner's wake works outside tests.
+- **Acceptance and verification:** A long job that cannot yield is refused during a meeting and a safe one carries on; the owner's wake of a stopped agent works against a real host.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### M05 — Implement meeting facilitation and owner control
@@ -2248,12 +2298,22 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Acceptance and verification:** Revoked artifact cannot execute; stale referenced artifact retained for inspection; merge/deprecation does not break silent resume; revocation applies the configured policy to in-flight operations and a personal fork of a revoked tool gains no authority; non-maintainer publication is refused and rollback to a prior release works.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
-### T02b — Finish catalog promotion: in-flight policy on revocation, retention
+### T02b — Catalog revocation: in-flight policy (finish or cancel) and revoking by chat
 
 - **Parent:** N13 / AII-263.
+- **Status:** implemented; commits `817e699`, `a2137bf`, `dad6c52`, `5121b0e`; CI runs 41163513254; record [implementation-notes.md](implementation-notes.md).
+- **Progress note:** A running catalogue tool call follows the owner-chosen finish or cancel policy when its version is revoked (cancel when the policy cannot be read), and the owner revokes a version by chat. Retention, a pause policy and runs on other processes are T02c.
 - **Blockers:** T02.
-- **Deliverable:** Split from T02 (2026-10-30): what happens to a run in flight when its artifact is revoked (finish, cancel or pause), and retention of old versions.
-- **Acceptance and verification:** A revoked artifact's running work follows the chosen policy; old versions are kept or dropped by the retention rule.
+- **Deliverable:** Split from T02 (2026-10-30): what happens to a catalogue tool call already running when its version is revoked (finish or cancel, chosen by the owner, fail-closed when the policy cannot be read), and revoking a tool version by chat. Retention, the pause policy and other-process runs moved to T02c (2026-10-30)..
+- **Acceptance and verification:** A revoked version's running calls follow the chosen policy and a new run of it is refused.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### T02c — Finish catalog promotion: retention of old versions, pause policy, runs on other processes
+
+- **Parent:** N13 / AII-263.
+- **Blockers:** T02b.
+- **Deliverable:** Split from T02b (2026-10-30): retention of old and stale referenced versions (K06), pause as a third in-flight policy, cancellation of runs on other hosts and processes (remote workers cannot run catalogue tools yet), a production launcher passed to the tool bridge, a chat view of past revocations.
+- **Acceptance and verification:** Old versions are kept or dropped by the retention rule and a revocation reaches calls on every host.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### T03 — Implement approved MCP client connections
@@ -2899,7 +2959,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, U14.
+- **Blockers:** D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, U14, M02g, M03g, M04g, L03i, T02c, U11c.
 - **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
 - **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

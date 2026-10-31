@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **203 of 309 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **209 of 315 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -109,17 +109,17 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓▓▓░` 93% | 15 of 16 |
 | Pi runtime and inference caching | `▓▓▓▓▓▓▓▓░░░░` 72% | 8 of 11 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
-| Pause, suspend and resume | `▓▓▓▓▓▓▓▓▓░░░` 78% | 18 of 23 |
+| Pause, suspend and resume | `▓▓▓▓▓▓▓▓▓░░░` 79% | 19 of 24 |
 | Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓░░░` 80% | 17 of 21 |
 | Context and memory | `▓▓▓▓▓▓▓▓▓▓░░` 90% | 20 of 22 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
 | Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓▓░` 92% | 12 of 13 |
-| Owner chat and web UI | `▓▓▓▓▓▓▓░░░░░` 64% | 11 of 17 |
+| Owner chat and web UI | `▓▓▓▓▓▓▓▓░░░░` 66% | 12 of 18 |
 | Workers, dispatch and teams | `▓▓▓▓▓▓▓░░░░░` 65% | 31 of 47 |
 | Agent messaging | `▓▓▓▓▓▓▓▓▓▓░░` 87% | 7 of 8 |
 | Health and recovery | `▓▓▓▓▓▓▓▓▓▓░░` 83% | 5 of 6 |
-| Meetings | `▓▓▓▓▓▓▓▓░░░░` 73% | 19 of 26 |
-| Tools and skills | `▓▓▓▓▓▓▓▓▓░░░` 75% | 12 of 16 |
+| Meetings | `▓▓▓▓▓▓▓▓▓░░░` 75% | 22 of 29 |
+| Tools and skills | `▓▓▓▓▓▓▓▓▓░░░` 76% | 13 of 17 |
 | Projects, repositories and workspaces | `▓▓▓▓░░░░░░░░` 35% | 6 of 17 |
 | Quality: deliverables, QA and defects | `░░░░░░░░░░░░` 0% | 0 of 5 |
 | Balancing delivery and improvement | `░░░░░░░░░░░░` 0% | 0 of 1 |
@@ -205,7 +205,7 @@ Project and task records, assignments, durable delivery, the effect ledger and a
 </details>
 
 <details>
-<summary><strong>Pause, suspend and resume</strong> — ▓▓▓▓▓▓▓▓▓░░░ 18 of 23</summary>
+<summary><strong>Pause, suspend and resume</strong> — ▓▓▓▓▓▓▓▓▓░░░ 19 of 24</summary>
 
 Pause, suspend, stop, release and checked resume, interrupting a model mid-generation, the remote watchdog, and shutdown and reboot handling.
 
@@ -231,7 +231,8 @@ Pause, suspend, stop, release and checked resume, interrupting a model mid-gener
 - [x] **L03e** · P36 · Finish hand-off: chat, richer package, temporary reassignment _(needs L03d)_
 - [x] **L03f** · P37 · Finish hand-off: chat, richer package, locks, drafts _(needs L03e)_
 - [x] **L03g** · P38 · Finish hand-off: locks, drafts, responsibilities in the package _(needs L03f)_
-- [ ] **L03h** · P39 · Finish hand-off: a locks source, offering to reassign responsibilities _(needs L03g)_
+- [x] **L03h** · P39 · Hand-off locks source from open workspace operations and held resource claims _(needs L03g)_
+- [ ] **L03i** · P40 · Finish hand-off: offering to reassign responsibilities, integrator and workspace lock sources _(needs L03h)_
 
 </details>
 
@@ -327,7 +328,7 @@ Routes and capability policy, provider failure fallback, difficulty profiles, dr
 </details>
 
 <details>
-<summary><strong>Owner chat and web UI</strong> — ▓▓▓▓▓▓▓░░░░░ 11 of 17</summary>
+<summary><strong>Owner chat and web UI</strong> — ▓▓▓▓▓▓▓▓░░░░ 12 of 18</summary>
 
 Talking to your agents: the chat interpreter, policy editing, status and blocker explanations, recovery chat, notifications and the responsive web interface.
 
@@ -347,7 +348,8 @@ Talking to your agents: the chat interpreter, policy editing, status and blocker
 - [ ] **U07** · P33 · Qualify responsive web chat over private networking _(needs U03, U06, A01, R05)_
 - [ ] **U14** · P33 · First-run setup assistant: guided configuration through chat before the first agent exists _(needs U03, U03b, U10, H11, A07c, P08, F02, F09, R01, H12k)_
 - [ ] **U08** · P34 · Implement settings and administration views _(needs U07, U10, A07, F09, H11, R03, T03, A07b, A07c)_
-- [ ] **U11b** · P34 · Implement notification levels, the Needs you view and escalation to Urgent _(needs U11, A07b, H05, M03, H12, K01, H01, H09, A08)_
+- [x] **U11b** · P34 · Notification levels, the Needs you view and escalation to Urgent by age _(needs U11, A07b, H05, M03, H12, K01, H01, H09, A08)_
+- [ ] **U11c** · P35 · Finish notification levels: Urgent triggers, critical path, answering in place, digest rule _(needs U11b)_
 
 </details>
 
@@ -437,7 +439,7 @@ Stall detection and bounded supervisor recovery.
 </details>
 
 <details>
-<summary><strong>Meetings</strong> — ▓▓▓▓▓▓▓▓░░░░ 19 of 26</summary>
+<summary><strong>Meetings</strong> — ▓▓▓▓▓▓▓▓▓░░░ 22 of 29</summary>
 
 Scheduling, votes and decisions, stand-ups, attendance and return to work, and facilitation.
 
@@ -462,16 +464,19 @@ Scheduling, votes and decisions, stand-ups, attendance and return to work, and f
 - [x] **M02e** · P33 · Meeting records: grant, budget and ownership appliers, shareable-notes check _(needs M02d)_
 - [x] **M03d** · P33 · Finish stand-ups: sinks, real occurrences, chat _(needs M03c)_
 - [x] **M04d** · P33 · Finish meeting attendance: wake sinks, chat, stand-up link _(needs M04c)_
-- [ ] **M02f** · P34 · Finish meeting records: decision log, steward agent, narrator, chat commands _(needs M02e)_
+- [x] **M02f** · P34 · Meeting decision log: each decision and its outcome recorded and readable _(needs M02e)_
 - [x] **M03e** · P34 · Finish stand-ups: other sinks, untold decisions shown to the owner, chat _(needs M03d)_
 - [x] **M04e** · P34 · Finish meeting attendance: keep no long-running work during a meeting, stopped agents, chat _(needs M04d)_
-- [ ] **M03f** · P35 · Finish stand-ups: agenda outcomes to chat turns and inquiries, other sinks, chat _(needs M03e)_
-- [ ] **M04f** · P35 · Finish meeting attendance: chat wording for the stopped-agent exception, wake of agents the host reports stopped _(needs M04e)_
+- [ ] **M02g** · P35 · Finish meeting records: steward agent, narrator, chat commands, per-decision limits _(needs M02f)_
+- [x] **M03f** · P35 · Stand-ups: agenda outcomes to chat turns and inquiries, the open agenda and the owner's items in chat _(needs M03e)_
+- [x] **M04f** · P35 · Stopped-agent meeting exception in chat, and the host wake path _(needs M04e)_
+- [ ] **M03g** · P36 · Finish stand-ups: allocation and usage sinks, follow-ups in the chat listing, stand-up chat commands, new owner questions _(needs M03f)_
+- [ ] **M04g** · P36 · Compose a real safeLongRunning and a host that wakes stopped agents _(needs M04f)_
 
 </details>
 
 <details>
-<summary><strong>Tools and skills</strong> — ▓▓▓▓▓▓▓▓▓░░░ 12 of 16</summary>
+<summary><strong>Tools and skills</strong> — ▓▓▓▓▓▓▓▓▓░░░ 13 of 17</summary>
 
 The immutable tool and skill catalogue, review and promotion, MCP connections, the protected agent tool bridge and background jobs.
 
@@ -489,7 +494,8 @@ The immutable tool and skill catalogue, review and promotion, MCP connections, t
 - [x] **T09c** · P32 · Run queued toolbox commands through the approval gates _(needs T09b)_
 - [x] **T09d** · P32 · Run queued agent commands _(needs T09b)_
 - [x] **T02** · P33 · Implement review/promotion/deprecation and retention _(needs T01, A05, L04)_
-- [ ] **T02b** · P34 · Finish catalog promotion: in-flight policy on revocation, retention _(needs T02)_
+- [x] **T02b** · P34 · Catalog revocation: in-flight policy (finish or cancel) and revoking by chat _(needs T02)_
+- [ ] **T02c** · P35 · Finish catalog promotion: retention of old versions, pause policy, runs on other processes _(needs T02b)_
 - [ ] **T08** · P35 · Implement shared toolbox audiences, personal copies and patch proposals _(needs T02, T06, M02, U08)_
 
 </details>
@@ -611,7 +617,7 @@ Installation, documentation, QA on real machines, the release decision and closi
 - [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, C07e, H07e, T09b, H07, H07b, H02e, T09, A07d, A07e, H07c, H07d, H11b, Q01b, A07f, P08, P08b, H12n, H12p, H12o, P09, P10, P10b, P10c, T09c, T09d)_
 - [ ] **D04** · P50 · Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
 - [ ] **D04b** · P51 · Measure code-navigation aids on real coding tasks (optional, after the first release) _(needs D04)_
-- [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, U14)_
+- [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, U14, M02g, M03g, M04g, L03i, T02c, U11c)_
 
 </details>
 
