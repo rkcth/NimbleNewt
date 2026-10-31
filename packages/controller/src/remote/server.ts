@@ -305,7 +305,7 @@ export class WorkerTransport {
     if (parts.length === 3) {
       allowed("GET");
       for (const key of url.searchParams.keys()) throw new HttpError(400, "invalid_command", `${key}: is not a parameter of this route`);
-      return { status: 200, body: { jobs: await release.jobsFor(host) } };
+      return { status: 200, body: (await release.jobsFor(host)) as never };
     }
     const id = parts[3];
     if (parts.length !== 5 || id === undefined || id.length > 80) throw new HttpError(404, "not_found", "no such route");

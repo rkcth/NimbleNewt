@@ -1495,11 +1495,11 @@ Arguments:
 
 - none
 
-Result: `{ item: { revision, set, effective: { qaAgents, bosses, qaRole }, profile } }`.
+Result: `{ item: { revision, set, effective: { qaAgents, bosses, qaRole, startsPerHour, qaAgentIds? }, profile } }`.
 
 #### `release.gate`
 
-Owner only: where each platform of a candidate stands (passed, failed, interrupted, running, missing) and whether the release is ready and approved.
+Owner only: where each platform of a candidate stands (passed, failed, interrupted, timed_out, running, missing) from all of its attempts, any platform that passed only after failing (`flaky`, with the earlier failures beside the pass), and whether the release is ready and approved.
 
 Arguments:
 
@@ -4350,7 +4350,7 @@ Result: `{ attemptId, payload }`.
 
 #### `release.cancel`
 
-Ends an open release-test attempt without a result, for whoever may start one (see `release.start`). It is never a pass; a retry is a new attempt.
+Ends an open release-test attempt without a result, for whoever may start one (see `release.start`); an agent cancels only an attempt it or an agent reporting directly to it started, the owner any. It is never a pass; a retry is a new attempt.
 
 Arguments:
 
@@ -4362,13 +4362,15 @@ Result: `{ ok }`.
 
 #### `release.settings.set`
 
-Owner only: sets who besides the owner may start and cancel release tests: `qaAgents` (agents holding the QA role), `bosses` (their supervisors), `qaRole` (the role's name, default `qa`). `null` returns a field to the profile's default. Optional `expectedRevision`.
+Owner only: sets who besides the owner may start and cancel release tests: `qaAgents` (agents holding the QA role), `bosses` (their supervisors), `qaRole` (the role's name, default `qa`; the role is editable by every holder of `agent.manage`, so the switches reach every agent that holds it), `qaAgentIds` (the QA agents you name: when set, the role is ignored) and `startsPerHour` (starts plus cancels one agent may make per hour, default 12, 0 is no limit; you are never limited). `null` returns a field to the profile's default. Optional `expectedRevision`.
 
 Arguments:
 
 - `qaAgents` (optional): true, false or null
 - `bosses` (optional): true, false or null
 - `qaRole` (optional): role name or null
+- `qaAgentIds` (optional): list of agent IDs, or null
+- `startsPerHour` (optional): whole number, 0 for no limit, or null
 - `expectedRevision` (optional): the revision you read
 - `commandId`: required
 
@@ -4400,11 +4402,12 @@ Result: `{ revision }`.
 
 #### `release.approve`
 
-Owner only: approves a candidate for release; refused unless every platform's latest attempt passed. A worker cannot.
+Owner only: approves a candidate for release; refused unless every platform's latest attempt passed. A platform that passed only after a failed attempt is shown as flaky in `release.gate`, and is approved only with `acknowledgeFlaky` true. A worker cannot.
 
 Arguments:
 
 - `candidateId`: the candidate
+- `acknowledgeFlaky` (optional): true to approve a release in which a platform passed only after earlier failures
 - `commandId`: required
 
 Result: `{ ok }`.

@@ -86,7 +86,12 @@ export class RemoteWorkerClient {
 
   /** The release-test jobs issued to this host, with their payloads (card X09b). */
   async releaseJobs(): Promise<{ readonly attemptId: string; readonly payload: { readonly [key: string]: Json }; readonly pickedUpAt?: string }[]> {
-    return ((await this.#send("GET", "/worker/release/jobs", { session: true })).body as unknown as { jobs: { attemptId: string; payload: { [key: string]: Json }; pickedUpAt?: string }[] }).jobs;
+    return (await this.releaseWork()).jobs;
+  }
+
+  /** The jobs and the attempts to stop: ones this host picked up that the controller ended without a result (cancelled, timed out, authorization withdrawn). Stopping is idempotent; the instruction is repeated for a day. */
+  async releaseWork(): Promise<{ readonly jobs: { readonly attemptId: string; readonly payload: { readonly [key: string]: Json }; readonly pickedUpAt?: string }[]; readonly cancel: string[] }> {
+    return (await this.#send("GET", "/worker/release/jobs", { session: true })).body as unknown as { jobs: { attemptId: string; payload: { [key: string]: Json }; pickedUpAt?: string }[]; cancel: string[] };
   }
 
   /** Tells the controller the job was fetched and is starting. */
