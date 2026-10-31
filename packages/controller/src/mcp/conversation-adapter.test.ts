@@ -96,6 +96,18 @@ for (const backend of backends) {
     assert.equal(code(await c.call(c.ann, "conversation_send", { commandId: cid("r"), threadId: t1, text: "late" })), "invalid_command");
   });
 
+  suite("a read that finds only messages hidden from the reader still moves its cursor past them", async (c) => {
+    const s = await c.call(c.ann, "conversation_start", { commandId: cid("s"), projectId: c.a, subject: "side", to: ["agent:bob", "client:ext"], text: "all" });
+    const t = s.structuredContent!["threadId"] as string;
+    for (let i = 0; i < 3; i++) assert.equal((await c.call(c.bob, "conversation_send", { commandId: cid("h"), threadId: t, to: ["client:ext"], text: `just ext ${i}` })).isError, false);
+    const r = (await c.call(c.ann, "conversation_read", { threadId: t, after: 1 })).structuredContent!;
+    assert.deepEqual([r["items"].length, r["lastSeq"], r["cursor"]], [0, 4, 4]);
+    // Asked again from that cursor, nothing is scanned twice and nothing is missed when a visible message follows.
+    await c.call(c.bob, "conversation_send", { commandId: cid("h"), threadId: t, text: "for all" });
+    const r2 = (await c.call(c.ann, "conversation_read", { threadId: t, after: r["cursor"] })).structuredContent!;
+    assert.deepEqual([r2["items"].length, r2["cursor"]], [1, 5]);
+  });
+
   suite("no leakage across projects or to outsiders; unreadable looks like missing; credentials are checked each call", async (c) => {
     const s = await c.call(c.ann, "conversation_start", { commandId: cid("s"), projectId: c.a, subject: "private", to: ["agent:bob"], text: "only for bob" });
     const t = s.structuredContent!["threadId"] as string;
@@ -162,7 +174,9 @@ for (const backend of backends) {
     // The client reconnects with a new instance, a different handshake and the newer revision. No session id or handshake is needed to act, and none is an owner of anything.
     const upgraded = c.make();
     assert.equal(((await c.rpc(c.bob, "initialize", { protocolVersion: newRev }, 2, upgraded)) as Ok).result !== undefined, true);
-    assert.equal(((await c.rpc(c.bob, "initialize", { protocolVersion: "1999-01-01" }, 3, upgraded)) as Err).error.code, -32602);
+    // An unknown version is answered with the newest one the server speaks; no version at all is an error.
+    assert.equal((((await c.rpc(c.bob, "initialize", { protocolVersion: "1999-01-01" }, 3, upgraded)) as Ok).result as { protocolVersion: string }).protocolVersion, MCP_SUPPORT.revisions[0]);
+    assert.equal(((await c.rpc(c.bob, "initialize", {}, 4, upgraded)) as Err).error.code, -32602);
     assert.deepEqual(((await c.rpc(c.bob, "initialize", {}, 4, upgraded)) as Err).error.data, { supported: [...MCP_SUPPORT.revisions] });
     const after = (await c.call(c.bob, "conversation_read", { threadId: t, after: 0 }, upgraded)).structuredContent!;
     assert.deepEqual(after, before);

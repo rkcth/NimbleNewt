@@ -55,6 +55,7 @@ const allowed = {
 export const DEFAULT_SETTINGS: readonly SettingDefinition[] = [
   { key: "provider.*.enabled", kind: "restriction", check: bool, ...flag, fallback: true, effect: "next-request", description: "Whether a model provider may be used at all. A disabled provider stays disabled for every layer below." },
   { key: "budget.paidAllowed", kind: "restriction", check: bool, ...flag, fallback: true, effect: "next-request", description: "Whether paid routes may be chosen." },
+  { key: "conversation.mcp.enabled", kind: "default", check: bool, fallback: true, installationOnly: true, effect: "next-request", description: "Whether the MCP door (POST /mcp on the conversation listener) answers. False: it answers 404 from the next request on; the REST door is not affected. Only the owner sets it." },
   { key: "grants.maxDays", kind: "default", check: whole(1, 36500), effect: "next-request", description: "The longest a standing grant made from chat may last, in days. Unset means no maximum; a grant with no end is only possible while it is unset." },
   { key: "grants.defaultDays", kind: "default", check: whole(1, 36500), effect: "next-request", description: "How long a standing grant made from chat lasts when the owner does not say. Unset means 30 days." },
   { key: "time.maxMinutes", kind: "restriction", check: whole(1, 10080), ...ceiling, effect: "after-current-operation", description: "The longest an attempt may run, in minutes." },

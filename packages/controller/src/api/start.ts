@@ -89,7 +89,7 @@ import { WorkspaceOpService, type WorkspacePort } from "../workspace-ops/index.j
 import { ArtifactService, DeliverableService, FileBlobStore, TaskArtifactPublisher } from "../artifacts/index.js";
 import { ServiceOperations, type ServiceTarget } from "../service-ops/index.js";
 import { composeDispatch, type DispatchHandle, type DispatchStartOptions } from "./dispatch-compose.js";
-import { ConversationTransport, type TransportOptions } from "../transport/index.js";
+import { ConversationTransport, MCP_ENABLED_SETTING, type TransportOptions } from "../transport/index.js";
 
 export type StorageChoice =
   | { readonly kind: "sqlite"; readonly path: string }
@@ -823,7 +823,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         hosts: HostService.withEpoch(storage, epoch, assignments, ro), admission: AdmissionService.withEpoch(storage, epoch, ro), pauses, desks, pauseTask: (owner, taskId, reason, commandId) => pauses.pause(owner, { commandId, scope: { kind: "task", id: taskId }, reason }), notice: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "needs-you", ref: { kind: "task", id: n.taskId }, detail: n.text }); }, ...options.tools, revocationPolicy: () => catalogPolicy.effective(),
       });
     }
-    const transport = options.conversationTransport === undefined ? undefined : await ConversationTransport.listen({ ...options.conversationTransport, conversations, principals });
+    const transport = options.conversationTransport === undefined ? undefined : await ConversationTransport.listen({ mcpEnabled: async () => (await configuration.installationValue(MCP_ENABLED_SETTING)) !== false, ...options.conversationTransport, conversations, principals });
     // A change that was approved but not finished when the last controller ended is picked up again (bounded; the applier is idempotent by request ID).
     maintenance.background(maintenance.ensureSettings().then(() => maintenance.resume()));
     // The maintenance loop: settings changes and lease expiries are looked at here, a bounded number per round, never inside the settings write.

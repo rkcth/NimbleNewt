@@ -159,7 +159,7 @@ export class ConversationService {
    * The messages of a thread after a sequence number (default: after what this reader has confirmed receiving), oldest first. A reader that reconnects asks again from its cursor and gets
    * exactly what it has not confirmed. Only participants and the owner can read a thread; anyone else gets `undefined`, as for a thread that does not exist.
    */
-  async read(by: Principal, query: { threadId: string; afterSeq?: number; limit?: number }): Promise<{ items: MessageView[]; lastSeq: number; deliveredSeq: number } | undefined> {
+  async read(by: Principal, query: { threadId: string; afterSeq?: number; limit?: number }): Promise<{ items: MessageView[]; lastSeq: number; deliveredSeq: number; scannedSeq: number } | undefined> {
     const threadId = this.#threadId(query.threadId);
     const limit = query.limit ?? 50;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > CONVERSATION_LIMITS.page) invalid("limit", `must be a whole number from 1 to ${CONVERSATION_LIMITS.page}`);
@@ -177,15 +177,16 @@ export class ConversationService {
       const page = await this.#runner.list("message", { afterId: messageIdOf(threadId, after), limit: 100 });
       const mine = page.filter((m) => m.id.startsWith(threadId + "."));
       for (const m of mine) {
+        if (items.length >= limit) break;
         after = (m.body as unknown as MessageBody).seq;
         if (!this.#visibleTo(fresh, m.body as unknown as MessageBody)) continue;
-        if (items.length >= limit) break;
         const delivery = (await this.#runner.get("conversation-delivery", `${m.id}:${by.id}`))?.body as unknown as DeliveryBody | undefined;
         items.push({ ...view<MessageBody>(m), trust: "untrusted-content", ...(delivery === undefined ? {} : { delivery: delivery.state, availability: delivery.availability }) });
       }
       if (mine.length < page.length || page.length < 100) break;
     }
-    return { items, lastSeq: thread.nextSeq - 1, deliveredSeq };
+    // `scannedSeq` is how far the scan got, hidden messages included: a reader whose page was empty because many messages were hidden from it asks from here next time.
+    return { items, lastSeq: thread.nextSeq - 1, deliveredSeq, scannedSeq: after };
   }
 
   /**

@@ -7,12 +7,17 @@ import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import type { Principal, PrincipalService } from "../security/index.js";
 import { redactText } from "../security/redact.js";
 
+/** The installation setting that switches the MCP door (POST /mcp) on or off (default on); read on every MCP request. */
+export const MCP_ENABLED_SETTING = "conversation.mcp.enabled";
+
 export interface TransportLimits {
   /** The largest request body, in bytes. */
   readonly bodyBytes: number;
   /** Requests one authenticated principal may make per minute. */
   readonly perPrincipalPerMinute: number;
-  /** Requests one network address may make per minute before it is authenticated (blunts guessing). The address is the connection's own: X-Forwarded-For is never trusted, so behind a reverse proxy every client shares the proxy's allowance. */
+  /** MCP messages one authenticated principal may send per minute (a connect is three messages, and clients poll), counted apart from its REST requests. */
+  readonly mcpPerPrincipalPerMinute: number;
+  /** Requests from one network address that FAIL authentication per minute (blunts guessing); requests that authenticate do not count, so local clients sharing an address do not starve each other. The address is the connection's own: X-Forwarded-For is never trusted, so behind a reverse proxy every client shares the proxy's allowance. */
   readonly perAddressPerMinute: number;
   /** Long-polls one principal may hold open at once, and all principals together. */
   readonly pollsPerPrincipal: number;
@@ -24,7 +29,7 @@ export interface TransportLimits {
 }
 
 /** Provisional limits, adjustable (decision record, 2026-10-20). */
-export const DEFAULT_TRANSPORT_LIMITS: TransportLimits = { bodyBytes: 64 * 1024, perPrincipalPerMinute: 600, perAddressPerMinute: 120, pollsPerPrincipal: 4, pollsTotal: 200, maxWaitMs: 25_000, connections: 1000 };
+export const DEFAULT_TRANSPORT_LIMITS: TransportLimits = { bodyBytes: 64 * 1024, perPrincipalPerMinute: 600, mcpPerPrincipalPerMinute: 1800, perAddressPerMinute: 120, pollsPerPrincipal: 4, pollsTotal: 200, maxWaitMs: 25_000, connections: 1000 };
 
 export interface TransportOptions {
   readonly conversations: ConversationService;
@@ -40,6 +45,8 @@ export interface TransportOptions {
   /** The host names clients use to reach this listener (for example `newt.example.org`). Requests addressed to any other host name are refused, which defeats DNS rebinding. */
   readonly publicHosts?: readonly string[];
   readonly limits?: Partial<TransportLimits>;
+  /** Asked on every MCP request: whether the MCP door is switched on (the chat-settable `conversation.mcp.enabled`). Absent: on. */
+  readonly mcpEnabled?: () => Promise<boolean>;
   readonly clock?: () => number;
 }
 
@@ -118,10 +125,18 @@ export class ConversationTransport {
     res.on("close", () => aborter.abort());
     try {
       this.#checkHost(req);
-      this.#limit(`addr:${req.socket.remoteAddress ?? "?"}`, this.#limits.perAddressPerMinute);
-      const principal = await this.#authenticate(req);
-      this.#limit(`principal:${principal.id}`, this.#limits.perPrincipalPerMinute);
-      const result = new URL(req.url ?? "/", "http://listener").pathname === "/mcp" ? await this.#mcpRoute(req) : await this.#route(req, principal, aborter);
+      const isMcp = new URL(req.url ?? "/", "http://listener").pathname === "/mcp";
+      if (isMcp) await this.#mcpOn();
+      const addr = `addr:${req.socket.remoteAddress ?? "?"}`;
+      // Only failed authentications count against an address; one already over its allowance is refused before the (deliberately slow) credential check.
+      this.#over(addr, this.#limits.perAddressPerMinute);
+      let principal: Principal;
+      try { principal = await this.#authenticate(req); } catch (error) {
+        if (error instanceof HttpError && error.status === 401) this.#limit(addr, this.#limits.perAddressPerMinute);
+        throw error;
+      }
+      this.#limit(isMcp ? `mcp:${principal.id}` : `principal:${principal.id}`, isMcp ? this.#limits.mcpPerPrincipalPerMinute : this.#limits.perPrincipalPerMinute);
+      const result = isMcp ? await this.#mcpRoute(req, principal) : await this.#route(req, principal, aborter);
       this.#send(res, result.status, result.body);
     } catch (error) {
       if (aborter.signal.aborted && res.destroyed) return;
@@ -132,6 +147,19 @@ export class ConversationTransport {
   #checkHost(req: IncomingMessage): void {
     const host = req.headers.host;
     if (host === undefined || !this.#hosts.has(host.toLowerCase())) throw new HttpError(421, "misdirected", "this host name is not one of the listener's own");
+  }
+
+  /** Refuses when the key has already used its allowance in the current window, without counting this request. */
+  #over(key: string, max: number): void {
+    const w = this.#windows.get(key);
+    if (w !== undefined && this.#now() - w.start < 60_000 && w.count >= max) throw new HttpError(429, "rate_limited", "too many requests; slow down", { "retry-after": String(Math.max(1, Math.ceil((60_000 - (this.#now() - w.start)) / 1000))) });
+  }
+
+  async #mcpOn(): Promise<void> {
+    if (this.#options.mcpEnabled === undefined) return;
+    let on: boolean;
+    try { on = await this.#options.mcpEnabled(); } catch { throw new HttpError(503, "unavailable", "whether the MCP door is on could not be checked; try again", { "retry-after": "5" }); }
+    if (!on) throw new HttpError(404, "not_found", "no such route");
   }
 
   /** Fixed one-minute windows, kept in memory: a restart forgets them, which only ever errs towards allowing a fresh minute. */
@@ -149,7 +177,7 @@ export class ConversationTransport {
 
   async #authenticate(req: IncomingMessage): Promise<Principal> {
     const header = req.headers.authorization;
-    const match = typeof header === "string" ? /^Bearer ([^\s]{20,400})$/.exec(header) : null;
+    const match = typeof header === "string" ? /^Bearer ([^\s]{20,400})$/i.exec(header) : null;
     const unauthenticated = new HttpError(401, "unauthenticated", "the credential was not accepted", { "www-authenticate": "Bearer" });
     if (match === null) throw unauthenticated;
     let principal: Principal;
@@ -241,8 +269,11 @@ export class ConversationTransport {
    * resume but the cursor). The adapter authenticates the bearer credential again for the message, so the principal is never cached here. A notification gets 202 and no body; GET (the
    * server-to-client stream) and DELETE (ending a session) answer 405 because there is neither. The same host check, rate limits and size bound as the REST routes apply.
    */
-  async #mcpRoute(req: IncomingMessage): Promise<{ status: number; body?: unknown }> {
+  async #mcpRoute(req: IncomingMessage, principal: Principal): Promise<{ status: number; body?: unknown }> {
     if (req.method !== "POST") throw new HttpError(405, "method_not_allowed", "use POST", { allow: "POST" });
+    // A browser page cannot reach this with a stranger's credential, but an Origin that is not one of the listener's own is refused all the same.
+    const origin = req.headers.origin;
+    if (origin !== undefined && ![...this.#hosts].some((h) => origin.toLowerCase() === `${this.#options.tls === undefined ? "http" : "https"}://${h}`)) throw new HttpError(403, "forbidden", "this origin is not one of the listener's own");
     const declared = Number(req.headers["content-length"] ?? 0);
     if (declared > this.#limits.bodyBytes) throw new HttpError(413, "too_large", `a request body is at most ${this.#limits.bodyBytes} bytes`);
     const chunks: Buffer[] = [];
@@ -256,8 +287,8 @@ export class ConversationTransport {
     if (typeof type !== "string" || !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(type)) throw new HttpError(415, "unsupported_media_type", "send application/json");
     let message: unknown;
     try { message = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { return { status: 200, body: { jsonrpc: "2.0", id: null, error: { code: -32700, message: "the body is not valid JSON" } } }; }
-    const token = /^Bearer ([^\s]{20,400})$/.exec(String(req.headers.authorization ?? ""))?.[1];
-    const answer = await this.#mcp.handle(token, message);
+    // The credential was just checked for this request; the adapter takes that result (it is never kept for the next request).
+    const answer = await this.#mcp.handle(undefined, message, principal);
     return answer === undefined ? { status: 202 } : { status: 200, body: answer };
   }
 

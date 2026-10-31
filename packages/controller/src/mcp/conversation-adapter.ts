@@ -41,7 +41,7 @@ export class McpConversationAdapter {
   }
 
   /** Handles one JSON-RPC message from a client with this credential. Notifications (no `id`) get no reply. A batch is refused. */
-  async handle(token: unknown, message: unknown): Promise<RpcResponse | undefined> {
+  async handle(token: unknown, message: unknown, authenticated?: Principal): Promise<RpcResponse | undefined> {
     if (Array.isArray(message)) return fail(null, CODES.invalidRequest, "batches are not supported; send one message at a time");
     if (typeof message !== "object" || message === null) return fail(null, CODES.invalidRequest, "a message is a JSON object");
     const m = message as Partial<RpcRequest>;
@@ -54,7 +54,7 @@ export class McpConversationAdapter {
         case "initialize": return this.#initialize(rid, m.params);
         case "ping": return reply(rid, {});
         case "tools/list": return reply(rid, { tools: Object.entries(TOOLS).map(([name, t]) => ({ name, description: `${t.summary}${t.kind === "command" ? " Needs a commandId; repeating the same commandId never repeats the change." : ""}`, inputSchema: this.#schema(t) })) });
-        case "tools/call": return await this.#call(token, rid, m.params);
+        case "tools/call": return await this.#call(token, rid, m.params, authenticated);
         case "resources/list": return reply(rid, { resources: [] });
         case "resources/templates/list": return reply(rid, { resourceTemplates: [] });
         case "prompts/list": return reply(rid, { prompts: [] });
@@ -65,11 +65,11 @@ export class McpConversationAdapter {
 
   #initialize(id: string | number, params: unknown): RpcResponse {
     const wanted = (params as { protocolVersion?: unknown } | undefined)?.protocolVersion;
-    if (typeof wanted !== "string" || !MCP_SUPPORT.revisions.includes(wanted)) {
-      return fail(id, CODES.params, `unsupported protocol version ${typeof wanted === "string" ? wanted.slice(0, 30) : "(none given)"}; this server speaks ${MCP_SUPPORT.revisions.join(", ")}`, { supported: MCP_SUPPORT.revisions });
-    }
+    // A version this server does not speak is answered with the newest one it does (the client then decides whether it can go on), as the protocol asks; no version at all is an error.
+    if (typeof wanted !== "string") return fail(id, CODES.params, `no protocol version given; this server speaks ${MCP_SUPPORT.revisions.join(", ")}`, { supported: MCP_SUPPORT.revisions });
+    const version = MCP_SUPPORT.revisions.includes(wanted) ? wanted : MCP_SUPPORT.revisions[0]!;
     // No session id is issued: nothing about the conversation is tied to this handshake.
-    return reply(id, { protocolVersion: wanted, capabilities: { tools: { listChanged: false } }, serverInfo: { name: "nimblenewt-conversations", version: "conversations-1" } });
+    return reply(id, { protocolVersion: version, capabilities: { tools: { listChanged: false } }, serverInfo: { name: "nimblenewt-conversations", version: "conversations-1" } });
   }
 
   #schema(t: Tool): object {
@@ -83,19 +83,21 @@ export class McpConversationAdapter {
     return { type: "object", properties, required, additionalProperties: false };
   }
 
+  /** Workers and the controller's own services have no business in a conversation. */
+  #allowed(principal: Principal): Principal | undefined { return principal.kind === "host" || principal.kind === "service" ? undefined : principal; }
+
   async #authenticate(token: unknown): Promise<Principal | undefined> {
     if (typeof token !== "string") return undefined;
     try {
       const principal = await this.#principals.authenticate(token);
-      // Workers and the controller's own services have no business in a conversation.
-      return principal.kind === "host" || principal.kind === "service" ? undefined : principal;
+      return this.#allowed(principal);
     } catch (error) {
       if (error instanceof DomainError && error.code === "unauthenticated") return undefined;
       throw error;
     }
   }
 
-  async #call(token: unknown, id: string | number, params: unknown): Promise<RpcResponse> {
+  async #call(token: unknown, id: string | number, params: unknown, authenticated: Principal | undefined): Promise<RpcResponse> {
     const p = params as { name?: unknown; arguments?: unknown } | undefined;
     const name = typeof p?.name === "string" && Object.hasOwn(TOOLS, p.name) ? p.name : undefined;
     const tool = name === undefined ? undefined : TOOLS[name];
@@ -105,7 +107,7 @@ export class McpConversationAdapter {
     const { commandId, ...rest } = args as Record<string, unknown>;
     if (tool.kind === "command" && (typeof commandId !== "string" || commandId.length === 0)) return fail(id, CODES.params, `${name} changes state, so it needs a commandId that you keep across a reconnect`);
     if (tool.kind === "query" && commandId !== undefined) return fail(id, CODES.params, `${name} only reads, so it takes no commandId`);
-    const who = await this.#authenticate(token);
+    const who = authenticated === undefined ? await this.#authenticate(token) : this.#allowed(authenticated);
     if (who === undefined) return reply(id, this.#error("unauthenticated", "the credential was not accepted"));
     try {
       return reply(id, this.#ok(await this.#run(who, name, commandId as string, rest)));
@@ -139,9 +141,9 @@ export class McpConversationAdapter {
         const after = whole("after"); const limit = whole("limit");
         const r = await c.read(who, { threadId: a["threadId"] as string, ...(after === undefined ? {} : { afterSeq: after }), ...(limit === undefined ? {} : { limit }) });
         if (r === undefined) throw new DomainError("not_found", "no such thread", { field: "threadId" });
-        // The cursor to ask from next time: the last message returned, else where this read started.
+        // The cursor to ask from next time: the last message returned, else how far the scan got (a long run of messages hidden from this reader must not leave it asking from the same place for ever).
         const last = r.items.at(-1)?.seq;
-        return { ...r, cursor: last ?? after ?? r.deliveredSeq };
+        return { ...r, cursor: last ?? r.scannedSeq };
       }
       case "conversation_thread": {
         known(["threadId"]);
