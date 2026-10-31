@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { SqliteStorage } from "../storage/index.js";
 import { BackupService, MaintenanceBarrier, StagedRestore, acquireDataLock, acquireDataLocks, applyPendingRestore, chooseKept, createBackup, type BackupInfo, type BackupKind, type PiStateSource } from "./index.js";
-import { applyAndCrashAfter } from "./k01h-crash.js";
+import { applyAndCrashAfter, importSpecifier } from "./k01h-crash.js";
 import { lockIsLive, sameBoot, LOCK_FILE } from "./data-lock.js";
 import { runBackupCli } from "./cli.js";
 import { copyPiState } from "./pi-state.js";
@@ -350,4 +350,9 @@ test("a folder inside a conversation store swapped for a link between the listin
     const stored = readdirSync(join(staging, "pi-state")).map((n) => readFileSync(join(staging, "pi-state", n), "utf8")).join("");
     assert.equal(stored.includes("outside the store"), false);
   } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test("the crash helper gives the child a file: URL to import, also for a Windows path (Node refuses D:\\... with ERR_UNSUPPORTED_ESM_URL_SCHEME)", () => {
+  assert.match(importSpecifier("D:\\a\\b\\staged-restore.js", true), /^file:\/\/\/D:\/a\/b\/staged-restore\.js$/);
+  assert.match(importSpecifier(join(tmpdir(), "x.js")), /^file:\/\//);
 });

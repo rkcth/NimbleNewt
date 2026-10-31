@@ -1,11 +1,14 @@
 import { spawnSync } from "node:child_process";
 import { rmSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { LOCK_FILE } from "./data-lock.js";
 
 /** Where the child dies besides "after the nth rename": between the "done" record and the removal of the marker, or between the removal of the marker and that of the journal. */
 export type CrashAt = number | "before-marker-removal" | "before-journal-removal";
+
+/** What `import()` in the child is given for a module file: a file: URL (Node refuses a Windows path such as D:\\x\\y.js with ERR_UNSUPPORTED_ESM_URL_SCHEME). `windows` is for the unit test. */
+export function importSpecifier(path: string, windows = false): string { return pathToFileURL(path, { windows }).href; }
 
 /**
  * Test helper: runs `applyPendingRestore` in a CHILD process that really dies (process.exit) where asked, so the data directory is left as a crash leaves it. `at`: a number n dies right after the nth rename (journal written, some moves
@@ -14,7 +17,7 @@ export type CrashAt = number | "before-marker-removal" | "before-journal-removal
  * (no test should depend on its pid not being reused by another process).
  */
 export function applyAndCrashAfter(dataDirectory: string, sqlite: string, piRoot: string, at: CrashAt): number | null {
-  const module = fileURLToPath(new URL("./staged-restore.js", import.meta.url));
+  const module = importSpecifier(fileURLToPath(new URL("./staged-restore.js", import.meta.url)));
   const script = `
     import { renameSync } from "node:fs";
     import { rm } from "node:fs/promises";
