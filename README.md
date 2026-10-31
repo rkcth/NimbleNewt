@@ -476,7 +476,7 @@ Scheduling, votes and decisions, stand-ups, attendance and return to work, and f
 - [ ] **M02g** · P35 · Finish meeting records: steward agent, narrator, chat commands, per-decision limits _(needs M02f)_
 - [x] **M03f** · P35 · Stand-ups: agenda outcomes to chat turns and inquiries, the open agenda and the owner's items in chat _(needs M03e)_
 - [x] **M04f** · P35 · Stopped-agent meeting exception in chat, and the host wake path _(needs M04e)_
-- [ ] **M03g** · P36 · Finish stand-ups: allocation and usage sinks, follow-ups in the chat listing, stand-up chat commands, new owner questions _(needs M03f)_
+- [ ] **M03g** · P36 · Finish stand-ups: allocation sink, follow-ups in the chat listing, stand-up chat commands _(needs M03f)_
 - [ ] **M04g** · P36 · Compose a real safeLongRunning from the job records _(needs M04f)_
 - [ ] **M03h** · P37 · Finish stand-ups: usage sink, owner questions raised by a stand-up, chat to run and read a stand-up _(needs M03g)_
 - [ ] **M04h** · P37 · A real host that wakes stopped agents _(needs M04g)_
