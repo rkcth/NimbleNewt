@@ -2,7 +2,7 @@ import { DomainError } from "../domain/errors.js";
 import type { JsonObject } from "../storage/types.js";
 import type { Principal } from "../security/index.js";
 import { sealContract } from "./contract.js";
-import type { ContractLimits, HostProbe, RecipeSummary, ToolGateway, WorkOrder, WorkerHandle, WorkerHost, WorkerTurnResult } from "../dispatch/ports.js";
+import type { ContractLimits, HostLocalWork, HostProbe, RecipeSummary, ToolGateway, WorkOrder, WorkerHandle, WorkerHost, WorkerTurnResult } from "../dispatch/ports.js";
 import type { WorkspacePort } from "../workspace-ops/workspace-ops.js";
 import type { RemoteWorkerService, Requirements } from "./service.js";
 
@@ -40,6 +40,20 @@ export class RemoteWorkerHost implements WorkerHost {
     this.resources = options.resources;
     this.ownerPolicy = options.ownerPolicy !== undefined;
     this.workspace = { run: (call) => this.remote.askWorkspace(this.by, this.hostId, call, { waitMs: this.options.workspaceWaitMs ?? 300_000 }) };
+  }
+
+  /**
+   * What this host holds for Stop (card L02d). The controller cannot see a remote worker's processes, and no worker report of them exists yet, so a live remote placement of an asked attempt reads as one unknown item: a Stop that
+   * ends the attempt (the placement is then over) is clean, and a look while it is still live says that nothing is known about what the worker runs. Bounded to 500 attempts.
+   */
+  async localWork(attemptIds: readonly string[]): Promise<HostLocalWork> {
+    const processes: { attemptId: string; ref: string; kind: "process"; state: "unknown" }[] = [];
+    for (const attemptId of attemptIds.slice(0, 500)) {
+      const placement = await this.remote.placement(this.by, attemptId);
+      if (placement === undefined || placement.hostId !== this.hostId || !["offered", "accepted", "relocating"].includes(placement.state)) continue;
+      processes.push({ attemptId, ref: `remote:${attemptId}`, kind: "process", state: "unknown" });
+    }
+    return { processes, costs: [], known: attemptIds.slice(0, 500) };
   }
 
   /** Why this host would refuse the attempt (card H07e), judged by the same rules as the placement. The order is not built yet, so the requirements are asked of a preview of it that carries no credential. */

@@ -182,7 +182,7 @@ test("a stop goes on for the other attempts when one has ended meanwhile, and a 
   };
   const ports = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), () => "pending", undefined, undefined, undefined, { dropEnding: async (id, why) => { dropped.push(`${id}:${why}`); } });
   const task = { kind: "task", id: "task-x" } as const;
-  await ports.begin!(task, { force: false });
+  await ports.begin!(task, { force: false, by: staff });
   assert.deepEqual(dropped, ["att-1:owner_stop", "att-2:owner_stop"]);
   assert.deepEqual(await ports.terminate(task, { force: false, by: staff }), { ended: true, unresolved: [] });
   assert.deepEqual(stops, ["att-2"]);
@@ -202,7 +202,7 @@ test("terminate asks a task's jobs and its swarm children's jobs to stop (not a 
   const asked: string[] = [];
   const by = { id: "owner:rob", kind: "owner" } as unknown as Principal;
   const ports = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), () => "pending", undefined, async (_by, taskId) => jobs[taskId] ?? [], undefined, undefined, {
-    descendants: async (taskId) => (taskId === "task-x" ? ["task-kid"] : []),
+    descendants: async (taskId) => ({ ids: taskId === "task-x" ? ["task-kid"] : [], truncated: false }),
     cancelJob: async (who, jobId, o) => { assert.equal(who, by, "asked as whoever advances the stop"); if (jobId === "job-nope") throw new DomainError("forbidden", "no"); asked.push(`${jobId}${o.force ? " force" : ""}`); },
   });
   const task = { kind: "task", id: "task-x" } as const;
@@ -230,4 +230,85 @@ test("the cleanup cost is read for every attempt seen, also one that ended, and 
   assert.deepEqual(cleaned.costs?.map((c) => c.attemptId).sort(), ["att-1", "att-gone"]);
   await ports.charge!({ commandId: "c1", attemptId: "att-gone", costMicros: 5, computeMs: 0 });
   assert.deepEqual(charges, [{ commandId: "c1", taskId: "task-y", agentId: "agent:a", costMicros: 5, computeMs: 0 }]);
+});
+
+test("a Stop of a task ends a swarm child's work only for someone who may control the child; the others are named as unresolved and left running (card L02d)", async () => {
+  const stopped: string[] = [];
+  const dispatcher = {
+    liveAttemptsOf: async (_by: Principal, s: { taskId?: string }) => (s.taskId === "task-x" ? ["att-1"] : s.taskId === "task-mine" ? ["att-2"] : s.taskId === "task-theirs" ? ["att-3"] : []),
+    get: async (_by: Principal, id: string) => ({ taskId: id === "att-1" ? "task-x" : id === "att-2" ? "task-mine" : "task-theirs", agentId: "agent:a", state: stopped.includes(id) ? "finished" : "running" }) as never,
+    operations: async () => [] as never, stop: async (_by: Principal, id: string) => { stopped.push(id); }, quiesce: async () => ({}), release: async () => undefined,
+  };
+  const jobs: Record<string, { id: string; state: string; kind: string; background: boolean; resumability: string }[]> = { "task-theirs": [{ id: "job-theirs", state: "running", kind: "process", background: false, resumability: "none" }] };
+  const cancelled: string[] = [];
+  const manager = { id: "agent:mgr", kind: "agent" } as unknown as Principal;
+  const owner = { id: "owner:rob", kind: "owner" } as unknown as Principal;
+  const ports = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), () => "pending", undefined, async (_by, taskId) => jobs[taskId] ?? [], undefined, undefined, {
+    descendants: async (taskId) => ({ ids: taskId === "task-x" ? ["task-mine", "task-theirs"] : [], truncated: false }),
+    mayControl: async (by, taskId) => by.kind === "owner" || taskId === "task-mine",
+    cancelJob: async (_by, jobId) => { cancelled.push(jobId); },
+  });
+  const task = { kind: "task", id: "task-x" } as const;
+  const result = await ports.terminate(task, { force: false, by: manager });
+  assert.deepEqual(stopped.sort(), ["att-1", "att-2"], "the child the manager controls is stopped, the other one is not");
+  assert.ok(result.unresolved.some((u) => /task-theirs.*may not control/.test(u)), JSON.stringify(result));
+  assert.ok(result.unresolved.includes("att-3"), "its attempt is still running, so it is named too");
+  assert.ok(result.unresolved.some((u) => /job-theirs.*may not control/.test(u)) && cancelled.length === 0, "nor is its job asked to stop");
+  // The owner may control every child.
+  stopped.length = 0;
+  const all = await ports.terminate(task, { force: false, by: owner });
+  assert.deepEqual(stopped.sort(), ["att-1", "att-2", "att-3"]);
+  assert.ok(!all.unresolved.some((u) => /may not control/.test(u)), JSON.stringify(all));
+  assert.deepEqual(cancelled, ["job-theirs"]);
+});
+
+test("a Stop of an agent asks only that agent's jobs to stop (the owner of a job is the agent of its attempt), also on a task with no live attempt; a cut list is an unknown item (card L02d)", async () => {
+  const owners: Record<string, string> = { "att-1": "agent:a", "att-other": "agent:b", "att-gone": "agent:a" };
+  const dispatcher = {
+    liveAttemptsOf: async (_by: Principal, s: { agentId?: string }) => (s.agentId === "agent:a" ? ["att-1"] : []),
+    get: async (_by: Principal, id: string) => ({ taskId: id === "att-gone" ? "task-idle" : "task-shared", agentId: owners[id], state: "running" }) as never,
+    operations: async () => [] as never, stop: async () => undefined, quiesce: async () => ({}), release: async () => undefined,
+  };
+  const row = (id: string, taskId: string, attemptId?: string) => ({ id, taskId, state: "running", kind: "process", background: true, resumability: "none", ...(attemptId === undefined ? {} : { attemptId }) });
+  let truncated = false;
+  const cancelled: string[] = [];
+  const ports = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), () => "pending", undefined, async () => [], undefined, undefined, {
+    agentJobs: async () => ({ jobs: [row("job-mine", "task-shared", "att-1"), row("job-theirs", "task-shared", "att-other"), row("job-idle", "task-idle", "att-gone"), row("job-nobody", "task-shared")], truncated }),
+    cancelJob: async (_by, jobId) => { cancelled.push(jobId); },
+  });
+  const agent = { kind: "agent", id: "a" } as const;
+  assert.deepEqual((await ports.inventory(agent)).filter((i) => i.kind === "job").map((i) => i.ref).sort(), ["job-idle", "job-mine"]);
+  await ports.terminate(agent, { force: false, by: staff });
+  assert.deepEqual(cancelled.sort(), ["job-idle", "job-mine"], "not the other agent's job on the same task, not a job with no known owner");
+  truncated = true;
+  assert.ok((await ports.inventory(agent)).some((i) => i.kind === "job" && i.ref === "jobs:truncated" && i.state === "unknown"));
+});
+
+test("more descendants than the walk returns is an unknown item in the inventory and a name in the unresolved list (card L02d)", async () => {
+  const dispatcher = { liveAttemptsOf: async () => [], get: async () => undefined, operations: async () => [] as never, stop: async () => undefined, quiesce: async () => ({}), release: async () => undefined };
+  const ports = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), () => "pending", undefined, undefined, undefined, undefined, { descendants: async () => ({ ids: [], truncated: true }) });
+  const task = { kind: "task", id: "task-x" } as const;
+  assert.deepEqual(await ports.inventory(task), [{ kind: "child", ref: "swarm:descendants-truncated", state: "unknown" }]);
+  assert.deepEqual((await ports.terminate(task, { force: false, by: staff })).unresolved, ["swarm:descendants-truncated"]);
+});
+
+test("the swarm walk is read once per port call, not once per use (card L02d)", async () => {
+  let walks = 0;
+  const dispatcher = { liveAttemptsOf: async () => [], get: async () => undefined, operations: async () => [] as never, stop: async () => undefined, quiesce: async () => ({}), release: async () => undefined };
+  const ports = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), () => "pending", undefined, async () => [], undefined, undefined, { descendants: async () => { walks++; return { ids: ["task-kid"], truncated: false }; } });
+  await ports.inventory({ kind: "task", id: "task-x" });
+  assert.equal(walks, 1);
+});
+
+test("a Stop asks the task's jobs to stop before the checkpoint is taken; a Suspend leaves them running while it checkpoints (card L02d)", async () => {
+  const log: string[] = [];
+  const dispatcher = { liveAttemptsOf: async () => ["att-1"], get: async () => ({ taskId: "task-x", agentId: "agent:a", state: "running" }) as never, operations: async () => [] as never, stop: async () => undefined, quiesce: async (_by: Principal, id: string, why: string) => { log.push(`quiesce ${why}`); return { checkpoint: { id: "cp" } }; }, release: async () => undefined };
+  const jobs = [{ id: "job-a", state: "running", kind: "process", background: true, resumability: "none" }];
+  const ports = dispatchStopPorts(() => ({ dispatcher: dispatcher as never, principal: staff }), () => "pending", undefined, async () => jobs, undefined, undefined, { cancelJob: async (_by, id) => { log.push(`ask ${id}`); } });
+  const task = { kind: "task", id: "task-x" } as const;
+  await ports.checkpoint(task, { by: staff, mode: "suspend" });
+  assert.deepEqual(log, ["quiesce checkpoint before suspension"], "a Suspend does not touch the job");
+  log.length = 0;
+  await ports.checkpoint(task, { by: staff, mode: "stop" });
+  assert.deepEqual(log, ["ask job-a", "quiesce checkpoint before suspension"], "a Stop asks first");
 });

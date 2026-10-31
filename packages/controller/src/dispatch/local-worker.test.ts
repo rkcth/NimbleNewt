@@ -51,7 +51,7 @@ for (const backend of backends) {
       await d.tick();
       await d.idle();
       assert.equal(closed, true, "the attempt ended and its sandbox was closed");
-      assert.deepEqual(await local.localWork([attemptId!, "att-unknownunknownunkn"]), { processes: [{ attemptId: attemptId!, ref: "pid-9 (left behind)", kind: "process", state: "uncooperative" }], costs: [{ attemptId: attemptId!, costMicros: 250, computeMs: 40 }] });
+      assert.deepEqual(await local.localWork([attemptId!, "att-unknownunknownunkn"]), { processes: [{ attemptId: attemptId!, ref: "pid-9 (left behind)", kind: "process", state: "uncooperative" }], costs: [{ attemptId: attemptId!, costMicros: 250, computeMs: 40 }], known: [attemptId!] });
       // The dispatcher aggregates it for staff only, and a host that fails fails the look.
       const got = await d.localWorkOf(w.owner, [attemptId!]);
       assert.deepEqual(got.costs, [{ attemptId: attemptId!, costMicros: 250, computeMs: 40 }]);
@@ -116,6 +116,45 @@ for (const backend of backends) {
       turn.release?.();
       await d.idle();
       assert.equal(stopped, 1, "the scheduler is stopped when the turn ends");
+    } finally { await store.close(); }
+  });
+
+  test(`${backend.name}: a replaced sandbox is still asked what it holds until it is empty, the costs of all the attempt's sandboxes add up, and a host that forgot an attempt that is live reads as unknown (card L02d)`, async () => {
+    const held: Record<string, { processes: { ref: string; kind: "process"; state: "running" | "uncooperative" }[]; costMicros: number }> = {};
+    const sandbox: SandboxPort = { open: async (recipe: RecipeSummary) => { held[recipe.revision] = { processes: [], costMicros: 0 }; held[recipe.revision]!.costMicros = recipe.revision === "r-narrower" ? 30 : 100; return { revision: recipe.revision, close: async () => undefined, work: async () => ({ processes: held[recipe.revision]!.processes, costMicros: held[recipe.revision]!.costMicros }) }; } };
+    const turn: { release?: () => void } = {};
+    const { store, w, local, d } = await setup({ sandbox, runtime: () => ({ run: () => new Promise((resolve) => { turn.release = () => resolve({ status: "completed", text: "x" }); }), checkpoint: async () => ({ kept: true }), close: async () => undefined }) });
+    try {
+      const ann = await w.agent("ann", workGrants(w.project, []));
+      const { attemptId } = await w.task("t", ann);
+      await d.tick();
+      const first = Object.keys(held)[0]!;
+      held[first]!.processes.push({ ref: "pid-7 (old confinement)", kind: "process", state: "running" });
+      await d.changeRecipe(w.owner, attemptId!, { kind: "narrow", recipe: { revision: "r-narrower", reach: [] } });
+      held["r-narrower"]!.processes.push({ ref: "pid-8", kind: "process", state: "running" });
+      // Both confinements are asked about, and their costs add up.
+      const both = await local.localWork([attemptId!]);
+      assert.deepEqual(both.processes.map((p) => p.ref).sort(), ["pid-7 (old confinement)", "pid-8"], "work in the replaced sandbox is not unseen");
+      assert.deepEqual(both.costs, [{ attemptId: attemptId!, costMicros: 130, computeMs: 0 }]);
+      assert.deepEqual(both.known, [attemptId!]);
+      // The old confinement empties: it is folded into the attempt's cost and no longer asked.
+      held[first]!.processes.length = 0;
+      const later = await local.localWork([attemptId!]);
+      assert.deepEqual(later.processes.map((p) => p.ref), ["pid-8"]);
+      assert.deepEqual(later.costs, [{ attemptId: attemptId!, costMicros: 130, computeMs: 0 }]);
+      held[first]!.costMicros = 0;
+      assert.equal((await local.localWork([attemptId!])).costs![0]!.costMicros, 130, "what the old sandbox cost stays counted");
+      // A host that lost its memory (a controller restart) while the attempt is live in the dispatcher's records: unknown, never clean.
+      const forgot = new LocalWorker({ hostId: "host:local", resources: { cpus: 1, memoryMb: 1024 }, version: "local-2.0.0", sandbox, runtimes: { open: async () => { throw new Error("unused"); } }, capabilities: () => CAPS });
+      const after = w.restart({ workers: [forgot] });
+      const got = await after.localWorkOf(w.owner, [attemptId!]);
+      assert.deepEqual(got.processes.map((p) => [p.ref, p.state]), [[`attempt:${attemptId!}`, "unknown"]]);
+      // Processes of attempts that were not asked about are not part of the answer.
+      const stranger: WorkerHost = { hostId: "host:other", resources: { cpus: 1, memoryMb: 1 }, start: async () => { throw new Error("unused"); }, localWork: async () => ({ processes: [{ attemptId: "att-not-asked", ref: "x", kind: "process", state: "running" }, { attemptId: attemptId!, ref: "mine", kind: "process", state: "running" }] }) };
+      const filtered = await w.restart({ workers: [stranger] }).localWorkOf(w.owner, [attemptId!]);
+      assert.deepEqual(filtered.processes.map((p) => p.ref), ["mine"]);
+      turn.release?.();
+      await d.idle();
     } finally { await store.close(); }
   });
 

@@ -25,13 +25,13 @@ export interface StopPorts {
   /** Lets go of what preparation froze, when the request is cancelled because the scope was resumed. Best effort. */
   release?(scope: PauseScope): Promise<void>;
   /** A stop or suspension was recorded for the scope: whatever the runtime had in hand for it that a stop must win over (the agent's own ending, card H12n) is dropped now, not when the attempt is finally terminated. Best effort. */
-  begin?(scope: PauseScope, options: { force: boolean }): Promise<void>;
+  begin?(scope: PauseScope, options: { force: boolean; by: Principal }): Promise<void>;
   /** Why a stop cannot be done for this scope at all (so it is refused before anything is paused or recorded), or undefined. */
   unsupported?(scope: PauseScope): string | undefined;
   /** Scoped cleanup only (finish or checkpoint what is running, nothing new). `backup` asks for an eligible backup model after the first one was lost. */
   cleanup(scope: PauseScope, options: { deadlineAt: string; spendBudget?: number; backup: boolean; by: Principal }): Promise<{ remaining: readonly InventoryItem[]; spent?: number; modelLost?: boolean; costs?: readonly CleanupCost[] }>;
   /** The checkpoint of the scope's state, and whether it and the artifacts it names are durable. */
-  checkpoint(scope: PauseScope): Promise<{ checkpointId: string; durable: boolean; artifactsDurable: boolean }>;
+  checkpoint(scope: PauseScope, options?: { by: Principal; mode: StopMode }): Promise<{ checkpointId: string; durable: boolean; artifactsDurable: boolean }>;
   /** Ends execution. `force` skips waiting. `unresolved` names what could not be settled (effects of unknown outcome, children still running). */
   terminate(scope: PauseScope, options: { force: boolean; by: Principal }): Promise<{ ended: boolean; unresolved: readonly string[]; costs?: readonly CleanupCost[] }>;
   /** Charges the cleanup cost of one attempt to the budget of its task (card L02d). Safe to repeat with the same `commandId`; the amounts are what is new since the last charge. Absent: nothing is charged. */
@@ -64,8 +64,6 @@ export interface StopIntentBody {
   readonly inventory: readonly InventoryItem[];
   /** The attempts the runtime saw for the scope while preparing (so a process of one that ended meanwhile is still asked about after a restart). */
   readonly attempts?: readonly string[];
-  /** What has been charged to budgets so far for the cleanup, per attempt (running totals), so a repeated pass or a restart charges only what is new. */
-  readonly charged?: Readonly<Record<string, { readonly costMicros: number; readonly computeMs: number }>>;
   readonly blocked?: { readonly reason: string; readonly choices: readonly StopChoice[]; /** The phase `wait` goes back to. */ readonly resume?: StopPhase } | undefined;
   /** The pause request that held the scope when this request was made: a later stop reuses this request's checkpoint only if the same hold is still in place. */
   readonly gateRequestId?: string;
@@ -78,6 +76,12 @@ export const STOP_LIMITS = { reason: 500, deadlineMs: { default: 60_000, max: 3_
 const KIND = "stop-intent";
 const ACTIVE = "stop-active";
 const FORCE_REF = "stop-force-ref";
+/** What has been charged for the cleanup of one attempt, whichever stop request asked (card L02d): one record per attempt, so Suspend then Stop, overlapping task and agent stops, and a stop after a resume never charge twice. */
+const CHARGE = "stop-charge";
+/** The most the host's figure for one attempt's cleanup is trusted to be: 10^12 micros (a million units of the currency) and 10^12 ms of compute. A larger figure is cut to this. */
+export const CLEANUP_CAP = 1_000_000_000_000;
+const CLEANUP_UNPAID = "cleanup spend not charged";
+interface ChargeBody { readonly costMicros: number; readonly computeMs: number; readonly pending?: { readonly costMicros: number; readonly computeMs: number; readonly commandId: string; readonly intentId: string; readonly counted: boolean } }
 const TERMINAL: readonly StopPhase[] = ["done", "recovery-required", "cancelled"];
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const plain = (value: unknown, field: string): string => {
@@ -163,7 +167,7 @@ export class StopService {
     // A replay (a retried old request) does not begin again: it would drop the endings of attempts newer than the request. Nor does a stop that is already over.
     const startedIntent = await this.#runner.get(KIND, intentId);
     const startedPhase = (startedIntent?.body as unknown as StopIntentBody | undefined)?.phase;
-    if (!run.replayed && !(startedPhase !== undefined && TERMINAL.includes(startedPhase))) await this.#ports.begin?.(scope, { force: false }).catch(() => undefined);
+    if (!run.replayed && !(startedPhase !== undefined && TERMINAL.includes(startedPhase))) await this.#ports.begin?.(scope, { force: false, by }).catch(() => undefined);
     // A replay of a request that upgraded an earlier one has no intent of its own: it answers with the one it upgraded.
     const own = await this.#runner.get(KIND, intentId);
     return { intentId: own !== undefined ? intentId : (await this.#activeId(scope)) ?? intentId, replayed: run.replayed };
@@ -190,7 +194,7 @@ export class StopService {
     }
     if ((await this.#pauses.gate(by, scope))?.intent !== "pause") await this.#pauses.pause(by, { commandId: `${String(command.commandId)}-pause`, scope, reason: `force stop: ${reason}`.slice(0, 500) });
     await this.#pauses.dropResumeCondition(by, scope);
-    await this.#ports.begin?.(scope, { force: true }).catch(() => undefined);
+    await this.#ports.begin?.(scope, { force: true, by }).catch(() => undefined);
     let id = await this.#activeId(scope);
     const existing = id === undefined ? undefined : await this.#runner.get(KIND, id);
     if (existing === undefined || TERMINAL.includes((existing.body as unknown as StopIntentBody).phase)) {
@@ -281,7 +285,7 @@ export class StopService {
           return view<StopIntentBody>((await this.#runner.get(KIND, id))!); // still settling: the next call looks again
         }
         let cp: Awaited<ReturnType<StopPorts["checkpoint"]>>;
-        try { cp = await this.#ports.checkpoint(b.scope); } catch (error) {
+        try { cp = await this.#ports.checkpoint(b.scope, { by, mode: b.mode }); } catch (error) {
           await this.#block(id, by.id, `the checkpoint could not be taken: ${redactText(error instanceof Error ? error.message : String(error)).slice(0, 200)}`, ["preparing"]);
           continue;
         }
@@ -308,7 +312,7 @@ export class StopService {
         const graceful = b.forced === undefined;
         // What the ending cost is billed too; a charge that cannot be made is named, never dropped.
         const billed = await this.#charge(id, by, ended.costs);
-        if (billed.failed) ended = { ...ended, unresolved: [...ended.unresolved, "cleanup spend not charged"] };
+        if (billed.failed) ended = { ...ended, unresolved: [...ended.unresolved, CLEANUP_UNPAID] };
         if (ended.ended && ended.unresolved.length === 0) {
           await this.#observe(by, b.scope, id, "stopped", graceful ? "ended after preparation" : "force stopped; incomplete state may need reconciling");
           await this.#settle(id, by, { state: "stopped", graceful, unresolved: [], at: now }, "done", graceful ? "stopped" : "force stopped", ["terminating"]);
@@ -336,6 +340,7 @@ export class StopService {
       }
       if (page.length < 100) break;
     }
+    await this.#retryCharges().catch(() => undefined);
     return { advanced, failed };
   }
 
@@ -403,40 +408,117 @@ export class StopService {
   }
 
   /**
-   * Changes the record only if it is still in one of the phases the decision was made in (`from`); otherwise someone else got there first and nothing is written (false). The command ID carries the new body's digest, so two
-   * different writes at the same revision are never mistaken for one replayed command.
-   */
-  /**
-   * Charges the part of the cleanup cost that has not been charged (card L02d). The totals charged so far are on the request, so a repeated pass, a retry or a restart charges only what is new; the charge's command ID is derived from the
-   * new totals, so a crash between the charge and the note of it makes the next try a replay, not a second charge. A figure that is not a whole number of zero or more, or that is for an attempt the runtime did not name, is ignored.
-   * A charge that fails is left for the next try (the total on the request is not moved) and reported as `failed`.
+   * Charges the part of the cleanup cost that has not been charged (card L02d). What was charged is kept per ATTEMPT (`stop-charge`, not per stop request). Each step is written before it is done: the new running total is noted
+   * as pending with the charge's command ID (derived from the attempt, the total charged so far and the new total), then the charge is made (the budget applies a command ID once), then the note is cleared. A crash between the
+   * steps is finished first by the next try with the same command ID, so a replay after the total has grown charges the part already paid once and only the rest as new. A figure that is not a whole number of zero or more is ignored
+   * and one above `CLEANUP_CAP` is cut to it. A charge that fails is left pending (retried by the next pass and by `sweep`), counted once against the spend budget, and reported as `failed`.
    */
   async #charge(id: string, by: Principal, costs: readonly CleanupCost[] | undefined): Promise<{ costMicros: number; failed: boolean }> {
     let billed = 0;
     let failed = false;
     if (costs === undefined || this.#ports.charge === undefined) return { costMicros: 0, failed: false };
-    const have = ((await this.#runner.get(KIND, id))?.body as unknown as StopIntentBody | undefined)?.charged ?? {};
     for (const c of costs.slice(0, STOP_LIMITS.inventory)) {
       const cost = c?.costMicros ?? 0, compute = c?.computeMs ?? 0;
-      if (typeof c?.attemptId !== "string" || !Number.isSafeInteger(cost) || cost < 0 || !Number.isSafeInteger(compute) || compute < 0) continue;
-      const prev = have[c.attemptId] ?? { costMicros: 0, computeMs: 0 };
-      const newCost = Math.max(cost, prev.costMicros), newCompute = Math.max(compute, prev.computeMs);
-      const dCost = newCost - prev.costMicros, dCompute = newCompute - prev.computeMs;
-      if (dCost === 0 && dCompute === 0) continue;
-      if (Object.keys(have).length >= STOP_LIMITS.inventory && have[c.attemptId] === undefined) { failed = true; continue; }
-      const commandId = `stopcl-${createHash("sha256").update(`${id}:${c.attemptId}:${newCost}:${newCompute}`).digest("hex").slice(0, 40)}`;
-      try {
-        await this.#ports.charge({ commandId, attemptId: c.attemptId, costMicros: dCost, computeMs: dCompute });
-        await this.#update(id, (x) => {
-          const now = x.charged?.[c.attemptId] ?? { costMicros: 0, computeMs: 0 };
-          return { ...x, charged: { ...(x.charged ?? {}), [c.attemptId]: { costMicros: Math.max(now.costMicros, newCost), computeMs: Math.max(now.computeMs, newCompute) } } };
-        });
-        billed += dCost;
-      } catch { failed = true; }
+      if (typeof c?.attemptId !== "string" || !/^[A-Za-z0-9:_-]{1,120}$/.test(c.attemptId) || !Number.isSafeInteger(cost) || cost < 0 || !Number.isSafeInteger(compute) || compute < 0) continue;
+      let found = await this.#runner.get(CHARGE, c.attemptId);
+      let have = (found?.body as unknown as ChargeBody | undefined) ?? { costMicros: 0, computeMs: 0 };
+      if (have.pending !== undefined) {
+        const paid = await this.#payPending(c.attemptId);
+        billed += paid.billed;
+        if (!paid.ok) { failed = true; continue; }
+        found = await this.#runner.get(CHARGE, c.attemptId);
+        have = (found?.body as unknown as ChargeBody | undefined) ?? { costMicros: 0, computeMs: 0 };
+      }
+      const newCost = Math.max(Math.min(cost, CLEANUP_CAP), have.costMicros), newCompute = Math.max(Math.min(compute, CLEANUP_CAP), have.computeMs);
+      if (newCost === have.costMicros && newCompute === have.computeMs) continue;
+      const commandId = `stopcl-${createHash("sha256").update(`${c.attemptId}:${have.costMicros}:${have.computeMs}:${newCost}:${newCompute}`).digest("hex").slice(0, 40)}`;
+      const noted = await this.#note(c.attemptId, found?.revision, { ...have, pending: { costMicros: newCost, computeMs: newCompute, commandId, intentId: id, counted: false } });
+      if (!noted) { failed = true; continue; }
+      const paid = await this.#payPending(c.attemptId);
+      billed += paid.billed;
+      if (!paid.ok) failed = true;
     }
     return { costMicros: billed, failed };
   }
 
+  /** Writes the per-attempt charge record if it is still at the revision it was read at (false when someone else got there first and the caller should try again later). */
+  async #note(attemptId: string, revision: number | undefined, body: ChargeBody): Promise<boolean> {
+    const ref: AggregateRef = { kind: CHARGE, id: attemptId };
+    const next = clean(body);
+    const digest = createHash("sha256").update(JSON.stringify(next)).digest("hex").slice(0, 16);
+    try {
+      await this.#runner.command("stop.charge-note", { commandId: `stop-chg-${attemptId}-${revision ?? 0}-${digest}`.slice(0, 200), actor: "system" }, async () => ({
+        payload: { attemptId, revision: revision ?? 0 },
+        build: async () => ({ ref, creates: revision === undefined, changes: [revision === undefined ? { type: "create", ref, body: next } : { type: "update", ref, expectedRevision: revision, body: next }], detail: { attemptId } }),
+      }));
+      return true;
+    } catch (error) {
+      if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict")) return false;
+      throw error;
+    }
+  }
+
+  /** Makes the charge a record has noted as pending and clears the note. The same command ID is used on every try, so a charge made before a crash is not made twice. `billed` is the part not yet counted against the spend budget. */
+  async #payPending(attemptId: string): Promise<{ ok: boolean; billed: number }> {
+    for (let tries = 0; tries < 4; tries++) {
+      const found = await this.#runner.get(CHARGE, attemptId);
+      const have = found?.body as unknown as ChargeBody | undefined;
+      const pending = have?.pending;
+      if (found === undefined || have === undefined || pending === undefined) return { ok: true, billed: 0 };
+      const dCost = pending.costMicros - have.costMicros, dCompute = pending.computeMs - have.computeMs;
+      try { await this.#ports.charge!({ commandId: pending.commandId, attemptId, costMicros: dCost, computeMs: dCompute }); } catch {
+        // Left pending; the spend counts against the budget once, and the next try (a later pass or a sweep) makes the charge again.
+        if (pending.counted) return { ok: false, billed: 0 };
+        await this.#note(attemptId, found.revision, { ...have, pending: { ...pending, counted: true } });
+        return { ok: false, billed: dCost };
+      }
+      if (await this.#note(attemptId, found.revision, { costMicros: pending.costMicros, computeMs: pending.computeMs })) return { ok: true, billed: pending.counted ? 0 : dCost };
+    }
+    return { ok: false, billed: 0 };
+  }
+
+  /**
+   * Makes the charges that failed or were cut short by a crash, for any request (a sweep does this, so a charge that could not be made at the time is retried later). When every charge a finished request was waiting on is made, the
+   * request's "cleanup spend not charged" mark is taken off its outcome.
+   */
+  async #retryCharges(): Promise<void> {
+    const cleared = new Set<string>();
+    const stuck = new Set<string>();
+    for (let after: string | undefined, pages = 0; pages < 20; pages++) {
+      const page = await this.#runner.list(CHARGE, { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
+      for (const rec of page) {
+        after = rec.id;
+        const pending = (rec.body as unknown as ChargeBody).pending;
+        if (pending === undefined) continue;
+        if ((await this.#payPending(rec.id)).ok) cleared.add(pending.intentId); else stuck.add(pending.intentId);
+      }
+      if (page.length < 100) break;
+    }
+    for (const intentId of cleared) {
+      if (stuck.has(intentId)) continue;
+      await this.#update(intentId, (x) => (x.outcome === undefined || !x.outcome.unresolved.includes(CLEANUP_UNPAID) ? x : { ...x, outcome: { ...x.outcome, unresolved: x.outcome.unresolved.filter((u) => u !== CLEANUP_UNPAID) }, history: this.#push(x, x.phase, "system", "the cleanup spend was charged later") })).catch(() => false);
+    }
+  }
+
+  /**
+   * Whether a Stop or Suspend of this task is in force: its request is not cancelled and the task is still paused. The dispatcher asks it for the swarm ancestors of a task before it starts an attempt, so a child of a stopped
+   * task is not started again while the parent's stop holds (card L02d). Resuming the parent, or cancelling the request, lets go.
+   */
+  async holding(taskId: string): Promise<{ intentId: string; mode: StopMode } | undefined> {
+    const scope: PauseScope = { kind: "task", id: taskId };
+    const id = await this.#activeId(scope);
+    const found = id === undefined ? undefined : await this.#runner.get(KIND, id);
+    if (id === undefined || found === undefined) return undefined;
+    const b = found.body as unknown as StopIntentBody;
+    if (b.phase === "cancelled") return undefined;
+    const guard = await this.#pauses.guard(taskId);
+    return guard.blockedBy.some((s) => s.kind === "task" && s.id === taskId) ? { intentId: id, mode: b.mode } : undefined;
+  }
+
+  /**
+   * Changes the record only if it is still in one of the phases the decision was made in (`from`); otherwise someone else got there first and nothing is written (false). The command ID carries the new body's digest, so two
+   * different writes at the same revision are never mistaken for one replayed command.
+   */
   async #update(id: string, change: (b: StopIntentBody) => StopIntentBody, from?: readonly StopPhase[]): Promise<boolean> {
     for (let attempt = 1; ; attempt++) {
       const found = await this.#runner.get(KIND, id);

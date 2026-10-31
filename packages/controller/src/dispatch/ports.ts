@@ -103,6 +103,8 @@ export interface HostProbe { readonly attemptId: string; readonly taskId: string
 export interface HostLocalWork {
   readonly processes: readonly { readonly attemptId?: string; readonly ref: string; readonly kind: "process" | "child"; readonly state: "running" | "uncooperative" | "unknown" }[];
   readonly costs?: readonly { readonly attemptId: string; readonly costMicros?: number; readonly computeMs?: number }[];
+  /** The attempts this host has a record of. An asked attempt that is live in the dispatcher's records but not named here is one the host has forgotten (a restart): the stop reads that as unknown, not as nothing running. Absent: the host answers for every attempt asked. */
+  readonly known?: readonly string[];
 }
 
 export interface WorkerHost {

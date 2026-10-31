@@ -201,7 +201,7 @@ export interface ComposeInput {
    */
   readonly bindWorkspacePort?: (portOf: (taskId: string) => Promise<WorkspacePort | undefined>) => void;
   /** Suspensions and stops the controller was carrying out are carried on each tick, and at start-up by the first one (card L02b). */
-  readonly stops?: Pick<StopService, "sweep">;
+  readonly stops?: Pick<StopService, "sweep" | "holding">;
   /** Meeting records are swept for votes past their time and records nobody finished (card M02c). */
   readonly records?: Pick<MeetingRecordService, "sweep">;
   /** Responsibility checks are recorded when due and incidents past their escalation time are escalated (card P04). */
@@ -493,7 +493,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     }
     const dispatcher = DispatcherService.withEpoch(storage, epoch, {
       principal, assignments: i.assignments, projects: i.projects, credentials: i.taskCredentials, admission, reportsTo: reportsToOf, hosts, workers, ...(i.workspaceOps === undefined ? {} : { workspaceBusy: (taskId: string) => i.workspaceOps!.isBusy(taskId) }), contracts: i.contracts, harnesses: i.catalog, policy, protectedBranch: (projectId, branch) => branchSettings.isProtected(projectId, branch), effects, blockers, route,
-      activity: async (step) => { await ActivityService.withEpoch(storage, epoch, ro).record(principal, { commandId: step.commandId, taskId: step.taskId, kind: step.kind, summary: step.summary, manifest: { refs: step.refs } } as never); }, routing: i.routing, pauses, decisions, ...(i.resumes === undefined ? {} : { resumes: i.resumes }), prerequisites: async (taskId: string) => { const deps = await i.contracts.prerequisitesOf(taskId); if (deps === undefined) throw new DomainError("unavailable", "the task's dependencies could not be read"); const open: string[] = []; const dead: string[] = []; for (const e of deps.dependsOn) { if (e.state === undefined) dead.push(`${e.taskId} (missing)`); else if (e.state === "cancelled") dead.push(`${e.taskId} (cancelled)`); else if (e.state !== "done") open.push(`${e.taskId} (${e.state})`); } return { open, dead }; }, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
+      activity: async (step) => { await ActivityService.withEpoch(storage, epoch, ro).record(principal, { commandId: step.commandId, taskId: step.taskId, kind: step.kind, summary: step.summary, manifest: { refs: step.refs } } as never); }, routing: i.routing, pauses, ...(i.stops === undefined ? {} : { heldBy: async (taskId: string) => { const ancestor = await stoppedAncestor(storage, i.stops!, taskId); return ancestor === undefined ? undefined : `its parent task ${ancestor.taskId} is ${ancestor.mode === "suspend" ? "suspended" : "stopped"} (stop ${ancestor.intentId}); its swarm children are not started while that holds`; } }), decisions, ...(i.resumes === undefined ? {} : { resumes: i.resumes }), prerequisites: async (taskId: string) => { const deps = await i.contracts.prerequisitesOf(taskId); if (deps === undefined) throw new DomainError("unavailable", "the task's dependencies could not be read"); const open: string[] = []; const dead: string[] = []; for (const e of deps.dependsOn) { if (e.state === undefined) dead.push(`${e.taskId} (missing)`); else if (e.state === "cancelled") dead.push(`${e.taskId} (cancelled)`); else if (e.state !== "done") open.push(`${e.taskId} (${e.state})`); } return { open, dead }; }, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
       ...(i.options.local === undefined ? {} : { toolWindow: (route: string) => { try { return i.options.local!.window({ route } as WorkOrder); } catch { return undefined; } } }),
       ...(remote === undefined ? {} : { storeOwner: (agentId: string, attemptId: string) => remote!.storeOwner(principal, agentId, attemptId) }),
     }, { ...ro, holder: "dispatcher", ...(i.onError === undefined ? {} : { onError: i.onError }), ...(i.options.dispatcher ?? {}), ...(i.dispatchLimits === undefined ? {} : { limits: i.dispatchLimits }), ...(i.taskMinutes === undefined ? {} : { configuredMinutes: i.taskMinutes }) });
@@ -551,4 +551,19 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     await i.options.local?.close?.().catch(() => undefined);
     throw error;
   }
+}
+
+/** The nearest swarm ancestor of a task that has a Stop or Suspend in force (card L02d), or undefined. Bounded: 50 levels, so a cycle in the links ends. */
+async function stoppedAncestor(storage: ControllerStorage, stops: Pick<StopService, "holding">, taskId: string): Promise<{ taskId: string; intentId: string; mode: string } | undefined> {
+  const seen = new Set<string>([taskId]);
+  let at = taskId;
+  for (let hops = 0; hops < 50; hops++) {
+    const parent = ((await storage.getAggregate({ kind: "swarm-link", id: at }))?.body as unknown as { parentTaskId?: string } | undefined)?.parentTaskId;
+    if (typeof parent !== "string" || seen.has(parent)) return undefined;
+    seen.add(parent);
+    const held = await stops.holding(parent);
+    if (held !== undefined) return { taskId: parent, ...held };
+    at = parent;
+  }
+  return undefined;
 }

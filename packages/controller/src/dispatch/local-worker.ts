@@ -128,26 +128,51 @@ export class LocalWorker implements WorkerHost {
     this.#options = options;
   }
 
-  /** The sandbox session of each attempt this process started, kept after the attempt ends so that Stop can still ask what outlived it. Bounded; the oldest are forgotten first. */
-  readonly #sessions = new Map<string, () => SandboxSession>();
-  #remember(attemptId: string, session: () => SandboxSession): void {
+  /**
+   * Every sandbox session of each attempt this process started, kept after the attempt ends so that Stop can still ask what outlived it. A restart opens a new session and the old confinement may still hold
+   * processes, so the old ones are kept until they report nothing left (then their last cost is folded into `base`, the attempt's cost so far). Bounded: the oldest attempts are forgotten first, and at most 8 sessions
+   * of one attempt are kept (the oldest idle ones go first).
+   */
+  readonly #sessions = new Map<string, { sessions: SandboxSession[]; base: { costMicros: number; computeMs: number } }>();
+  #remember(attemptId: string, session: SandboxSession): void {
+    const had = this.#sessions.get(attemptId);
     this.#sessions.delete(attemptId);
-    this.#sessions.set(attemptId, session);
+    const entry = had ?? { sessions: [], base: { costMicros: 0, computeMs: 0 } };
+    entry.sessions.push(session);
+    while (entry.sessions.length > 8) entry.sessions.shift();
+    this.#sessions.set(attemptId, entry);
     while (this.#sessions.size > 500) this.#sessions.delete(this.#sessions.keys().next().value!);
   }
 
-  /** What Stop needs from this host (card L02d): asked for the attempts it knows, answered from their sandbox sessions. A session that cannot say is left out; one that fails to answer fails the whole look (the stop then names an unknown item). */
+  /**
+   * What Stop needs from this host (card L02d): asked for the attempts it knows, answered from all their sandbox sessions (a replaced sandbox's processes are still reported until it is empty; the cost is the sum over the
+   * attempt's sessions). A session that cannot say is left out; one that fails to answer fails the whole look (the stop then names an unknown item). `known` lists the attempts this process has a record of, so a caller can tell
+   * "nothing runs" from "this host has forgotten the attempt" (a restart of the controller).
+   */
   async localWork(attemptIds: readonly string[]): Promise<HostLocalWork> {
     const processes: Mutable<HostLocalWork["processes"]> = [];
     const costs: Mutable<NonNullable<HostLocalWork["costs"]>> = [];
+    const known: string[] = [];
     for (const attemptId of attemptIds.slice(0, 500)) {
-      const session = this.#sessions.get(attemptId)?.();
-      if (session?.work === undefined) continue;
-      const w = await session.work();
-      for (const p of w.processes.slice(0, 200)) processes.push({ attemptId, ref: p.ref, kind: p.kind, state: p.state });
-      if (w.costMicros !== undefined || w.computeMs !== undefined) costs.push({ attemptId, ...(w.costMicros === undefined ? {} : { costMicros: w.costMicros }), ...(w.computeMs === undefined ? {} : { computeMs: w.computeMs }) });
+      const entry = this.#sessions.get(attemptId);
+      if (entry === undefined) continue;
+      known.push(attemptId);
+      let cost = entry.base.costMicros, compute = entry.base.computeMs, said = false;
+      const keep: SandboxSession[] = [];
+      for (const [i, session] of entry.sessions.entries()) {
+        if (session.work === undefined) { keep.push(session); continue; }
+        const w = await session.work();
+        for (const p of w.processes.slice(0, 200)) processes.push({ attemptId, ref: p.ref, kind: p.kind, state: p.state });
+        if (w.costMicros !== undefined) { cost += w.costMicros; said = true; }
+        if (w.computeMs !== undefined) { compute += w.computeMs; said = true; }
+        // An older confinement that holds nothing any more is folded into the base; the newest session is always kept.
+        if (i < entry.sessions.length - 1 && w.processes.length === 0) { entry.base = { costMicros: entry.base.costMicros + (w.costMicros ?? 0), computeMs: entry.base.computeMs + (w.computeMs ?? 0) }; continue; }
+        keep.push(session);
+      }
+      entry.sessions = keep;
+      if (said || entry.base.costMicros > 0 || entry.base.computeMs > 0) costs.push({ attemptId, costMicros: cost, computeMs: compute });
     }
-    return { processes, costs };
+    return { processes, costs, known };
   }
 
   /** Announces this host's capabilities (from its own facts) under its own credential, and beats once. */
@@ -185,7 +210,7 @@ export class LocalWorker implements WorkerHost {
     }
     const content = note === undefined ? order.content : `${order.content}\n\n[${note}]`;
     let sandbox = await options.sandbox.open(order.recipe, order);
-    this.#remember(order.attemptId, () => sandbox);
+    this.#remember(order.attemptId, sandbox);
     let gateway: ToolGateway | undefined;
     let runtime: AttemptRuntime | undefined;
     let inFlight = 0;
@@ -315,6 +340,7 @@ export class LocalWorker implements WorkerHost {
           // Whatever the restart opened is closed again when it fails (a refused re-admission, a process that did not start): a frozen attempt does not keep a second sandbox running.
           try {
             sandbox = await options.sandbox.open(recipe, order);
+            this.#remember(order.attemptId, sandbox);
             if (stopped) { await sandbox.close().catch(() => undefined); throw new DomainError("fenced", "the attempt was stopped"); }
             // The conversation continues from a checkpoint just taken from the same attempt; the new process has told nothing yet.
             reported = undefined;

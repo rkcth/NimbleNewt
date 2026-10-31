@@ -51,7 +51,10 @@ class Runtime implements StopPorts {
   terminateCosts: Array<{ attemptId: string; costMicros?: number; computeMs?: number }> | undefined;
   charges: Array<{ commandId: string; attemptId: string; costMicros: number; computeMs: number }> = [];
   failCharges = 0;
+  /** The next charges are made and then the caller is told they failed (a crash between the charge and the note of it). */
+  crashAfterCharge = 0;
   async charge(c: { commandId: string; attemptId: string; costMicros: number; computeMs: number }): Promise<void> {
+    if (this.crashAfterCharge > 0) { this.crashAfterCharge--; if (!this.charges.some((x) => x.commandId === c.commandId)) this.charges.push(c); throw new Error("the process died after the charge"); }
     if (this.failCharges > 0) { this.failCharges--; throw new Error("the budget could not be reached"); }
     // A repeated command ID is the same charge (as the budget ledger answers it).
     if (!this.charges.some((x) => x.commandId === c.commandId)) this.charges.push(c);
@@ -418,7 +421,6 @@ for (const backend of backends) {
     c.rt.failCharges = 1;
     await c.stops.advance(c.owner, { intentId });
     assert.equal(c.rt.charges.length, 1, "the second charge failed and was not recorded as charged");
-    assert.equal((await c.stops.get(c.owner, intentId))?.charged?.["att-a"]?.costMicros, 1000);
     await c.stops.advance(c.owner, { intentId });
     assert.deepEqual(c.rt.charges.map((x) => [x.attemptId, x.costMicros, x.computeMs]), [["att-a", 1000, 100], ["att-a", 800, 0]], "the missed part is charged by the next pass, nothing twice");
     const done = await c.stops.advance(c.owner, { intentId });
@@ -445,6 +447,54 @@ for (const backend of backends) {
     const done = await c.stops.advance(c.owner, { intentId: r.intentId });
     assert.equal(done.outcome?.state, "recovery-required");
     assert.deepEqual(done.outcome?.unresolved, ["cleanup spend not charged"]);
+  });
+
+  suite("what was charged is kept per attempt: Suspend then Stop, a stop after a resume and an overlapping stop never charge the same cost again, only what has grown (card L02d)", async (c) => {
+    c.rt.items = [{ kind: "foreground", ref: "att-a/c1", state: "running" }];
+    c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-a", costMicros: 1000, computeMs: 10 }] }];
+    const sus = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "suspend", reason: "x" });
+    assert.equal((await c.stops.advance(c.owner, { intentId: sus.intentId })).outcome?.state, "suspended");
+    assert.deepEqual(c.rt.charges.map((x) => [x.costMicros, x.computeMs]), [[1000, 10]]);
+    // A Stop after the Suspend (a request of its own, the preparation reused) reports the same total, then a larger one: only the growth is charged.
+    c.rt.terminateCosts = [{ attemptId: "att-a", costMicros: 1000, computeMs: 10 }];
+    const stop = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "x" });
+    assert.equal((await c.stops.advance(c.owner, { intentId: stop.intentId })).outcome?.state, "stopped");
+    assert.equal(c.rt.charges.length, 1, "the same total is not charged again by another request");
+    // Resumed, then stopped once more with a larger total.
+    await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "again" });
+    c.rt.terminateCosts = [{ attemptId: "att-a", costMicros: 1400, computeMs: 10 }];
+    const again = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "x" });
+    assert.equal((await c.stops.advance(c.owner, { intentId: again.intentId })).outcome?.state, "stopped");
+    assert.deepEqual(c.rt.charges.map((x) => [x.costMicros, x.computeMs]), [[1000, 10], [400, 0]]);
+  });
+
+  suite("a crash after a charge was made, followed by a larger total, charges the part already paid once and only the rest as new (card L02d)", async (c) => {
+    c.rt.items = [{ kind: "foreground", ref: "att-a/c1", state: "running" }];
+    c.rt.cleanups = [
+      { remaining: [{ kind: "foreground", ref: "att-a/c1", state: "running" }], costs: [{ attemptId: "att-a", costMicros: 1000 }] },
+      { remaining: [], costs: [{ attemptId: "att-a", costMicros: 1700 }] },
+    ];
+    c.rt.crashAfterCharge = 1;
+    const { intentId } = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "suspend", reason: "x" });
+    await c.stops.advance(c.owner, { intentId });
+    assert.deepEqual(c.rt.charges.map((x) => x.costMicros), [1000], "the first charge was made, and the process died before noting it");
+    await c.stops.advance(c.owner, { intentId });
+    assert.equal(c.rt.charges.reduce((sum, x) => sum + x.costMicros, 0), 1700, "the 1,000 already paid is not paid again; the rest is the new charge");
+    assert.deepEqual(c.rt.charges.map((x) => x.costMicros), [1000, 700]);
+  });
+
+  suite("a host's figure is cut to the cap, and a charge that failed is retried by a later sweep, which takes the mark off the result (card L02d)", async (c) => {
+    c.rt.terminateCosts = [{ attemptId: "att-a", costMicros: 5_000_000_000_000 }];
+    c.rt.failCharges = 1;
+    const r = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "x" });
+    const done = await c.stops.advance(c.owner, { intentId: r.intentId });
+    assert.deepEqual(done.outcome?.unresolved, ["cleanup spend not charged"]);
+    assert.equal(c.rt.charges.length, 0);
+    await c.stops.sweep(c.owner);
+    assert.deepEqual(c.rt.charges.map((x) => x.costMicros), [1_000_000_000_000], "charged at the cap");
+    assert.deepEqual((await c.stops.get(c.owner, r.intentId))?.outcome?.unresolved, []);
+    await c.stops.sweep(c.owner);
+    assert.equal(c.rt.charges.length, 1, "once");
   });
 
   suite("a Stop does not wait in preparation for processes, child work or jobs (it ends them itself), a Suspend does; an uncooperative one blocks either (card L02d)", async (c) => {

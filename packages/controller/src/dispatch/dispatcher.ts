@@ -98,6 +98,8 @@ export interface DispatcherDeps {
   /** The routing table, to judge the chosen route again at each call. Without it the route is not judged again. */
   readonly routing?: Pick<RoutingService, "get">;
   readonly pauses: PauseGuard;
+  /** Why a task may not be started although no pause gate of its own holds it, or undefined: the controller says so when a swarm ancestor of the task has a Stop or Suspend in force (card L02d), so a stopped parent's children are not started again. */
+  readonly heldBy?: (taskId: string) => Promise<string | undefined>;
   readonly decisions?: DecisionGuard;
   /**
    * Whether an operation on the task's checkout (integration, refresh, quarantine) is running or left open (card H12m): an attempt of such a task is not started until it ends, and waits instead. A failure to
@@ -723,17 +725,31 @@ export class DispatcherService {
     const ids = attemptIds.filter((id) => typeof id === "string" && ATTEMPT.test(id)).slice(0, 500);
     const processes: HostLocalWork["processes"][number][] = [];
     const costs = new Map<string, { costMicros: number; computeMs: number }>();
+    const asked = new Set(ids);
     for (const host of this.#deps.workers) {
       if (host.localWork === undefined) continue;
       const got = await host.localWork(ids);
-      for (const p of (Array.isArray(got?.processes) ? got.processes : []).slice(0, 200)) processes.push(p);
+      for (const p of (Array.isArray(got?.processes) ? got.processes : []).slice(0, 200)) {
+        // A process of an attempt that was not asked about is not part of this answer (a host may know more than the caller asked for).
+        if (p?.attemptId !== undefined && !asked.has(p.attemptId)) continue;
+        processes.push(p);
+      }
       for (const c of Array.isArray(got?.costs) ? got.costs : []) {
         // A figure for an attempt that was not asked about is not taken, and a figure that is not a whole count of zero or more is not trusted: the entry is dropped.
-        if (typeof c?.attemptId !== "string" || !ids.includes(c.attemptId)) continue;
+        if (typeof c?.attemptId !== "string" || !asked.has(c.attemptId)) continue;
         const cost = c.costMicros ?? 0; const compute = c.computeMs ?? 0;
         if (!Number.isSafeInteger(cost) || cost < 0 || !Number.isSafeInteger(compute) || compute < 0) continue;
         const had = costs.get(c.attemptId) ?? { costMicros: 0, computeMs: 0 };
         costs.set(c.attemptId, { costMicros: had.costMicros + cost, computeMs: had.computeMs + compute });
+      }
+      // An attempt this host was running that is still live in the dispatcher's records, but that the host has no record of (it forgot it in a restart), cannot be said to hold nothing: it reads as unknown.
+      if (Array.isArray(got?.known)) {
+        const known = new Set(got.known);
+        for (const id of ids) {
+          if (known.has(id)) continue;
+          const d = await this.#load(id);
+          if (d !== undefined && d.body.hostId === host.hostId && d.body.state !== "finished" && processes.length < 5000) processes.push({ attemptId: id, ref: `attempt:${id}`, kind: "process", state: "unknown" });
+        }
       }
     }
     return { processes, costs: [...costs].map(([attemptId, v]) => ({ attemptId, ...v })) };
@@ -995,6 +1011,8 @@ export class DispatcherService {
     // 2. Pause gates.
     const paused = await this.#deps.pauses.guard(taskId);
     if (paused.blockedBy.length > 0) return skip("pause", `paused by ${paused.blockedBy.map((s) => `${s.kind} ${s.id}`).join(", ")}`);
+    const held = await this.#deps.heldBy?.(taskId);
+    if (held !== undefined) return skip("pause", held);
     // 3. The owner's decisions and gates.
     if (this.#deps.decisions !== undefined) {
       const g = await this.#deps.decisions.guard(taskId, "start");

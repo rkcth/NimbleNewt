@@ -147,3 +147,27 @@ test("a Stop of a task ends its swarm child's work too, and a Pause leaves a bac
     assert.equal((await c.services.jobs.get(owner, job))?.state, "cancellation_requested", "the child's job was asked to stop");
   } finally { await c.close(); cleanup(d); }
 });
+
+test("a stopped parent keeps its swarm children from starting again: after the Stop the next tick starts nothing for a child, and resuming the parent lets go (card L02d)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-l02d-"));
+  const w = await world(d, { asked: [], work: () => ({ processes: [] }) });
+  const { c, boot } = w;
+  try {
+    const parent = await w.task(1);
+    const child = await w.task(2, parent.id);
+    await c.dispatch!.dispatcher.tick();
+    const stop = await call(c, boot.token, "lifecycle.stop", { scope: { kind: "task", id: parent.id }, mode: "stop", reason: "night" }, "st1");
+    assert.ok(stop.ok, JSON.stringify(stop));
+    assert.equal((await w.state(child.attempt)).state, "finished", "the child's attempt was ended with the parent's");
+    // A new attempt for the child (a retry, a re-assignment) is not started while the parent's Stop holds.
+    const assignment = (await c.services.assignments.getAssignment(child.id))!;
+    const again = (await c.services.assignments.admitAttempt({ commandId: "ad-again", actor: "inbox", taskId: child.id, expectedRevision: assignment.revision, generation: assignment.generation, owner: { kind: "agent", id: child.agent }, harness: "pi" })).id;
+    const held = await c.dispatch!.dispatcher.tick();
+    assert.ok(!held.started.includes(again), JSON.stringify(held));
+    assert.ok(held.skipped.some((s) => s.attemptId === again && /parent task .* is stopped/.test(s.reason)), JSON.stringify(held.skipped));
+    // The parent resumed: the hold is let go and the child starts.
+    assert.ok((await call(c, boot.token, "lifecycle.resume", { scope: { kind: "task", id: parent.id }, reason: "morning" }, "rs1")).ok);
+    const free = await c.dispatch!.dispatcher.tick();
+    assert.ok(free.started.includes(again), JSON.stringify(free));
+  } finally { await c.close(); cleanup(d); }
+});
