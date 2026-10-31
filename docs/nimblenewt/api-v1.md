@@ -1397,7 +1397,7 @@ Result: `{ item }`.
 
 #### `responsibility.coverage`
 
-The active responsibilities of a project with a coverage gap: no active holder, no recent check (none yet, or older than twice the period) or no check schedule, with how long and whether it is beyond the alert period. Paged by responsibility ID. A paused or retired responsibility is not listed.
+The active responsibilities of a project with a coverage gap: no active holder, no recent check (none yet, or older than twice the period) or no check schedule, with how long (from when the lapse was first seen, kept: an edit of the responsibility does not move it) and whether it is beyond the alert period. A responsibility driven by event sources is not counted as having no schedule. Paged by responsibility ID; one call looks at a bounded number of records and, when it stops there, says `partial` and gives `next` to go on from. `alert.status` is `on`, `off` or `damaged` (a damaged setting is not off: set it again with coverage.settings.set). A paused or retired responsibility is not listed.
 
 Arguments:
 
@@ -1405,7 +1405,7 @@ Arguments:
 - `afterId` (optional): the `next` of the previous page
 - `limit` (optional): 1 to 100 (default 50)
 
-Result: `{ items, next?, asOf, alert }`.
+Result: `{ items, next?, partial?, asOf, alert }`.
 
 #### `coverage.settings.get`
 

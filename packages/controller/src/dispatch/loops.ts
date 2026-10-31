@@ -325,20 +325,23 @@ export function responsibilityLoops(checks: { generate(by: Principal, projectId:
   } }];
 }
 
-/** P04: a responsibility whose coverage has lapsed beyond the owner's period is told to the owner once (the notice id is fixed by the responsibility and the start of the lapse). Does nothing while the setting is off. One project's failure does not skip the others. */
-export function coverageLoops(coverage: { lapsed(by: Principal, projectId: string): Promise<readonly { alertId: string; responsibilityId: string; projectId: string; title: string; reasons: readonly string[] }[]> }, projects: () => Promise<readonly string[]>, notify: (lapse: { alertId: string; responsibilityId: string; projectId: string; title: string; reasons: readonly string[] }) => Promise<void>): DispatcherLoop[] {
+/**
+ * P04: the coverage sweep, once a tick for the whole installation (a bounded slice of the responsibilities, not one scan of every project): it keeps when each lapse was first seen and returns at most one notice per project
+ * for lapses beyond the owner's period (nothing is told while the setting is off). A notice is marked told only after it was sent; an already-sent id (`command_conflict`) counts as sent. One failing notice does not skip the others.
+ */
+export function coverageLoops(coverage: { sweep(by: Principal): Promise<readonly CoverageNoticeLike[]>; markTold(by: Principal, notice: CoverageNoticeLike): Promise<void> }, notify: (notice: CoverageNoticeLike) => Promise<void>): DispatcherLoop[] {
   return [{ name: "responsibilities.coverage", run: async (by) => {
     let failure: unknown;
-    for (const projectId of await projects()) {
+    for (const n of await coverage.sweep(by)) {
       try {
-        for (const g of await coverage.lapsed(by, projectId)) {
-          try { await notify(g); } catch (error) { if (!(error instanceof DomainError && error.code === "command_conflict")) failure ??= error; /* a conflict: already told under this id */ }
-        }
+        try { await notify(n); } catch (error) { if (!(error instanceof DomainError && error.code === "command_conflict")) throw error; /* already told under this id */ }
+        await coverage.markTold(by, n);
       } catch (error) { failure ??= error; }
     }
     if (failure !== undefined) throw failure;
   } }];
 }
+export interface CoverageNoticeLike { readonly alertId: string; readonly projectId: string; readonly count: number; readonly items: readonly { readonly responsibilityId: string; readonly title: string; readonly reasons: readonly string[]; readonly since: string; readonly lapsedMinutes: number }[]; readonly covered: readonly string[] }
 
 /** K06: old resolved incidents are soft-archived, per project, so one project's failure does not skip the others. Not wired into the controller yet. */
 export function archiveLoops(incidents: { archive(by: Principal, options: { projectId?: string }): Promise<number> }, projects: () => Promise<readonly string[]>): DispatcherLoop[] {

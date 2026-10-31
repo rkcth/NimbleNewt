@@ -14,7 +14,7 @@ const cid = (label: string): string => `${label}-${n++}`;
 const T0 = "2026-10-22T10:00:00.000Z";
 
 for (const backend of backends) {
-  const suite = (name: string, body: (c: { owner: Principal; project: string; duties: ResponsibilityService; settings: CoverageSettingsService; coverage: CoverageService; principals: PrincipalService; setNow(iso: string): void; make(extra?: Record<string, unknown>): Promise<string>; agent(grants: unknown[]): Promise<Principal> }) => Promise<void>) =>
+  const suite = (name: string, body: (c: { owner: Principal; project: string; duties: ResponsibilityService; settings: CoverageSettingsService; coverage: CoverageService; principals: PrincipalService; setNow(iso: string): void; make(extra?: Record<string, unknown>): Promise<string>; agent(grants: unknown[]): Promise<Principal>; storage: any; projects: ProjectService; sweepWith(slice: number, reportExamine?: number): CoverageService }) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
       const world = await backend.open();
       let now = T0;
@@ -29,7 +29,7 @@ for (const backend of backends) {
         const project = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "Ops" })).id;
         await body({
           owner, project, duties, settings, coverage, principals,
-          setNow: (iso) => { now = iso; },
+          setNow: (iso) => { now = iso; }, storage: world.storage, projects, sweepWith: (slice, reportExamine) => CoverageService.withEpoch(world.storage, projects.epoch, settings, { ...options, slice, ...(reportExamine === undefined ? {} : { reportExamine }) }),
           make: async (extra = {}) => (await duties.create(owner, { commandId: cid("r"), projectId: project, title: "Keep the server healthy", objective: "Up", everyMinutes: 60, ...extra } as never)).id,
           agent: async (grants) => { await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: `a${n++}`, grants: grants as never }); return principals.authenticate((await principals.issueCredential(owner, `agent:a${n - 1}`)).token); },
         });
@@ -100,20 +100,117 @@ for (const backend of backends) {
     assert.equal(await coverage.report(owner, "proj-aaaaaaaaaaaaaaaaaaaa"), undefined);
   });
 
-  suite("lapsed lists only gaps beyond the period, only while the alert is on, with a stable ID per lapse; only owner, service or responsibility.write may ask", async ({ owner, project, settings, coverage, setNow, make, agent }) => {
+  const dispatcher = { id: "service:dispatcher", kind: "service", name: "dispatcher", grants: [] } as unknown as Principal;
+
+  suite("the start of a lapse is kept when first seen: an unrelated edit does not move it, the alert ID and the notice stay, a closed gap starts a new episode", async ({ owner, project, settings, coverage, duties, setNow, make, agent }) => {
     const r = await make({ title: "no holder" });
-    setNow("2026-10-22T10:40:00.000Z");
-    assert.deepEqual(await coverage.lapsed(owner, project), [], "off: nothing, whatever the gap");
+    setNow("2026-10-22T10:10:00.000Z");
+    assert.deepEqual(await coverage.sweep(dispatcher), [], "off: nobody is told");
+    // Edited later (the stored update time moves), the lapse still began when it was first seen.
+    setNow("2026-10-22T10:50:00.000Z");
+    await duties.update(owner, { commandId: cid("u"), responsibilityId: r, expectedRevision: (await duties.get(owner, r))!.revision, title: "no holder, renamed" } as never);
+    const g = (await coverage.report(owner, project))!.items[0]!;
+    assert.deepEqual([g.since, g.lapsedMinutes], [T0, 50], "the edit did not hide the lapse");
     await settings.set(owner, { commandId: cid("s"), enabled: true, afterMinutes: 60 });
-    assert.deepEqual(await coverage.lapsed(owner, project), [], "a lapse shorter than the period is not told");
+    assert.deepEqual(await coverage.sweep(dispatcher), [], "50 minutes is shorter than the period");
     setNow("2026-10-22T11:05:00.000Z");
-    const [g] = await coverage.lapsed(owner, project);
-    assert.deepEqual([g!.responsibilityId, g!.reasons, g!.since], [r, ["no-holder"], T0]);
-    setNow("2026-10-22T14:00:00.000Z");
-    assert.equal((await coverage.lapsed(owner, project))[0]!.alertId, g!.alertId, "the same lapse keeps its ID however long it goes on");
-    await assert.rejects(coverage.lapsed(await agent([]), project), (e) => e instanceof DomainError && e.code === "forbidden");
+    const [n] = await coverage.sweep(dispatcher);
+    assert.deepEqual([n!.count, n!.items.map((x) => x.responsibilityId), n!.covered], [1, [r], [r]]);
+    // Not told yet (no markTold): the same notice comes again with the same ID, even after another edit.
+    setNow("2026-10-22T13:00:00.000Z");
+    await duties.update(owner, { commandId: cid("u"), responsibilityId: r, expectedRevision: (await duties.get(owner, r))!.revision, title: "renamed again" } as never);
+    const [again] = await coverage.sweep(dispatcher);
+    assert.equal(again!.alertId, n!.alertId);
+    await coverage.markTold(dispatcher, again!);
+    assert.deepEqual(await coverage.sweep(dispatcher), [], "told once");
+    // The gap closes: a holder is given. Later it opens again: a new episode, told again.
+    const ann = await agent([]);
+    await duties.update(owner, { commandId: cid("u"), responsibilityId: r, expectedRevision: (await duties.get(owner, r))!.revision, ownerId: ann.id, everyMinutes: 100_000 } as never);
+    assert.deepEqual(await coverage.sweep(dispatcher), []);
+    assert.equal((await coverage.report(owner, project))!.items.length, 0);
+    setNow("2026-10-23T09:00:00.000Z");
+    await duties.update(owner, { commandId: cid("u"), responsibilityId: r, expectedRevision: (await duties.get(owner, r))!.revision, ownerId: null } as never);
+    assert.deepEqual(await coverage.sweep(dispatcher), []);
+    setNow("2026-10-23T10:30:00.000Z");
+    const [second] = await coverage.sweep(dispatcher);
+    assert.notEqual(second!.alertId, n!.alertId);
+    assert.equal((await coverage.report(owner, project))!.items[0]!.since, "2026-10-23T09:00:00.000Z");
+    // Only the dispatcher sweeps.
+    await assert.rejects(coverage.sweep(owner), (e) => e instanceof DomainError && e.code === "forbidden");
+    await assert.rejects(coverage.sweep(await agent([])), (e) => e instanceof DomainError && e.code === "forbidden");
+    await assert.rejects(coverage.markTold(owner, second!), (e) => e instanceof DomainError && e.code === "forbidden");
+  });
+
+  suite("many lapses make one notice per project per period (a few named, the count of all), event-driven responsibilities are not unscheduled, and a project told within the period waits", async ({ owner, project, projects, settings, coverage, setNow, make, agent }) => {
+    const ann = await agent([]);
+    const ids: string[] = [];
+    for (let i = 0; i < 25; i++) ids.push(await make({ title: `duty ${i}` }));
+    const driven = await make({ title: "event driven", everyMinutes: undefined, eventSources: ["alerts"], ownerId: ann.id });
+    const plain = await make({ title: "no schedule", everyMinutes: undefined, ownerId: ann.id });
+    const late = await make({ title: "late", everyMinutes: 30, ownerId: ann.id });
+    const other = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "Other" })).id;
+    await settings.set(owner, { commandId: cid("s"), enabled: true, afterMinutes: 60 });
+    setNow("2026-10-22T10:01:00.000Z");
+    await coverage.sweep(dispatcher);
+    setNow("2026-10-22T11:30:00.000Z");
+    const first = await coverage.sweep(dispatcher);
+    assert.equal(first.length, 1, "one notice for the project");
+    assert.equal(first[0]!.count, 26, "25 without a holder and the one without a schedule; the one checked every 30 minutes is not late enough yet");
+    assert.equal(first[0]!.items.length, 10, "a few named");
+    assert.ok(!first[0]!.covered.includes(driven), "an event-driven responsibility has no schedule to miss");
+    assert.ok(first[0]!.covered.includes(plain));
+    const rep = (await coverage.report(owner, project, { limit: 100 }))!;
+    assert.ok(!rep.items.some((g) => g.responsibilityId === driven));
+    await coverage.markTold(dispatcher, first[0]!);
+    // A lapse that grows past the period inside the project's own period waits; after it, it is told.
+    setNow("2026-10-22T12:00:00.000Z");
+    assert.deepEqual(await coverage.sweep(dispatcher), [], "the project was told 30 minutes ago");
+    setNow("2026-10-22T12:31:00.000Z");
+    const next = await coverage.sweep(dispatcher);
+    assert.deepEqual(next.map((x) => [x.projectId, x.count, x.covered]), [[project, 1, [late]]]);
+    void other; void ids;
+  });
+
+  suite("the work per tick is bounded: the sweep takes one slice and a kept cursor goes round; a report stops at its bound and says where, however many records there are", async ({ owner, project, storage, settings, make, sweepWith }) => {
+    for (let i = 0; i < 7; i++) await make({ title: `d${i}` });
     await settings.set(owner, { commandId: cid("s"), enabled: false });
-    assert.deepEqual(await coverage.lapsed(owner, project), [], "turned off again");
+    const sliced = sweepWith(3, 4);
+    const kept = async (): Promise<number> => (await storage.listAggregates("coverage-lapse", { limit: 100 })).length;
+    await sliced.sweep(dispatcher);
+    assert.equal(await kept(), 3, "one slice per tick");
+    await sliced.sweep(dispatcher);
+    assert.equal(await kept(), 6);
+    await sliced.sweep(dispatcher);
+    assert.equal(await kept(), 7, "the third tick reaches the end");
+    await sliced.sweep(dispatcher);
+    assert.equal(await kept(), 7, "and then it starts over");
+    // The report examines at most 4 records a call; the rest is asked for with next.
+    const seen: string[] = [];
+    let after: string | undefined;
+    let partials = 0;
+    for (let guard = 0; guard < 10; guard++) {
+      const page = (await sliced.report(owner, project, { limit: 100, ...(after === undefined ? {} : { afterId: after }) }))!;
+      seen.push(...page.items.map((g) => g.responsibilityId));
+      if (page.partial) partials++;
+      if (page.next === undefined) break;
+      after = page.next;
+    }
+    assert.equal(seen.length, 7);
+    assert.equal(new Set(seen).size, 7);
+    assert.ok(partials >= 1, "a call that stopped at its bound said so");
+  });
+
+  suite("a damaged setting is reported as damaged, not off", async ({ owner, project, storage, make, coverage }) => {
+    await make({ title: "x" });
+    assert.equal((await coverage.report(owner, project))!.alert.status, "off");
+    const rec = await storage.getAggregate({ kind: "coverage-settings", id: "main" });
+    assert.equal(rec, undefined);
+    const real = storage.getAggregate.bind(storage);
+    storage.getAggregate = async (ref: { kind: string; id: string }) => { const a = await real(ref); return ref.kind === "coverage-settings" ? { kind: ref.kind, id: ref.id, revision: 1, body: { enabled: "maybe" }, createdAt: T0, updatedAt: T0 } : a; };
+    try {
+      assert.equal((await coverage.report(owner, project))!.alert.status, "damaged");
+      await assert.rejects(coverage.sweep(dispatcher), (e) => e instanceof DomainError && e.code === "unavailable");
+    } finally { storage.getAggregate = real; }
   });
 
 }

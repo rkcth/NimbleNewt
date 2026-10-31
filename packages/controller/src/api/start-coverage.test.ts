@@ -87,6 +87,8 @@ test("a damaged coverage setting is an error on the setting, does not stop other
     let damaged = true;
     c.storage.getAggregate = async (ref) => { const a = await real(ref); return damaged && ref.kind === "coverage-settings" && a !== undefined ? { ...a, body: { enabled: "maybe" } } as never : a; };
     assert.equal((await call("coverage.settings.get", {})).error?.code, "unavailable");
+    const project = (await call("project.create", { name: "Ops" }, "p1")).result.id as string;
+    assert.equal((await call("responsibility.coverage", { projectId: project })).result.alert.status, "damaged", "a damaged setting is reported as damaged, not off");
     const ok = (await call("coverage.settings.set", { enabled: true, afterMinutes: 90 }, "s2"));
     assert.ok(ok.ok, JSON.stringify(ok));
     damaged = false;

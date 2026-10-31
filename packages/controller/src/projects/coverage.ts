@@ -5,16 +5,17 @@ import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import type { ControllerStorage, JsonObject } from "../storage/types.js";
-import { hidden, may, scanAll } from "./common.js";
+import { may } from "./common.js";
 import type { ResponsibilityBody } from "./responsibilities.js";
 
 const REF = { kind: "coverage-settings", id: "main" } as const;
 /** Bounds of the lapse period in minutes, and the period used when the alert is turned on without naming one (provisional: one day). */
 export const COVERAGE_PERIOD = { min: 1, max: 525_600, default: 1_440 } as const;
 const wholeMinutes = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= COVERAGE_PERIOD.min && v <= COVERAGE_PERIOD.max;
-/** Most lapsed responsibilities one project's sweep tells about per tick (bounded work); the rest are reached on the report, and when others are resolved. */
-const SWEEP_MAX = 500;
+/** The work bounds (card P04 review): the sweep looks at one slice of the installation's responsibilities per tick (a persisted cursor rotates through them, so no tick reads them all); a report looks at no more than this many records per call and says where it stopped. */
+export const COVERAGE_WORK = { slice: 200, reportExamine: 2_000, noticeItems: 10 } as const;
 const PAGE_MAX = 100;
+const DISPATCHER = "service:dispatcher";
 
 export interface CoverageSettingsBody {
   /** The alert for a lapse beyond the period. Off unless the owner turns it on. */
@@ -91,15 +92,40 @@ export interface CoverageGap {
   readonly projectId: string;
   readonly title: string;
   readonly reasons: readonly CoverageReason[];
-  /** The earliest time any of the reasons began to hold. */
+  /** The earliest time any of the reasons began to hold: the time the lapse was first seen (kept, so an unrelated edit does not move it), or the moment it is known to have begun. */
   readonly since: string;
   readonly lapsedMinutes: number;
-  /** The gap is longer than the alert period (false when no period applies, which is when the alert is off). */
+  /** The gap is longer than the alert period (false when no period applies, which is when the alert is off or damaged). */
   readonly beyondPeriod: boolean;
   readonly holder?: string;
   readonly lastCheckAt?: string;
 }
-export interface CoverageReport { readonly items: CoverageGap[]; readonly next?: string; readonly asOf: string; readonly alert: CoverageSettings }
+/** `status` says what the alert is: `damaged` is not `off` (a damaged setting is neither on nor off; mend it with coverage.settings.set). */
+export interface CoverageReport { readonly items: CoverageGap[]; readonly next?: string; /** True when the search stopped at its work bound before the end: ask again from `next`. */ readonly partial?: true; readonly asOf: string; readonly alert: CoverageSettings & { readonly status: "on" | "off" | "damaged" } }
+
+/** One notice for one project: up to a few responsibilities by name, and the count of all of them. */
+export interface CoverageNotice {
+  readonly alertId: string;
+  readonly projectId: string;
+  readonly count: number;
+  readonly items: readonly { readonly responsibilityId: string; readonly title: string; readonly reasons: readonly CoverageReason[]; readonly since: string; readonly lapsedMinutes: number }[];
+  /** Every responsibility the notice covers (bounded by the slice), marked as told once the notice is sent. */
+  readonly covered: readonly string[];
+}
+
+/** The kept record of a lapse (kind `coverage-lapse`, the responsibility's ID): when each reason was first seen. It is written when a lapse is first seen and emptied when the gap closes. */
+interface LapseBody { readonly projectId: string; readonly seen: Partial<Record<CoverageReason, string>>; /** When this episode was told to the owner. */ readonly toldAt?: string }
+const LAPSE = "coverage-lapse";
+const CURSOR = { kind: "coverage-cursor", id: "main" } as const;
+const PROJECT_TOLD = "coverage-project";
+const lapseBody = (b: unknown): LapseBody | undefined => {
+  if (b === null || typeof b !== "object" || Array.isArray(b)) return undefined;
+  const r = b as Record<string, unknown>;
+  if (typeof r["projectId"] !== "string" || r["seen"] === null || typeof r["seen"] !== "object" || Array.isArray(r["seen"])) return undefined;
+  const seen: Partial<Record<CoverageReason, string>> = {};
+  for (const [k, v] of Object.entries(r["seen"] as Record<string, unknown>)) if ((k === "no-holder" || k === "no-recent-check" || k === "unscheduled") && typeof v === "string" && Number.isFinite(Date.parse(v))) seen[k] = v;
+  return { projectId: r["projectId"], seen, ...(typeof r["toldAt"] === "string" ? { toldAt: r["toldAt"] } : {}) };
+};
 
 interface Reads {
   holderState(holder: string): Promise<{ active: boolean; since?: string }>;
@@ -107,17 +133,18 @@ interface Reads {
 
 /**
  * Coverage of ongoing responsibilities (card P04): which active responsibilities have no active holder, no recent check (none yet, or the last one older than twice the period: the same rule as `observed`, so
- * "no recent observation" is never counted as covered) or no check schedule at all. A pure read, plus a sweep that finds the gaps longer than the owner's alert period. A paused or retired responsibility is not
- * expected to be covered and is not listed.
+ * "no recent observation" is never counted as covered) or no check schedule at all (a responsibility driven by event sources is not "unscheduled"). A paused or retired responsibility is not expected to be covered and
+ * is not listed. The report is a read; the sweep (dispatcher only) keeps the time each lapse was first seen and tells the owner, one notice per project per period.
  */
 export class CoverageService {
   readonly #runner: CommandRunner;
   readonly #settings: Pick<CoverageSettingsService, "effective">;
   readonly #reads: Reads;
-  readonly #scanLimit: number;
+  readonly #slice: number;
+  readonly #examine: number;
 
-  private constructor(runner: CommandRunner, settings: Pick<CoverageSettingsService, "effective">, scanLimit: number) {
-    this.#runner = runner; this.#settings = settings; this.#scanLimit = scanLimit;
+  private constructor(runner: CommandRunner, settings: Pick<CoverageSettingsService, "effective">, slice: number, examine: number) {
+    this.#runner = runner; this.#settings = settings; this.#slice = slice; this.#examine = examine;
     this.#reads = {
       holderState: async (holder) => {
         const p = await runner.get("principal", holder);
@@ -132,59 +159,144 @@ export class CoverageService {
     };
   }
 
-  static withEpoch(storage: ControllerStorage, epoch: number, settings: Pick<CoverageSettingsService, "effective">, options: RunnerOptions & { scanLimit?: number } = {}): CoverageService {
-    return new CoverageService(new CommandRunner(storage, epoch, options), settings, options.scanLimit ?? 50_000);
+  static withEpoch(storage: ControllerStorage, epoch: number, settings: Pick<CoverageSettingsService, "effective">, options: RunnerOptions & { slice?: number; reportExamine?: number } = {}): CoverageService {
+    return new CoverageService(new CommandRunner(storage, epoch, options), settings, options.slice ?? COVERAGE_WORK.slice, options.reportExamine ?? COVERAGE_WORK.reportExamine);
   }
 
-  async #gaps(projectId: string, alertMinutes: number | undefined): Promise<{ gaps: CoverageGap[]; asOf: string } | undefined> {
-    if ((await this.#runner.get("project", projectId)) === undefined) return undefined;
-    const asOf = this.#runner.now();
-    const now = Date.parse(asOf);
-    const gaps: CoverageGap[] = [];
-    for (const a of (await scanAll(this.#runner, "responsibility", this.#scanLimit, (x) => { const b = x.body as unknown as ResponsibilityBody; return b.projectId === projectId && b.state === "active"; })).sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0))) {
-      const r = view<ResponsibilityBody>(a);
-      const reasons: CoverageReason[] = [];
-      const starts: number[] = [];
-      if (r.ownerId === undefined) { reasons.push("no-holder"); starts.push(Date.parse(r.updatedAt)); }
-      else { const h = await this.#reads.holderState(r.ownerId); if (!h.active) { reasons.push("no-holder"); starts.push(Date.parse(h.since ?? r.updatedAt)); } }
-      let lastCheckAt: string | undefined;
-      if (r.everyMinutes === undefined) { reasons.push("unscheduled"); starts.push(Date.parse(r.updatedAt)); }
-      else {
-        lastCheckAt = ((await this.#runner.get("responsibility-log", r.id))?.body as unknown as { lastCheckAt?: string } | undefined)?.lastCheckAt;
-        const stale = Date.parse(lastCheckAt ?? r.createdAt) + 2 * r.everyMinutes * 60_000;
-        if (stale < now) { reasons.push("no-recent-check"); starts.push(stale); }
-      }
-      if (reasons.length === 0) continue;
-      const since = Math.min(...starts);
-      const lapsedMinutes = Math.max(0, Math.floor((now - since) / 60_000));
-      gaps.push({ responsibilityId: r.id, projectId, title: r.title, reasons, since: new Date(since).toISOString(), lapsedMinutes, beyondPeriod: alertMinutes !== undefined && lapsedMinutes >= alertMinutes, ...(r.ownerId === undefined ? {} : { holder: r.ownerId }), ...(lastCheckAt === undefined ? {} : { lastCheckAt }) });
+  /** The reasons a responsibility is not covered and when each is known to have begun (before any kept first-seen time is applied). */
+  async #assess(r: ResponsibilityBody & { id: string; createdAt: string; updatedAt: string }, now: number): Promise<{ reasons: CoverageReason[]; natural: Partial<Record<CoverageReason, number>>; lastCheckAt?: string }> {
+    const reasons: CoverageReason[] = [];
+    const natural: Partial<Record<CoverageReason, number>> = {};
+    if (r.ownerId === undefined) { reasons.push("no-holder"); natural["no-holder"] = Date.parse(r.updatedAt); }
+    else { const h = await this.#reads.holderState(r.ownerId); if (!h.active) { reasons.push("no-holder"); natural["no-holder"] = Date.parse(h.since ?? r.updatedAt); } }
+    let lastCheckAt: string | undefined;
+    if (r.everyMinutes === undefined) {
+      // Driven by events, not by a clock: it has no schedule to miss, so it is not "unscheduled".
+      if ((r.eventSources ?? []).length === 0) { reasons.push("unscheduled"); natural["unscheduled"] = Date.parse(r.updatedAt); }
+    } else {
+      lastCheckAt = ((await this.#runner.get("responsibility-log", r.id))?.body as unknown as { lastCheckAt?: string } | undefined)?.lastCheckAt;
+      const stale = Date.parse(lastCheckAt ?? r.createdAt) + 2 * r.everyMinutes * 60_000;
+      if (stale < now) { reasons.push("no-recent-check"); natural["no-recent-check"] = stale; }
     }
-    return { gaps, asOf };
+    return { reasons, natural, ...(lastCheckAt === undefined ? {} : { lastCheckAt }) };
   }
 
-  /** The responsibilities of a project with a coverage gap, by ID, `limit` (1 to 100, default 50) after `afterId`. Needs `responsibility.read` in the project. `undefined`: no such project, or not readable (told apart from nothing). */
+  #gap(r: ResponsibilityBody & { id: string }, a: { reasons: CoverageReason[]; natural: Partial<Record<CoverageReason, number>>; lastCheckAt?: string }, kept: LapseBody | undefined, now: number, alertMinutes: number | undefined): CoverageGap {
+    // The kept time wins over the derived one: editing the responsibility must not move the start of a lapse that was already seen.
+    const since = Math.min(...a.reasons.map((x) => (kept?.seen[x] === undefined ? a.natural[x]! : Date.parse(kept.seen[x]!))));
+    const lapsedMinutes = Math.max(0, Math.floor((now - since) / 60_000));
+    return { responsibilityId: r.id, projectId: r.projectId, title: r.title, reasons: a.reasons, since: new Date(since).toISOString(), lapsedMinutes, beyondPeriod: alertMinutes !== undefined && lapsedMinutes >= alertMinutes, ...(r.ownerId === undefined ? {} : { holder: r.ownerId }), ...(a.lastCheckAt === undefined ? {} : { lastCheckAt: a.lastCheckAt }) };
+  }
+
+  /** The responsibilities of a project with a coverage gap, by ID, `limit` (1 to 100, default 50) after `afterId`; looks at no more than a bounded number of records per call (`partial` and `next` say where it stopped). Needs `responsibility.read` in the project. `undefined`: no such project, or not readable. */
   async report(by: Principal, projectIdValue: string, page: { afterId?: string; limit?: number } = {}): Promise<CoverageReport | undefined> {
     const projectId = coverageProjectId(projectIdValue);
     if (!(by.kind === "owner" || may(by, "responsibility.read", projectId))) return undefined;
     const limit = page.limit ?? 50;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > PAGE_MAX) throw new DomainError("invalid_command", `limit: must be a whole number from 1 to ${PAGE_MAX}`, { field: "limit" });
     if (page.afterId !== undefined && (typeof page.afterId !== "string" || page.afterId.length > 120)) throw new DomainError("invalid_command", "afterId: must be an ID", { field: "afterId" });
-    const alert = await this.#settings.effective().catch((): CoverageSettings => ({ enabled: false, afterMinutes: COVERAGE_PERIOD.default }));
-    const found = await this.#gaps(projectId, alert.enabled ? alert.afterMinutes : undefined);
-    if (found === undefined) return undefined;
-    const rest = page.afterId === undefined ? found.gaps : found.gaps.filter((g) => g.responsibilityId > page.afterId!);
-    const items = rest.slice(0, limit);
-    return { items, ...(rest.length > limit ? { next: items[items.length - 1]!.responsibilityId } : {}), asOf: found.asOf, alert };
+    let alert: CoverageReport["alert"];
+    try { const e = await this.#settings.effective(); alert = { ...e, status: e.enabled ? "on" : "off" }; } catch { alert = { enabled: false, afterMinutes: COVERAGE_PERIOD.default, status: "damaged" }; }
+    if ((await this.#runner.get("project", projectId)) === undefined) return undefined;
+    const asOf = this.#runner.now();
+    const now = Date.parse(asOf);
+    const gaps: CoverageGap[] = [];
+    let after = page.afterId;
+    let examined = 0;
+    let last: string | undefined;
+    let partial = false;
+    scan: for (;;) {
+      const want = Math.min(500, this.#examine - examined);
+      const rows = await this.#runner.list("responsibility", { ...(after === undefined ? {} : { afterId: after }), limit: want });
+      for (const row of rows) {
+        after = row.id; last = row.id; examined++;
+        const b = row.body as unknown as ResponsibilityBody;
+        if (b.projectId !== projectId || b.state !== "active") continue;
+        const r = view<ResponsibilityBody>(row);
+        const a = await this.#assess(r, now);
+        if (a.reasons.length === 0) continue;
+        gaps.push(this.#gap(r, a, lapseBody((await this.#runner.get(LAPSE, r.id))?.body), now, alert.enabled ? alert.afterMinutes : undefined));
+        if (gaps.length > limit) break scan;
+      }
+      if (rows.length < want) break;
+      if (examined >= this.#examine) { partial = true; break; }
+    }
+    if (gaps.length > limit) { const items = gaps.slice(0, limit); return { items, next: items[items.length - 1]!.responsibilityId, asOf, alert }; }
+    return { items: gaps, ...(partial && last !== undefined ? { next: last, partial: true as const } : {}), asOf, alert };
   }
 
-  /** The gaps longer than the alert period, oldest first, at most 500; nothing when the alert is off. Owner, service, or `responsibility.write` in the project. */
-  async lapsed(by: Principal, projectIdValue: string): Promise<(CoverageGap & { alertId: string })[]> {
-    const projectId = coverageProjectId(projectIdValue);
-    if (!(by.kind === "owner" || by.kind === "service" || may(by, "responsibility.write", projectId))) throw hidden(by, "check coverage in that project");
-    const alert = await this.#settings.effective();
-    if (!alert.enabled) return [];
-    const found = await this.#gaps(projectId, alert.afterMinutes);
-    return (found?.gaps ?? []).filter((g) => g.beyondPeriod).sort((a, b) => (a.since < b.since ? -1 : a.since > b.since ? 1 : a.responsibilityId < b.responsibilityId ? -1 : 1)).slice(0, SWEEP_MAX)
-      .map((g) => ({ ...g, alertId: `cov-lapse-${createHash("sha256").update(`${g.responsibilityId}\0${g.since}`).digest("hex").slice(0, 24)}` }));
+  /**
+   * One tick of the coverage sweep (dispatcher only): looks at the next slice of the installation's responsibilities (a kept cursor rotates through them, so the work per tick is bounded however many there are), keeps the time each
+   * lapse was first seen (and empties it when the gap closes), and, when the alert is on, returns one notice for each project that has lapses beyond the period not yet told, unless that project was told within the period. The
+   * notice is final only when `markTold` follows. A damaged setting keeps the bookkeeping going and then raises its error.
+   */
+  async sweep(by: Principal): Promise<CoverageNotice[]> {
+    if (by.id !== DISPATCHER) throw new DomainError("forbidden", `${by.id} may not run the coverage sweep`);
+    let alert: CoverageSettings | undefined;
+    let damaged: unknown;
+    try { alert = await this.#settings.effective(); } catch (error) { damaged = error; }
+    const cursor = await this.#runner.get(CURSOR.kind, CURSOR.id);
+    const after = (cursor?.body as { after?: unknown } | undefined)?.after;
+    const rows = await this.#runner.list("responsibility", { ...(typeof after === "string" ? { afterId: after } : {}), limit: this.#slice });
+    const at = this.#runner.now();
+    const now = Date.parse(at);
+    const pending = new Map<string, { gap: CoverageGap; seen: LapseBody }>();
+    for (const row of rows) {
+      const r = view<ResponsibilityBody>(row);
+      const rec = await this.#runner.get(LAPSE, r.id);
+      const kept = lapseBody(rec?.body);
+      const a: { reasons: CoverageReason[]; natural: Partial<Record<CoverageReason, number>>; lastCheckAt?: string } = r.state === "active" ? await this.#assess(r, now) : { reasons: [], natural: {} };
+      const seen: Partial<Record<CoverageReason, string>> = {};
+      for (const x of a.reasons) seen[x] = kept?.seen[x] ?? new Date(Math.min(a.natural[x]!, now)).toISOString();
+      const same = kept !== undefined && Object.keys(seen).length === Object.keys(kept.seen).length && (Object.keys(seen) as CoverageReason[]).every((k) => kept.seen[k] === seen[k]);
+      // A new episode (the gap had closed) is not "told" yet.
+      const toldAt = Object.keys(kept?.seen ?? {}).length === 0 || Object.keys(seen).length === 0 ? undefined : kept?.toldAt;
+      const next: LapseBody = { projectId: r.projectId, seen, ...(toldAt === undefined ? {} : { toldAt }) };
+      if (!same && !(kept === undefined && Object.keys(seen).length === 0)) await this.#put(by, LAPSE, r.id, rec, next);
+      if (a.reasons.length > 0 && toldAt === undefined && alert?.enabled === true) {
+        const g = this.#gap(r, a, next, now, alert.afterMinutes);
+        if (g.beyondPeriod) pending.set(r.id, { gap: g, seen: next });
+      }
+    }
+    const nextAfter = rows.length === this.#slice ? rows[rows.length - 1]!.id : undefined;
+    if (nextAfter !== (typeof after === "string" ? after : undefined)) await this.#put(by, CURSOR.kind, CURSOR.id, cursor, nextAfter === undefined ? {} : { after: nextAfter });
+    if (damaged !== undefined) throw damaged;
+    const byProject = new Map<string, CoverageGap[]>();
+    for (const { gap } of pending.values()) byProject.set(gap.projectId, [...(byProject.get(gap.projectId) ?? []), gap]);
+    const notices: CoverageNotice[] = [];
+    for (const [projectId, gaps] of [...byProject].sort(([x], [y]) => (x < y ? -1 : 1))) {
+      const told = ((await this.#runner.get(PROJECT_TOLD, projectId))?.body as { toldAt?: unknown } | undefined)?.toldAt;
+      if (typeof told === "string" && now - Date.parse(told) < alert!.afterMinutes * 60_000) continue; // one notice a project each period; these wait
+      gaps.sort((x, y) => (x.since < y.since ? -1 : x.since > y.since ? 1 : x.responsibilityId < y.responsibilityId ? -1 : 1));
+      const covered = gaps.map((g) => g.responsibilityId).sort();
+      const digest = createHash("sha256").update(`${projectId}\0${gaps.map((g) => `${g.responsibilityId}@${g.since}`).sort().join("\0")}`).digest("hex").slice(0, 24);
+      notices.push({ alertId: `cov-lapse-${digest}`, projectId, count: gaps.length, items: gaps.slice(0, COVERAGE_WORK.noticeItems).map((g) => ({ responsibilityId: g.responsibilityId, title: g.title, reasons: g.reasons, since: g.since, lapsedMinutes: g.lapsedMinutes })), covered });
+    }
+    return notices;
+  }
+
+  /** The notice reached the owner: its responsibilities are not told again for this lapse, and the project is not told again within the period. */
+  async markTold(by: Principal, notice: CoverageNotice): Promise<void> {
+    if (by.id !== DISPATCHER) throw new DomainError("forbidden", `${by.id} may not run the coverage sweep`);
+    const at = this.#runner.now();
+    for (const id of notice.covered) {
+      const rec = await this.#runner.get(LAPSE, id);
+      const kept = lapseBody(rec?.body);
+      if (rec === undefined || kept === undefined || kept.toldAt !== undefined) continue;
+      await this.#put(by, LAPSE, id, rec, { ...kept, toldAt: at });
+    }
+    await this.#put(by, PROJECT_TOLD, notice.projectId, await this.#runner.get(PROJECT_TOLD, notice.projectId), { toldAt: at });
+  }
+
+  /** Writes a small bookkeeping record under a command keyed by the record and its revision; a concurrent writer that got there first is accepted (the next tick looks again). */
+  async #put(by: Principal, kind: string, id: string, current: { revision: number } | undefined, body: object): Promise<void> {
+    const ref = { kind, id };
+    const commandId = `cov-${createHash("sha256").update(`${kind}\0${id}\0${current?.revision ?? 0}`).digest("hex").slice(0, 40)}`;
+    try {
+      await this.#runner.command("coverage.keep", { commandId, actor: by.id }, async () => ({
+        payload: { kind, id, revision: current?.revision ?? 0, body } as unknown as JsonObject,
+        build: async () => ({ ref, creates: current === undefined, changes: [current === undefined ? { type: "create" as const, ref, body: body as JsonObject } : { type: "update" as const, ref, expectedRevision: current.revision, body: body as JsonObject }], detail: { kind } }),
+      }));
+    } catch (error) { if (!(error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict"))) throw error; }
   }
 }

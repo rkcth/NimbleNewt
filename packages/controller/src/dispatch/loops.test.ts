@@ -261,11 +261,13 @@ test("archive loop: one project's failure does not skip the others and is raised
   assert.deepEqual(seen, ["proj-a", "proj-b"]);
 });
 
-test("the coverage loop tells every lapse of every project, a failing project does not skip the others, and an already-told id is not a failure (card P04)", async () => {
+test("the coverage loop tells each project\'s notice once, marks it told only after it was sent, counts an already-sent id as sent, and a failing notice does not skip the others (card P04)", async () => {
   const told: string[] = [];
-  const lapse = (id: string, p: string) => ({ alertId: id, responsibilityId: `r-${id}`, projectId: p, title: "t", reasons: ["no-holder"] });
-  const [loop] = coverageLoops({ lapsed: async (_by, p) => { if (p === "proj-a") throw new Error("boom"); return p === "proj-b" ? [lapse("x", p), lapse("y", p)] : [lapse("z", p)]; } }, async () => ["proj-a", "proj-b", "proj-c"], async (g) => { told.push(g.alertId); if (g.alertId === "x") throw Object.assign(new DomainError("command_conflict", "already"), {}); });
+  const marked: string[] = [];
+  const notice = (id: string, p: string) => ({ alertId: id, projectId: p, count: 1, items: [{ responsibilityId: `r-${id}`, title: "t", reasons: ["no-holder"], since: "2026-10-22T10:00:00.000Z", lapsedMinutes: 90 }], covered: [`r-${id}`] });
+  const [loop] = coverageLoops({ sweep: async () => [notice("x", "proj-a"), notice("y", "proj-b"), notice("z", "proj-c")], markTold: async (_by, n) => { marked.push(n.alertId); } }, async (g) => { told.push(g.alertId); if (g.alertId === "x") throw new DomainError("command_conflict", "already"); if (g.alertId === "y") throw new Error("boom"); });
   assert.equal(loop!.name, "responsibilities.coverage");
   await assert.rejects(loop!.run({ id: "service:dispatcher", kind: "service" } as never), /boom/);
   assert.deepEqual(told, ["x", "y", "z"]);
+  assert.deepEqual(marked, ["x", "z"], "a notice that failed is not marked told, so it comes again");
 });
