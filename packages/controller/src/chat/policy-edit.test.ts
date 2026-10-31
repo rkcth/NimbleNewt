@@ -987,3 +987,31 @@ for (const backend of backends) {
     assert.deepEqual(await c.grants.held(ann, NOW), [], "no permanent grant came out of a missing end");
   });
 }
+
+test("saysWords: curly quotes negate, a negation must govern the words, and 'never expires' is a no-end word", () => {
+  const permanent = /\bpermanent(ly)?\b|\bno\s+end\b|\bnever\s+expires?\b|\bdoesn'?t\s+expire\b/i;
+  assert.equal(saysWords(permanent, "Don’t make it permanent."), false, "curly apostrophe");
+  assert.equal(saysWords(permanent, "Don't make it permanent."), false);
+  assert.equal(saysWords(permanent, "Not permanent."), false);
+  assert.equal(saysWords(permanent, "Never permanent, please."), false);
+  assert.equal(saysWords(permanent, "Make it permanent instead of a week."), true, "the negation is after the word");
+  assert.equal(saysWords(permanent, "Permanent, I don't want to keep approving this."), true, "another clause");
+  assert.equal(saysWords(permanent, "No end, and stop asking me."), true);
+  assert.equal(saysWords(permanent, "It never expires."), true);
+  assert.equal(saysWords(permanent, "It doesn’t expire."), true);
+  assert.equal(saysWords(permanent, "Please do not make this grant permanent."), false);
+});
+
+test("lengthInWords: number words, fortnight, and months and years within calendar tolerance", () => {
+  assert.equal(lengthInWords(14, "for two weeks"), true);
+  assert.equal(lengthInWords(14, "a fortnight"), true);
+  assert.equal(lengthInWords(30, "for a month"), true);
+  assert.equal(lengthInWords(31, "for a month"), true);
+  assert.equal(lengthInWords(27, "for a month"), false);
+  assert.equal(lengthInWords(365, "for a year"), true);
+  assert.equal(lengthInWords(366, "for a year"), true);
+  assert.equal(lengthInWords(90, "three months"), true);
+  assert.equal(lengthInWords(180, "6 months"), true);
+  assert.equal(lengthInWords(20, "twenty days"), true);
+  assert.equal(lengthInWords(21, "twenty days"), false);
+});

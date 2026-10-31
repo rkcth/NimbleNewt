@@ -3558,3 +3558,9 @@ Owner rule: limits are optional and every setting can be changed and switched of
 - `grants.maxDays` scope: it binds chat policy edits (the owner's setting is read on prepare and again on apply) and now the standing-rule proposal path too: `ApprovalLoadService.accept` takes an optional `maxDays` reader; a length the owner picked or stated beyond it is refused, the usual default is cut to it and says so. Provisional: the reader is an option only; no production code constructs `ApprovalLoadService` yet, so wire it to `configuration.effective` when it is composed.
 - `describe("grant.create", ...)` now puts the end ("ends ..." or "permanent: no end time") before the long basis and terms, so line truncation cannot drop it.
 - Merge note: rebased onto main; both sides of the notes conflict kept.
+
+### Optional grant length, second review round (provisional choices)
+
+- Owner wording is normalized (curly quotes become straight) before the negation, no-end and no-limit checks. A negation now refuses only when it directly governs the matched words: up to six words before them in the same clause (clauses end at a comma, "but" or "and"). "Not permanent", "don't make it permanent" and "never permanent" are still refused; "permanent instead of a week" and "permanent, I don't want to keep approving this" are accepted. Doubt still fails closed (no end is never assumed). "never expires" and "doesn't expire" count as no-end words.
+- `lengthInWords` accepts digits and number words (one to twelve, twenty, thirty) for days, weeks, fortnights, months and years; a month is 28 to 31 days and a year 365 or 366 (tolerance, not equality).
+- The `grants.maxDays` reader for `ApprovalLoadService` stays unwired: nothing constructs `ApprovalLoadService` yet. Wire it when that service is constructed.

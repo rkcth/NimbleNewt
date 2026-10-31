@@ -188,13 +188,24 @@ const NO_END_WORDS = /\b(permanent(ly)?|no\s+(end|expir\w*|time\s+limit)|never\s
 /** The words of a sentence that say what the owner means, with a negation in the rest of the sentence ("don't make it permanent", "not unlimited"), a question or a musing ruled out; "taking forever" is a complaint, not an order. */
 const WORD_NEGATION = /\b(don'?t|do\s+not|doesn'?t|does\s+not|didn'?t|never|not|isn'?t|aren'?t|won'?t|can'?t|cannot|no\s+longer|stop|avoid|rather\s+than|instead\s+of)\b/i;
 const FOREVER_COMPLAINT = /\b(tak(es?|ing)|took|wait(ed|ing|s)?|seems?|feels?|felt)\b[^.!?;]*\bforever\b/i;
+const CURLY = /[\u2018\u2019\u02bc\u201b]/g;
+/** How many words before a matched word can govern it ("I don't think it should be permanent" reaches five). */
+const NEGATION_WINDOW = 6;
 export function saysWords(words: RegExp, wording: string): boolean {
-  const sentences = (wording.match(/[^.!?;\n]+[.!?;]*/g) ?? []).filter((x) => !x.trimEnd().endsWith("?"));
+  const normal = wording.replace(CURLY, "'");
+  const sentences = (normal.match(/[^.!?;\n]+[.!?;]*/g) ?? []).filter((x) => !x.trimEnd().endsWith("?"));
   const global = new RegExp(words.source, "gi");
   return sentences.some((x) => {
     const s = FOREVER_COMPLAINT.test(x) ? x.replace(/\bforever\b/gi, " ") : x;
-    if (!words.test(s)) return false;
-    return !WORD_NEGATION.test(s.replace(global, " ")) && !MUSING.test(s);
+    if (!words.test(s) || MUSING.test(s)) return false;
+    // A negation counts only when it directly governs the matched words: a few words before them in the same clause (clauses end at a comma, "but" or "and").
+    return s.split(/,|\bbut\b|\band\b/i).some((clause) => {
+      for (const m of clause.matchAll(global)) {
+        const before = clause.slice(0, m.index).replace(global, " ").trim().split(/\s+/).filter((w) => w.length > 0).slice(-NEGATION_WINDOW).join(" ");
+        if (!WORD_NEGATION.test(before)) return true;
+      }
+      return false;
+    });
   });
 }
 const freedom = (profile: string): number => (profile === "strict" ? 0 : profile === "derived" ? 1 : 2);
@@ -247,14 +258,18 @@ export function ownerOrders(evidence: string, wording: string, move: string, tar
   return sentences.some((x) => norm(x).includes(wanted) && verb.test(x) && targets.every((t) => t.test(x)) && !NEGATION.test(x) && !MUSING.test(x));
 }
 
-/** Whether the owner's own words state this number of days ("90", "a week", "a month"). */
+const NUMBER_WORDS: Readonly<Record<string, number>> = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, twenty: 20, thirty: 30 };
+/** Whether the owner's own words state this number of days ("90", "a week", "two weeks", "a fortnight", "a month" as 28 to 31 days, "a year" as 365 or 366, "3 months" as 84 to 93). */
 export function lengthInWords(days: number, text: string): boolean {
   // Record IDs and anything shaped like one are not the owner's numbers.
-  const t = text.toLowerCase().replace(/\b[a-z]+-[a-z0-9-]*\d[a-z0-9-]*/g, " ").replace(/\b(pedit|prop|turn|thr|agt|proj|task|grt)-\S+/g, " ");
-  if (new RegExp(`(^|[^0-9])${days}[ -]?days?\\b`).test(t)) return true;
-  if (days % 7 === 0 && new RegExp(`(^|[^0-9])${days / 7}[ -]?weeks?\\b`).test(t)) return true;
-  if (days % 30 === 0 && new RegExp(`(^|[^0-9])${days / 30}[ -]?months?\\b`).test(t)) return true;
-  return (days === 1 && /\b(a|one) day\b|\btomorrow\b/.test(t)) || (days === 7 && /\b(a|one) week\b/.test(t)) || (days === 30 && /\b(a|one) month\b/.test(t)) || (days === 90 && /\b(three months|quarter)\b/.test(t)) || (days === 365 && /\b(a|one) year\b|\b1 ?y(ea)?r\b/.test(t));
+  const t = text.replace(CURLY, "'").toLowerCase().replace(/\b[a-z]+-[a-z0-9-]*\d[a-z0-9-]*/g, " ").replace(/\b(pedit|prop|turn|thr|agt|proj|task|grt)-\S+/g, " ");
+  const re = new RegExp(`(?:^|[^0-9a-z])(\\d+|${Object.keys(NUMBER_WORDS).join("|")})[ -]?(day|week|fortnight|month|year)s?\\b`, "g");
+  for (const m of t.matchAll(re)) {
+    const n = /^\d+$/.test(m[1]!) ? Number(m[1]) : NUMBER_WORDS[m[1]!]!;
+    const [lo, hi] = m[2] === "day" ? [n, n] : m[2] === "week" ? [7 * n, 7 * n] : m[2] === "fortnight" ? [14 * n, 14 * n] : m[2] === "month" ? [28 * n, 31 * n] : [365 * n, 366 * n];
+    if (days >= lo && days <= hi) return true;
+  }
+  return (days === 1 && /\btomorrow\b/.test(t)) || (days >= 89 && days <= 92 && /\bquarter\b/.test(t)) || (days >= 365 && days <= 366 && /\b1 ?y(ea)?r\b/.test(t));
 }
 
 export class PolicyEditService {
