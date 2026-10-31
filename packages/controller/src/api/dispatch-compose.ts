@@ -563,7 +563,7 @@ async function stoppedAncestor(storage: ControllerStorage, stops: Pick<StopServi
     const parent = ((await storage.getAggregate({ kind: "swarm-link", id: at }))?.body as unknown as { parentTaskId?: string } | undefined)?.parentTaskId;
     if (typeof parent !== "string" || seen.has(parent)) return undefined;
     seen.add(parent);
-    const held = await stops.holding(parent);
+    const held = await stops.holding(parent, taskId);
     if (held !== undefined) return { taskId: parent, ...held };
     at = parent;
   }

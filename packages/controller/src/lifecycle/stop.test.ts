@@ -18,6 +18,8 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>): Prom
   await assert.rejects(run, (error: unknown) => { assert.ok(error instanceof DomainError, String(error)); assert.equal(error.code, code, error.message); return true; });
 };
 
+let mayHoldHook: (requestedBy: string, taskId: string) => Promise<boolean> = async () => true;
+
 /** A runtime whose behaviour each test scripts; every call is recorded. */
 class Runtime implements StopPorts {
   calls: string[] = [];
@@ -89,7 +91,8 @@ for (const backend of backends) {
         const ann = await plain("ann", [{ action: "attempt.work", project }]);
         const pauses = PauseService.withEpoch(world.storage, epoch, {}, options);
         const rt = new Runtime();
-        const make = (): StopService => StopService.withEpoch(world.storage, epoch, PauseService.withEpoch(world.storage, epoch, {}, options), rt, options);
+        mayHoldHook = async () => true;
+        const make = (): StopService => StopService.withEpoch(world.storage, epoch, PauseService.withEpoch(world.storage, epoch, {}, options), rt, { ...options, mayHold: (by, t) => mayHoldHook(by, t) });
         await body({ owner, mgr, ann, task, agentA, rt, stops: make(), pauses, reopen: make, assignments, projects });
       } finally { await world.close(); }
     });
@@ -520,6 +523,50 @@ for (const backend of backends) {
     const blocked = await c.stops.advance(c.owner, { intentId: up.intentId });
     assert.equal(blocked.phase, "blocked");
     assert.ok(blocked.blocked?.choices.includes("force-stop"));
+  });
+
+  suite("a Suspend is not held by a placeholder (a remote placement, an attempt a restarted worker forgot) once the attempt is quiesced, and records it as unverified; a real unknown process still holds it (card L02d review)", async (c) => {
+    const placeholder: InventoryItem = { kind: "process", ref: "remote:att-a", state: "unknown" };
+    c.rt.items = [placeholder];
+    c.rt.cleanups = [{ remaining: [placeholder, { kind: "process", ref: "attempt:att-b", state: "unknown" }] }];
+    const sus = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "suspend", reason: "x" });
+    const done = await c.stops.advance(c.owner, { intentId: sus.intentId });
+    assert.equal(done.outcome?.state, "suspended");
+    assert.ok(done.history.some((h) => h.note.includes("unverified") && h.note.includes("remote:att-a")), "the unverified items are recorded");
+  });
+
+  suite("a Suspend still waits for an unknown process that is not a placeholder", async (c) => {
+    const unknown: InventoryItem = { kind: "process", ref: "node", state: "unknown" };
+    c.rt.items = [unknown];
+    c.rt.cleanups = [{ remaining: [unknown] }];
+    const sus = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "suspend", reason: "x" });
+    assert.equal((await c.stops.advance(c.owner, { intentId: sus.intentId })).phase, "preparing");
+  });
+
+  suite("a finished Stop does not keep holding after a resume: a later plain Pause of the parent holds nothing (card L02d review)", async (c) => {
+    const stop = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "x" });
+    await c.stops.advance(c.owner, { intentId: stop.intentId });
+    assert.equal((await c.stops.holding(c.task))?.intentId, stop.intentId, "held while the stop's own pause stands");
+    await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "again" });
+    await c.pauses.pause(c.owner, { commandId: cid("pz"), scope: scopeOf(c.task), reason: "just a pause" });
+    assert.equal(await c.stops.holding(c.task), undefined, "the finished stop is not the cause of this pause");
+  });
+
+  suite("a stop does not hold a child its requester may not control (card L02d review)", async (c) => {
+    const stop = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "x" });
+    await c.stops.advance(c.owner, { intentId: stop.intentId });
+    mayHoldHook = async (_by, child) => child !== "child-x";
+    assert.ok(await c.stops.holding(c.task, "child-y"));
+    assert.equal(await c.stops.holding(c.task, "child-x"), undefined);
+  });
+
+  suite("two stops of the same attempt at once: neither loses the race into a permanent unpaid mark, and the cost is charged once (card L02d review)", async (c) => {
+    c.rt.terminateCosts = [{ attemptId: "att-a", costMicros: 700, computeMs: 5 }];
+    const a = await c.stops.request(c.owner, { commandId: cid("s1"), scope: scopeOf(c.task), mode: "stop", reason: "x" });
+    const b = await c.stops.request(c.owner, { commandId: cid("s2"), scope: { kind: "agent", id: c.agentA }, mode: "stop", reason: "x" });
+    const [ra, rb] = await Promise.all([c.stops.advance(c.owner, { intentId: a.intentId }), c.stops.advance(c.owner, { intentId: b.intentId })]);
+    for (const r of [ra, rb]) assert.ok(!(r.outcome?.unresolved ?? []).includes("cleanup spend not charged"), "a lost race is not a failure");
+    assert.deepEqual(c.rt.charges.map((x) => x.costMicros), [700], "charged once");
   });
 
   suite("a scope that cannot be stopped yet is refused before anything is paused or recorded", async (c) => {

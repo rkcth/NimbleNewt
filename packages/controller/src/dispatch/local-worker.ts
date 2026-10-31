@@ -136,12 +136,20 @@ export class LocalWorker implements WorkerHost {
    * of one attempt are kept (the oldest idle ones go first).
    */
   readonly #sessions = new Map<string, { sessions: SandboxSession[]; base: { costMicros: number; computeMs: number } }>();
+  /** Sessions the last look found holding nothing: the only ones the cap on remembered sessions may drop. */
+  readonly #emptied = new WeakSet<SandboxSession>();
   #remember(attemptId: string, session: SandboxSession): void {
     const had = this.#sessions.get(attemptId);
     this.#sessions.delete(attemptId);
     const entry = had ?? { sessions: [], base: { costMicros: 0, computeMs: 0 } };
     entry.sessions.push(session);
-    while (entry.sessions.length > 8) entry.sessions.shift();
+    // Past 8 sessions, the oldest one that is known to hold nothing (or cannot say) goes; one that still holds processes stays, so Stop still reports them. A hard bound of 64 keeps memory bounded whatever happens.
+    while (entry.sessions.length > 8) {
+      const at = entry.sessions.findIndex((x, i) => i < entry.sessions.length - 1 && (x.work === undefined || this.#emptied.has(x)));
+      if (at >= 0) entry.sessions.splice(at, 1);
+      else if (entry.sessions.length > 64) entry.sessions.shift();
+      else break;
+    }
     this.#sessions.set(attemptId, entry);
     while (this.#sessions.size > 500) this.#sessions.delete(this.#sessions.keys().next().value!);
   }
@@ -176,6 +184,7 @@ export class LocalWorker implements WorkerHost {
       for (const [i, session] of entry.sessions.entries()) {
         if (session.work === undefined) { keep.push(session); continue; }
         const w = await session.work();
+        if (w.processes.length === 0) this.#emptied.add(session); else this.#emptied.delete(session);
         for (const p of w.processes.slice(0, 200)) processes.push({ attemptId, ref: p.ref, kind: p.kind, state: p.state });
         if (w.costMicros !== undefined) { cost += w.costMicros; said = true; }
         if (w.computeMs !== undefined) { compute += w.computeMs; said = true; }

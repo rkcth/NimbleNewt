@@ -160,6 +160,7 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "maintenance.decide": { verb: "Decide an agent's environment change request", mode: "propose" },
   "maintenance.revoke": { verb: "Revoke an environment change", mode: "apply" },
   "maintenance.apply": { verb: "Try applying an approved environment change again", mode: "apply" },
+  "maintenance.settings.set": { verb: "Change the environment-change settings (who may decide which kinds, request caps, how long an application may run, how often they are handled)", mode: "propose" },
   "maintenance.settings.enable": { verb: "Turn on environment change requests, supervisor decisions or automatic rules", mode: "propose" },
   "maintenance.settings.disable": { verb: "Turn off environment change requests, supervisor decisions or automatic rules", mode: "apply" },
   "maintenance.site.set": { verb: "Set the rule for a network site", mode: "propose" },

@@ -450,11 +450,11 @@ export class JobService {
   }
 
   /** Every job that has not ended, on any task (card L02d: a Stop of an agent finds the agent's jobs, also on a task with no live attempt). Bounded: at most `max` (default 1,000); `truncated` says there were more. */
-  async unfinishedAll(max = 1000): Promise<{ readonly jobs: { readonly id: string; readonly taskId: string; readonly state: JobState; readonly kind: JobKind; readonly background: boolean; readonly resumability: Resumability; readonly attemptId?: string }[]; readonly truncated: boolean }> {
+  async unfinishedAll(max = 1000, afterId?: string): Promise<{ readonly next?: string; readonly jobs: { readonly id: string; readonly taskId: string; readonly state: JobState; readonly kind: JobKind; readonly background: boolean; readonly resumability: Resumability; readonly attemptId?: string }[]; readonly truncated: boolean }> {
     const jobs: { id: string; taskId: string; state: JobState; kind: JobKind; background: boolean; resumability: Resumability; attemptId?: string }[] = [];
-    for (let after: string | undefined; ;) {
+    for (let after: string | undefined = afterId; ;) {
       const page = await this.#scan((job) => !TERMINAL.includes(job.state), after, JOB_LIMITS.page);
-      for (const j of page.jobs) { if (jobs.length >= max) return { jobs, truncated: true }; jobs.push({ id: j.id, taskId: j.taskId, state: j.state, kind: j.kind, background: j.background, resumability: j.resumability, ...(j.attemptId === undefined ? {} : { attemptId: j.attemptId }) }); }
+      for (const j of page.jobs) { if (jobs.length >= max) return { jobs, truncated: true, ...(jobs.length > 0 ? { next: jobs[jobs.length - 1]!.id } : {}) }; jobs.push({ id: j.id, taskId: j.taskId, state: j.state, kind: j.kind, background: j.background, resumability: j.resumability, ...(j.attemptId === undefined ? {} : { attemptId: j.attemptId }) }); }
       if (page.next === undefined) return { jobs, truncated: false };
       after = page.next;
     }

@@ -21,7 +21,7 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 interface World {
   readonly m: MaintenanceService; readonly applier: FakeApplier; readonly owner: Principal; readonly agents: AgentService; readonly grants: GrantService; readonly principals: PrincipalService;
   readonly time: { ms: number };
-  service(extra?: { heartbeatMs?: number }): MaintenanceService;
+  service(extra?: { heartbeatMs?: number; applyTimeoutMs?: number }): MaintenanceService;
   make(name: string, by?: Principal, supervisorId?: string): Promise<{ id: string; principal: Principal }>;
   body(id: string): Promise<MaintenanceBody & { revision: number }>;
   until(id: string, want: string): Promise<void>;
@@ -39,7 +39,7 @@ async function world(backendIndex: number, body: (w: World) => Promise<void>, he
     const grants = GrantService.withEpoch(open.storage, projects.epoch, options);
     const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
     const applier = new FakeApplier();
-    const service = (extra: { heartbeatMs?: number } = {}) => MaintenanceService.withEpoch(open.storage, projects.epoch, { applier, heartbeatMs, ...extra }, options);
+    const service = (extra: { heartbeatMs?: number; applyTimeoutMs?: number } = {}) => MaintenanceService.withEpoch(open.storage, projects.epoch, { applier, heartbeatMs, ...extra }, options);
     const m = service();
     const make: World["make"] = async (friendlyName, by = owner, supervisorId) => {
       const created = await agents.create(by, { commandId: cid("a"), friendlyName, ...(supervisorId === undefined ? {} : { supervisorId }) });
@@ -93,7 +93,7 @@ test("the per-agent daily cap counts every request however it is decided, is set
     assert.ok((await w.m.request(ann.principal, { commandId: cid("k"), kind: "skill", spec: { name: "s-next-day", digest: D("1") }, reason: "x" })).maintenanceId, "a new window starts");
     assert.equal((await w.m.settings(w.owner)).effective.requestsPerDay, 3);
     await w.m.change(w.owner, { commandId: cid("s"), requestsPerDay: null });
-    assert.equal((await w.m.settings(w.owner)).effective.requestsPerDay, MAINTENANCE_LIMITS.requestsPerDay, "the default is bounded");
+    assert.equal((await w.m.settings(w.owner)).effective.requestsPerDay, undefined, "the default is no cap (owner rule: limits are optional and off by default)");
   });
 });
 
@@ -326,5 +326,149 @@ test("writing settings never drives the applier inside the call; a site denied w
     await w.m.tick();
     assert.equal((await w.body(b.maintenanceId)).status, "revoked", "the denial written during the application counts once it has ended");
     assert.ok(w.applier.reverted.has(b.maintenanceId));
+  });
+});
+
+// ---- A09 re-review fixes ----------------------------------------------------------------------------------------------------------------
+
+const bossSetup = async (w: World) => {
+  await w.m.toggle(w.owner, { commandId: cid("t"), what: "bosses", enabled: true });
+  await w.m.change(w.owner, { commandId: cid("s"), bossKinds: ["network", "package"] });
+  await settle(w);
+  const withManage = async (nm: string) => {
+    const a = await w.make(nm);
+    await w.grants.grant(w.owner, { commandId: cid("g"), grantee: a.principal.id, action: "agent.manage", project: "*", source: "direct", basis: "test" });
+    return { ...a, principal: await w.principals.authenticate((await w.principals.issueCredential(w.owner, a.principal.id)).token) };
+  };
+  const decideAs = async (who: Principal, id: string) => w.m.decide(who, { commandId: cid("d"), maintenanceId: id, verdict: "approve", specDigest: await specOf(w, id) });
+  return { withManage, decideAs };
+};
+
+test("a puppet is not a boss: a decider created by a manager who also set the requester's supervisor, a decider created by the requester itself, and a requester whose supervisor was never recorded are all refused", async () => {
+  await world(0, async (w) => {
+    const { withManage, decideAs } = await bossSetup(w);
+    // M creates the decider P; M then makes P the supervisor of T (T was made by the owner): P.createdBy is the hand that chose T's supervisor.
+    const m = await withManage("Mia");
+    const p = await w.make("Pup", m.principal);
+    const t = await w.make("Tom");
+    await w.agents.update(m.principal, { commandId: cid("u"), agentId: t.id, expectedRevision: (await w.agents.get(w.owner, t.id))!.revision, supervisorId: p.id });
+    const r1 = await request(w, t.principal, "network", { site: "puppet.example.net" });
+    await refuses("forbidden", () => decideAs(p.principal, r1.maintenanceId));
+    // The requester R made its own supervisor D (D.createdBy = R).
+    const r = await withManage("Ray");
+    const d = await w.make("Dee", r.principal);
+    await w.agents.update(w.owner, { commandId: cid("u"), agentId: r.id, expectedRevision: (await w.agents.get(w.owner, r.id))!.revision, supervisorId: d.id });
+    const r2 = await request(w, r.principal, "network", { site: "self.example.net" });
+    await refuses("forbidden", () => decideAs(d.principal, r2.maintenanceId));
+    // A legacy agent whose supervisor has no recorded author: unknown, so the boss does not decide.
+    const lg = await w.make("Leg", w.owner, d.id);
+    const rec = (await w.storage.getAggregate({ kind: "agent", id: lg.id }))!;
+    const { supervisorSetBy: _x, ...legacy } = rec.body as unknown as Record<string, unknown>;
+    await w.storage.applyOperation({ operationId: cid("legacy-op"), epoch: await w.storage.currentEpoch(), actor: "owner:test", correlationId: cid("co"), at: "2026-10-31T10:00:00.000Z", changes: [{ type: "update", ref: { kind: "agent", id: lg.id }, expectedRevision: rec.revision, body: legacy as never }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeTimers: [], settleEffects: [], completeDeliveries: [] } as never);
+    const r3 = await request(w, lg.principal, "network", { site: "legacy.example.net" });
+    await refuses("forbidden", () => decideAs(d.principal, r3.maintenanceId));
+    // A genuine report is still decided by its supervisor.
+    const real = await w.make("Rea", w.owner, d.id);
+    const r4 = await request(w, real.principal, "network", { site: "real.example.net" });
+    assert.equal((await decideAs(d.principal, r4.maintenanceId)).status, "applied");
+  });
+});
+
+test("an applier that never answers is given up on after the apply timeout: the request is marked uncertain and verified or reverted, and nothing waits for ever", async () => {
+  await world(0, async (w) => {
+    const ann = await w.make("Ann");
+    const m = w.service({ applyTimeoutMs: 60, heartbeatMs: 10 });
+    const r = await request(w, ann.principal, "package", pkg("hung"));
+    w.applier.gates = [new Promise<void>(() => undefined)];
+    const done = await m.decide(w.owner, { commandId: cid("d"), maintenanceId: r.maintenanceId, verdict: "approve", specDigest: await specOf(w, r.maintenanceId) });
+    assert.notEqual(done.status, "applying");
+    assert.ok(w.applier.calls.some((c) => c.op === "revert" && c.id === r.maintenanceId), "the unknown state was verified or reverted");
+    assert.ok(["approved", "apply-uncertain", "failed"].includes((await w.body(r.maintenanceId)).status));
+  });
+});
+
+test("close() waits only the owner's bound for running applications and leaves a claim that is still running for the next start", async () => {
+  await world(0, async (w) => {
+    const ann = await w.make("Ann");
+    const m = w.service({ heartbeatMs: 0 });
+    await m.change(w.owner, { commandId: cid("s"), closeWaitSeconds: 1 });
+    await settle(w);
+    const r = await request(w, ann.principal, "package", pkg("slow"));
+    w.applier.gates = [new Promise<void>(() => undefined)];
+    m.background(m.decide(w.owner, { commandId: cid("d"), maintenanceId: r.maintenanceId, verdict: "approve", specDigest: await specOf(w, r.maintenanceId) }));
+    await w.until(r.maintenanceId, "applying");
+    const t0 = Date.now();
+    const closed = await m.close();
+    assert.equal(closed.left, 1);
+    assert.ok(Date.now() - t0 < 5000);
+    assert.equal((await w.body(r.maintenanceId)).status, "applying", "the claim is left for the restart to take up");
+  });
+});
+
+test("ticks do not overlap: a tick that runs while another does leaves the work to it", async () => {
+  await world(0, async (w) => {
+    const ann = await w.make("Ann");
+    const m = w.service({ heartbeatMs: 0 });
+    const ids: string[] = [];
+    for (const n of ["tk-a", "tk-b"]) {
+      const r = await request(w, ann.principal, "package", pkg(n));
+      w.applier.nextApply = [{ outcome: "unsupported", reason: "not now" }];
+      await m.decide(w.owner, { commandId: cid("d"), maintenanceId: r.maintenanceId, verdict: "approve", specDigest: await specOf(w, r.maintenanceId) });
+      ids.push(r.maintenanceId);
+    }
+    assert.deepEqual(await Promise.all(ids.map(async (i) => (await w.body(i)).status)), ["approved", "approved"]);
+    const before = w.applier.calls.length;
+    let release!: () => void;
+    w.applier.gates = [new Promise<void>((res) => { release = res; })];
+    const first = m.tick();
+    await w.until(ids[0]!, "applying");
+    assert.deepEqual(await m.tick(), { touched: 0, driven: 0 }, "the second tick does nothing while the first runs");
+    release();
+    await first;
+    assert.equal(w.applier.calls.length - before, 2, "each request was applied once (the first tick drove both)");
+  });
+});
+
+test("every maintenance number is settable, with null for the default: no cap on requests per day by default, a bounded pending cap that can be switched off, and settings exist from the start", async () => {
+  await world(0, async (w) => {
+    const ann = await w.make("Ann");
+    await w.m.ensureSettings();
+    assert.ok(await w.storage.getAggregate({ kind: "maintenance-settings", id: "main" }), "a settings record exists before any write");
+    const eff = (await w.m.settings(w.owner)).effective;
+    assert.equal(eff.requestsPerDay, undefined, "no daily cap by default");
+    assert.equal(eff.pendingPerAgent, 20);
+    assert.equal(eff.applyTimeoutMs, 60 * 60_000);
+    await w.m.change(w.owner, { commandId: cid("s"), requestsPerDay: 2, pendingPerAgent: 1, attempts: 3, applyTimeoutMinutes: 0, closeWaitSeconds: 5, maxApplies: 2, tickSeconds: 10 });
+    await settle(w);
+    const set = (await w.m.settings(w.owner)).effective;
+    assert.deepEqual([set.requestsPerDay, set.pendingPerAgent, set.attempts, set.applyTimeoutMs, set.closeWaitMs, set.maxApplies, set.tickMs], [2, 1, 3, undefined, 5000, 2, 10_000]);
+    await request(w, ann.principal, "package", pkg("one"));
+    await refuses("invalid_command", () => request(w, ann.principal, "package", pkg("two")));
+    await w.m.change(w.owner, { commandId: cid("s"), pendingPerAgent: 0, requestsPerDay: null });
+    await settle(w);
+    await request(w, ann.principal, "package", pkg("two"));
+    await request(w, ann.principal, "package", pkg("three"));
+    await assert.rejects(w.m.change(w.owner, { commandId: cid("s"), attempts: 0 } as never), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
+    await assert.rejects(w.m.change(w.owner, { commandId: cid("s"), maxApplies: null, bogus: 1 } as never), (e: unknown) => e instanceof DomainError);
+  });
+});
+
+test("the live index is covered over several ticks when it is longer than one pass (a cursor, not a cut)", async () => {
+  await world(0, async (w) => {
+    const ann = await w.make("Ann");
+    const limits = MAINTENANCE_LIMITS as unknown as { indexScan: number };
+    const was = limits.indexScan;
+    try {
+      const ids: string[] = [];
+      for (let i = 0; i < 5; i++) {
+        const r = await request(w, ann.principal, "network", { site: `net-${i}.example.net` });
+        w.applier.nextApply = [{ outcome: "unsupported", reason: "not now" }];
+        await w.m.decide(w.owner, { commandId: cid("d"), maintenanceId: r.maintenanceId, verdict: "approve", specDigest: await specOf(w, r.maintenanceId) });
+        ids.push(r.maintenanceId);
+      }
+      limits.indexScan = 2;
+      for (let i = 0; i < 4; i++) await w.m.tick();
+      for (const id of ids) assert.equal((await w.body(id)).status, "applied", "every request in the index was reached");
+    } finally { limits.indexScan = was; }
   });
 });

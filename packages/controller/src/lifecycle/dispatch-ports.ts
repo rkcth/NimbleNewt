@@ -85,7 +85,7 @@ export interface LocalWork {
   costs?(attempts: readonly string[]): Promise<readonly { readonly attemptId: string; readonly costMicros?: number; readonly computeMs?: number }[]>;
 }
 
-type JobRow = { readonly id: string; readonly state: string; readonly kind?: string; readonly background?: boolean; readonly resumability?: string; readonly attemptId?: string };
+type JobRow = { readonly ownerUnknown?: boolean; readonly id: string; readonly state: string; readonly kind?: string; readonly background?: boolean; readonly resumability?: string; readonly attemptId?: string };
 
 export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; principal: Principal } | undefined, runtime: () => "none" | "pending" = () => "pending", members?: (scope: PauseScope) => Promise<readonly string[]>, jobs?: (by: Principal, taskId: string) => Promise<readonly JobRow[]>, local?: LocalWork, ending?: { dropEnding(attemptId: string, why: "owner_stop" | "emergency_stop", reason: string): Promise<unknown> }, more?: {
   /** The tasks spawned (directly or not) by a task, deepest first: a Stop of the task ends their work too (card L02d). `truncated`: there are more than were returned (the stop says so as an unknown item). */
@@ -160,7 +160,14 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
       const owners = new Set<string>(scope.kind === "agent" ? [principalForm(scope.id)] : (await (members?.(scope) ?? Promise.resolve([]))).map(principalForm));
       const all = await more.agentJobs(h.principal);
       incomplete = all.truncated;
-      for (const j of all.jobs) { const owner = j.attemptId === undefined ? undefined : await agentOfAttempt(l, j.attemptId); if (owner !== undefined && owners.has(owner)) rows.set(j.id, j); }
+      // The tasks of the scope's attempts: a job there with no attempt has no known owner and is included as such (listed for everyone, ended only by the owner).
+      const scopeTasks = new Set<string>();
+      for (const attemptId of attempts) { const t = (await h.dispatcher.get(h.principal, attemptId))?.taskId; if (t !== undefined) scopeTasks.add(t); }
+      for (const j of all.jobs) {
+        if (j.attemptId === undefined) { if (scopeTasks.has(j.taskId)) rows.set(j.id, { ...j, ownerUnknown: true }); continue; }
+        const owner = await agentOfAttempt(l, j.attemptId);
+        if (owner !== undefined && owners.has(owner)) rows.set(j.id, j);
+      }
       return { rows: [...rows.values()], incomplete };
     }
     const tasks = new Set<string>();
@@ -207,6 +214,8 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
     for (const job of found.rows) {
       if (job.kind === "remote" && job.background === true && job.resumability === "remote_tracked") continue;
       if (!["admitted", "dispatched", "running"].includes(job.state) && !(force && job.state === "cancellation_requested")) continue;
+      // A job whose owner is not known (no attempt) is ended only at the owner's own stop.
+      if (job.ownerUnknown === true && by.kind !== "owner") { unresolved.push(`job ${job.id}: not stopped, its owner is not known and ${by.id} is not the owner`.slice(0, 120)); continue; }
       // A job of a swarm child is a child's work: ended only by someone who may control the child.
       if (scope.kind === "task" && job.taskId !== scope.id && more.mayControl !== undefined) {
         if (!verdict.has(job.taskId)) verdict.set(job.taskId, await more.mayControl(by, job.taskId).catch(() => false));
@@ -270,10 +279,12 @@ export function dispatchStopPorts(dispatch: () => { dispatcher: Dispatcher; prin
     checkpoint: async (scope, options) => {
       const h = dispatch();
       const l = look();
-      const attempts = await attemptsOf(scope, l);
+      const all = await attemptsOf(scope, l);
+      // Only the attempts the asker may control are quiesced and checkpointed (a swarm child they may not touch is left alone; terminate names it as unresolved).
+      const attempts = options?.by === undefined ? all : (await controllable(options.by, all, scope)).allowed;
       // A Stop asks the task's background jobs to stop before the checkpoint is taken (preparation does not wait for them), so the checkpoint is of a state they are changing as little as they can. A Suspend leaves jobs running:
       // its checkpoint is taken while they run, and whatever they produce after it is not in it. The ending step asks again and escalates.
-      if (options?.mode === "stop" && options.by !== undefined) await askJobs(scope, attempts, l, options.by, false).catch(() => undefined);
+      if (options?.mode === "stop" && options.by !== undefined) await askJobs(scope, all, l, options.by, false).catch(() => undefined);
       if (h === undefined || attempts.length === 0) return { checkpointId: `${scope.kind}:${scope.id}`.slice(0, 120), durable: true, artifactsDurable: true }; // nothing runs here, so there is nothing to save
       let checkpointed = true;
       let artifacts = true;

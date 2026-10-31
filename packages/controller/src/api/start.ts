@@ -519,19 +519,31 @@ export async function startController(options: StartOptions): Promise<Controller
       return attempt === undefined ? false : checkpointVerdict(await continuations.latest(dispatch.principal, a.taskId).catch(() => undefined), attempt);
     } } });
     workEndLate = workEnd;
+    const stopMayControl = async (by: Principal, taskId: string): Promise<boolean> => {
+      if (by.kind === "owner") return true;
+      const parent = ((await storage.getAggregate({ kind: "swarm-link", id: taskId }))?.body as unknown as { parentTaskId?: string } | undefined)?.parentTaskId;
+      if (parent !== undefined && await budgets.canManage(by, parent).catch(() => false)) return true;
+      return pauses.authorizeControl(by, { kind: "task", id: taskId }).then(() => true, () => false);
+    };
     const stops = stopsLive = StopService.withEpoch(storage, epoch, pauses, dispatchStopPorts(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal }), () => (options.dispatch === undefined ? "none" : "pending"), (scope) => agentsUnder(storage, scope), (_by, taskId) => jobs.unfinishedOf(taskId), options.localWork ?? hostLocalWork(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal })), { dropEnding: (id, why, reason) => workEnd.drop(id, why, reason) }, {
       descendants: (taskId) => swarmDescendantsInfo(storage, taskId),
       // Like `swarm.cancel`: the owner, or whoever holds the budget of the child's parent; or whoever may control the child's own scope.
-      mayControl: async (by, taskId) => {
-        if (by.kind === "owner") return true;
-        const parent = ((await storage.getAggregate({ kind: "swarm-link", id: taskId }))?.body as unknown as { parentTaskId?: string } | undefined)?.parentTaskId;
-        if (parent !== undefined && await budgets.canManage(by, parent).catch(() => false)) return true;
-        return pauses.authorizeControl(by, { kind: "task", id: taskId }).then(() => true, () => false);
+      mayControl: stopMayControl,
+      agentJobs: async (_by) => {
+        // Paged to the end (up to 50 pages of 1,000), so a large installation does not make every agent Stop recovery-required; only a really huge list is reported as cut.
+        const all: Awaited<ReturnType<typeof jobs.unfinishedAll>>["jobs"][number][] = [];
+        let after: string | undefined;
+        for (let page = 0; page < 50; page++) {
+          const got = await jobs.unfinishedAll(1000, after);
+          all.push(...got.jobs);
+          if (!got.truncated || got.next === undefined) return { jobs: all, truncated: false };
+          after = got.next;
+        }
+        return { jobs: all, truncated: true };
       },
-      agentJobs: (_by) => jobs.unfinishedAll(),
       cancelJob: (by, jobId, o) => jobs.requestCancel(by, { commandId: `stopjob-${jobId}-${o.force ? "force" : "ask"}`, jobId, reason: o.reason, ...(o.force ? { force: true } : {}) }),
       charge: (by, c) => budgets.charge(by, { commandId: c.commandId, activity: "stop-cleanup", taskId: c.taskId, ...(c.agentId === undefined ? {} : { agentId: c.agentId }), ...(c.costMicros > 0 ? { costMicros: c.costMicros } : {}), ...(c.computeMs > 0 ? { computeMs: c.computeMs } : {}) }),
-    }), { onSettled: async (by, e) => { if (e.scope.kind !== "task") return; await activity.record(by, { commandId: `${e.intentId}-act`, taskId: e.scope.id, kind: "lifecycle", summary: `${e.mode === "suspend" ? "Suspension" : "Stop"} ${e.outcome.state}${e.outcome.graceful ? "" : " (not graceful)"}${e.outcome.unresolved.length > 0 ? `; unresolved: ${e.outcome.unresolved.slice(0, 5).join(", ")}` : ""}.`, manifest: { refs: [{ kind: "stop-intent", id: e.intentId }] } } as never); } });
+    }), { mayHold: async (requestedBy, taskId) => { const p = await principals.get(requestedBy); return p !== undefined && p.state === "active" && stopMayControl((await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString())) as Principal, taskId); }, onSettled: async (by, e) => { if (e.scope.kind !== "task") return; await activity.record(by, { commandId: `${e.intentId}-act`, taskId: e.scope.id, kind: "lifecycle", summary: `${e.mode === "suspend" ? "Suspension" : "Stop"} ${e.outcome.state}${e.outcome.graceful ? "" : " (not graceful)"}${e.outcome.unresolved.length > 0 ? `; unresolved: ${e.outcome.unresolved.slice(0, 5).join(", ")}` : ""}.`, manifest: { refs: [{ kind: "stop-intent", id: e.intentId }] } } as never); } });
 
     // Provider drain and cutover (card R04b): the owner's controls gate every route choice made through the fallback service, which the cutover cancels running calls on.
     const cutover = CutoverService.withEpoch(storage, epoch, routing, {});
@@ -752,16 +764,23 @@ export async function startController(options: StartOptions): Promise<Controller
     }
     const transport = options.conversationTransport === undefined ? undefined : await ConversationTransport.listen({ ...options.conversationTransport, conversations, principals });
     // A change that was approved but not finished when the last controller ended is picked up again (bounded; the applier is idempotent by request ID).
-    maintenance.background(maintenance.resume());
+    maintenance.background(maintenance.ensureSettings().then(() => maintenance.resume()));
     // The maintenance loop: settings changes and lease expiries are looked at here, a bounded number per round, never inside the settings write.
-    const maintenanceTimer = setInterval(() => { maintenance.background(maintenance.tick()); }, options.maintenance?.tickMs ?? 30_000);
-    maintenanceTimer.unref();
+    // The loop period is the owner's setting (maintenance.settings.set tickSeconds), read before each round; a start option overrides it for tests.
+    let maintenanceStopped = false;
+    let maintenanceTimer: ReturnType<typeof setTimeout> | undefined;
+    const maintenanceRound = (): void => {
+      if (maintenanceStopped) return;
+      maintenance.background(maintenance.tick());
+      void (options.maintenance?.tickMs !== undefined ? Promise.resolve(options.maintenance.tickMs) : maintenance.tickMs()).catch(() => 30_000).then((ms) => { if (!maintenanceStopped) { maintenanceTimer = setTimeout(maintenanceRound, ms); maintenanceTimer.unref(); } });
+    };
+    void maintenance.tickMs().catch(() => 30_000).then((first) => { if (!maintenanceStopped) { maintenanceTimer = setTimeout(maintenanceRound, options.maintenance?.tickMs ?? first); maintenanceTimer.unref(); } });
     return {
       api, storage, epoch, check, filesystems, prerequisites, services: { maintenance, retention, retentionSettings, ...(backups === undefined ? {} : { backups }), acceptance, catalog: catalogService, workEnd, scratchCleanup, records, activity, continuations, resumes, handoffs, cutover, fallback, principals, taskCredentials, grants, projects, assignments, waits, stall, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing, pauses, branches, jobs },
       ...(chat === undefined ? {} : { chat }), ...(coordinator === undefined ? {} : { coordinator }),
       ...(dispatch === undefined ? {} : { dispatch }), ...(tools === undefined ? {} : { tools }), ...(dispatchProblem === undefined ? {} : { dispatchProblem }),
       ...(transport === undefined ? {} : { conversationUrl: transport.url }),
-      close: async () => { clearInterval(maintenanceTimer); await maintenance.idle().catch(() => undefined); tools?.dispose(); await dispatch?.driver.stop(); await scratchCleanup.close().catch(() => undefined); await dispatch?.closeWorkers().catch(() => undefined); await transport?.close(); await backups?.finish(); await storage.close(); },
+      close: async () => { maintenanceStopped = true; if (maintenanceTimer !== undefined) clearTimeout(maintenanceTimer); await maintenance.close().catch(() => undefined); tools?.dispose(); await dispatch?.driver.stop(); await scratchCleanup.close().catch(() => undefined); await dispatch?.closeWorkers().catch(() => undefined); await transport?.close(); await backups?.finish(); await storage.close(); },
     };
   } catch (error) {
     toolsLive?.dispose();

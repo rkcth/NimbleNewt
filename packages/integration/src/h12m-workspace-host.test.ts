@@ -240,6 +240,8 @@ test("remote host: the same requests cross the authenticated transport to a work
     const offer = (await client.offers()).find((o) => o.order.attemptId === attemptId)!;
     const attempt = client.attempt(attemptId, offer.placement);
     await attempt.accept();
+    // The H12a gate: no checkpoint or call counts before the worker confirms the dispatch contract.
+    assert.deepEqual(await attempt.honorContract(offer.order, { formats: [1], features: ["limits", "wall-time"], enforces: { cpus: "full", memoryMb: "full", diskMb: "full", processes: "full", wallTimeMs: "full" } } as never), { ok: true });
     const told: string[] = [];
     let after = 0; let seq = 0;
     // The remote worker's loop: answers the controller's control messages (a checkpoint when asked, what it is told) and reads its workspace requests.
