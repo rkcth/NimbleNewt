@@ -31,14 +31,16 @@ export async function listBackups(root: string): Promise<BackupInfo[]> {
   return out.sort((a, b) => b.at.localeCompare(a.at));
 }
 
-export const DEFAULT_RETENTION = { daily: 7, weekly: 4 } as const;
+/** `preRestoreKept`: keep the newest this many snapshots taken before a restore (card K01h); absent or null: keep them all. */
+export interface Retention { readonly daily: number; readonly weekly: number; readonly preRestoreKept?: number | null }
+export const DEFAULT_RETENTION: Retention = { daily: 7, weekly: 4 };
 
 const day = (iso: string): string => iso.slice(0, 10);
 /** The Monday (UTC) that starts the week the instant is in. */
 const week = (iso: string): string => { const d = new Date(`${day(iso)}T00:00:00.000Z`); const back = (d.getUTCDay() + 6) % 7; return new Date(d.getTime() - back * 86_400_000).toISOString().slice(0, 10); };
 
 /** Which of the backups to keep: the newest of each of the last `daily` days that have one, the newest of each of the last `weekly` weeks that have one, the newest backup of all, and every pre-upgrade snapshot (a later release decides when those may go). */
-export function chooseKept(backups: readonly BackupInfo[], retention: { daily: number; weekly: number } = DEFAULT_RETENTION): Set<string> {
+export function chooseKept(backups: readonly BackupInfo[], retention: Retention = DEFAULT_RETENTION): Set<string> {
   const newestFirst = backups.filter((b) => b.trusted).sort((a, b) => b.at.localeCompare(a.at));
   const kept = new Set<string>();
   // A backup whose manifest does not agree with its name is never deleted here and never takes the place of a trusted one in a rule.
@@ -46,6 +48,9 @@ export function chooseKept(backups: readonly BackupInfo[], retention: { daily: n
   const first = newestFirst[0];
   if (first !== undefined) kept.add(first.path);
   for (const b of newestFirst) if (b.manifest.kind === "pre-upgrade") kept.add(b.path);
+  // A snapshot taken before a restore is the only way back from it: all are kept unless the owner set a count, then the newest that many.
+  let preRestore = 0;
+  for (const b of newestFirst) if (b.manifest.kind === "pre-restore" && (retention.preRestoreKept === undefined || retention.preRestoreKept === null || ++preRestore <= retention.preRestoreKept)) kept.add(b.path);
   const keepBy = (key: (iso: string) => string, count: number): void => {
     const seen = new Set<string>();
     for (const b of newestFirst) {
@@ -64,7 +69,7 @@ export function chooseKept(backups: readonly BackupInfo[], retention: { daily: n
 }
 
 /** Deletes the backups outside every rule, and the `.partial` folders of backups that were interrupted (older than `partialAgeMs`, so one being written now is left alone). Returns what was removed. */
-export async function pruneBackups(root: string, options: { now?: () => Date; retention?: { daily: number; weekly: number }; partialAgeMs?: number } = {}): Promise<{ deleted: string[]; partialsRemoved: string[]; kept: string[] }> {
+export async function pruneBackups(root: string, options: { now?: () => Date; retention?: Retention; partialAgeMs?: number } = {}): Promise<{ deleted: string[]; partialsRemoved: string[]; kept: string[] }> {
   const now = (options.now ?? (() => new Date()))().getTime();
   const backups = await listBackups(root);
   const kept = chooseKept(backups, options.retention);

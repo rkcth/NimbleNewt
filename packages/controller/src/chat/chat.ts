@@ -466,7 +466,7 @@ export class ChatService {
       // Every text in the command must be the owner's own words (or a record, or a fixed choice): a model cannot add content the owner never said.
       if (hasRefMarker(intent.args)) { push({ i, kind: "refused", code: "invalid_command", message: "$ref is reserved for steps the controller builds" }); continue; }
       // The reason recorded with a right is the owner's message, set by the chat. A gate is always shown to the owner first, so its kind and its (fixed) topic need not be words of the message: the wording still must be.
-      const unchecked = intent.op === "release.activate" ? ["digest"] : intent.op === "grant.create" ? ["basis"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
+      const unchecked = intent.op === "release.activate" ? ["digest"] : intent.op === "backup.restore.apply" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
       const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined);
       if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: `${foreign} is not in your message, so it was not done. Say what it should be.` }); continue; }
       const landing = intent.op === "project.create" ? (intent.args["integration"] as { landing?: unknown } | undefined)?.landing : intent.args["landing"];
@@ -575,6 +575,17 @@ export class ChatService {
       const digest = String(found.result["digest"]);
       args["digest"] = digest;
       fillNotes.push(`Digest of the staged release, filled in from its record: ${digest}${found.result["ok"] === true ? "" : " (its files do not match this digest now; activation will refuse)"}`);
+    }
+    // A restore is proposed with the plan the controller computes NOW from the backup's record; the approval token comes from that plan (never from the interpreter's words), so the owner's yes is bound to exactly what is shown.
+    if (intent.op === "backup.restore.apply") {
+      delete args["confirm"];
+      const wanted = args["name"];
+      if (typeof wanted !== "string") return refuse("invalid_command", "say which backup to restore, by the name backup.list shows");
+      const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "backup.restore.preview", args: { name: wanted } });
+      if (!found.ok) return refuse(found.error.code, found.error.message);
+      const plan = found.result["item"] as { token: string; expiresAt?: string; name: string; createdAt: string; kind: string; rows: number; artifactFiles: number; piStores: number; piFiles: number; piStateIncluded: boolean; changesSinceBackup?: number; effectsToMarkUncertain?: number; deliveriesToResend?: number; steps: string[]; warnings: string[] };
+      args["confirm"] = plan.token;
+      fillNotes.push(`Restore plan, worked out just now from the backup ${plan.name} (made ${plan.createdAt}, ${plan.kind}): ${plan.rows} records, ${plan.artifactFiles} artifact files, ${plan.piStateIncluded ? `${plan.piFiles} conversation files in ${plan.piStores} stores` : "NO conversation state (Pi state not included)"}${plan.changesSinceBackup === undefined ? "" : `; about ${plan.changesSinceBackup} changes made since then will be lost`}${plan.effectsToMarkUncertain === undefined ? "" : `; ${plan.effectsToMarkUncertain} intended actions come back as uncertain`}${plan.deliveriesToResend === undefined ? "" : `; ${plan.deliveriesToResend} undelivered messages are sent again`}. ${plan.expiresAt === undefined ? "" : `Your approval is good until ${plan.expiresAt}. `}Steps: ${plan.steps.join(" ")} Warnings: ${plan.warnings.join(" ")}`);
     }
     const labels: Record<string, string> = {};
     const pins: ChatPin[] = [];

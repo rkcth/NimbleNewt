@@ -2,7 +2,7 @@ export { BACKUP_FORMAT, BACKUP_KINDS, BACKUP_NOTES, MANIFEST_FILE, PARTIAL_SUFFI
 export { backupName, createBackup, type BackupOptions } from "./write.js";
 export { readManifest, verifyBackup, type BackupCheck } from "./verify.js";
 export { RestoreRefused, restoreBackup, type RestoreResult } from "./restore.js";
-export { DEFAULT_RETENTION, chooseKept, listBackups, pruneBackups, type BackupInfo } from "./retention.js";
+export { DEFAULT_RETENTION, chooseKept, listBackups, pruneBackups, type BackupInfo, type Retention as BackupRetention } from "./retention.js";
 export { BackupService, type BackupServiceOptions, type BackupStatus } from "./service.js";
 export { BackupCipher, BackupKey, PasscodeRefused, SealedFileBad, UnlockFailed, checkPasscode, createKeyring, keyringFingerprint, parseKeyring, unlockWithPasscode, unlockWithRecovery, type BackupSeal, type Keyring, type RecoveryFile } from "./crypto.js";
 export { BackupKeyPinService, KeyPinMismatch } from "./pin.js";
@@ -10,4 +10,6 @@ export { SecretFileRefused, readSecretFile } from "./secret-file.js";
 export { BackupEncryption, ProofRefused, readKeyringFile, type EncryptionOptions, type EncryptionStatus, type UnlockMethod } from "./encryption.js";
 export { MaintenanceBarrier, BarrierRefused, type BarrierParticipant, type BarrierState } from "./barrier.js";
 export { PI_LIMITS, copyPiState, validRel, validStoreId, writePiState, type PiStateSource, type PiStateStore } from "./pi-state.js";
-export { PENDING_FILE, STAGING_DIR, StagedRestore, applyPendingRestore, type PendingRestore, type RestorePlan, type StagedRestoreOptions } from "./staged-restore.js";
+export { acquireDataLock, LOCK_FILE, type DataLock } from "./data-lock.js";
+export { manifestDigestOf } from "./verify.js";
+export { BACKUP_NAME, JOURNAL_FILE, KEY_FILE, PENDING_FILE, STAGING_DIR, StagedRestore, applyPendingRestore, canon, type ApplyOptions, type PendingRestore, type RestoreStatus, type RestorePlan, type StagedRestoreOptions } from "./staged-restore.js";

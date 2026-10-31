@@ -4,7 +4,7 @@ import type { FileBlobStore } from "../artifacts/index.js";
 import type { ControllerStorage } from "../storage/index.js";
 import { type BackupKind, type BackupManifest } from "./format.js";
 import { basename } from "node:path";
-import { DEFAULT_RETENTION, chooseKept, listBackups, pruneBackups, type BackupInfo } from "./retention.js";
+import { DEFAULT_RETENTION, chooseKept, listBackups, pruneBackups, type BackupInfo, type Retention } from "./retention.js";
 import type { Keyring } from "./crypto.js";
 import { createBackup } from "./write.js";
 import type { PiStateSource } from "./pi-state.js";
@@ -17,9 +17,9 @@ export interface BackupServiceOptions {
   readonly everyMs?: number;
   /** How long after a failed scheduled run the next one waits. Default one hour. */
   readonly retryAfterMs?: number;
-  readonly retention?: { daily: number; weekly: number };
+  readonly retention?: Retention;
   /** The counts now in force (card K06: the owner's retention settings). Takes precedence over `retention` and is read at each prune. */
-  readonly retentionSource?: () => Promise<{ daily: number; weekly: number }>;
+  readonly retentionSource?: () => Promise<Retention>;
   readonly pageSize?: number;
   /** The artifact store, if the installation has one: its blobs are part of each backup. */
   readonly blobs?: FileBlobStore;
@@ -29,7 +29,7 @@ export interface BackupServiceOptions {
   readonly piState?: PiStateSource;
 }
 
-export interface BackupStatus { readonly root: string; readonly newest?: { name: string; createdAt: string; kind: BackupKind }; readonly count: number; readonly running: boolean; readonly lastError?: { at: string; message: string } }
+export interface BackupStatus { readonly root: string; readonly newest?: { name: string; createdAt: string; kind: BackupKind }; readonly count: number; readonly running: boolean; /** Whether backups made here include the agents' conversation state (Pi state). False: it is NOT included, and a restore leaves the conversation memory as it is. */ readonly piStateIncluded: boolean; readonly lastError?: { at: string; message: string } }
 
 /**
  * The first release's built-in backup (card K01): "back up now", a nightly run and the retention rule (7 daily and 4 weekly copies, pre-upgrade snapshots untouched). One backup runs at a time; asking while one
@@ -70,10 +70,14 @@ export class BackupService {
     return run;
   }
 
-  /** The snapshot taken inside the maintenance barrier before a restore replaces the data (card K01h): not stopped by the hold, kept like a pre-upgrade snapshot. */
+  /** The snapshot taken inside the maintenance barrier before a restore replaces the data (card K01h): not stopped by the hold, kind `pre-restore`, kept unless the owner sets how many to keep (`preRestoreKept`). */
   async safetyCopy(): Promise<{ path: string; manifest: BackupManifest }> {
     await this.finish();
-    return createBackup(this.#storage, { root: this.#options.root, kind: "pre-upgrade", version: this.#options.version, ...(this.#options.now === undefined ? {} : { now: this.#options.now }), ...(this.#options.pageSize === undefined ? {} : { pageSize: this.#options.pageSize }), ...(this.#options.blobs === undefined ? {} : { blobs: this.#options.blobs }), ...(this.#options.encryption === undefined ? {} : { encryption: this.#options.encryption }), ...(this.#options.piState === undefined ? {} : { piState: this.#options.piState }) });
+    // Two restores prepared within one second would share a name: the later one is stamped a second on.
+    for (let skew = 0; ; skew++) {
+      try { return await createBackup(this.#storage, { root: this.#options.root, kind: "pre-restore", version: this.#options.version, now: () => new Date(this.#now().getTime() + skew * 1000), ...(this.#options.pageSize === undefined ? {} : { pageSize: this.#options.pageSize }), ...(this.#options.blobs === undefined ? {} : { blobs: this.#options.blobs }), ...(this.#options.encryption === undefined ? {} : { encryption: this.#options.encryption }), ...(this.#options.piState === undefined ? {} : { piState: this.#options.piState }) }) }
+      catch (error) { if (skew >= 30 || !["ENOTEMPTY", "EEXIST"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error; }
+    }
   }
 
   /** Takes a backup now. A backup already running is the answer to a second ask. */
@@ -102,7 +106,7 @@ export class BackupService {
     // After a failed run, wait before trying again: a full disk would otherwise be hit with a new copy every tick.
     if (this.#lastError !== undefined && this.#now().getTime() - Date.parse(this.#lastError.at) < (this.#options.retryAfterMs ?? 3_600_000)) return false;
     let newest;
-    try { newest = (await listBackups(this.#options.root)).find((b) => b.manifest.kind !== "pre-upgrade" && b.trusted); } catch (error) {
+    try { newest = (await listBackups(this.#options.root)).find((b) => b.manifest.kind !== "pre-upgrade" && b.manifest.kind !== "pre-restore" && b.trusted); } catch (error) {
       // A backups folder that cannot be read is a failed run: it shows in the status and is not retried every tick.
       this.#lastError = { at: this.#now().toISOString(), message: error instanceof Error ? error.message.slice(0, 300) : "the backups folder could not be read" };
       return false;
@@ -127,20 +131,20 @@ export class BackupService {
   list(): Promise<BackupInfo[]> { return listBackups(this.#options.root); }
 
   /** The counts in force: the owner's setting when one is wired, else the option, else the 7 daily and 4 weekly of the first release. A source that fails leaves the option (never fewer copies than before). */
-  async #counts(): Promise<{ daily: number; weekly: number }> {
+  async #counts(): Promise<Retention> {
     if (this.#options.retentionSource !== undefined) { try { return await this.#options.retentionSource(); } catch { /* keep the fixed counts */ } }
     return this.#options.retention ?? DEFAULT_RETENTION;
   }
 
   /** The names of the backups the rule would delete under these counts (default: those in force). Nothing is deleted. */
-  async preview(retention?: { daily: number; weekly: number }): Promise<string[]> {
+  async preview(retention?: Retention): Promise<string[]> {
     const all = await listBackups(this.#options.root);
     const kept = chooseKept(all, retention ?? await this.#counts());
     return all.filter((b) => !kept.has(b.path)).map((b) => b.manifest.name);
   }
 
   /** Deletes the backups outside the rule (the newest, every pre-upgrade snapshot and any backup that cannot be trusted by name are kept) and returns their names. Used by the retention runner. */
-  async prune(retention?: { daily: number; weekly: number }): Promise<string[]> {
+  async prune(retention?: Retention): Promise<string[]> {
     const result = await pruneBackups(this.#options.root, { ...(this.#options.now === undefined ? {} : { now: this.#options.now }), retention: retention ?? await this.#counts() });
     return result.deleted.map((p) => basename(p));
   }
@@ -154,13 +158,13 @@ export class BackupService {
     try { await readdir(this.#options.root); } catch (error) { return (error as NodeJS.ErrnoException)?.code === "ENOENT" ? { ...lastError } : { unreadable: true, ...lastError }; }
     let all: BackupInfo[];
     try { all = await listBackups(this.#options.root); } catch { return { unreadable: true, ...lastError }; }
-    const good = all.find((b) => b.manifest.kind !== "pre-upgrade" && b.trusted);
+    const good = all.find((b) => b.manifest.kind !== "pre-upgrade" && b.manifest.kind !== "pre-restore" && b.trusted);
     return { ...(good === undefined ? {} : { at: good.at }), ...lastError };
   }
 
   async status(): Promise<BackupStatus> {
     const all = await listBackups(this.#options.root).catch(() => [] as BackupInfo[]); // an unreadable folder shows as empty, with the reason in lastError
     const newest = all[0];
-    return { root: this.#options.root, count: all.length, running: this.#running !== undefined, ...(newest === undefined ? {} : { newest: { name: newest.manifest.name, createdAt: newest.manifest.createdAt, kind: newest.manifest.kind } }), ...(this.#lastError === undefined ? {} : { lastError: this.#lastError }) };
+    return { root: this.#options.root, count: all.length, running: this.#running !== undefined, piStateIncluded: this.#options.piState !== undefined, ...(newest === undefined ? {} : { newest: { name: newest.manifest.name, createdAt: newest.manifest.createdAt, kind: newest.manifest.kind } }), ...(this.#lastError === undefined ? {} : { lastError: this.#lastError }) };
   }
 }

@@ -22,6 +22,10 @@ export interface RetentionValues {
   /** Backup counts the nightly run keeps (the K01 rule: 7 daily, 4 weekly). The newest backup and every pre-upgrade snapshot are always kept. */
   readonly backupDaily: number;
   readonly backupWeekly: number;
+  /** How many of the snapshots taken before a restore (kind pre-restore) are kept, newest first. `null`: keep them all (the default). */
+  readonly preRestoreKept: number | null;
+  /** How many minutes the owner's approval of a restore (the token of its preview) stays good. `null`: it does not expire. */
+  readonly restoreConfirmMinutes: number | null;
   /** Resolved incidents are soft-archived after this many days, and removed this many days after being archived. `null`: never. */
   readonly incidentArchiveDays: number | null;
   readonly incidentPurgeDays: number | null;
@@ -43,7 +47,7 @@ export interface RetentionValues {
 }
 
 export const RETENTION_DEFAULTS: RetentionValues = {
-  derivedDays: null, generationRunDays: null, autoRun: false, thinkingDays: 14, backupDaily: 7, backupWeekly: 4, incidentArchiveDays: null, incidentPurgeDays: null, catalogVersionsKept: null, catalogAutoDrop: false, revokedBytesDays: 90, revokedBytesBlank: false,
+  derivedDays: null, generationRunDays: null, autoRun: false, thinkingDays: 14, backupDaily: 7, backupWeekly: 4, preRestoreKept: null, restoreConfirmMinutes: 30, incidentArchiveDays: null, incidentPurgeDays: null, catalogVersionsKept: null, catalogAutoDrop: false, revokedBytesDays: 90, revokedBytesBlank: false,
   quotaProjectBytes: null, quotaAgentBytes: null, quotaWarnPercent: 80, reserveBytes: 16 * 1024 * 1024,
 };
 
@@ -56,6 +60,8 @@ export const RETENTION_FIELDS: Readonly<Record<keyof RetentionValues, Spec>> = {
   thinkingDays: { kind: "days", min: 1, max: 365, nullable: false },
   backupDaily: { kind: "count", min: 1, max: 365, nullable: false },
   backupWeekly: { kind: "count", min: 0, max: 520, nullable: false },
+  preRestoreKept: { kind: "count", min: 1, max: 1000, nullable: true },
+  restoreConfirmMinutes: { kind: "count", min: 1, max: 10080, nullable: true },
   incidentArchiveDays: { kind: "days", min: 7, max: 3650, nullable: true },
   incidentPurgeDays: { kind: "days", min: 30, max: 3650, nullable: true },
   catalogVersionsKept: { kind: "count", min: 1, max: 500, nullable: true },

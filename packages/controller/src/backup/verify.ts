@@ -33,6 +33,9 @@ export async function readManifest(path: string): Promise<{ manifest?: BackupMan
 }
 
 /** The cipher a backup needs: none for a plain backup, the unlocked key's for a sealed one. Refuses a sealed backup when no key was given, and a key that is not the backup's. */
+/** A digest of the WHOLE manifest (every file digest, the artifact and conversation indexes, the MAC): what a restore approval is bound to, so nothing in the backup can change between the preview and the apply. */
+export const manifestDigestOf = (m: BackupManifest): string => createHash("sha256").update(canonicalJson(m as never)).digest("hex");
+
 export function cipherOf(manifest: BackupManifest, unlock: BackupKey | undefined): BackupCipher | undefined {
   if (manifest.encryption === undefined) return undefined;
   if (unlock === undefined) throw new UnlockFailed("the backup is encrypted: give the passcode or the recovery file");

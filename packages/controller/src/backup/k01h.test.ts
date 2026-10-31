@@ -125,8 +125,9 @@ async function rig() {
   const barrier = new MaintenanceBarrier();
   barrier.add({ name: "backups", hold: async () => backups.hold() });
   let staged = 0;
-  const restore = (extra: Partial<ConstructorParameters<typeof StagedRestore>[0]> = {}) => new StagedRestore({ backups, root: join(d, "b"), barrier, sqlitePath: sqlite, dataDirectory: data, storage, piFinal: (id) => join(live, id), onStaged: () => { staged += 1; }, now: () => new Date("2026-10-31T11:00:00.000Z"), ...extra });
-  return { d, data, live, sqlite, backups, made, barrier, restore, get storage() { return storage; }, set storage(s) { storage = s; }, staged: () => staged };
+  const restore = (extra: Partial<ConstructorParameters<typeof StagedRestore>[0]> = {}) => new StagedRestore({ backups, root: join(d, "b"), barrier, sqlitePath: sqlite, dataDirectory: data, storage, piFinal, onStaged: () => { staged += 1; }, now: () => new Date("2026-10-31T11:00:00.000Z"), ...extra });
+  const piFinal = (id: string): string => join(live, id);
+  return { d, data, live, sqlite, piFinal, backups, made, barrier, restore, get storage() { return storage; }, set storage(s) { storage = s; }, staged: () => staged };
 }
 
 test("a restore from inside the controller is previewed, needs the approved token, snapshots the current state, holds the barrier and swaps in at the next start; the old data is kept (card K01h)", async () => {
@@ -142,16 +143,16 @@ test("a restore from inside the controller is previewed, needs the approved toke
     assert.equal(r.staged(), 1);
     assert.equal(r.barrier.held, true);
     await assert.rejects(r.backups.backUpNow("manual"), /maintenance/);
-    assert.match(done.safetyCopy, /pre-upgrade/);
+    assert.match(done.safetyCopy, /pre-restore/);
     // The live data is untouched until the restart.
     assert.equal((await r.storage.getAggregate({ kind: "task", id: "task-late" }))?.body["title"], "late");
     assert.match(readFileSync(join(r.live, "att-1", "history.jsonl"), "utf8"), /after the backup/);
     await assert.rejects(sr.apply(plan.name, plan.token), /already/);
     await r.storage.close();
     // The next start.
-    const applied = await applyPendingRestore(r.data, r.sqlite);
+    const applied = await applyPendingRestore(r.data, r.sqlite, undefined, { piFinal: r.piFinal });
     assert.equal(applied, r.made.manifest.name);
-    assert.equal(await applyPendingRestore(r.data, r.sqlite), undefined, "applied once");
+    assert.equal(await applyPendingRestore(r.data, r.sqlite, undefined, { piFinal: r.piFinal }), undefined, "applied once");
     const back = await SqliteStorage.open({ path: r.sqlite });
     try {
       assert.equal((await back.getAggregate({ kind: "task", id: "task-a" }))?.body["title"], "before");
@@ -162,7 +163,7 @@ test("a restore from inside the controller is previewed, needs the approved toke
     assert.ok(kept.length >= 1, "the old database is kept");
     assert.ok(readdirSync(r.live).some((n) => n.startsWith("att-1.before-restore-")), "the old conversation folder is kept");
     assert.match(readFileSync(join(r.live, readdirSync(r.live).find((n) => n.startsWith("att-1.before-restore-"))!, "history.jsonl"), "utf8"), /after the backup/);
-    assert.equal(readdirSync(r.data).includes(".nn-restore") && readdirSync(join(r.data, ".nn-restore")).length > 0, false, "staging is gone");
+    assert.equal(readdirSync(r.data).some((n) => n.includes(".nn-staged-")) || readdirSync(r.live).some((n) => n.includes(".nn-staged-")), false, "staging is gone");
   } finally { rmSync(r.d, { recursive: true, force: true }); }
 });
 
@@ -175,7 +176,7 @@ test("a prepared restore can be cancelled and leaves the live data exactly as it
     assert.equal((await sr.cancel()).cancelled, true);
     assert.equal(r.barrier.held, false);
     assert.equal(existsSync(join(r.data, "pending-restore.json")), false);
-    assert.equal(existsSync(join(r.data, ".nn-restore", "20261031T110000Z")), false);
+    assert.equal(existsSync(`${r.sqlite}.nn-staged-20261031T110000Z`), false);
     assert.equal((await r.storage.getAggregate({ kind: "task", id: "task-late" }))?.body["title"], "late");
     assert.equal((await sr.cancel()).cancelled, false);
     // A participant that refuses (work still running) stops the restore and clears the staging.
@@ -184,7 +185,7 @@ test("a prepared restore can be cancelled and leaves the live data exactly as it
     await assert.rejects(sr.apply(plan2.name, plan2.token), /work 2 agent attempts/);
     assert.equal(r.barrier.held, false);
     assert.equal(existsSync(join(r.data, "pending-restore.json")), false);
-    assert.equal(existsSync(join(r.data, ".nn-restore", "20261031T110000Z")), false);
+    assert.equal(existsSync(`${r.sqlite}.nn-staged-20261031T110000Z`), false);
     await assert.rejects(sr.preview("backup-20200101T000000Z-manual"), /no complete backup/);
     await assert.rejects(sr.preview("../etc"), /name of a backup/);
   } finally { rmSync(r.d, { recursive: true, force: true }); }
@@ -199,15 +200,15 @@ test("an interrupted swap is finished by the next start, and a marker for anothe
     await r.storage.close();
     // Crash after the conversation folders were swapped but before the database was: run the swap by hand for the folders, then start.
     const marker = JSON.parse(readFileSync(join(r.data, "pending-restore.json"), "utf8"));
-    await assert.rejects(applyPendingRestore(r.data, join(r.d, "other.sqlite")), /not for this database/);
+    await assert.rejects(applyPendingRestore(r.data, join(r.d, "other.sqlite"), undefined, { piFinal: r.piFinal }), /not for this database/);
     const { renameSync } = await import("node:fs");
     for (const p of marker.pi) { renameSync(p.target, `${p.target}.before-restore-${marker.stamp}`); renameSync(p.staged, p.target); }
-    assert.equal(await applyPendingRestore(r.data, r.sqlite), r.made.manifest.name);
+    assert.equal(await applyPendingRestore(r.data, r.sqlite, undefined, { piFinal: r.piFinal }), r.made.manifest.name);
     const back = await SqliteStorage.open({ path: r.sqlite });
     try { assert.equal(await back.getAggregate({ kind: "task", id: "task-late" }), undefined); } finally { await back.close(); }
-    // A marker that names files outside its staging folder is refused.
-    writeFileSync(join(r.data, "pending-restore.json"), JSON.stringify({ ...marker, pi: [{ staged: join(r.d, "elsewhere"), target: join(r.d, "t") }] }));
-    await assert.rejects(applyPendingRestore(r.data, r.sqlite), /outside its staging/);
+    // A marker that anything else wrote (names files elsewhere, no valid MAC) is refused.
+    writeFileSync(join(r.data, "pending-restore.json"), JSON.stringify({ ...marker, pi: [{ id: "att-1", staged: join(r.d, "elsewhere"), target: join(r.d, "t") }] }));
+    await assert.rejects(applyPendingRestore(r.data, r.sqlite, undefined, { piFinal: r.piFinal }), /not authentic/);
   } finally { rmSync(r.d, { recursive: true, force: true }); }
 });
 
@@ -231,7 +232,7 @@ test("an encrypted backup is restored from inside the controller with the passco
     assert.equal(done.result.piFilesRestored, 3);
     assert.equal(JSON.stringify(done).includes(PASS), false);
     await storage.close();
-    assert.equal(await applyPendingRestore(data, sqlite), made.manifest.name);
+    assert.equal(await applyPendingRestore(data, sqlite, undefined, { piFinal: (id) => join(d, "live", id) }), made.manifest.name);
     // Without the passcode file there is no restore, and nothing is staged.
     const again = await SqliteStorage.open({ path: sqlite });
     try {

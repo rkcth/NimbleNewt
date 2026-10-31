@@ -870,7 +870,7 @@ Arguments:
 
 - `name`: the backup's name, as backup.list shows it
 
-Result: `{ item: { token, name, createdAt, kind, version, schemaVersion, encrypted, rows, artifactFiles, piStores, piFiles, effectsToMarkUncertain?, deliveriesToResend?, steps, warnings } }`.
+Result: `{ item: { token, expiresAt?, name, createdAt, kind, version, schemaVersion, encrypted, rows, artifactFiles, piStores, piFiles, piStateIncluded, piStateProblems?, changesSinceBackup?, effectsToMarkUncertain?, deliveriesToResend?, steps, warnings } }`; the token is bound to the whole backup and expires (restoreConfirmMinutes).
 
 #### `backup.restore.status`
 
@@ -880,7 +880,7 @@ Arguments:
 
 - none
 
-Result: `{ item: { pending?, barrier } }`.
+Result: `{ item: { pending?, barrier, markerProblem? } }`; `pending.failed` says a start tried the swap and it was rolled back (cancel it, then prepare it again).
 
 #### `backup.list`
 
@@ -890,7 +890,7 @@ Arguments:
 
 - none
 
-Result: `{ items: [{ name, createdAt, kind, schemaVersion, epoch, rows }], status }`.
+Result: `{ items: [{ name, createdAt, kind, schemaVersion, epoch, rows, piState }], status }`; `piState` says whether the agents' conversation state is in that backup ("not included" when it is not); kind `pre-restore` is the snapshot taken before a restore.
 
 #### `message.readable`
 
@@ -3445,7 +3445,7 @@ Arguments:
 - `confirm`: the token from backup.restore.preview
 - `method` (optional): passcode or recovery, for an encrypted backup (default passcode)
 
-Result: `{ item: { name, restartRequired: true, safetyCopy, rows, blobsRestored, piStoresRestored, piFilesRestored, effectsMarkedUncertain, deliveriesToResend } }`.
+Result: `{ item: { name, restartRequired: true, safetyCopy, rows, blobsRestored, piStoresRestored, piFilesRestored, effectsMarkedUncertain, deliveriesToResend, blobsSkippedDeleted, changesDiscarded? } }`; `blobsSkippedDeleted` counts artifact files not put back because the artifact was deleted on the retention ledger; `changesDiscarded` is the exact number of recorded changes the restore will discard.
 
 #### `backup.restore.cancel`
 
@@ -3455,7 +3455,7 @@ Arguments:
 
 - none
 
-Result: `{ cancelled }`.
+Result: `{ cancelled, leftovers? }`; also clears a restore that a start tried and rolled back, and puts back what a half-done swap had moved.
 
 #### `message.send`
 
@@ -4640,7 +4640,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `retention.settings.set`
 
-Owner only: changes retention values; only the fields given change, `null` clears an optional one and "default" returns a field to the installation default. `derivedDays` (7 to 3650) expires derived summaries (off unless set); `generationRunDays` (1 to 3650) removes recorded model replies (generation runs, which may hold personal data) that are over, that many days after their last change (off unless set: they are kept); `autoRun` lets the dispatcher run it by itself; `thinkingDays` (default 14) is how long stored model thinking is kept after a task is done (recorded; deleting it needs card K06c); `backupDaily` and `backupWeekly` are the backup counts kept (7 and 4); `incidentArchiveDays` and `incidentPurgeDays` archive and then remove old resolved incidents (off); `catalogVersionsKept` (1 to 500, off) keeps only that many of the newest versions of each catalogue tool: the latest, the one a tool resolves to now, the newest unrevoked one, revoked ones and any a resumable task ran, has parked or approved to run, or lists in an environment or dependency record stay, older ones are dropped by the runner (by hand always; by the automatic pass only when `catalogAutoDrop` is true, default false); `revokedBytesBlank` (true or false, default false) is the switch for blanking the executable text of revoked versions, and `revokedBytesDays` (7 to 3650, default 90, null keeps them) is how long after the revocation, applied only while the switch is on; only a record whose text is still exactly what was registered and that no resumable task, dependency or checkpoint cites is blanked (the record, digest and revocation stay); `quotaProjectBytes` and `quotaAgentBytes` are optional storage quotas (off), warned at `quotaWarnPercent` (80); `reserveBytes` is the room kept for shutdown and recovery records (16 MiB; 0 for none). The answer names each old and new value. This is the form the chat uses.
+Owner only: changes retention values; only the fields given change, `null` clears an optional one and "default" returns a field to the installation default. `derivedDays` (7 to 3650) expires derived summaries (off unless set); `generationRunDays` (1 to 3650) removes recorded model replies (generation runs, which may hold personal data) that are over, that many days after their last change (off unless set: they are kept); `autoRun` lets the dispatcher run it by itself; `thinkingDays` (default 14) is how long stored model thinking is kept after a task is done (recorded; deleting it needs card K06c); `backupDaily` and `backupWeekly` are the backup counts kept (7 and 4); `preRestoreKept` (1 to 1000, null keeps all, the default) keeps only that many of the newest snapshots taken before a restore; `restoreConfirmMinutes` (1 to 10080, default 30, null for no expiry) is how long the owner's approval of a restore stays good; `incidentArchiveDays` and `incidentPurgeDays` archive and then remove old resolved incidents (off); `catalogVersionsKept` (1 to 500, off) keeps only that many of the newest versions of each catalogue tool: the latest, the one a tool resolves to now, the newest unrevoked one, revoked ones and any a resumable task ran, has parked or approved to run, or lists in an environment or dependency record stay, older ones are dropped by the runner (by hand always; by the automatic pass only when `catalogAutoDrop` is true, default false); `revokedBytesBlank` (true or false, default false) is the switch for blanking the executable text of revoked versions, and `revokedBytesDays` (7 to 3650, default 90, null keeps them) is how long after the revocation, applied only while the switch is on; only a record whose text is still exactly what was registered and that no resumable task, dependency or checkpoint cites is blanked (the record, digest and revocation stay); `quotaProjectBytes` and `quotaAgentBytes` are optional storage quotas (off), warned at `quotaWarnPercent` (80); `reserveBytes` is the room kept for shutdown and recovery records (16 MiB; 0 for none). The answer names each old and new value. This is the form the chat uses.
 
 Arguments:
 

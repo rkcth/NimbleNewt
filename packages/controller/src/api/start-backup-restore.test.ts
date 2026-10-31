@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { SqliteStorage } from "../storage/index.js";
+import { ScriptedInterpreter } from "../chat/index.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -58,5 +59,32 @@ test("the owner restores a backup from inside the running controller: preview, a
     const names = JSON.stringify(projects.result ?? projects);
     assert.ok(names.includes("Garden")); assert.equal(names.includes("Late"), false); assert.equal(names.includes("After cancel"), false);
     assert.ok(existsSync(join(d, "c.sqlite")));
+  } finally { await c.close().catch(() => undefined); rmSync(d, { recursive: true, force: true }); }
+});
+
+test("the chat proposes a restore with the plan worked out by the controller, its token comes from the record and not the interpreter; the backup list says Pi state is not included; a second start on the directory is refused (card K01h)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-bkc-"));
+  const say: Record<string, unknown[]> = {};
+  const open = () => startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer() },
+    chat: { interpreter: new ScriptedInterpreter((input) => say[input.text] ?? []) }, backup: { directory: join(d, "backups") } } as never);
+  const c = await open();
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const call = async (op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    await assert.rejects(open(), /another controller holds this data directory/);
+    const made = await call("backup.now", {}, "b1");
+    const name = made.result.item.name as string;
+    const listed = await call("backup.list", {});
+    assert.equal(listed.result.items[0].piState, "not included");
+    assert.equal(listed.result.status.piStateIncluded, false);
+    const text = `restore the backup ${name}`;
+    say[text] = [{ kind: "command", op: "backup.restore.apply", args: { name, confirm: "invented-by-the-interpreter" }, evidence: text, basis: "owner" }];
+    const shown = (await c.chat!.submit(boot.token, { messageId: "m1", text })).outcomes;
+    assert.equal(shown[0]!.status, "proposed", JSON.stringify(shown));
+    const preview = JSON.stringify(shown[0]!.preview);
+    assert.ok(preview.includes("Restore plan"), "the proposal shows the plan");
+    assert.ok(preview.includes("Pi state not included"), "and what is not in it");
+    assert.ok(!preview.includes("invented-by-the-interpreter"));
+    assert.equal((await call("backup.restore.status", {})).result.item.pending, undefined, "a proposal stages nothing");
   } finally { await c.close().catch(() => undefined); rmSync(d, { recursive: true, force: true }); }
 });

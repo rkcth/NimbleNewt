@@ -8,8 +8,8 @@ import type { BackupSeal } from "./crypto.js";
 export const BACKUP_FORMAT = 1;
 export const MANIFEST_FILE = "manifest.json";
 export const PARTIAL_SUFFIX = ".partial";
-export type BackupKind = "manual" | "scheduled" | "pre-upgrade";
-export const BACKUP_KINDS: readonly BackupKind[] = ["manual", "scheduled", "pre-upgrade"];
+export type BackupKind = "manual" | "scheduled" | "pre-upgrade" | "pre-restore";
+export const BACKUP_KINDS: readonly BackupKind[] = ["manual", "scheduled", "pre-upgrade", "pre-restore"];
 
 export interface BackupFileEntry { readonly table: SnapshotTable; readonly file: string; readonly rows: number; readonly bytes: number; readonly sha256: string }
 
@@ -19,7 +19,7 @@ export interface BackupArtifacts { readonly index: BackupIndexEntry; readonly bl
 export interface BlobIndexLine { readonly digest: string; readonly size: number; readonly file?: string }
 export interface BackupIndexEntry { readonly file: string; readonly rows: number; readonly bytes: number; readonly sha256: string }
 /** The agents' own conversation stores in a backup (card K01h): `pi-state.jsonl` lists each file (store, relative path with forward slashes, size, digest, stored name) and the file is `pi-state/f-<n>`. */
-export interface BackupPiState { readonly index: BackupIndexEntry; readonly stores: number; readonly files: number; readonly bytes: number }
+export interface BackupPiState { readonly index: BackupIndexEntry; readonly stores: number; readonly files: number; readonly bytes: number; /** What could not be copied faithfully (a link, a hard-linked or special file, a file that kept changing, a folder or store that could not be read), at most 100 lines; `problemCount` is the full count. Absent: nothing. */ readonly problems?: readonly string[]; readonly problemCount?: number }
 export interface PiIndexLine { readonly store: string; readonly rel: string; readonly size: number; readonly sha256: string; readonly file?: string }
 export const PI_INDEX = "pi-state.jsonl";
 export const PI_FOLDER = "pi-state";
@@ -64,7 +64,7 @@ export const BACKUP_NOTES: readonly string[] = [
 /** A marker the backups folder gets the first time an encrypted backup is made in it: afterwards a plain backup in that folder is refused by the command line unless the owner says `--allow-plain yes`. */
 export const ENCRYPTION_MARKER = "encryption-set-up";
 
-const NAME = /^backup-(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z-(manual|scheduled|pre-upgrade)$/;
+const NAME = /^backup-(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z-(manual|scheduled|pre-upgrade|pre-restore)$/;
 /** The time and kind a backup's folder name carries (the name is the one thing retention can check without a secret), or undefined for a name that is not a backup's. */
 export function parseBackupName(name: string): { at: string; kind: BackupKind } | undefined {
   const m = NAME.exec(name);
