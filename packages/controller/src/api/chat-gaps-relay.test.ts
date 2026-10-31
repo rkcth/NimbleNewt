@@ -33,21 +33,33 @@ test("the model relay stops a paid call once the owner's aggregate spending cap 
     const task = (await c.services.projects.createTask({ commandId: "t1", actor: rob.id, projectId: project, title: "Build" })).id;
     const budgets = BudgetService.withEpoch(c.storage, c.epoch);
     await budgets.open(rob, { commandId: "bo", taskId: task, currency: "USD", costMicros: 1_000_000 });
-    const send = async (attemptId: string, route: string) => {
-      const attempt = services!.attemptRelay({ attemptId, taskId: task, projectId: project, agentId: "ann", generation: 1, route, expiresAt: "2999-01-01T00:00:00.000Z" } as never, relay);
+    // Each call comes from a real running attempt (as in production, where the relay records the call's generation): a fresh task, assigned, admitted and in progress.
+    let n = 0;
+    const send = async (route: string) => {
+      const id = `${++n}`;
+      const t = (await c.services.projects.createTask({ commandId: `t-${id}`, actor: rob.id, projectId: project, title: `Call ${id}` })).id;
+      await c.services.projects.transitionTask({ commandId: `r-${id}`, actor: rob.id, taskId: t, expectedRevision: 1, to: "ready" });
+      const ann = { kind: "agent", id: "ann" } as const;
+      await c.services.assignments.assignTask({ commandId: `as-${id}`, actor: rob.id, taskId: t, owner: ann });
+      const a = (await c.services.assignments.getAssignment(t))!;
+      await c.services.assignments.admitAttempt({ commandId: `ad-${id}`, actor: rob.id, taskId: t, expectedRevision: a.revision, generation: a.generation, owner: ann, harness: "pi" });
+      const row = (await c.services.projects.getTask(t))!;
+      await c.services.projects.transitionTask({ commandId: `ip-${id}`, actor: rob.id, taskId: t, expectedRevision: row.revision, to: "in_progress" });
+      const live = (await c.services.assignments.getAssignment(t))!.activeAttemptId!;
+      const attempt = services!.attemptRelay({ attemptId: live, taskId: t, projectId: project, agentId: "ann", generation: a.generation, route, expiresAt: "2999-01-01T00:00:00.000Z" } as never, relay);
       return attempt.relay({ url: `${attempt.relayBase}/${attempt.alias}/chat/completions`, method: "POST", headers: [["content-type", "application/json"]], body: Buffer.from("{}"), signal: new AbortController().signal } as never);
     };
     // No cap: a paid call goes out.
-    assert.equal((await send("att-aaaaaaaaaaaaaaaaaaaa", "cloud/big")).status, 200);
+    assert.equal((await send("cloud/big")).status, 200);
     await budgets.setAggregate(rob, { commandId: "cap", enabled: true, scope: "installation", period: "none", amountMicros: 1000 });
     await budgets.charge(rob, { commandId: "ch", activity: "model-call", taskId: task, agentId: "agent:ann", costMicros: 1500 });
     const before = calls.length;
-    await assert.rejects(() => send("att-bbbbbbbbbbbbbbbbbbbb", "cloud/big"), /the model relay refused the call: .*aggregate cap is reached/);
+    await assert.rejects(() => send("cloud/big"), /the model relay refused the call: .*aggregate cap is reached/);
     assert.equal(calls.length, before, "the paid call was never sent");
     // A free (local) route is not money: it goes through.
-    assert.equal((await send("att-cccccccccccccccccccc", "llama/local")).status, 200);
+    assert.equal((await send("llama/local")).status, 200);
     // Turned off: paid calls go out again.
     await budgets.setAggregate(rob, { commandId: "cap2", enabled: false });
-    assert.equal((await send("att-dddddddddddddddddddd", "cloud/big")).status, 200);
+    assert.equal((await send("cloud/big")).status, 200);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
