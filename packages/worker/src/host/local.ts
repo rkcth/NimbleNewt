@@ -83,6 +83,8 @@ export interface AttemptWorkspace extends AttemptSandboxPlan { readonly limits?:
 /** What a launch of the worker process came to, for the record (card H12k): the figures asked for, how each was applied, and whether the owner allowed best effort. Contains no secret. */
 export interface LaunchEnforcement {
   readonly attemptId: string;
+  /** The agent the attempt belongs to (so records can be kept per agent). */
+  readonly agentId?: string;
   readonly outcome: "started" | "refused";
   /** The limits asked for at this launch (the workspace's and the owner's setting, the smaller of each figure). */
   readonly requested: ResourceLimits;
@@ -94,6 +96,10 @@ export interface LaunchEnforcement {
   readonly wallTimeMs: number;
   /** Why the launch was refused (at most 500 characters). */
   readonly reason?: string;
+  /** For a refusal because limits could not be enforced in full: which limits and how far each was enforced. */
+  readonly failed?: readonly { readonly limit: string; readonly enforced: "partial" | "none"; readonly detail: string }[];
+  /** Where the host's own start-up figure is stricter than the figure the owner set, the figure that was applied and why. */
+  readonly stricter?: readonly { readonly limit: string; readonly owner: number; readonly applied: number; readonly why: string }[];
 }
 
 /** The smaller of each figure two limit sets name; a figure only one names is kept. */
@@ -101,11 +107,33 @@ export function strictestLimits(a: ResourceLimits | undefined, b: ResourceLimits
   if (a === undefined) return b;
   if (b === undefined) return a;
   const out: Record<string, number> = {};
-  for (const key of ["cpus", "memoryMb", "diskMb", "processes"] as const) {
+  for (const key of ["cpus", "memoryMb", "diskMb", "processes", "wallTimeMs"] as const) {
     const x = a[key]; const y = b[key];
     if (x !== undefined || y !== undefined) out[key] = Math.min(x ?? Number.MAX_SAFE_INTEGER, y ?? Number.MAX_SAFE_INTEGER);
   }
   return out;
+}
+
+/** The figures where `host` (the embedder's start-up figure carried by the workspace) is stricter than the `owner`'s. */
+export function stricterThanOwner(host: ResourceLimits | undefined, owner: ResourceLimits | undefined): NonNullable<LaunchEnforcement["stricter"]> {
+  const out: { limit: string; owner: number; applied: number; why: string }[] = [];
+  if (host === undefined || owner === undefined) return out;
+  for (const key of ["cpus", "memoryMb", "diskMb", "processes", "wallTimeMs"] as const) {
+    const h = host[key]; const o = owner[key];
+    if (h !== undefined && o !== undefined && h < o) out.push({ limit: key, owner: o, applied: h, why: `the host's own start-up figure (${h}) is stricter than the ${o} you set, so ${h} applies` });
+  }
+  return out;
+}
+
+/** What the controller hands a host builder to apply the owner's policy (structural: the worker package holds no controller type). */
+export interface OwnerPolicyServices {
+  readonly currentLimits: () => Promise<ResourceLimits | undefined>;
+  readonly bestEffortAllowed: () => Promise<boolean>;
+  readonly recordLaunch: (record: LaunchEnforcement) => Promise<void>;
+}
+/** The three options that connect a host to the owner's limits, best-effort setting and launch record, from the services the controller gave `build`. Spread into `localWorkerParts` options. */
+export function ownerPolicyOptions(services: OwnerPolicyServices): Pick<LocalHostOptions<unknown>, "limits" | "bestEffort" | "onLaunch"> {
+  return { limits: () => services.currentLimits(), bestEffort: () => services.bestEffortAllowed(), onLaunch: (record) => services.recordLaunch(record) };
 }
 
 export interface LocalHostOptions<Call> {
@@ -156,6 +184,8 @@ interface Reserved { readonly order: HostOrder; readonly workspace: AttemptWorks
 export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
   readonly sandbox: { open(recipe: HostOrder["recipe"], order: HostOrder): Promise<HostSandboxSession> };
   readonly runtimes: { open(order: HostOrder, call: Call, from: JsonObj | undefined): Promise<HostRuntime> };
+  /** True when the owner's limits, best-effort setting and launch record are all connected (`limits`, `bestEffort`, `onLaunch` given); pass it to the `LocalWorker` so the controller can tell. */
+  readonly ownerPolicy: boolean;
 } {
   const reserved = new Map<string, Reserved>();
   const clock = options.clock ?? Date.now;
@@ -193,28 +223,39 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
       if (from?.["pi"] !== undefined && !existsSync(join(entry.workspace.home, "pi"))) throw new Error("the attempt resumes from a checkpoint but this host no longer holds the conversation");
       await entry.process?.close().catch(() => undefined);
       const remaining = Math.min(MAX_RUN_MS, order.expiresAt === undefined ? Number.MAX_SAFE_INTEGER : Math.max(1000, Date.parse(order.expiresAt) - clock()));
-      const requested = strictestLimits(entry.workspace.limits, await options.limits?.(order)) ?? {};
-      const bestEffort = options.bestEffort === undefined ? options.requireEnforced === false : (await options.bestEffort(order)) === true;
+      // Everything the owner's policy needs is read inside the guard: a setting that cannot be read refuses the launch AND is recorded as refused, with the reason (never an unrecorded throw).
+      let requested: ResourceLimits = {};
+      let bestEffort = false;
+      let stricter: NonNullable<LaunchEnforcement["stricter"]> = [];
+      let wallTimeMs = remaining;
       let process: WorkerProcess;
       try {
+        const ownerLimits = await options.limits?.(order);
+        requested = strictestLimits(entry.workspace.limits, ownerLimits) ?? {};
+        stricter = stricterThanOwner(entry.workspace.limits, ownerLimits);
+        bestEffort = options.bestEffort === undefined ? options.requireEnforced === false : (await options.bestEffort(order)) === true;
+        if (requested.wallTimeMs !== undefined) wallTimeMs = Math.min(remaining, requested.wallTimeMs);
+        const { wallTimeMs: _wall, ...processLimits } = requested;
         process = await WorkerProcess.launch(options.launcher, {
           recipe: entry.recipe,
           command: [`/opt/node/${options.app.node.executable}`, options.app.entry],
-          timeoutMs: remaining,
+          timeoutMs: wallTimeMs,
           // Standard error is kept (bounded) for the failure message; standard output is the channel.
           maxOutputBytes: 64 * 1024,
-          ...(Object.keys(requested).length === 0 ? {} : { limits: requested }),
+          ...(Object.keys(processLimits).length === 0 ? {} : { limits: processLimits }),
           requireEnforced: !bestEffort,
         }, {
           bridge: (token, request) => options.bridge(order, call, token, request),
           relay: (request) => options.relay(order, request),
         });
       } catch (error) {
-        try { await options.onLaunch?.({ attemptId: order.attemptId, outcome: "refused", requested, bestEffort, enforcement: [], wallTimeMs: remaining, reason: String((error as Error)?.message ?? error).slice(0, 500) }); } catch { /* the refusal itself is what is reported */ }
+        const failed = (error as { limitFailures?: NonNullable<LaunchEnforcement["failed"]> }).limitFailures;
+        try { await options.onLaunch?.({ attemptId: order.attemptId, agentId: order.agentId, outcome: "refused", requested, bestEffort, enforcement: [], wallTimeMs, reason: String((error as Error)?.message ?? error).slice(0, 500), ...(failed === undefined ? {} : { failed }), ...(stricter.length === 0 ? {} : { stricter }) }); } catch { /* the refusal itself is what is reported */ }
         throw error;
       }
       try {
-        await options.onLaunch?.({ attemptId: order.attemptId, outcome: "started", requested, bestEffort, enforcement: process.enforcement, wallTimeMs: remaining });
+        const wall = requested.wallTimeMs === undefined ? [] : [{ limit: "wallTimeMs" as const, value: requested.wallTimeMs, enforced: "full" as const, by: "launcher time limit", detail: "the process is ended when the time is up" }];
+        await options.onLaunch?.({ attemptId: order.attemptId, agentId: order.agentId, outcome: "started", requested, bestEffort, enforcement: [...process.enforcement, ...wall], wallTimeMs, ...(stricter.length === 0 ? {} : { stricter }) });
       } catch (error) {
         await process.close().catch(() => undefined);
         throw error;
@@ -259,5 +300,5 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
     },
   };
 
-  return { sandbox, runtimes };
+  return { sandbox, runtimes, ownerPolicy: options.limits !== undefined && options.bestEffort !== undefined && options.onLaunch !== undefined };
 }

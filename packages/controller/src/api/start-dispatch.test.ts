@@ -178,7 +178,7 @@ test("start binds the controller's services to the local worker's guards, offers
   let gated = false;
   const c = await open(join(d, "c.sqlite"), {
     harnesses: [PI],
-    dispatch: { timer, manual: true, local: { window: () => 8192, close: async () => { closed++; }, build: (services) => { built.push(services); const limits = services.context({ route: "x" } as never); const relay = services.attemptRelay({ attemptId: "att-r", route: "llama/local", expiresAt: "2999-01-01T00:00:00.000Z" } as never, { forAttempt: (a: { onFirstUsage?: unknown }) => ({ alias: "m0", relayBase: "x", relay: async () => { throw new Error(String(typeof a.onFirstUsage)); } }) } as never);
+    dispatch: { timer, manual: true, local: { acceptUnenforcedLimits: true, window: () => 8192, close: async () => { closed++; }, build: (services) => { built.push(services); const limits = services.context({ route: "x" } as never); const relay = services.attemptRelay({ attemptId: "att-r", route: "llama/local", expiresAt: "2999-01-01T00:00:00.000Z" } as never, { forAttempt: (a: { onFirstUsage?: unknown }) => ({ alias: "m0", relayBase: "x", relay: async () => { throw new Error(String(typeof a.onFirstUsage)); } }) } as never);
           assert.equal(services.attemptRelay({ attemptId: "att-r", route: "llama/local", expiresAt: "2999-01-01T00:00:00.000Z" } as never, {} as never), relay, "one relay for every call of an attempt");
           assert.ok(limits !== undefined && (limits.toolOutputBytes ?? 0) > 0 && limits.compaction?.fallback === "extractive", "the composer gives the host the context limits of the window"); return worker; } }, mcp: { resolve: async () => { lookups++; return Array.isArray(answer[0]) ? (answer as string[][])[Math.min(lookups, answer.length) - 1]! : (answer as string[]); }, gate: async () => { if (gated) throw new Error("the controller is paused"); } } },
   });
@@ -223,7 +223,7 @@ test("start gives the local host one cache policy per attempt, from the owner's 
     dispatch: {
       timer: new ManualTimer(), manual: true,
       cache: { secret: "installation-secret-0123456789", endpoints: { "vllm/big": { url: "http://127.0.0.1:8000", config: { kind: "vllm", model: "big", route: "vllm/big" } } } },
-      local: { window: () => 8192, build: (services) => { seen.push(services.cache as never); return { hostId: "host:w1" } as unknown as WorkerHost; } },
+      local: { acceptUnenforcedLimits: true, window: () => 8192, build: (services) => { seen.push(services.cache as never); return { hostId: "host:w1" } as unknown as WorkerHost; } },
     },
   });
   try {
@@ -319,7 +319,7 @@ test("the composed dispatcher reads prerequisites without grants: a task with an
 test("start hands the configured limits for local agents to the host builder, and refuses a bad figure at start (card H12k)", async () => {
   const d = dir();
   const seen: unknown[] = [];
-  const mk = (limits?: unknown) => ({ harnesses: [PI], dispatch: { timer: new ManualTimer(), manual: true, local: { window: () => 8192, ...(limits === undefined ? {} : { limits }), build: (s: { currentLimits: () => Promise<unknown> }) => { seen.push(s.currentLimits()); return { hostId: "host:w1" } as unknown as WorkerHost; } } } } as unknown as Partial<Parameters<typeof startController>[0]>);
+  const mk = (limits?: unknown) => ({ harnesses: [PI], dispatch: { timer: new ManualTimer(), manual: true, local: { acceptUnenforcedLimits: true, window: () => 8192, ...(limits === undefined ? {} : { limits }), build: (s: { currentLimits: () => Promise<unknown> }) => { seen.push(s.currentLimits()); return { hostId: "host:w1" } as unknown as WorkerHost; } } } } as unknown as Partial<Parameters<typeof startController>[0]>);
   const none = await open(join(d, "a.sqlite"), mk());
   await none.close();
   assert.deepEqual(await Promise.all(seen), [undefined], "nothing configured: nothing applied");

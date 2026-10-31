@@ -77,6 +77,8 @@ export interface WorkerHost {
   readonly hostId: string;
   /** What one attempt asks of the host, for admission (H03). */
   readonly resources: { readonly cpus: number; readonly memoryMb: number };
+  /** True when this host applies the owner's limits, best-effort setting and launch record (the host builder connected `currentLimits`, `bestEffortAllowed` and `recordLaunch`). A local host that does not say so is refused at start (card H12k). */
+  readonly ownerPolicy?: boolean;
   start(order: WorkOrder): Promise<WorkerHandle>;
   /** Ends whatever this host still holds for an attempt that ended while this process had no handle for it (the controller restarted since the worker was placed). Without it a placement that outlived its controller would hold the agent's store for ever. Nothing held: nothing happens. */
   release?(attemptId: string, reason: string, signal?: AbortSignal): Promise<void>;

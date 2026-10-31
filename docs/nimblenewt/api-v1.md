@@ -197,7 +197,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `workers.limits.enforced`
 
-What the launches of one local agent attempt came to (owner only): per launch (last ten) whether it started or was refused, the limits asked for, how each was enforced (full, partial or none, by what mechanism), whether best effort was allowed, and the wall-clock limit.
+What the launches of one local agent attempt came to (owner only): per launch (last ten) whether it started or was refused, the limits asked for, how each was enforced (full, partial or none, by what mechanism), whether best effort was allowed, the wall-clock limit, `failed` (for a refusal: the limits that could not be enforced) and `stricter` (where the host's own start-up figure was stricter than the owner's and so applied). The newest 20 attempts of each agent are kept.
 
 Arguments:
 
@@ -1764,7 +1764,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `workers.limits.set`
 
-The owner sets what one local agent may use (owner only): `limits` has any of `cpus` (1 to 256), `memoryMb` (16 to 4194304), `diskMb` (1 to 16777216) and `processes` (1 to 100000), whole numbers. The object replaces the earlier setting; an empty object clears it so the start-up figures apply. It counts from the next agent launched; agents already running keep their limits. The host enforces the limits or refuses to launch.
+The owner sets what one local agent may use (owner only): `limits` has any of `cpus` (1 to 256), `memoryMb` (16 to 4194304), `diskMb` (1 to 16777216), `processes` (1 to 100000) and `wallTimeMs` (1000 to 604800000: how long one launch of the agent's process may run; optional, off when not set), whole numbers. The object replaces the earlier setting; an empty object clears it so the start-up figures apply. It counts from the next agent launched; agents already running keep their limits. The host enforces the limits or refuses to launch.
 
 Arguments:
 
@@ -1777,7 +1777,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `workers.limits.change`
 
-The owner changes some of the limits for local agents, leaving the others as they are (owner only): `set` has any of `cpus`, `memoryMb`, `diskMb`, `processes` (same bounds as `workers.limits.set`) and `unset` lists figures to clear so the start-up figure applies. This is the form the chat uses, so a request that waits to be accepted does only what it says and keeps a figure changed meanwhile. It counts from the next agent launched.
+The owner changes some of the limits for local agents, leaving the others as they are (owner only): `set` has any of `cpus`, `memoryMb`, `diskMb`, `processes`, `wallTimeMs` (same bounds as `workers.limits.set`) and `unset` lists figures to clear so the start-up figure applies. This is the form the chat uses, so a request that waits to be accepted does only what it says and keeps a figure changed meanwhile. It counts from the next agent launched.
 
 Arguments:
 
@@ -1791,7 +1791,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `workers.limits.besteffort`
 
-The owner allows or forbids best effort for local agents (owner only). Off (the default): an agent whose limits (cpus, memoryMb, diskMb, processes) this operating system cannot enforce in full is not started; the refusal is recorded with the reason. On: it starts anyway and the record says which limit was only partly enforced or not at all. Counts from the next agent launched. Chat: enable or disable.
+The owner allows or forbids best effort for local agents (owner only). Off (the default): an agent whose limits (cpus, memoryMb, diskMb, processes) this operating system cannot enforce in full is not started; the refusal is recorded with the reason and names the limits that failed. Pinning to cores (taskset) counts as partial: only a cgroup scope enforces cpus in full. On: it starts anyway and the record says which limit was only partly enforced or not at all. Counts from the next agent launched. Chat: disabling applies at once (it is the safer direction); enabling is shown first.
 
 Arguments:
 

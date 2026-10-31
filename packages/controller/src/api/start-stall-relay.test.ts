@@ -32,7 +32,7 @@ test("a model call the relay carries is reported to stall detection by the contr
   const c = await startController({
     storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
     onInternalError: (e) => { problems.push(e); },
-    dispatch: { timer: new ManualTimer(), manual: true, local: { window: () => 8192, close: async () => undefined, build: (s) => { services = s as never; return { hostId: "host:w1" } as unknown as WorkerHost; } } },
+    dispatch: { timer: new ManualTimer(), manual: true, local: { acceptUnenforcedLimits: true, window: () => 8192, close: async () => undefined, build: (s) => { services = s as never; return { hostId: "host:w1" } as unknown as WorkerHost; } } },
   });
   try {
     assert.ok(c.dispatch !== undefined, c.dispatchProblem);
@@ -101,7 +101,7 @@ test("a route's declared reading speed in the routing table judges the first cal
   const c = await startController({
     storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
     onInternalError: (e) => { problems.push(e); },
-    dispatch: { timer: new ManualTimer(), manual: true, local: { window: () => 8192, close: async () => undefined, build: (s) => { services = s as never; return { hostId: "host:w1" } as unknown as WorkerHost; } } },
+    dispatch: { timer: new ManualTimer(), manual: true, local: { acceptUnenforcedLimits: true, window: () => 8192, close: async () => undefined, build: (s) => { services = s as never; return { hostId: "host:w1" } as unknown as WorkerHost; } } },
   });
   try {
     assert.ok(c.dispatch !== undefined, c.dispatchProblem);

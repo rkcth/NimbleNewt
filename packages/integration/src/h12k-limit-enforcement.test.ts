@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { startController } from "@nimblenewt/controller";
-import { SandboxError, SandboxLauncher, limitedPlan, localWorkerParts, strictestLimits, type LaunchEnforcement, type LimitCapabilities } from "@nimblenewt/worker";
+import { SandboxError, SandboxLauncher, limitedPlan, localWorkerParts, ownerPolicyOptions, strictestLimits, type LaunchEnforcement, type LimitCapabilities } from "@nimblenewt/worker";
 import type { HostOrder, LaunchRequest, RunResult, SandboxRun } from "@nimblenewt/worker";
 
 // Card H12k (limits): the owner's limits for local agents reach the sandbox launch, a launch whose limits this OS cannot enforce in full is refused unless the owner allowed best effort, and every launch is recorded.
@@ -31,7 +31,7 @@ async function rig(options: { onLaunchFails?: boolean; hang?: boolean; workspace
       const report = limitedPlan({ file: request.command[0]!, args: [], env: {} } as never, request.limits ?? {}, CAPS).report;
       if (request.requireEnforced === true) {
         const weak = report.filter((r) => r.enforced !== "full");
-        if (weak.length > 0) throw new SandboxError("unavailable", `these limits cannot be fully enforced on this host: ${weak.map((r) => `${r.limit} (${r.detail})`).join("; ")}`);
+        if (weak.length > 0) throw new SandboxError("unavailable", `these limits cannot be fully enforced on this host: ${weak.map((r) => `${r.limit} (${r.detail})`).join("; ")}`, { limitFailures: weak.map((r) => ({ limit: r.limit, enforced: r.enforced as "partial" | "none", detail: r.detail })) });
       }
       requests.push(request);
       const result: RunResult = { exitCode: 1, signal: null, timedOut: false, killed: false, stdout: "", stderr: "fake: no process", truncated: false, stdoutTruncated: false, durationMs: 1 };
@@ -53,7 +53,7 @@ async function rig(options: { onLaunchFails?: boolean; hang?: boolean; workspace
         limits: () => s.currentLimits(), bestEffort: () => s.bestEffortAllowed(),
         onLaunch: async (record) => { launches.push(record); if (options.onLaunchFails === true) throw new Error("record store down"); await s.recordLaunch(record); },
       });
-      return { hostId: "host:w1" } as never;
+      return { hostId: "host:w1", ownerPolicy: parts.ownerPolicy } as never;
     } } },
   } as never);
   const owner = await c.services.principals.bootstrapOwner({ name: "rob" });
@@ -98,13 +98,14 @@ test("limits the OS cannot enforce in full refuse the launch (nothing is started
     assert.equal(item.launches[0].outcome, "refused");
     assert.deepEqual(item.launches[0].requested, { memoryMb: 512, diskMb: 100, processes: 50 });
     assert.match(item.launches[0].reason, /processes/);
+    assert.deepEqual(item.launches[0].failed.map((f: any) => [f.limit, f.enforced]).sort(), [["diskMb", "partial"], ["memoryMb", "partial"], ["processes", "none"]], "the record names which limits failed, in a field of its own");
   } finally { await t.done(); }
 });
 
 test("best effort (owner, chat-settable) lets the weak ones through and the record says which were not full; disabling refuses again; limit changes keep the switch", async () => {
   const t = await rig();
   try {
-    // cpus is enforced in full (core affinity) but processes cannot be without a user systemd scope, so strict refuses; with the switch on it starts and the record says which one was not enforced.
+    // cpus is only pinned to cores (partial) and processes cannot be enforced without a user systemd scope, so strict refuses both; with the switch on it starts and the record says which one was not enforced.
     assert.ok((await t.call(t.token, "workers.limits.set", { limits: { cpus: 2, processes: 10 } }, "s1")).ok);
     assert.ok((await t.attempt()).error?.message.includes("cannot be fully enforced"));
     const rev = (await t.call(t.token, "workers.limits.get", {})).result.item.revision;
@@ -119,7 +120,7 @@ test("best effort (owner, chat-settable) lets the weak ones through and the reco
     assert.equal(rec.outcome, "started");
     assert.equal(rec.bestEffort, true);
     const byLimit = Object.fromEntries(rec.enforcement.map((e: any) => [e.limit, e.enforced]));
-    assert.deepEqual(byLimit, { cpus: "full", processes: "none" }, "what was not enforced in full is recorded, not hidden");
+    assert.deepEqual(byLimit, { cpus: "partial", processes: "none" }, "what was not enforced in full is recorded, not hidden: a core pin is partial, an unprivileged process can widen it");
     // Changing figures does not switch best effort off.
     assert.ok((await t.call(t.token, "workers.limits.change", { set: { memoryMb: 256 } }, "c1")).ok);
     assert.ok((await t.call(t.token, "workers.limits.set", { limits: { cpus: 2, processes: 10 } }, "s2")).ok);
@@ -161,6 +162,9 @@ test("when the setting cannot be read the launch is refused, not made unlimited 
     const { error } = await t.attempt();
     assert.ok(error !== undefined);
     assert.equal(t.requests.length, 0, "no process was started");
+    assert.equal(t.launches.length, 1, "the refusal is reported to the record, not only thrown");
+    assert.equal(t.launches[0]!.outcome, "refused");
+    assert.match(String(t.launches[0]!.reason), /disk gone/);
     // A damaged best-effort flag is refused too.
     storage.getAggregate = async (ref) => { const a = await real(ref) as any; return ref.kind === "worker-limits-settings" && a !== undefined ? { ...a, body: { ...a.body, bestEffort: "yes" } } : a; };
     assert.ok((await t.attempt()).error !== undefined);
@@ -191,12 +195,14 @@ test("a launch that cannot be recorded does not run: the process is ended", asyn
   } finally { await t.done(); }
 });
 
-test("the real launcher refuses a disk limit it cannot enforce in full, before anything starts, and the host records it", async () => {
+test("the real launcher refuses a disk limit it cannot enforce in full, before anything starts, and the host records it", async (t) => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "nn h12kr ")));
   try {
     const dirs = { checkout: join(dir, "checkout"), gitDir: join(dir, "git"), home: join(dir, "home"), scratch: join(dir, "scratch") };
     for (const d of Object.values(dirs)) mkdirSync(d);
     const real = await SandboxLauncher.create({ protectedPaths: [], audit: () => undefined });
+    // Without a confined launch the refusal would be a different one ("no confined launch is possible"): this test is about the limit.
+    if (!real.capacity.available) return t.skip(`no confined launch on this machine: ${real.capacity.reason}`);
     const records: LaunchEnforcement[] = [];
     const parts = localWorkerParts<unknown>({
       launcher: real, app: { node: { root: nodeRoot, executable: "bin/node" }, mounts: [], entry: "/opt/app/main.js" }, protectedPaths: [],
@@ -211,6 +217,69 @@ test("the real launcher refuses a disk limit it cannot enforce in full, before a
     assert.equal(records.length, 1);
     assert.equal(records[0]!.outcome, "refused");
     assert.deepEqual(records[0]!.requested, { diskMb: 10 });
-    assert.ok((records[0]!.reason ?? "").length > 0);
+    assert.match(records[0]!.reason ?? "", /these limits cannot be fully enforced on this host: diskMb \(/, "refused for the disk limit specifically");
+    assert.deepEqual(records[0]!.failed?.map((f) => f.limit), ["diskMb"]);
+  } finally { rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("an owner-set wallTimeMs ends the process at that time (optional, off by default) and the record shows it", async () => {
+  const t = await rig();
+  try {
+    assert.ok((await t.call(t.token, "workers.limits.besteffort", { enabled: true }, "b1")).ok);
+    await t.attempt();
+    assert.ok(t.requests[0]!.timeoutMs > 3_000_000, "no wall-clock limit set: the attempt's remaining time");
+    assert.ok((await t.call(t.token, "workers.limits.change", { set: { wallTimeMs: 5000 } }, "w1")).ok);
+    assert.equal((await t.call(t.token, "workers.limits.set", { limits: { wallTimeMs: 10 } }, "w2")).error?.code, "invalid_command", "below the smallest allowed");
+    const run = await t.attempt();
+    assert.equal(t.requests[1]!.timeoutMs, 5000);
+    assert.equal(t.requests[1]!.limits, undefined, "the time limit is the launcher's timeout, not a process limit");
+    const rec = (await t.call(t.token, "workers.limits.enforced", { attemptId: run.order.attemptId })).result.item.launches[0];
+    assert.equal(rec.wallTimeMs, 5000);
+    assert.deepEqual(rec.enforcement.map((e: any) => [e.limit, e.enforced, e.by]), [["wallTimeMs", "full", "launcher time limit"]]);
+    assert.ok((await t.call(t.token, "workers.limits.change", { unset: ["wallTimeMs"] }, "w3")).ok);
+    await t.attempt();
+    assert.ok(t.requests[2]!.timeoutMs > 3_000_000, "cleared: off again");
+  } finally { await t.done(); }
+});
+
+test("the record says why a figure is not the one the owner set when the host's own start-up figure is stricter", async () => {
+  const t = await rig({ workspaceLimits: { memoryMb: 100 } });
+  try {
+    assert.ok((await t.call(t.token, "workers.limits.besteffort", { enabled: true }, "b1")).ok);
+    assert.ok((await t.call(t.token, "workers.limits.set", { limits: { memoryMb: 4096 } }, "s1")).ok);
+    const run = await t.attempt();
+    assert.deepEqual(t.requests[0]!.limits, { memoryMb: 100 });
+    const rec = (await t.call(t.token, "workers.limits.enforced", { attemptId: run.order.attemptId })).result.item.launches[0];
+    assert.deepEqual(rec.stricter.map((x: any) => [x.limit, x.owner, x.applied]), [["memoryMb", 4096, 100]]);
+    assert.match(rec.stricter[0].why, /stricter than the 4096 you set/);
+  } finally { await t.done(); }
+});
+
+test("a host built with the controller's policy services through ownerPolicyOptions is accepted and enforces the owner's limits; one that ignores them is refused at start", async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "nn h12ko ")));
+  const base = (build: (s: any) => unknown) => ({ storage: { kind: "sqlite", path: join(dir, `${Math.random()}.sqlite`) }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], dispatch: { timer, manual: true, local: { window: () => 8192, close: async () => undefined, build } } }) as never;
+  try {
+    // Ignoring the policy: refused by startController.
+    const ignoring = await startController(base(() => ({ hostId: "host:w1" })));
+    assert.equal(ignoring.dispatch, undefined, "no dispatcher runs agents unlimited");
+    assert.match(String(ignoring.dispatchProblem), /does not apply the owner's limits/);
+    await ignoring.close();
+    // Through the helper: accepted.
+    const records: LaunchEnforcement[] = [];
+    const c = await startController(base((s: any) => {
+      const parts = localWorkerParts<unknown>({
+        launcher: { launch: async () => { throw new Error("not reached"); } } as never, app: { node: { root: nodeRoot, executable: "bin/node" }, mounts: [], entry: "/opt/app/main.js" }, protectedPaths: [],
+        workspace: () => ({ checkout: join(dir, "c"), gitDir: join(dir, "g"), home: join(dir, "h"), scratch: join(dir, "s") }),
+        model: () => ({ alias: "m0", provider: "llama", api: "openai-completions", modelId: "local", contextWindow: 32768, maxTokens: 1024, reasoning: false, input: ["text"] }),
+        namespaceId: () => "abcdef0123456789", bridge: async () => ({ ok: true, result: {} }), relay: async () => { throw new Error("not used"); },
+        ...ownerPolicyOptions({ ...s, recordLaunch: async (r: LaunchEnforcement) => { records.push(r); await s.recordLaunch(r); } }),
+      });
+      assert.equal(parts.ownerPolicy, true);
+      return { hostId: "host:w1", ownerPolicy: parts.ownerPolicy };
+    }));
+    await c.close();
+    // A host that connected only some of the three does not claim the policy.
+    const partial = localWorkerParts<unknown>({ launcher: {} as never, app: { node: { root: nodeRoot, executable: "bin/node" }, mounts: [], entry: "/x" }, protectedPaths: [], workspace: () => ({} as never), model: () => ({} as never), namespaceId: () => "x", bridge: async () => ({ ok: true, result: {} }), relay: async () => { throw new Error("n"); }, limits: () => undefined });
+    assert.equal(partial.ownerPolicy, false);
   } finally { rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

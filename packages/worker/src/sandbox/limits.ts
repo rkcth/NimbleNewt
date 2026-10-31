@@ -15,6 +15,8 @@ export interface ResourceLimits {
   readonly diskMb?: number;
   /** Processes and threads at once. */
   readonly processes?: number;
+  /** How long the process may run, in milliseconds (the launcher's time limit; applied by the host, not the plan). */
+  readonly wallTimeMs?: number;
 }
 export type LimitName = keyof ResourceLimits;
 
@@ -46,7 +48,7 @@ export interface LimitCapabilities {
 /** What the controller and the host keep for themselves out of what agents may be given. */
 export interface Headroom { readonly cpus: number; readonly memoryMb: number }
 export const DEFAULT_HEADROOM: Headroom = { cpus: 1, memoryMb: 1024 };
-export const LIMIT_BOUNDS = { cpus: [1, 256], memoryMb: [16, 4_194_304], diskMb: [1, 16_777_216], processes: [1, 100_000] } as const;
+export const LIMIT_BOUNDS = { cpus: [1, 256], memoryMb: [16, 4_194_304], diskMb: [1, 16_777_216], processes: [1, 100_000], wallTimeMs: [1000, 604_800_000] } as const;
 
 const bad = (message: string): never => { throw new SandboxError("invalid_recipe", `limits: ${message}`); };
 
@@ -95,15 +97,31 @@ export async function detectLimitCapabilities(platform: NodeJS.Platform = proces
 
 export interface LimitedPlan { readonly plan: SpawnPlan; readonly report: readonly LimitEnforcement[] }
 
+let coreRotor = 0;
+/** The first core to pin the next process to, rotating by the number of cores each pin uses, so agents spread over the machine instead of all sharing cores 0..n-1. */
+export function nextCoreOffset(count: number, total: number = availableParallelism()): number {
+  const t = Math.max(1, total);
+  const offset = coreRotor % t;
+  coreRotor = (coreRotor + Math.max(1, count)) % t;
+  return offset;
+}
+/** The cores a pin uses: `count` cores from `offset`, wrapping; every core when the count covers the machine. */
+export function coreList(count: number, offset: number, total: number = availableParallelism()): number[] {
+  const t = Math.max(1, total);
+  if (count >= t) return Array.from({ length: t }, (_, i) => i);
+  return Array.from({ length: count }, (_, i) => (offset + i) % t).sort((a, b) => a - b);
+}
+
 /**
  * Wraps a spawn plan so the limits are applied to the process and everything it starts, and says exactly how each was handled. On Linux with a user systemd the cgroup carries memory (swap
  * off), process count and CPU time; without one, memory falls back to an address-space cap and CPUs to a core-affinity mask, and the process count is not enforced (the OS limit counts all of the
  * service user's processes, so it would also stop the service). Disk is only ever a per-file size cap here: a total needs a quota on the filesystem, which a worker does not own, so it is reported
  * as partial. Other operating systems have no per-process limits wired in yet and report every limit as not enforced.
  */
-export function limitedPlan(plan: SpawnPlan, limits: ResourceLimits, caps: LimitCapabilities): LimitedPlan {
+export function limitedPlan(plan: SpawnPlan, limits: ResourceLimits, caps: LimitCapabilities, pin: { readonly coreOffset?: number; readonly cores?: number } = {}): LimitedPlan {
   const report: LimitEnforcement[] = [];
-  const names = (Object.keys(limits) as LimitName[]).filter((k) => limits[k] !== undefined).sort();
+  // The wall-clock time is the host's launcher time limit, not something the plan wraps: it is not listed here.
+  const names = (Object.keys(limits) as LimitName[]).filter((k) => limits[k] !== undefined && k !== "wallTimeMs").sort();
   if (names.length === 0) return { plan, report };
   if (caps.platform !== "linux") {
     for (const limit of names) report.push({ limit, value: limits[limit]!, enforced: "none", detail: `no way to limit ${limit} is wired in for ${caps.platform} yet` });
@@ -126,7 +144,7 @@ export function limitedPlan(plan: SpawnPlan, limits: ResourceLimits, caps: Limit
         break;
       case "cpus":
         if (caps.cgroupScope) { scope.push("-p", `CPUQuota=${value * 100}%`); report.push({ limit, value, enforced: "full", by: "cgroup cpu.max", detail: "time is throttled to the quota" }); }
-        else if (caps.taskset) { affinity = value; report.push({ limit, value, enforced: "full", by: "CPU affinity mask", detail: `restricted to ${value} core(s)` }); }
+        else if (caps.taskset) { affinity = value; report.push({ limit, value, enforced: "partial", by: "CPU affinity mask (taskset)", detail: `pinned to ${value} core(s) at start; an unprivileged process can widen its own affinity, so this is a request and not a quota (only a cgroup scope limits CPU time)` }); }
         else report.push({ limit, value, enforced: "none", detail: "neither a user systemd scope nor taskset is available" });
         break;
       case "diskMb":
@@ -137,7 +155,7 @@ export function limitedPlan(plan: SpawnPlan, limits: ResourceLimits, caps: Limit
   }
   let file = plan.file; let args = [...plan.args]; let env = { ...plan.env };
   if (prl.length > 0) { args = [...prl, "--", file, ...args]; file = "prlimit"; }
-  if (affinity !== undefined) { args = ["-c", Array.from({ length: affinity }, (_, i) => i).join(","), file, ...args]; file = "taskset"; }
+  if (affinity !== undefined) { args = ["-c", coreList(affinity, pin.coreOffset ?? 0, pin.cores).join(","), file, ...args]; file = "taskset"; }
   // Some systemd versions expand $NAME and ${NAME} in a command line, so a literal dollar sign is written $$ there (found by trying).
   if (scope.length > 0) { args = ["--user", "--scope", "--quiet", "--collect", ...scope, "--", file, ...args].map((a, i, all) => (caps.escapeDollar && i > all.indexOf("--") ? a.replaceAll("$", "$$$$") : a)); file = "systemd-run"; env = { ...env, ...caps.passEnv, PATH: "/usr/bin:/bin" }; }
   else if (file !== plan.file) env = { ...env, PATH: "/usr/bin:/bin" };

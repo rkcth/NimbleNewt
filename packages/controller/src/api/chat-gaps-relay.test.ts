@@ -22,7 +22,7 @@ test("the model relay stops a paid call once the owner's aggregate spending cap 
   const relay = new ModelRelay({ endpoint: (route) => (route === "cloud/big" ? { url: "https://cloud.example/v1/" } : route === "llama/local" ? { url: "http://llama.internal:8080/v1/" } : undefined), fetch });
   const c = await startController({
     storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
-    dispatch: { timer: new ManualTimer(), manual: true, local: { window: () => 8192, close: async () => undefined, build: (s) => { services = s as never; return { hostId: "host:w1" } as unknown as WorkerHost; } } },
+    dispatch: { timer: new ManualTimer(), manual: true, local: { acceptUnenforcedLimits: true, window: () => 8192, close: async () => undefined, build: (s) => { services = s as never; return { hostId: "host:w1" } as unknown as WorkerHost; } } },
   });
   try {
     assert.ok(c.dispatch !== undefined, c.dispatchProblem);

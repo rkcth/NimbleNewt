@@ -5,7 +5,7 @@ import type { GuestView, SandboxBackend, SpawnPlan } from "./backend.js";
 import { bubblewrapBackend } from "./linux.js";
 import { seatbeltBackend } from "./seatbelt.js";
 import { SandboxError } from "./errors.js";
-import { DEFAULT_HEADROOM, checkHeadroom, checkLimits, detectLimitCapabilities, limitedPlan, type Headroom, type LimitCapabilities, type LimitEnforcement, type ResourceLimits } from "./limits.js";
+import { DEFAULT_HEADROOM, checkHeadroom, checkLimits, detectLimitCapabilities, limitedPlan, nextCoreOffset, type Headroom, type LimitCapabilities, type LimitEnforcement, type ResourceLimits } from "./limits.js";
 import { canonical, normalizeRecipe, protectedPathsFor, sha256, type NormalizedRecipe, type SandboxMode, type SandboxRecipe } from "./recipe.js";
 
 /** What is written to the audit trail before every launch (card A03: the mode is visible there). */
@@ -210,10 +210,12 @@ export class SandboxLauncher {
     }
 
     const caps = this.#limitCaps ?? { platform: this.#config.platform ?? process.platform, cgroupScope: false, escapeDollar: false, prlimit: false, taskset: false, passEnv: {} };
-    const limited = limitedPlan(makePlan(), limits, caps);
+    // One rotation step per launch, used by the recorded plan and the real one alike.
+    const pin = { coreOffset: limits.cpus === undefined ? 0 : nextCoreOffset(limits.cpus) };
+    const limited = limitedPlan(makePlan(), limits, caps, pin);
     if (request.requireEnforced === true) {
       const weak = limited.report.filter((r) => r.enforced !== "full");
-      if (weak.length > 0) throw new SandboxError("unavailable", `these limits cannot be fully enforced on this host: ${weak.map((r) => `${r.limit} (${r.detail})`).join("; ")}`);
+      if (weak.length > 0) throw new SandboxError("unavailable", `these limits cannot be fully enforced on this host: ${weak.map((r) => `${r.limit} (${r.detail})`).join("; ")}`, { limitFailures: weak.map((r) => ({ limit: r.limit, enforced: r.enforced as "partial" | "none", detail: r.detail })) });
     }
     const record: LaunchRecord = {
       limits: limited.report,
@@ -223,7 +225,7 @@ export class SandboxLauncher {
     };
     try { await this.#config.audit(record); } catch (error) { throw new SandboxError("audit_failed", `the launch could not be recorded, so it did not happen: ${(error as Error).message}`, { cause: error }); }
     // Planned only now, after the record is written, so the checks the plan repeats run as close to the start as possible.
-    return this.#start(runId, recipe, limitedPlan(makePlan(), limits, caps).plan, recipe.mode === "sandboxed" ? this.#backend : undefined, timeoutMs, maxOutputBytes, request.stdin, request.stream, limited.report);
+    return this.#start(runId, recipe, limitedPlan(makePlan(), limits, caps, pin).plan, recipe.mode === "sandboxed" ? this.#backend : undefined, timeoutMs, maxOutputBytes, request.stdin, request.stream, limited.report);
   }
 
   #start(runId: string, recipe: NormalizedRecipe, plan: SpawnPlan, backend: SandboxBackend | undefined, timeoutMs: number, maxOutputBytes: number, stdin: string | undefined, stream: LaunchRequest["stream"], enforcement: readonly LimitEnforcement[]): SandboxRun {

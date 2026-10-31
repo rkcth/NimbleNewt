@@ -10,9 +10,11 @@ export interface LocalWorkerLimits {
   readonly diskMb?: number;
   /** Processes and threads at once. */
   readonly processes?: number;
+  /** How long one launch of the agent's process may run, in milliseconds (optional; off when absent). */
+  readonly wallTimeMs?: number;
 }
 
-export const LOCAL_WORKER_LIMIT_BOUNDS = { cpus: [1, 256], memoryMb: [16, 4_194_304], diskMb: [1, 16_777_216], processes: [1, 100_000] } as const;
+export const LOCAL_WORKER_LIMIT_BOUNDS = { cpus: [1, 256], memoryMb: [16, 4_194_304], diskMb: [1, 16_777_216], processes: [1, 100_000], wallTimeMs: [1000, 604_800_000] } as const;
 
 /** The limits as a plain object of valid whole numbers; anything else throws, naming the key. An empty object is the same as none. */
 export function checkLocalWorkerLimits(limits: unknown, label = "dispatch.local.limits"): LocalWorkerLimits | undefined {

@@ -20,7 +20,7 @@ test("the relay of an attempt with no time limit is kept past 24 hours, as long 
   let relays: ((o: object) => unknown) | undefined;
   const worker = { hostId: "host:w1" } as unknown as WorkerHost;
   const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
-    dispatch: { timer: new ManualTimer(), manual: true, clock: () => new Date(now).toISOString(), local: { window: () => 8192, close: async () => undefined, build: (services: Parameters<NonNullable<NonNullable<NonNullable<Parameters<typeof startController>[0]["dispatch"]>["local"]>["build"]>>[0]) => {
+    dispatch: { timer: new ManualTimer(), manual: true, clock: () => new Date(now).toISOString(), local: { acceptUnenforcedLimits: true, window: () => 8192, close: async () => undefined, build: (services: Parameters<NonNullable<NonNullable<NonNullable<Parameters<typeof startController>[0]["dispatch"]>["local"]>["build"]>>[0]) => {
       relays = (o) => services.attemptRelay(o as never, { forAttempt: () => ({ alias: "m0", relayBase: "x", relay: async () => { throw new Error("x"); } }) } as never);
       void ({} as RuntimeGuards); return worker; } } },
   } as never);

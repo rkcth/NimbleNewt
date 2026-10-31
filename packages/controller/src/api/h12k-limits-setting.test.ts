@@ -24,7 +24,7 @@ test("the owner sets the limits for local agents: owner only, validated, race-sa
   let currentLimits: (() => Promise<unknown>) | undefined;
   const c = await startController({
     storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [],
-    dispatch: { timer: new ManualTimer(), manual: true, local: { window: () => 8192, limits: { cpus: 2, memoryMb: 2048 }, close: async () => undefined, build: (s: { currentLimits: () => Promise<unknown> }) => { currentLimits = s.currentLimits; return { hostId: "host:w1" } as never; } } },
+    dispatch: { timer: new ManualTimer(), manual: true, local: { acceptUnenforcedLimits: true, window: () => 8192, limits: { cpus: 2, memoryMb: 2048 }, close: async () => undefined, build: (s: { currentLimits: () => Promise<unknown> }) => { currentLimits = s.currentLimits; return { hostId: "host:w1" } as never; } } },
   } as never);
   try {
     const boot = await c.services.principals.bootstrapOwner({ name: "rob" });

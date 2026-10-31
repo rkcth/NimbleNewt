@@ -3,17 +3,25 @@ import { DomainError } from "../domain/errors.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
-import type { ControllerStorage, JsonObject } from "../storage/types.js";
+import type { Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import { checkLocalWorkerLimits, defaultWorkspaceLimits, LOCAL_WORKER_LIMIT_BOUNDS, type LocalWorkerLimits } from "./worker-limits.js";
 
 const REF = { kind: "worker-limits-settings", id: "main" } as const;
 const ENFORCED_KIND = "worker-limits-enforced";
 const KEEP_LAUNCHES = 10;
+const AGENT_KIND = "worker-limits-agent";
+/** Launch records kept per agent (the newest attempts); older ones are removed with the next launch. */
+export const KEEP_ATTEMPTS_PER_AGENT = 20;
 const MAX_ENTRIES = 12;
 
 /** What one launch of a local agent came to (host's `LaunchEnforcement`, restated: the controller does not depend on the worker package). */
 export interface LaunchRecord {
   readonly attemptId: string;
+  readonly agentId?: string;
+  /** For a refusal because limits could not be enforced in full: which limits, and how far each was. */
+  readonly failed?: readonly { readonly limit: string; readonly enforced: "partial" | "none"; readonly detail: string }[];
+  /** Where the host's own start-up figure was stricter than the owner's, the figure applied and why. */
+  readonly stricter?: readonly { readonly limit: string; readonly owner: number; readonly applied: number; readonly why: string }[];
   readonly outcome: "started" | "refused";
   readonly requested: LocalWorkerLimits;
   readonly bestEffort: boolean;
@@ -34,7 +42,9 @@ function cleanLaunch(raw: LaunchRecord, at: string): JsonObject {
     if (!["full", "partial", "none"].includes(e.enforced)) throw new DomainError("invalid_command", "enforcement: enforced is full, partial or none", { field: "enforcement" });
     return { limit: text(e.limit, 30), value: Number.isSafeInteger(e.value) ? e.value : 0, enforced: e.enforced, ...(e.by === undefined ? {} : { by: text(e.by, 120) }), detail: text(e.detail, 300) };
   });
-  return { attemptId: raw.attemptId, outcome: raw.outcome, requested: requested as unknown as JsonObject, bestEffort: raw.bestEffort === true, enforcement, wallTimeMs: Number.isSafeInteger(raw.wallTimeMs) ? raw.wallTimeMs : 0, ...(raw.reason === undefined ? {} : { reason: text(raw.reason, 500) }), at };
+  const failed = (raw.failed ?? []).slice(0, MAX_ENTRIES).map((f) => ({ limit: text(f.limit, 30), enforced: f.enforced === "partial" ? "partial" : "none", detail: text(f.detail, 300) }));
+  const stricter = (raw.stricter ?? []).slice(0, MAX_ENTRIES).map((x) => ({ limit: text(x.limit, 30), owner: Number.isSafeInteger(x.owner) ? x.owner : 0, applied: Number.isSafeInteger(x.applied) ? x.applied : 0, why: text(x.why, 300) }));
+  return { attemptId: raw.attemptId, ...(typeof raw.agentId === "string" && raw.agentId !== "" ? { agentId: raw.agentId.slice(0, 200) } : {}), ...(failed.length === 0 ? {} : { failed }), ...(stricter.length === 0 ? {} : { stricter }), outcome: raw.outcome, requested: requested as unknown as JsonObject, bestEffort: raw.bestEffort === true, enforcement, wallTimeMs: Number.isSafeInteger(raw.wallTimeMs) ? raw.wallTimeMs : 0, ...(raw.reason === undefined ? {} : { reason: text(raw.reason, 500) }), at };
 }
 
 export interface WorkerLimitsSettingsBody {
@@ -159,11 +169,23 @@ export class WorkerLimitsSettingsService {
     return flag === true;
   }
 
-  /** Keeps what a launch came to (the last ten per attempt). Called by the host for every launch, started or refused. Each call is its own command (a launch is not a replay of an earlier one). */
+  /**
+   * Keeps what a launch came to (the last ten per attempt, and the newest `KEEP_ATTEMPTS_PER_AGENT` attempts per agent). Called by the host for every launch, started or refused. Each call is its own command (a launch is not a replay of an
+   * earlier one). Two launches recorded at the same moment retry: a launch that started correctly is never ended because the record lost a race.
+   */
   async recordLaunch(record: LaunchRecord): Promise<void> {
-    const at = this.#runner.now();
-    const clean = cleanLaunch(record, at);
+    const clean = cleanLaunch(record, this.#runner.now());
+    for (let tries = 0; ; tries++) {
+      try { await this.#recordOnce(clean); return; } catch (error) {
+        if (!(error instanceof DomainError) || (error.code !== "stale_revision" && error.code !== "command_conflict") || tries >= 8) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 5 * (tries + 1)));
+      }
+    }
+  }
+
+  async #recordOnce(clean: JsonObject): Promise<void> {
     const id = clean["attemptId"] as string;
+    const agentId = typeof clean["agentId"] === "string" ? clean["agentId"] : undefined;
     await this.#runner.command("workers.limits.enforced", { commandId: `wle-${randomUUID()}`, actor: "host" }, async () => ({
       payload: { launch: clean },
       build: async () => {
@@ -172,8 +194,19 @@ export class WorkerLimitsSettingsService {
         const before = (current?.body as unknown as { launches?: JsonObject[]; count?: number } | undefined);
         const launches = [...(before?.launches ?? []), clean].slice(-KEEP_LAUNCHES);
         const body = { attemptId: id, count: (before?.count ?? 0) + 1, launches } as unknown as JsonObject;
-        const change = current === undefined ? { type: "create" as const, ref, body } : { type: "update" as const, ref, expectedRevision: current.revision, body };
-        return { ref, creates: current === undefined, changes: [change], detail: { outcome: clean["outcome"] as string } };
+        const changes: Change[] = [current === undefined ? { type: "create", ref, body } : { type: "update", ref, expectedRevision: current.revision, body }];
+        // Per agent: the attempts that have records, newest last; beyond the bound the oldest records are removed.
+        if (agentId !== undefined) {
+          const index = await this.#runner.get(AGENT_KIND, agentId);
+          const known = ((index?.body as unknown as { attempts?: string[] } | undefined)?.attempts ?? []).filter((a) => a !== id);
+          const attempts = [...known, id];
+          const drop = attempts.length > KEEP_ATTEMPTS_PER_AGENT ? attempts.splice(0, attempts.length - KEEP_ATTEMPTS_PER_AGENT) : [];
+          const indexBody = { agentId, attempts } as unknown as JsonObject;
+          changes.push(index === undefined ? { type: "create", ref: { kind: AGENT_KIND, id: agentId }, body: indexBody } : { type: "update", ref: { kind: AGENT_KIND, id: agentId }, expectedRevision: index.revision, body: indexBody });
+          for (const old of drop) { const found = await this.#runner.get(ENFORCED_KIND, old); if (found !== undefined) changes.push({ type: "delete", ref: { kind: ENFORCED_KIND, id: old }, expectedRevision: found.revision }); }
+        }
+        const pruned = changes.filter((c) => c.type === "delete").map((c) => c.ref);
+        return { ref, creates: current === undefined, changes, detail: { outcome: clean["outcome"] as string }, ...(pruned.length === 0 ? {} : { audit: pruned.map((subject) => ({ type: "workers.limits.enforced.prune", subject, detail: { reason: "older than the newest launch records kept per agent" } })) }), contention: async () => new DomainError("stale_revision", "the launch record changed at the same moment") };
       },
     }));
   }

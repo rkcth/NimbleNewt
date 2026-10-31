@@ -39,6 +39,8 @@ export interface LocalWorkerOptions {
   readonly hostId: string;
   readonly resources: { readonly cpus: number; readonly memoryMb: number };
   readonly version: string;
+  /** Whether the host's runtime applies the owner's limits, best-effort setting and launch record (the worker package's `localWorkerParts(...).ownerPolicy`). */
+  readonly ownerPolicy?: boolean;
   readonly sandbox: SandboxPort;
   readonly runtimes: RuntimeFactory;
   /** What this host states about itself when it registers: its own facts, never a caller's. */
@@ -88,6 +90,7 @@ export interface RuntimeGuards {
 export class LocalWorker implements WorkerHost {
   readonly hostId: string;
   readonly resources: { readonly cpus: number; readonly memoryMb: number };
+  readonly ownerPolicy: boolean;
   readonly #options: LocalWorkerOptions;
   #sequence = 0;
   #beat = 0;
@@ -95,6 +98,7 @@ export class LocalWorker implements WorkerHost {
   constructor(options: LocalWorkerOptions) {
     this.hostId = options.hostId;
     this.resources = options.resources;
+    this.ownerPolicy = options.ownerPolicy === true;
     this.#options = options;
   }
 
