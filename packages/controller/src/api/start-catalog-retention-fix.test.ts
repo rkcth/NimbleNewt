@@ -118,6 +118,24 @@ test("the automatic pass drops catalogue versions only when catalogAutoDrop is o
   } finally { await c.close(); cleanup(d); }
 });
 
+test("a claim stamped in the future (the clock was set back) is void: runs start on the version again (card T02c re-review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-catfx-"));
+  const { c, s, ann, project, task, publish } = await world(d);
+  try {
+    const name = await publish(["1.0.0"]);
+    const t = await task("one");
+    const v = (await c.storage.listAggregates("catalog-version", { limit: 10 })).find((x) => (x.body as { version?: string }).version === "1.0.0")!;
+    const claim = async (at: string, n: string): Promise<void> => {
+      const cur = (await c.storage.getAggregate({ kind: "catalog-version", id: v.id }))!;
+      await c.storage.applyOperation({ operationId: `claim-${n}`, epoch: c.epoch, actor: "test", correlationId: "claim", at: new Date().toISOString(), changes: [{ type: "update", ref: { kind: "catalog-version", id: v.id }, expectedRevision: cur.revision, body: { ...(cur.body as object), dropping: at } as never }], audit: [{ type: "test.claim", detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] });
+    };
+    await claim(new Date(Date.now() + 3_600_000).toISOString(), "future");
+    assert.equal((await s.catalog.authorizeRun(ann, { commandId: "run-future", name, version: "1.0.0", taskId: t, projectId: project, host })).ready, true, "a claim from the future does not hold the version");
+    await claim(new Date().toISOString(), "now");
+    await assert.rejects(s.catalog.authorizeRun(ann, { commandId: "run-now", name, version: "1.0.0", taskId: t, projectId: project, host }), /being checked for removal/);
+  } finally { await c.close(); cleanup(d); }
+});
+
 test("revoked versions keep their record and digest; the executable text is blanked after revokedBytesDays (default 90, null keeps it), unless another live version uses the same text (card T02c fix)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-catfx-"));
   let nowMs = Date.parse("2026-01-01T00:00:00.000Z");

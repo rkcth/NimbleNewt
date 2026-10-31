@@ -366,6 +366,18 @@ test("when the task cannot be paused the call is stopped all the same and the ow
   assert.deepEqual(notices, [], "a task that is paused already is held, nothing to tell");
 });
 
+test("a revocation pause pauses the task itself even while a wider scope (the installation) is paused (that pause can be lifted alone) (card T02c re-review)", async () => {
+  const seen: { blockedBy?: readonly { kind: string }[] } = {};
+  await scenario(async ({ c, owner, name, call, callsBefore, ownerPrincipal }) => {
+    const [running] = await callsBefore();
+    await c.services.pauses.pause(ownerPrincipal, { commandId: "wide-pause", scope: { kind: "installation", id: "installation" }, reason: "owner paused everything" });
+    assert.ok((await call(owner, "catalog.revoke", { name, version: "1.0.0", reason: "bad", runningCalls: "pause" }, "rv-pp2")).ok);
+    await sleep(30);
+    seen.blockedBy = (await c.services.pauses.guard(running.taskId)).blockedBy;
+  });
+  assert.ok(seen.blockedBy!.some((b) => b.kind === "task"), JSON.stringify(seen.blockedBy));
+});
+
 test("a call that is recorded but has not launched when its version is revoked does not launch: the revocation is read again just before the launch, even while the owner's choice is still being worked out (card T02c fix)", async () => {
   let launched = 0;
   const out = await scenario(async () => undefined, {
@@ -385,6 +397,25 @@ test("a call that is recorded but has not launched when its version is revoked d
     },
   });
   assert.equal(launched, 0, "the tool never launched");
+  assert.equal(out.running["state"], "failed");
+});
+
+test("under finish only calls that are actually running continue: a call recorded and authorized but not yet launched when its version is revoked is refused, and the choice finish does not let it start (card T02c re-review)", async () => {
+  let launched = 0;
+  const out = await scenario(async () => undefined, {
+    noLaunch: true,
+    run: { hook: () => { launched += 1; } },
+    install: (c, owner) => {
+      const catalog = c.services.catalog;
+      const original = catalog.authorizeRun.bind(catalog);
+      (catalog as { authorizeRun: typeof original }).authorizeRun = async (...args) => {
+        const ready = await original(...args);
+        await catalog.revoke(owner(), { commandId: "rv-window-finish", name: args[1].name, version: "1.0.0", reason: "bad", runningCalls: "finish" });
+        return ready;
+      };
+    },
+  });
+  assert.equal(launched, 0, "the tool never launched although the owner chose finish");
   assert.equal(out.running["state"], "failed");
 });
 

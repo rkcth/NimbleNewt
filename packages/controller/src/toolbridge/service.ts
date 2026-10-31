@@ -176,8 +176,6 @@ export class ToolExecutionService {
   /** Runs of the catalogue that have been handed to the runner (or are about to be), by `name|version`, so a revocation can cancel them. */
   readonly #running = new Map<string, Set<{ readonly ctl: AbortController; readonly attemptId: string; readonly callId: string; readonly taskId: string; readonly agentId: string }>>();
   readonly #unsubscribe: (() => void) | undefined;
-  /** What was decided for running calls when a version was revoked (`name|version`), bounded. A call not yet launched when it was decided reads it. */
-  readonly #decided = new Map<string, "finish" | "cancel" | "pause">();
 
   constructor(deps: ToolExecutionDeps) {
     this.#deps = deps;
@@ -208,9 +206,6 @@ export class ToolExecutionService {
     const live = this.#running.get(key);
     let policy: unknown = choice;
     if (policy === undefined && live !== undefined && live.size > 0) { try { policy = await (this.#deps.revocationPolicy?.() ?? "finish"); } catch { policy = "cancel"; } }
-    // What was decided is kept, so a call registered but not yet launched asks it again just before it launches.
-    this.#decided.set(key, policy === "finish" || policy === "cancel" || policy === "pause" ? policy : policy === undefined ? "finish" : "cancel");
-    if (this.#decided.size > 500) this.#decided.delete(this.#decided.keys().next().value as string);
     const runs = this.#running.get(key);
     if (runs === undefined || runs.size === 0) return;
     if (policy === "finish") return;
@@ -223,8 +218,8 @@ export class ToolExecutionService {
       const reason = `${name} ${version} was revoked while a call of it ran; the call was stopped; resume the task when you have decided`.slice(0, 300);
       let held = false;
       try {
-        // A task that is already paused (or stopping) is held already; pausing it again would only fail.
-        held = (await this.#deps.pauses.guard(taskId)).blockedBy.length > 0;
+        // A task that is already paused (or stopping) itself is held already; pausing it again would only fail. A pause of the whole project does not count: it can be lifted without the task being resumed, so the task is paused on its own as well.
+        held = (await this.#deps.pauses.guard(taskId)).blockedBy.some((b) => b.kind === "task" && b.id === taskId);
       } catch { held = false; }
       if (!held && this.#deps.pauseTask !== undefined) {
         try { await this.#deps.pauseTask(owner, taskId, reason, `rvp-${createHash("sha256").update(`${name}|${version}|${taskId}`).digest("hex").slice(0, 40)}`); held = true; } catch { held = false; }
@@ -489,9 +484,9 @@ export class ToolExecutionService {
           if (!ready.ready) throw new Error(ready.reasons.join("; "));
           if (ready.digest !== v.digest) throw new Error(`${v.name} ${v.version} changed after it was checked`);
           if (own.signal.aborted) throw new Error(`${v.name} ${v.version} was revoked before it started`);
-          // Revoked between the record above and the launch: a call that was not running when the owner chose is held to the choice now (`finish` lets it start; anything else, or no decision yet, does not).
+          // Revoked between the record above and the launch: only a call that is actually running when a version is revoked may be let finish, so a call that has not launched yet is refused whatever was chosen (a choice of `finish` is about calls already running).
           const nowVersion = await this.#deps.catalog.get(c.agent, v.name, v.version);
-          if (nowVersion === undefined || (nowVersion.revoked !== undefined && this.#decided.get(`${v.name}|${v.version}`) !== "finish")) throw new Error(`${v.name} ${v.version} was revoked before it started`);
+          if (nowVersion === undefined || nowVersion.revoked !== undefined) throw new Error(`${v.name} ${v.version} was revoked before it started`);
           if (own.signal.aborted) throw new Error(`${v.name} ${v.version} was revoked before it started`);
           const out = await this.#deps.runner.run(launch, guardedSignal(AbortSignal.any([signal, own.signal])));
           if (own.signal.aborted) throw new Error(`${v.name} ${v.version} was revoked while it ran`);

@@ -602,7 +602,9 @@ export class CatalogService {
         const current = await this.#runner.get(vref.kind, vref.id);
         if (current === undefined || !(entry.body as unknown as EntryBody).versions.includes(v.version)) throw new DomainError("not_found", `${v.name} ${v.version} is no longer in the catalog`);
         const claim = (current.body as unknown as VersionBody).dropping;
-        if (claim !== undefined && Date.parse(this.#runner.now()) - Date.parse(claim) < CLAIM_MS) throw new DomainError("unavailable", `${v.name} ${v.version} is being checked for removal by retention; ask again in a moment`);
+        // A claim stamped in the future (the clock moved back since it was taken) is void as well: it would otherwise hold the version for as long as the clock was set back.
+        const heldFor = claim === undefined ? undefined : Date.parse(this.#runner.now()) - Date.parse(claim);
+        if (heldFor !== undefined && heldFor >= 0 && heldFor < CLAIM_MS) throw new DomainError("unavailable", `${v.name} ${v.version} is being checked for removal by retention; ask again in a moment`);
         return { ref, creates: true, changes: [{ type: "create", ref, body: usage as unknown as JsonObject }, { type: "check", ref: eref, expectedRevision: entry.revision }, { type: "check", ref: vref, expectedRevision: current.revision }], detail: { name: v.name, version: v.version, taskId, projectId }, contention: async () => new DomainError("stale_revision", "the catalog changed at the same moment; ask again") };
       },
     }));
