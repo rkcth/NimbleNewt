@@ -9,7 +9,7 @@ import { WorkerRequestError, type RemoteWorkerClient } from "./client.js";
  * of in a burst. A refused protocol or a revoked credential is not retried quickly: it waits the longest backoff and says so. The sleep and the random source are injected, so the schedule is testable.
  */
 export interface PollerOptions {
-  readonly client: Pick<RemoteWorkerClient, "connect" | "heartbeat" | "offers" | "session" | "forgetSession"> & Partial<Pick<RemoteWorkerClient, "workspaceRequests">>;
+  readonly client: Pick<RemoteWorkerClient, "connect" | "heartbeat" | "offers" | "session" | "forgetSession"> & Partial<Pick<RemoteWorkerClient, "workspaceRequests" | "workspaceList">>;
   readonly capabilities: Capabilities;
   /** Called with offers, in order. The poller polls again only after it returns; an offer not accepted is offered again by the controller. */
   readonly onOffers: (offers: readonly Offer[]) => Promise<void>;
@@ -17,7 +17,7 @@ export interface PollerOptions {
    * Called with the workspace requests the controller has for this host after every round (card H12m). It must return at once: the work of a request runs in the background (a `WorkspaceResponder` does), or the
    * poller would stop beating while an integration runs. Needs a client that has `workspaceRequests`.
    */
-  readonly onWorkspace?: (requests: readonly WorkspaceAsk[]) => void;
+  readonly onWorkspace?: (requests: readonly WorkspaceAsk[], withdrawn: readonly string[]) => void;
   /** The poll hold, in ms (default 20 000; at most the controller's limit). */
   readonly waitMs?: number;
   /** The gap between heartbeats, in ms (default 15 000). */
@@ -87,8 +87,8 @@ export class HostPoller {
         if (offers.length > 0 && !signal.aborted) {
           try { await this.#o.onOffers(offers); } catch (error) { await this.#trouble(error, "offers", signal); continue; }
         }
-        if (this.#o.onWorkspace !== undefined && this.#o.client.workspaceRequests !== undefined && !signal.aborted) {
-          try { const requests = await this.#o.client.workspaceRequests(); if (requests.length > 0) this.#o.onWorkspace(requests); } catch (error) { await this.#trouble(error, "workspace", signal); continue; }
+        if (this.#o.onWorkspace !== undefined && (this.#o.client.workspaceRequests !== undefined || this.#o.client.workspaceList !== undefined) && !signal.aborted) {
+          try { const { requests, withdrawn } = this.#o.client.workspaceList !== undefined ? await this.#o.client.workspaceList() : { requests: await this.#o.client.workspaceRequests!(), withdrawn: [] as string[] }; if (requests.length > 0 || withdrawn.length > 0) this.#o.onWorkspace(requests, withdrawn); } catch (error) { await this.#trouble(error, "workspace", signal); continue; }
         }
         this.#failures = 0;
         const gap = this.#o.minGapMs - (this.#now() - started);

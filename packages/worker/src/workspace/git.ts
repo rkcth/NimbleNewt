@@ -322,7 +322,8 @@ export class GitBridge {
     for (const r of ready) {
       if (r.skip !== undefined) { results.push({ path: r.path, result: { status: "skipped", reason: r.skip } }); continue; }
       // Work that is already in the shared workspace (an integration asked for again, or the same edit made there) is not written again, and no copy is kept for review.
-      const there = await options.bridge.read(r.path).then((x) => x.version, () => undefined);
+      // A path whose folder is not there either reads as not found: that is ABSENT, the same as a missing file (an unknown failure still means unknown).
+      const there = await options.bridge.read(r.path).then((x) => x.version, (e: unknown) => (e instanceof WorkspaceError && e.code === "not_found" ? ABSENT : undefined));
       if (there !== undefined && (r.op === "delete" ? there === ABSENT : there === versionOf(r.content!))) { results.push({ path: r.path, result: { status: "skipped", reason: "the shared workspace already holds exactly this" } }); continue; }
       results.push({ path: r.path, result: r.op === "delete"
         ? await options.bridge.remove({ path: r.path, expectedVersion: r.expectedVersion, author: options.author, reason: options.reason })

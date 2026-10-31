@@ -13,18 +13,24 @@ export class WorkspaceResponder {
   readonly #onError: ((error: unknown) => void) | undefined;
   readonly #running = new Set<string>();
   readonly #unsent = new Map<string, RemoteWorkspaceAnswer>();
+  readonly #withdrawn = new Set<string>();
+  readonly #now: () => number;
   #tail: Promise<void> = Promise.resolve();
 
-  constructor(options: { readonly client: Pick<RemoteWorkerClient, "answerWorkspace">; readonly port: WorkspacePort; readonly onError?: (error: unknown) => void }) {
+  constructor(options: { readonly client: Pick<RemoteWorkerClient, "answerWorkspace">; readonly port: WorkspacePort; readonly onError?: (error: unknown) => void; readonly now?: () => number }) {
+    this.#now = options.now ?? Date.now;
     this.#client = options.client; this.#port = options.port; this.#onError = options.onError;
   }
 
   /** Starts the requests not already in hand and returns at once. */
-  handle(requests: readonly WorkspaceAsk[]): void {
+  handle(requests: readonly WorkspaceAsk[], withdrawn: readonly string[] = []): void {
+    // A request the controller gave up on is dropped if it has not started; one already running cannot be stopped here, and its answer is accepted and dropped there.
+    for (const id of withdrawn) { this.#withdrawn.add(id); this.#unsent.delete(id); }
+    if (this.#withdrawn.size > 500) this.#withdrawn.delete(this.#withdrawn.values().next().value as string);
     for (const ask of requests) {
       const unsent = this.#unsent.get(ask.requestId);
       if (unsent !== undefined) { void this.#send(ask.requestId, unsent); continue; }
-      if (this.#running.has(ask.requestId)) continue;
+      if (this.#running.has(ask.requestId) || this.#withdrawn.has(ask.requestId)) continue;
       this.#running.add(ask.requestId);
       this.#tail = this.#tail.then(() => this.#carryOut(ask), () => this.#carryOut(ask));
     }
@@ -35,6 +41,9 @@ export class WorkspaceResponder {
 
   async #carryOut(ask: WorkspaceAsk): Promise<void> {
     let answer: RemoteWorkspaceAnswer;
+    // Waiting behind a long request is where a request goes stale: the controller may have stopped waiting and freed the agent meanwhile. The host checks the deadline again before it starts.
+    if (this.#withdrawn.has(ask.requestId)) { this.#running.delete(ask.requestId); return; }
+    if (ask.expiresAt !== undefined && this.#now() >= Date.parse(ask.expiresAt)) { this.#running.delete(ask.requestId); return; }
     try { answer = await this.#port.run({ ...ask, quietAttempts: [...ask.quietAttempts] }); } catch (error) {
       // The work may be half done: this is told as a refusal that says so, and the port's journal refuses to run the request again.
       answer = { ok: false, reason: `the host could not finish the request and may have done part of it: ${String((error as Error)?.message ?? error).slice(0, 300)}` };

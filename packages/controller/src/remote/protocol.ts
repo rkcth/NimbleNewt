@@ -108,6 +108,8 @@ export interface WorkspaceAsk {
   readonly reason: string;
   readonly quietAttempts: readonly string[];
   readonly assignee?: string;
+  /** When the controller stops waiting (an ISO time). It frees the agent then, so a host must not start the work after it. */
+  readonly expiresAt?: string;
 }
 /** What the host answers: the same typed outcomes a local host gives (done, or a refusal with its reason). */
 export type RemoteWorkspaceAnswer = { readonly ok: true; readonly summary: string; readonly detail?: JsonObject } | { readonly ok: false; readonly reason: string };

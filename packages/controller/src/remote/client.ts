@@ -106,7 +106,13 @@ export class RemoteWorkerClient {
 
   /** The workspace requests (integration, refresh, quarantine) the controller has for this host and has not had an answer to (card H12m). */
   async workspaceRequests(): Promise<WorkspaceAsk[]> {
-    return ((await this.#send("GET", "/worker/session/workspace", { session: true })).body as unknown as { requests: WorkspaceAsk[] }).requests;
+    return (await this.workspaceList()).requests;
+  }
+
+  /** The requests, and the IDs of those the controller withdrew (it stopped waiting): a host drops a withdrawn request it has not started. */
+  async workspaceList(): Promise<{ readonly requests: WorkspaceAsk[]; readonly withdrawn: string[] }> {
+    const body = (await this.#send("GET", "/worker/session/workspace", { session: true })).body as unknown as { requests: WorkspaceAsk[]; withdrawn?: string[] };
+    return { requests: body.requests, withdrawn: body.withdrawn ?? [] };
   }
 
   /** Answers one workspace request. The same answer sent again is accepted as a repeat; the key is derived from the request, so a retry applies once. */

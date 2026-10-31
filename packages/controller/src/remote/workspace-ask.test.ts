@@ -27,13 +27,15 @@ for (const backend of backends) {
     for (let i = 0; i < 100 && (await r1.client.workspaceRequests()).length === 0; i++) await new Promise((ok) => setTimeout(ok, 10));
     const listed = await r1.client.workspaceRequests();
     assert.deepEqual(listed.map((x) => x.requestId), [first.requestId]);
-    assert.deepEqual(listed[0], { ...first });
+    const { expiresAt: deadline, ...bare } = listed[0]!;
+    assert.ok(deadline !== undefined && Number.isFinite(Date.parse(deadline)));
+    assert.deepEqual(bare, { ...first });
     responder.handle(listed);
     responder.handle(listed); // listed again before it was answered: not started twice
     assert.deepEqual(await pending, { ok: true, summary: "the checkout moved", detail: { changed: true, base: "abc" } });
     await responder.idle();
     assert.equal(seen.length, 1);
-    assert.deepEqual(seen[0], first, "the host got exactly the request the controller made");
+    assert.deepEqual({ ...seen[0], expiresAt: undefined }, { ...first, expiresAt: undefined }, "the host got exactly the request the controller made");
     assert.deepEqual(await r1.client.workspaceRequests(), [], "answered: no longer listed");
     // A refusal is carried as a refusal.
     const refused = ask(call({ operation: "quarantine" }));
@@ -108,4 +110,47 @@ for (const backend of backends) {
     assert.deepEqual(await c.remote.askWorkspace(c.dispatcherPrincipal, "host:r1", x, { waitMs: 50 }), { ok: true, summary: "too late" }, "kept for a repeat of the same request, which the workspace service never makes (it records the first as failed)");
   });
 
+}
+
+// Review fixes for H12m (2026-10-31).
+for (const backend of backends) {
+  const suite = remoteSuite(backend);
+
+  suite("a request that timed out is listed as withdrawn, carries its deadline, and a repeat of its ID fails fast; a responder drops a queued request that was withdrawn or expired instead of starting it (review fix 1, 2)", async (c) => {
+    const r1 = await c.host("r1");
+    const a = call(); const b = call({ operation: "integration" });
+    const started: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((ok) => { release = ok; });
+    const responder = new WorkspaceResponder({ client: r1.client, port: { run: async (x) => { started.push(x.requestId); if (x.requestId === a.requestId) await gate; return { ok: true, summary: "done" }; } } });
+    const askA = c.remote.askWorkspace(c.dispatcherPrincipal, "host:r1", a, { waitMs: 5000 });
+    const askB = c.remote.askWorkspace(c.dispatcherPrincipal, "host:r1", b, { waitMs: 1500 });
+    const outcomeB = askB.then(() => "answered", (e: Error) => e.message);
+    for (let i = 0; i < 100 && (await r1.client.workspaceRequests()).length < 2; i++) await new Promise((ok) => setTimeout(ok, 10));
+    const listed = await r1.client.workspaceRequests();
+    assert.equal(listed.length, 2, await Promise.race([outcomeB, new Promise((ok) => setTimeout(() => ok('B pending'), 50))]) as string);
+    assert.ok(listed.every((x) => typeof x.expiresAt === "string" && Number.isFinite(Date.parse(x.expiresAt))), "each request carries the time the controller stops waiting");
+    responder.handle(listed); // A starts and holds the queue; B waits behind it.
+    assert.match(await outcomeB, /may or may not have been carried out/, "B timed out while A was running");
+    const list = await r1.client.workspaceList();
+    assert.deepEqual(list.withdrawn, [b.requestId]);
+    assert.deepEqual(list.requests.map((x) => x.requestId), [a.requestId], "only A is still listed");
+    responder.handle(list.requests, list.withdrawn);
+    release(); await responder.idle();
+    assert.deepEqual(started, [a.requestId], "B was not started on the host after the controller released the freeze");
+    // A repeat of B's ID is refused at once with a clear error, not joined to a dead ask.
+    await refuses("unavailable", () => c.remote.askWorkspace(c.dispatcherPrincipal, "host:r1", b, { waitMs: 5000 }), (e) => assert.match(e.message, /timed out earlier and was withdrawn/));
+    await askA;
+  });
+
+  suite("a responder does not start a request whose deadline passed while it waited, even before the controller lists it as withdrawn (review fix 1)", async (c) => {
+    const r1 = await c.host("r1");
+    const ran: string[] = [];
+    let now = 1_000;
+    const responder = new WorkspaceResponder({ client: r1.client, now: () => now, port: { run: async (x) => { ran.push(x.requestId); now += 10_000; return { ok: true, summary: "ok" }; } } });
+    const first = call(); const second = call();
+    responder.handle([{ ...first, quietAttempts: [] }, { ...second, quietAttempts: [], expiresAt: new Date(0).toISOString() }]);
+    await responder.idle();
+    assert.deepEqual(ran, [first.requestId], "the expired one never reached the port");
+  });
 }

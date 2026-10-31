@@ -20,7 +20,7 @@ let counter = 0;
 const rid = (): string => { const n = (++counter).toString(32).padStart(4, "a").replace(/[018-9]/g, (c) => ({ "0": "a", "1": "b", "8": "c", "9": "d" } as Record<string, string>)[c]!); return `wsr-${"abcdefgh".repeat(3).slice(0, 16)}${n.slice(-4)}`; };
 const call = (operation: HostWorkspaceCall["operation"], more: Partial<HostWorkspaceCall> = {}): HostWorkspaceCall => ({ requestId: rid(), operation, taskId: "tsk-one", projectId: "prj-one", reason: "test", quietAttempts: [], ...more });
 
-async function world() {
+async function world(extra: Partial<ConstructorParameters<typeof WorkspaceHost>[0]> = {}) {
   const dir = await mkdtemp(join(tmpdir(), "nn-wsh-"));
   const shared = join(dir, "shared");
   await mkdir(join(shared, "src"), { recursive: true });
@@ -31,7 +31,7 @@ async function world() {
   const where: CheckoutLocation = { shared, checkout: join(dir, "checkout"), gitDir: join(dir, "task.git"), bridgeState: join(dir, "state"), quarantineRoot: join(dir, "quarantine") };
   await git.createCheckout({ shared, commit: await git.head(shared), gitDir: where.gitDir, checkout: where.checkout });
   const located: string[] = [];
-  const host = new WorkspaceHost({ git, journal: join(dir, "journal"), locate: ({ taskId }) => { located.push(taskId); return taskId === "tsk-one" ? where : undefined; }, clock: () => "2026-10-30T10:00:00.000Z" });
+  const host = new WorkspaceHost({ git, journal: join(dir, "journal"), locate: ({ taskId }) => { located.push(taskId); return taskId === "tsk-one" ? where : undefined; }, clock: () => "2026-10-30T10:00:00.000Z", ...extra });
   /** Everything about the shared repository that a refresh or quarantine must leave alone. */
   const sharedState = (): string => [sh(shared, "rev-parse", "HEAD"), sh(shared, "status", "--porcelain=v1", "--ignored"), sh(shared, "for-each-ref")].join("|");
   // A quarantined tree is read-only on purpose; the test makes it writable again to clean up.
@@ -170,11 +170,11 @@ test("one request ID is carried out once: a repeat gets the recorded answer, and
     await writeFile(join(w.shared, "src", "n.ts"), "export const n = 2; // later\n");
     const repeat = await w.host.run(c);
     assert.deepEqual(repeat, first, "the same answer from the journal");
-    assert.deepEqual(await w.host.run({ ...c, operation: "refresh" }), { ok: false, reason: "that request ID was used for another operation here" });
+    assert.deepEqual(await w.host.run({ ...c, operation: "refresh" }), { ok: false, reason: "that request ID was used for another operation or task here" });
     // A started record with no end: the work may be half done.
     const lost = call("refresh");
     await mkdir(join(w.dir, "journal"), { recursive: true });
-    await writeFile(join(w.dir, "journal", `${lost.requestId}.json`), `${JSON.stringify({ operation: "refresh", state: "started", at: "x" })}\n`);
+    await writeFile(join(w.dir, "journal", `${lost.requestId}.json`), `${JSON.stringify({ operation: "refresh", taskId: "tsk-one", state: "started", at: "x" })}\n`);
     const r = await w.host.run(lost);
     assert.equal(r.ok, false);
     assert.match(reasonOf(r), /did not finish/);
@@ -191,5 +191,72 @@ test("two requests for one checkout run one at a time, and two with one request 
     assert.equal(x.ok, true);
     const pending = await readdir(join(w.where.bridgeState, "pending")).catch(() => []);
     assert.deepEqual(pending, [], "no duplicate kept change");
+  } finally { await w.done(); }
+});
+
+test("a request ID used for one task is refused for another task (review fix 3)", { skip }, async () => {
+  const w = await world();
+  try {
+    const c = call("refresh");
+    assert.equal((await w.host.run(c)).ok, true);
+    const other = await w.host.run({ ...c, taskId: "tsk-two" });
+    assert.equal(other.ok, false);
+    assert.match(reasonOf(other), /another operation or task|not on this host/);
+    // The same ID and task, different task located too: the journal itself refuses the mismatch.
+    await writeFile(join(w.dir, "journal", `${c.requestId}.json`), `${JSON.stringify({ operation: "refresh", taskId: "tsk-zzz", state: "done", at: "x", outcome: { ok: true, summary: "other task" } })}\n`);
+    const r = await w.host.run(c);
+    assert.equal(r.ok, false);
+    assert.match(reasonOf(r), /another operation or task/);
+  } finally { await w.done(); }
+});
+
+test("a request past its deadline, or with an attempt running, is not started and leaves no journal record (review fix 1)", { skip }, async () => {
+  let quiet = true;
+  const asked: string[][] = [];
+  const w = await world({ attemptsQuiet: (ids) => { asked.push([...ids]); return quiet; } });
+  try {
+    await writeFile(join(w.shared, "src", "c.ts"), "export const c = 1;\n");
+    sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "second");
+    const late = await w.host.run(call("refresh", { expiresAt: new Date(Date.now() - 1000).toISOString() }));
+    assert.equal(late.ok, false); assert.match(reasonOf(late), /stopped waiting/);
+    assert.equal(existsSync(join(w.where.checkout, "src", "c.ts")), false, "the checkout did not move");
+    quiet = false;
+    const busy = await w.host.run(call("refresh", { quietAttempts: ["att-aaaaaaaaaaaaaaaaaaaa"] }));
+    assert.equal(busy.ok, false); assert.match(reasonOf(busy), /attempt of the task is running/);
+    assert.equal(existsSync(join(w.where.checkout, "src", "c.ts")), false);
+    assert.deepEqual(asked.at(-1), ["att-aaaaaaaaaaaaaaaaaaaa"]);
+    assert.deepEqual(await readdir(join(w.dir, "journal")).catch(() => []), [], "refused requests are not recorded as begun");
+    quiet = true;
+    assert.equal((await w.host.run(call("refresh", { expiresAt: new Date(Date.now() + 60_000).toISOString() }))).ok, true);
+  } finally { await w.done(); }
+});
+
+test("a deadline that passes while the request waits behind another on the same checkout stops it before it starts (review fix 1)", { skip }, async () => {
+  let gate!: () => void;
+  const hold = new Promise<void>((ok) => { gate = ok; });
+  let first = true;
+  const w = await world({ attemptsQuiet: async () => { if (first) { first = false; await hold; } return true; } });
+  try {
+    await writeFile(join(w.shared, "src", "c.ts"), "export const c = 1;\n");
+    sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "second");
+    const a = w.host.run(call("refresh"));
+    const b = w.host.run(call("integration", { expiresAt: new Date(Date.now() + 150).toISOString() }));
+    await new Promise((ok) => setTimeout(ok, 300));
+    gate();
+    assert.equal((await a).ok, true);
+    const rb = await b;
+    assert.equal(rb.ok, false); assert.match(reasonOf(rb), /stopped waiting/);
+  } finally { await w.done(); }
+});
+
+test("integration treats a deleted file whose folder is already gone in the shared workspace as already done, not as a failure (review fix 4)", { skip }, async () => {
+  const w = await world();
+  try {
+    await rm(join(w.where.checkout, "src", "b.ts"));
+    await rm(join(w.shared, "src"), { recursive: true });
+    const r = await w.host.run(call("integration"));
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(detailOf(r)["skipped"], 1);
+    assert.equal(detailOf(r)["written"], 0);
   } finally { await w.done(); }
 });

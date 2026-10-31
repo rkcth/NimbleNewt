@@ -29,6 +29,8 @@ export interface HostWorkspaceCall {
   readonly projectId: string;
   readonly reason: string;
   readonly quietAttempts?: readonly string[];
+  /** When the controller stops waiting for the answer (an ISO time): it frees the agent then, so the host must not start the work after it. */
+  readonly expiresAt?: string;
   /** The agent the task is assigned to, when the controller says (named as the author of what is carried into the shared workspace). */
   readonly assignee?: string;
 }
@@ -55,6 +57,11 @@ export interface WorkspaceHostOptions {
   /** A directory only the controller's side can write: one record per request. */
   readonly journal: string;
   readonly clock?: () => string;
+  /**
+   * Whether none of these attempts is running on this host right now. Asked just before the work starts (after any wait behind another request): a request is never carried out under a running agent. If given and it
+   * answers false or throws, the request is refused and left unstarted. A host that has attempts must give it.
+   */
+  readonly attemptsQuiet?: (attemptIds: readonly string[], call: { readonly taskId: string; readonly projectId: string }) => Promise<boolean> | boolean;
 }
 
 const REQUEST = /^wsr-[a-z2-7]{20}$/;
@@ -62,7 +69,7 @@ const IDENT = /^[A-Za-z0-9._:-]{1,120}$/;
 const OPERATIONS: readonly string[] = ["integration", "refresh", "release", "quarantine"];
 export const HOST_LIMITS = { summary: 600, keptListed: 20 } as const;
 
-interface JournalRecord { readonly operation: string; readonly state: "started" | "done"; readonly at: string; readonly finishedAt?: string; readonly outcome?: HostWorkspaceOutcome }
+interface JournalRecord { readonly operation: string; readonly taskId?: string; readonly state: "started" | "done"; readonly at: string; readonly finishedAt?: string; readonly outcome?: HostWorkspaceOutcome }
 
 const no = (reason: string): HostWorkspaceOutcome => ({ ok: false, reason });
 const cut = (text: string): string => text.replace(/\s+/g, " ").slice(0, HOST_LIMITS.summary);
@@ -89,7 +96,26 @@ export class WorkspaceHost {
     if (where === undefined) return no("the checkout of that task is not on this host");
     for (const p of [where.shared, where.checkout, where.gitDir, where.bridgeState, where.quarantineRoot]) if (typeof p !== "string" || !isAbsolute(p)) return no("this host's location for the checkout is not an absolute path (a host fault)");
     // One operation at a time per checkout, and a request ID carried out once.
-    return this.#serial(where.checkout, () => this.#once(call, operation as HostOperation, where));
+    return this.#serial(where.checkout, async () => {
+      // Checked at the moment the work would start, after any wait behind another request: the controller may have given up and freed the agent by then.
+      const stale = await this.#notNow(call);
+      return stale !== undefined ? no(stale) : this.#once(call, operation as HostOperation, where);
+    });
+  }
+
+  /** Why the request must not start now (its deadline passed, or an attempt it names is running), or `undefined`. Nothing is written to the journal for a request refused here, so it is not counted as begun. */
+  async #notNow(call: HostWorkspaceCall): Promise<string | undefined> {
+    if (call.expiresAt !== undefined) {
+      const deadline = Date.parse(call.expiresAt);
+      if (!Number.isFinite(deadline)) return "the request's deadline is not a time";
+      if (Date.now() >= deadline) return "the controller stopped waiting for this request before it could start; it was not carried out";
+    }
+    if (this.#options.attemptsQuiet !== undefined) {
+      let quiet = false;
+      try { quiet = (await this.#options.attemptsQuiet(call.quietAttempts ?? [], { taskId: call.taskId, projectId: call.projectId })) === true; } catch { quiet = false; }
+      if (!quiet) return "an attempt of the task is running on this host; the request was not carried out";
+    }
+    return undefined;
   }
 
   async #serial<T>(key: string, work: () => Promise<T>): Promise<T> {
@@ -106,19 +132,19 @@ export class WorkspaceHost {
     const file = join(dir, `${call.requestId}.json`);
     const earlier = await this.#read(file);
     if (earlier !== undefined) {
-      if (earlier.operation !== operation) return no("that request ID was used for another operation here");
+      if (earlier.operation !== operation || earlier.taskId !== call.taskId) return no("that request ID was used for another operation or task here");
       if (earlier.state === "done" && earlier.outcome !== undefined) return earlier.outcome;
       return no("an earlier run of this request began and did not finish, so the checkout may be half changed; it is not run again; look at the checkout and ask with a new request");
     }
     const at = (this.#options.clock ?? (() => new Date().toISOString()))();
     // The marker is created exclusively: of two callers with one request ID only one goes on.
-    try { await writeFile(file, `${JSON.stringify({ operation, state: "started", at } satisfies JournalRecord)}\n`, { flag: "wx", mode: 0o600 }); } catch (error) {
+    try { await writeFile(file, `${JSON.stringify({ operation, taskId: call.taskId, state: "started", at } satisfies JournalRecord)}\n`, { flag: "wx", mode: 0o600 }); } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EEXIST") return no("this request is already being carried out here");
       throw error;
     }
     // A throw leaves the record `started`: the work may be half done, so a repeat is refused as uncertain and the controller records the request as failed.
     const outcome = await this.#do(call, operation, where);
-    const record: JournalRecord = { operation, state: "done", at, finishedAt: (this.#options.clock ?? (() => new Date().toISOString()))(), outcome };
+    const record: JournalRecord = { operation, taskId: call.taskId, state: "done", at, finishedAt: (this.#options.clock ?? (() => new Date().toISOString()))(), outcome };
     const temporary = `${file}.${createHash("sha256").update(String(Math.random())).digest("hex").slice(0, 8)}.tmp`;
     await writeFile(temporary, `${JSON.stringify(record)}\n`, { mode: 0o600, flag: "wx" });
     await rename(temporary, file);

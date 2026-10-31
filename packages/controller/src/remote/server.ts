@@ -254,7 +254,8 @@ export class WorkerTransport {
     if (a === "session" && b === "workspace" && parts.length === 3) {
       allowed("GET");
       for (const key of url.searchParams.keys()) throw new HttpError(400, "invalid_command", `${key}: is not a parameter of this route`);
-      return { status: 200, body: { requests: await svc.workspaceRequests(host, await this.#session(req, host)) } };
+      const session = await this.#session(req, host);
+      return { status: 200, body: { requests: await svc.workspaceRequests(host, session), withdrawn: await svc.workspaceWithdrawn(host, session) } };
     }
     if (a === "session" && b === "workspace" && c !== undefined && parts.length === 4) {
       allowed("POST");

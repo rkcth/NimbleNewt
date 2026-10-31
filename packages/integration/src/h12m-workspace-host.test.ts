@@ -61,7 +61,7 @@ test("local host: refresh, integration and quarantine of a running agent's real 
     dispatch: {
       manual: true,
       route: async () => ({ route: "cloud/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: true } }),
-      local: {
+      local: { acceptUnenforcedLimits: true,
         window: () => 8192, close: async () => undefined,
         build: () => {
           local = new LocalWorker({

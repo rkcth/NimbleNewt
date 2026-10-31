@@ -390,6 +390,8 @@ export class RemoteWorkerService {
     let ask: WorkspaceAskState;
     if (earlier !== undefined) {
       if (earlier.hostId !== host) invalid("requestId", "was asked of another host");
+      // A request that timed out was withdrawn and is no longer listed: the host may have started it, or may refuse to start it, so joining it would wait for an answer that cannot come. Ask again with a new request ID.
+      if (earlier.abandoned && earlier.answer === undefined) throw new DomainError("unavailable", `request ${wire.requestId} timed out earlier and was withdrawn from ${host}; it may or may not have been carried out there, so it is not asked again under the same ID`);
       ask = earlier;
     } else {
       const reasons = capabilityReasons(host, await this.#deps.hosts.status(this.#deps.principal, host), { data: "cloud-allowed" });
@@ -399,7 +401,9 @@ export class RemoteWorkerService {
       // The map stays bounded: answered and withdrawn requests older than an hour are dropped first.
       if (this.#asks.size >= 256) for (const [id, a] of this.#asks) if ((a.answer !== undefined || a.abandoned) && Date.now() - a.at > 3_600_000) this.#asks.delete(id);
       if (this.#asks.size >= 256) return { ok: false, reason: "too many workspace requests are open; nothing was sent" };
-      ask = { hostId: host, wire, at: Date.now(), abandoned: false, waiters: new Set() };
+      const at = Date.now();
+      // The host enforces the deadline: it does not start the request after the controller has stopped waiting and freed the agent.
+      ask = { hostId: host, wire: { ...wire, expiresAt: new Date(at + options.waitMs).toISOString() }, at, abandoned: false, waiters: new Set() };
       this.#asks.set(wire.requestId, ask);
       // The host's offers poll ends now, so it reads its requests without waiting out the hold.
       this.#endPoll(host);
@@ -422,6 +426,12 @@ export class RemoteWorkerService {
   async workspaceRequests(host: Principal, sessionId: unknown): Promise<WorkspaceAsk[]> {
     await this.#session(host, sessionId);
     return [...this.#asks.values()].filter((a) => a.hostId === host.id && a.answer === undefined && !a.abandoned).sort((x, y) => x.at - y.at).map((a) => a.wire);
+  }
+
+  /** The requests the controller withdrew from this host (it stopped waiting) and no answer came for; the host drops any it has queued and not started. Kept for an hour. */
+  async workspaceWithdrawn(host: Principal, sessionId: unknown): Promise<string[]> {
+    await this.#session(host, sessionId);
+    return [...this.#asks.entries()].filter(([, a]) => a.hostId === host.id && a.answer === undefined && a.abandoned && Date.now() - a.at < 3_600_000).map(([id]) => id).slice(0, 100);
   }
 
   /**
