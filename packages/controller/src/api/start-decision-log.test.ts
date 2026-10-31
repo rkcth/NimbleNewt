@@ -86,6 +86,10 @@ test("meeting.decisions.log: the owner reads one line per carried-out change, an
     const lines = asked.result.item.lines as { text: string; cites: { kind: string; id: string }[] }[];
     assert.equal(lines.length, 2);
     for (const l of lines) { assert.match(l.text, /budget\.raise on a task: applied; you allowed it\./); assert.ok(l.cites.some((x) => x.kind === "meeting-decision-log" && entries.some((e) => e.id === x.id))); }
+    assert.deepEqual(lines.map((l) => l.text.slice(0, 24)), [...lines.map((l) => l.text.slice(0, 24))].sort().reverse(), "newest first");
+    const badKind = await call(owner, "status.ask", { request: { kind: "decision_log", changeKind: 7 } });
+    assert.equal(badKind.ok, false);
+    assert.match(badKind.error.message, /changeKind/);
     assert.equal(((await call(owner, "status.ask", { request: { kind: "decision_log", outcome: "declined" } })).result.item.lines as unknown[]).length, 1, "an empty reading says so in one line");
     const denied = await call(ann, "status.ask", { request: { kind: "decision_log" } });
     assert.equal(denied.ok, false, "an agent reads nothing");

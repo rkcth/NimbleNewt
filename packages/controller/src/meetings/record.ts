@@ -963,6 +963,8 @@ export class MeetingRecordService {
       if (d.outcome !== "adopted" || d.scope !== "in-scope" || d.ownerResponse === "pending") return tally();
       const change = d.changes.find((c) => c.state === "adopted" || c.state === "applying");
       if (change === undefined) { await this.#announceChanges(decisionId); return tally(); }
+      let limitNow: number | undefined;
+      const countPolicy = (body: DecisionRecordBody, exceptId: string): number => body.changes.filter((c) => c.id !== exceptId && c.agreedBy !== undefined && c.agreedBy.startsWith("policy:") && c.agreedBy !== "policy:none").length;
       // `agreement` is set for the save that starts a change: it holds only while the change is still adopted and the owner's response is still the one the agreement was worked out from.
       const save = async (next: ChangeRecord, agreement?: string): Promise<boolean> => {
         let lost = false;
@@ -975,6 +977,8 @@ export class MeetingRecordService {
             if (agreement !== undefined) {
               const here = body.changes.find((c) => c.id === change.id);
               if (here?.state !== "adopted" || body.ownerResponse !== d.ownerResponse) { lost = true; throw new DomainError("invalid_command", "the owner answered before this change started"); }
+              // The limit is counted again here, on the record the save will replace: a concurrent start of another widening change in the same decision is seen on the retry (card M02g).
+              if (limitNow !== undefined && agreement.startsWith("policy:") && agreement !== "policy:none" && countPolicy(body, change.id) >= limitNow) { lost = true; throw new DomainError("invalid_command", "the decision reached its limit of widening changes before this change started"); }
             }
             const changes = body.changes.map((c) => (c.id === change.id && (c.state === "adopted" || c.state === "applying") ? { ...next, at: now } : c));
             return { ref: { kind: "meeting-decision", id: decisionId }, creates: false, changes: [{ type: "update", ref: { kind: "meeting-decision", id: decisionId }, expectedRevision: cur!.revision, body: json({ ...body, changes }) }], detail: { projectId: body.projectId, change: change.id, to: next.state } };
@@ -987,17 +991,29 @@ export class MeetingRecordService {
       // Until the change has been started, a refusal is saved only while the change is still adopted and the owner's answer is the one this pass worked from; if the owner answered meanwhile the pass reads the decision again (card M02g).
       let started = change.state === "applying";
       const refuse = async (code: ChangeRecord["code"], reason: string): Promise<void> => { await save({ ...change, state: "not-applied", ...(code === undefined ? {} : { code }), ...((cell ?? change.setting) === undefined ? {} : { setting: cell ?? change.setting }), reason }, started ? undefined : "refusal"); };
+      // The decision goes back to waiting for the owner, only while the owner's answer is still the one this pass worked from; needs_you then shows it, an agree carries out what is left and a decline refuses it.
+      const holdForOwner = async (): Promise<void> => {
+        let moved = false;
+        try { await this.#retrying(() => this.#runner.command("meeting.decision.limit-hold", { commandId: `${decisionId}:limit-hold`.slice(0, 120), actor: by.id }, async () => ({
+          payload: { decisionId },
+          build: async () => {
+            const cur = await this.#runner.get("meeting-decision", decisionId);
+            const body = known<DecisionRecordBody>(cur)!;
+            if (body.ownerResponse !== d.ownerResponse || body.ownerResponse === "pending") { moved = true; throw new DomainError("invalid_command", "the owner answered meanwhile"); }
+            return { ref: { kind: "meeting-decision", id: decisionId }, creates: false, changes: [{ type: "update", ref: { kind: "meeting-decision", id: decisionId }, expectedRevision: cur!.revision, body: json({ ...body, ownerResponse: "pending" }) }], detail: { projectId: body.projectId, limit: "reached" } };
+          },
+        }))); } catch (error) { if (!moved) throw error; }
+      };
       if (change.state === "adopted") {
         const applier = this.#options.appliers?.[change.kind];
         if (applier === undefined) { await refuse("failed", `no applier is registered for ${change.kind}`); continue; }
         if (applier.widens !== undefined) cell = this.#options.widening === undefined ? "ask" : await this.#options.widening(applier.widens, d.projectId).catch(() => "ask" as const);
         // The policy may have tightened since the vote: a widening change goes ahead without the owner's agreement only while the policy still lets its class through.
         if (applier.widens !== undefined && d.ownerResponse !== "agreed" && cell !== "allow") { await refuse("unauthorized", `the approval policy asks the owner before ${applier.widens} changes are carried out, and the owner has not agreed`); continue; }
-        // A limit on how much widening one decision may do without the owner: the policy's leave covers that many changes, the rest wait for the owner (who may agree to the whole decision).
+        // A limit on how much widening one decision may do without the owner: the policy's leave covers that many changes. At the limit the decision waits for the owner (as when the policy asks), the rest stay adopted, and the owner's agreement carries them out.
         if (applier.widens !== undefined && d.ownerResponse !== "agreed") {
-          const limit = this.#options.policyWideningLimit === undefined ? undefined : await this.#options.policyWideningLimit(d.projectId).catch(() => 0);
-          const used = d.changes.filter((c) => c.id !== change.id && c.agreedBy !== undefined && c.agreedBy.startsWith("policy:") && c.agreedBy !== "policy:none").length;
-          if (limit !== undefined && used >= limit) { await refuse("unauthorized", `this decision already has ${used} widening change${used === 1 ? "" : "s"} carried out on the policy's leave (the limit is ${limit}); the owner has to agree to the rest`); continue; }
+          limitNow = this.#options.policyWideningLimit === undefined ? undefined : await this.#options.policyWideningLimit(d.projectId).catch(() => 0);
+          if (limitNow !== undefined && countPolicy(d, change.id) >= limitNow) { await holdForOwner(); continue; }
         }
         if (change.target.kind === "task" && this.#deps.decisions !== undefined) {
           const blocked = (await this.#deps.decisions.guard(change.target.id, "start")).blockedBy;

@@ -211,7 +211,7 @@ export type StatusRequest =
   | { readonly kind: "timeline"; readonly projectId: string; readonly agent?: string; readonly since?: string; readonly limit?: number }
   | { readonly kind: "meetings"; readonly projectId: string; readonly limit?: number }
   | { readonly kind: "agenda"; readonly projectId: string; readonly limit?: number }
-  | { readonly kind: "decision_log"; readonly projectId?: string; readonly changeKind?: string; readonly outcome?: string; readonly limit?: number }
+  | { readonly kind: "decision_log"; readonly projectId?: string; readonly changeKind?: string; readonly outcome?: string; readonly after?: string; readonly limit?: number }
   | { readonly kind: "explanations"; readonly taskId: string; readonly seq?: number; readonly limit?: number }
   | { readonly kind: "replay"; readonly taskId: string; readonly seq?: number; readonly from?: number; readonly limit?: number; readonly lane?: string; readonly agent?: string }
   | { readonly kind: "revocations"; readonly name?: string; readonly limit?: number }
@@ -241,7 +241,7 @@ export interface StatusDeps {
   /** The planned meetings of a project (card M04f). Absent: the view is not offered. */
   readonly meetings?: { planned(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { id: string; revision: number; title: string; kind: string; startsAt: string; endsAt: string; mode: string; state: string; participants: readonly { id: string; status?: string; availability?: string }[] }[]; next?: string } | undefined> };
   /** The log of what happened to each change a meeting decided (card M02g). Owner only: for anyone else the view reads as missing. Absent: the view is not offered. */
-  readonly decisionLog?: (viewer: Principal, query: { kind?: string; outcome?: string; projectId?: string; limit?: number }) => Promise<{ entries: readonly { id: string; revision: number; decisionId: string; projectId: string; kind: string; targetKind: string; outcome: string; code?: string; decidedBy: string; agreedBy?: string; widens?: string; setting?: string; changedAt: string }[]; next?: string; scanLimited?: true }>;
+  readonly decisionLog?: (viewer: Principal, query: { kind?: string; outcome?: string; projectId?: string; after?: string; limit?: number }) => Promise<{ entries: readonly { id: string; revision: number; decisionId: string; projectId: string; kind: string; targetKind: string; outcome: string; code?: string; decidedBy: string; agreedBy?: string; widens?: string; setting?: string; changedAt: string }[]; next?: string; scanLimited?: true }>;
   /** The open agenda of a project (card M03f). Absent: the view is not offered. */
   readonly agenda?: { openAgenda(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { id: string; revision: number; topic: string; question?: string; requestedOutcome?: string; urgency: string; intent: string; state: string; requestedBy: string; timeboxMinutes?: number }[]; next?: string } | undefined> };
   /** The steps of a task's activity record (card C09h). Absent: the view is not offered. */
@@ -357,7 +357,7 @@ export class StatusService {
       case "shutdown": { onlyKnown(request, ["kind"]); return this.shutdownLines(by); }
       case "handoff": { onlyKnown(request, ["kind", "taskId"]); return this.handoffLines(by, request.taskId); }
       case "meetings": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.meetingLines(by, request); }
-      case "decision_log": { onlyKnown(request, ["kind", "projectId", "changeKind", "outcome", "limit"]); return this.decisionLogLines(by, request); }
+      case "decision_log": { onlyKnown(request, ["kind", "projectId", "changeKind", "outcome", "after", "limit"]); return this.decisionLogLines(by, request); }
       case "agenda": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.agendaLines(by, request); }
       case "explanations": { onlyKnown(request, ["kind", "taskId", "seq", "limit"]); return this.explanationLines(by, request); }
       case "replay": { onlyKnown(request, ["kind", "taskId", "seq", "from", "limit", "lane", "agent"]); return this.replayLines(by, request); }
@@ -489,20 +489,24 @@ export class StatusService {
     return { observedAt: this.#runner.now(), lines };
   }
 
-  /** What happened to the changes meetings decided, as plain lines (card M02g): the owner's reading of the decision log, newest page first as stored (ID order), one line a change with who allowed it. Anyone but the owner gets nothing. */
-  async decisionLogLines(by: Principal, request: { projectId?: string; changeKind?: string; outcome?: string; limit?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+  /** What happened to the changes meetings decided, as plain lines (card M02g): the owner's reading of the decision log. The log is stored in ID order (not time order), so one reading takes a window of up to 100 stored entries (the log reader scans at most 2000), shows the newest of them first, and gives `after` to go on with the next window; a window can therefore hold entries newer than ones shown later. Anyone but the owner gets nothing. */
+  async decisionLogLines(by: Principal, request: { projectId?: string; changeKind?: string; outcome?: string; after?: string; limit?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     if (this.#deps.decisionLog === undefined) return undefined;
     if (by.kind !== "owner" || by.taskScope !== undefined) return undefined;
     const limit = request.limit === undefined ? 10 : Number.isSafeInteger(request.limit) && request.limit >= 1 && request.limit <= 50 ? request.limit : invalid("limit", "must be 1 to 50");
     const projectId = request.projectId === undefined ? undefined : checkProjectId(request.projectId);
-    const page = await this.#deps.decisionLog(by, { limit, ...(projectId === undefined ? {} : { projectId }), ...(request.changeKind === undefined ? {} : { kind: request.changeKind }), ...(request.outcome === undefined ? {} : { outcome: request.outcome }) });
-    const lines: Line[] = page.entries.map((e) => {
+    if (request.changeKind !== undefined && (typeof request.changeKind !== "string" || request.changeKind.length === 0 || request.changeKind.length > 80)) invalid("changeKind", "must be a kind of change, such as budget.raise");
+    const page = await this.#deps.decisionLog(by, { limit: 100, ...(projectId === undefined ? {} : { projectId }), ...(request.changeKind === undefined ? {} : { kind: request.changeKind }), ...(request.outcome === undefined ? {} : { outcome: request.outcome }), ...(request.after === undefined ? {} : { after: request.after }) });
+    const newestFirst = [...page.entries].sort((a, b) => (a.changedAt < b.changedAt ? 1 : a.changedAt > b.changedAt ? -1 : a.id < b.id ? -1 : 1));
+    const lines: Line[] = newestFirst.slice(0, limit).map((e) => {
       const b = e;
       const who = b.decidedBy === "owner" ? "you allowed it" : b.decidedBy === "policy" ? `the approval policy let it through${b.setting === undefined ? "" : ` (${b.widens ?? "widening"}: ${b.setting})`}` : b.decidedBy === "vote" ? "the team's vote alone" : b.decidedBy === "steward" ? "the steward agent decided" : "nobody started it";
-      return line(`${b.changedAt}: ${shown(b.kind)} on a ${shown(b.targetKind)}: ${b.outcome}${b.code === undefined ? "" : ` (${shown(b.code)})`}; ${who}.`, cite("meeting-decision-log", e.id, e.revision), cite("meeting-decision", b.decisionId), cite("project", b.projectId));
+      return line(`${b.changedAt}: ${shown(b.kind)} on a ${shown(b.targetKind)}: ${b.outcome}${b.code === undefined ? "" : ` (${shown(b.code)})`}; ${who}.`, cite("meeting-decision-log", b.id, b.revision), cite("meeting-decision", b.decisionId), cite("project", b.projectId));
     });
-    if (lines.length === 0) lines.push(line("No meeting decision matches."));
-    else if (page.next !== undefined || page.scanLimited === true) lines.push(line("There are more entries than shown."));
+    const more = page.next !== undefined || page.scanLimited === true;
+    if (lines.length === 0) lines.push(line(more ? `Nothing matched in the part of the log searched so far; ask again with after "${page.next ?? ""}" to search further.` : "No meeting decision matches."));
+    else if (newestFirst.length > limit) lines.push(line(`There are more entries in this part of the log than shown; ask for a larger limit${more ? ` or go on with after "${page.next ?? ""}"` : ""}.`));
+    else if (more) lines.push(line(`The log has more entries; go on with after "${page.next ?? ""}".`));
     return { observedAt: this.#runner.now(), lines };
   }
 

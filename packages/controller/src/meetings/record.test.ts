@@ -931,30 +931,52 @@ for (const backend of backends) {
     assert.equal((await c.projects.getTask(task.id))!.title, "Write the guide, v2");
   });
 
-  suite("a decision may carry out only so many widening changes on the policy's leave; the rest wait for the owner, whose agreement lifts the limit (card M02g)", async (c) => {
+  suite("a decision may carry out only so many widening changes on the policy's leave; at the limit it waits for the owner, whose agreement carries out the rest and whose decline refuses them (card M02g)", async (c) => {
     const widens = { ...taskUpdateApplier(c.projects), widens: "spend" as const };
     await c.grantUpdate(c.pA);
-    const decide = async (limit: number | undefined, count: number, owner?: "agree") => {
-      const svc = c.reopen({ appliers: { "task.update": taskUpdateApplier(c.projects), "task.retitle-widening": widens }, widening: async () => "allow", policyWideningLimit: async () => limit });
+    type Mixed = "widen" | "plain";
+    const decide = async (limit: (() => Promise<number | undefined>) | undefined, kinds: Mixed[]) => {
+      const svc = c.reopen({ appliers: { "task.update": taskUpdateApplier(c.projects), "task.retitle-widening": widens }, widening: async () => "allow", ...(limit === undefined ? {} : { policyWideningLimit: limit }) });
       const ctx = { ...c, records: svc } as Ctx;
-      const tasks = await Promise.all(Array.from({ length: count }, (_, i) => c.task(`Limit ${i}`)));
+      const tasks = await Promise.all(kinds.map((_, i) => c.task(`Limit ${i}`)));
       const meeting = await c.meet({ chair: c.pD, item: "delegated-decision" });
       const item = (await c.meetings.occurrence(c.owner, (await recordOf(c, meeting.rec)).occurrenceId))!.agenda.find((a) => a.intent === "delegated-decision")!.id;
-      const m = await adopt(ctx, meeting.rec, c.asB, { agendaItemId: item, changes: tasks.map((t, i) => ({ ...change(c, t, c.pA, `Limit ${i}, retitled`), kind: "task.retitle-widening" })) });
+      const m = await adopt(ctx, meeting.rec, c.asB, { agendaItemId: item, changes: tasks.map((t, i) => ({ ...change(c, t, c.pA, `Limit ${i}, retitled`), ...(kinds[i] === "widen" ? { kind: "task.retitle-widening" } : {}) })) });
       const d = await decisionOf(ctx, m);
-      if (owner === "agree") await svc.ownerRespond(c.owner, { commandId: cid("or"), decisionId: d.id, response: "agree" });
-      else await svc.apply(c.host, { decisionId: d.id });
-      return (await decisionOf(ctx, m)).changes;
+      const result = await svc.apply(c.host, { decisionId: d.id });
+      return { svc, ctx, m, d, result, now: async () => decisionOf(ctx, m) };
     };
-    const none = await decide(undefined, 3);
-    assert.deepEqual(none.map((x) => x.state), ["applied", "applied", "applied"], "no limit set: nothing is held back");
-    const two = await decide(2, 3);
-    assert.deepEqual(two.map((x) => [x.state, x.code]), [["applied", undefined], ["applied", undefined], ["not-applied", "unauthorized"]]);
-    assert.match(two[2]!.reason!, /already has 2 widening changes .* limit is 2/);
-    const zero = await decide(0, 1);
-    assert.deepEqual(zero.map((x) => [x.state, x.code]), [["not-applied", "unauthorized"]], "limit 0: nothing without the owner");
-    const agreed = await decide(1, 3, "agree");
-    assert.deepEqual(agreed.map((x) => x.state), ["applied", "applied", "applied"], "the owner's agreement lifts the limit");
+    const five: Mixed[] = ["widen", "widen", "widen", "widen", "widen"];
+    // No limit: nothing is held back.
+    assert.deepEqual((await decide(undefined, five)).result, { applied: 5, notApplied: 0, pending: 0 });
+    // Limit 3, five raises: three go ahead, the decision waits for the owner with two still adopted.
+    const held = await decide(async () => 3, five);
+    assert.deepEqual(held.result, { applied: 3, notApplied: 0, pending: 2, waitingFor: "owner" });
+    const mid = await held.now();
+    assert.deepEqual([mid.ownerResponse, ...mid.changes.map((x) => x.state)], ["pending", "applied", "applied", "applied", "adopted", "adopted"]);
+    assert.deepEqual((await held.svc.decisionLog(c.owner)).entries.filter((e) => e.decisionId === held.d.id).map((e) => [e.outcome, e.decidedBy]), [["applied", "policy"], ["applied", "policy"], ["applied", "policy"]]);
+    // A repeat of the apply does not start more while it waits.
+    assert.equal((await held.svc.apply(c.host, { decisionId: held.d.id })).applied, 3);
+    // The owner agrees: the rest is carried out, and the log says the owner allowed those two.
+    assert.equal((await held.svc.ownerRespond(c.owner, { commandId: cid("or"), decisionId: held.d.id, response: "agree" })).applied, 5);
+    const done = await held.now();
+    assert.deepEqual(done.changes.map((x) => [x.state, x.agreedBy]), [["applied", "policy:spend"], ["applied", "policy:spend"], ["applied", "policy:spend"], ["applied", "owner:agreed"], ["applied", "owner:agreed"]]);
+    const log = (await held.svc.decisionLog(c.owner)).entries.filter((e) => e.decisionId === held.d.id);
+    assert.deepEqual(log.map((e) => [e.outcome, e.decidedBy]).sort().map((x) => x.join(":")), ["applied:owner", "applied:owner", "applied:policy", "applied:policy", "applied:policy"]);
+    // The owner declines instead: the three stay applied, the two are refused by the owner.
+    const declined = await decide(async () => 3, five);
+    await declined.svc.ownerRespond(c.owner, { commandId: cid("or"), decisionId: declined.d.id, response: "decline" });
+    assert.deepEqual((await declined.now()).changes.map((x) => [x.state, x.code]), [["applied", undefined], ["applied", undefined], ["applied", undefined], ["not-applied", "owner"], ["not-applied", "owner"]]);
+    assert.deepEqual((await declined.svc.decisionLog(c.owner)).entries.filter((e) => e.decisionId === declined.d.id).map((e) => e.outcome).sort(), ["applied", "applied", "applied", "declined", "declined"]);
+    // Limit 0: nothing goes ahead without the owner.
+    const zero = await decide(async () => 0, ["widen"]);
+    assert.deepEqual(zero.result, { applied: 0, notApplied: 0, pending: 1, waitingFor: "owner" });
+    // A failing read of the limit fails closed (as 0).
+    const broken = await decide(async () => { throw new Error("settings down"); }, ["widen"]);
+    assert.deepEqual(broken.result, { applied: 0, notApplied: 0, pending: 1, waitingFor: "owner" });
+    // A change that widens nothing (policy:none) does not count: with a limit of 1, a plain change and a widening one both go ahead.
+    const mixed = await decide(async () => 1, ["plain", "plain", "widen"]);
+    assert.deepEqual(mixed.result, { applied: 3, notApplied: 0, pending: 0 });
   });
 
   suite("a refusal is not saved over a change the owner's agreement has already started (card M02g)", async (c) => {
