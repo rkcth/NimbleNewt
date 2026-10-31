@@ -171,6 +171,20 @@ for (const backend of backends) {
     await assert.rejects(() => broken.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, costMicros: 1, decisionId: "d", agreedBy: "policy:spend" }), /unreadable/);
   });
 
+  suite("an agreed raise that was already made is answered as made even if the owner has since lowered the ceiling (replay after a crash)", async (c) => {
+    await open(c);
+    const controller = { id: "service:meeting-records", kind: "service", name: "meeting-records", grants: [] } as unknown as Principal;
+    let ceiling: number | undefined;
+    const svc = c.withLimits(async () => (ceiling === undefined ? {} : { raiseMaxCostMicros: ceiling }));
+    const cmd = { commandId: cid("replay"), taskId: c.root, costMicros: 500, decisionId: "d", agreedBy: "policy:spend" };
+    const before = (await rep(c, c.root)).available.costMicros;
+    await svc.raiseAgreed(controller, cmd);
+    ceiling = 100; // lowered after the money was added
+    await svc.raiseAgreed(controller, cmd); // the replay must not be refused
+    assert.equal((await rep(c, c.root)).available.costMicros, before + 500);
+    await refuses("invalid_command", () => svc.raiseAgreed(controller, { ...cmd, commandId: cid("fresh") })); // a new one is still held to the ceiling
+  });
+
   suite("uncertain and in-flight amounts are held and shown until reconciled", async (c) => {
     await open(c, 100, 500);
     const r1 = await c.reserve(c.root, 40, 100);

@@ -274,16 +274,18 @@ export class BudgetService {
     onlyKnown(command, ["commandId", "taskId", "costMicros", "computeMs", "decisionId", "agreedBy"]);
     if (typeof command.decisionId !== "string" || command.decisionId.length < 1 || command.decisionId.length > 120) throw new DomainError("invalid_command", "decisionId: must name the decision", { field: "decisionId" });
     if (typeof command.agreedBy !== "string" || !/^(owner:[a-z0-9-]{1,60}|policy:[a-z0-9.-]{1,60})$/.test(command.agreedBy)) throw new DomainError("invalid_command", "agreedBy: must be the owner or the policy that let it through", { field: "agreedBy" });
-    if (command.agreedBy.startsWith("policy:")) {
+    // Checked inside the command, after the runner has looked for a record of this very command: a raise that was already made is answered as made even if the owner has since lowered the ceiling (a replay after a crash must not be refused).
+    const ceiling = async (): Promise<void> => {
+      if (!command.agreedBy.startsWith("policy:")) return;
       // No ceiling unless the owner set one (owner decision 2026-10-30). A setting that cannot be read refuses the raise.
       const limits = this.#limits === undefined ? {} : await this.#limits();
       if (limits.raiseMaxCostMicros !== undefined && (command.costMicros ?? 0) > limits.raiseMaxCostMicros) throw new DomainError("invalid_command", `costMicros: a raise carried out by policy is at most ${limits.raiseMaxCostMicros}, the ceiling the owner set; a larger one needs the owner's agreement`, { field: "costMicros" });
       if (limits.raiseMaxComputeMs !== undefined && (command.computeMs ?? 0) > limits.raiseMaxComputeMs) throw new DomainError("invalid_command", `computeMs: a raise carried out by policy is at most ${limits.raiseMaxComputeMs}, the ceiling the owner set; a larger one needs the owner's agreement`, { field: "computeMs" });
-    }
-    await this.#raise(by, command, { decisionId: command.decisionId, agreedBy: command.agreedBy });
+    };
+    await this.#raise(by, command, { decisionId: command.decisionId, agreedBy: command.agreedBy }, ceiling);
   }
 
-  async #raise(owner: Principal, command: NoActor & { taskId: string; costMicros?: number; computeMs?: number }, agreement: { decisionId: string; agreedBy: string } | undefined): Promise<void> {
+  async #raise(owner: Principal, command: NoActor & { taskId: string; costMicros?: number; computeMs?: number }, agreement: { decisionId: string; agreedBy: string } | undefined, precheck?: () => Promise<void>): Promise<void> {
     const taskId = checkTaskId(command.taskId);
     const add = amounts(command, true);
     const treeId = await this.#treeIdOf(taskId, () => new DomainError("not_found", "that task has no budget"));
@@ -291,6 +293,7 @@ export class BudgetService {
     await this.#retrying(() => this.#runner.command("budget.raise", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
       payload: { taskId, add: add as unknown as JsonObject },
       build: async () => {
+        if (precheck !== undefined) await precheck();
         const found = await this.#tree(treeId);
         const tree = clone(found.body);
         this.#grow(tree, taskId, add);

@@ -86,6 +86,7 @@ export class AgreedLimitsSettingsService {
   async effective(): Promise<AgreedLimits> {
     const found = await this.#runner.get(REF.kind, REF.id);
     if (found === undefined) return {};
-    return checkAgreedLimits((found.body as unknown as Body).limits, "limits");
+    // A damaged record is a DomainError, not a plain Error: the meeting applier turns only DomainErrors into a visible failed change (a plain Error would leave the change "applying" and retried without a word).
+    try { return checkAgreedLimits((found.body as unknown as Body).limits, "limits"); } catch (e) { throw new DomainError("invalid_command", `the limits on agreed raises and grants cannot be read, so nothing is carried out under them until the owner sets them again: ${(e as Error).message}`, { field: "limits", cause: e }); }
   }
 }

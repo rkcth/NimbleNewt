@@ -155,7 +155,6 @@ export const AGREED_GRANTABLE_ACTIONS: readonly string[] = [
 ];
 /** Granted by a decision only for exactly one task (a `resource` of kind task): the grant then covers that task and no other. A project-wide request for these stays refused. */
 export const AGREED_GRANTABLE_ON_ONE_TASK: readonly string[] = ["task.update", "task.transition"];
-/** The longest an agreed (meeting-decided) grant may last. Provisional; the owner may change it. */
 const KIND = /^[a-z][a-z0-9-]{0,39}$/;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 

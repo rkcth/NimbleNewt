@@ -8,6 +8,7 @@ import { ManualTimer } from "../dispatch/testing/timer.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import type { Principal } from "../security/principals.js";
 import { MemoryStorage } from "../storage/memory.js";
+import { DomainError } from "../domain/errors.js";
 import { AgreedLimitsSettingsService } from "./agreed-limits-settings.js";
 import { startController } from "./index.js";
 
@@ -54,7 +55,8 @@ test("a damaged agreed-limits record or a storage fault makes effective() throw,
   const real = storage.getAggregate.bind(storage);
   for (const body of [{ limits: { grantMaxDays: 0 } }, { limits: { gpus: 3 } }, { limits: "lots" }, { limits: [1] }]) {
     storage.getAggregate = async (ref) => { const a = await real(ref); return ref.kind === "agreed-limits-settings" && a !== undefined ? { ...a, body } as never : a; };
-    await assert.rejects(svc.effective(), /./, JSON.stringify(body));
+    // A DomainError (not a plain Error), so the meeting applier fails the change visibly instead of retrying it unseen.
+    await assert.rejects(svc.effective(), (e: unknown) => e instanceof DomainError && e.code === "invalid_command", JSON.stringify(body));
   }
   storage.getAggregate = async () => { throw new Error("disk gone"); };
   await assert.rejects(svc.effective(), /./);
