@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { constants as fsc, type Dirent } from "node:fs";
 import { chmod, lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, rm, stat, symlink } from "node:fs/promises";
+import { hostname } from "node:os";
 import { join, sep } from "node:path";
 import { DomainError } from "../domain/errors.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
@@ -30,6 +31,8 @@ export const ACTIVATION_LIMITS = { fileBytes: 4 * 1024 ** 3, files: 100, staged:
 const CANDIDATE_ID = /^rcn-[0-9a-f]{24}$/;
 const SHA = /^[0-9a-f]{64}$/;
 const STAGED = "release-staged";
+/** Names this process among others that may share the folder (another host on a shared disk, an earlier run with the same pid): host, pid and the moment the process started. */
+export const PROCESS_TOKEN = createHash("sha256").update(`${hostname()}|${process.pid}|${Math.round(Date.now() - process.uptime() * 1000)}`).digest("hex").slice(0, 12);
 const STATE: AggregateRef = { kind: "release-activation", id: "main" };
 const SETTINGS: AggregateRef = { kind: "release-activation-settings", id: "main" };
 const MANIFEST_FILE = "MANIFEST.json";
@@ -49,7 +52,7 @@ export interface ReleaseRef { readonly id: string; readonly digest: string }
 export interface JournalBody { readonly kind: "activate" | "rollback"; readonly from?: ReleaseRef; readonly to: ReleaseRef; readonly by: string; readonly startedAt: string }
 export interface HistoryEntry { readonly at: string; readonly kind: "activated" | "rolled_back" | "aborted" | "recovered" | "resolved"; readonly by: string; readonly to?: string; readonly from?: string; readonly reason?: string }
 export interface ActivationBody { readonly current?: ReleaseRef & { readonly at: string; readonly by: string }; readonly previous?: ReleaseRef; readonly journal?: JournalBody; readonly history: readonly HistoryEntry[]; readonly updatedAt: string }
-export interface ActivationSettingsBody { readonly requireApproval?: boolean; readonly maxStagedBytes?: number; readonly keepStaged?: number; readonly updatedBy: string; readonly updatedAt: string }
+export interface ActivationSettingsBody { readonly requireApproval?: boolean; readonly maxStagedBytes?: number; readonly keepStaged?: number; /** The hard caps, when the owner moved them from the built-in ones (`ACTIVATION_LIMITS`). */ readonly maxStaged?: number; readonly maxFiles?: number; readonly maxFileBytes?: number; readonly updatedBy: string; readonly updatedAt: string }
 
 /** The place the launcher reads the active release from. */
 export interface Switcher { read(): Promise<string | undefined | "invalid">; write(id: string): Promise<void>; clear(): Promise<void> }
@@ -200,31 +203,42 @@ export class ReleaseActivationService {
     this.#locks.set(key, mine);
     try { return await mine; } finally { if (this.#locks.get(key) === mine) this.#locks.delete(key); }
   }
+  /** The release the launcher's pointer names. A pointer that cannot be read is not "no release": the caller refuses (fails closed) instead of going on without knowing what the launcher runs from. */
+  async #pointer(): Promise<string | undefined> {
+    try { return await this.#sw.read(); } catch { throw new DomainError("unavailable", "the launcher's pointer could not be read, so what it runs from is not known; nothing is staged, removed or pruned until it can be"); }
+  }
+  /** The hard caps as they count now: the owner's setting, else the built-in one. */
+  async #caps(): Promise<{ staged: number; files: number; fileBytes: number }> {
+    const b = (await this.#runner.get(SETTINGS.kind, SETTINGS.id))?.body as unknown as ActivationSettingsBody | undefined;
+    return { staged: b?.maxStaged ?? ACTIVATION_LIMITS.staged, files: b?.maxFiles ?? ACTIVATION_LIMITS.files, fileBytes: b?.maxFileBytes ?? ACTIVATION_LIMITS.fileBytes };
+  }
   #dir(id: string): string { return join(this.#o.root, "releases", id); }
   #incomingRoot(): string { return this.#o.incoming ?? join(this.#o.root, "incoming"); }
   #platform(): Pick<Cell, "os" | "arch"> { return this.#o.platform ?? { os: process.platform as Cell["os"], arch: process.arch as Cell["arch"] }; }
 
   // ---- settings ----------------------------------------------------------------------------------------------------------------------------------------------------------
 
-  async settings(owner: Principal): Promise<{ revision: number; requireApproval: boolean; maxStagedBytes: number | null; keepStaged: number | null; set: { requireApproval?: boolean; maxStagedBytes?: number; keepStaged?: number } }> {
+  async settings(owner: Principal): Promise<{ revision: number; requireApproval: boolean; maxStagedBytes: number | null; keepStaged: number | null; maxStaged: number; maxFiles: number; maxFileBytes: number; set: { requireApproval?: boolean; maxStagedBytes?: number; keepStaged?: number; maxStaged?: number; maxFiles?: number; maxFileBytes?: number } }> {
     strictOwner(owner, "read the release activation settings");
     const found = await this.#runner.get(SETTINGS.kind, SETTINGS.id);
     const b = found?.body as unknown as ActivationSettingsBody | undefined;
-    return { revision: found?.revision ?? 0, requireApproval: b?.requireApproval ?? true, maxStagedBytes: b?.maxStagedBytes ?? null, keepStaged: b?.keepStaged ?? null, set: { ...(b?.requireApproval === undefined ? {} : { requireApproval: b.requireApproval }), ...(b?.maxStagedBytes === undefined ? {} : { maxStagedBytes: b.maxStagedBytes }), ...(b?.keepStaged === undefined ? {} : { keepStaged: b.keepStaged }) } };
+    return { revision: found?.revision ?? 0, requireApproval: b?.requireApproval ?? true, maxStagedBytes: b?.maxStagedBytes ?? null, keepStaged: b?.keepStaged ?? null, maxStaged: b?.maxStaged ?? ACTIVATION_LIMITS.staged, maxFiles: b?.maxFiles ?? ACTIVATION_LIMITS.files, maxFileBytes: b?.maxFileBytes ?? ACTIVATION_LIMITS.fileBytes, set: { ...(b?.requireApproval === undefined ? {} : { requireApproval: b.requireApproval }), ...(b?.maxStagedBytes === undefined ? {} : { maxStagedBytes: b.maxStagedBytes }), ...(b?.keepStaged === undefined ? {} : { keepStaged: b.keepStaged }), ...(b?.maxStaged === undefined ? {} : { maxStaged: b.maxStaged }), ...(b?.maxFiles === undefined ? {} : { maxFiles: b.maxFiles }), ...(b?.maxFileBytes === undefined ? {} : { maxFileBytes: b.maxFileBytes }) } };
   }
   /** `requireApproval`: activation needs the candidate approved through `release.approve` (default on). `maxStagedBytes`: an optional cap on all staged releases together (off by default; null turns it off). `keepStaged`: keep only the newest N staged releases (never the current, the previous or one being switched to); off by default, null turns it off. */
-  async setSettings(owner: Principal, command: NoActor & { requireApproval?: unknown; maxStagedBytes?: unknown; keepStaged?: unknown; expectedRevision?: number }): Promise<{ revision: number }> {
+  async setSettings(owner: Principal, command: NoActor & { requireApproval?: unknown; maxStagedBytes?: unknown; keepStaged?: unknown; maxStaged?: unknown; maxFiles?: unknown; maxFileBytes?: unknown; expectedRevision?: number }): Promise<{ revision: number }> {
     strictOwner(owner, "change the release activation settings");
-    known(command, ["commandId", "requireApproval", "maxStagedBytes", "keepStaged", "expectedRevision"]);
-    if (command.requireApproval === undefined && command.maxStagedBytes === undefined && command.keepStaged === undefined) bad("requireApproval", "give requireApproval, maxStagedBytes, keepStaged or several");
+    known(command, ["commandId", "requireApproval", "maxStagedBytes", "keepStaged", "maxStaged", "maxFiles", "maxFileBytes", "expectedRevision"]);
+    if (command.requireApproval === undefined && command.maxStagedBytes === undefined && command.keepStaged === undefined && command.maxStaged === undefined && command.maxFiles === undefined && command.maxFileBytes === undefined) bad("requireApproval", "give requireApproval, maxStagedBytes, keepStaged or several");
     if (command.requireApproval !== undefined && typeof command.requireApproval !== "boolean") bad("requireApproval", "must be true or false");
     const m = command.maxStagedBytes;
     if (m !== undefined && m !== null && !(typeof m === "number" && Number.isSafeInteger(m) && m >= 1)) bad("maxStagedBytes", "must be a whole number of bytes, or null for no cap");
     const kp = command.keepStaged;
     if (kp !== undefined && kp !== null && !(typeof kp === "number" && Number.isSafeInteger(kp) && kp >= 1 && kp <= ACTIVATION_LIMITS.staged)) bad("keepStaged", `must be a whole number from 1 to ${ACTIVATION_LIMITS.staged}, or null to keep them all`);
+    const cap = (v: unknown, f: string, hi: number): number | null | undefined => (v === undefined || v === null ? (v as null | undefined) : typeof v === "number" && Number.isSafeInteger(v) && v >= 1 && v <= hi ? v : bad(f, `must be a whole number from 1 to ${hi}, or null for the built-in value`));
+    const mS = cap(command.maxStaged, "maxStaged", 10_000), mF = cap(command.maxFiles, "maxFiles", 100_000), mB = cap(command.maxFileBytes, "maxFileBytes", Number.MAX_SAFE_INTEGER);
     wholeRev(command.expectedRevision);
     const r = await this.#runner.command("release.staging.settings.set", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
-      payload: { requireApproval: (command.requireApproval as boolean | undefined) ?? null, maxStagedBytes: m === undefined ? "keep" : (m as number | null), keepStaged: kp === undefined ? "keep" : (kp as number | null), expectedRevision: command.expectedRevision ?? null },
+      payload: { requireApproval: (command.requireApproval as boolean | undefined) ?? null, maxStagedBytes: m === undefined ? "keep" : (m as number | null), keepStaged: kp === undefined ? "keep" : (kp as number | null), maxStaged: mS === undefined ? "keep" : mS, maxFiles: mF === undefined ? "keep" : mF, maxFileBytes: mB === undefined ? "keep" : mB, expectedRevision: command.expectedRevision ?? null },
       build: async () => {
         const current = await this.#runner.get(SETTINGS.kind, SETTINGS.id);
         if (command.expectedRevision !== undefined && (current?.revision ?? 0) !== command.expectedRevision) throw new DomainError("stale_revision", `the release settings are at revision ${current?.revision ?? 0}, not ${command.expectedRevision}`, { currentRevision: current?.revision ?? 0 });
@@ -232,9 +246,11 @@ export class ReleaseActivationService {
         const requireApproval = (command.requireApproval as boolean | undefined) ?? before?.requireApproval;
         const cap = m === undefined ? before?.maxStagedBytes : m === null ? undefined : (m as number);
         const keep = kp === undefined ? before?.keepStaged : kp === null ? undefined : (kp as number);
-        const body: ActivationSettingsBody = { ...(requireApproval === undefined ? {} : { requireApproval }), ...(cap === undefined ? {} : { maxStagedBytes: cap }), ...(keep === undefined ? {} : { keepStaged: keep }), updatedBy: owner.id, updatedAt: this.#runner.now() };
+        const pick = (v: number | null | undefined, was: number | undefined): number | undefined => (v === undefined ? was : v === null ? undefined : v);
+        const nS = pick(mS, before?.maxStaged), nF = pick(mF, before?.maxFiles), nB = pick(mB, before?.maxFileBytes);
+        const body: ActivationSettingsBody = { ...(nS === undefined ? {} : { maxStaged: nS }), ...(nF === undefined ? {} : { maxFiles: nF }), ...(nB === undefined ? {} : { maxFileBytes: nB }), ...(requireApproval === undefined ? {} : { requireApproval }), ...(cap === undefined ? {} : { maxStagedBytes: cap }), ...(keep === undefined ? {} : { keepStaged: keep }), updatedBy: owner.id, updatedAt: this.#runner.now() };
         const change = current === undefined ? { type: "create" as const, ref: SETTINGS, body: body as unknown as JsonObject } : { type: "update" as const, ref: SETTINGS, expectedRevision: current.revision, body: body as unknown as JsonObject };
-        return { ref: SETTINGS, creates: current === undefined, changes: [change], detail: { requireApproval: requireApproval ?? null, maxStagedBytes: cap ?? null, keepStaged: keep ?? null } };
+        return { ref: SETTINGS, creates: current === undefined, changes: [change], detail: { requireApproval: requireApproval ?? null, maxStagedBytes: cap ?? null, keepStaged: keep ?? null, maxStaged: nS ?? null, maxFiles: nF ?? null, maxFileBytes: nB ?? null } };
       },
     }));
     return { revision: r.revision };
@@ -259,13 +275,14 @@ export class ReleaseActivationService {
       }
       // A release the launcher follows (or that the record names) is never staged again: that would replace the files it is running from (for example after the database was restored from an older copy).
       const live = await this.#liveIds();
-      if (live.has(id) || (await this.#sw.read().catch(() => undefined)) === id) throw new DomainError("invalid_transition", "the launcher's pointer or the activation record already names this release; it cannot be staged again over the files it runs from");
-      const all = await this.#runner.list(STAGED, { limit: ACTIVATION_LIMITS.staged + 1 });
-      if (all.length > ACTIVATION_LIMITS.staged) throw new DomainError("invalid_transition", `${ACTIVATION_LIMITS.staged} releases are already staged; the oldest must be removed first`);
+      if (live.has(id) || (await this.#pointer()) === id) throw new DomainError("invalid_transition", "the launcher's pointer or the activation record already names this release; it cannot be staged again over the files it runs from");
+      const caps = await this.#caps();
+      const all = await this.#runner.list(STAGED, { limit: caps.staged + 1 });
+      if (all.length >= caps.staged) throw new DomainError("invalid_transition", `${caps.staged} releases are already staged; the oldest must be removed first (or the owner raises maxStaged)`);
       const settings = await this.settings(owner);
       const used = all.reduce((n, a) => n + (a.body as unknown as StagedBody).bytes, 0);
       const names = Object.keys(candidate.manifest.artifacts).sort();
-      if (names.length > ACTIVATION_LIMITS.files) bad("candidateId", "has too many artifacts");
+      if (names.length > caps.files) bad("candidateId", "has too many artifacts");
       this.#names(names);
       const releases = join(this.#o.root, "releases");
       await mkdir(releases, { recursive: true, mode: 0o700 });
@@ -274,7 +291,7 @@ export class ReleaseActivationService {
       let incomingReal: string;
       try { incomingReal = await realpath(incoming); } catch { throw new DomainError("not_found", `the artifacts are not in place: nothing at incoming/${id}`); }
       if (incomingReal !== join(await realpath(this.#incomingRoot()), id)) throw new DomainError("invalid_command", "incoming/<candidate> is not a plain directory (a link is refused)");
-      const tmpName = `.tmp-${id}-${process.pid}-${randomBytes(6).toString("hex")}`;
+      const tmpName = `.tmp-${id}-${PROCESS_TOKEN}-${randomBytes(6).toString("hex")}`;
       const tmp = join(releases, tmpName);
       inflight.add(tmpName);
       await mkdir(tmp, { mode: 0o700 });
@@ -283,7 +300,7 @@ export class ReleaseActivationService {
       try {
         for (const name of names) {
           const want = candidate.manifest.artifacts[name]!;
-          const got = await this.#copyIn(incomingReal, name, join(tmp, ...name.split("/")));
+          const got = await this.#copyIn(incomingReal, name, join(tmp, ...name.split("/")), caps.fileBytes);
           if (got.sha256 !== want) throw new DomainError("invalid_command", `${name}: its digest is not the one the candidate's manifest names (staged nothing)`, { field: "candidateId" });
           files[name] = got; bytes += got.size;
           if (settings.maxStagedBytes !== null && used + bytes > settings.maxStagedBytes) throw new DomainError("invalid_transition", `staging would use more than the ${settings.maxStagedBytes} bytes the owner allowed for staged releases`);
@@ -328,7 +345,7 @@ export class ReleaseActivationService {
   }
 
   /** Reads one source file without following links, bounded in size, hashing as it copies to a new read-only file. */
-  async #copyIn(sourceRoot: string, name: string, dest: string): Promise<{ sha256: string; size: number }> {
+  async #copyIn(sourceRoot: string, name: string, dest: string, maxBytes: number = ACTIVATION_LIMITS.fileBytes): Promise<{ sha256: string; size: number }> {
     const src = join(sourceRoot, ...name.split("/"));
     let real: string;
     try { real = await realpath(src); } catch { throw new DomainError("not_found", `${name}: not in the incoming folder`); }
@@ -338,7 +355,7 @@ export class ReleaseActivationService {
     try {
       const st = await input.stat();
       if (!st.isFile()) throw new DomainError("invalid_command", `${name}: is not a plain file`);
-      if (st.size > ACTIVATION_LIMITS.fileBytes) throw new DomainError("invalid_command", `${name}: is larger than ${ACTIVATION_LIMITS.fileBytes} bytes`);
+      if (st.size > maxBytes) throw new DomainError("invalid_command", `${name}: is larger than ${maxBytes} bytes`);
       await mkdir(join(dest, ".."), { recursive: true, mode: 0o700 });
       const out = await open(dest, "wx", 0o444);
       const hash = createHash("sha256");
@@ -503,12 +520,14 @@ export class ReleaseActivationService {
   /** Removes the oldest staged releases beyond `keep`, never a live one and never `spare`. */
   async #prune(keep: number, spare: string): Promise<void> {
     await this.#serial("switch", async () => {
-      const all = (await this.#runner.list(STAGED, { limit: ACTIVATION_LIMITS.staged + 1 })).map((a) => a.body as unknown as StagedBody).sort((a, b) => (a.stagedAt < b.stagedAt ? -1 : a.stagedAt > b.stagedAt ? 1 : a.candidateId < b.candidateId ? -1 : 1));
+      // What the launcher's pointer names is spared like a live release; if the pointer cannot be read nothing is pruned.
+      const pointed = await this.#pointer();
+      const all = (await this.#runner.list(STAGED, { limit: (await this.#caps()).staged + 1 })).map((a) => a.body as unknown as StagedBody).sort((a, b) => (a.stagedAt < b.stagedAt ? -1 : a.stagedAt > b.stagedAt ? 1 : a.candidateId < b.candidateId ? -1 : 1));
       const live = await this.#liveIds();
       let extra = all.length - keep;
       for (const b of all) {
         if (extra <= 0) break;
-        if (live.has(b.candidateId) || b.candidateId === spare) continue;
+        if (live.has(b.candidateId) || b.candidateId === spare || b.candidateId === pointed) continue;
         await this.#removeStaged(b.candidateId, `prune-${b.candidateId}-${randomBytes(4).toString("hex")}`, "system");
         extra--;
       }
@@ -536,7 +555,7 @@ export class ReleaseActivationService {
     return this.#serial("switch", async () => {
       if ((await this.#runner.get(STAGED, id)) === undefined) throw new DomainError("not_found", "that release is not staged");
       const live = await this.#liveIds();
-      if (live.has(id) || (await this.#sw.read().catch(() => undefined)) === id) throw new DomainError("invalid_transition", "that release is the current one, the one before it (the rollback target), part of an open switch, or what the launcher follows; it cannot be removed");
+      if (live.has(id) || (await this.#pointer()) === id) throw new DomainError("invalid_transition", "that release is the current one, the one before it (the rollback target), part of an open switch, or what the launcher follows; it cannot be removed");
       await this.#removeStaged(id, scopedCommandId(owner.id, command.commandId), owner.id);
       return { candidateId: id, removed: true };
     });
@@ -604,7 +623,7 @@ export class ReleaseActivationService {
       if (!e.startsWith(".tmp-") || inflight.has(e)) continue;
       try {
         const age = Date.now() - (await stat(join(releases, e))).mtimeMs;
-        if (e.includes(`-${process.pid}-`) || age >= stale) await removeTree(join(releases, e));
+        if (e.includes(`-${PROCESS_TOKEN}-`) || age >= stale) await removeTree(join(releases, e));
       } catch { /* gone already, or not ours to judge now */ }
     }
   }

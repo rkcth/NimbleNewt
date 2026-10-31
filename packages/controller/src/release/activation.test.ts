@@ -9,6 +9,7 @@ import { CommandRunner, type Built } from "../domain/runner.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
+import { PROCESS_TOKEN } from "./activation.js";
 import { ReleaseActivationService, ReleaseService, SimulatedCrash, verifyReleaseDirectory, type ActivationOptions } from "./index.js";
 
 after(stopServer);
@@ -264,16 +265,51 @@ for (const backend of backends.slice(0, 2)) for (const switcher of ["symlink", "
     assert.equal((await c.act.settings(c.owner)).requireApproval, true, "unchanged fields stay");
   });
 
+  suite("a folder that only shares this process's pid (another host on a shared disk, an earlier run with a reused pid) is not taken for ours (card K02 review)", async (c) => {
+    const r = join(c.root, "releases");
+    const theirs = `.tmp-mine-${process.pid}-x`;
+    mkdirSync(join(r, theirs), { recursive: true });
+    await c.act.recover();
+    assert.equal(existsSync(join(r, theirs)), true, "same pid, different start token: fresh, kept");
+  });
+
+  suite("the hard caps are settable: staged releases, artifacts per release and the size of one artifact (card K02 review)", async (c) => {
+    const a = await c.candidate({ "a.js": "AAAA" });
+    const two = await c.candidate({ "x.js": "1", "y.js": "2" });
+    assert.deepEqual([(await c.act.settings(c.owner)).maxStaged, (await c.act.settings(c.owner)).maxFiles], [200, 100]);
+    await c.act.setSettings(c.owner, { commandId: cid("se"), maxFileBytes: 2 });
+    await refuses("invalid_command", () => c.act.stage(c.owner, { commandId: cid("st"), candidateId: a }), /larger than 2 bytes/);
+    await c.act.setSettings(c.owner, { commandId: cid("se"), maxFileBytes: null, maxFiles: 1 });
+    await refuses("invalid_command", () => c.act.stage(c.owner, { commandId: cid("st"), candidateId: two }));
+    await c.act.setSettings(c.owner, { commandId: cid("se"), maxFiles: null, maxStaged: 1 });
+    await c.act.stage(c.owner, { commandId: cid("st"), candidateId: a });
+    await refuses("invalid_transition", () => c.act.stage(c.owner, { commandId: cid("st"), candidateId: two }), /already staged/);
+    await refuses("invalid_command", () => c.act.setSettings(c.owner, { commandId: cid("se"), maxStaged: 0 }));
+  });
+
+  suite("a launcher pointer that cannot be read refuses staging and removal instead of going on without knowing what it runs from (card K02 review)", async (c) => {
+    if (switcher !== "pointer") return;
+    const a = await c.candidate({ "a.js": "A" });
+    const b = await c.candidate({ "b.js": "B" });
+    await c.act.stage(c.owner, { commandId: cid("st"), candidateId: a });
+    mkdirSync(join(c.root, "current.json"));
+    await refuses("unavailable", () => c.act.stage(c.owner, { commandId: cid("st"), candidateId: b }));
+    await refuses("unavailable", () => c.act.remove(c.owner, { commandId: cid("rm"), candidateId: a }));
+    rmSync(join(c.root, "current.json"), { recursive: true });
+    await c.act.stage(c.owner, { commandId: cid("st"), candidateId: b });
+    assert.equal((await c.act.remove(c.owner, { commandId: cid("rm"), candidateId: a })).removed, true);
+  });
+
   suite("sweep: only .tmp folders of this process (not in use) or older than the staleness window are removed; a fresh folder of another process and one being filled are kept", async (c) => {
     const a = await c.candidate({ "a.js": "A" });
     const r = join(c.root, "releases");
-    for (const n of [".tmp-old", `.tmp-mine-${process.pid}-x`, ".tmp-fresh-other"]) mkdirSync(join(r, n), { recursive: true });
+    for (const n of [".tmp-old", `.tmp-mine-${PROCESS_TOKEN}-x`, ".tmp-fresh-other"]) mkdirSync(join(r, n), { recursive: true });
     const old = new Date(Date.now() - 2 * 3_600_000);
     utimesSync(join(r, ".tmp-old"), old, old);
     mkdirSync(join(r, a), { recursive: true }); writeFileSync(join(r, a, "a.js"), "EVIL");
     await c.act.recover();
     assert.equal(existsSync(join(r, ".tmp-old")), false, "older than the window");
-    assert.equal(existsSync(join(r, `.tmp-mine-${process.pid}-x`)), false, "left by this process");
+    assert.equal(existsSync(join(r, `.tmp-mine-${PROCESS_TOKEN}-x`)), false, "left by this process");
     assert.equal(existsSync(join(r, ".tmp-fresh-other")), true, "fresh and not ours: kept (another process may be filling it)");
     const s = await c.act.stage(c.owner, { commandId: cid("st"), candidateId: a });
     assert.equal(readFileSync(join(r, a, "a.js"), "utf8"), "A");
