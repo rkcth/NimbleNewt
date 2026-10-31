@@ -1639,7 +1639,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `recovery.ladder.set`
 
-The owner sets which recovery actions a supervisor may take on a stalled task at each level of the supervisor ladder (owner only). The actions, lowest rung first, are `nudge`, `rebrief`, `reassign`, `pause`, `stop` and `hand-to-owner`; a concern climbs them one rung at a time. `levels` lists the allowed actions for level 0 (the first supervisor), level 1 and so on, at most 16 levels (an empty list clears them; unlisted levels use the defaults); `owner` lists the actions allowed while the owner holds the concern; `enabled` turns agents' recovery steps on or off. Fields left out stay.
+The owner sets which recovery actions a supervisor may take on a stalled task at each level of the supervisor ladder (owner only). The actions, lowest rung first, are `nudge`, `rebrief`, `pause`, `reassign`, `stop` and `hand-to-owner`; a concern climbs them one rung at a time. `levels` lists the allowed actions for level 0 (the first supervisor), level 1 and so on, at most 16 levels (an empty list clears them; unlisted levels use the defaults); `owner` lists the actions allowed while the owner holds the concern; `enabled` turns agents' recovery steps on or off. Fields left out stay.
 
 Arguments:
 
@@ -1679,13 +1679,13 @@ Completion: finished when accepted (`completed: true`).
 
 #### `recovery.step`
 
-Takes the next recovery step on a stall concern: `nudge` (a message to the agent), `rebrief` (a new brief), `reassign` (to the agent in `to`, at once; a warning names rights the new holder lacks), `pause` or `stop` the agent, or `hand-to-owner`. Allowed for the supervisor it was routed to, its current holder and holders of `assignment.manage` (not the task's own owner nor the agent it is about). What an agent may take is the installation's list for the ACTOR's own level; the step is the lowest allowed rung above the last one, except that a rung the actor cannot take, or that is refused on a precondition, is passed and recorded as skipped with the reason. Pause and stop act on the concern's task. A step is recorded as pending first and finished after its effect, so a retry does it once; a repeat of a finished command is answered as recorded.
+Takes the next recovery step on a stall concern: `nudge` (a message to the agent), `rebrief` (a new brief), `pause` the task, `reassign` (to the agent in `to`, at once; a warning names rights the new holder lacks), `stop` the task, or `hand-to-owner`. Allowed for the supervisor it was routed to, its current holder and holders of `assignment.manage` (not the task's own owner nor the agent it is about). What an agent may take is the installation's list for the ACTOR's own level; the step is the lowest allowed rung above the last one, except that a rung the actor cannot take, or that is refused on a precondition, is passed and recorded as skipped with the reason. Pause and stop act on the concern's task (every agent working on it, not only the one the concern is about), which is why pause comes before reassign. A step that the actor has no right to is refused (forbidden) and the rung stays free; the owner may replace a pending step in one call. A step is recorded as pending first and finished after its effect, so a retry does it once; a repeat of a finished command is answered as recorded.
 
 Arguments:
 
 - `concernId`: the concern
 - `expectedRevision`: the revision you read
-- `action`: nudge, rebrief, reassign, pause, stop or hand-to-owner
+- `action`: nudge, rebrief, pause, reassign, stop or hand-to-owner
 - `text` (optional): the message, brief or reason (required except for hand-to-owner)
 - `to` (optional): agent:<name>, for reassign only
 

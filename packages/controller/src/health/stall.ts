@@ -67,6 +67,8 @@ export interface ConcernBody {
   readonly recoverySteps?: readonly RecoveryStep[];
   /** The agent the concern is about (the bare ID), pinned when the concern was opened (or at its first recovery step): recovery acts on this agent's task, not on whoever holds it after a reassignment. */
   readonly stalledAgent?: string;
+  /** Counts every reset of the recovery state of this concern (route change, reopening, owner's abandon of a step): part of the effect key, so a key is never used for two different requests. */
+  readonly recoveryGen?: number;
   /** A recovery step begun and not yet marked done (two phases, so the effect outside the commit is made once): a retry finishes it. */
   readonly recoveryPending?: RecoveryPending;
 }
@@ -118,6 +120,8 @@ export interface StallOptions extends RunnerOptions {
   readonly recoveryPolicy?: () => Promise<RecoveryPolicy>;
   /** What each recovery action does (nudge, re-brief, reassign, pause, stop), through the existing services. Absent: recovery steps are unavailable. */
   readonly recoveryEffects?: RecoveryEffects;
+  /** Told of something the log should keep (a recovery step whose effect was made but could not be marked done, an abandoned step that may have been made). */
+  readonly onNote?: (message: string) => void;
   readonly ladderDamaged?: (notice: { id: string; detail: string }) => Promise<void>;
   /** Whether a pause gate (card L01) applies to the task. A paused task is assessed as `paused`: its silence is expected, and a concern already suspected is cleared. */
   readonly isPaused?: (taskId: string) => Promise<boolean>;
@@ -135,6 +139,8 @@ const amount = (value: unknown, field: string): number | undefined => (value ===
 const tokens = (value: unknown, field: string): number | undefined => (value === undefined ? undefined : typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= 1e9 ? value : invalid(field, "must be a whole number of tokens from 0 to 1000000000"));
 const pad = (n: number): string => String(n).padStart(10, "0");
 const concernId = (taskId: string, generation: number, kind: StallKind): string => `stl-${taskId.slice(5)}-${pad(generation)}-${kind.replace("_", "-")}`;
+/** The key of a recovery effect: stable for (concern, rung, episode, reset counter), not for the command. */
+const keyOf = (concern: string, rung: number, reopened: number, gen: number): string => `rec-${createHash("sha256").update(`${concern}|${rung}|${reopened}|${gen}`).digest("hex").slice(0, 32)}`;
 const prefixOf = (taskId: string): string => `stl-${taskId.slice(5)}-`;
 
 /** What a model route has shown about its own speed (kind `stall-speed`, one per route and host; card V01b): smoothed tokens a second for reading a prompt and for writing. */
@@ -300,6 +306,7 @@ export class StallService {
   readonly #ladderHours: (() => Promise<readonly number[]>) | undefined;
   readonly #recoveryPolicy: (() => Promise<RecoveryPolicy>) | undefined;
   readonly #recoveryEffects: RecoveryEffects | undefined;
+  readonly #onNote: ((message: string) => void) | undefined;
   readonly #ladderDamaged: ((notice: { id: string; detail: string }) => Promise<void>) | undefined;
   /** The start time of the current episode of an unreadable ladder setting (undefined: the setting reads fine, or the owner has not been told yet). */
   #damageEpisode: string | undefined;
@@ -321,6 +328,7 @@ export class StallService {
     this.#ladderDamaged = options.ladderDamaged;
     this.#recoveryPolicy = options.recoveryPolicy;
     this.#recoveryEffects = options.recoveryEffects;
+    this.#onNote = options.onNote;
     if (!Number.isSafeInteger(this.#escalateAfterMs) || this.#escalateAfterMs < 1000) throw new DomainError("invalid_command", "escalateAfterMs: must be a whole number of at least 1000", { field: "escalateAfterMs" });
     this.#isPaused = options.isPaused;
     if (!Number.isSafeInteger(this.#hostStaleAfterMs) || this.#hostStaleAfterMs < 1000) throw new DomainError("invalid_command", "hostStaleAfterMs: must be a whole number of at least 1000", { field: "hostStaleAfterMs" });
@@ -483,12 +491,12 @@ export class StallService {
             if (sameRoute(body.route, facts.route)) continue;
             // The ladder starts again for the new route: a holder up the old chain (or a mark of an escalation) must not stay on a concern routed elsewhere.
             const { escalatedAt: _ea, notifiedAt: _na, escalatedTo: _et, escalationLevel: _el, escalationTrail: _tr, recoveryRung: _rr, recoverySteps: _rs, recoveryPending: _rp, ...fresh } = body;
-            await this.#write(by, id, found.revision, { ...fresh, route: facts.route, lastChangedAt: this.#runner.now() });
+            await this.#write(by, id, found.revision, { ...fresh, route: facts.route, recoveryGen: (body.recoveryGen ?? 0) + 1, lastChangedAt: this.#runner.now() });
             continue;
           }
           // Cleared, or a dismissal that has run out: it came back.
           const { dismissedUntil: _d, clearedBecause: _c, decidedBy: _b, decidedAt: _a, decision: _n, escalatedAt: _e, notifiedAt: _f, escalatedTo: _g, escalationLevel: _h, escalationTrail: _i, recoveryRung: _j, recoverySteps: _k, recoveryPending: _l, ...rest } = body;
-          await this.#write(by, id, found.revision, { ...rest, state: "suspected", detail: concern.detail, difficulty: facts.difficulty, route: facts.route, lastChangedAt: this.#runner.now(), reopened: body.reopened + 1 });
+          await this.#write(by, id, found.revision, { ...rest, state: "suspected", detail: concern.detail, difficulty: facts.difficulty, route: facts.route, lastChangedAt: this.#runner.now(), reopened: body.reopened + 1, recoveryGen: (body.recoveryGen ?? 0) + 1 });
           counts.reopened++;
         } catch (error) { if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict")) counts.contended++; else throw error; }
       }
@@ -510,6 +518,8 @@ export class StallService {
         const stillTrue = body.generation === facts.generation && wanted.has(body.kind);
         if (stillTrue) continue;
         const status = facts.assessment.status;
+        // A task the ladder itself paused is quiet on purpose, but the concern stays so the next rung (reassign, hand-to-owner) can still be taken; it is cleared when the pause is lifted and the signals are good, or the task moves on.
+        if (status === "paused" && body.generation === facts.generation && body.recoverySteps?.some((st) => st.action === "pause" && st.skipped !== true) === true) continue;
         const because = body.generation !== facts.generation ? "the task has a new owner or is no longer assigned" : status === "waiting" ? "the task is waiting on purpose" : status === "paused" ? "the task is paused on purpose" : status === "not_running" ? "the task is not running" : "the signals recovered";
         try {
           await this.#write(by, found.id, found.revision, { ...body, state: "cleared", clearedBecause: because, lastChangedAt: this.#runner.now() });
@@ -566,6 +576,10 @@ export class StallService {
    * Two phases, so the effect is done once and recorded once: (1) under the concern's revision the step is recorded as pending with a key made from (concern, rung, episode), not from the command; (2) the effect is made through the existing
    * services as the caller under that key; (3) the pending step is marked done. A retry (with the same or a new command) finds the pending step and finishes it instead of repeating it; a repeat of a finished command is answered as recorded,
    * before any check. Only a suspected or confirmed concern. At most one step per revision of the concern.
+   * The effect key also carries the concern's reset counter (`recoveryGen`, up on a route change, a reopening and the owner's abandon of a step), so a key is never reused for a different request; an effect that answers `command_conflict` (the key was used by an earlier
+   * different request) is made again once under a new key. An effect that answers `forbidden` is a refusal, not a pass: the pending step is dropped, the rung stays free, and the caller is told. Only `invalid_transition` and `not_found` pass the rung as skipped.
+   * `pause` and `stop` act on the concern's TASK (the services have no scope of one agent's work on one task): every agent working on that task is paused or stopped, not only the one the concern is about, which is why `pause` comes before `reassign` on the ladder.
+   * The owner may replace a pending step: the pending step is dropped and the new one begun in the same call, from the revision the owner read.
    */
   async recover(by: Principal, command: NoActor & { concernId: string; expectedRevision: number; action: RecoveryAction; text?: string; to?: string }): Promise<{ id: string; revision: number; replayed: boolean; step?: RecoveryStep }> {
     onlyKnown(command, ["commandId", "concernId", "expectedRevision", "action", "text", "to"]);
@@ -590,20 +604,28 @@ export class StallService {
     const ref: AggregateRef = { kind: "stall-concern", id: found.id };
     const effects = this.#recoveryEffects;
     let body = found;
+    let expected = command.expectedRevision;
     const pending = body.recoveryPending;
     if (pending !== undefined && !same(pending)) {
       if (by.kind !== "owner") throw new DomainError("invalid_transition", `the recovery step ${pending.action} is still in progress; repeat it to finish it`);
-      // The owner may drop an unfinished step and take another.
+      // The owner may drop an unfinished step and take another, from the revision the owner read; the step dropped is the one read (a later one is not touched).
+      if (command.expectedRevision !== found.revision) throw new DomainError("stale_revision", `the concern is at revision ${found.revision}`, { currentRevision: found.revision });
       await this.#runner.command("stall.recover.abandon", { commandId: sub("abandon"), actor: by.id }, async () => ({
         payload: { concernId: found.id, key: pending.key },
         build: async () => {
           const current = await this.#runner.get(ref.kind, ref.id);
           if (current === undefined) throw new DomainError("not_found", "no such concern");
-          const { recoveryPending: _p, ...rest } = current.body as unknown as ConcernBody;
-          return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: rest as unknown as JsonObject }], detail: { action: pending.action, abandoned: true } };
+          const cur = readConcern(current.body as unknown as ConcernBody);
+          if (current.revision !== found.revision || cur.recoveryPending?.key !== pending.key) throw new DomainError("stale_revision", `the concern changed (revision ${current.revision}); read it again`, { currentRevision: current.revision });
+          const { recoveryPending: _p, ...rest } = cur;
+          const { id: _i, revision: _r, ...stored } = { ...rest, recoveryGen: (cur.recoveryGen ?? 0) + 1 } as ConcernBody & { id?: string; revision?: number };
+          return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: stored as unknown as JsonObject }], detail: { action: pending.action, abandoned: true } };
         },
       }));
+      this.#onNote?.(`recovery step ${pending.action} (${pending.key}) on ${found.id} was abandoned by ${by.id}; if its effect had already been made it may be made again under a new key`);
       body = (await this.#concern(found.id))!;
+      // The only change since the owner read it is the drop just made, so the new step is begun from the revision it produced.
+      expected = body.revision;
     } else if (pending !== undefined && pending.by !== by.id && by.kind !== "owner") throw new DomainError("forbidden", `the recovery step ${pending.action} was begun by ${pending.by}; it can be finished by them or the owner`);
     if (body.recoveryPending === undefined) {
       const policy = await this.#recoveryPolicy();
@@ -612,12 +634,15 @@ export class StallService {
         build: async () => {
           const current = await this.#runner.get(ref.kind, ref.id);
           if (current === undefined) throw new DomainError("not_found", "no such concern");
-          if (current.revision !== command.expectedRevision) throw new DomainError("stale_revision", `the concern is at revision ${current.revision}`, { currentRevision: current.revision });
+          if (current.revision !== expected) throw new DomainError("stale_revision", `the concern is at revision ${current.revision}`, { currentRevision: current.revision });
           const cb = readConcern(current.body as unknown as ConcernBody);
           if (cb.state !== "suspected" && cb.state !== "confirmed") throw new DomainError("invalid_transition", `the concern is ${cb.state}; only a suspected or confirmed one can be acted on`);
           // The rights are checked here, after a repeat of the command was recognised, so a repeat of a recorded step never meets them.
           const assignment = await this.#assignments.getAssignment(cb.taskId);
-          const pinned = cb.stalledAgent ?? (assignment?.state === "assigned" && assignment.owner?.kind === "agent" ? assignment.owner.id : undefined);
+          // The agent the concern is about is pinned when the concern was opened. For one opened before that, the current assignee is pinned only if the assignment is still of the concern's generation; with a newer generation the concern is no longer about this holder and is left to the scan to close.
+          const sameGeneration = assignment?.state === "assigned" && assignment.generation === cb.generation;
+          if (cb.stalledAgent === undefined && !sameGeneration) throw new DomainError("invalid_transition", "the task has a new owner since this concern was opened; the next scan closes it");
+          const pinned = cb.stalledAgent ?? (sameGeneration && assignment?.owner?.kind === "agent" ? assignment.owner.id : undefined);
           const own = isOwner(assignment?.owner, by.id) || (pinned !== undefined && by.id === `agent:${pinned}`);
           const supervisor = (cb.route.via === "supervisor" && `agent:${cb.route.to.id}` === by.id) || cb.escalatedTo === by.id;
           const manager = by.kind === "owner" || allows(by, "assignment.manage", cb.projectId);
@@ -646,7 +671,7 @@ export class StallService {
             const lastAt = cb.recoverySteps?.at(-1)?.at;
             if (gapMs > 0 && lastAt !== undefined && Date.parse(at) - Date.parse(lastAt) < gapMs) throw new DomainError("invalid_transition", `the last recovery step was at ${lastAt}; the next one may be taken ${Math.ceil((gapMs - (Date.parse(at) - Date.parse(lastAt))) / 60_000)} minute(s) from now`);
           } else if (rung <= last) throw new DomainError("invalid_transition", `${RECOVERY_ACTIONS[last]} was already taken; take a higher step`);
-          const key = `rec-${createHash("sha256").update(`${found.id}|${rung}|${cb.reopened}`).digest("hex").slice(0, 32)}`;
+          const key = keyOf(found.id, rung, cb.reopened, cb.recoveryGen ?? 0);
           const next: ConcernBody = { ...cb, ...(pinned === undefined ? {} : { stalledAgent: pinned }), recoveryPending: { action, rung, key, by: by.id, at, level, cmd: scoped, ...(reason === undefined ? {} : { text: reason }), ...(command.to === undefined ? {} : { to: command.to }), ...(skipped.length === 0 ? {} : { skipped }) } };
           const { id: _i, revision: _r, ...stored } = next as ConcernBody & { id?: string; revision?: number };
           return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: stored as unknown as JsonObject }], detail: { taskId: cb.taskId, kind: cb.kind, state: cb.state, generation: cb.generation, action, begun: true } };
@@ -654,51 +679,95 @@ export class StallService {
       }));
       body = (await this.#concern(found.id))!;
     }
-    const p = body.recoveryPending;
+    let p = body.recoveryPending;
     if (p === undefined || !same(p)) throw new DomainError("invalid_transition", "that recovery step is no longer pending; read the concern again");
-    // The effect, under the key of the pending step. A refusal on a precondition passes the rung (recorded as skipped); a failure that may be passed again leaves the step pending for a retry.
+    // The effect, under the key of the pending step. A refusal on a precondition (invalid_transition, not_found) passes the rung (recorded as skipped); `forbidden` is the actor lacking rights: the step is dropped and refused, the rung stays free;
+    // `command_conflict` means the key was used by an earlier different request: the step is re-keyed once; any other failure leaves the step pending for a retry.
     let warnings: readonly string[] | undefined;
     let refused: string | undefined;
     if (p.action !== "hand-to-owner") {
-      try { warnings = (await effects.run(p.action, { by, key: p.key, taskId: body.taskId, projectId: body.projectId, concernId: found.id, text: p.text ?? "", ...(body.stalledAgent === undefined ? {} : { agent: body.stalledAgent }), ...(p.to === undefined ? {} : { to: p.to }) })).warnings; }
-      catch (error) {
-        if (error instanceof DomainError && (error.code === "forbidden" || error.code === "invalid_transition" || error.code === "not_found")) refused = error.message.slice(0, 200);
-        else throw error;
+      for (let round = 0; ; round++) {
+        const act = p.action; if (act === "hand-to-owner") break;
+        try { warnings = (await effects.run(act, { by, key: p.key, taskId: body.taskId, projectId: body.projectId, concernId: found.id, text: p.text ?? "", ...(body.stalledAgent === undefined ? {} : { agent: body.stalledAgent }), ...(p.to === undefined ? {} : { to: p.to }) })).warnings; break; } catch (error) {
+          if (error instanceof DomainError && error.code === "forbidden") {
+            const dropping = p;
+            await this.#runner.command("stall.recover.refused", { commandId: sub(`refused:${dropping.key}`), actor: by.id }, async () => ({
+              payload: { concernId: found.id, key: dropping.key },
+              build: async () => {
+                const current = await this.#runner.get(ref.kind, ref.id);
+                if (current === undefined) throw new DomainError("not_found", "no such concern");
+                const cur = readConcern(current.body as unknown as ConcernBody);
+                if (cur.recoveryPending?.key !== dropping.key) throw new DomainError("invalid_transition", "that recovery step is no longer pending");
+                const { recoveryPending: _p, ...rest } = cur;
+                const { id: _i, revision: _r, ...stored } = rest as ConcernBody & { id?: string; revision?: number };
+                return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: stored as unknown as JsonObject }], detail: { action: dropping.action, refused: true } };
+              },
+            }));
+            throw error;
+          }
+          if (error instanceof DomainError && (error.code === "invalid_transition" || error.code === "not_found")) { refused = error.message.slice(0, 200); break; }
+          if (error instanceof DomainError && error.code === "command_conflict" && round === 0) {
+            const old = p;
+            await this.#runner.command("stall.recover.rekey", { commandId: sub(`rekey:${old.key}`), actor: by.id }, async () => ({
+              payload: { concernId: found.id, key: old.key },
+              build: async () => {
+                const current = await this.#runner.get(ref.kind, ref.id);
+                if (current === undefined) throw new DomainError("not_found", "no such concern");
+                const cur = readConcern(current.body as unknown as ConcernBody);
+                if (cur.recoveryPending?.key !== old.key) throw new DomainError("invalid_transition", "that recovery step is no longer pending");
+                const gen = (cur.recoveryGen ?? 0) + 1;
+                const next: ConcernBody = { ...cur, recoveryGen: gen, recoveryPending: { ...cur.recoveryPending, key: keyOf(found.id, old.rung, cur.reopened, gen) } };
+                const { id: _i, revision: _r, ...stored } = next as ConcernBody & { id?: string; revision?: number };
+                return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: stored as unknown as JsonObject }], detail: { action: old.action, rekeyed: true } };
+              },
+            }));
+            body = (await this.#concern(found.id))!;
+            if (body.recoveryPending === undefined) throw new DomainError("invalid_transition", "that recovery step is no longer pending; read the concern again");
+            p = body.recoveryPending;
+            continue;
+          }
+          throw error;
+        }
       }
     }
+    const pend: RecoveryPending = p;
     const finish = async (attempt: number): Promise<{ id: string; revision: number; replayed: boolean; step: RecoveryStep }> => {
       let step: RecoveryStep | undefined;
       try {
         const result = await this.#runner.command("stall.recover.done", { commandId: sub("done"), actor: by.id }, async () => ({
-          payload: { concernId: found.id, key: p.key },
+          payload: { concernId: found.id, key: pend.key },
           build: async () => {
             const current = await this.#runner.get(ref.kind, ref.id);
             if (current === undefined) throw new DomainError("not_found", "no such concern");
             const cb = readConcern(current.body as unknown as ConcernBody);
-            if (cb.recoveryPending?.key !== p.key) throw new DomainError("invalid_transition", "that recovery step is no longer pending");
+            if (cb.recoveryPending?.key !== pend.key) throw new DomainError("invalid_transition", "that recovery step is no longer pending");
             const at = this.#runner.now();
             let n = (cb.recoverySteps?.at(-1)?.n ?? 0);
-            const made: RecoveryStep[] = (p.skipped ?? []).map((s) => ({ n: ++n, action: s.action, by: p.by, at, level: p.level, skipped: true, reason: s.reason }));
-            step = { n: ++n, action: p.action, by: p.by, at, level: p.level, cmd: p.cmd, ...(p.text === undefined ? {} : { text: p.text }), ...(p.to === undefined ? {} : { to: p.to }), ...(refused === undefined ? {} : { skipped: true, reason: refused }), ...(warnings === undefined || warnings.length === 0 ? {} : { warnings: warnings.slice(0, 5).map((w) => w.slice(0, 200)) }) };
+            const made: RecoveryStep[] = (pend.skipped ?? []).map((s) => ({ n: ++n, action: s.action, by: pend.by, at, level: pend.level, skipped: true, reason: s.reason }));
+            step = { n: ++n, action: pend.action, by: pend.by, at, level: pend.level, cmd: pend.cmd, ...(pend.text === undefined ? {} : { text: pend.text }), ...(pend.to === undefined ? {} : { to: pend.to }), ...(refused === undefined ? {} : { skipped: true, reason: refused }), ...(warnings === undefined || warnings.length === 0 ? {} : { warnings: warnings.slice(0, 5).map((w) => w.slice(0, 200)) }) };
             const { recoveryPending: _p, ...rest } = cb;
-            let next: ConcernBody = { ...rest, recoveryRung: p.rung, recoverySteps: [...(cb.recoverySteps ?? []), ...made, step].slice(-TRAIL_KEEP), lastChangedAt: at };
+            let next: ConcernBody = { ...rest, recoveryRung: pend.rung, recoverySteps: [...(cb.recoverySteps ?? []), ...made, step].slice(-TRAIL_KEEP), lastChangedAt: at };
             // Handing the concern to the owner parks it there and has the owner told once (a concern already with the owner, or already told, is not told again).
-            if (p.action === "hand-to-owner" && cb.escalatedTo !== "owner") {
+            if (pend.action === "hand-to-owner" && cb.escalatedTo !== "owner") {
               const { notifiedAt: _n, ...kept } = next;
               const climb: EscalationStep = { level: (cb.escalationLevel ?? 0) + 1, to: "owner", at };
               next = { ...kept, escalatedAt: at, escalatedTo: "owner", escalationLevel: climb.level, escalationTrail: [...(cb.escalationTrail ?? []), climb].slice(-TRAIL_KEEP) };
             }
             const { id: _i, revision: _r, ...stored } = next as ConcernBody & { id?: string; revision?: number };
-            return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: stored as unknown as JsonObject }], detail: { taskId: cb.taskId, kind: cb.kind, state: cb.state, generation: cb.generation, action: p.action, step: step.n, ...(refused === undefined ? {} : { skipped: true }) } };
+            return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: stored as unknown as JsonObject }], detail: { taskId: cb.taskId, kind: cb.kind, state: cb.state, generation: cb.generation, action: pend.action, step: step.n, ...(refused === undefined ? {} : { skipped: true }) } };
           },
         }));
-        return { id: result.id, revision: result.revision, replayed: false, step: step ?? (await this.#concern(found.id))!.recoverySteps!.find((s) => s.cmd === p.cmd)! };
+        return { id: result.id, revision: result.revision, replayed: false, step: step ?? (await this.#concern(found.id))!.recoverySteps!.find((s) => s.cmd === pend.cmd)! };
       } catch (error) {
         if (error instanceof DomainError && error.code === "stale_revision" && attempt < 5) return finish(attempt + 1);
         throw error;
       }
     };
-    return finish(0);
+    try { return await finish(0); } catch (error) {
+      // The effect has been made under its key; it is not made again by a retry (the key is the same), the retry only marks it done.
+      this.#onNote?.(`recovery step ${pend.action} (${pend.key}) on ${found.id} was made but could not be marked done (${error instanceof Error ? error.message : String(error)}); repeating the step marks it done without making it again`);
+      throw error;
+    }
   }
 
   /**

@@ -3,7 +3,7 @@ import { after, test } from "node:test";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import type { Principal } from "../security/principals.js";
 import { buildWorld } from "../dispatch/testing/world.js";
-import { ScratchCleanupService, SCRATCH_LIMITS, WorkEndService, checkpointByAttempt, checkpointVerdict, ownerNotices, supervisorNotice, type EndingAttempt, type Leftover, type ScratchMode, type ScratchOrder, type ScratchReport, type SettleReport, type WorkEndDeps } from "./index.js";
+import { ScratchCleanupService, SCRATCH_LIMITS, WorkEndService, checkpointByAttempt, checkpointVerdict, ownerNotices, supervisorNotice, type ScratchLimits, type EndingAttempt, type Leftover, type ScratchMode, type ScratchOrder, type ScratchReport, type SettleReport, type WorkEndDeps } from "./index.js";
 
 after(stopServer);
 
@@ -418,6 +418,150 @@ for (const backend of backends) {
       assert.equal((await host.run(plain(b), [])).state, "ordering", "busy: nothing is decided");
       assert.equal((await host.run(plain(b), [])).state, "removed", "asked again: removed");
     } finally { await b.store.close(); }
+  });
+
+  test(`${backend.name}: A1: a host that never answers does not hold the sweep: every record looked at counts, the pass has a time budget, retries are spaced out by a growing wait and a day of outage does not use them up`, async () => {
+    const r = await rig();
+    try {
+      let calls = 0;
+      const hang = (limits: Partial<ScratchLimits> = {}) => ScratchCleanupService.withEpoch(r.w.storage, r.w.epoch, { mode: async () => "after-handoff", order: () => { calls++; return new Promise<never>(() => undefined); }, report: async () => undefined }, { clock: r.w.clock.now, limits: { orderMs: 15, passMs: 60_000, ...limits } });
+      const svc = hang();
+      const att = (i: number) => ({ attemptId: `att-h${i}`, taskId: "t", projectId: r.w.project, agentId: "agent:ann" });
+      for (let i = 0; i < 100; i++) await svc.run(att(i), []);
+      assert.equal(calls, 100);
+      assert.equal((await svc.get("att-h7"))?.state, "ordering");
+      // All 100 wait for their time: nothing is sent early.
+      r.w.clock.advance(SCRATCH_LIMITS.staleMs + SCRATCH_LIMITS.leaseMs + 1000);
+      calls = 0;
+      await svc.recover();
+      assert.ok(calls > 0 && calls <= SCRATCH_LIMITS.perRecover, `a pass looks at no more than ${SCRATCH_LIMITS.perRecover} records (it sent ${calls})`);
+      const first = calls;
+      await svc.recover();
+      assert.ok(calls - first <= SCRATCH_LIMITS.perRecover, "the next pass moves on to other records, and the ones just tried wait for their time");
+      // The rotation reaches every record, none is tried twice before the others.
+      for (let i = 0; i < 6; i++) await svc.recover();
+      const tried = (await Promise.all(Array.from({ length: 100 }, (_, i) => svc.get(`att-h${i}`)))).filter((x) => (x?.retries ?? 0) >= 2).length;
+      assert.equal(tried, 100, "every record was reached");
+      // A pass has a time budget: a tight one stops after a few records.
+      const tight = hang({ passMs: 40, orderMs: 25 });
+      r.w.clock.advance(SCRATCH_LIMITS.retryCapMs + 1000);
+      calls = 0;
+      const began = Date.now();
+      await tight.recover();
+      assert.ok(calls >= 1 && calls <= 4, `a pass of 40 ms started ${calls} orders`);
+      assert.ok(Date.now() - began < 1000);
+    } finally { await r.store.close(); }
+    // One record, a day of outage with a pass every five minutes: the retries are spaced and not used up.
+    const day = await rig();
+    try {
+      let calls = 0;
+      const svc = ScratchCleanupService.withEpoch(day.w.storage, day.w.epoch, { mode: async () => "after-handoff", order: () => { calls++; return new Promise<never>(() => undefined); }, report: async () => undefined }, { clock: day.w.clock.now, limits: { orderMs: 5 } });
+      await svc.run({ attemptId: "att-1", taskId: "t", projectId: day.w.project, agentId: "agent:ann" }, []);
+      for (let i = 0; i < 24 * 12; i++) { day.w.clock.advance(5 * 60_000); await svc.recover(); }
+      assert.equal((await svc.get("att-1"))?.state, "ordering", "still waiting for the host, not given up as kept");
+      assert.ok(calls >= 6 && calls <= 14, `${calls} orders in a day`);
+      assert.ok(((await svc.get("att-1"))?.retries ?? 99) < SCRATCH_LIMITS.retries - 5);
+    } finally { await day.store.close(); }
+  });
+
+  test(`${backend.name}: A2: a decision that can never be read, and a wait for a stop no host can confirm, are closed as kept after a bounded age, said once, and leave the open list`, async () => {
+    const r = await rig();
+    try {
+      const said: string[] = [];
+      const open = async (): Promise<string[]> => ((await r.w.storage.getAggregate({ kind: "scratch-open", id: "main" }))?.body as { attempts?: string[] } | undefined)?.attempts ?? [];
+      const svc = ScratchCleanupService.withEpoch(r.w.storage, r.w.epoch, { mode: async () => "after-handoff", order: async () => ({ removed: true, leftovers: [] }), report: async () => undefined, decide: async () => undefined, unresolved: async (_a, why, key) => { said.push(`${key}:${why.slice(0, 20)}`); } }, { clock: r.w.clock.now });
+      await svc.begin("att-deciding");
+      await svc.run({ attemptId: "att-wait", taskId: "t", projectId: r.w.project, agentId: "agent:ann" }, [], undefined, { workerStopped: false });
+      assert.equal((await svc.get("att-wait"))?.state, "awaiting-stop");
+      assert.deepEqual((await open()).sort(), ["att-deciding", "att-wait"]);
+      r.w.clock.advance(SCRATCH_LIMITS.staleMs + SCRATCH_LIMITS.recheckMs + 1000);
+      await svc.recover();
+      assert.equal((await svc.get("att-deciding"))?.state, "deciding", "not yet: a bounded number of looks, spaced out");
+      r.w.clock.advance(SCRATCH_LIMITS.unresolvedMs);
+      await svc.recover(); await svc.recover();
+      for (const id of ["att-deciding", "att-wait"]) {
+        const rec = (await svc.get(id))!;
+        assert.equal(rec.state, "kept", id);
+        assert.match(rec.why ?? "", /unresolved/);
+      }
+      assert.deepEqual(said.map((x) => x.split(":")[0] + ":" + x.split(":")[1]).sort(), ["scratch-unresolved:att-deciding", "scratch-unresolved:att-wait"], "said once each");
+      assert.deepEqual(await open(), [], "nothing is walked any more");
+      await svc.recover();
+      assert.equal(said.length, 2);
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: A3: a worker that parked on an approval and kept heartbeating is not taken for working: its earlier checkpoint covers it`, async () => {
+    const start = "2026-03-01T10:00:00.000Z";
+    const rec = { capturedAt: "2026-03-01T10:30:00.000Z", agent: "agent:ann" };
+    const att = { agentId: "agent:ann", startedAt: start, claimedAt: start, lastHeartbeatAt: "2026-03-01T16:00:00.000Z" };
+    assert.match(String(checkpointVerdict(rec, att)), /older than the attempt's last activity/, "without a record of activity the heartbeat is the conservative sign");
+    assert.equal(checkpointVerdict(rec, { ...att, lastActivityAt: "2026-03-01T10:31:00.000Z" }), true, "its last activity was before parking");
+    assert.match(String(checkpointVerdict(rec, { ...att, lastActivityAt: "2026-03-01T14:00:00.000Z" })), /older than/, "work after the checkpoint is not covered");
+  });
+
+  test(`${backend.name}: A4: the signal reaches the host calls, a cut-off hook gives up its lease, and close() waits for the runs`, async () => {
+    const r = await rig();
+    try {
+      const seen: { order?: AbortSignal | undefined; stop?: AbortSignal | undefined } = {};
+      let ordered = 0;
+      const svc = ScratchCleanupService.withEpoch(r.w.storage, r.w.epoch, {
+        mode: async () => "after-handoff",
+        order: (_o, signal) => { ordered++; seen.order = signal; return new Promise<never>(() => undefined); },
+        workerStopped: (_a, signal) => { seen.stop = signal; return new Promise<boolean>(() => undefined); },
+        report: async () => undefined,
+      }, { clock: r.w.clock.now, limits: { orderMs: 60_000, callMs: 60_000 } });
+      const ctl = new AbortController();
+      const run = svc.run(plain(r), [], undefined, { signal: ctl.signal });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      assert.ok(seen.order !== undefined && !seen.order.aborted, "the order got a signal");
+      assert.equal((await svc.get("att-1"))?.lease !== undefined, true);
+      ctl.abort();
+      const out = await run;
+      assert.equal(out.state, "ordering", "nothing was decided");
+      assert.equal((await svc.get("att-1"))?.lease, undefined, "the lease was given up so the next run can take the order at once");
+      assert.equal((await svc.get("att-1"))?.retries ?? 0, 0, "no retry was used up");
+      assert.ok(seen.order!.aborted);
+      // The wait for a stop: the confirmation call gets the signal and close() cancels it and waits.
+      const w = await rig();
+      try {
+        const wait = ScratchCleanupService.withEpoch(w.w.storage, w.w.epoch, { mode: async () => "after-handoff", order: async () => ({ removed: true, leftovers: [] }), workerStopped: (_a, signal) => { seen.stop = signal; return new Promise<boolean>(() => undefined); }, report: async () => undefined }, { clock: w.w.clock.now, limits: { callMs: 60_000 } });
+        const pending = wait.run(plain(w), [], undefined, { workerStopped: false });
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        assert.ok(seen.stop !== undefined && !seen.stop.aborted);
+        w.w.clock.advance(SCRATCH_LIMITS.recheckMs + 1000);
+        const sweep = wait.recover();
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        await wait.close();
+        await sweep.catch(() => undefined);
+        assert.ok(seen.stop.aborted, "close() told the in-flight call to stop");
+        void pending;
+      } finally { await w.store.close(); }
+      void ordered;
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: A5: a removal the host reports is recorded even when another run has already closed the cleanup as kept`, async () => {
+    const r = await rig();
+    try {
+      let n = 0;
+      let release: (v: ScratchReport) => void = () => undefined;
+      const slow = new Promise<ScratchReport>((resolve) => { release = resolve; });
+      const svc = ScratchCleanupService.withEpoch(r.w.storage, r.w.epoch, { mode: async () => "after-handoff", order: () => (++n === 1 ? slow : Promise.resolve({ removed: false, leftovers: [], detail: "refused by the host" })), report: async () => undefined }, { clock: r.w.clock.now, limits: { orderMs: 60_000 } });
+      const first = svc.run(plain(r), []);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      r.w.clock.advance(SCRATCH_LIMITS.leaseMs + 1000);
+      const second = await svc.run(plain(r), []);
+      assert.equal(second.state, "kept", "the other run closed it as kept");
+      release({ removed: true, leftovers: [{ kind: "installed", what: "pnpm cache" }] });
+      assert.equal((await first).state, "removed");
+      const rec = (await svc.get("att-1"))!;
+      assert.equal(rec.state, "removed", "the fact is recorded: kept became removed");
+      assert.equal(rec.leftovers.length, 1);
+      // A removed record is never changed by a later answer.
+      const again = await svc.run(plain(r), []);
+      assert.equal(again.state, "removed");
+    } finally { await r.store.close(); }
   });
 
   test(`${backend.name}: the order names the attempt, its host and generation, and a replay for an older attempt never touches a successor's scratch`, async () => {

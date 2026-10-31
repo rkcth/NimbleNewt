@@ -10,7 +10,7 @@ import { HostService } from "../hosts/index.js";
 import { ContractService } from "../planning/contracts.js";
 import { GrantService, PrincipalService, type Grant, type Principal } from "../security/index.js";
 import type { Difficulty } from "../planning/contracts.js";
-import { EscalationLadderService, RecoveryLadderService, StallService, type RecoveryAction, type RecoveryEffects, assessStall, DEFAULT_THRESHOLDS, type StallEvent, type StallOptions } from "./index.js";
+import { EscalationLadderService, RECOVERY_ACTIONS, RecoveryLadderService, StallService, type RecoveryAction, type RecoveryEffects, assessStall, DEFAULT_THRESHOLDS, type StallEvent, type StallOptions } from "./index.js";
 
 after(stopServer);
 
@@ -1217,26 +1217,26 @@ for (const backend of backends) {
     const svc = c.service({ recoveryPolicy: () => setting.policy(), recoveryEffects: effects });
     const rev = async () => (await svc.get(c.owner, concernId))!.revision;
     const take = async (by: Principal, action: RecoveryAction, more: { text?: string; to?: string } = {}) => svc.recover(by, { commandId: cid("r"), concernId, expectedRevision: await rev(), action, text: "go", ...more });
-    await setting.set(c.owner, { commandId: cid("s"), levels: [["nudge", "reassign", "pause", "hand-to-owner"], ["reassign", "pause", "stop", "hand-to-owner"]] });
+    await setting.set(c.owner, { commandId: cid("s"), levels: [["nudge", "pause", "reassign", "hand-to-owner"], ["pause", "reassign", "stop", "hand-to-owner"]] });
     // The agent is pinned on the concern.
     assert.equal((await svc.get(c.owner, concernId))!.stalledAgent, ann.id);
     // A rung the actor can take must be taken first; one they cannot take is passed, recorded as skipped with the reason.
     await refuses("invalid_transition", () => take(boss.principal, "pause"), (e) => assert.match(e.message, /next step is nudge/));
     await take(boss.principal, "nudge");
-    await refuses("invalid_transition", () => take(boss.principal, "pause"), (e) => assert.match(e.message, /next step is reassign/));
-    unavailable = "agent:boss holds no right to move the task";
+    await refuses("invalid_transition", () => take(boss.principal, "reassign", { to: "agent:other" }), (e) => assert.match(e.message, /next step is pause/));
     const paused = await take(boss.principal, "pause");
     assert.equal(paused.replayed, false);
-    const steps = (await svc.get(c.owner, concernId))!.recoverySteps!;
-    assert.deepEqual(steps.map((x) => [x.action, x.skipped === true]), [["nudge", false], ["reassign", true], ["pause", false]]);
-    assert.equal(steps[1]!.reason, unavailable);
-    assert.deepEqual(calls, [`nudge:${ann.id}`, `pause:${ann.id}`], "the effect acts on the pinned agent's task");
+    unavailable = "agent:boss holds no right to move the task";
     // Pacing: off unless set; the owner sets a gap and a step too soon is refused, a later one is taken.
     await setting.set(c.owner, { commandId: cid("s"), minGapMinutes: 30 });
     assert.equal((await setting.policy()).minGapMinutes, 30);
     await refuses("invalid_transition", () => take(boss.principal, "hand-to-owner"), (e) => assert.match(e.message, /minute/));
     now += 31 * MIN;
     await take(boss.principal, "hand-to-owner");
+    const steps = (await svc.get(c.owner, concernId))!.recoverySteps!;
+    assert.deepEqual(steps.map((x) => [x.action, x.skipped === true]), [["nudge", false], ["pause", false], ["reassign", true], ["hand-to-owner", false]]);
+    assert.equal(steps[2]!.reason, unavailable);
+    assert.deepEqual(calls, [`nudge:${ann.id}`, `pause:${ann.id}`], "the effect acts on the pinned agent's task");
     await refuses("invalid_command", async () => setting.set(c.owner, { commandId: cid("s"), minGapMinutes: -1 }));
     await setting.set(c.owner, { commandId: cid("s"), minGapMinutes: 0 });
     assert.equal((await setting.policy()).minGapMinutes, undefined, "0 switches the gap off again");
@@ -1267,16 +1267,16 @@ for (const backend of backends) {
   suite("recovery ladder fixes: a rung refused on a precondition is passed; hand-to-owner on a confirmed concern is still told to the owner; a concern about the pinned agent is not theirs to act on", async (c) => {
     const { boss, ann, concernId } = await ladderWorld(c, ["Mid", "Chief", "Top"]);
     const setting = RecoveryLadderService.withEpoch(c.storage, c.projects.epoch, options);
-    await setting.set(c.owner, { commandId: cid("s"), levels: [["reassign", "pause", "hand-to-owner"]] });
+    await setting.set(c.owner, { commandId: cid("s"), levels: [["pause", "reassign", "hand-to-owner"]] });
     let refuse = true;
     const effects: RecoveryEffects = { run: async (action) => { if (refuse && action === "reassign") throw new DomainError("invalid_transition", "the task has a running attempt"); return {}; } };
     const svc = c.service({ recoveryPolicy: () => setting.policy(), recoveryEffects: effects });
     const rev = async () => (await svc.get(c.owner, concernId))!.revision;
+    await svc.recover(boss.principal, { commandId: cid("r"), concernId, expectedRevision: await rev(), action: "pause", text: "x" });
     const first = await svc.recover(boss.principal, { commandId: cid("r"), concernId, expectedRevision: await rev(), action: "reassign", text: "x", to: "agent:other" });
     assert.equal(first.step!.skipped, true);
     assert.match(first.step!.reason!, /running attempt/);
-    assert.equal((await svc.get(c.owner, concernId))!.recoveryRung, 2, "the rung is passed, so the ladder can go on");
-    await svc.recover(boss.principal, { commandId: cid("r"), concernId, expectedRevision: await rev(), action: "pause", text: "x" });
+    assert.equal((await svc.get(c.owner, concernId))!.recoveryRung, 3, "the rung is passed, so the ladder can go on");
     refuse = false;
     // Confirmed concern, handed to the owner: the notice is owed, once.
     await svc.decide(c.owner, { commandId: cid("d"), concernId, expectedRevision: await rev(), decision: "confirm", reason: "yes" });
@@ -1289,5 +1289,122 @@ for (const backend of backends) {
     await patch(c, "stall-concern", concernId, (b) => ({ ...b, stalledAgent: boss.id, recoveryRung: -1 }));
     await refuses("forbidden", async () => svc.recover(boss.principal, { commandId: cid("r"), concernId, expectedRevision: await rev(), action: "hand-to-owner" }));
     void ann;
+  });
+
+  const fullLadder = [["nudge", "rebrief", "pause", "reassign", "stop", "hand-to-owner"]] as const;
+
+  suite("recovery ladder B1/B2/B6: the owner replaces a pending step in one call; the effect key moves on after an abandon, and a key an earlier different request used is replaced once", async (c) => {
+    const { boss, concernId } = await ladderWorld(c);
+    const setting = RecoveryLadderService.withEpoch(c.storage, c.projects.epoch, options);
+    await setting.set(c.owner, { commandId: cid("s"), levels: fullLadder.map((l) => [...l]) });
+    const keys: string[] = [];
+    let mode: "down" | "conflict-once" | "ok" = "down";
+    const notes: string[] = [];
+    const effects: RecoveryEffects = { run: async (_a, ctx) => {
+      keys.push(ctx.key);
+      if (mode === "down") throw new DomainError("unavailable", "the message service is down");
+      if (mode === "conflict-once" && keys.length === 1) throw new DomainError("command_conflict", "that command ID was already used with different text");
+      return {};
+    } };
+    const svc = c.service({ recoveryPolicy: () => setting.policy(), recoveryEffects: effects, onNote: (m) => notes.push(m) });
+    const rev = async () => (await svc.get(c.owner, concernId))!.revision;
+    // A step whose effect failed stays pending; the owner cannot be held up by it.
+    await refuses("unavailable", async () => svc.recover(boss.principal, { commandId: cid("r"), concernId, expectedRevision: await rev(), action: "nudge", text: "first" }));
+    const pending = (await svc.get(c.owner, concernId))!.recoveryPending!;
+    assert.equal(pending.action, "nudge");
+    await refuses("invalid_transition", async () => svc.recover(boss.principal, { commandId: cid("r"), concernId, expectedRevision: await rev(), action: "rebrief", text: "x" }));
+    // The owner's call with a revision it did not read is stale and drops nothing.
+    await refuses("stale_revision", async () => svc.recover(c.owner, { commandId: cid("r"), concernId, expectedRevision: (await rev()) - 1, action: "rebrief", text: "x" }));
+    assert.equal((await svc.get(c.owner, concernId))!.recoveryPending?.key, pending.key);
+    // The owner replaces it in ONE call, from the revision it read.
+    mode = "ok";
+    const replaced = await svc.recover(c.owner, { commandId: cid("r"), concernId, expectedRevision: await rev(), action: "rebrief", text: "second" });
+    assert.equal(replaced.step!.action, "rebrief");
+    const after = (await svc.get(c.owner, concernId))!;
+    assert.equal(after.recoveryPending, undefined);
+    assert.deepEqual(after.recoverySteps!.map((x) => x.action), ["rebrief"]);
+    assert.equal(after.recoveryGen, 1, "the abandon counts as a reset");
+    assert.notEqual(keys.at(-1), pending.key, "the new request has a new key");
+    assert.ok(notes.some((n) => /abandoned/.test(n)), "the drop is logged");
+    // An earlier different request used the key: the step is made again under a new key, once.
+    mode = "conflict-once";
+    keys.length = 0;
+    const done = await svc.recover(c.owner, { commandId: cid("r"), concernId, expectedRevision: await rev(), action: "pause", text: "hold" });
+    assert.notEqual(done.step!.skipped, true, "not left pending and not passed as skipped");
+    assert.equal(keys.length, 2);
+    assert.notEqual(keys[0], keys[1]);
+    assert.equal((await svc.get(c.owner, concernId))!.recoveryPending, undefined);
+  });
+
+  suite("recovery ladder B2: a route change or a reopening starts a new key for the same rung", async (c) => {
+    const { boss, ann, concernId } = await ladderWorld(c);
+    const setting = RecoveryLadderService.withEpoch(c.storage, c.projects.epoch, options);
+    await setting.set(c.owner, { commandId: cid("s"), levels: fullLadder.map((l) => [...l]) });
+    const keys: string[] = [];
+    const svc = c.service({ recoveryPolicy: () => setting.policy(), recoveryEffects: { run: async (_a, ctx) => { keys.push(ctx.key); return {}; } } });
+    const rev = async () => (await svc.get(c.owner, concernId))!.revision;
+    await svc.recover(boss.principal, { commandId: cid("r"), concernId, expectedRevision: await rev(), action: "nudge", text: "one" });
+    // The route changed (the agent got another supervisor): the ladder starts again and the same rung gets a different key.
+    const other = await c.hbAgent(`Other${++worlds}`, {});
+    await patch(c, "agent", ann.id, (b) => ({ ...b, supervisorId: other.id }));
+    await svc.scan(c.owner);
+    const reset = (await svc.list(c.owner, { taskId: (await svc.get(c.owner, concernId))!.taskId })).items[0]!;
+    assert.equal(reset.recoveryRung, undefined);
+    assert.equal(reset.recoveryGen, 1);
+    await svc.recover(other.principal, { commandId: cid("r"), concernId, expectedRevision: reset.revision, action: "nudge", text: "two" });
+    assert.equal(keys.length, 2);
+    assert.notEqual(keys[0], keys[1], "the same concern and rung after a reset is a different request");
+  });
+
+  suite("recovery ladder B3: pause comes before reassign, and the ladder's own pause does not close the concern, so nudge, pause, reassign works", async (c) => {
+    const { boss, concernId } = await ladderWorld(c);
+    const setting = RecoveryLadderService.withEpoch(c.storage, c.projects.epoch, options);
+    let paused = false;
+    const calls: string[] = [];
+    const svc = c.service({ recoveryPolicy: () => setting.policy(), recoveryEffects: { run: async (a) => { calls.push(a); if (a === "pause") paused = true; return {}; } }, isPaused: async () => paused });
+    const rev = async () => (await svc.get(c.owner, concernId))!.revision;
+    await setting.set(c.owner, { commandId: cid("s"), levels: [["nudge", "pause", "reassign"]] });
+    assert.deepEqual(RECOVERY_ACTIONS, ["nudge", "rebrief", "pause", "reassign", "stop", "hand-to-owner"]);
+    await svc.recover(boss.principal, { commandId: cid("r"), concernId, expectedRevision: await rev(), action: "nudge", text: "x" });
+    await svc.recover(boss.principal, { commandId: cid("r"), concernId, expectedRevision: await rev(), action: "pause", text: "x" });
+    // The task is paused now: the scan would clear a concern of a task paused on purpose, but not one the ladder itself paused.
+    await svc.scan(c.owner);
+    assert.equal((await svc.get(c.owner, concernId))!.state, "suspected");
+    await svc.recover(boss.principal, { commandId: cid("r"), concernId, expectedRevision: await rev(), action: "reassign", text: "x", to: "agent:other" });
+    assert.deepEqual(calls, ["nudge", "pause", "reassign"]);
+  });
+
+  suite("recovery ladder B4: a forbidden effect is a refusal and leaves the rung free; only invalid_transition and not_found pass a rung", async (c) => {
+    const { boss, concernId } = await ladderWorld(c);
+    const setting = RecoveryLadderService.withEpoch(c.storage, c.projects.epoch, options);
+    await setting.set(c.owner, { commandId: cid("s"), levels: fullLadder.map((l) => [...l]) });
+    let code: "forbidden" | "ok" = "forbidden";
+    const svc = c.service({ recoveryPolicy: () => setting.policy(), recoveryEffects: { run: async () => { if (code === "forbidden") throw new DomainError("forbidden", "the pause service says no"); return {}; } } });
+    const rev = async () => (await svc.get(c.owner, concernId))!.revision;
+    await refuses("forbidden", async () => svc.recover(c.owner, { commandId: cid("r"), concernId, expectedRevision: await rev(), action: "pause", text: "x" }));
+    const after = (await svc.get(c.owner, concernId))!;
+    assert.deepEqual([after.recoveryPending, after.recoveryRung, after.recoverySteps], [undefined, undefined, undefined], "no skipped step, the rung is not used up, nothing is left pending");
+    code = "ok";
+    const again = await svc.recover(c.owner, { commandId: cid("r"), concernId, expectedRevision: await rev(), action: "pause", text: "x" });
+    assert.notEqual(again.step!.skipped, true);
+  });
+
+  suite("recovery ladder B5: a concern opened before the pin is acted on only while the assignment is still of its generation", async (c) => {
+    const { boss, concernId } = await ladderWorld(c);
+    const setting = RecoveryLadderService.withEpoch(c.storage, c.projects.epoch, options);
+    await setting.set(c.owner, { commandId: cid("s"), levels: fullLadder.map((l) => [...l]) });
+    const agents: (string | undefined)[] = [];
+    const svc = c.service({ recoveryPolicy: () => setting.policy(), recoveryEffects: { run: async (_a, ctx) => { agents.push(ctx.agent); return {}; } } });
+    const rev = async () => (await svc.get(c.owner, concernId))!.revision;
+    // Opened before the pin existed, and the task has been given to somebody else since (a newer generation).
+    await patch(c, "stall-concern", concernId, (b) => { const { stalledAgent: _s, ...rest } = b; void _s; return { ...rest, generation: 0 }; });
+    await refuses("invalid_transition", async () => svc.recover(boss.principal, { commandId: cid("r"), concernId, expectedRevision: await rev(), action: "nudge", text: "x" }), (e) => assert.match(e.message, /new owner/));
+    assert.deepEqual(agents, [], "nobody was nudged");
+    // Same generation: the current assignee is the agent the concern is about, and is pinned.
+    const gen = (await c.assignments.getAssignment((await svc.get(c.owner, concernId))!.taskId))!.generation;
+    await patch(c, "stall-concern", concernId, (b) => ({ ...b, generation: gen }));
+    await svc.recover(boss.principal, { commandId: cid("r"), concernId, expectedRevision: await rev(), action: "nudge", text: "x" });
+    assert.equal(agents.length, 1);
+    assert.ok((await svc.get(c.owner, concernId))!.stalledAgent !== undefined);
   });
 }

@@ -423,7 +423,7 @@ export class WorkEndService {
       if (d === undefined) return;
       const cutOff = (): never => { throw new DomainError("unavailable", "the cleanup was cut off (timeout); the sweep finishes it"); };
       if (signal?.aborted === true) cutOff();
-      await sc.cleanup.run(d.attempt, d.missing, async () => { if (signal?.aborted === true) cutOff(); return undefined; }, { workerStopped: d.workerStopped });
+      await sc.cleanup.run(d.attempt, d.missing, async () => { if (signal?.aborted === true) cutOff(); return undefined; }, { workerStopped: d.workerStopped, ...(signal === undefined ? {} : { signal }) });
     } catch { /* kept; the sweep tries again for what is left open */ }
   }
 

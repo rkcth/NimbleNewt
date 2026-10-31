@@ -553,18 +553,47 @@ for (const backend of backends) {
     assert.equal(moved.filter((m) => m.startsWith("a-")).length, 0);
   }, { policy: open });
 
-  suite("a new episode of a host told about a short while ago still gets the notice that carries the timer; the cannot-move notice is not held back past the grace period", async (c) => {
+  suite("A6: a host that flaps just past the quiet threshold is not announced at every episode, even with automatic moves on; a changed timer or an episode that outlasted the grace period is told again", async (c) => {
     const w = await world(c);
+    const recover = async (): Promise<void> => { for (let i = 0; i < 7; i++) { await pass(c, 2 * MIN, [w.r2, w.r1]); await w.quiet.sweep(c.dispatcherPrincipal); } };
     await pass(c, 6 * MIN, [w.r2]);
     await w.quiet.sweep(c.dispatcherPrincipal);
     assert.equal(w.notices.length, 1);
-    for (const ms of [3 * MIN, 3 * MIN, 8 * MIN]) { await pass(c, ms, [w.r1, w.r2]); await w.quiet.sweep(c.dispatcherPrincipal); }
-    assert.equal((await w.quiet.episodes(c.owner))[0]!.state, "recovered");
+    for (let cycle = 0; cycle < 3; cycle++) {
+      await recover();
+      assert.equal((await w.quiet.episodes(c.owner))[0]!.state, "recovered");
+      await pass(c, 6 * MIN, [w.r2]);
+      await w.quiet.sweep(c.dispatcherPrincipal); // a new episode within the notice interval
+      assert.equal((await w.quiet.episodes(c.owner))[0]!.state, "quiet", `cycle ${cycle}: a new episode`);
+      assert.ok((await w.quiet.episodes(c.owner))[0]!.warnedAt !== undefined, "the grace period runs");
+    }
+    assert.equal(w.notices.length, 1, "one notice for the flapping host, however many episodes");
+    // A different timer is news.
+    await recover();
+    await w.settings.change(c.owner, { commandId: "g1", graceHours: 24 });
     await pass(c, 6 * MIN, [w.r2]);
-    await w.quiet.sweep(c.dispatcherPrincipal); // a second episode within the notice interval
-    assert.equal(w.notices.length, 2, "the restarted grace period is told");
-    assert.match(w.notices[1]!.detail, /moves after 12h/);
+    await w.quiet.sweep(c.dispatcherPrincipal);
+    assert.equal(w.notices.length, 2);
+    assert.match(w.notices[1]!.detail, /moves after 24h/);
+    // The same timer again inside the interval is not.
+    await recover();
+    await pass(c, 6 * MIN, [w.r2]);
+    await w.quiet.sweep(c.dispatcherPrincipal);
+    assert.equal(w.notices.length, 2);
   }, { policy: open });
+
+  for (const [label, hours, told] of [["lasted past", 25, 1], ["did not outlast", 1, 0]] as const) {
+    suite(`A6: an earlier episode that ${label} the grace period ${told === 1 ? "is followed by a notice" : "is not followed by one"} when the host drops out again inside the notice interval`, async (c) => {
+      const w = await world(c);
+      const at = Date.parse(c.clock.now());
+      const iso = (ms: number): string => new Date(ms).toISOString();
+      await commitOperation(c.storage, { operationId: "cmd:fx-prior", epoch: c.epoch, actor: "fixture", correlationId: "fx-prior", at: iso(at), changes: [{ type: "create", ref: { kind: QUIET_HOST_KIND, id: w.r1.id }, body: { hostId: w.r1.id, episode: iso(at - hours * HOUR), quietSince: iso(at - hours * HOUR), state: "recovered", pending: [], lastNoticeAt: iso(at), lastTimerHours: 12, updatedAt: iso(at) } as never }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] }, { attempts: 3, pause: async () => undefined });
+      await pass(c, 6 * MIN, [w.r2]);
+      await w.quiet.sweep(c.dispatcherPrincipal);
+      assert.equal((await w.quiet.episodes(c.owner))[0]!.state, "quiet");
+      assert.equal(w.notices.length, told);
+    }, { policy: open });
+  }
 
   suite("the notice interval cannot hold back the cannot-move notice past the grace period", async (c) => {
     const w = await world(c);

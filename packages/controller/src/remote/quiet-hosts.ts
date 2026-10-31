@@ -39,6 +39,9 @@ export interface QuietHostBody {
   readonly blockedAt?: string;
   /** The last time the owner was told anything about this host, in any episode: at most one notice per host in the notice interval. */
   readonly lastNoticeAt?: string;
+  /** The grace period (hours) the last timer notice named, and whether the episode before this one lasted past it: a new episode inside the notice interval repeats the timer notice only when the figure changed or the last episode outlasted it. */
+  readonly lastTimerHours?: number;
+  readonly priorLong?: boolean;
   /** While the episode is open and the host reports again: when the unbroken run of fresh sightings began and how many were seen (counted to 2). A sighting of the host not fresh clears both. */
   readonly freshSince?: string;
   readonly freshSightings?: number;
@@ -219,7 +222,7 @@ export class QuietHostService {
         const quiet = heard === undefined || nowMs - heard >= this.#quietAfterMs;
         if (!quiet || attempts.length === 0) continue;
         // The episode is named by the time the host was first judged quiet, not by when it was last heard: dropping out again later does not make a new one.
-        current = keepBody(await this.#write(hostId, (cur) => (cur !== undefined && cur.state === "quiet" ? undefined : { hostId, episode: now, quietSince: status.lastSeenAt ?? now, state: "quiet", pending: cur?.pending ?? [], ...(cur?.lastNoticeAt === undefined ? {} : { lastNoticeAt: cur.lastNoticeAt }), updatedAt: now }), "open")) ?? current;
+        current = keepBody(await this.#write(hostId, (cur) => (cur !== undefined && cur.state === "quiet" ? undefined : { hostId, episode: now, quietSince: status.lastSeenAt ?? now, state: "quiet", pending: cur?.pending ?? [], ...(cur?.lastNoticeAt === undefined ? {} : { lastNoticeAt: cur.lastNoticeAt }), ...(cur?.lastTimerHours === undefined ? {} : { lastTimerHours: cur.lastTimerHours }), ...(cur !== undefined && Date.parse(cur.updatedAt) - Date.parse(cur.quietSince) > figures.graceHours * HOUR_MS ? { priorLong: true } : {}), updatedAt: now }), "open")) ?? current;
       }
       if (current === undefined || current.state !== "quiet") continue;
       const episode = current.episode;
@@ -228,21 +231,21 @@ export class QuietHostService {
       if (current.warnedAt === undefined && attempts.length > 0) {
         // The notification text is at most 200 characters.
         const detail = (figures.autoMove ? timerText : `${hostId} stopped reporting and holds ${attempts.length} attempt(s). Automatic moves are off. Say "move the work off ${hostId}" to move it.`).slice(0, 200);
-        if (noticeLimited && !figures.autoMove) {
-          // The owner was told about this host a short while ago and there is no timer to tell: the warning is recorded, no second notice. (A timer, "the work will be moved after Xh", is always told, once per episode: it bypasses the notice interval.)
+        if (noticeLimited && (!figures.autoMove || (current.lastTimerHours === figures.graceHours && current.priorLong !== true))) {
+          // The owner was told about this host a short while ago and there is nothing new to tell: no timer (moves are off), or the same timer as the last notice after an episode that did not outlast it. The warning is recorded, no second notice. A new timer figure, or an earlier episode that lasted past the grace period (so work may have moved), is told even inside the notice interval; a host that flaps is not announced at every episode.
           keepBody(await this.#write(hostId, (cur) => (cur !== undefined && cur.episode === episode && cur.warnedAt === undefined ? { ...cur, warnedAt: now, warnedAutoMove: figures.autoMove, updatedAt: now } : undefined), "warned-quiet"));
           continue;
         }
         // A notice that cannot be sent leaves the record as it was: the next pass sends it again under the same identity, and the other hosts are not held up.
         try { await this.#deps.notify({ commandId: `quiet-host:${hostName(hostId)}:${digest(hostId, episode)}`.slice(0, 120), hostId, detail }); } catch { continue; }
-        keepBody(await this.#write(hostId, (cur) => (cur !== undefined && cur.episode === episode && cur.warnedAt === undefined ? { ...cur, warnedAt: this.#runner.now(), warnedAutoMove: figures.autoMove, lastNoticeAt: this.#runner.now(), updatedAt: this.#runner.now() } : undefined), "warned"));
+        keepBody(await this.#write(hostId, (cur) => (cur !== undefined && cur.episode === episode && cur.warnedAt === undefined ? { ...cur, warnedAt: this.#runner.now(), warnedAutoMove: figures.autoMove, lastNoticeAt: this.#runner.now(), ...(figures.autoMove ? { lastTimerHours: figures.graceHours } : {}), updatedAt: this.#runner.now() } : undefined), "warned"));
         out.warned++;
         continue;
       }
       if (current.warnedAt !== undefined && current.warnedAutoMove === false && figures.autoMove && attempts.length > 0) {
         // The warning said automatic moves were off and the owner has turned them on since: the grace period counts from now, and the owner is told the timer (this answers the owner's own change, so it is not held back by the notice interval).
         try { await this.#deps.notify({ commandId: `quiet-host-auto:${hostName(hostId)}:${digest(hostId, episode, current.warnedAt)}`.slice(0, 120), hostId, detail: timerText.slice(0, 200) }); } catch { continue; }
-        keepBody(await this.#write(hostId, (cur) => (cur !== undefined && cur.episode === episode && cur.warnedAutoMove === false ? { ...without(cur, "blockedAt"), warnedAt: this.#runner.now(), warnedAutoMove: true, lastNoticeAt: this.#runner.now(), updatedAt: this.#runner.now() } : undefined), "rewarned"));
+        keepBody(await this.#write(hostId, (cur) => (cur !== undefined && cur.episode === episode && cur.warnedAutoMove === false ? { ...without(cur, "blockedAt"), warnedAt: this.#runner.now(), warnedAutoMove: true, lastNoticeAt: this.#runner.now(), lastTimerHours: figures.graceHours, updatedAt: this.#runner.now() } : undefined), "rewarned"));
         out.warned++;
         continue;
       }

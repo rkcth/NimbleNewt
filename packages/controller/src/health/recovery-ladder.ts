@@ -6,8 +6,11 @@ import type { ControllerStorage, JsonObject } from "../storage/types.js";
 
 const REF = { kind: "recovery-ladder-settings", id: "main" } as const;
 
-/** The recovery actions, lowest rung first (card V02c). A concern climbs them one rung at a time; a rung once taken is not taken again. */
-export const RECOVERY_ACTIONS = ["nudge", "rebrief", "reassign", "pause", "stop", "hand-to-owner"] as const;
+/**
+ * The recovery actions, lowest rung first (card V02c). A concern climbs them one rung at a time; a rung once taken is not taken again. `pause` comes before `reassign` because a reassignment changes the task's generation, which closes the concern and so ends
+ * the ladder; and pause and stop act on the task (not on one agent's work on it), which they must do while the stalled agent still holds it.
+ */
+export const RECOVERY_ACTIONS = ["nudge", "rebrief", "pause", "reassign", "stop", "hand-to-owner"] as const;
 export type RecoveryAction = (typeof RECOVERY_ACTIONS)[number];
 export const rungOf = (action: RecoveryAction): number => RECOVERY_ACTIONS.indexOf(action);
 
@@ -15,12 +18,12 @@ export const rungOf = (action: RecoveryAction): number => RECOVERY_ACTIONS.index
 export const RECOVERY_BOUNDS = { maxLevels: 16 } as const;
 
 /**
- * The installation default (provisional, see the notes): the first supervisor may nudge, re-brief and hand the concern to the owner; reassigning and pausing the agent come once the concern has climbed a level;
- * stopping the agent is for the top (the owner's level). `owner` is the level of a concern held by the owner (agents holding `assignment.manage` act there).
+ * The installation default (provisional, see the notes): the first supervisor may nudge, re-brief and hand the concern to the owner; pausing the task and reassigning it come once the concern has climbed a level;
+ * stopping is for the top (the owner's level, owner only by default). `owner` is the level of a concern held by the owner (agents holding `assignment.manage` act there).
  */
 export function defaultActionsAt(level: number | "owner"): readonly RecoveryAction[] {
   if (level === "owner") return RECOVERY_ACTIONS;
-  return level === 0 ? ["nudge", "rebrief", "hand-to-owner"] : ["nudge", "rebrief", "reassign", "pause", "hand-to-owner"];
+  return level === 0 ? ["nudge", "rebrief", "hand-to-owner"] : ["nudge", "rebrief", "pause", "reassign", "hand-to-owner"];
 }
 
 export interface RecoveryLadderBody {

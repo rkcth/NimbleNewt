@@ -79,7 +79,7 @@ export interface WorkerHost {
   readonly resources: { readonly cpus: number; readonly memoryMb: number };
   start(order: WorkOrder): Promise<WorkerHandle>;
   /** Ends whatever this host still holds for an attempt that ended while this process had no handle for it (the controller restarted since the worker was placed). Without it a placement that outlived its controller would hold the agent's store for ever. Nothing held: nothing happens. */
-  release?(attemptId: string, reason: string): Promise<void>;
+  release?(attemptId: string, reason: string, signal?: AbortSignal): Promise<void>;
   /**
    * Why this host would refuse the attempt (policy, capabilities, connection), asked before a place is requested so that the dispatcher can pass over a host that would refuse and pick the next one. Empty: it would take it. A host
    * that does not say leaves it out and is judged only when the worker starts (card H07e).

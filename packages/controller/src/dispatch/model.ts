@@ -65,6 +65,8 @@ export interface DispatchBody {
   readonly lease?: { readonly holder: string; readonly until: string };
   readonly heartbeats: number;
   readonly lastHeartbeatAt?: string;
+  /** The last time the worker was DOING something (a heartbeat while no call waited for an approval); a heartbeat is a lease timer, so one sent while every call was parked does not move it. Absent on attempts from before this field: the heartbeat stands for it. */
+  readonly lastActivityAt?: string;
   readonly frozen?: Frozen;
   /** Set when the attempt was stopped (card L02), by whom, before it was ended; the agent's ending reads it to tell an owner's stop from an attempt that merely ended. */
   readonly stopped?: { readonly by: "owner" | "emergency"; readonly reason: string };

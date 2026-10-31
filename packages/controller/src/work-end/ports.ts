@@ -73,16 +73,16 @@ export const CHECKPOINT_WINDOW_MS = 2 * 60_000;
 
 /**
  * Whether a recorded continuation covers THIS ATTEMPT's work: taken by the attempt's agent, at or after the start of the attempt, and not older than the attempt's last sign of life (its last heartbeat; else the time it ended) less a small window.
- * A checkpoint taken a minute after the start, followed by hours of work and a crash or a lost worker, does not cover that work, so its scratch is kept (card H12n, owner decision 2026-10-30; the dispatcher records no time of the last write, the heartbeat is the nearest it has).
+ * A checkpoint taken a minute after the start, followed by hours of work and a crash or a lost worker, does not cover that work, so its scratch is kept (card H12n, owner decision 2026-10-30; the dispatcher records no time of the last write. A heartbeat is a lease timer, not activity: the dispatcher keeps `lastActivityAt`, which a heartbeat moves only while no call of the attempt waits parked for an approval, so a worker that parked and kept heartbeating is not taken for working and its earlier checkpoint covers it. Without that field the heartbeat is used, the conservative reading).
  * Returns true, or the reason it does not cover.
  */
-export function checkpointVerdict(continuation: { readonly capturedAt: string; readonly agent: string } | undefined, attempt: { readonly agentId: string; readonly startedAt?: string; readonly claimedAt: string; readonly lastHeartbeatAt?: string; readonly outcome?: { readonly at?: string } }): true | string {
+export function checkpointVerdict(continuation: { readonly capturedAt: string; readonly agent: string } | undefined, attempt: { readonly agentId: string; readonly startedAt?: string; readonly claimedAt: string; readonly lastHeartbeatAt?: string; readonly lastActivityAt?: string; readonly outcome?: { readonly at?: string } }): true | string {
   if (continuation === undefined) return "no checkpoint is recorded";
   const bare = (id: string): string => (id.startsWith("agent:") ? id.slice("agent:".length) : id);
   if (bare(continuation.agent) !== bare(attempt.agentId)) return "no checkpoint of this attempt is recorded: the last one is another agent's";
   const since = Date.parse(attempt.startedAt ?? attempt.claimedAt), at = Date.parse(continuation.capturedAt);
   if (!Number.isFinite(since) || !Number.isFinite(at) || at < since) return "no checkpoint of this attempt is recorded: the last one is from before it";
-  const lastSign = Date.parse(attempt.lastHeartbeatAt ?? attempt.outcome?.at ?? "");
+  const lastSign = Date.parse(attempt.lastActivityAt ?? attempt.lastHeartbeatAt ?? attempt.outcome?.at ?? "");
   if (Number.isFinite(lastSign) && at < lastSign - CHECKPOINT_WINDOW_MS) return `no checkpoint covers the attempt: the last (${continuation.capturedAt}) is older than the attempt's last activity (${new Date(lastSign).toISOString()}), so later work is not covered`;
   return true;
 }

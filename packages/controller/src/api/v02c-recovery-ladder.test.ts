@@ -56,7 +56,7 @@ test("the owner sets which recovery actions are allowed at which level, and swit
   }
 });
 
-test("end to end with the real effects: a supervisor's steps nudge, reassign and pause the concern's task (not the agent), the effect is keyed by the step so a retry under a new command does it once, and a repeat is answered as recorded (card V02c review)", async () => {
+test("end to end with the real effects: a supervisor's steps nudge, pause and reassign the concern's task (not the agent), the effect is keyed by the step so a retry under a new command does it once, and a repeat is answered as recorded (card V02c review)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-recovery-e2e-"));
   const c = await startController({
     storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [],
@@ -73,6 +73,8 @@ test("end to end with the real effects: a supervisor's steps nudge, reassign and
     await c.services.assignments.assignTask({ commandId: "as", actor: rob.id, taskId: task, owner: { kind: "agent", id: names.ann } });
     // The supervisor can see and manage the task; it is not the task's owner.
     for (const a of ["task.read", "assignment.read", "assignment.manage"]) await c.services.grants.grant(rob, { commandId: `g-${a}`, grantee: `agent:${names.boss}`, action: a, project, source: "direct", basis: "test" } as never);
+    // The stalled agent can see its task, so a nudge can reach it (a nudge to an agent that cannot be told is refused as forbidden, not passed).
+    await c.services.grants.grant(rob, { commandId: "g-ann-read", grantee: `agent:${names.ann}`, action: "task.read", project, source: "direct", basis: "test" } as never);
     const boss = (await c.services.principals.issueCredential(rob, `agent:${names.boss}`)).token;
     const generation = (await c.services.assignments.getAssignment(task))!.generation;
     const id = `stl-${task.slice(5)}-${String(generation).padStart(10, "0")}-silent`;
@@ -82,23 +84,25 @@ test("end to end with the real effects: a supervisor's steps nudge, reassign and
     const call = (token: string, op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<{ ok: boolean; result?: any; error?: { code: string; message?: string } }>;
     const revision = async (): Promise<number> => (await c.storage.getAggregate({ kind: "stall-concern", id }))!.revision;
     const step = async (action: string, commandId: string, more: Record<string, unknown> = {}) => call(boss, "recovery.step", { concernId: id, expectedRevision: await revision(), action, text: "please look", ...more }, commandId);
-    assert.ok((await call(boot.token, "recovery.ladder.set", { levels: [["nudge", "reassign", "pause", "hand-to-owner"]] }, "lad")).ok);
+    assert.ok((await call(boot.token, "recovery.ladder.set", { levels: [["nudge", "pause", "reassign", "hand-to-owner"]] }, "lad")).ok);
     // Nudge: a real notice to the stalled agent.
     const nudge = await step("nudge", "n1");
     assert.ok(nudge.ok, JSON.stringify(nudge));
-    // Reassign by a supervisor (no hand-off needed: no attempt runs), recorded as a recovery step, not a meeting.
+    // Reassign cannot come before pause: the ladder's order is nudge, rebrief, pause, reassign.
+    assert.equal((await step("reassign", "m0", { to: `agent:${names.bob}` })).error?.code, "invalid_transition");
+    // Pause: the TASK is paused (pause acts on the task, so while the stalled agent still holds it), not the agent's other work, and the supervisor's own rights are what the pause service checked.
+    const pause = await step("pause", "p1");
+    assert.ok(pause.ok, JSON.stringify(pause));
+    assert.equal((await c.services.pauses.gate(rob, { kind: "task", id: task }))?.intent, "pause");
+    assert.equal((await c.services.pauses.gate(rob, { kind: "agent", id: names.ann }))?.intent ?? "run", "run", "the agent's other work is not paused");
+    // Reassign by a supervisor after the pause (no hand-off needed: no attempt runs), recorded as a recovery step, not a meeting.
     const move = await step("reassign", "m1", { to: `agent:${names.bob}` });
     assert.ok(move.ok, JSON.stringify(move));
     const after = (await c.services.assignments.getAssignment(task))!;
     assert.equal(after.owner?.id, names.bob);
     assert.match(String((await c.services.assignments.history(task)).at(-1)!.reason), /recovery step/);
-    // Pause: the TASK is paused, not the agent's other work, and the supervisor's own rights are what the pause service checked.
-    const pause = await step("pause", "p1");
-    assert.ok(pause.ok, JSON.stringify(pause));
-    assert.equal((await c.services.pauses.gate(rob, { kind: "task", id: task }))?.intent, "pause");
-    assert.equal((await c.services.pauses.gate(rob, { kind: "agent", id: names.ann }))?.intent ?? "run", "run", "the agent's other work is not paused");
     const record = (await c.storage.getAggregate({ kind: "stall-concern", id }))!.body as any;
-    assert.deepEqual(record.recoverySteps.map((x: any) => x.action), ["nudge", "reassign", "pause"]);
+    assert.deepEqual(record.recoverySteps.map((x: any) => x.action), ["nudge", "pause", "reassign"]);
     assert.equal(record.stalledAgent, names.ann, "the concern still names the agent it is about, not the new holder");
     assert.equal(record.recoveryPending, undefined);
     // A repeat is answered as recorded, even after the supervisor's recovery rights are switched off.

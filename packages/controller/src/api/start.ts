@@ -423,7 +423,8 @@ export async function startController(options: StartOptions): Promise<Controller
       patienceHours: async () => (await cleanupSettings.effective()).awaitStopHours,
       before: async (a) => workEndLate?.droppedReason(a.attemptId),
       decide: async (attemptId) => workEndLate?.scratchDecision(attemptId),
-      workerStopped: async (a) => (dispatch === undefined ? false : dispatch.dispatcher.confirmStopped(dispatch.principal, a.attemptId)),
+      workerStopped: async (a, signal) => (dispatch === undefined ? false : dispatch.dispatcher.confirmStopped(dispatch.principal, a.attemptId, signal)),
+      unresolved: async (a, reason, key) => { await notifications.emitFromController({ commandId: key, kind: "maintenance", level: "needs-you", ref: { kind: "scratch-cleanup", id: `${scratchRecordId(a.attemptId)}-unresolved` }, ...(a.projectId === "" ? {} : { projectId: a.projectId }), detail: `Scratch of attempt ${a.attemptId} is kept and its cleanup was closed without a decision: ${reason}. Nothing was removed; check it by hand.`.slice(0, 200) }); },
       stuck: async (a, hours, key) => { await notifications.emitFromController({ commandId: key, kind: "maintenance", level: "needs-you", ref: { kind: "scratch-cleanup", id: `${scratchRecordId(a.attemptId)}-stuck` }, projectId: a.projectId, detail: `Scratch of attempt ${a.attemptId} is kept: its worker never confirmed it stopped within ${hours} hour(s), so nothing was removed. Check the host; the cleanup goes on by itself once the stop is confirmed.`.slice(0, 200) }); },
       ...(options.scratchHost === undefined ? {} : { order: options.scratchHost.remove }),
       report: async (a, leftovers, _key) => {
@@ -552,7 +553,8 @@ export async function startController(options: StartOptions): Promise<Controller
     const dispatchLimits = DispatchLimitsSettingsService.withEpoch(storage, epoch, { ...(options.dispatch?.dispatcher?.attemptMs === undefined ? {} : { attemptMs: options.dispatch.dispatcher.attemptMs }), ...(options.dispatch?.dispatcher?.maxAttempts === undefined ? {} : { maxAttempts: options.dispatch.dispatcher.maxAttempts }) });
     recoveryRun = {
       // The existing services do the work as the caller, so their own rights checks apply; each is keyed by the step (`ctx.key`, made from concern, rung and episode), so a repeat of the step does it once.
-      // The agent is the one the concern is about (pinned when it was opened), and pause and stop act on the concern's task, not on the agent's other work.
+      // The agent is the one the concern is about (pinned when it was opened). Pause and stop act on the concern's TASK, not on the agent's other work; the services have no scope of one agent's work on one task, so every agent working on that task is paused or stopped
+      // (nudge, rebrief and pause come before reassign on the ladder, so they meet the stalled agent, not the new holder).
       run: async (action, ctx) => {
         const asg = await assignments.getAssignment(ctx.taskId);
         const holder = asg?.state === "assigned" && asg.owner?.kind === "agent" ? asg.owner.id : undefined;
@@ -581,7 +583,12 @@ export async function startController(options: StartOptions): Promise<Controller
       // Whether the actor can take the rung at all; a rung they cannot take is passed on the ladder, with the reason.
       unavailable: async (action, ctx) => {
         if (action === "nudge" || action === "rebrief") return ctx.agent === undefined && (await assignments.getAssignment(ctx.taskId))?.owner?.kind !== "agent" ? "the task has no agent working on it" : undefined;
-        if (action === "reassign") return undefined;
+        if (action === "reassign") {
+          // The target must be an active agent; a task with a running attempt moves by a prepared hand-off, which needs the right to control the task.
+          if (ctx.to !== undefined) { const t = await principals.get(ctx.to); if (t === undefined || t.state !== "active" || t.kind !== "agent") return `${ctx.to} is not an active agent`; }
+          if ((await assignments.getAssignment(ctx.taskId))?.activeAttemptId === undefined) return undefined;
+          try { await pauses.authorizeControl(ctx.by, { kind: "task", id: ctx.taskId }); return undefined; } catch (error) { return error instanceof DomainError ? `${ctx.by.id} may not hand the running task over: ${error.message}`.slice(0, 200) : undefined; }
+        }
         try { await pauses.authorizeControl(ctx.by, { kind: "task", id: ctx.taskId }); return undefined; } catch (error) { return error instanceof DomainError ? `${ctx.by.id} may not ${action} the task: ${error.message}`.slice(0, 200) : undefined; }
       },
     };
@@ -645,7 +652,7 @@ export async function startController(options: StartOptions): Promise<Controller
       ...(chat === undefined ? {} : { chat }), ...(coordinator === undefined ? {} : { coordinator }),
       ...(dispatch === undefined ? {} : { dispatch }), ...(tools === undefined ? {} : { tools }), ...(dispatchProblem === undefined ? {} : { dispatchProblem }),
       ...(transport === undefined ? {} : { conversationUrl: transport.url }),
-      close: async () => { tools?.dispose(); await dispatch?.driver.stop(); await dispatch?.closeWorkers().catch(() => undefined); await transport?.close(); await backups?.finish(); await storage.close(); },
+      close: async () => { tools?.dispose(); await dispatch?.driver.stop(); await scratchCleanup.close().catch(() => undefined); await dispatch?.closeWorkers().catch(() => undefined); await transport?.close(); await backups?.finish(); await storage.close(); },
     };
   } catch (error) {
     toolsLive?.dispose();

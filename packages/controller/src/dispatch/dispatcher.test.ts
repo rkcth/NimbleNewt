@@ -1008,6 +1008,34 @@ for (const backend of backends) {
     await c.dispatcher.idle();
   });
 
+  suite("a heartbeat is a lease timer, not activity: one sent while a call waits parked for an approval does not move the attempt's last activity", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["git-push"]));
+    const { attemptId } = await c.task("push", ann);
+    const log = { applied: 0, reconciled: 0 };
+    const beats = { before: "", parkedBeat: "" };
+    const gone = deferred();
+    const first = deferred<ToolResult>();
+    c.worker.script = async ({ gateway }) => {
+      await gateway.heartbeat();
+      beats.before = c.clock.now();
+      c.clock.advance(10 * 60_000);
+      first.resolve(await gateway.call(effectCall("push1", pushBridge(log)), { kind: "effect", effectKind: "git-push", target: "repo", input: {}, bridge: pushBridge(log) }));
+      c.clock.advance(10 * 60_000);
+      await gateway.heartbeat();
+      beats.parkedBeat = c.clock.now();
+      await gone.promise;
+      return { status: "completed", text: "x" };
+    };
+    await c.dispatcher.tick();
+    assert.equal((await first.promise).state, "awaiting-approval");
+    for (let i = 0; i < 50 && beats.parkedBeat === ""; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+    const d = (await c.dispatcher.get(c.owner, attemptId!))!;
+    assert.equal(d.lastHeartbeatAt, beats.parkedBeat, "the lease timer moved");
+    assert.equal(d.lastActivityAt, beats.before, "but the worker did nothing since the first beat: the parked call is not activity");
+    gone.resolve();
+    await c.dispatcher.idle();
+  });
+
   suite("an MCP tool call is a durable operation with the server's protocol and catalogue revision; a capability that changed since the owner accepted it is refused and recorded", async (c) => {
     const { McpService } = await import("../mcp/index.js");
     const { createHash } = await import("node:crypto");

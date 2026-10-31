@@ -250,6 +250,8 @@ export class DispatcherService {
   readonly #endedRunning = new Set<Promise<unknown>>();
   /** The hook calls themselves, which go on after their timeout (the signal they were given is aborted then; they must stop at their next check). `shutdown` waits for them (bounded: a hook that never answers does not hold it). */
   readonly #endedCalls = new Set<Promise<unknown>>();
+  /** The cut-off signals of the hooks now running: `shutdown` aborts them all at once so a hook gives up its claims (an order's lease) before the store closes. */
+  readonly #endedAborts = new Set<AbortController>();
   readonly #endingBy = new Map<string, Promise<{ readmitted?: string }>>();
   /** Consecutive ticks an attempt pinned to a host has waited for it (in memory: a restart starts the count again). */
   readonly #pinnedWaits = new Map<string, number>();
@@ -410,7 +412,8 @@ export class DispatcherService {
         errors.push(`${id}: ${errorText(error)}`);
       }
     }
-    // Ended hooks still running get their time (each is cut off by its own timeout) before the process goes on to close the store.
+    // Ended hooks still running are told to stop now (they give up what they hold) and get their time (each is cut off by its own timeout too) before the process goes on to close the store.
+    for (const c of this.#endedAborts) c.abort();
     await Promise.race([Promise.allSettled([...this.#endedCalls]), new Promise<void>((resolve) => { setTimeout(resolve, (this.#options.endedHookMs ?? this.#options.endHookMs ?? 30_000) + 1000).unref(); })]);
     await this.dropWorkers();
     return { closed, errors };
@@ -420,13 +423,13 @@ export class DispatcherService {
    * Whether the worker of a FINISHED attempt is confirmed stopped now. One recorded as stopped is. Otherwise the host that held it is asked to let go again (a release is repeatable); an answer without error is the confirmation and is recorded.
    * An attempt that is not finished, or has no host that can release, is not confirmed. Used by the scratch cleanup's sweep.
    */
-  async confirmStopped(_by: Principal, attemptId: string): Promise<boolean> {
+  async confirmStopped(_by: Principal, attemptId: string, signal?: AbortSignal): Promise<boolean> {
     const d = await this.#load(attemptId);
     if (d === undefined || d.body.state !== "finished") return false;
     if (d.body.workerStopped === true) return true;
     const host = this.#deps.workers.find((w) => w.hostId === d.body.hostId);
     if (host?.release === undefined) return false;
-    const ok = await host.release(attemptId, "confirming the worker of a finished attempt is stopped").then(() => true, () => false);
+    const ok = await host.release(attemptId, "confirming the worker of a finished attempt is stopped", signal).then(() => true, () => false);
     if (ok) await this.#update(attemptId, (x) => ({ ...x, workerStopped: true })).catch(() => undefined);
     return ok;
   }
@@ -481,7 +484,7 @@ export class DispatcherService {
     await this.#assertCurrent(d.body);
     const now = this.#runner.now();
     const until = new Date(Date.parse(now) + this.#options.leaseMs).toISOString();
-    await this.#update(attemptId, (b) => ({ ...b, lease: { holder: this.#holder, until }, heartbeats: b.heartbeats + 1, lastHeartbeatAt: now }));
+    await this.#update(attemptId, (b) => ({ ...b, lease: { holder: this.#holder, until }, heartbeats: b.heartbeats + 1, lastHeartbeatAt: now, lastActivityAt: b.parked.length === 0 ? now : (b.lastActivityAt ?? b.startedAt ?? b.claimedAt) }));
     return { until };
   }
 
@@ -1383,9 +1386,10 @@ export class DispatcherService {
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<"timeout">((resolve) => { timer = setTimeout(() => resolve("timeout"), limit); });
     const abort = new AbortController();
+    this.#endedAborts.add(abort);
     const call = (async () => hook(attemptId, { outcome, workerStopped, signal: abort.signal }))();
     this.#endedCalls.add(call);
-    call.then(() => undefined, (error: unknown) => { this.#options.onError?.(error); }).finally(() => { this.#endedCalls.delete(call); });
+    call.then(() => undefined, (error: unknown) => { this.#options.onError?.(error); }).finally(() => { this.#endedCalls.delete(call); this.#endedAborts.delete(abort); });
     const run: Promise<unknown> = Promise.race([call, timeout]).then((r) => { if (r === "timeout") abort.abort(); if (r === "timeout") this.#options.onError?.(new Error(`the ended hook of attempt ${attemptId} did not answer within ${limit} ms; it is left to the sweep`)); }, () => undefined).finally(() => { if (timer !== undefined) clearTimeout(timer); this.#endedRunning.delete(run); });
     this.#endedRunning.add(run);
   }
