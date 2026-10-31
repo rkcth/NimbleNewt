@@ -55,7 +55,7 @@ import type { CommandService } from "../commands/index.js";
 import type { Principal, PrincipalService } from "../security/principals.js";
 import type { TaskCredentialService } from "../security/task-credentials.js";
 import type { JsonObject } from "../storage/types.js";
-import { OPERATION_BY_NAME, type Args, type Context } from "./operations.js";
+import { OPERATION_BY_NAME, type Args, type CatalogRevocationPort, type Context } from "./operations.js";
 
 export const API_VERSION = 1;
 
@@ -127,6 +127,8 @@ export interface StateApiDeps {
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set" | "change">;
   /** Which event sources are watched (card H13f). */
   readonly eventSourceSettings?: Pick<EventSourceSettingsService, "get" | "set" | "change">;
+  /** Revoking a catalogue version and listing its running calls (card T02b). */
+  readonly catalogRevocation?: CatalogRevocationPort;
   /** Absent when the controller runs without the agent's ending (card H12n). */
   readonly workEnd?: Pick<WorkEndService, "request" | "get">;
   readonly notes?: Pick<WorkingNoteService, "write" | "revise" | "setVisibility" | "read" | "versions" | "list">;
@@ -249,6 +251,7 @@ export class StateApi {
         ...(this.#deps.dispatchLimits === undefined ? {} : { dispatchLimits: this.#deps.dispatchLimits }),
         ...(this.#deps.branchSettings === undefined ? {} : { branchSettings: this.#deps.branchSettings }),
         ...(this.#deps.eventSourceSettings === undefined ? {} : { eventSourceSettings: this.#deps.eventSourceSettings }),
+        ...(this.#deps.catalogRevocation === undefined ? {} : { catalogRevocation: this.#deps.catalogRevocation }),
         ...(this.#deps.integration === undefined ? {} : { integration: this.#deps.integration }),
         ...(this.#deps.notes === undefined ? {} : { notes: this.#deps.notes }),
         ...(this.#deps.workEnd === undefined ? {} : { workEnd: this.#deps.workEnd }),

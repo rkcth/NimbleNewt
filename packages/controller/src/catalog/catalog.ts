@@ -52,6 +52,8 @@ export interface VersionBody {
   readonly registeredAt: string;
 }
 export interface EntryBody { readonly name: string; readonly layer: Layer; readonly kind: ArtifactKind; readonly owner?: string; readonly latest: string; /** Every published version, in publication order. */ readonly versions: readonly string[]; /** The versions revoked. Revoking changes the entry, so a run in flight notices. */ readonly revoked: readonly string[]; /** The versions no longer chosen when no version is named (a newer one was rolled back, or the owner set it aside). They still resolve by name and version, so a paused task resumes silently on the one it used. */ readonly deprecated?: readonly string[] }
+/** What the owner chose for calls of a version that are running when it is revoked (owner decision, 2026-10-30): let them end, or cancel them. Absent: nobody was asked (the caller is not chat, or gave no answer), which means `finish`. */
+export type RunningCallsChoice = "finish" | "cancel";
 export interface RevocationBody { readonly revokedBy: string; readonly reason: string; readonly at: string }
 export interface UsageBody {
   readonly versionId: string;
@@ -183,7 +185,7 @@ export class CatalogService {
   readonly #runner: CommandRunner;
   readonly #desks: DeskService;
 
-  readonly #revoked = new Set<(name: string, version: string) => void>();
+  readonly #revoked = new Set<(name: string, version: string, runningCalls: RunningCallsChoice | undefined) => void>();
 
   private constructor(runner: CommandRunner, desks: DeskService) { this.#runner = runner; this.#desks = desks; }
 
@@ -191,7 +193,7 @@ export class CatalogService {
    * Tells `listener` (name, version) after a revocation has been committed (T02b: what happens to work in flight is the listener's policy). A repeat of an already-committed revoke tells again, so a listener must be idempotent;
    * a listener that throws never undoes the revocation. Returns the way to stop listening.
    */
-  onRevoked(listener: (name: string, version: string) => void): () => void { this.#revoked.add(listener); return () => { this.#revoked.delete(listener); }; }
+  onRevoked(listener: (name: string, version: string, runningCalls: RunningCallsChoice | undefined) => void): () => void { this.#revoked.add(listener); return () => { this.#revoked.delete(listener); }; }
 
   static withEpoch(storage: ControllerStorage, epoch: number, desks: DeskService, options: RunnerOptions = {}): CatalogService {
     return new CatalogService(new CommandRunner(storage, epoch, options), desks);
@@ -260,9 +262,11 @@ export class CatalogService {
   }
 
   /** The owner withdraws a version for good. It is no longer chosen and a run of it is refused; nothing is deleted. */
-  async revoke(owner: Principal, command: NoActor & { name: string; version: string; reason: string }): Promise<void> {
+  async revoke(owner: Principal, command: NoActor & { name: string; version: string; reason: string; runningCalls?: RunningCallsChoice }): Promise<void> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner revokes a version`);
-    onlyKnown(command, ["commandId", "name", "version", "reason"]);
+    onlyKnown(command, ["commandId", "name", "version", "reason", "runningCalls"]);
+    if (command.runningCalls !== undefined && command.runningCalls !== "finish" && command.runningCalls !== "cancel") invalid("runningCalls", "must be finish or cancel");
+    const runningCalls = command.runningCalls;
     const parsed = parseName(command.name);
     if (parsed === null) invalid("name", "is not a canonical name");
     if (typeof command.version !== "string" || !VERSION.test(command.version)) invalid("version", "must be major.minor.patch");
@@ -271,7 +275,7 @@ export class CatalogService {
     const ref: AggregateRef = { kind: "catalog-revocation", id: versionId };
     const eref: AggregateRef = { kind: "catalog-entry", id: derivedId("cat", command.name) };
     await this.#runner.command("catalog.revoke", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
-      payload: { versionId, reason },
+      payload: { versionId, reason, runningCalls: runningCalls ?? null },
       build: async () => {
         const entry = await this.#runner.get(eref.kind, eref.id);
         const prior = entry?.body as unknown as EntryBody | undefined;
@@ -286,7 +290,7 @@ export class CatalogService {
         };
       },
     }));
-    for (const listener of [...this.#revoked]) { try { listener(command.name, command.version); } catch { /* the revocation stands whatever a listener does */ } }
+    for (const listener of [...this.#revoked]) { try { listener(command.name, command.version, runningCalls); } catch { /* the revocation stands whatever a listener does */ } }
   }
 
   /**

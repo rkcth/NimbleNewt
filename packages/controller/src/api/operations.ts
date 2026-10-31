@@ -103,6 +103,8 @@ export interface Context {
   readonly dispatchLimits?: Pick<DispatchLimitsSettingsService, "get" | "change">;
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set" | "change">;
   readonly eventSourceSettings?: Pick<EventSourceSettingsService, "get" | "set" | "change">;
+  /** Revoking a catalogue version and listing its running calls (card T02b). Absent when the controller has no catalogue wired. */
+  readonly catalogRevocation?: CatalogRevocationPort;
   /** Absent when the controller runs without the agent's ending (card H12n). */
   readonly workEnd?: Pick<WorkEndService, "request" | "get">;
   readonly notes?: Pick<WorkingNoteService, "write" | "revise" | "setVisibility" | "read" | "versions" | "list">;
@@ -162,6 +164,12 @@ export type Args = Record<string, unknown>;
  */
 export type Completion = { readonly kind: "completed" } | { readonly kind: "deferred"; readonly awaits: string };
 
+/** What the API needs to revoke a catalogue version: the one shared catalogue and the calls the tool bridge is running. */
+export interface CatalogRevocationPort {
+  revoke(owner: Principal, command: { commandId: string; name: string; version: string; reason: string; runningCalls?: "finish" | "cancel" }): Promise<void>;
+  running(owner: Principal, name: string, version: string): Promise<readonly { readonly attemptId: string; readonly callId: string; readonly taskId: string; readonly agentId: string }[]>;
+}
+
 export interface Operation {
   readonly name: string;
   readonly kind: "query" | "command";
@@ -220,6 +228,7 @@ const activityOf = (c: Context): NonNullable<Context["activity"]> => c.activity 
 const policyContextOf = (c: Context): NonNullable<Context["policyContext"]> => c.policyContext ?? unavailable("policy context");
 const stopsOf = (c: Context): NonNullable<Context["stops"]> => c.stops ?? unavailable("suspend and stop");
 const integrationOf = (c: Context): NonNullable<Context["integration"]> => c.integration ?? unavailable("integration policy");
+const catalogRevocationOf = (c: Context): CatalogRevocationPort => c.catalogRevocation ?? unavailable("catalogue revocation");
 const eventSourceSettingsOf = (c: Context): NonNullable<Context["eventSourceSettings"]> => c.eventSourceSettings ?? unavailable("event source settings");
 const branchSettingsOf = (c: Context): NonNullable<Context["branchSettings"]> => c.branchSettings ?? unavailable("branch settings");
 
@@ -396,6 +405,10 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => { only(a, ["disabled", "expectedRevision"]); return asJson({ ...(await eventSourceSettingsOf(c).set(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
   { name: "events.sources.change", kind: "command", summary: "The owner turns event sources off or on, leaving the others as they are (owner only). `disable` must name sources this controller has; `enable` may also clear an old entry. This is the form the chat uses, so a request that waits to be accepted does only what it says.", args: { "disable?": "source IDs to turn off", "enable?": "source IDs to turn on" }, result: "`{ revision, warning? }`: `warning` says when a source turned off will lose events older than its window. A critical source cannot be turned off.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["disable", "enable"]); return asJson({ ...(await eventSourceSettingsOf(c).change(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
+  { name: "catalog.running", kind: "query", summary: "The owner lists the catalogue tool calls of one version that are running now (owner only), so a revocation can say what it would reach. Each is named by attempt, call, task and agent, never by its input; at most 50 are listed.", args: { name: "the canonical tool name", version: "major.minor.patch" }, result: "`{ items: [{ attemptId, callId, taskId, agentId }] }`.",
+    run: async (c, a) => { only(a, ["name", "version"]); ownerOnly(c, "list running tool calls"); return asJson({ items: await catalogRevocationOf(c).running(c.principal, str(a, "name"), str(a, "version")) }); } },
+  { name: "catalog.revoke", kind: "command", summary: "The owner withdraws a catalogue version for good (owner only): no new run of it starts. `runningCalls` says what happens to calls of it that are running now: `finish` lets them end on the bytes they started with, `cancel` aborts them and they end as failed. Chat asks the owner which, listing the calls; a caller that gives none (nobody was asked) gets `finish`.", args: { name: "the canonical tool name", version: "major.minor.patch", reason: "why it is withdrawn", "runningCalls?": "`finish` or `cancel`; default `finish`" }, result: "`{}`; a repeat with the same commandId and the same arguments answers again, with a different `runningCalls` it is a conflict.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["name", "version", "reason", "runningCalls"]); ownerOnly(c, "revoke a tool version"); await catalogRevocationOf(c).revoke(c.principal, { commandId: need(id), name: str(a, "name"), version: str(a, "version"), reason: str(a, "reason"), ...(a["runningCalls"] === undefined ? {} : { runningCalls: a["runningCalls"] as "finish" }) }); return {}; } },
 
   { name: "command.run", kind: "command", summary: "Runs a typed command as the caller (card T09b). `/nimblenewt.<operation>` names a state-API operation with its dots written as hyphens, for example `/nimblenewt.grant-list {\"grantee\": \"service:dispatcher\"}`: the arguments are a JSON object after the name, and the operation runs under the caller's own rights, so it refuses what the caller may not do. The command is queued with what it resolved to and runs once; sending the same command ID again answers from the record. A name that is unknown, ambiguous or needs a context is answered in words and nothing runs. Toolbox and agent commands are queued and answered as not runnable yet.", args: { typed: "the command text, starting with `/`", "context?": "`{ agent?, scope?, version? }` for `/agent.` and `/custom.` shortcuts" }, result: "`{ status }`: `done` (with `answer`), `failed` (with `error`), `unsupported`, or, when nothing was queued, `ambiguous`, `needs_context`, `unknown` or `refused` with the reason. `command` names the operation and `queued` the record.", completion: { kind: "completed" },
     run: async (c, a, id) => {

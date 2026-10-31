@@ -180,7 +180,7 @@ const asJson = (value: unknown): JsonObject => JSON.parse(JSON.stringify(value))
 const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 
 type Resolved =
-  | { readonly ok: true; readonly steps: ChatStep[]; readonly pins: ChatPin[]; readonly labels: Record<string, string>; readonly projectId?: string; readonly reason?: string; readonly args: Record<string, unknown>; readonly op: string }
+  | { readonly ok: true; readonly steps: ChatStep[]; readonly pins: ChatPin[]; readonly labels: Record<string, string>; readonly projectId?: string; readonly reason?: string; /** Extra lines for the owner's preview (the calls a revocation would reach). */ readonly notes?: readonly string[]; readonly args: Record<string, unknown>; readonly op: string }
   | { readonly ok: false; readonly kind: "ask"; readonly question: string; readonly options: string[]; readonly field?: string; readonly choices?: string[] }
   | { readonly ok: false; readonly kind: "refuse"; readonly code: string; readonly message: string };
 
@@ -483,7 +483,7 @@ export class ChatService {
         const notDecided = typeof wordsOf === "string" ? notADecisionIn(words, wordsOf) : undefined;
         if (notDecided !== undefined) { push({ i, kind: "ignored", reason: `Nothing was recorded: ${notDecided}` }); continue; }
         const proposalId = `prop-${hash(scopedCommandId(owner.id, `${turnId}-p${i}`))}`;
-        push({ i, kind: "propose", proposalId, steps, pins: resolved.pins, preview: steps.map((st) => describe(st.op, st.args, resolved.labels)), reason: resolved.reason });
+        push({ i, kind: "propose", proposalId, steps, pins: resolved.pins, preview: [...steps.map((st) => describe(st.op, st.args, resolved.labels)), ...(resolved.notes ?? [])], reason: resolved.reason });
       }
     }
     // One question holds the message: nothing that would change a record runs while something is unanswered. The held commands are kept, so the answer carries them on.
@@ -522,7 +522,8 @@ export class ChatService {
       return { work, quoted: old.quotedCount > 0 };
     }
     args[asked.field] = choice;
-    work[asked.intentIndex] = { intent: { ...target.intent, args }, text: target.text };
+    // The owner's pick between letting running calls finish and cancelling them is their word: it counts as said, like the project-creation answers.
+    work[asked.intentIndex] = { intent: { ...target.intent, args }, text: asked.field === "runningCalls" ? `${target.text}. ${choice}` : target.text };
     return { work, quoted: old.quotedCount > 0 };
   }
 
@@ -730,6 +731,22 @@ export class ChatService {
       delete args["taskId"];
     }
     // A hand-off: the recipient named by the agent's name (exactly one active agent), and, for completing or cancelling, the hand-off itself found as the one going on for the named task.
+    // Revoking a tool version (owner decision 2026-10-30): when calls of it are running, the owner is asked whether they finish or are cancelled; the calls are listed. Nothing is assumed: the answer is the owner's.
+    const notes: string[] = [];
+    if (intent.op === "catalog.revoke") {
+      if (typeof args["name"] !== "string" || typeof args["version"] !== "string") return refuse("invalid_command", "say which tool and which version to revoke");
+      const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "catalog.running", args: { name: args["name"], version: args["version"] } });
+      if (!found.ok) return refuse(found.error.code, found.error.message);
+      const running = (found.result["items"] ?? []) as { attemptId: string; callId: string; taskId: string; agentId: string }[];
+      const listed = running.slice(0, 10).map((r) => `call ${String(r.callId).slice(0, 40)} of task ${String(r.taskId).slice(0, 60)} (agent ${String(r.agentId).slice(0, 60)})`);
+      const more = running.length > listed.length ? ` and ${running.length - listed.length} more` : "";
+      if (running.length > 0) notes.push(`${running.length} running ${running.length === 1 ? "call" : "calls"} of ${args["name"].slice(0, 80)} ${args["version"].slice(0, 20)}: ${listed.join("; ")}${more}.`.slice(0, CHAT_LIMITS.line - 10));
+      if (args["runningCalls"] === undefined) {
+        if (running.length > 0) return { ok: false, kind: "ask", question: `${notes[0]!.slice(0, 380)} Should they finish, or be cancelled? (A cancelled call ends as failed.)`, options: ["finish: let them end on the version they started with", "cancel: stop them now; each ends as failed"], field: "runningCalls", choices: ["finish", "cancel"] };
+        // Nothing is running now: the choice is recorded as finish, so a call that slips in before the owner accepts is not cancelled without being asked.
+        args["runningCalls"] = "finish";
+      }
+    }
     if (intent.op === "handoff.prepare" || intent.op === "handoff.takeover") {
       const named = args["toAgentName"];
       delete args["toAgentName"];
@@ -839,7 +856,7 @@ export class ChatService {
     const raisesSpend = intent.op === "difficulty.set" ? await this.#raisesSpend(token, args) : false;
     const reasonBase = proposalReason(intent.op, args, intent.draft === true, { profile, quoted, raisesSpend, said: ownerSaysMove(intent.op, args, words, ["taskId", "prerequisiteId", "projectId", "agentId"].flatMap((k) => (typeof args[k] === "string" && labels[args[k] as string] !== undefined ? [labels[args[k] as string] as string] : [])).concat(intent.op === "resource.bind" && typeof args["label"] === "string" ? [args["label"]] : []).concat(extraTargets)) });
     const reason = reasonBase ?? showFirst ?? (fromRecord ? "the location comes from an earlier binding, not from your words, so it is shown first" : undefined);
-    return { ok: true, steps, pins, labels, ...(projectId === undefined ? {} : { projectId }), ...(reason === undefined ? {} : { reason }), args, op: intent.op };
+    return { ok: true, steps, pins, labels, ...(projectId === undefined ? {} : { projectId }), ...(reason === undefined ? {} : { reason }), ...(notes.length === 0 ? {} : { notes }), args, op: intent.op };
   }
 
   /**

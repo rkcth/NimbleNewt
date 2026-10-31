@@ -42,6 +42,7 @@ import { PostgresStorage, probePostgresLibrary } from "../storage/postgres/index
 import type { ControllerStorage } from "../storage/types.js";
 import type { BeforeUpgrade } from "../storage/snapshot.js";
 import { SetupReadinessService } from "../setup/index.js";
+import type { CatalogRevocationPort } from "./operations.js";
 import { StateApi } from "./state-api.js";
 import { ConfigurationService } from "../configuration/index.js";
 import { ConversationService, type Availability } from "../conversations/index.js";
@@ -49,6 +50,9 @@ import { AgentMessageService } from "../messaging/index.js";
 import { PolicyEditService } from "../chat/index.js";
 
 import { CatalogService } from "../catalog/index.js";
+import { AdmissionService } from "../admission/index.js";
+import { HostService } from "../hosts/index.js";
+import { ToolExecutionService, type ToolExecutionDeps } from "../toolbridge/index.js";
 import { CommandService, catalogSource } from "../commands/index.js";
 import { BUILTIN_COMMANDS } from "./operations.js";
 
@@ -126,6 +130,11 @@ export interface StartOptions {
    */
   readonly dispatch?: DispatchStartOptions;
   /**
+   * The protected tool bridge for catalogue tools (card T06, wired by T02b): the script runner and which hosts are this machine. Off unless given (and it needs `dispatch`). The service is built ONCE here, over the controller's one
+   * catalogue, so a revocation reaches the calls it runs; `revocationPolicy` is only the fallback for a revocation that carried no owner choice.
+   */
+  readonly tools?: Pick<ToolExecutionDeps, "runner" | "isLocalHost" | "facts" | "revocationPolicy">;
+  /**
    * Where the artifact files are kept (card U05b). Given, the status answers check each delivered artifact against its files and say whether they match, are damaged, or were not checked; absent: they are shown as not checked and never as verified.
    * This controller only reads through it (it publishes nothing here), but opening creates the folder if it is missing, so a mistyped path shows every artifact as not matching until it is corrected. Not defaulted from the remote hosts' blob folder: name it explicitly.
    */
@@ -171,12 +180,16 @@ export interface Controller {
   readonly services: {
     readonly backups?: BackupService;
     readonly workEnd: WorkEndService;
+    /** The one catalogue (revoke path and tool bridge share it). */
+    readonly catalog: CatalogService;
     readonly principals: PrincipalService; readonly taskCredentials: TaskCredentialService; readonly grants: GrantService; readonly projects: ProjectService; readonly assignments: AssignmentService;
     readonly waits: WaitService; readonly stall: StallService; readonly desks: DeskService; readonly histories: HistoryService; readonly retrieval: RetrievalService; readonly inquiries: InquiryService; readonly agents: AgentService; readonly harnesses: HarnessCatalog; readonly contracts: ContractService; readonly graph: WaitGraphService; readonly resources: ProjectResourceService; readonly plans: ProjectPlanService; readonly responsibilities: ResponsibilityService; readonly reviews: ReviewService; readonly conversations: ConversationService; readonly configuration: ConfigurationService; readonly routing: RoutingService; readonly records: MeetingRecordService; readonly activity: ActivityService; readonly continuations: ContinuationService; readonly resumes: ResumeCheckService; readonly handoffs: HandoffService; readonly cutover: CutoverService; readonly fallback: FallbackService; readonly pauses: PauseService; readonly branches: ContextBranchService;
     readonly jobs: JobService;
   };
   /** The dispatcher and the driver of its loops, when `dispatch` was given and the dispatcher could be provisioned. */
   readonly dispatch?: DispatchHandle;
+  /** The tool bridge's execution service, when `tools` was given and the dispatcher was built. It is the only one: it subscribes to revocations of `services.catalog`. */
+  readonly tools?: ToolExecutionService;
   /** The owner chat and the coordinator, when `chat` was given. */
   readonly chat?: ChatService;
   readonly coordinator?: CoordinatorService;
@@ -360,7 +373,11 @@ export async function startController(options: StartOptions): Promise<Controller
     const status = StatusService.withEpoch(storage, epoch, { assignments, waits, blockers: BlockerService.withEpoch(storage, epoch), contracts, pauses, stall, watch: watchService, reviews, ownerQuestions: messages, agenda: meetings, meetings, shutdown: { readiness: async (by) => { if (stopsLive === undefined) throw new DomainError("unavailable", "stop is not ready"); return stopsLive.readiness(by, { kind: "installation", id: "installation" }); } }, handoffs: { forTask: (by, taskId) => handoffs.forTask(by, taskId) }, activity, ...(checked === undefined ? {} : { verifyArtifact: async (id: string) => ({ ok: (await checked.verify(id)).ok }) }) });
     const branchSettings = ProtectedBranchService.withEpoch(storage, epoch);
     // Typed commands (card T09b): the `nimblenewt.` names are the state-API operations, `toolbox.` and `a_<id>.` names come from the catalog.
-    const commands = CommandService.withEpoch(storage, epoch, BUILTIN_COMMANDS.source(catalogSource(CatalogService.withEpoch(storage, epoch, desks))));
+    // ONE catalogue for the whole controller: its revocation listeners live on the instance, so the revoke path and the tool bridge must share it.
+    const catalogService = CatalogService.withEpoch(storage, epoch, desks);
+    let toolsLive: ToolExecutionService | undefined;
+    const catalogRevocation: CatalogRevocationPort = { revoke: (owner, command) => catalogService.revoke(owner, command), running: async (_owner, name, version) => toolsLive?.runningCalls(name, version) ?? [] };
+    const commands = CommandService.withEpoch(storage, epoch, BUILTIN_COMMANDS.source(catalogSource(catalogService)));
     const integration = IntegrationPolicyService.withEpoch(storage, epoch);
     const notes = WorkingNoteService.withEpoch(storage, epoch);
     // The agent's ending (card H12n). The submission is bound to the submission service through the optional `stage` (and the landing check to `landing`) of the start options: without them a submit is refused as unavailable and nothing is submitted.
@@ -468,7 +485,7 @@ export async function startController(options: StartOptions): Promise<Controller
     const workerLimits = WorkerLimitsSettingsService.withEpoch(storage, epoch, checkLocalWorkerLimits(options.dispatch?.local?.limits));
     // How long an attempt may run and how many attempts are admitted: off unless the owner (or a start-up option) turns them on.
     const dispatchLimits = DispatchLimitsSettingsService.withEpoch(storage, epoch, { ...(options.dispatch?.dispatcher?.attemptMs === undefined ? {} : { attemptMs: options.dispatch.dispatcher.attemptMs }), ...(options.dispatch?.dispatcher?.maxAttempts === undefined ? {} : { maxAttempts: options.dispatch.dispatcher.maxAttempts }) });
-    const api = new StateApi({ setup: SetupReadinessService.withEpoch(storage, epoch), eventSourceSettings, resumeSettings, workerLimits, agreedLimits, escalationLadder, dispatchLimits, workEnd, submissions, deliverables: DeliverableService.withEpoch(storage, epoch), release: ReleaseService.withEpoch(storage, epoch), responsibilityChecks, incidents, swarm: SwarmService.withEpoch(storage, epoch, { projects, contracts, budgets, stops }), status, branchSettings, improvements, ...(backups === undefined ? {} : { backups }), policyForward, watchControl, standups, attendance, records, policyContext: PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }), activity, resumes, handoffs, cutover, modelBudget: fallback, commands, integration, notes, stops, pauses, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size) }, watches: watchService, events: EventService.withEpoch(storage, epoch), notifications, budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
+    const api = new StateApi({ catalogRevocation, setup: SetupReadinessService.withEpoch(storage, epoch), eventSourceSettings, resumeSettings, workerLimits, agreedLimits, escalationLadder, dispatchLimits, workEnd, submissions, deliverables: DeliverableService.withEpoch(storage, epoch), release: ReleaseService.withEpoch(storage, epoch), responsibilityChecks, incidents, swarm: SwarmService.withEpoch(storage, epoch, { projects, contracts, budgets, stops }), status, branchSettings, improvements, ...(backups === undefined ? {} : { backups }), policyForward, watchControl, standups, attendance, records, policyContext: PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) }), activity, resumes, handoffs, cutover, modelBudget: fallback, commands, integration, notes, stops, pauses, workspaceOps, branches, meetings, invitations: invitationInbox, grants, placement, spill: { readSpill: async (by, id, index, size) => dispatch?.readSpill(by, id, index, size) }, watches: watchService, events: EventService.withEpoch(storage, epoch), notifications, budgets, difficulty: DifficultyService.withEpoch(storage, epoch, routing, contracts), decisions, ownerQuestions: messages, messages, principals, taskCredentials, projects, assignments, retrieval, inquiries, agents, contracts, graph, resources, plans, responsibilities, ...(options.onInternalError === undefined ? {} : { onInternalError: options.onInternalError }) });
     let chat: ChatService | undefined;
     let coordinator: CoordinatorService | undefined;
     if (options.chat !== undefined) {
@@ -513,13 +530,21 @@ export async function startController(options: StartOptions): Promise<Controller
     // The dispatcher asks the ending before it ends an attempt for any reason: a stop drops it with its true reason, the turn completing after work.end completes it with the agent's result.
     dispatch?.dispatcher.onEnd((attemptId, how) => workEnd.resolveOnEnd(attemptId, how));
     if (dispatch !== undefined) await workEnd.recover().catch((error: unknown) => { options.onInternalError?.(error); });
+    let tools: ToolExecutionService | undefined;
+    if (options.tools !== undefined && dispatch !== undefined) {
+      const ro = {};
+      tools = toolsLive = new ToolExecutionService({
+        principal: dispatch.principal, credentials: taskCredentials, dispatch: { get: (...a) => dispatch!.dispatcher.get(...a), toolOperation: (...a) => dispatch!.dispatcher.toolOperation(...a) }, assignments, catalog: catalogService,
+        hosts: HostService.withEpoch(storage, epoch, assignments, ro), admission: AdmissionService.withEpoch(storage, epoch, ro), pauses, desks, ...options.tools,
+      });
+    }
     const transport = options.conversationTransport === undefined ? undefined : await ConversationTransport.listen({ ...options.conversationTransport, conversations, principals });
     return {
-      api, storage, epoch, check, filesystems, prerequisites, services: { ...(backups === undefined ? {} : { backups }), workEnd, records, activity, continuations, resumes, handoffs, cutover, fallback, principals, taskCredentials, grants, projects, assignments, waits, stall, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing, pauses, branches, jobs },
+      api, storage, epoch, check, filesystems, prerequisites, services: { ...(backups === undefined ? {} : { backups }), catalog: catalogService, workEnd, records, activity, continuations, resumes, handoffs, cutover, fallback, principals, taskCredentials, grants, projects, assignments, waits, stall, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing, pauses, branches, jobs },
       ...(chat === undefined ? {} : { chat }), ...(coordinator === undefined ? {} : { coordinator }),
-      ...(dispatch === undefined ? {} : { dispatch }), ...(dispatchProblem === undefined ? {} : { dispatchProblem }),
+      ...(dispatch === undefined ? {} : { dispatch }), ...(tools === undefined ? {} : { tools }), ...(dispatchProblem === undefined ? {} : { dispatchProblem }),
       ...(transport === undefined ? {} : { conversationUrl: transport.url }),
-      close: async () => { await dispatch?.driver.stop(); await dispatch?.closeWorkers().catch(() => undefined); await transport?.close(); await backups?.finish(); await storage.close(); },
+      close: async () => { tools?.dispose(); await dispatch?.driver.stop(); await dispatch?.closeWorkers().catch(() => undefined); await transport?.close(); await backups?.finish(); await storage.close(); },
     };
   } catch (error) {
     await dispatch?.driver.stop().catch(() => undefined);

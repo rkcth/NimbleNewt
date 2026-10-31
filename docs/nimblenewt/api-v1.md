@@ -170,6 +170,17 @@ Result: `{ item }`: `revision`, `disabled` (source IDs), and `sources` (`id`, `t
 
 Completion: finished when accepted (`completed: true`).
 
+#### `catalog.running`
+
+The owner lists the catalogue tool calls of one version that are running now (owner only), so a revocation can say what it would reach. Each is named by attempt, call, task and agent, never by its input; at most 50 are listed.
+
+Arguments:
+
+- `name`: the canonical tool name
+- `version`: major.minor.patch
+
+Result: `{ items: [{ attemptId, callId, taskId, agentId }] }`.
+
 #### `integration.get`
 
 How finished work lands in a project (owner only): `landing` (`integration-branch`, `main-automatic` or `human-promotes`), who integrates, the checks required, and how many times an author refreshes before the integrator takes over. A project made without a setting gets the installation default, else the approval profile's.
@@ -1598,6 +1609,21 @@ Arguments:
 - `enable` (optional): source IDs to turn on
 
 Result: `{ revision, warning? }`: `warning` says when a source turned off will lose events older than its window. A critical source cannot be turned off.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `catalog.revoke`
+
+The owner withdraws a catalogue version for good (owner only): no new run of it starts. `runningCalls` says what happens to calls of it that are running now: `finish` lets them end on the bytes they started with, `cancel` aborts them and they end as failed. Chat asks the owner which, listing the calls; a caller that gives none (nobody was asked) gets `finish`.
+
+Arguments:
+
+- `name`: the canonical tool name
+- `version`: major.minor.patch
+- `reason`: why it is withdrawn
+- `runningCalls` (optional): `finish` or `cancel`; default `finish`
+
+Result: `{}`; a repeat with the same commandId and the same arguments answers again, with a different `runningCalls` it is a conflict.
 
 Completion: finished when accepted (`completed: true`).
 

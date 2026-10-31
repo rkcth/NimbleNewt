@@ -39,7 +39,7 @@ export type BridgeResponse =
   | { readonly ok: true; readonly result: JsonObject }
   | { readonly ok: false; readonly code: string; readonly message: string };
 
-export const BRIDGE_LIMITS = { args: 64 * 1024, output: 64 * 1024, instructions: 16 * 1024, page: 100, defaultPage: 50, query: 100, access: 50 } as const;
+export const BRIDGE_LIMITS = { args: 64 * 1024, output: 64 * 1024, instructions: 16 * 1024, page: 100, defaultPage: 50, query: 100, access: 50, runningListed: 50 } as const;
 
 /** Runs an approved script (the sandbox of H12b/A03 implements it). It is handed argv and stdin as data: nothing here builds, and nothing there may build, a shell command line. */
 export interface ScriptLaunch {
@@ -116,6 +116,26 @@ const canonicalOf = (pathName: string): string => (pathName.startsWith("a-") ? `
 
 interface Context { /** The task credential's own principal, cut to the task and project (desk, messages). */ readonly scoped: Principal; /** The agent with its own grants, for installation-wide records (the catalogue). */ readonly agent: Principal; /** The agent as the attempt presents it (cut to the task, without the contract's tool ceiling). */ readonly acting: Principal; readonly attemptId: string; readonly taskId: string; readonly projectId: string; readonly hostId: string; readonly callId: string }
 
+/**
+ * A signal for the runner whose abort listeners cannot end the process: a listener that throws is an uncaught exception in Node, and the runner is not ours. Listeners added with `addEventListener` or `onabort` run
+ * inside a try, so a revocation that cancels a run can never take the controller down with it.
+ */
+export function guardedSignal(source: AbortSignal): AbortSignal {
+  type Listener = ((event: unknown) => void) | { handleEvent(event: unknown): void };
+  const guard = new AbortController();
+  const signal = guard.signal;
+  const target = signal as unknown as { addEventListener(type: string, listener: (event: unknown) => void, options?: unknown): void; onabort: unknown };
+  const add = target.addEventListener.bind(signal);
+  const wrap = (listener: Listener) => (event: unknown): void => { try { if (typeof listener === "function") listener.call(signal, event); else listener.handleEvent(event); } catch { /* contained */ } };
+  target.addEventListener = (type, listener, options) => { if (listener !== null && listener !== undefined) add(type, wrap(listener as Listener), options); };
+  let handler: ((event: unknown) => unknown) | null = null;
+  Object.defineProperty(signal, "onabort", { configurable: true, get: () => handler, set: (fn: unknown) => { handler = typeof fn === "function" ? (fn as (event: unknown) => unknown) : null; } });
+  add("abort", wrap((event) => { handler?.(event); }));
+  if (source.aborted) guard.abort(source.reason);
+  else source.addEventListener("abort", () => { guard.abort(source.reason); }, { once: true });
+  return signal;
+}
+
 export class ToolExecutionService {
   readonly #deps: ToolExecutionDeps;
   /** Calls this service is handing to the gateway right now (attempt and call ID), for the replay-safe hook. */
@@ -124,20 +144,37 @@ export class ToolExecutionService {
   readonly #calls = new Map<string, Map<string, { digest: string; inFlight: number; answered: boolean }>>();
 
   /** Runs of the catalogue that have been handed to the runner (or are about to be), by `name|version`, so a revocation can cancel them. */
-  readonly #running = new Map<string, Set<AbortController>>();
+  readonly #running = new Map<string, Set<{ readonly ctl: AbortController; readonly attemptId: string; readonly callId: string; readonly taskId: string; readonly agentId: string }>>();
+  readonly #unsubscribe: (() => void) | undefined;
 
   constructor(deps: ToolExecutionDeps) {
     this.#deps = deps;
-    deps.catalog.onRevoked?.((name, version) => { void this.#revoked(name, version); });
+    // The listener never rejects: a failure while cancelling must not become an unhandled rejection that ends the process.
+    this.#unsubscribe = deps.catalog.onRevoked?.((name, version, runningCalls) => { this.#revoked(name, version, runningCalls).catch(() => undefined); });
   }
 
-  async #revoked(name: string, version: string): Promise<void> {
+  /** Stops listening for revocations. The service subscribes in its constructor, so whoever builds it once also disposes it once. */
+  dispose(): void { this.#unsubscribe?.(); }
+
+  /**
+   * The catalogue calls of a version that are running now (owner decision 2026-10-30: the chat revoke flow lists them and asks whether to let them finish or cancel them).
+   * Bounded; each is named by attempt, call, task and agent, never by its input.
+   */
+  runningCalls(name: string, version: string): { readonly attemptId: string; readonly callId: string; readonly taskId: string; readonly agentId: string }[] {
+    return [...(this.#running.get(`${name}|${version}`) ?? [])].slice(0, BRIDGE_LIMITS.runningListed).map(({ attemptId, callId, taskId, agentId }) => ({ attemptId, callId, taskId, agentId }));
+  }
+
+  /**
+   * What the owner chose on the revoke command decides; with no choice (nobody could be asked) the dependency `revocationPolicy` answers, and without one the run finishes. A policy that cannot be read, or answers
+   * anything else, cancels (a revocation is a safety act).
+   */
+  async #revoked(name: string, version: string, choice: "finish" | "cancel" | undefined): Promise<void> {
     const live = this.#running.get(`${name}|${version}`);
     if (live === undefined || live.size === 0) return;
-    let policy: unknown = "cancel";
-    try { policy = await (this.#deps.revocationPolicy?.() ?? "finish"); } catch { policy = "cancel"; }
+    let policy: unknown = choice;
+    if (policy === undefined) { try { policy = await (this.#deps.revocationPolicy?.() ?? "finish"); } catch { policy = "cancel"; } }
     if (policy === "finish") return;
-    for (const ctl of [...live]) ctl.abort(new Error(`${name} ${version} was revoked while it ran`));
+    for (const run of [...live]) run.ctl.abort(new Error(`${name} ${version} was revoked while it ran`));
   }
 
   /**
@@ -382,8 +419,9 @@ export class ToolExecutionService {
           // Recorded at the moment it starts: revocation, the grants and the host are asked again, and the version must still be the one that was checked.
           // The access the tool asks for is asked again with the grants as they are now.
           const own = new AbortController();
-          const set = this.#running.get(`${v.name}|${v.version}`) ?? new Set<AbortController>();
-          set.add(own); this.#running.set(`${v.name}|${v.version}`, set);
+          const entry = { ctl: own, attemptId: c.attemptId, callId: c.callId, taskId: c.taskId, agentId: c.agent.id };
+          const set = this.#running.get(`${v.name}|${v.version}`) ?? new Set<typeof entry>();
+          set.add(entry); this.#running.set(`${v.name}|${v.version}`, set);
           try {
           const now = await this.#deps.credentials.principalOf(this.#deps.principal, c.attemptId, { limit: false });
           const lost = v.manifest.requestedAccess.filter((action) => !allows(now, action, c.projectId, { resource: { kind: "task", id: c.taskId } }));
@@ -392,7 +430,7 @@ export class ToolExecutionService {
           if (!ready.ready) throw new Error(ready.reasons.join("; "));
           if (ready.digest !== v.digest) throw new Error(`${v.name} ${v.version} changed after it was checked`);
           if (own.signal.aborted) throw new Error(`${v.name} ${v.version} was revoked before it started`);
-          const out = await this.#deps.runner.run(launch, AbortSignal.any([signal, own.signal]));
+          const out = await this.#deps.runner.run(launch, guardedSignal(AbortSignal.any([signal, own.signal])));
           if (own.signal.aborted) throw new Error(`${v.name} ${v.version} was revoked while it ran`);
           if (Buffer.byteLength(out.text, "utf8") > BRIDGE_LIMITS.output) throw new Error(`the tool wrote more than ${BRIDGE_LIMITS.output} bytes`);
           let parsed: unknown;
@@ -400,7 +438,7 @@ export class ToolExecutionService {
           const bad = checkValue(v.manifest.output, parsed);
           if (bad.length > 0) throw new Error(`the tool's output does not match its manifest: ${bad.slice(0, 3).join("; ")}`);
           return out;
-          } finally { set.delete(own); if (set.size === 0) this.#running.delete(`${v.name}|${v.version}`); }
+          } finally { set.delete(entry); if (set.size === 0) this.#running.delete(`${v.name}|${v.version}`); }
         },
       },
     );
