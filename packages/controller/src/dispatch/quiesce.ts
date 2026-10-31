@@ -11,7 +11,7 @@ import type { DispatcherService } from "./dispatcher.js";
  * attempt and why, the attempts already quiet are released, and the caller gets the refusal. After the operation (whatever its result) every attempt is released, so each continues from where it was; `after` can tell the agent what changed.
  * The operations themselves live where their files are (the worker's workspace code); the composer hands them to `around`.
  */
-export type QuiesceOperation = "integration" | "refresh" | "release" | "quarantine";
+export type QuiesceOperation = "integration" | "landing" | "refresh" | "release" | "quarantine";
 
 export interface QuiesceDeps {
   readonly dispatcher: Pick<DispatcherService, "liveAttemptsOf" | "quiesce" | "release" | "get">;

@@ -21,7 +21,7 @@ import type { GitBridge } from "./git.js";
  * - operations on one checkout run one at a time.
  * Nothing here freezes the agent: the controller does that (the quiesce) before it asks.
  */
-export type HostOperation = "integration" | "refresh" | "release" | "quarantine";
+export type HostOperation = "integration" | "landing" | "refresh" | "release" | "quarantine";
 export interface HostWorkspaceCall {
   readonly requestId: string;
   readonly operation: HostOperation;
@@ -66,7 +66,7 @@ export interface WorkspaceHostOptions {
 
 const REQUEST = /^wsr-[a-z2-7]{20}$/;
 const IDENT = /^[A-Za-z0-9._:-]{1,120}$/;
-const OPERATIONS: readonly string[] = ["integration", "refresh", "release", "quarantine"];
+const OPERATIONS: readonly string[] = ["integration", "landing", "refresh", "release", "quarantine"];
 export const HOST_LIMITS = { summary: 600, keptListed: 20 } as const;
 
 interface JournalRecord { readonly operation: string; readonly taskId?: string; readonly state: "started" | "done"; readonly at: string; readonly finishedAt?: string; readonly outcome?: HostWorkspaceOutcome }
@@ -179,7 +179,17 @@ export class WorkspaceHost {
       }
       return { ok: true, summary: `the checkout moved from ${before.slice(0, 12)} to ${target.slice(0, 12)}`, detail: { changed: true, before, base: target } };
     }
-    if (operation === "integration") {
+    if (operation === "integration" || operation === "landing") {
+      // A landing (card H12q) is an integration that is only done on the current head of the landing branch: the checkout's base must be that head. A moved head is the author's to refresh first (the re-apply and the queue are P10's).
+      if (operation === "landing") {
+        const base = await git.baseOf(where.gitDir);
+        let head: string;
+        try { head = await git.head(where.shared); } catch (error) { return no(`the landing branch's head could not be read: ${(error as Error).message}`); }
+        if (base !== head) return no(`the checkout is based on ${base.slice(0, 12)} but the landing branch is at ${head.slice(0, 12)}; nothing was landed (the author refreshes onto the head first)`);
+        // Only committed work lands: a file written after the review (or while the agent was being made quiet) is not part of what was reviewed.
+        const state = await git.status({ gitDir: where.gitDir, checkout: where.checkout });
+        if (state.dirty) return no(`the checkout holds ${state.entries.length} changed or new file(s) that are not committed; nothing was landed (only committed work lands)`);
+      }
       const bridge = new WorkspaceBridge({ shared: where.shared, state: where.bridgeState, ...(this.#options.clock === undefined ? {} : { clock: this.#options.clock }) });
       const author = call.assignee ?? `workspace:${call.requestId}`;
       // What would be carried is checked before anything is written: a change that touches Git's data, a link or too many files is refused whole.
@@ -188,7 +198,7 @@ export class WorkspaceHost {
         if (error instanceof WorkspaceError && error.code !== "unavailable") return no(cut(error.message));
         throw error;
       }
-      if (planned.length === 0) return { ok: true, summary: "the checkout holds no change from its base; nothing to integrate", detail: { written: 0, kept: 0, skipped: 0, changed: false } };
+      if (planned.length === 0) return { ok: true, summary: `the checkout holds no change from its base; nothing to ${operation === "landing" ? "land" : "integrate"}`, detail: { written: 0, kept: 0, skipped: 0, changed: false, ...(operation === "landing" ? { landed: false } : {}) } };
       const results = await git.integrate({ gitDir: where.gitDir, checkout: where.checkout, bridge, author, reason: call.reason });
       const written = results.filter((r) => r.result.status === "written").length;
       const kept = results.flatMap((r) => (r.result.status === "rejected" ? [{ path: r.path.slice(0, 200), pendingId: r.result.pendingId }] : []));
@@ -196,7 +206,7 @@ export class WorkspaceHost {
       let marked = false;
       if (kept.length === 0) { try { marked = (await git.markIntegrated({ gitDir: where.gitDir, checkout: where.checkout, bridge })).moved; } catch { marked = false; } }
       const summary = kept.length === 0 ? `${written} file(s) carried into the shared workspace${skipped === 0 ? "" : `, ${skipped} skipped`}` : `${written} file(s) carried, ${kept.length} kept for review because the shared file had moved since the base${skipped === 0 ? "" : `, ${skipped} skipped`}`;
-      return { ok: true, summary, detail: { written, kept: kept.length, keptFiles: kept.slice(0, HOST_LIMITS.keptListed), skipped, markedIntegrated: marked, changed: written > 0 } };
+      return { ok: true, summary, detail: { written, kept: kept.length, keptFiles: kept.slice(0, HOST_LIMITS.keptListed), skipped, markedIntegrated: marked, changed: written > 0, ...(operation === "landing" ? { landed: kept.length === 0 && marked } : {}) } };
     }
     // quarantine
     try {

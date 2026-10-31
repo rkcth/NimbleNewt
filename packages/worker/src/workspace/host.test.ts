@@ -150,7 +150,7 @@ test("a host that cannot do an operation, or does not hold the task's checkout, 
     assert.deepEqual([release.ok, /commit permit/.test(reasonOf(release))], [false, true]);
     const other = await w.host.run(call("refresh", { taskId: "tsk-two" }));
     assert.deepEqual([other.ok, /not on this host/.test(reasonOf(other))], [false, true]);
-    for (const bad of [{ requestId: "../../etc/passwd" }, { requestId: "wsr-short" }, { operation: "landing" }, { taskId: "../x" }, { projectId: "a b" }, { reason: "" }, { reason: "x".repeat(501) }, { assignee: "a/b" }]) {
+    for (const bad of [{ requestId: "../../etc/passwd" }, { requestId: "wsr-short" }, { operation: "deploy" }, { taskId: "../x" }, { projectId: "a b" }, { reason: "" }, { reason: "x".repeat(501) }, { assignee: "a/b" }]) {
       const r = await w.host.run({ ...call("refresh"), ...bad } as never);
       assert.equal(r.ok, false, JSON.stringify(bad));
     }
@@ -258,5 +258,66 @@ test("integration treats a deleted file whose folder is already gone in the shar
     assert.equal(r.ok, true, JSON.stringify(r));
     assert.equal(detailOf(r)["skipped"], 1);
     assert.equal(detailOf(r)["written"], 0);
+  } finally { await w.done(); }
+});
+
+// Card H12q: landing is an integration done only on the current head of the landing branch, of committed work.
+const commitCheckout = (w: { where: CheckoutLocation }, message: string): void => { sh(w.where.checkout, "--git-dir", w.where.gitDir, "--work-tree", w.where.checkout, "add", "-A"); sh(w.where.checkout, "--git-dir", w.where.gitDir, "--work-tree", w.where.checkout, "commit", "-q", "-m", message); };
+
+test("landing carries committed work into the shared working tree on the landing branch's current head, and says it landed (card H12q)", { skip }, async () => {
+  const w = await world();
+  try {
+    await writeFile(join(w.where.checkout, "src", "a.ts"), "export const a = 2;\n");
+    commitCheckout(w, "agent work");
+    const head = sh(w.shared, "rev-parse", "HEAD");
+    const r = await w.host.run(call("landing", { assignee: "agent:ann" }));
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.deepEqual([detailOf(r)["written"], detailOf(r)["kept"], detailOf(r)["landed"], detailOf(r)["markedIntegrated"]], [1, 0, true, true]);
+    assert.equal(await readFile(join(w.shared, "src", "a.ts"), "utf8"), "export const a = 2;\n");
+    assert.equal(sh(w.shared, "rev-parse", "HEAD"), head, "landing makes no commit; promotion is another step");
+    // The base moved to the landed commit, so it is no longer the landing branch's head: a second landing of the same work is refused rather than repeated (a repeat of the same request ID gets the recorded answer).
+    const again = await w.host.run(call("landing"));
+    assert.equal(again.ok, false);
+    assert.match(reasonOf(again), /refreshes onto the head first/);
+  } finally { await w.done(); }
+});
+
+test("landing is refused, with nothing written, when the landing branch moved since the checkout's base or when the checkout holds uncommitted files (card H12q)", { skip }, async () => {
+  const w = await world();
+  try {
+    await writeFile(join(w.where.checkout, "src", "a.ts"), "export const a = 2;\n");
+    commitCheckout(w, "agent work");
+    await writeFile(join(w.shared, "src", "c.ts"), "export const c = 1;\n");
+    sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "second");
+    const before = w.sharedState();
+    const moved = await w.host.run(call("landing"));
+    assert.equal(moved.ok, false);
+    assert.match(reasonOf(moved), /landing branch is at .*refreshes onto the head first/);
+    assert.equal(w.sharedState(), before);
+    assert.equal(await readFile(join(w.shared, "src", "a.ts"), "utf8"), "export const a = 1;\n");
+    // An integration has no head check: the check belongs to the landing.
+    assert.equal(detailOf(await w.host.run(call("integration")))["written"], 1);
+    const dirtyWorld = await world();
+    try {
+      await writeFile(join(dirtyWorld.where.checkout, "src", "a.ts"), "export const a = 5;\n");
+      const dirtyBefore = dirtyWorld.sharedState();
+      const dirty = await dirtyWorld.host.run(call("landing"));
+      assert.equal(dirty.ok, false);
+      assert.match(reasonOf(dirty), /not committed.*only committed work lands/);
+      assert.equal(dirtyWorld.sharedState(), dirtyBefore);
+    } finally { await dirtyWorld.done(); }
+  } finally { await w.done(); }
+});
+
+test("a landing that finds the shared file moved is kept for review and is not reported as landed (card H12q)", { skip }, async () => {
+  const w = await world();
+  try {
+    await writeFile(join(w.where.checkout, "src", "a.ts"), "export const a = 2;\n");
+    commitCheckout(w, "agent work");
+    await writeFile(join(w.shared, "src", "a.ts"), "export const a = 99; // somebody else, not committed\n");
+    const r = await w.host.run(call("landing"));
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.deepEqual([detailOf(r)["kept"], detailOf(r)["landed"]], [1, false]);
+    assert.equal(await readFile(join(w.shared, "src", "a.ts"), "utf8"), "export const a = 99; // somebody else, not committed\n");
   } finally { await w.done(); }
 });

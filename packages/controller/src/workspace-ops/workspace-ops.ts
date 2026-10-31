@@ -18,7 +18,7 @@ import type { Aggregate, AggregateRef, Change, JsonObject } from "../storage/typ
  * controller that crashed can release exactly those (`recover`, or the next request for the task). A repeat of a command returns the recorded answer; a request that was recorded but whose outcome was never written is answered `uncertain` and is not run
  * again, because the host may have done it; if the original call then finishes it replaces `uncertain` with what really happened.
  */
-export const WORKSPACE_OPERATIONS = ["integration", "refresh", "release", "quarantine"] as const;
+export const WORKSPACE_OPERATIONS = ["integration", "landing", "refresh", "release", "quarantine"] as const;
 export type WorkspaceOperation = (typeof WORKSPACE_OPERATIONS)[number];
 export type WorkspaceState = "started" | "done" | "refused" | "failed" | "uncertain";
 
@@ -29,7 +29,7 @@ const RECORD = "workspace-request";
 const OPEN = "workspace-open";
 const WORKSPACE_ID = /^wsr-[a-z2-7]{20}$/;
 /** A freeze set for this request says so in its reason (the quiesce writes the tag); recovery lifts only that one. */
-const frozenFor = (reason: string, requestId: string): boolean => /^(integration|refresh|release|quarantine): the agent's work is being changed \(/.test(reason) && reason.endsWith(`(${requestId})`);
+const frozenFor = (reason: string, requestId: string): boolean => /^(integration|landing|refresh|release|quarantine): the agent's work is being changed \(/.test(reason) && reason.endsWith(`(${requestId})`);
 
 /** What the host is asked, with the attempts that were made quiet for it. */
 export interface WorkspaceCall {
@@ -275,7 +275,7 @@ export class WorkspaceOpService {
         return answer;
       }, async (attemptId) => {
         if (!changed || body.operation === "quarantine" || this.#deps.attempts?.tell === undefined) return;
-        const what = body.operation === "refresh" ? "was refreshed to the shared workspace's current head: files in it may differ from what you read earlier, so read them again before you rely on them" : "was integrated into the shared workspace";
+        const what = body.operation === "refresh" ? "was refreshed to the shared workspace's current head: files in it may differ from what you read earlier, so read them again before you rely on them" : body.operation === "landing" ? "was landed on the landing branch" : "was integrated into the shared workspace";
         if (await this.#deps.attempts.tell(attemptId, `[workspace] Your checkout ${what} (request ${id}).`)) told.push(attemptId);
       }, id, status);
       const more: Partial<WorkspaceRecordBody> = { quietAttempts, ...(told.length === 0 ? {} : { told }), ...(stopped.length === 0 ? {} : { stopped }) };

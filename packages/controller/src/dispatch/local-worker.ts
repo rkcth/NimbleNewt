@@ -119,6 +119,8 @@ export class LocalWorker implements WorkerHost {
   readonly workspace?: WorkspacePort;
   #sequence = 0;
   #beat = 0;
+  /** For each attempt whose turn is running here, how much work (tool calls, model calls) it has in flight (card H12q). */
+  readonly #busy = new Map<string, () => number>();
 
   constructor(options: LocalWorkerOptions) {
     if (options.workspace !== undefined) this.workspace = options.workspace;
@@ -149,6 +151,12 @@ export class LocalWorker implements WorkerHost {
    * attempt's sessions). A session that cannot say is left out; one that fails to answer fails the whole look (the stop then names an unknown item). `known` lists the attempts this process has a record of, so a caller can tell
    * "nothing runs" from "this host has forgotten the attempt" (a restart of the controller).
    */
+  /**
+   * The attempts of this host that have a tool call or a model call in flight right now. A workspace host (the worker's `WorkspaceHost.attemptsQuiet`) refuses to change a checkout under any of these: the controller's quiesce has
+   * settled them first, so this is the host's own check that it really is quiet (card H12q).
+   */
+  busyAttempts(): string[] { return [...this.#busy].filter(([, busy]) => busy() > 0).map(([id]) => id); }
+
   async localWork(attemptIds: readonly string[]): Promise<HostLocalWork> {
     const processes: Mutable<HostLocalWork["processes"]> = [];
     const costs: Mutable<NonNullable<HostLocalWork["costs"]>> = [];
@@ -310,6 +318,7 @@ export class LocalWorker implements WorkerHost {
       workerVersion: options.version,
       run: async (g) => {
         gateway = g;
+        this.#busy.set(order.attemptId, busy);
         const stop = options.schedule?.(async () => { await g.heartbeat().then(() => undefined, () => undefined); await watch(true); });
         try {
           let carried: TurnUsage | undefined;
@@ -323,6 +332,7 @@ export class LocalWorker implements WorkerHost {
           }
         } finally {
           stop?.();
+          if (this.#busy.get(order.attemptId) === busy) this.#busy.delete(order.attemptId);
           // A turn that ended while the attempt is paused is reported as paused (its calls have settled); nothing is delivered after the turn.
           await watch(false);
         }

@@ -138,7 +138,7 @@ for (const backend of backends) {
       await refuses("not_found", () => ask(nobody, {}, "w-n"));
       await refuses("not_found", () => ask(elsewhere, {}, "w-e"));
       await refuses("not_found", () => ask(boss, { taskId: derivedId("task", "no-such-task") }, "w-m"));
-      await refuses("invalid_command", () => ask(boss, { operation: "landing" }, "w-o"));
+      await refuses("invalid_command", () => ask(boss, { operation: "deploy" }, "w-o"));
       await refuses("invalid_command", () => ask(boss, { reason: "token sk-abcdefghijklmnopqrstuvwxyz0123456789ABCD" }, "w-r"));
       await refuses("invalid_command", () => ask(boss, { extra: 1 }, "w-x"));
       assert.equal(calls.length, 0, "nothing ran for a refused caller or a malformed request");
@@ -217,6 +217,50 @@ for (const backend of backends) {
   const control = (r: Awaited<ReturnType<typeof rig>>) => ({ live: (taskId: string) => r.d.liveAttemptsOf(r.w.owner, { taskId }), frozenReason: async (id: string) => (await r.d.get(r.w.owner, id))?.frozen?.reason, release: async (id: string) => { await r.d.release(r.w.owner, id); } });
   const records = async (r: Awaited<ReturnType<typeof rig>>) => (await r.w.storage.listAggregates("workspace-request", { limit: 10 })).map((a) => ({ id: a.id, ...(a.body as unknown as { state: string; held?: string[] }) }));
   const keepAlive = (r: Awaited<ReturnType<typeof rig>>) => { let stay!: () => void; const alive = new Promise<void>((ok) => { stay = ok; }); r.turn.second = async () => { await alive; return "x"; }; return stay; };
+
+  test(`${backend.name}: a landing waits for the attempt to be quiet: with a failing checkpoint the host is not asked and a typed blocker says why (card H12q)`, async () => {
+    const r = await rig(async () => { throw new Error("the checkpoint could not be taken"); });
+    try {
+      r.turn.second = async () => "x";
+      await r.d.tick();
+      await r.inCall;
+      let asked = 0;
+      const answer = await service(r, { run: async () => { asked++; return { ok: true, summary: "x" }; } }).request(r.w.owner, { commandId: "wl1", operation: "landing", taskId: r.taskId, reason: "land the reviewed work" });
+      assert.equal(asked, 0);
+      assert.equal(answer.state, "refused");
+      assert.equal(answer.operation, "landing");
+      assert.match(answer.summary!, /landing did not run.*checkpoint could not be taken/);
+      assert.ok(answer.blocker !== undefined && (await r.w.blockers.openFor("runtime_hold", { kind: "task", id: r.taskId })) !== undefined, "the owner sees why");
+      assert.equal((await r.d.get(r.w.owner, r.attemptId))!.frozen, undefined);
+      r.turn.release?.();
+      await r.d.idle();
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: a landing that was running when the controller stopped is recovered like the others: its freeze is lifted (card H12q)`, async () => {
+    const r = await rig(async () => ({}));
+    try {
+      const stay = keepAlive(r);
+      await r.d.tick();
+      await r.inCall;
+      let finish!: () => void;
+      const hold = new Promise<void>((ok) => { finish = ok; });
+      let asked = 0;
+      const port: WorkspacePort = { run: async () => { asked++; await hold; return { ok: true, summary: "late" }; } };
+      const make = () => WorkspaceOpService.withEpoch(r.w.storage, r.w.epoch, { quiesce: r.coordinator, portOf: async () => port, attempts: control(r) }, { clock: r.w.clock.now });
+      const pending = make().request(r.w.owner, { commandId: "land1", operation: "landing", taskId: r.taskId, reason: "land it" });
+      while (asked === 0) await new Promise((ok) => setTimeout(ok, 5));
+      assert.ok((await r.d.get(r.w.owner, r.attemptId))!.frozen !== undefined, "the attempt is frozen while the landing runs");
+      const [only] = await records(r);
+      assert.deepEqual(await make().recover(r.w.owner), [only!.id]);
+      assert.equal((await r.d.get(r.w.owner, r.attemptId))!.frozen, undefined, "the freeze left by a landing was lifted");
+      finish();
+      await pending;
+      await r.d.release(r.w.owner, r.attemptId);
+      stay();
+      await r.d.idle();
+    } finally { await r.store.close(); }
+  });
 
   test(`${backend.name}: a release that was running when the controller stopped is recovered like the others: its freeze is lifted (card H12d)`, async () => {
     const r = await rig(async () => ({}));

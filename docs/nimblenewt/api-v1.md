@@ -3366,11 +3366,11 @@ Completion: finished when accepted (`completed: true`).
 
 #### `workspace.request`
 
-Integrates, refreshes or quarantines a task's checkout on the host that holds it (the local worker or a remote one, which answer the same typed outcomes). The task's running attempts are made quiet first (new calls refused, calls in flight settled, a checkpoint taken) and go on afterwards; if one cannot be made quiet nothing runs and a blocker says why. A refresh is refused for a checkout that holds changes; an integration carries the changes into the shared workspace through the expected-version bridge (a file that moved is kept for review) and makes no commit; a quarantine moves the checkout to the owner-only quarantine and stops the task's running attempts. A running agent is told when its checkout was refreshed or its changes integrated. An attempt of the task does not start while a request is running. `release` (committing reviewed work) is accepted and run behind the same quiet, but a host answers it with a refusal: the commit has its own permit.
+Integrates, lands, refreshes or quarantines a task's checkout on the host that holds it (the local worker or a remote one, which answer the same typed outcomes). The task's running attempts are made quiet first (new calls refused, calls in flight settled, a checkpoint taken) and go on afterwards; if one cannot be made quiet nothing runs and a blocker says why. A refresh is refused for a checkout that holds changes; an integration carries the changes into the shared workspace through the expected-version bridge (a file that moved is kept for review) and makes no commit; a landing is an integration of committed work that is made only while the checkout's base is the landing branch's current head (otherwise it is refused and nothing is written; the author refreshes first) and reports `landed`; a quarantine moves the checkout to the owner-only quarantine and stops the task's running attempts. A running agent is told when its checkout was refreshed or its changes integrated or landed. An attempt of the task does not start while a request is running. `release` (committing reviewed work) is accepted and run behind the same quiet, but a host answers it with a refusal: the commit has its own permit.
 
 Arguments:
 
-- `operation`: `integration`, `refresh`, `release` or `quarantine`
+- `operation`: `integration`, `landing`, `refresh`, `release` or `quarantine`
 - `taskId`: the task
 - `reason`: why
 

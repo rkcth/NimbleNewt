@@ -3600,8 +3600,27 @@
       "depends_on": [
         "H12d"
       ],
-      "deliverable": "Split from H12d (2026-10-30): landing runs behind the quiesce and the production workspace port supplies it",
+      "deliverable": "Split from H12d (2026-10-30); narrowed 2026-10-31 (the product worker host composition is H12s, the lease and queue of landing are P10): landing is an operation of workspace.request run behind the quiesce, and the worker package supplies the production workspace port",
       "acceptance_and_verification": "A landing waits for running attempts to quiesce and an attempt cannot start during one",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "H12s",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Compose the production workspace port into the product worker host",
+      "depends_on": [
+        "H12q",
+        "H12k",
+        "H12o"
+      ],
+      "deliverable": "Split from H12q (2026-10-31): the worker package has the workspace port (LocalWorkspaces) and the controller reports which attempts are busy, but no product code builds a LocalWorker with them; the work order must carry the task and project so the attempt's workspace and the operations use one checkout, and a remote worker must pass its busy check to the responder",
+      "acceptance_and_verification": "A started controller with a product-built local worker host runs an attempt in a checkout made by the port, answers a landing, a refresh and a quarantine of it with the busy check wired, and a remote worker that never gives the responder its busy check is refused at start",
       "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
@@ -8471,6 +8490,7 @@
         "V02c",
         "H12q",
         "H12r",
+        "H12s",
         "U14",
         "M02g",
         "M03g",
